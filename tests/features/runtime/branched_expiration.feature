@@ -26,10 +26,9 @@ Feature: Branched branch expiration
         CREATE RELAY reingested_notifications SCHEMA notification BRANCHED BY by_reproject_notifications;
         CREATE RELAY projected_notifications SCHEMA notification BRANCHED BY by_reproject_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT http_notifications_endpoint
+        CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -124,10 +123,9 @@ Feature: Branched branch expiration
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT http_notifications_endpoint
+      CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
@@ -204,15 +202,13 @@ Feature: Branched branch expiration
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT left_endpoint
+      CREATE HTTP ENDPOINT left_endpoint
         ON edge
-        PATH '/left'
-        TYPE HTTP;
+        PATH '/left';
 
-      CREATE ENDPOINT right_endpoint
+      CREATE HTTP ENDPOINT right_endpoint
         ON edge
-        PATH '/right'
-        TYPE HTTP;
+        PATH '/right';
 
       CREATE HTTP ENDPOINT INGESTOR left_ingestor
         FROM left_endpoint MODE NO ACK
@@ -338,10 +334,9 @@ Feature: Branched branch expiration
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT http_notifications_endpoint
+      CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
@@ -433,10 +428,9 @@ Feature: Branched branch expiration
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT http_notifications_endpoint
+      CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK

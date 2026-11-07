@@ -50,7 +50,7 @@ Feature: HTTP codec ingestion
         ENCODE occurred_at AS RFC3339, body AS BASE64;
       CREATE RELAY json_values SCHEMA json_value UNBRANCHED;
       CREATE VHOST edge json-values-{{test_id}}.example.com;
-      CREATE ENDPOINT json_values_endpoint ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT json_values_endpoint ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR json_values_ingestor
         FROM json_values_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING json_value_codec
@@ -198,7 +198,7 @@ Feature: HTTP codec ingestion
         TO SCHEMA exact_value ENCODE occurred_at AS RFC3339;
       CREATE RELAY exact_values SCHEMA exact_value UNBRANCHED;
       CREATE VHOST edge exact-values-{{test_id}}.example.com;
-      CREATE ENDPOINT exact_values_endpoint ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT exact_values_endpoint ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR exact_values_ingestor
         FROM exact_values_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING exact_value_codec
@@ -249,7 +249,7 @@ Feature: HTTP codec ingestion
         TO SCHEMA single_value;
       CREATE RELAY single_values SCHEMA single_value UNBRANCHED;
       CREATE VHOST edge single-values-{{test_id}}.example.com;
-      CREATE ENDPOINT single_values_endpoint ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT single_values_endpoint ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR single_values_ingestor
         FROM single_values_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING single_value_codec
@@ -300,10 +300,9 @@ Feature: HTTP codec ingestion
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT http_notifications_endpoint
+        CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -365,10 +364,9 @@ Feature: HTTP codec ingestion
         CREATE IF NOT EXISTS BRANCH by_metrics_ingestor SCHEMA device_branch TTL 5m;
         CREATE RELAY metrics_stream SCHEMA metrics BRANCHED BY by_metrics_ingestor;
         CREATE VHOST edge http-arrays-{{test_id}}.example.com;
-        CREATE ENDPOINT metrics_endpoint
+        CREATE HTTP ENDPOINT metrics_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR metrics_ingestor
         FROM metrics_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metrics_codec
@@ -423,10 +421,9 @@ Feature: HTTP codec ingestion
         TO SCHEMA shaped_metrics;
       CREATE RELAY shaped_metrics_stream SCHEMA shaped_metrics UNBRANCHED;
       CREATE VHOST edge shaped-arrays-{{test_id}}.example.com;
-      CREATE ENDPOINT shaped_metrics_endpoint
+      CREATE HTTP ENDPOINT shaped_metrics_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR shaped_metrics_ingestor
         FROM shaped_metrics_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING shaped_metrics_codec
@@ -490,15 +487,13 @@ Feature: HTTP codec ingestion
 
       CREATE VHOST edge strict-loose-{{test_id}}.example.com;
 
-      CREATE ENDPOINT strict_ingress
+      CREATE HTTP ENDPOINT strict_ingress
         ON edge
-        PATH '/strict'
-        TYPE HTTP;
+        PATH '/strict';
 
-      CREATE ENDPOINT loose_ingress
+      CREATE HTTP ENDPOINT loose_ingress
         ON edge
-        PATH '/loose'
-        TYPE HTTP;
+        PATH '/loose';
 
       CREATE HTTP ENDPOINT INGESTOR strict_notifications_ingestor
         FROM strict_ingress MODE NO ACK
@@ -567,10 +562,9 @@ Feature: HTTP codec ingestion
         CREATE IF NOT EXISTS BRANCH by_metrics_ingestor SCHEMA device_branch TTL 5m;
         CREATE RELAY metrics_stream SCHEMA metrics BRANCHED BY by_metrics_ingestor;
         CREATE VHOST edge http-binary-arrays-{{test_id}}.example.com;
-        CREATE ENDPOINT metrics_endpoint
+        CREATE HTTP ENDPOINT metrics_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR metrics_ingestor
         FROM metrics_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metrics_codec
@@ -619,10 +613,9 @@ Feature: HTTP codec ingestion
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT http_notifications_endpoint
+        CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec

@@ -74,7 +74,7 @@ Feature: Interconnection observability
         'bind' = 'false'
       };
       CREATE VHOST edge observability-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec

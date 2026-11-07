@@ -34,7 +34,7 @@ Feature: Wire schema list fields
         ENCODE stamps AS RFC3339;
       CREATE RELAY measurements SCHEMA measurement UNBRANCHED;
       CREATE VHOST edge avro-lists-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/measurements' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/measurements';
       CREATE HTTP ENDPOINT INGESTOR measurement_source
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING measurement_codec
@@ -104,7 +104,7 @@ Feature: Wire schema list fields
         ENCODE chunks AS BASE64, stamps AS RFC3339;
       CREATE RELAY captures SCHEMA capture UNBRANCHED;
       CREATE VHOST edge json-lists-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/captures' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/captures';
       CREATE HTTP ENDPOINT INGESTOR capture_source
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING capture_codec
@@ -160,7 +160,7 @@ Feature: Wire schema list fields
         ENCODE stamps AS RFC3339;
       CREATE RELAY captures SCHEMA capture UNBRANCHED;
       CREATE VHOST edge cbor-lists-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/captures' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/captures';
       CREATE HTTP ENDPOINT INGESTOR capture_source
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING capture_codec

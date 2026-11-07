@@ -28,10 +28,9 @@ Feature: Sensitive data
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT sensitive_notifications_endpoint
+      CREATE HTTP ENDPOINT sensitive_notifications_endpoint
         ON edge
-        PATH '/sensitive'
-        TYPE HTTP;
+        PATH '/sensitive';
 
       CREATE HTTP ENDPOINT INGESTOR sensitive_notifications
         FROM sensitive_notifications_endpoint MODE NO ACK
@@ -103,10 +102,9 @@ Feature: Sensitive data
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT sensitive_notifications_endpoint
+      CREATE HTTP ENDPOINT sensitive_notifications_endpoint
         ON edge
-        PATH '/sensitive'
-        TYPE HTTP;
+        PATH '/sensitive';
 
       CREATE HTTP ENDPOINT INGESTOR sensitive_notifications
         FROM sensitive_notifications_endpoint MODE NO ACK
@@ -224,10 +222,9 @@ Feature: Sensitive data
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT sensitive_notifications_endpoint
+      CREATE HTTP ENDPOINT sensitive_notifications_endpoint
         ON edge
-        PATH '/sensitive'
-        TYPE HTTP;
+        PATH '/sensitive';
 
       CREATE HTTP ENDPOINT INGESTOR sensitive_notifications
         FROM sensitive_notifications_endpoint MODE NO ACK

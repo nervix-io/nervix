@@ -139,7 +139,11 @@ fn main() -> ExitCode {
     println!(
         "  CREATE VHOST <name> <hostname>, <hostname>, ... [WITH TLS <resource> [VERSION <n>]] [;]"
     );
-    println!("  CREATE ENDPOINT <name> ON <vhost> PATH '/path' TYPE WEBSOCKETS|HTTP [;]");
+    println!("  CREATE HTTP ENDPOINT <name> ON <vhost> PATH '/path' [;]");
+    println!(
+        "  CREATE WEBSOCKETS ENDPOINT <name> ON <vhost> PATH '/path' [WITH SIGNALING PROTOCOL \
+         <protocol>] [;]"
+    );
     println!(
         "  CREATE <CONNECTOR> CLIENT <name> [POOL SIZE MIN <n> MAX <n>] [WITH SIGNALING PROTOCOL \
          <name>] [MOUNT <resource> VERSION <n>|LATEST] CONFIG {{ 'k' = 'v', ... }} [;]"

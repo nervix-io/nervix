@@ -120,10 +120,9 @@ Feature: Cluster leader failover
       CREATE RELAY features SCHEMA features BRANCHED BY by_feature_source;
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_feature_source;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/dedup'
-        TYPE HTTP;
+        PATH '/dedup';
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
@@ -300,10 +299,9 @@ Feature: Cluster leader failover
       CREATE RELAY features SCHEMA features BRANCHED BY by_feature_source;
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_feature_source;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/dedup'
-        TYPE HTTP;
+        PATH '/dedup';
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'

@@ -97,7 +97,7 @@ Feature: MySQL client pool keys
       CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge deadline-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR incoming FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE

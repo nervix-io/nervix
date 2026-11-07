@@ -26,7 +26,7 @@ Feature: Iceberg TLS resource mounts
       CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge iceberg-tls-catalog-{{test_id}}.example.com;
-      CREATE ENDPOINT notification_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT notification_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR notification_input
         FROM notification_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -102,7 +102,7 @@ Feature: Iceberg TLS resource mounts
       CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge iceberg-tls-objects-{{test_id}}.example.com;
-      CREATE ENDPOINT notification_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT notification_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR notification_input
         FROM notification_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec

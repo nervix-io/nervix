@@ -100,7 +100,7 @@ Feature: ClickHouse admission and case-preserving delivery
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge clickhouse-{{test_id}}.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR incoming
         FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE

@@ -32,7 +32,7 @@ CREATE WIRE JSON CODEC payment_codec
 
 CREATE RELAY payments SCHEMA payment_record UNBRANCHED;
 
-CREATE ENDPOINT payment_ingress ON edge PATH '/payments' TYPE HTTP;
+CREATE HTTP ENDPOINT payment_ingress ON edge PATH '/payments';
 
 CREATE HTTP ENDPOINT INGESTOR payment_source
   FROM payment_ingress MODE NO ACK

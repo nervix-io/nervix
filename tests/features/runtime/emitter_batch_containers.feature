@@ -70,7 +70,7 @@ Feature: Emitter batch containers
           ON EMITTING BATCH '{count: length, records: .}';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
@@ -217,7 +217,7 @@ Feature: Emitter batch containers
           ON EMITTING BATCH '[.[], .[]]';
       CREATE RELAY events SCHEMA rich_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
@@ -319,7 +319,7 @@ Feature: Emitter batch containers
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY echoed SCHEMA echoed_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING json_batch_codec
@@ -421,7 +421,7 @@ Feature: Emitter batch containers
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
@@ -500,7 +500,7 @@ Feature: Emitter batch containers
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
@@ -575,7 +575,7 @@ Feature: Emitter batch containers
       CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_event;
       CREATE RELAY syslog_events SCHEMA syslog_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec

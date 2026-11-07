@@ -27,10 +27,9 @@ Feature: Domain-paced branch buffering
       CREATE RELAY fast_ingested SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE RELAY observed SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE VHOST edge fast-buffering-{{test_id}}.example.com;
-      CREATE ENDPOINT fast_buffering_endpoint
+      CREATE HTTP ENDPOINT fast_buffering_endpoint
         ON edge
-        PATH '/events'
-        TYPE HTTP;
+        PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR fast_buffering_ingestor
         FROM fast_buffering_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
@@ -115,10 +114,9 @@ Feature: Domain-paced branch buffering
       CREATE RELAY fast_ingested SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE RELAY observed SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE VHOST edge fast-buffering-{{test_id}}.example.com;
-      CREATE ENDPOINT fast_buffering_endpoint
+      CREATE HTTP ENDPOINT fast_buffering_endpoint
         ON edge
-        PATH '/events'
-        TYPE HTTP;
+        PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR fast_buffering_ingestor
         FROM fast_buffering_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
@@ -201,10 +199,9 @@ Feature: Domain-paced branch buffering
       CREATE RELAY immediate_ingested SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE RELAY observed SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE VHOST edge immediate-buffering-{{test_id}}.example.com;
-      CREATE ENDPOINT immediate_buffering_endpoint
+      CREATE HTTP ENDPOINT immediate_buffering_endpoint
         ON edge
-        PATH '/events'
-        TYPE HTTP;
+        PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR immediate_buffering_ingestor
         FROM immediate_buffering_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
@@ -278,10 +275,9 @@ Feature: Domain-paced branch buffering
       CREATE RELAY collect_ingested SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE RELAY observed SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE VHOST edge collect-buffering-{{test_id}}.example.com;
-      CREATE ENDPOINT collect_buffering_endpoint
+      CREATE HTTP ENDPOINT collect_buffering_endpoint
         ON edge
-        PATH '/events'
-        TYPE HTTP;
+        PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR collect_buffering_ingestor
         FROM collect_buffering_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
@@ -351,14 +347,12 @@ Feature: Domain-paced branch buffering
       CREATE RELAY held_ingested SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE RELAY gate_ingested SCHEMA timed_event BRANCHED BY by_tenant;
       CREATE VHOST edge held-buffering-{{test_id}}.example.com;
-      CREATE ENDPOINT held_buffering_endpoint
+      CREATE HTTP ENDPOINT held_buffering_endpoint
         ON edge
-        PATH '/events'
-        TYPE HTTP;
-      CREATE ENDPOINT gate_buffering_endpoint
+        PATH '/events';
+      CREATE HTTP ENDPOINT gate_buffering_endpoint
         ON edge
-        PATH '/gate'
-        TYPE HTTP;
+        PATH '/gate';
       CREATE HTTP ENDPOINT INGESTOR held_buffering_ingestor
         FROM held_buffering_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec

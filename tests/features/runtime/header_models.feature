@@ -114,7 +114,7 @@ Feature: Header models
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge header-models-{{test_id}}.example.com;
-      CREATE ENDPOINT events_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR events_ingestor
         FROM events_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec

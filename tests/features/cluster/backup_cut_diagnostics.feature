@@ -65,7 +65,7 @@ Feature: Attributing a quiesced backup cut's timeout
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge backup-slow-application-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE

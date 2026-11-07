@@ -25,10 +25,9 @@ Feature: Session subscription delivery options
         CREATE IF NOT EXISTS BRANCH by_telemetry_http SCHEMA device_branch TTL 5m;
         CREATE RELAY telemetry SCHEMA telemetry BRANCHED BY by_telemetry_http;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT telemetry_endpoint
+        CREATE HTTP ENDPOINT telemetry_endpoint
         ON edge
-        PATH '/telemetry'
-        TYPE HTTP;
+        PATH '/telemetry';
         CREATE HTTP ENDPOINT INGESTOR telemetry_http
         FROM telemetry_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING telemetry_codec
@@ -73,10 +72,9 @@ Feature: Session subscription delivery options
         TO SCHEMA metric;
       CREATE RELAY metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT metric_endpoint
+      CREATE HTTP ENDPOINT metric_endpoint
         ON edge
-        PATH '/metrics'
-        TYPE HTTP;
+        PATH '/metrics';
       CREATE HTTP ENDPOINT INGESTOR metric_http
         FROM metric_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -125,10 +123,9 @@ Feature: Session subscription delivery options
         TO SCHEMA ratio;
       CREATE RELAY ratios SCHEMA ratio UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ratio_endpoint
+      CREATE HTTP ENDPOINT ratio_endpoint
         ON edge
-        PATH '/ratios'
-        TYPE HTTP;
+        PATH '/ratios';
       CREATE HTTP ENDPOINT INGESTOR ratio_http
         FROM ratio_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ratio_codec
@@ -194,10 +191,9 @@ Feature: Session subscription delivery options
         CREATE IF NOT EXISTS BRANCH by_telemetry_http SCHEMA device_branch TTL 5m;
         CREATE RELAY telemetry SCHEMA telemetry BRANCHED BY by_telemetry_http;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT telemetry_endpoint
+        CREATE HTTP ENDPOINT telemetry_endpoint
         ON edge
-        PATH '/telemetry'
-        TYPE HTTP;
+        PATH '/telemetry';
         CREATE HTTP ENDPOINT INGESTOR telemetry_http
         FROM telemetry_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING telemetry_codec

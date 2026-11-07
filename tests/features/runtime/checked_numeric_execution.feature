@@ -32,7 +32,7 @@ Feature: Checked numeric execution
       CREATE RELAY computed_results SCHEMA computed UNBRANCHED;
       CREATE RELAY numeric_errors SCHEMA numeric_error UNBRANCHED;
       CREATE VHOST edge checked-integers-{{test_id}}.example.com;
-      CREATE ENDPOINT operand_ingress ON edge PATH '/operands' TYPE HTTP;
+      CREATE HTTP ENDPOINT operand_ingress ON edge PATH '/operands';
       CREATE HTTP ENDPOINT INGESTOR operand_ingestor
         FROM operand_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING operand_batch_codec
@@ -135,7 +135,7 @@ Feature: Checked numeric execution
       CREATE RELAY narrow_results SCHEMA narrow_result UNBRANCHED;
       CREATE RELAY numeric_errors SCHEMA numeric_error UNBRANCHED;
       CREATE VHOST edge checked-narrow-{{test_id}}.example.com;
-      CREATE ENDPOINT narrow_operand_ingress ON edge PATH '/operands' TYPE HTTP;
+      CREATE HTTP ENDPOINT narrow_operand_ingress ON edge PATH '/operands';
       CREATE HTTP ENDPOINT INGESTOR narrow_operand_ingestor
         FROM narrow_operand_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING narrow_operand_batch_codec
@@ -235,7 +235,7 @@ Feature: Checked numeric execution
       CREATE RELAY derived_results SCHEMA derived UNBRANCHED;
       CREATE RELAY numeric_errors SCHEMA numeric_error UNBRANCHED;
       CREATE VHOST edge checked-floats-{{test_id}}.example.com;
-      CREATE ENDPOINT measurement_ingress ON edge PATH '/measurements' TYPE HTTP;
+      CREATE HTTP ENDPOINT measurement_ingress ON edge PATH '/measurements';
       CREATE HTTP ENDPOINT INGESTOR measurement_ingestor
         FROM measurement_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING measurement_batch_codec
@@ -317,7 +317,7 @@ Feature: Checked numeric execution
       CREATE RELAY partitioned_operands SCHEMA operand BRANCHED BY by_operand_id;
       CREATE RELAY numeric_errors SCHEMA numeric_error UNBRANCHED;
       CREATE VHOST edge checked-routes-{{test_id}}.example.com;
-      CREATE ENDPOINT operand_ingress ON edge PATH '/operands' TYPE HTTP;
+      CREATE HTTP ENDPOINT operand_ingress ON edge PATH '/operands';
       CREATE HTTP ENDPOINT INGESTOR operand_ingestor
         FROM operand_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING operand_batch_codec

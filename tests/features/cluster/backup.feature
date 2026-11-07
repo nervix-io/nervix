@@ -103,7 +103,7 @@ Feature: Configuration backup into a public archive
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge backup-other-{{test_id}}.example.com;
-      CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -216,7 +216,7 @@ Feature: Configuration backup into a public archive
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE VHOST edge backup-wait-{{test_id}}.example.com;
-      CREATE ENDPOINT wait_state_ingress ON edge PATH '/state' TYPE HTTP;
+      CREATE HTTP ENDPOINT wait_state_ingress ON edge PATH '/state';
       CREATE HTTP ENDPOINT INGESTOR wait_state_ingestor
         FROM wait_state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wait_event_codec
@@ -296,7 +296,7 @@ Feature: Configuration backup into a public archive
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE VHOST edge backup-slow-wait-{{test_id}}.example.com;
-      CREATE ENDPOINT wait_state_ingress ON edge PATH '/state' TYPE HTTP;
+      CREATE HTTP ENDPOINT wait_state_ingress ON edge PATH '/state';
       CREATE HTTP ENDPOINT INGESTOR wait_state_ingestor
         FROM wait_state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wait_event_codec
@@ -353,7 +353,7 @@ Feature: Configuration backup into a public archive
       CREATE RELAY held_input SCHEMA held_event UNBRANCHED;
       CREATE RELAY held_output SCHEMA held_event UNBRANCHED;
       CREATE VHOST edge backup-held-installation-{{test_id}}.example.com;
-      CREATE ENDPOINT held_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT held_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
@@ -409,7 +409,7 @@ Feature: Configuration backup into a public archive
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge backup-stalled-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -470,7 +470,7 @@ Feature: Configuration backup into a public archive
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge backup-slow-pause-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE

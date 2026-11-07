@@ -32,7 +32,7 @@ Feature: Expression function semantics
       CREATE RELAY greetings SCHEMA greeting UNBRANCHED;
       CREATE RELAY normalized_greetings SCHEMA normalized_greeting UNBRANCHED;
       CREATE VHOST edge case-mapping-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/greetings' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/greetings';
       CREATE HTTP ENDPOINT INGESTOR greeting_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING greeting_codec
@@ -106,7 +106,7 @@ Feature: Expression function semantics
       CREATE RELAY measurements SCHEMA measurement UNBRANCHED;
       CREATE RELAY compared_measurements SCHEMA compared_measurement UNBRANCHED;
       CREATE VHOST edge nullif-equality-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/measurements' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/measurements';
       CREATE HTTP ENDPOINT INGESTOR measurement_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING measurement_codec
@@ -194,7 +194,7 @@ Feature: Expression function semantics
       CREATE RELAY matched_notes SCHEMA matched_note UNBRANCHED;
       CREATE RELAY note_errors SCHEMA note_error UNBRANCHED;
       CREATE VHOST edge regexp-patterns-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/notes' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/notes';
       CREATE HTTP ENDPOINT INGESTOR note_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING note_codec
@@ -295,7 +295,7 @@ Feature: Expression function semantics
       CREATE RELAY grown_values SCHEMA grown_value UNBRANCHED;
       CREATE RELAY growth_errors SCHEMA growth_error UNBRANCHED;
       CREATE VHOST edge unselected-arm-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/growths' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/growths';
       CREATE HTTP ENDPOINT INGESTOR growth_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING growth_codec
@@ -375,7 +375,7 @@ Feature: Expression function semantics
       CREATE RELAY reading_totals SCHEMA reading_total UNBRANCHED;
       CREATE RELAY reading_errors SCHEMA reading_error UNBRANCHED;
       CREATE VHOST edge list-sum-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/readings' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
@@ -456,7 +456,7 @@ Feature: Expression function semantics
       CREATE RELAY sized_texts SCHEMA sized_text UNBRANCHED;
       CREATE RELAY sizing_errors SCHEMA sizing_error UNBRANCHED;
       CREATE VHOST edge text-sizing-{{test_id}}.example.com;
-      CREATE ENDPOINT sizing_ingress ON edge PATH '/sizings' TYPE HTTP;
+      CREATE HTTP ENDPOINT sizing_ingress ON edge PATH '/sizings';
       CREATE HTTP ENDPOINT INGESTOR sizing_ingestor
         FROM sizing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sizing_batch_codec

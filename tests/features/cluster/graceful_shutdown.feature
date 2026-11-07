@@ -346,7 +346,7 @@ Feature: Graceful shutdown
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
       CREATE VHOST edge follower-drain-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/follower-drain' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/follower-drain';
       CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
@@ -486,7 +486,7 @@ Feature: Graceful shutdown
       CREATE RELAY shutdown_ack_input SCHEMA shutdown_ack_event UNBRANCHED;
       CREATE RELAY shutdown_ack_output SCHEMA shutdown_ack_event UNBRANCHED;
       CREATE VHOST edge shutdown-ack-{{test_id}}.example.com;
-      CREATE ENDPOINT shutdown_ack_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT shutdown_ack_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR shutdown_ack_ingestor
         FROM shutdown_ack_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING shutdown_ack_codec
@@ -557,7 +557,7 @@ Feature: Graceful shutdown
       CREATE RELAY held_ingested SCHEMA held_event UNBRANCHED;
       CREATE RELAY held_routed SCHEMA held_event UNBRANCHED;
       CREATE VHOST edge held-shutdown-{{test_id}}.example.com;
-      CREATE ENDPOINT held_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT held_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
@@ -620,7 +620,7 @@ Feature: Graceful shutdown
       CREATE WIRE JSON CODEC held_event_codec FROM WIRE SCHEMA held_event_wire TO SCHEMA held_event;
       CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
       CREATE VHOST edge held-finish-{{test_id}}.example.com;
-      CREATE ENDPOINT held_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT held_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
@@ -963,7 +963,7 @@ Feature: Graceful shutdown
       CREATE RELAY handoff_input SCHEMA eligible_event UNBRANCHED;
       CREATE RELAY handoff_output SCHEMA eligible_event UNBRANCHED;
       CREATE VHOST edge eligible-shutdown-{{test_id}}.example.com;
-      CREATE ENDPOINT eligible_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT eligible_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR eligible_ingestor
         FROM eligible_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING eligible_event_codec
@@ -1299,7 +1299,7 @@ Feature: Graceful shutdown
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY generated_totals SCHEMA tenant_total BRANCHED BY by_generated_tenant;
       CREATE VHOST edge generated-shutdown-{{test_id}}.example.com;
-      CREATE ENDPOINT tenant_amount_ingress ON edge PATH '/amounts' TYPE HTTP;
+      CREATE HTTP ENDPOINT tenant_amount_ingress ON edge PATH '/amounts';
       CREATE HTTP ENDPOINT INGESTOR tenant_amount_ingestor
         FROM tenant_amount_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING tenant_amount_codec
@@ -1387,7 +1387,7 @@ Feature: Graceful shutdown
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE VHOST edge wait-state-{{test_id}}.example.com;
-      CREATE ENDPOINT wait_state_ingress ON edge PATH '/state' TYPE HTTP;
+      CREATE HTTP ENDPOINT wait_state_ingress ON edge PATH '/state';
       CREATE HTTP ENDPOINT INGESTOR wait_state_ingestor
         FROM wait_state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wait_event_codec
@@ -1543,10 +1543,9 @@ Feature: Graceful shutdown
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/dedup'
-        TYPE HTTP;
+        PATH '/dedup';
 
       CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK

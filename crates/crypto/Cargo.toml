@@ -1,0 +1,20 @@
+[package]
+description = "The AWS-LC cryptography boundary for Nervix"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-crypto"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+aws-lc-rs = { workspace = true }
+error-stack = { workspace = true }
+nervix-primitives = { workspace = true }
+nervix-recovery = { workspace = true }
+rustls = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+meticulous = { workspace = true }

@@ -24,10 +24,9 @@ Feature: Memory pressure
         CREATE IF NOT EXISTS BRANCH by_memory_pressure_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_memory_pressure_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT memory_pressure_ingress
+        CREATE HTTP ENDPOINT memory_pressure_ingress
         ON edge
-        PATH '/memory-pressure'
-        TYPE HTTP;
+        PATH '/memory-pressure';
       CREATE HTTP ENDPOINT INGESTOR memory_pressure_ingestor
         FROM memory_pressure_ingress MODE NO ACK
         ON QUIESCE REJECT RETRY AFTER 3s DECODE USING notification_codec

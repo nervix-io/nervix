@@ -15,8 +15,8 @@ Feature: Typed ingestor metadata
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA tagged UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-ingestor-metadata.example.com;
-      CREATE ENDPOINT http_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE ENDPOINT ws_ingress ON edge PATH '/stream' TYPE WEBSOCKETS;
+      CREATE HTTP ENDPOINT http_ingress ON edge PATH '/events';
+      CREATE WEBSOCKETS ENDPOINT ws_ingress ON edge PATH '/stream';
       CREATE HTTP CLIENT http_main CONFIG {
         'endpoint' = 'http://127.0.0.1:9/events',
         'timeout_ms' = 5000

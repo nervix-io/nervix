@@ -102,14 +102,12 @@ Feature: ZeroMQ emission
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_state_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT state_ingress
+        CREATE HTTP ENDPOINT state_ingress
         ON edge
-        PATH '/state'
-        TYPE HTTP;
-        CREATE ENDPOINT notifications_ingress
+        PATH '/state';
+        CREATE HTTP ENDPOINT notifications_ingress
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR state_ingestor
         FROM state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -185,7 +183,7 @@ Feature: ZeroMQ emission
       CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge zeromq-open-{{test_id}}.example.com;
-      CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec

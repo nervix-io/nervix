@@ -15,8 +15,9 @@ a change that raises the count fails `just ratchet`.
 ## The Boundary
 
 `nervix-crypto` is the single source of Nervix-authored cryptography. It is an engine-layer crate
-built only on `aws-lc-rs` and `rustls`, and it knows no Nervix model, graph or connector. It
-provides:
+using `aws-lc-rs` and `rustls` for cryptography, the primitive boundary for shared ownership and
+initialization, and shared error-reporting contracts. It knows no Nervix model, graph or connector.
+It owns the scope of:
 
 - the rustls `CryptoProvider`, built in one place and installed as the process default once, by
   purpose: the interconnect's fixed set of approved algorithms, and the provider of outward-facing
@@ -25,19 +26,35 @@ provides:
 - secure random values;
 - password and key derivation.
 
-The crate does not exist yet. Until it does, it is the target, and each authored use it will own is
-debt the `non_aws_lc_crypto` count records. Nervix obtains that cryptography today as follows.
+The crate owns TLS provider selection and Ed25519 signing. Security digests, randomness and
+password derivation still have the counted call sites below; the remaining FIPS preparation work
+moves those operations to this boundary.
 
 | Purpose | Where Nervix obtains it today |
 | --- | --- |
-| TLS provider | Three direct installs of AWS-LC's default provider: in the interconnect, in the connectors' shared TLS configuration and in the client core. The application's shared certificate/key constructor reads the installed default for native sessions and TLS VHOSTs. |
+| TLS provider | `nervix-crypto` installs the outward provider through rustls's process-default installation and supplies an independent checked interconnect provider. Connector TLS, native sessions and TLS VHOSTs retain the outward provider; SQS projects the boundary's typed outward choice into Smithy's mode, preserving the SDK's cipher filtering. |
 | Security digests | RustCrypto SHA-256, for the interconnect's trust-root fingerprint and the expression function `sha256()`. |
 | Secure randomness | The operating-system generator of `rand_core`, for interconnect entropy and for password salts. |
 | Password derivation | Argon2, for user passwords. |
-| NATS user authentication | AWS-LC Ed25519 in the NATS connection owner; its nonce callback signs nkey and credentials-file authentication. This operation moves to the boundary when FIPS Prep 02 establishes it. |
+| NATS user authentication | `nervix-crypto` prepares the Ed25519 signing key and signs the nonce with AWS-LC. The NATS connector owns seed and credentials decoding, public-key encoding and the driver callback. |
 | Other digests | BLAKE3, for backups, resources, checkpoints, archives, identities and fingerprints. No product site is classified yet. |
 
 ## Algorithm Policy
+
+The interconnect uses TLS 1.3 with `TLS_AES_256_GCM_SHA384` and
+`TLS_AES_128_GCM_SHA256`, and the `secp256r1`, `secp384r1` and `X25519MLKEM768` key
+exchange groups. It preserves AWS-LC's preference order among those members. The pinned rustls
+0.23.46 classifies the hybrid through its first, ML-KEM component when the backend is in FIPS mode;
+standalone X25519 and ChaCha20 are outside this set. Every client/server bundle checks its provider
+against the fixed set and keeps TLS 1.3, mutual certificate authentication and its certificate clock.
+This selects algorithms; the ordinary AWS-LC build is not a validated FIPS module.
+
+Outward TLS keeps the full AWS-LC default algorithm set. Rustls installs that process default
+once and retains a provider installed by the embedding host. The interconnect's independent
+immutable provider is cached once per process, so neither install order nor outward host policy
+changes its algorithm set. SQS retains Smithy's existing AWS-LC mode and its additional cipher
+filter, rather than using a custom-provider hook that bypasses that filter. Protocol negotiation,
+trust roots and client identities remain with their existing TLS owners.
 
 Anything that protects confidentiality, integrity or authenticity uses an algorithm AWS-LC provides
 and FIPS 140-3 approves, such as the SHA-2 family, HMAC, AES-GCM, PBKDF2, RSA and ECDSA signatures,
@@ -192,9 +209,10 @@ interoperability oracle and scenario fixture, outside the release product graph.
 adds no non-AWS-LC cryptography edge. Seed decoding clears both its intermediate record and its
 returned bytes; neither the codec nor credentials parser includes secret values in refusals.
 
-The signing operation currently lives in `crates/connectors/nats/src/client/authentication.rs`
-while `nervix-crypto` is still a target. FIPS Prep 02 moves it into the boundary; wire decoding
-continues to belong to the connector. This is preparation, with no FIPS-validation claim. The
+The signing operation lives in `nervix_crypto::ed25519`.
+`crates/connectors/nats/src/client/authentication.rs` owns wire decoding and maps the boundary's
+typed errors into the driver's authentication callback. This is preparation, with no
+FIPS-validation claim. The
 pinned [aws-lc-rs Ed25519 implementation](https://github.com/aws/aws-lc-rs/blob/v1.18.2/aws-lc-rs/src/ed25519.rs)
 marks signing as unsuitable for FIPS use, so the future FIPS mode must refuse these NATS methods
 until its boundary has a validated signing service for the protocol. Token authentication has no

@@ -12,7 +12,7 @@ Feature: Web console visual ingestor creation
       CREATE WIRE JSON CODEC visual_ingest_codec FROM WIRE SCHEMA visual_ingest_wire TO SCHEMA visual_ingest_event;
       CREATE RELAY visual_ingest_relay SCHEMA visual_ingest_event UNBRANCHED;
       CREATE VHOST visual_ingest_host ingest-{{test_id}}.example.com;
-      CREATE ENDPOINT visual_ingest_endpoint ON visual_ingest_host PATH '/visual-ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT visual_ingest_endpoint ON visual_ingest_host PATH '/visual-ingest';
       """
     And the web console is opened on the leader node
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
@@ -93,7 +93,7 @@ Feature: Web console visual ingestor creation
       CREATE WIRE JSON SCHEMA visual_scope_wire MODE STRICT (message string);
       CREATE WIRE JSON CODEC visual_scope_codec FROM WIRE SCHEMA visual_scope_wire TO SCHEMA visual_scope_event;
       CREATE VHOST visual_scope_host scope-{{test_id}}.example.com;
-      CREATE ENDPOINT visual_scope_endpoint ON visual_scope_host PATH '/scope' TYPE HTTP;
+      CREATE HTTP ENDPOINT visual_scope_endpoint ON visual_scope_host PATH '/scope';
       """
     And the web console is opened on the leader node
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
@@ -131,7 +131,7 @@ Feature: Web console visual ingestor creation
       CREATE WIRE JSON SCHEMA visual_tx_wire MODE STRICT (message string);
       CREATE RELAY staged_ingest_relay SCHEMA visual_tx_event UNBRANCHED;
       CREATE VHOST visual_tx_host tx-{{test_id}}.example.com;
-      CREATE ENDPOINT visual_tx_endpoint ON visual_tx_host PATH '/tx' TYPE HTTP;
+      CREATE HTTP ENDPOINT visual_tx_endpoint ON visual_tx_host PATH '/tx';
       """
     And the web console is opened on the leader node
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
@@ -190,7 +190,7 @@ Feature: Web console visual ingestor creation
       CREATE WIRE JSON CODEC visual_reconnect_codec FROM WIRE SCHEMA visual_reconnect_wire TO SCHEMA visual_reconnect_event;
       CREATE RELAY visual_reconnect_relay SCHEMA visual_reconnect_event UNBRANCHED;
       CREATE VHOST visual_reconnect_host reconnect-{{test_id}}.example.com;
-      CREATE ENDPOINT visual_reconnect_endpoint ON visual_reconnect_host PATH '/reconnect' TYPE HTTP;
+      CREATE HTTP ENDPOINT visual_reconnect_endpoint ON visual_reconnect_host PATH '/reconnect';
       """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
@@ -247,7 +247,7 @@ Feature: Web console visual ingestor creation
       CREATE RELAY visual_branch_relay SCHEMA visual_branch_output BRANCHED BY visual_branch;
       CREATE RELAY visual_branch_error_relay SCHEMA visual_branch_error UNBRANCHED;
       CREATE VHOST visual_branch_host branch-{{test_id}}.example.com;
-      CREATE ENDPOINT visual_branch_endpoint ON visual_branch_host PATH '/branch' TYPE HTTP;
+      CREATE HTTP ENDPOINT visual_branch_endpoint ON visual_branch_host PATH '/branch';
       """
     And the web console is opened on the leader node
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists

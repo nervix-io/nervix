@@ -12,7 +12,7 @@ Feature: Logical ingestion time and admission
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY admission_errors SCHEMA admission_error UNBRANCHED;
       CREATE VHOST edge batch-clock-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_batch_codec
         TIMESTAMP AT occurred_at
@@ -73,7 +73,7 @@ Feature: Logical ingestion time and admission
         ENCODE occurred_at AS RFC3339;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge ingestion-clock-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TIMESTAMP AT occurred_at
@@ -138,7 +138,7 @@ Feature: Logical ingestion time and admission
       CREATE RELAY events SCHEMA event BRANCHED BY tenants;
       CREATE RELAY summaries SCHEMA summary BRANCHED BY tenants;
       CREATE VHOST edge ingestion-window-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TIMESTAMP <timestamp_source>
@@ -200,7 +200,7 @@ Feature: Logical ingestion time and admission
         ENCODE occurred_at AS RFC3339;
       CREATE RELAY observations SCHEMA request UNBRANCHED;
       CREATE VHOST edge retained-clock-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING request_codec
         TIMESTAMP AT occurred_at
@@ -242,8 +242,8 @@ Feature: Logical ingestion time and admission
       CREATE RELAY buffered_events SCHEMA request UNBRANCHED;
       CREATE RELAY observations SCHEMA observation UNBRANCHED;
       CREATE VHOST edge quiesced-clock-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE ENDPOINT clock_ingress ON edge PATH '/clock' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT clock_ingress ON edge PATH '/clock';
       CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING request_codec
         TIMESTAMP NOW

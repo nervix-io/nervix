@@ -26,7 +26,7 @@ Feature: Diagnostic nodes track their blocking locks for active deadlocks
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE RELAY event_errors SCHEMA event_error UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-deadlock-diagnostics.example.com;
-      CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec

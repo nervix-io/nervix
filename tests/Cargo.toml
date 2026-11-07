@@ -57,6 +57,7 @@ async-nats = { workspace = true, features = ["nkeys"] }
 aws-config = { workspace = true }
 aws-credential-types = { workspace = true }
 aws-sdk-sqs = { workspace = true }
+nervix-crypto = { workspace = true }
 # The SDK crates disable their TLS defaults below; select AWS-LC on their shared client.
 aws-smithy-http-client = { workspace = true, features = ["rustls-aws-lc"] }
 base64 = { workspace = true }

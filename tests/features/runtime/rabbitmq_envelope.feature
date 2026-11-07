@@ -17,7 +17,7 @@ Feature: RabbitMQ emitter properties follow the declared envelope
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge envelope-{{test_id}}.example.com;
-      CREATE ENDPOINT incoming ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT incoming ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR incoming FROM incoming MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -128,7 +128,7 @@ Feature: RabbitMQ emitter properties follow the declared envelope
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge persistent-{{test_id}}.example.com;
-      CREATE ENDPOINT incoming ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT incoming ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR incoming FROM incoming MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -203,7 +203,7 @@ Feature: RabbitMQ emitter properties follow the declared envelope
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected UNBRANCHED;
       CREATE VHOST edge time-{{test_id}}.example.com;
-      CREATE ENDPOINT incoming ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT incoming ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR incoming FROM incoming MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE

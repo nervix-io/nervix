@@ -54,7 +54,7 @@ CREATE RELAY replay_orders
 
 CREATE VHOST replay_edge replay.example.com;
 
-CREATE ENDPOINT replay_ingress ON replay_edge PATH '/events' TYPE HTTP;
+CREATE HTTP ENDPOINT replay_ingress ON replay_edge PATH '/events';
 
 CREATE HTTP ENDPOINT INGESTOR replay_source
   FROM replay_ingress MODE NO ACK

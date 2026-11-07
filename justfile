@@ -335,6 +335,13 @@ test-scenarios *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
 
+# Endpoint inspection/refusal cases use in-process nodes and the native session client.
+test-endpoint-heads *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/kinded_endpoint_heads.feature {{ quote(args) }}
+
 # Exercise emitter destination keys and partitions without unrelated client-tool preparation.
 test-emitter-destinations *args: build-deps
     #!/usr/bin/env bash
@@ -770,6 +777,10 @@ coverage-web-console output *args:
 # compiler cache.
 coverage-connector package output *args:
     cargo llvm-cov --no-clean --package {{ package }} --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+
+# Collect focused unit coverage for the cryptography boundary and its TLS/signing consumers.
+coverage-crypto output *args:
+    cargo llvm-cov --no-clean --package nervix-crypto --package nervix-interconnect --package nervix-connector --package nervix-connector-nats --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
 test-scenarios-reuse *args: tests-deps
     #!/usr/bin/env bash
@@ -1347,6 +1358,10 @@ test-consensus *args:
 test-models *args:
     cargo test --package nervix-models --all-targets -- {{ args }}
 
+# Run vocabulary API examples and compile-time refusals, optionally matching one API.
+test-models-docs filter="":
+    cargo test --package nervix-models --doc {{ quote(filter) }}
+
 # Run vocabulary tests with their declared Arrow schema boundary enabled.
 test-models-arrow *args:
     cargo test --package nervix-models --all-targets --features arrow -- {{ args }}
@@ -1356,8 +1371,11 @@ test-otel-declarations:
     cargo test --package nervix-models --lib --features arrow connector::otel::
     cargo test --package nervix-plexus --lib emitter::
 
-# Run the interconnect unit tests, which live in the nervix-interconnect crate rather than the
-# server lib.
+# Run the cryptography boundary's provider and signing unit tests.
+test-crypto *args:
+    cargo test --package nervix-crypto --lib -- {{ args }}
+
+# Run the node transport's production owners and their protocol fixtures.
 test-interconnect *args:
     cargo test --package nervix-interconnect --lib -- {{ args }}
 
@@ -2872,7 +2890,7 @@ clippy_language_packages_1 := ["nervix-plexus", "nervix-plexus-format", "nervix-
 
 clippy_language_packages_2 := ["nervix-benchmark", "nervix-cli", "nervix-client-ffi", "nervix-client-host", "nervix-client-jvm", "nervix-client-python"]
 
-clippy_foundation_packages_1 := ["nervix-approx-into", "nervix-bounded-write", "nervix-dataflow-graph", "nervix-expiry-map", "nervix-primitives-macros", "nervix-recovery"]
+clippy_foundation_packages_1 := ["nervix-approx-into", "nervix-bounded-write", "nervix-crypto", "nervix-dataflow-graph", "nervix-expiry-map", "nervix-primitives-macros", "nervix-recovery"]
 
 clippy_foundation_packages_2 := [
     "nervix-arbitrary",

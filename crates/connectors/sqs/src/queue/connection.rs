@@ -288,7 +288,10 @@ impl SqsTrust {
     /// The HTTP client every request of the SQS client travels over, whose every new connection
     /// resolves the endpoint host through `dns` and takes no proxy.
     fn http_client(self, dns: DnsResolver) -> SharedHttpClient {
-        let builder = Builder::new().tls_provider(Provider::Rustls(CryptoMode::AwsLc));
+        let mode = match nervix_crypto::tls::outward_tls_provider() {
+            nervix_crypto::tls::OutwardTlsProvider::AwsLc => CryptoMode::AwsLc,
+        };
+        let builder = Builder::new().tls_provider(Provider::Rustls(mode));
         match self {
             Self::Platform => builder.build_with_resolver(dns),
             Self::Ca(tls_context) => builder.tls_context(tls_context).build_with_resolver(dns),

@@ -35,7 +35,7 @@ Feature: Roto user-defined functions
       CREATE RELAY udf_inputs SCHEMA udf_input UNBRANCHED;
       CREATE RELAY udf_outputs SCHEMA udf_output UNBRANCHED;
       CREATE VHOST edge udf-{{test_id}}.example.com;
-      CREATE ENDPOINT udf_ingress ON edge PATH '/udf' TYPE HTTP;
+      CREATE HTTP ENDPOINT udf_ingress ON edge PATH '/udf';
       CREATE HTTP ENDPOINT INGESTOR udf_ingestor
         FROM udf_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING udf_input_codec
@@ -151,7 +151,7 @@ Feature: Roto user-defined functions
       CREATE RELAY card_events SCHEMA card_event UNBRANCHED;
       CREATE RELAY valid_cards SCHEMA card_event UNBRANCHED;
       CREATE VHOST card_edge luhn-{{test_id}}.example.com;
-      CREATE ENDPOINT card_ingress ON card_edge PATH '/cards' TYPE HTTP;
+      CREATE HTTP ENDPOINT card_ingress ON card_edge PATH '/cards';
       CREATE HTTP ENDPOINT INGESTOR card_ingestor
         FROM card_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING card_event_codec

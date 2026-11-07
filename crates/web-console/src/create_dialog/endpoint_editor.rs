@@ -2,7 +2,7 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** Browser presentation of endpoint VHOST, path, type and signaling selections.
+//! - **Owns.** Browser presentation of endpoint VHOST, path, kind and signaling selections.
 //! - **Depends on.** Endpoint browser drafts and shared typed choices.
 //! - **Must not know.** Listener routing or WebSocket handshake execution.
 
@@ -44,33 +44,33 @@ pub(super) fn EndpointEditor(
                     signals.edit();
                 } />
         </label>
-        <fieldset class="create-choice-group create-endpoint-type">
-            <legend>"Endpoint type"</legend>
+        <fieldset class="create-choice-group create-endpoint-kind">
+            <legend>"Endpoint kind"</legend>
             <div class="create-choice-buttons">
-                <button type="button" data-type="http"
-                    class:active=move || signals.endpoint.get().endpoint_type == Some(EndpointType::Http)
+                <button type="button" data-kind="http"
+                    class:active=move || signals.endpoint.get().endpoint_type() == Some(EndpointType::Http)
                     disabled=pending
                     on:click=move |_| {
-                        signals.endpoint.update(|draft| draft.select_type(EndpointType::Http));
+                        signals.endpoint.update(|draft| draft.select_http());
                         signals.edit();
                     }>"HTTP"</button>
-                <button type="button" data-type="websockets"
-                    class:active=move || signals.endpoint.get().endpoint_type == Some(EndpointType::Websockets)
+                <button type="button" data-kind="websockets"
+                    class:active=move || signals.endpoint.get().endpoint_type() == Some(EndpointType::Websockets)
                     disabled=pending
                     on:click=move |_| {
-                        signals.endpoint.update(|draft| draft.select_type(EndpointType::Websockets));
+                        signals.endpoint.update(|draft| draft.select_websockets());
                         signals.edit();
                     }>"WEBSOCKETS"</button>
             </div>
         </fieldset>
-        <Show when=move || signals.endpoint.get().endpoint_type == Some(EndpointType::Websockets) fallback=|| ()>
+        <Show when=move || signals.endpoint.get().endpoint_type() == Some(EndpointType::Websockets) fallback=|| ()>
             <ChoiceGroup class_name="create-endpoint-signaling" label="Signaling protocol · optional"
                 control=ChoiceControl::EndpointSignaling signals=signals request_tx=request_tx
                 session_generation=session_generation />
-            <Show when=move || signals.endpoint.get().signaling_protocol.is_some() fallback=|| ()>
+            <Show when=move || signals.endpoint.get().signaling_protocol().is_some() fallback=|| ()>
                 <button type="button" class="create-endpoint-signaling-clear" disabled=pending
                     on:click=move |_| {
-                        signals.endpoint.update(|draft| draft.signaling_protocol = None);
+                        signals.endpoint.update(|draft| draft.clear_signaling());
                         signals.edit();
                     }>"No signaling protocol"</button>
             </Show>

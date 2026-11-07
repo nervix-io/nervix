@@ -45,15 +45,13 @@ Feature: Branch activity sampling
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT left_endpoint
+      CREATE HTTP ENDPOINT left_endpoint
         ON edge
-        PATH '/left'
-        TYPE HTTP;
+        PATH '/left';
 
-      CREATE ENDPOINT right_endpoint
+      CREATE HTTP ENDPOINT right_endpoint
         ON edge
-        PATH '/right'
-        TYPE HTTP;
+        PATH '/right';
 
       CREATE HTTP ENDPOINT INGESTOR left_ingestor
         FROM left_endpoint MODE NO ACK

@@ -18,7 +18,7 @@ Feature: JAQ codec unfolding
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY order_lines SCHEMA order_line UNBRANCHED;
       CREATE VHOST edge unfold-{{test_id}}.example.com;
-      CREATE ENDPOINT order_lines_endpoint ON edge PATH '/order-lines' TYPE HTTP;
+      CREATE HTTP ENDPOINT order_lines_endpoint ON edge PATH '/order-lines';
       CREATE HTTP ENDPOINT INGESTOR order_lines_ingestor
         FROM order_lines_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_lines_codec
@@ -66,7 +66,7 @@ Feature: JAQ codec unfolding
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE RELAY order_lines SCHEMA order_line UNBRANCHED;
       CREATE VHOST edge unfold-{{test_id}}.example.com;
-      CREATE ENDPOINT order_lines_endpoint ON edge PATH '/order-lines' TYPE HTTP;
+      CREATE HTTP ENDPOINT order_lines_endpoint ON edge PATH '/order-lines';
       CREATE HTTP ENDPOINT INGESTOR order_lines_ingestor
         FROM order_lines_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_line_stream_codec
@@ -114,7 +114,7 @@ Feature: JAQ codec unfolding
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge unfold-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR events_ingestor
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING events_codec
@@ -175,7 +175,7 @@ Feature: JAQ codec unfolding
         WITH JAQ TRANSFORMATIONS ON INGESTION 'if .flood then range(65537) | {user_id: .} else . end';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge unfold-{{test_id}}.example.com;
-      CREATE ENDPOINT flood_endpoint ON edge PATH '/flood' TYPE HTTP;
+      CREATE HTTP ENDPOINT flood_endpoint ON edge PATH '/flood';
       CREATE HTTP ENDPOINT INGESTOR flood_ingestor
         FROM flood_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING flood_codec
@@ -513,7 +513,7 @@ Feature: JAQ codec unfolding
         WITH JAQ TRANSFORMATIONS ON INGESTION '<transformation>';
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge unfold-{{test_id}}.example.com;
-      CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR notifications_ingestor
         FROM notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec

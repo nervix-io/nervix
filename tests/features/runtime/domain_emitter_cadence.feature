@@ -24,10 +24,9 @@ Feature: Domain-paced emitter cadence
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge emitter-cadence-{{test_id}}.example.com;
-      CREATE ENDPOINT emitter_cadence_endpoint
+      CREATE HTTP ENDPOINT emitter_cadence_endpoint
         ON edge
-        PATH '/events'
-        TYPE HTTP;
+        PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR emitter_cadence_ingestor
         FROM emitter_cadence_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -103,10 +102,9 @@ Feature: Domain-paced emitter cadence
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge emitter-hold-{{test_id}}.example.com;
-      CREATE ENDPOINT emitter_hold_endpoint
+      CREATE HTTP ENDPOINT emitter_hold_endpoint
         ON edge
-        PATH '/events'
-        TYPE HTTP;
+        PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR emitter_hold_ingestor
         FROM emitter_hold_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -172,10 +170,9 @@ Feature: Domain-paced emitter cadence
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge emitter-immediate-{{test_id}}.example.com;
-      CREATE ENDPOINT emitter_immediate_endpoint
+      CREATE HTTP ENDPOINT emitter_immediate_endpoint
         ON edge
-        PATH '/events'
-        TYPE HTTP;
+        PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR emitter_immediate_ingestor
         FROM emitter_immediate_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -240,10 +237,9 @@ Feature: Domain-paced emitter cadence
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge iceberg-cadence-{{test_id}}.example.com;
-      CREATE ENDPOINT iceberg_cadence_endpoint
+      CREATE HTTP ENDPOINT iceberg_cadence_endpoint
         ON edge
-        PATH '/events'
-        TYPE HTTP;
+        PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR iceberg_cadence_ingestor
         FROM iceberg_cadence_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec

@@ -33,10 +33,9 @@ Feature: Websocket signaling protocols
                  '.id == 2 and .result == null'
         TIMEOUT 5s;
 
-      CREATE ENDPOINT ws_notifications_endpoint
+      CREATE WEBSOCKETS ENDPOINT ws_notifications_endpoint
         ON edge
-        PATH '/ws'
-        TYPE WEBSOCKETS WITH SIGNALING PROTOCOL binance_style_subscribe;
+        PATH '/ws' WITH SIGNALING PROTOCOL binance_style_subscribe;
 
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
         FROM ws_notifications_endpoint MODE NO ACK
@@ -103,10 +102,9 @@ Feature: Websocket signaling protocols
         WAIT JAQ '.id == 1 and .result == null' FAIL JAQ '.error'
         TIMEOUT 5s;
 
-      CREATE ENDPOINT ws_notifications_endpoint
+      CREATE WEBSOCKETS ENDPOINT ws_notifications_endpoint
         ON edge
-        PATH '/ws'
-        TYPE WEBSOCKETS WITH SIGNALING PROTOCOL rejecting_subscribe;
+        PATH '/ws' WITH SIGNALING PROTOCOL rejecting_subscribe;
 
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
         FROM ws_notifications_endpoint MODE NO ACK
@@ -167,10 +165,9 @@ Feature: Websocket signaling protocols
         WAIT JAQ '. == "WELCOME"'
         TIMEOUT 5s;
 
-      CREATE ENDPOINT ws_notifications_endpoint
+      CREATE WEBSOCKETS ENDPOINT ws_notifications_endpoint
         ON edge
-        PATH '/ws'
-        TYPE WEBSOCKETS WITH SIGNALING PROTOCOL raw_handshake;
+        PATH '/ws' WITH SIGNALING PROTOCOL raw_handshake;
 
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
         FROM ws_notifications_endpoint MODE NO ACK
@@ -252,10 +249,9 @@ Feature: Websocket signaling protocols
         WAIT JAQ '.id == 1'
         TIMEOUT 5s;
 
-      CREATE ENDPOINT ws_notifications_endpoint
+      CREATE WEBSOCKETS ENDPOINT ws_notifications_endpoint
         ON edge
-        PATH '/ws'
-        TYPE WEBSOCKETS WITH SIGNALING PROTOCOL protobuf_subscribe;
+        PATH '/ws' WITH SIGNALING PROTOCOL protobuf_subscribe;
 
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
         FROM ws_notifications_endpoint MODE NO ACK
@@ -335,10 +331,9 @@ Feature: Websocket signaling protocols
         WAIT JAQ '.level == 1.4000000000000001'
         TIMEOUT 5s;
 
-      CREATE ENDPOINT ws_notifications_endpoint
+      CREATE WEBSOCKETS ENDPOINT ws_notifications_endpoint
         ON edge
-        PATH '/ws'
-        TYPE WEBSOCKETS WITH SIGNALING PROTOCOL protobuf_levels;
+        PATH '/ws' WITH SIGNALING PROTOCOL protobuf_levels;
 
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
         FROM ws_notifications_endpoint MODE NO ACK
@@ -403,10 +398,9 @@ Feature: Websocket signaling protocols
         WAIT JAQ '.id == 1 and .success'
         TIMEOUT 5s;
 
-      CREATE ENDPOINT ws_notifications_endpoint
+      CREATE WEBSOCKETS ENDPOINT ws_notifications_endpoint
         ON edge
-        PATH '/ws'
-        TYPE WEBSOCKETS WITH SIGNALING PROTOCOL authenticated_subscribe;
+        PATH '/ws' WITH SIGNALING PROTOCOL authenticated_subscribe;
 
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
         FROM ws_notifications_endpoint MODE NO ACK
@@ -473,10 +467,9 @@ Feature: Websocket signaling protocols
         WAIT JAQ '.acked == "second"'
         TIMEOUT 5s;
 
-      CREATE ENDPOINT ws_notifications_endpoint
+      CREATE WEBSOCKETS ENDPOINT ws_notifications_endpoint
         ON edge
-        PATH '/ws'
-        TYPE WEBSOCKETS WITH SIGNALING PROTOCOL sequenced_subscribe;
+        PATH '/ws' WITH SIGNALING PROTOCOL sequenced_subscribe;
 
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
         FROM ws_notifications_endpoint MODE NO ACK
@@ -543,10 +536,9 @@ Feature: Websocket signaling protocols
         WAIT JAQ '.accepted'
         TIMEOUT 5s;
 
-      CREATE ENDPOINT ws_notifications_endpoint
+      CREATE WEBSOCKETS ENDPOINT ws_notifications_endpoint
         ON edge
-        PATH '/ws'
-        TYPE WEBSOCKETS WITH SIGNALING PROTOCOL challenge_response;
+        PATH '/ws' WITH SIGNALING PROTOCOL challenge_response;
 
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
         FROM ws_notifications_endpoint MODE NO ACK
@@ -612,10 +604,9 @@ Feature: Websocket signaling protocols
         WAIT JAQ '.subscribed_more'
         TIMEOUT 5s;
 
-      CREATE ENDPOINT ws_notifications_endpoint
+      CREATE WEBSOCKETS ENDPOINT ws_notifications_endpoint
         ON edge
-        PATH '/ws'
-        TYPE WEBSOCKETS WITH SIGNALING PROTOCOL passthrough_subscribe;
+        PATH '/ws' WITH SIGNALING PROTOCOL passthrough_subscribe;
 
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
         FROM ws_notifications_endpoint MODE NO ACK
@@ -680,10 +671,9 @@ Feature: Websocket signaling protocols
         WAIT JAQ '.subscribed'
         TIMEOUT 5s;
 
-      CREATE ENDPOINT ws_notifications_endpoint
+      CREATE WEBSOCKETS ENDPOINT ws_notifications_endpoint
         ON edge
-        PATH '/ws'
-        TYPE WEBSOCKETS WITH SIGNALING PROTOCOL buffered_subscribe;
+        PATH '/ws' WITH SIGNALING PROTOCOL buffered_subscribe;
 
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
         FROM ws_notifications_endpoint MODE NO ACK

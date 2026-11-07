@@ -30,14 +30,14 @@ Feature: Web console visual client, vhost and endpoint creation
     Then selector ".create-endpoint-vhost [data-value='visual_edge']" exists
     When selector ".create-endpoint-vhost [data-value='visual_edge']" is clicked
     And selector ".create-endpoint-path" is filled with "/ingest"
-    And selector ".create-endpoint-type [data-type='http']" is clicked
-    Then selector ".create-preview" contains "CREATE ENDPOINT visual_ingest ON visual_edge PATH '/ingest' TYPE HTTP"
+    And selector ".create-endpoint-kind [data-kind='http']" is clicked
+    Then selector ".create-preview" contains "CREATE HTTP ENDPOINT visual_ingest ON visual_edge PATH '/ingest'"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
     And selector ".prompt-row input" is filled with "SHOW CREATE ENDPOINT visual_ingest;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "CREATE ENDPOINT visual_ingest ON visual_edge PATH '/ingest' TYPE HTTP"
+    Then selector ".terminal" contains "CREATE HTTP ENDPOINT visual_ingest ON visual_edge PATH '/ingest'"
     When these Plexus commands are executed on the leader node
       """
       CREATE HTTP ENDPOINT INGESTOR visual_ingestor FROM visual_ingest MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_payload_codec TO visual_inbox INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -250,17 +250,18 @@ Feature: Web console visual client, vhost and endpoint creation
     Then selector ".create-endpoint-vhost [data-value='visual_edge']" exists
     When selector ".create-endpoint-vhost [data-value='visual_edge']" is clicked
     And selector ".create-endpoint-path" is filled with "/socket"
-    And selector ".create-endpoint-type [data-type='websockets']" is clicked
+    And selector ".create-endpoint-kind [data-kind='websockets']" is clicked
     And selector ".create-endpoint-signaling .create-choice-search" is filled with "visual_handshake"
     Then selector ".create-endpoint-signaling [data-value='visual_handshake']" exists
     When selector ".create-endpoint-signaling [data-value='visual_handshake']" is clicked
-    Then selector ".create-preview" contains "TYPE WEBSOCKETS WITH SIGNALING PROTOCOL visual_handshake"
+    Then selector ".create-preview" contains "CREATE WEBSOCKETS ENDPOINT visual_socket_endpoint"
+    And selector ".create-preview" contains "WITH SIGNALING PROTOCOL visual_handshake"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
     And selector ".prompt-row input" is filled with "SHOW CREATE ENDPOINT visual_socket_endpoint;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "TYPE WEBSOCKETS WITH SIGNALING PROTOCOL visual_handshake"
+    Then selector ".terminal" contains "WITH SIGNALING PROTOCOL visual_handshake"
 
   @visual_endpoint_transaction
   Scenario: An endpoint can select a VHOST staged earlier in its transaction
@@ -285,7 +286,7 @@ Feature: Web console visual client, vhost and endpoint creation
     Then selector ".create-endpoint-vhost [data-value='staged_edge']" exists
     When selector ".create-endpoint-vhost [data-value='staged_edge']" is clicked
     And selector ".create-endpoint-path" is filled with "/staged"
-    And selector ".create-endpoint-type [data-type='http']" is clicked
+    And selector ".create-endpoint-kind [data-kind='http']" is clicked
     And selector ".create-submit" is clicked
     Then selector ".create-status" contains "Queued in transaction"
     And selector ".create-status" contains "position 2"
@@ -299,7 +300,7 @@ Feature: Web console visual client, vhost and endpoint creation
     Then selector ".transaction-indicator" eventually disappears
     When selector ".prompt-row input" is filled with "SHOW CREATE ENDPOINT staged_endpoint;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "CREATE ENDPOINT staged_endpoint ON staged_edge PATH '/staged' TYPE HTTP"
+    Then selector ".terminal" contains "CREATE HTTP ENDPOINT staged_endpoint ON staged_edge PATH '/staged'"
 
   @visual_endpoint_reconnect
   Scenario: Selected endpoint references survive a leader reconnection
@@ -324,17 +325,17 @@ Feature: Web console visual client, vhost and endpoint creation
     Then selector ".create-endpoint-vhost [data-value='reconnect_edge']" exists
     When selector ".create-endpoint-vhost [data-value='reconnect_edge']" is clicked
     And selector ".create-endpoint-path" is filled with "/reconnected"
-    And selector ".create-endpoint-type [data-type='websockets']" is clicked
+    And selector ".create-endpoint-kind [data-kind='websockets']" is clicked
     And selector ".create-endpoint-signaling .create-choice-search" is filled with "reconnect_handshake"
     Then selector ".create-endpoint-signaling [data-value='reconnect_handshake']" exists
     When selector ".create-endpoint-signaling [data-value='reconnect_handshake']" is clicked
     And leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
     Then node "{{old_leader}}" eventually reports leader "{{new_leader}}"
     And selector ".topbar-status .pill.ok" contains "CONNECTED"
-    And selector ".create-preview" contains "TYPE WEBSOCKETS WITH SIGNALING PROTOCOL reconnect_handshake"
+    And selector ".create-preview" contains "WITH SIGNALING PROTOCOL reconnect_handshake"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
     And selector ".prompt-row input" is filled with "SHOW CREATE ENDPOINT reconnected_endpoint;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "CREATE ENDPOINT reconnected_endpoint ON reconnect_edge"
+    Then selector ".terminal" contains "CREATE WEBSOCKETS ENDPOINT reconnected_endpoint ON reconnect_edge"

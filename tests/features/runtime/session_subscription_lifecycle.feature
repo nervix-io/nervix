@@ -11,7 +11,7 @@ Feature: Session subscription lifecycle
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge redefined-{{test_id}}.example.com;
-      CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT event_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -124,7 +124,7 @@ Feature: Session subscription lifecycle
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge restarted-{{test_id}}.example.com;
-      CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT event_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -186,7 +186,7 @@ Feature: Session subscription lifecycle
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge interest-{{test_id}}.example.com;
-      CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT event_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -304,7 +304,7 @@ Feature: Session subscription lifecycle
       CREATE RELAY floods SCHEMA filler UNBRANCHED;
       CREATE RELAY probes SCHEMA filler UNBRANCHED;
       CREATE VHOST edge saturated-{{test_id}}.example.com;
-      CREATE ENDPOINT seed_endpoint ON edge PATH '/seeds' TYPE HTTP;
+      CREATE HTTP ENDPOINT seed_endpoint ON edge PATH '/seeds';
       CREATE HTTP ENDPOINT INGESTOR seed_ingestor
         FROM seed_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING seed_codec
@@ -343,7 +343,7 @@ Feature: Session subscription lifecycle
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge neighbor-{{test_id}}.example.com;
-      CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT event_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec

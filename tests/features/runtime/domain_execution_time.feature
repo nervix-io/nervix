@@ -30,10 +30,9 @@ Feature: Domain execution time
       CREATE RELAY ingested_events SCHEMA ingested_event UNBRANCHED;
       CREATE RELAY processed_events SCHEMA processed_event UNBRANCHED;
       CREATE VHOST edge execution-time-{{test_id}}.example.com;
-      CREATE ENDPOINT source_event_endpoint
+      CREATE HTTP ENDPOINT source_event_endpoint
         ON edge
-        PATH '/events'
-        TYPE HTTP;
+        PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor_events
         FROM source_event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_event_codec
@@ -116,10 +115,9 @@ Feature: Domain execution time
       CREATE RELAY clock_probes SCHEMA clock_probe UNBRANCHED;
       CREATE RELAY accepted_clock_probes SCHEMA clock_probe UNBRANCHED;
       CREATE VHOST edge roto-clock-{{test_id}}.example.com;
-      CREATE ENDPOINT clock_probe_endpoint
+      CREATE HTTP ENDPOINT clock_probe_endpoint
         ON edge
-        PATH '/probe'
-        TYPE HTTP;
+        PATH '/probe';
       CREATE HTTP ENDPOINT INGESTOR clock_probe_ingestor
         FROM clock_probe_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING clock_probe_codec
@@ -192,10 +190,9 @@ Feature: Domain execution time
       CREATE RELAY calculation_results SCHEMA calculation_result UNBRANCHED;
       CREATE RELAY calculation_errors SCHEMA calculation_error UNBRANCHED;
       CREATE VHOST edge execution-error-time-{{test_id}}.example.com;
-      CREATE ENDPOINT calculation_endpoint
+      CREATE HTTP ENDPOINT calculation_endpoint
         ON edge
-        PATH '/calculations'
-        TYPE HTTP;
+        PATH '/calculations';
       CREATE HTTP ENDPOINT INGESTOR calculation_ingestor
         FROM calculation_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING calculation_codec
@@ -279,10 +276,9 @@ Feature: Domain execution time
       CREATE RELAY generated_events SCHEMA generated_event UNBRANCHED;
       CREATE RELAY generated_summaries SCHEMA generated_summary UNBRANCHED;
       CREATE VHOST edge wasm-execution-time-{{test_id}}.example.com;
-      CREATE ENDPOINT trigger_endpoint
+      CREATE HTTP ENDPOINT trigger_endpoint
         ON edge
-        PATH '/trigger'
-        TYPE HTTP;
+        PATH '/trigger';
       CREATE HTTP ENDPOINT INGESTOR trigger_ingestor
         FROM trigger_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING trigger_event_codec

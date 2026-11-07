@@ -76,10 +76,9 @@ Feature: LOOKUP_HASH_MAP filter-map function
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/enrich'
-        TYPE HTTP;
+        PATH '/enrich';
 
       CREATE HTTP ENDPOINT INGESTOR ingestor_logs
         FROM ingress MODE NO ACK
@@ -355,10 +354,9 @@ Feature: LOOKUP_HASH_MAP filter-map function
 
       CREATE VHOST edge http-lookup-routes-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/lookup-routes'
-        TYPE HTTP;
+        PATH '/lookup-routes';
 
       CREATE HTTP ENDPOINT INGESTOR ingestor_logs
         FROM ingress MODE NO ACK
@@ -496,10 +494,9 @@ Feature: LOOKUP_HASH_MAP filter-map function
 
       CREATE VHOST edge http-lookup-failure-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/lookup-failure'
-        TYPE HTTP;
+        PATH '/lookup-failure';
 
       CREATE HTTP ENDPOINT INGESTOR ingestor_logs
         FROM ingress MODE NO ACK

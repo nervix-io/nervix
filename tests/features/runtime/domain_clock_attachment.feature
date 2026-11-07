@@ -50,7 +50,7 @@ Feature: Domain clock attachment
         ENCODE occurred_at AS RFC3339;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge attached-clock-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TIMESTAMP AT occurred_at

@@ -61,7 +61,7 @@ CREATE RELAY go_positive_metrics SCHEMA metric UNBRANCHED CAPACITY 1;
 
 CREATE VHOST edge http-wasm-dual.example.com;
 
-CREATE ENDPOINT wasm_metrics_ingress ON edge PATH '/wasm-metrics' TYPE HTTP;
+CREATE HTTP ENDPOINT wasm_metrics_ingress ON edge PATH '/wasm-metrics';
 
 CREATE HTTP ENDPOINT INGESTOR metric_source
   FROM wasm_metrics_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB

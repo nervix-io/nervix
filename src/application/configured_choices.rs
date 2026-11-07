@@ -403,7 +403,7 @@ impl ConfiguredChoices {
                 {
                     ModelCandidate::new(
                         NodeRef::new(ModelKind::Endpoint, &endpoint.name),
-                        format!("{} endpoint", endpoint.endpoint_type),
+                        endpoint.kind.to_string(),
                         "Endpoint source",
                         model.to_canonical_plexus(),
                     )?
@@ -1151,7 +1151,7 @@ mod tests {
     fn ingestor_source_and_codec_choices_offer_only_matching_capabilities() {
         use nervix_models::{
             ClientName, CodecJaqFormat, CodecJaqTransformations, CreateClientHttp,
-            CreateClientKafka, CreateEndpoint, EndpointName, EndpointType, IngestorEntityKind,
+            CreateClientKafka, CreateEndpoint, EndpointName, IngestorEntityKind,
         };
 
         let models = vec![
@@ -1169,15 +1169,15 @@ mod tests {
                 name: EndpointName::parse("listener").assured("valid endpoint"),
                 on_vhost: VhostName::parse("host").assured("valid VHOST"),
                 path: "/in".into(),
-                endpoint_type: EndpointType::Http,
-                signaling_protocol: None,
+                kind: nervix_models::EndpointKind::Http,
             }),
             Model::Endpoint(CreateEndpoint {
                 name: EndpointName::parse("socket").assured("valid endpoint"),
                 on_vhost: VhostName::parse("host").assured("valid VHOST"),
                 path: "/ws".into(),
-                endpoint_type: EndpointType::Websockets,
-                signaling_protocol: None,
+                kind: nervix_models::EndpointKind::Websockets {
+                    signaling_protocol: None,
+                },
             }),
             Model::Codec(CreateCodec {
                 name: CodecName::parse("decode").assured("valid codec"),

@@ -25,7 +25,7 @@ Feature: Config entity quiesce classification
         };
 
       CREATE VHOST config_edge http-{{test_id}}-config.example.com;
-      CREATE ENDPOINT config_ingress ON config_edge PATH '/config-quiesce' TYPE HTTP;
+      CREATE HTTP ENDPOINT config_ingress ON config_edge PATH '/config-quiesce';
 
       CREATE HTTP ENDPOINT INGESTOR config_ingestor
         FROM config_ingress MODE NO ACK

@@ -21,7 +21,7 @@ Feature: Gossip subscription interest
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge subscription-interest-{{test_id}}.example.com;
-      CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT event_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec

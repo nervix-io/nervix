@@ -38,7 +38,7 @@ Feature: Relay partition failover
         BRANCHED BY by_tenant;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/ingest';
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
@@ -154,7 +154,7 @@ Feature: Relay partition failover
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/ingest';
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK

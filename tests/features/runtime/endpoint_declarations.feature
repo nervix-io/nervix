@@ -16,8 +16,8 @@ Feature: Declared endpoint surfaces
         TO candidate_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE VHOST edge endpoints-{{test_id}}.example.com;
-      CREATE ENDPOINT http_intake ON edge PATH '/http' TYPE HTTP;
-      CREATE ENDPOINT websocket_intake ON edge PATH '/ws' TYPE WEBSOCKETS;
+      CREATE HTTP ENDPOINT http_intake ON edge PATH '/http';
+      CREATE WEBSOCKETS ENDPOINT websocket_intake ON edge PATH '/ws';
       CREATE HTTP ENDPOINT INGESTOR candidate_http
         FROM http_intake MODE NO ACK ON QUIESCE REJECT RETRY AFTER 1s
         DECODE USING event_codec
@@ -59,7 +59,7 @@ Feature: Declared endpoint surfaces
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge refusals-{{test_id}}.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE <protocol>;
+      CREATE <protocol> ENDPOINT intake ON edge PATH '/events';
       CREATE <protocol> ENDPOINT INGESTOR rejected
         FROM intake MODE NO ACK ON QUIESCE REJECT RETRY AFTER 1s
         DECODE USING event_codec
