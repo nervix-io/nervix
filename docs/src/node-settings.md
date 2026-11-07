@@ -383,8 +383,10 @@ ALTER CLUSTER SET DOMAIN_DRAIN_TIMEOUT = 13m 49s;
 ```
 
 The statement runs outside domain transactions and needs no selected domain. Its assignments
-form one transition: either every assignment is committed or none is. A duplicate parameter,
-an invalid value, or a cap that an existing model exceeds refuses the transition with the
+form one transition: either every assignment is committed or none is. A statement assigns each
+parameter at most once, so completion offers only the parameters it has not assigned yet, and a
+parameter written a second time is refused at the name that repeats it, naming the parameter.
+An invalid value, or a cap that an existing model exceeds, refuses the transition with the
 parameter and owning model identified. Timings that drive repeated work or retained validity
 must be greater than zero and no longer than `u32::MAX` whole seconds, with nanosecond precision
 within that range. Counts used by a wire or native count fit its current representation. HTTP

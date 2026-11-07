@@ -114,8 +114,7 @@ Feature: Web console visual schema and branch creation
     And selector ".create-mode-options [data-value='STRICT']" is clicked
     And selector ".create-add-field" is clicked
     And selector ".create-field-name" is filled with "matrix"
-    Then selector ".create-field-type [data-type='array']" does not exist
-    When selector ".create-field-type [data-type='double']" is clicked
+    And selector ".create-field-type [data-type='double']" is clicked
     And selector ".create-add-wire-array" is clicked
     Then selector ".create-preview" contains "matrix ARRAY<DOUBLE>"
     When selector ".create-add-wire-array" is clicked

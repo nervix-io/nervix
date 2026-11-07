@@ -31,6 +31,8 @@ use std::{
     num::NonZeroUsize,
 };
 
+use apache_avro::{Schema as AvroSchema, write_avro_datum_ref};
+use ciborium_ll::{Encoder as CborEncoder, Header as CborHeader};
 use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
 use nervix_bounded_write::{BoundedWrite, BoundedWriter};
@@ -244,8 +246,8 @@ impl CompiledCodec {
 
     #[cfg_attr(
         nervix_lint,
-        nervix::dispatch(reason = "the external JSON, Arrow and payload writer interfaces \
-                                   encode one admitted batch")
+        nervix::dispatch(reason = "the external JSON, CBOR, Avro, Arrow and payload writer \
+                                   interfaces encode one admitted batch")
     )]
     fn write_batch(
         &self,
@@ -268,8 +270,10 @@ impl CompiledCodec {
                 output.write_all(b"]").map_err(unwritable)
             }
             CompiledWireSchema::Cbor(_) => {
-                output
-                    .write_all(&cbor_array_header(members.len()))
+                // A definite-length array head, which ciborium writes in its shortest form, then
+                // the members.
+                CborEncoder::from(&mut *output)
+                    .push(CborHeader::Array(Some(members.len())))
                     .map_err(unwritable)?;
                 for member in encoded_members(members, encoding)? {
                     output.write_all(member).map_err(unwritable)?;
@@ -278,14 +282,20 @@ impl CompiledCodec {
             }
             CompiledWireSchema::Avro(_) => {
                 // One array block: the item count as an Avro long, the items, then the zero count
-                // that ends the array.
+                // that ends the array. apache-avro writes each count as a long datum.
+                let unwritable_count = |cause: apache_avro::Error| {
+                    Report::new(cause).change_context(BatchContainerError::Unwritable { encoding })
+                };
                 let count = i64::try_from(members.len())
                     .assured("a batch holds at most 65,536 members, which fits an Avro long");
-                output.write_all(&avro_long(count)).map_err(unwritable)?;
+                write_avro_datum_ref(&AvroSchema::Long, &count, output)
+                    .map_err(unwritable_count)?;
                 for member in encoded_members(members, encoding)? {
                     output.write_all(member).map_err(unwritable)?;
                 }
-                output.write_all(&avro_long(0)).map_err(unwritable)
+                write_avro_datum_ref(&AvroSchema::Long, &0_i64, output)
+                    .map_err(unwritable_count)?;
+                Ok(())
             }
             CompiledWireSchema::Protobuf(protobuf) => {
                 let batch_message = protobuf
@@ -447,52 +457,6 @@ fn native_container(format: JaqNativeFormat, values: Vec<JsonValue>) -> JsonValu
         | JaqNativeFormat::Yaml
         | JaqNativeFormat::Cbor
         | JaqNativeFormat::Raw => JsonValue::Array(values),
-    }
-}
-
-/// The head of a definite-length CBOR array of `count` items: major type 4 with the count as its
-/// argument, in the shortest form RFC 8949 allows.
-fn cbor_array_header(count: usize) -> Vec<u8> {
-    const MAJOR_ARRAY: u8 = 0x80;
-    if let Ok(count) = u8::try_from(count)
-        && count < 24
-    {
-        return vec![MAJOR_ARRAY | count];
-    }
-    if let Ok(count) = u8::try_from(count) {
-        return vec![MAJOR_ARRAY | 24, count];
-    }
-    if let Ok(count) = u16::try_from(count) {
-        let mut header = vec![MAJOR_ARRAY | 25];
-        header.extend_from_slice(&count.to_be_bytes());
-        return header;
-    }
-    if let Ok(count) = u32::try_from(count) {
-        let mut header = vec![MAJOR_ARRAY | 26];
-        header.extend_from_slice(&count.to_be_bytes());
-        return header;
-    }
-    let count = u64::try_from(count)
-        .assured("Nervix builds for 64-bit targets only, where u64 holds every usize");
-    let mut header = vec![MAJOR_ARRAY | 27];
-    header.extend_from_slice(&count.to_be_bytes());
-    header
-}
-
-/// An Avro `long`: the zig-zag encoding of `value` as a variable-length integer.
-fn avro_long(value: i64) -> Vec<u8> {
-    // Zig-zag maps a signed value onto an unsigned one so small magnitudes stay short; the shifts
-    // and the exclusive or are the encoding itself.
-    let mut zigzag = ((value << 1) ^ (value >> 63)).cast_unsigned();
-    let mut encoded = Vec::new();
-    loop {
-        let byte = u8::try_from(zigzag & 0x7f).assured("the value is masked to seven bits");
-        zigzag >>= 7;
-        if zigzag == 0 {
-            encoded.push(byte);
-            return encoded;
-        }
-        encoded.push(byte | 0x80);
     }
 }
 
@@ -1113,26 +1077,126 @@ mod tests {
         assert!(matches!(member, BatchMemberEncoding::Oversize(_)));
     }
 
-    #[test]
-    fn cbor_array_headers_use_the_shortest_argument() {
-        assert_eq!(cbor_array_header(1), vec![0x81]);
-        assert_eq!(cbor_array_header(23), vec![0x97]);
-        assert_eq!(cbor_array_header(24), vec![0x98, 24]);
-        assert_eq!(cbor_array_header(255), vec![0x98, 0xff]);
-        assert_eq!(cbor_array_header(256), vec![0x99, 0x01, 0x00]);
-        assert_eq!(
-            cbor_array_header(65_536),
-            vec![0x9a, 0x00, 0x01, 0x00, 0x00]
+    fn cbor_event_codec() -> Arc<CompiledCodec> {
+        let codec = codec_named(
+            "event_codec",
+            CodecWireFormat::Cbor {
+                wire_schema: named("event_wire"),
+            },
         );
+        let wire = event_wire(CborType::Integer, CborType::Text);
+        compile(&codec, ResolvedCodecWireFormat::Cbor(&wire), None)
     }
 
+    fn avro_event_codec() -> Arc<CompiledCodec> {
+        let codec = codec_named(
+            "event_codec",
+            CodecWireFormat::Avro {
+                wire_schema: named("event_avro"),
+            },
+        );
+        let wire = avro_wire();
+        compile(&codec, ResolvedCodecWireFormat::Avro(&wire), None)
+    }
+
+    /// A container of the three events' members repeated to a count, beside the members' own
+    /// encodings concatenated in the same order.
+    struct RepeatedContainer {
+        members: Vec<u8>,
+        payload: Vec<u8>,
+    }
+
+    /// The container `codec` writes for `count` members, the three events repeated in order,
+    /// under a limit no container of a batch reaches.
+    fn repeated_container(codec: &CompiledCodec, count: usize) -> RepeatedContainer {
+        let batch = events();
+        let distinct = members_of(codec, &batch, limit(4096));
+        let mut run = Vec::with_capacity(count);
+        let mut members = Vec::new();
+        for index in 0..count {
+            let member = &distinct[index % distinct.len()];
+            let MemberValue::Encoded(bytes) = &member.0 else {
+                panic!("a schemaful member is its record's own encoding");
+            };
+            members.extend_from_slice(bytes);
+            run.push(member);
+        }
+        let encoded = codec
+            .encode_batch_within(&run, limit(1 << 24))
+            .expect("a container of encoded members has no evaluation to fail");
+        let BoundedBatchEncoding::Encoded(payload) = encoded else {
+            panic!("{count} members fit 16 MiB");
+        };
+        RepeatedContainer { members, payload }
+    }
+
+    /// RFC 8949 §3 and §4.1: the array head is major type 4 with the count as its argument in its
+    /// preferred serialization, inline below 24 and otherwise the shortest of one, two, four or
+    /// eight big-endian bytes. A batch holds at most 65,536 members, the first count that needs
+    /// four.
     #[test]
-    fn avro_longs_are_zig_zag_varints() {
-        assert_eq!(avro_long(0), vec![0x00]);
-        assert_eq!(avro_long(1), vec![0x02]);
-        assert_eq!(avro_long(3), vec![0x06]);
-        assert_eq!(avro_long(64), vec![0x80, 0x01]);
-        assert_eq!(avro_long(65_536), vec![0x80, 0x80, 0x08]);
+    fn a_cbor_container_heads_its_members_with_the_shortest_array_argument() {
+        let codec = cbor_event_codec();
+        for (count, head) in [
+            (1, vec![0x81]),
+            (23, vec![0x97]),
+            (24, vec![0x98, 24]),
+            (255, vec![0x98, 0xff]),
+            (256, vec![0x99, 0x01, 0x00]),
+            (65_535, vec![0x99, 0xff, 0xff]),
+            (65_536, vec![0x9a, 0x00, 0x01, 0x00, 0x00]),
+        ] {
+            let container = repeated_container(&codec, count);
+
+            let mut expected = head;
+            expected.extend_from_slice(&container.members);
+            assert_eq!(container.payload, expected, "{count} members");
+        }
+    }
+
+    /// The Avro specification's binary encoding: an array is blocks of a long count and that many
+    /// items, ended by a zero count, and a long is zig-zag encoded seven bits at a time, low group
+    /// first. The container is one block, so its count needs a second byte from 64 members.
+    #[test]
+    fn an_avro_container_is_one_block_counted_by_a_zig_zag_long() {
+        let codec = avro_event_codec();
+        for (count, block_count) in [
+            (1, vec![0x02]),
+            (3, vec![0x06]),
+            (63, vec![0x7e]),
+            (64, vec![0x80, 0x01]),
+            (65_536, vec![0x80, 0x80, 0x08]),
+        ] {
+            let container = repeated_container(&codec, count);
+
+            let mut expected = block_count;
+            expected.extend_from_slice(&container.members);
+            expected.push(0x00);
+            assert_eq!(container.payload, expected, "{count} members");
+        }
+    }
+
+    /// A limit that ends inside a container's count refuses the container as a whole, however the
+    /// count is written: the payload is never cut after a partial count.
+    #[test]
+    fn a_limit_inside_the_container_count_is_oversize() {
+        for (codec, count) in [(cbor_event_codec(), 24), (avro_event_codec(), 64)] {
+            let batch = events();
+            let distinct = members_of(&codec, &batch, limit(4096));
+            let mut run = Vec::with_capacity(count);
+            for index in 0..count {
+                run.push(&distinct[index % distinct.len()]);
+            }
+
+            let encoded = codec
+                .encode_batch_within(&run, limit(1))
+                .expect("reaching the limit is an outcome");
+
+            let BoundedBatchEncoding::Oversize(exceeded) = encoded else {
+                panic!("a two-byte count does not fit one byte");
+            };
+            assert_eq!(exceeded.limit, limit(1), "{count} members");
+        }
     }
 
     #[test]
