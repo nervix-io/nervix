@@ -64,6 +64,4 @@ fn class(ruby: &Ruby, module: RModule, name: &str) -> Result<RClass, Error> {
 }
 
 #[cfg(all(test, feature = "ruby-tests"))]
-mod test_server;
-#[cfg(all(test, feature = "ruby-tests"))]
 mod tests;

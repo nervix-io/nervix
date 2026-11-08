@@ -4,6 +4,8 @@
 //! - **Depends on.** The production registration and one embedded Ruby interpreter.
 //! - **Must not know.** Server internals or a copied host state machine.
 
+mod server;
+
 use magnus::{RClass, prelude::*};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_host::{Failure, FailureKind};
@@ -97,7 +99,7 @@ fn ruby_boundary_preserves_kinds_values_views_and_interruptible_waits() {
         .eval("40 + 2")
         .assured("Ruby remains usable after the native unwind");
     assert_eq!(answer, 42);
-    let peer = crate::test_server::Peer::start();
+    let peer = server::Peer::start();
     let fixture = ruby
         .define_module("RubyLifetime")
         .assured("the lifetime fixture module registers");
