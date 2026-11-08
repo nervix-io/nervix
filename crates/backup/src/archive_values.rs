@@ -17,8 +17,7 @@ use nervix_arbitrary::{Arbitrary, Domain};
 use nervix_models::{
     BackupCut, BackupQuiesceCounters, BackupResources, BranchKeyFingerprint, DomainClockPeriod,
     DomainClockSkew, DomainClockState, DomainName, DomainPace, DomainStartPoint, DomainStatus,
-    DomainTimeRate, ModelName, PlacementPolicy, ResourceName, SchemaFingerprint, Timestamp, Unit,
-    UserName,
+    DomainTimeRate, ModelName, ResourceName, SchemaFingerprint, Timestamp, Unit, UserName,
 };
 
 use crate::{
@@ -237,12 +236,6 @@ impl<'a> Values<'a> {
         DomainRecord {
             domain,
             pace,
-            placement: self.0.entropy().pick([
-                PlacementPolicy::RequireColocation,
-                PlacementPolicy::PreferColocation,
-                PlacementPolicy::Neutral,
-                PlacementPolicy::SuggestSeparation,
-            ]),
             status: self.0.entropy().pick([
                 DomainStatus::Stopped,
                 DomainStatus::Running,

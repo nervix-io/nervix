@@ -31,7 +31,7 @@ use nervix_models::{
     ClusterSchedule, CreateAvroWireSchema, CreateBranch, CreateCodec, CreateDeduplicator,
     CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction, CreatePlacement,
     CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, DomainName,
-    EmitterPayloadPresentation, Model, ModelIndex, ModelKind, ModelName, NodeRef, PlacementPolicy,
+    EmitterPayloadPresentation, Model, ModelIndex, ModelKind, ModelName, NodeRef,
     RequestedResourceVersion, TransactionModelTransition, UniquelyKindedModel,
 };
 use nervix_primitives::sync::{
@@ -1239,16 +1239,12 @@ impl Registry {
         Ok(Some((emitter, payload)))
     }
 
-    pub(crate) fn placement_plan(
-        &self,
-        domain: &DomainName,
-        default_policy: PlacementPolicy,
-    ) -> Option<PlacementPlan> {
+    pub(crate) fn placement_plan(&self, domain: &DomainName) -> Option<PlacementPlan> {
         let state = self.state.read();
         state
             .domains
             .get(domain)
-            .map(|domain_state| domain_state.graph.placement_plan(default_policy))
+            .map(|domain_state| domain_state.graph.placement_plan())
     }
 
     pub(crate) fn active_graphs(&self) -> Vec<(DomainName, ActiveGraph)> {
@@ -1604,7 +1600,7 @@ fn deserialize_value(bytes: &[u8]) -> Result<Model, Report<RegistryError>> {
 }
 
 // The header identifies the current persisted Model shape before archive decoding.
-const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX KIND KEYS";
+const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX HOP RULES";
 
 #[cfg(test)]
 #[cfg_attr(
@@ -2037,7 +2033,6 @@ mod tests {
                 &domain,
                 &[ClusterNodeName::parse("node-1").expect("valid name")],
                 0,
-                PlacementPolicy::Neutral,
             );
         let scheduled_relay = schedule
             .nodes

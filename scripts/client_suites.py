@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from scripts.rust_source import RustFile, _end_of_block
+from scripts.client_suites_c import NativeSuite
 
 # The prefix of every line a suite's reporter prints for one test: `NERVIX-SUITE <outcome> <id>`.
 RESULT_PREFIX = "NERVIX-SUITE "
@@ -94,6 +95,30 @@ HOSTS = {
         suite="tests/client_conformance/python/suite",
         guide="docs/src/client-library-python.md",
         typed=("examples/paced-simulation/python/paced_simulation.py",),
+    ),
+    "ruby": Host(
+        name="ruby",
+        module="Nervix::Client",
+        sources="crates/client-ruby/src",
+        stub="",
+        suite="tests/client_conformance/ruby/suite",
+        guide="docs/src/client-library-ruby.md",
+    ),
+    "c": Host(
+        name="c",
+        module="nervix_client.h",
+        sources="crates/client-ffi/include/nervix_client.h",
+        stub="",
+        suite="tests/client_conformance/c/suite",
+        guide="docs/src/client-library-c.md",
+    ),
+    "cpp": Host(
+        name="cpp",
+        module="nervix_client.h",
+        sources="crates/client-ffi/include/nervix_client.h",
+        stub="",
+        suite="tests/client_conformance/cpp/suite",
+        guide="docs/src/client-library-c.md",
     ),
 }
 
@@ -765,7 +790,12 @@ def check_include(guide: Path, suite: Path, include: re.Match[str], line: int,
                   host: Host) -> list[str]:
     target = (guide.parent / include.group("path")).resolve()
     where = f"{host.guide}:{line}"
-    if not target.is_relative_to(suite):
+    suites = (suite,)
+    if host.name in {"c", "cpp"}:
+        # One guide explains the two hosts of this ABI, with a C++ example beside C wherever
+        # ownership differs. The shared cases are compiled into both checked programs.
+        suites = tuple(suite.parent.parent / name / "suite" for name in ("c", "cpp"))
+    if not any(target.is_relative_to(directory) for directory in suites):
         return [f"{where}: {include.group('path')} is not a source of the {host.name} suite"]
     if not target.is_file():
         return [f"{where}: {include.group('path')} does not exist"]
@@ -832,6 +862,24 @@ def validate(root: Path, hosts: list[Host]) -> list[str]:
     problems = Problems()
     registered = read_inventory(root)
     for host in hosts:
+        if host.name == "ruby":
+            from scripts.client_suites_ruby import analyze
+
+            analysis = analyze(root, host.sources, host.suite, host.module)
+            problems.extend(analysis.problems)
+            for missing in sorted(analysis.surface - analysis.references):
+                problems.add(f"{host.suite} does not reference Ruby member {missing}")
+            problems.extend(compare_inventory(host, registered.get(host.name, {}), analysis.tests))
+            problems.extend(check_guide(root, host))
+            continue
+        if host.name in {"c", "cpp"}:
+            inspection = NativeSuite(root, host.name).inspect()
+            problems.extend(inspection.problems)
+            for missing in sorted(inspection.missing):
+                problems.add(f"the {host.name} suite never references header member {missing}")
+            problems.extend(compare_inventory(host, registered.get(host.name, {}), inspection.tests))
+            problems.extend(check_guide(root, host))
+            continue
         if host.name == "java":
             analysis = analyze_java(root, host)
             problems.extend(analysis.problems)

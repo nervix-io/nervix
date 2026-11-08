@@ -131,9 +131,6 @@ impl TransactionCommitAdmissionPlan {
             TransactionCommitStepKind::Models { schedule, .. } => {
                 Ok(inputs.after_schedule(schedule.as_deref().cloned()))
             }
-            TransactionCommitStepKind::AlterDomain { next, schedule, .. } => {
-                Ok(inputs.after_domain_update((**next).clone(), schedule.as_deref().cloned()))
-            }
             TransactionCommitStepKind::StartDomain { resolved } => {
                 let operation = step.impact.operations().first();
                 let mut domain = inputs.state().cloned().ok_or_else(|| {
@@ -250,18 +247,6 @@ impl FrozenTransactionCommitStep {
                 }),
             ) => **inputs == expected_inputs && applied.as_deref() == schedule.as_deref(),
             (
-                TransactionCommitStepKind::AlterDomain { next, schedule, .. },
-                Some(TransactionStepEffect::PutDomainAndSchedule {
-                    inputs,
-                    domain,
-                    schedule: applied,
-                }),
-            ) => {
-                **inputs == expected_inputs
-                    && domain.as_ref() == next.as_ref()
-                    && applied.as_deref() == schedule.as_deref()
-            }
-            (
                 TransactionCommitStepKind::StartDomain { resolved },
                 Some(TransactionStepEffect::StartDomain {
                     inputs,
@@ -305,10 +290,6 @@ impl FrozenTransactionCommitStep {
                     && schedule == applied_schedule
             }
             (TransactionCommitStepKind::Models { transitions, .. }, None) => transitions.is_empty(),
-            (TransactionCommitStepKind::AlterDomain { next, schedule, .. }, None) => {
-                self.inputs.state() == Some(next.as_ref())
-                    && self.inputs.schedule() == schedule.as_deref()
-            }
             (
                 TransactionCommitStepKind::CreateResource {
                     already_existed: true,

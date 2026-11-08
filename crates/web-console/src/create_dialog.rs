@@ -27,8 +27,8 @@ use nervix_client_wire::{
 use nervix_models::{
     CanonicalPlexusError, CreateDomain, CreateResource, CreateStatement, CreateSubscription,
     CreateUser, DomainClockPeriod, DomainClockSkew, DomainConfig, DomainName, DomainPace, Model,
-    ModelKind, ModelName, PlacementPolicy, RelayName, RequestedResourceVersion, ResourceName,
-    Statement, SubscriptionName, UserName,
+    ModelKind, ModelName, RelayName, RequestedResourceVersion, ResourceName, Statement,
+    SubscriptionName, UserName,
 };
 use nervix_plexus::client_statement::ClientStatement;
 use nervix_recovery::Discarded as _;
@@ -67,6 +67,7 @@ mod ingestor_editor;
 mod ingestor_route_draft;
 mod ingestor_route_editor;
 mod ingestor_source_draft;
+mod placement_draft;
 mod processor_assignment_editor;
 mod processor_choices;
 mod processor_draft;
@@ -117,6 +118,7 @@ use hash_map_editor::HashMapEditor;
 use ingestor_draft::{IngestorDraft, IngestorDraftError, TimestampDraft};
 use ingestor_editor::IngestorEditor;
 use ingestor_route_draft::{InheritDraft, MessageErrorDraft, RouteBranchDraft};
+use placement_draft::{PlacementDraft, PlacementDraftError};
 use processor_draft::{ProcessorDraft, ProcessorDraftError, ProcessorFamily};
 use processor_editor::ProcessorEditor;
 use relay_draft::{RelayDraft, RelayDraftError};
@@ -135,6 +137,7 @@ use vhost_editor::VhostEditor;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum CreateKind {
     Domain,
+    Placement,
     User,
     Resource,
     Schema,
@@ -163,6 +166,7 @@ impl CreateKind {
     fn label(self) -> &'static str {
         match self {
             Self::Domain => "domain",
+            Self::Placement => "placement",
             Self::User => "user",
             Self::Resource => "resource",
             Self::Schema => "schema",
@@ -204,6 +208,7 @@ impl CreateKind {
             Self::WireCborSchema => Some(WireFormat::Cbor),
             Self::WireAvroSchema => Some(WireFormat::Avro),
             Self::Domain
+            | Self::Placement
             | Self::User
             | Self::Resource
             | Self::Schema
@@ -234,6 +239,7 @@ impl CreateKind {
             Self::Reorderer => Some(ProcessorFamily::Reorderer),
             Self::Reingestor => Some(ProcessorFamily::Reingestor),
             Self::Domain
+            | Self::Placement
             | Self::User
             | Self::Resource
             | Self::Schema
@@ -320,7 +326,8 @@ impl ChoiceControl {
     /// The form whose draft this control edits.
     fn form(self) -> CreateKind {
         match self {
-            Self::DomainPace | Self::PlacementPolicy => CreateKind::Domain,
+            Self::DomainPace => CreateKind::Domain,
+            Self::PlacementPolicy => CreateKind::Placement,
             Self::BranchSchema => CreateKind::Branch,
             Self::RelaySchema | Self::RelayBranch => CreateKind::Relay,
             Self::SubscriptionRelay | Self::SubscriptionField => CreateKind::Subscription,
@@ -699,7 +706,6 @@ struct DomainDraft {
     pace: DomainPaceChoice,
     period: String,
     skew: String,
-    placement: PlacementPolicy,
 }
 
 impl Default for DomainDraft {
@@ -710,7 +716,6 @@ impl Default for DomainDraft {
             pace: DomainPaceChoice::Unpaced,
             period: "1s".to_string(),
             skew: "0s".to_string(),
-            placement: PlacementPolicy::Neutral,
         }
     }
 }
@@ -737,10 +742,7 @@ impl DomainDraft {
         let statement = Statement::CreateDomain(CreateStatement::new(
             CreateDomain {
                 id: name.clone(),
-                config: DomainConfig {
-                    pace,
-                    placement: self.placement,
-                },
+                config: DomainConfig { pace },
             },
             self.if_not_exists,
         ));
@@ -850,6 +852,8 @@ enum CreateDraftError {
     KindRequired,
     #[error("Domain name is invalid")]
     DomainName,
+    #[error("{0}")]
+    Placement(#[from] PlacementDraftError),
     #[error("Period is invalid")]
     Period,
     #[error("Skew is invalid")]
@@ -1032,6 +1036,7 @@ pub(crate) struct CreateSignals {
     progress: RwSignal<CreateProgress>,
     validation: RwSignal<Option<String>>,
     domain: RwSignal<DomainDraft>,
+    placement: RwSignal<PlacementDraft>,
     user: RwSignal<UserDraft>,
     resource: RwSignal<ResourceDraft>,
     structured: RwSignal<StructuredDrafts>,
@@ -1097,6 +1102,7 @@ impl CreateSignals {
             progress: RwSignal::new(CreateProgress::Editing),
             validation: RwSignal::new(None),
             domain: RwSignal::new(DomainDraft::default()),
+            placement: RwSignal::new(PlacementDraft::default()),
             user: RwSignal::new(UserDraft::default()),
             resource: RwSignal::new(ResourceDraft::default()),
             structured: RwSignal::new(StructuredDrafts::default()),
@@ -1240,7 +1246,7 @@ impl CreateSignals {
                 CreateKind::Reingestor => self
                     .reingestor
                     .update(ProcessorDraft::invalidate_references),
-                CreateKind::Udf => {}
+                CreateKind::Udf | CreateKind::Placement => {}
                 CreateKind::Domain
                 | CreateKind::User
                 | CreateKind::Resource
@@ -1394,9 +1400,7 @@ impl CreateSignals {
             }),
             ChoiceControl::PlacementPolicy => Ok(ChoiceQuery {
                 target: ChoiceTarget::PlacementPolicy,
-                dependencies: vec![ChoiceSelection {
-                    value: ChoiceValue::DomainPace(self.domain.get_untracked().pace),
-                }],
+                dependencies: Vec::new(),
                 page_size: 3,
             }),
             ChoiceControl::BranchSchema | ChoiceControl::RelaySchema => self.domain_question(
@@ -1740,6 +1744,17 @@ impl CreateSignals {
         let captured_domain = self.captured_domain.get_untracked();
         match kind {
             CreateKind::Domain => self.domain.get_untracked().submission(),
+            CreateKind::Placement => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let draft = self.placement.get_untracked();
+                CreateSubmission::domain_model(
+                    CreateKind::Placement,
+                    Model::Placement(draft.build().map_err(draft_error)?),
+                    draft.if_not_exists,
+                    scope,
+                )
+            }
             CreateKind::User => self.user.get_untracked().submission(),
             CreateKind::Resource => self.resource.get_untracked().submission(captured_domain),
             CreateKind::Schema
@@ -1952,7 +1967,10 @@ pub(crate) fn CreateMenu(
             </button>
             <div class="popup-menu create-menu" class:open=move || menu_open.get() role="menu">
                 <button type="button" role="menuitem" data-create-kind="domain" on:click=move |_| choose(CreateKind::Domain)>
-                    <span>"Domain"</span><em>"Clock and placement"</em>
+                    <span>"Domain"</span><em>"Clock and lifecycle"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="placement" on:click=move |_| choose(CreateKind::Placement)>
+                    <span>"Placement"</span><em>"Domain-wide policy"</em>
                 </button>
                 <button type="button" role="menuitem" data-create-kind="user" on:click=move |_| choose(CreateKind::User)>
                     <span>"User"</span><em>"Login credential"</em>
@@ -2095,7 +2113,8 @@ fn page_cursor(load: RwSignal<ChoiceLoad>) -> Option<String> {
 /// so a reply to an older draft or connection never fills it.
 fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceControl> {
     match kind {
-        CreateKind::Domain => vec![ChoiceControl::DomainPace, ChoiceControl::PlacementPolicy],
+        CreateKind::Domain => vec![ChoiceControl::DomainPace],
+        CreateKind::Placement => vec![ChoiceControl::PlacementPolicy],
         CreateKind::Branch => vec![ChoiceControl::BranchSchema],
         CreateKind::Relay => {
             let mut controls = vec![ChoiceControl::RelaySchema];
@@ -2412,6 +2431,18 @@ pub(crate) fn CreateDialog(
                                     </label>
                                 </div>
                             </Show>
+                        </Show>
+
+                        <Show when=move || signals.open.get() == Some(CreateKind::Placement) fallback=|| ()>
+                            <label class="create-field">
+                                <span>"Placement name"</span>
+                                <input node_ref=name_input class="create-name" type="text" autocomplete="off"
+                                    prop:value=move || signals.placement.get().name
+                                    disabled=move || signals.progress.get().is_pending()
+                                    on:input=move |event| { signals.placement.update(|draft| draft.name = event_target_value(&event)); signals.edit(); }
+                                />
+                            </label>
+                            <div class="create-field"><span>"Coverage"</span><strong class="create-placement-coverage">"Entire domain"</strong></div>
                             <ChoiceGroup
                                 class_name="create-placement-options"
                                 label="Placement"
@@ -2420,6 +2451,14 @@ pub(crate) fn CreateDialog(
                                 request_tx=request_tx
                                 session_generation=session_generation
                             />
+                            <label class="create-field">
+                                <span>"Rank (optional)"</span>
+                                <input class="create-placement-rank" type="text" inputmode="numeric"
+                                    prop:value=move || signals.placement.get().rank
+                                    disabled=move || signals.progress.get().is_pending()
+                                    on:input=move |event| { signals.placement.update(|draft| draft.rank = event_target_value(&event)); signals.edit(); }
+                                />
+                            </label>
                         </Show>
 
                         <Show when=move || signals.open.get() == Some(CreateKind::User) fallback=|| ()>
@@ -2517,6 +2556,7 @@ pub(crate) fn CreateDialog(
                                     type="checkbox"
                                     prop:checked=move || match signals.open.get() {
                                         Some(CreateKind::Domain) => signals.domain.get().if_not_exists,
+                                        Some(CreateKind::Placement) => signals.placement.get().if_not_exists,
                                         Some(CreateKind::User) => signals.user.get().if_not_exists,
                                         Some(CreateKind::Resource) => signals.resource.get().if_not_exists,
                                         Some(CreateKind::Schema) => signals.structured.get().schema.if_not_exists,
@@ -2545,6 +2585,7 @@ pub(crate) fn CreateDialog(
                                         let checked = event_target_checked(&event);
                                         match signals.open.get_untracked() {
                                             Some(CreateKind::Domain) => signals.domain.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Placement) => signals.placement.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::User) => signals.user.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::Resource) => signals.resource.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::Schema) => signals.structured.update(|draft| draft.schema.if_not_exists = checked),

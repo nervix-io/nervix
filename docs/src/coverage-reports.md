@@ -37,7 +37,7 @@ counters.
 
 | Producer | Execution and exported evidence |
 | --- | --- |
-| `just test-coverage` (`scenarios-build` and `tests`) | Ordinary workspace unit, binary, benchmark test-mode and harness-liveness tests. Packages that own execution modes run separately with ordinary features, so an all-features invocation never combines modes. Exports `lcov-workspace.info` and `coverage-source-root.txt` as `coverage-tests`. |
+| `just test-coverage` (`scenarios-build` and `tests`) | Ordinary workspace unit, binary, benchmark test-mode and harness-liveness tests, including the C/C++ application boundary harness and its shared binding. Packages that own execution modes run separately with ordinary features, so an all-features invocation never combines modes. Exports `lcov-workspace.info` and `coverage-source-root.txt` as `coverage-tests`. |
 | `just test-scenarios-coverage` (`scenarios-build` and the `scenarios` shards) | The public Cucumber suite, including the server it links and its instrumented CLI, report tool, paced Rust driver and shared binding. Each shard exports the same report/root pair for its share of the suite, and the paced Python drivers' `python.lcov` when it ran them, as `coverage-scenarios-<I>`. |
 | `coverage-native-extras test-typed-ratchet` (`extra-tests`) | Source-contract compiler fixtures, including their paired fixture doctests and loaded procedural macro objects; the `nervix-lint-report` unit tests and its five properties; and the Rust analysis runner's unit/process tests and six representation properties, using the analysis compiler's matching LLVM tools. Product API doctests and modeled fixture checks finish separately without instrumentation. |
 | `coverage-native-extras bench-smoke` (`extra-tests`) | The smoke recipe's benchmark bodies in test mode. Other Cargo benchmark test targets run in `test-coverage`. Instrumented timings are not performance evidence. |
@@ -62,6 +62,7 @@ the downloaded artifact:
 | `coverage-connector-matrix` | Plexus connector matrix rendering, generated manual regions and declaration drift checks |
 | `coverage-ci-selection` | Exact-source suite and Bolero call selection |
 | `coverage-wasm-bindgen` | The console build's wasm-bindgen CLI selection, installation and verification |
+| `coverage-client-suites-runner` | Host suite inventory/result accounting, guide includes, compiler-resolved C/C++ header references and native unit-test archive inputs |
 | `coverage-model-runner` | Native collector supervision, command and artifact accounting |
 | `coverage-typed-ratchet-python` | The remaining source checks, the native collector, the Bolero runner and its coverage export, and the console build script; the Rust audit is collected by the native typed-ratchet producer |
 | `coverage-primitive-boundary` | Primitive provenance and thread-owner validation |
@@ -96,6 +97,13 @@ local patch review; it is not a separate ordinary CI producer or evidence for ev
 member. Ordinary workspace unit collection already includes this crate with `ruby-tests` and the
 same interpreter provisioned on the build and restored runners. LLVM counters measure the Rust
 binding the Ruby calls execute; they do not measure the Ruby scripts themselves.
+The local-only native selection `just coverage-native-extras test-client-ruby-api` additionally builds
+the instrumented extension, packages it with build-time profiling disabled and runs the prepared
+minitest boundary tier through its Rust `host_suite` test. Its child-loaded extension is retained
+as a coverage object. Ordinary workspace collection owns the CI evidence: its build prepares both
+the extracted gem and fresh installed archive under the coverage target, and `unit-tests` carries
+both to restored runners. This adds no duplicate CI producer. `coverage-client-suites-runner`
+includes the Python registration reader and its controls; it does not measure Prism's Ruby process.
 The assertion tests build in `typed-ratchet/tests`, separately from the executable in
 `typed-ratchet/source`, so building a test cannot replace an executable the producer already ran.
 The collected runner gives Cargo children the build-time `/dev/null` profile path, keeping build
@@ -315,6 +323,17 @@ that jar and every fixture class, including nested classes; packing refuses miss
 The build and restored-test jobs provision Java 21. The restored runner loads those inputs and
 registers the instrumented executable's JNI methods, so their counters belong to the ordinary
 workspace report; the runner does not rebuild the jar, fixtures or Rust code.
+
+The native application harness is also an ordinary integration target. Preparation builds the C11
+and C++17 boundary programs in ordinary and ASan/UBSan modes against the instrumented
+`nervix-client-ffi` shared library. Its unit-test archive carries all four programs and the library
+at the paths their loader resolves. The restored harness runs those files, so the shared library's
+Rust profiles join the existing ordinary workspace report. Focused native collector selections
+`test-client-c-api` and `test-client-cpp-api` use the same preparation and canonical run recipe.
+They run only when explicitly named; a collection without names keeps the CI producer selection.
+They add no separate CI artifact or full-union requirement: the ordinary unit producer already
+executes the harness. C/C++ program source lines are outside Rust LCOV, and sanitizer verdicts are
+recorded separately from line coverage.
 
 The scenario suite runs in
 [shards](./integration-test-lifecycle.md#scenario-shards): each shard restores its archive and runs

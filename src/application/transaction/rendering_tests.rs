@@ -463,27 +463,19 @@ fn every_kind_report() -> TransactionImpactReport {
         },
         OperationImpactReport {
             number: operation(2),
-            operation: TransactionOperation::AlterDomain { domain: domain() },
-            execution_step: step_range(2, 2),
-            completeness: ImpactReportCompleteness::Complete,
-            reasons: vec![OperationImpactReason::DomainPlacement],
-            contribution: ImpactEffects::default(),
-        },
-        OperationImpactReport {
-            number: operation(3),
             operation: TransactionOperation::StopDomain { domain: domain() },
-            execution_step: step_range(3, 3),
+            execution_step: step_range(2, 2),
             completeness: ImpactReportCompleteness::Complete,
             reasons: vec![OperationImpactReason::DomainStop],
             contribution: ImpactEffects::default(),
         },
         OperationImpactReport {
-            number: operation(4),
+            number: operation(3),
             operation: TransactionOperation::CreateResource {
                 domain: domain(),
                 resource: bundle.clone(),
             },
-            execution_step: step_range(4, 4),
+            execution_step: step_range(3, 3),
             completeness: ImpactReportCompleteness::Complete,
             reasons: vec![OperationImpactReason::ResourceCatalog {
                 resource: bundle.clone(),
@@ -491,14 +483,14 @@ fn every_kind_report() -> TransactionImpactReport {
             contribution: ImpactEffects::default(),
         },
         OperationImpactReport {
-            number: operation(5),
+            number: operation(4),
             operation: TransactionOperation::RebindResource {
                 domain: domain(),
                 resource: bundle.clone(),
                 requested: RequestedResourceVersion::Latest,
                 version: 3,
             },
-            execution_step: step_range(5, 5),
+            execution_step: step_range(4, 4),
             completeness: ImpactReportCompleteness::Complete,
             reasons: vec![OperationImpactReason::ResourceRebinding {
                 node: rebound.clone(),
@@ -566,7 +558,7 @@ fn every_kind_report() -> TransactionImpactReport {
         lifecycle: CanonicalImpactSet::new([DomainLifecycleImpact {
             domain: domain(),
             action: DomainLifecycleAction::Stop,
-            attribution: ImpactAttribution::single(operation(3)),
+            attribution: ImpactAttribution::single(operation(2)),
         }]),
         ..ImpactEffects::default()
     };
@@ -574,7 +566,7 @@ fn every_kind_report() -> TransactionImpactReport {
         resource_catalog: CanonicalImpactSet::new([ResourceCatalogImpact {
             resource: bundle.clone(),
             action: ResourceCatalogAction::Create,
-            attribution: ImpactAttribution::single(operation(4)),
+            attribution: ImpactAttribution::single(operation(3)),
         }]),
         ..ImpactEffects::default()
     };
@@ -584,7 +576,7 @@ fn every_kind_report() -> TransactionImpactReport {
             resource: bundle,
             requested: RequestedResourceVersion::Latest,
             version: 3,
-            attribution: ImpactAttribution::single(operation(5)),
+            attribution: ImpactAttribution::single(operation(4)),
         }]),
         ..ImpactEffects::default()
     };
@@ -597,29 +589,6 @@ fn every_kind_report() -> TransactionImpactReport {
                 QuiescenceOutcome::Requested,
                 QuiescenceOutcome::Confirmed,
                 QuiescenceOutcome::Released,
-            ],
-        }],
-        effects: ImpactEffects::default(),
-    };
-    let refused = ActualExecutionStepImpact {
-        outcome: ExecutionStepOutcome::Failed {
-            diagnostic: ImpactDiagnostic {
-                kind: ImpactDiagnosticKind::Quiescence,
-                operation: None,
-                message: "the domain did not pause".to_string(),
-            },
-        },
-        quiescence: vec![ActualQuiescence {
-            requirement: domain_pause.clone(),
-            outcomes: vec![
-                QuiescenceOutcome::Requested,
-                QuiescenceOutcome::Failed {
-                    diagnostic: ImpactDiagnostic {
-                        kind: ImpactDiagnosticKind::Quiescence,
-                        operation: Some(operation(2)),
-                        message: "pause refused".to_string(),
-                    },
-                },
             ],
         }],
         effects: ImpactEffects::default(),
@@ -655,28 +624,23 @@ fn every_kind_report() -> TransactionImpactReport {
         ),
         ExecutionStepImpactReport::new(
             step_range(2, 2),
-            planned(domain_pause.clone(), ImpactEffects::default()),
-            refused,
-        ),
-        ExecutionStepImpactReport::new(
-            step_range(3, 3),
             planned(domain_pause, lifecycle_effects),
             uncertain,
         ),
         ExecutionStepImpactReport::new(
-            step_range(4, 4),
+            step_range(3, 3),
             planned(PauseRequirement::NoPause, catalog_effects),
             ActualExecutionStepImpact::unattempted(),
         ),
         ExecutionStepImpactReport::new(
-            step_range(5, 5),
+            step_range(4, 4),
             planned(PauseRequirement::NoPause, binding_effects),
             ActualExecutionStepImpact::unattempted(),
         ),
     ];
     TransactionImpactReport::new(
         domain(),
-        TransactionPosition::new(5),
+        TransactionPosition::new(4),
         ImpactPlanningBasis::new([0xcd; 32]),
         unresolved(None),
         operations,
@@ -698,7 +662,7 @@ fn text_names_every_operation_reason_effect_and_outcome() {
 
     for expected in [
         "state: COMMITTING",
-        "operations: 5 accepted, 1 applied, 4 pending",
+        "operations: 4 accepted, 1 applied, 3 pending",
         "report: INCOMPLETE",
         "- kind=PLANNING the prefix is still being planned",
         "quiesce level: DOMAIN_PAUSE",
@@ -706,13 +670,11 @@ fn text_names_every_operation_reason_effect_and_outcome() {
         "operation 1: DROP_CONFIGURATION kind=relay name=retired_events",
         "  incomplete: kind=PLANNING operation=1 the prefix is still being planned",
         "  reason: CONFIGURATION kind=relay name=retired_events aspect=RELAY_SCHEMA",
-        "operation 2: ALTER_DOMAIN domain=payments",
-        "  reason: DOMAIN_PLACEMENT",
-        "operation 3: STOP_DOMAIN domain=payments",
+        "operation 2: STOP_DOMAIN domain=payments",
         "  reason: DOMAIN_STOP",
-        "operation 4: CREATE_RESOURCE resource=bundle",
+        "operation 3: CREATE_RESOURCE resource=bundle",
         "  reason: RESOURCE_CATALOG resource=bundle",
-        "operation 5: REBIND_RESOURCE resource=bundle version=3 requested=LATEST",
+        "operation 4: REBIND_RESOURCE resource=bundle version=3 requested=LATEST",
         "  reason: RESOURCE_REBINDING kind=inferencer name=score resource=bundle from=2 to=3",
         "execution step 1: planned DOMAIN_PAUSE, actual DOMAIN_PAUSE, outcome APPLIED",
         "  pause: DOMAIN domain=payments",
@@ -728,17 +690,14 @@ fn text_names_every_operation_reason_effect_and_outcome() {
          operations=1",
         "  effect: force flush kind=junction name=enrich operations=1",
         "  quiescence: DOMAIN domain=payments REQUESTED, CONFIRMED, RELEASED",
-        "execution step 2: planned DOMAIN_PAUSE, actual DYNAMIC, outcome FAILED",
-        "  quiescence: DOMAIN domain=payments REQUESTED, FAILED (pause refused)",
-        "  failure: kind=QUIESCENCE the domain did not pause",
-        "execution step 3: planned DOMAIN_PAUSE, actual DOMAIN_PAUSE, outcome APPLYING",
-        "  effect: lifecycle STOP domain=payments operations=3",
+        "execution step 2: planned DOMAIN_PAUSE, actual DOMAIN_PAUSE, outcome APPLYING",
+        "  effect: lifecycle STOP domain=payments operations=2",
         "  quiescence: DOMAIN domain=payments UNCERTAIN (leadership changed)",
+        "execution step 3: planned DYNAMIC, actual DYNAMIC, outcome UNATTEMPTED",
+        "  effect: resource CREATE resource=bundle operations=3",
         "execution step 4: planned DYNAMIC, actual DYNAMIC, outcome UNATTEMPTED",
-        "  effect: resource CREATE resource=bundle operations=4",
-        "execution step 5: planned DYNAMIC, actual DYNAMIC, outcome UNATTEMPTED",
         "  effect: resource binding kind=inferencer name=score resource=bundle version=3 \
-         requested=LATEST operations=5",
+         requested=LATEST operations=4",
     ] {
         assert!(
             text.lines().any(|line| line == expected),
@@ -761,7 +720,7 @@ fn json_keeps_every_kind_of_the_same_report() {
     let inspection = inspection(
         TransactionLifecycle::Committing,
         1,
-        Some(operation(5)),
+        Some(operation(4)),
         every_kind_report(),
     );
 
@@ -773,7 +732,7 @@ fn json_keeps_every_kind_of_the_same_report() {
 
     assert_eq!(report, inspection.report);
     assert_eq!(document["transaction"]["state"], "COMMITTING");
-    assert_eq!(document["operation"], 5);
+    assert_eq!(document["operation"], 4);
     let rebuild_keys = &document["report"]["execution_steps"][0]["planned"]["effects"]["rebuilds"]
         [0]["node"]["branches"]["keys"];
     assert_eq!(
