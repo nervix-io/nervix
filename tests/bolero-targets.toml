@@ -4453,6 +4453,36 @@ test = "create_dialog::codec_draft::tests::bolero_codec_drafts_preserve_complete
 test_target = "bin:nervix-web-console"
 
 [[target]]
+case_timeout_seconds = 30
+corpus = "crates/client-ruby/tests/__fuzz__/bolero_columns_round_trip_through_ruby/corpus"
+domain_version = 1
+features = ["ruby-tests"]
+id = "client-ruby-columns"
+invariant = "Every significant scalar bit, UTF-8 and NUL byte, binary byte, null state, field flag and order, row count and list/fixed-list value survives the native Ruby builder, reader and IPC decode."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-client-ruby"
+random_iterations = 256
+source = "crates/client-ruby/tests/columns.rs"
+test = "bolero_columns_round_trip_through_ruby"
+test_target = "test:columns"
+
+[[target]]
+case_timeout_seconds = 30
+corpus = "crates/client-ruby/tests/__fuzz__/bolero_field_descriptions_round_trip_through_ruby/corpus"
+domain_version = 1
+features = ["ruby-tests"]
+id = "client-ruby-fields"
+invariant = "Every generated field name, type level, fixed-list length, nullability, sensitivity and field order survives native Ruby Fields and Schema; editing the draft preserves the complete earlier snapshot."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-client-ruby"
+random_iterations = 256
+source = "crates/client-ruby/tests/fields.rs"
+test = "bolero_field_descriptions_round_trip_through_ruby"
+test_target = "test:fields"
+
+[[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/state_inspection/__fuzz__/state_inspection__tests__bolero_state_inspection_envelope_round_trips/corpus"
 domain_version = 1

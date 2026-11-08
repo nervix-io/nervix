@@ -77,7 +77,8 @@ over the interconnect, and that node encodes Row frames for its own sessions.
 | Data plane | Relay subscription fan-out | The subscribers of one relay, the definition they were attached under, and ending every subscriber before a batch of another definition can reach it. |
 | Edges | The Rust client, `nervix-client-core` | Connecting, TLS selection, the dispatcher that pairs replies with requests, execution identity across retries, redirect and reconnect, transaction binding and previews, desired subscriptions and their restoration, followed domain clocks, uploads, and backup downloads verified against their summary. |
 | Edges | The host session runtime, `nervix-client-host` | What every binding shares: the session runtime a host's thread blocks on, cancellation and deadlines, the classification of every client failure by its report's context, subscription events with bulk column access to their verified frames, domain clock events and the clock of each followed domain with its projections, field descriptions, and the Rust client's producers and consumers with their typed outcomes, settlements and Arrow batches built and read one column level at a time. |
-| Edges | The C ABI, `nervix-client-ffi` | The C ABI through which C, C++ and Ruby hosts drive the host session runtime: the handles a host holds, retains and releases, borrowed frame access, and bulk column copies into memory the host passes. |
+| Edges | The C ABI, `nervix-client-ffi` | The C ABI through which C and C++ hosts drive the host session runtime: the handles a host holds, retains and releases, borrowed frame access, and bulk column copies into memory the host passes. |
+| Edges | The Ruby gem, `nervix-client-ruby` | Ruby 3.3+ classes on magnus and rb-sys over the host session runtime: collector-owned objects, released-GVL waits, typed exceptions, immutable owner-retaining `IO::Buffer` views, typed columns and Arrow IPC. |
 | Edges | The JVM library, `nervix-client-jvm` | Java 21 classes on JNI: Cleaner-owned handles, independent blocking leases, typed exceptions, owner-retaining read-only direct buffers, bulk column arrays and Arrow IPC. |
 | Edges | The Python package, `nervix-client-python` | `nervix_client`, through which CPython hosts drive the host session runtime on pyo3: objects whose lifetimes are Python's, waits that release the GIL, typed exceptions, connection options, columns read as Python values, and Arrow batches exchanged through the Arrow PyCapsule interface. |
 | Edges | The web console and the CLI | Consumers of the same protocol with bounded buffers of their own. The console speaks it over its WebSockets: the session, and one per backup download or restore stream, whose archive it verifies or measures itself; the CLI uses the Rust client. |
@@ -2285,10 +2286,11 @@ it restores them.
 ## Bindings For Other Hosts
 
 A host language reaches the protocol in one of two ways. It uses the shared Rust binding, or it
-implements the protocol itself from the schema. The binding is the supported path: C, C++ and
-Ruby hosts load its C ABI, `nervix-client-ffi`, whose contract is
-`crates/client-ffi/include/nervix_client.h`, and CPython hosts import its Python package,
-`nervix_client`, while JVM hosts use the Java 21 JNI library in `crates/client-jvm`. All drive the host session runtime every binding of the Rust client shares,
+implements the protocol itself from the schema. The binding is the supported path: C and C++
+hosts load its C ABI, `nervix-client-ffi`, whose contract is
+`crates/client-ffi/include/nervix_client.h`. CPython hosts import `nervix_client`, Ruby hosts load
+the native gem `nervix-client` with `require 'nervix_client'`, and JVM hosts use the Java 21 JNI
+library in `crates/client-jvm`. All drive the host session runtime every binding of the Rust client shares,
 `nervix-client-host`, and through it the Rust client's own state machine, so request correlation,
 leader redirects, reconnection, execution identity across retries, and desired-subscription
 restoration are decided once, in the library, and a host never retries, reroutes, or reinterprets
@@ -2453,6 +2455,23 @@ clients check each frame's identifier and every union discriminant and required 
 the Rust verifier remains the only full structural verification. [Conformance
 Evidence](./client-implementation-manual.md#conformance-evidence) lists the probes, the runtimes
 they cover, and how to run them.
+
+The Ruby gem uses magnus over rb-sys in `crates/client-ruby`. Its `Nervix::Client` classes
+forward to the same host runtime. Each blocking call releases the GVL with only native owned
+inputs; library workers never enter Ruby. A call holds its own share of the session, execution,
+endpoint or batch, so collecting or closing the original session cannot invalidate that call.
+An endpoint open retains a complete field snapshot; a concurrent draft edit copies it first.
+Ruby collection releases native ownership without waiting. Producers, consumers and deliveries
+keep the runtime they need, and dropping a delivery does not settle it.
+
+`Event#frame`, `Batch#ipc` and `Delivery#ipc` return immutable `IO::Buffer` views. Their root is
+frozen and locked and marks its native owner; slices retain that root through Ruby's buffer
+source. `get_string` makes an ordinary binary String copy. Typed column arrays preserve unsigned
+integers, signed DATETIME nanoseconds, nulls, redaction and nested lists; bulk fixed-width reads
+preserve float bits, and builders copy every input before returning. A `ClientError` subclass
+carries its `kind`, whole `message`, `execution_reference` and `open_refusal`. Recovery executes
+the original prepared `Execution` again. A Ruby interrupt cancels only its current call; a
+shared `Cancel` still cancels every child call and carries the same deadline.
 
 ## Measured Costs
 

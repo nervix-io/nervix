@@ -225,6 +225,8 @@ class InventoryTests(unittest.TestCase):
             "client-host-typed-field-descriptors",
             "client-jvm-columns",
             "client-jvm-fields",
+            "client-ruby-columns",
+            "client-ruby-fields",
             "branch-membership",
             "restore-installation-wire",
             "backup-capture-wire",
@@ -454,6 +456,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-client-ffi",
             "nervix-client-host",
             "nervix-client-jvm",
+            "nervix-client-ruby",
             "nervix-server",
             "nervix-plexus",
             "nervix-plexus-format",
@@ -507,7 +510,10 @@ class InventoryTests(unittest.TestCase):
             self.assertTrue(target.corpus.is_dir())
             self.assertIn(
                 target.test_target,
-                {"lib", "test:representations", "test:connectors", "test:metrics_report_properties", "bin:nervix-web-console"},
+                {
+                    "lib", "test:representations", "test:connectors", "test:columns",
+                    "test:fields", "test:metrics_report_properties", "bin:nervix-web-console",
+                },
             )
             self.assertEqual(target.corpus.parent.name, target.test.replace("::", "__"))
             self.assertGreater(target.random_iterations, 0)
