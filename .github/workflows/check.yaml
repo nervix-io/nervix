@@ -219,6 +219,12 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v6
 
+      - name: Setup Java for the JVM suite surface check
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
       - name: Runner diagnostics before Validate
         uses: ./.github/actions/runner-diagnostics
         with:

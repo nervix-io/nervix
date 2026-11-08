@@ -5246,6 +5246,7 @@ fn execute_md5(input: &StringArray) -> StringArray {
             builder.append_null();
         } else {
             digest_text.clear();
+            // Non-security checksum exposed by md5(); collision-resistant hashing uses sha256().
             for byte in md5::compute(input.value(row)).0 {
                 digest_text.push(char::from(HEX[usize::from(byte >> 4)]));
                 digest_text.push(char::from(HEX[usize::from(byte & 0x0f)]));

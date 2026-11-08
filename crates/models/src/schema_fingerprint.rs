@@ -49,6 +49,7 @@ impl SchemaFingerprint {
     }
 
     /// The materialized state identity for this exact schema and domain start.
+    /// Non-security BLAKE3: identifies schema/start state; admission and validation are separate.
     pub fn materialized_at(self, start_version: u64) -> Self {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"nervix/materialized-state/start-version");

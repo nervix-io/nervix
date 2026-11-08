@@ -13,6 +13,7 @@ import weakref
 import pytest
 
 import nervix_client as nx
+from actions import Harness
 from support import (
     WAIT_SECONDS,
     Cluster,
@@ -53,6 +54,10 @@ def published_until_seen(
 
     ends = time.monotonic() + WAIT_SECONDS
     while True:
+        if time.monotonic() >= ends:
+            raise AssertionError(
+                f"the restored subscription delivered no rows within {WAIT_SECONDS} seconds"
+            )
         publish(publishing, domain, [row])
         try:
             event = watching.next_event(cancel=nx.Cancel(deadline=10))
@@ -61,6 +66,13 @@ def published_until_seen(
                 raise AssertionError(
                     f"the restored subscription delivered no rows within {WAIT_SECONDS} seconds"
                 ) from None
+            continue
+        if event.kind == nx.EventKind.RESTORATION_FAILED:
+            # Another seed can still owe its one refusal; each attempt stays observable.
+            failure = event.restoration_failure
+            assert failure is not None
+            assert failure.cause == nx.RestorationCause.UNAVAILABLE
+            assert failure.message and failure.retry_after_nanos > 0
             continue
         assert event.kind == nx.EventKind.ROWS, event.kind
         return event
@@ -175,6 +187,34 @@ def test_a_lost_session_interrupts_a_subscription_which_is_then_restored(
         # A generation is numbered within its session, so the generation the new session opens can
         # carry the number the lost session gave the subscription; the name is what stays.
         assert after.subscription.name == before.subscription.name == name
+        completed(watching, f"DELETE SUBSCRIPTION {name};")
+
+
+def test_a_refused_subscription_restoration_reports_its_cause_and_recovers(
+    cluster: Cluster, relay: Relay, subscription_opening_refusal: Harness,
+    session: nx.Session, unique: str
+) -> None:
+    name = f"refused_{unique}"
+    with cluster.connect(relay.uri) as watching:
+        completed(watching, f"CREATE SUBSCRIPTION {name} TO watched_rows;")
+        relay.cut()
+        subscription_opening_refusal.refuse_next_subscription_opening()
+        relay.restore()
+        assert watching.next_event(cancel=deadline()).kind == nx.EventKind.INTERRUPTED
+        # ANCHOR: restoration_failed
+        event = watching.next_event(cancel=nx.Cancel(deadline=120))
+        assert event.kind == nx.EventKind.RESTORATION_FAILED
+        failure = event.restoration_failure
+        assert failure is not None
+        assert failure.cause == nx.RestorationCause.UNAVAILABLE
+        assert failure.message
+        assert failure.retry_after_nanos > 0
+        # The subscription stays alive and a later attempt opens it again.
+        after = published_until_seen(session, watching, cluster.domain, Row(8, "refused"))
+        assert after.kind == nx.EventKind.ROWS
+        assert after.column(0) == [8]
+        # ANCHOR_END: restoration_failed
+        assert event.subscription.name == after.subscription.name == name
         completed(watching, f"DELETE SUBSCRIPTION {name};")
 
 

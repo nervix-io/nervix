@@ -1898,6 +1898,9 @@ authentication rejection; operator-visible hash failures keep their separate dia
 The Rust client's terminal subscription close keeps the queue-end report beneath `SessionClosed`.
 The shared C binding declares its host-visible failure as a fixed ABI outcome; conversion from a
 client report renders the whole chain into that outcome's message at the binding boundary.
+Canonical Arrow batches use one shared decoder with typed failures. A malformed received delivery
+is a protocol failure; malformed IPC passed to a local batch constructor is an invalid argument.
+Both retain the decoder's complete cause chain, including an originating Arrow error.
 Local archive readers and feeders report their actual failure before the stream produces its
 fixed refusal; a client download's file-install worker retains its join error in the I/O cause.
 
@@ -1995,6 +1998,12 @@ archive's summary: its size and BLAKE3 digest, the capture time, the instant the
 retaining the archive, whether resource bytes are included, the number of users, and each domain's
 revision, cut kind and quiesce counters, section count, and bytes. The summary is part of the recorded outcome, so repeating the
 command under its reference returns the same summary and never assembles a second archive.
+
+The BLAKE3 digest checks content consistency with that summary and binds a restore to the
+operator-selected archive. It is not a signature or credential: matching it does not authenticate
+an archive's provenance or authorize a command. Session authentication and configured transport
+security retain those separate roles; the [cryptography register](cryptography.md#classification-register)
+names the checksum owners.
 
 A quiesced cut whose pause commits after its cut deadline is refused before the coordinator
 starts installation, even if reconciliation already installed that pause. The command records
@@ -2581,7 +2590,10 @@ The protocol makes a client's view of its own work explicit rather than inferred
   and each restoration refused for good as the end the server would have sent.
   `Client::subscription_lifecycle` reads each subscription's state, including `Ended` for one the
   server ended. The web console shows each tab's state on the tab: pending, active, interrupted,
-  restoring, ended, resubscribing, or closing. Each node exports `nervix_session_subscriptions`, the
+  restoring, ended, resubscribing, or closing. Console restoration carries the acknowledged
+  schema and ends a tab on `DomainNotFound`, `RelayNotFound` or `RelayChanged`. Other failures
+  report their typed cause, diagnostics and bounded retry wait only in that tab, leaving REPL
+  history intact; see [Web Console](./client-tools-web-console.md). Each node exports `nervix_session_subscriptions`, the
   number of subscription leases it holds per relay, and
   `nervix_session_subscription_dropped_rows_total`, the rows its `DROPPING` subscriptions discarded,
   both labeled by `domain` and `relay`; see [Metrics And

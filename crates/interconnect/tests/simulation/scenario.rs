@@ -27,11 +27,11 @@ use std::{
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_crypto::digest::sha256;
 use nervix_models::parse_duration_text;
 use nervix_primitives::{sync::blocking::OnceLock, thread, unmodeled::time::Instant};
 use nervix_recovery::Discarded as _;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 use super::runner::{PanicReport, SemanticTrace, SimulationConfig, SimulationError, TraceEvent};
@@ -546,7 +546,7 @@ impl BuildFingerprint {
 
     fn lockfile_sha256() -> Option<String> {
         let lockfile = fs::read(Path::new(WORKSPACE).join("Cargo.lock")).ok()?;
-        Some(format!("{:x}", Sha256::digest(lockfile)))
+        Some(faster_hex::hex_string(&sha256(&lockfile)))
     }
 
     /// The trimmed standard output of a command that succeeded in the workspace.

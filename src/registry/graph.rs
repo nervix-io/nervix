@@ -256,6 +256,7 @@ impl ActiveGraph {
     /// The fingerprint of every schema model the node at `index` depends on through its
     /// configuration, together with the window definition when the node is a window processor.
     /// The runtime keys the node's schema-bound state by this identity.
+    /// Non-security BLAKE3: identifies admitted schema/configuration state; validation is separate.
     pub(in crate::registry) fn schema_fingerprint_for_index(
         &self,
         index: NodeIndex,

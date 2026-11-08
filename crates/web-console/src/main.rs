@@ -38,10 +38,10 @@ use nervix_client_wire::{
     RowBatchView, RowSchema, SelectDomainRequest, ServerEvent, ServerFrame, ServerMessage,
     ServerNotice, SessionEndReason, SessionLimits, StatementDisposition, StatementOutcome,
     SubscribeDisposition, SubscribeOutcome, SubscribeRequest, SubscriptionEnded,
-    SubscriptionHandle, SubscriptionOpened, SubscriptionRows, SubscriptionType, SuggestRequest,
-    Suggestion as WireSuggestion, SuggestionKind, SuggestionStatus, TextEdit, TransferAssembly,
-    TransferError, TransferPart, UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest,
-    VerifiedFrame,
+    SubscriptionHandle, SubscriptionOpened, SubscriptionRefusal, SubscriptionRows,
+    SubscriptionType, SuggestRequest, Suggestion as WireSuggestion, SuggestionKind,
+    SuggestionStatus, TextEdit, TransferAssembly, TransferError, TransferPart,
+    UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame,
     websocket::{CONSOLE_SESSION_PATH, ClientWebSocketCodec, WebSocketData},
 };
 use nervix_dataflow_graph::{
@@ -77,6 +77,7 @@ mod create_dialog;
 mod node_panel;
 mod request_handoff;
 mod resource_upload;
+mod tab_restoration;
 mod transaction_inspector;
 
 use backup_dialog::{
@@ -92,6 +93,7 @@ use create_dialog::{
 use node_panel::{ClusterEventLog, NodePanel};
 use request_handoff::{RequestReceiver, RequestSender, request_handoff};
 use resource_upload::UploadAnswer;
+use tab_restoration::{RetryTick, RetryWait, TabRestoration};
 use transaction_inspector::{InspectorSignals, TransactionInspector};
 
 const RUNTIME_VERSION_LABEL: &str = concat!("nervix runtime v", env!("CARGO_PKG_VERSION"));
@@ -202,6 +204,7 @@ struct WebConsoleSignals {
     domains: RwSignal<Vec<DomainView>>,
     resource_details: RwSignal<BTreeMap<String, ResourceDetailView>>,
     subscription_tabs: RwSignal<Vec<SubscriptionTabView>>,
+    subscription_retry_tick: RwSignal<RetryTick>,
     active_subscription_tab: RwSignal<Option<u64>>,
     domains_loaded: RwSignal<bool>,
     auth_token: RwSignal<Option<String>>,
@@ -413,7 +416,7 @@ impl WebConsoleSignals {
             .find(|tab| tab.id == tab_id)?;
         let stream = match tab.state {
             SubscriptionTabState::Pending
-            | SubscriptionTabState::Restoring
+            | SubscriptionTabState::Restoring(_)
             | SubscriptionTabState::Resubscribing => {
                 self.subscription_tabs.update(|tabs| {
                     if let Some(tab) = tabs.iter_mut().find(|tab| tab.id == tab_id) {
@@ -422,7 +425,9 @@ impl WebConsoleSignals {
                 });
                 return None;
             }
-            SubscriptionTabState::Interrupted | SubscriptionTabState::Ended => {
+            SubscriptionTabState::Interrupted(_)
+            | SubscriptionTabState::RetryWaiting { .. }
+            | SubscriptionTabState::Ended => {
                 remove_subscription_tab(
                     self.subscription_tabs,
                     self.active_subscription_tab,
@@ -447,22 +452,31 @@ impl WebConsoleSignals {
     /// subscriptions again, each under its name as a new generation of the current session.
     fn begin_restorations(self) -> Vec<ConsoleRequest> {
         let mut restorations = Vec::new();
+        let now = self.subscription_retry_tick.get_untracked();
         self.subscription_tabs.update(|tabs| {
             // Bounded by the subscription tabs the operator has open in this console.
             for tab in tabs.iter_mut() {
-                if let SubscriptionTabState::Interrupted = &tab.state {
-                    tab.state = SubscriptionTabState::Restoring;
-                    restorations.push(ConsoleRequest::SubscriptionStart {
-                        tab_id: tab.id,
-                        request: SubscribeRequest {
-                            domain: tab.domain.clone(),
-                            statement: tab.subscribe_command.clone(),
-                            subscription_type: SubscriptionType::Row,
-                            expected_schema: None,
-                        },
-                        origin: SubscriptionOrigin::Restoration,
-                    });
-                }
+                let restoration = match &tab.state {
+                    SubscriptionTabState::Interrupted(restoration) => restoration,
+                    SubscriptionTabState::RetryWaiting { restoration, wait }
+                        if now >= wait.ready_at =>
+                    {
+                        restoration
+                    }
+                    _ => continue,
+                };
+                let expected_schema = restoration.schema();
+                tab.state = SubscriptionTabState::Restoring(restoration.clone());
+                restorations.push(ConsoleRequest::SubscriptionStart {
+                    tab_id: tab.id,
+                    request: SubscribeRequest {
+                        domain: tab.domain.clone(),
+                        statement: tab.subscribe_command.clone(),
+                        subscription_type: SubscriptionType::Row,
+                        expected_schema: Some(expected_schema),
+                    },
+                    origin: SubscriptionOrigin::Restoration,
+                });
             }
         });
         restorations
@@ -515,8 +529,9 @@ impl WebConsoleSignals {
                     }
                     SubscriptionTabState::Pending
                     | SubscriptionTabState::Open(_)
-                    | SubscriptionTabState::Interrupted
-                    | SubscriptionTabState::Restoring
+                    | SubscriptionTabState::Interrupted(_)
+                    | SubscriptionTabState::RetryWaiting { .. }
+                    | SubscriptionTabState::Restoring(_)
                     | SubscriptionTabState::Ended
                     | SubscriptionTabState::Resubscribing
                     | SubscriptionTabState::Closing(_) => {}
@@ -1354,13 +1369,15 @@ enum SubscriptionTabState {
     Pending,
     /// The subscription streams its rows into the tab.
     Open(TabStream),
-    /// The connection that carried the subscription ended, or the tab's restoration was refused.
-    /// The next connection restores the tab, and so does a retry every second while the session
-    /// holds no transaction.
-    Interrupted,
-    /// The subscription of an interrupted tab is being opened again. A refusal leaves the tab
-    /// interrupted, so it is tried again.
-    Restoring,
+    /// The previous connection ended. The next connection restores the acknowledged contract.
+    Interrupted(TabRestoration),
+    /// A transient refusal waits for its backoff before another attempt on this session.
+    RetryWaiting {
+        restoration: TabRestoration,
+        wait: RetryWait,
+    },
+    /// A desired tab's subscription is being opened again under its acknowledged contract.
+    Restoring(TabRestoration),
     /// The server ended the subscription's generation, because its relay was redefined or
     /// removed. The tab keeps its rows and why it ended, and is never restored on its own.
     Ended,
@@ -1376,8 +1393,8 @@ impl SubscriptionTabState {
         match self {
             Self::Pending => "pending",
             Self::Open(_) => "active",
-            Self::Interrupted => "interrupted",
-            Self::Restoring => "restoring",
+            Self::Interrupted(_) | Self::RetryWaiting { .. } => "interrupted",
+            Self::Restoring(_) => "restoring",
             Self::Ended => "ended",
             Self::Resubscribing => "resubscribing",
             Self::Closing(_) => "closing",
@@ -1387,8 +1404,9 @@ impl SubscriptionTabState {
     fn can_activate(&self) -> bool {
         match self {
             Self::Open(_)
-            | Self::Interrupted
-            | Self::Restoring
+            | Self::Interrupted(_)
+            | Self::RetryWaiting { .. }
+            | Self::Restoring(_)
             | Self::Ended
             | Self::Resubscribing
             | Self::Closing(Some(_)) => true,
@@ -1402,8 +1420,9 @@ impl SubscriptionTabState {
             Self::Ended => true,
             Self::Pending
             | Self::Open(_)
-            | Self::Interrupted
-            | Self::Restoring
+            | Self::Interrupted(_)
+            | Self::RetryWaiting { .. }
+            | Self::Restoring(_)
             | Self::Resubscribing
             | Self::Closing(_) => false,
         }
@@ -1554,6 +1573,7 @@ fn App() -> impl IntoView {
         domains,
         resource_details,
         subscription_tabs,
+        subscription_retry_tick: RwSignal::new(RetryTick::default()),
         active_subscription_tab,
         domains_loaded,
         auth_token,
@@ -2167,7 +2187,13 @@ fn send_subscription_start(
         },
         None => SESSION_UNAVAILABLE.to_string(),
     };
-    fail_subscription_start(signals, tab_id, vec![TermLine::error(reason.clone())]);
+    fail_subscription_start(
+        signals,
+        tab_id,
+        origin,
+        None,
+        vec![TermLine::error(reason.clone())],
+    );
     fail_subscription_origin(signals, origin, reason);
 }
 
@@ -2616,6 +2642,7 @@ async fn serve_connection(
             }
             () = retry_delay.as_mut() => {
                 retry_delay = Box::pin(wait_for_browser_delay(SUBSCRIPTION_RETRY_DELAY).fuse());
+                signals.subscription_retry_tick.update(RetryTick::advance);
                 // A tab whose restoration was refused is tried again while the session is ready,
                 // has room for it in flight, and holds no transaction, which would refuse it again.
                 let transaction_active = signals
@@ -2688,15 +2715,22 @@ fn interrupt_subscription_tabs(signals: WebConsoleSignals) {
     signals.subscription_tabs.update(|tabs| {
         for tab in tabs.iter_mut() {
             match &tab.state {
-                SubscriptionTabState::Open(_) => {
-                    tab.state = SubscriptionTabState::Interrupted;
+                SubscriptionTabState::Open(stream) => {
+                    tab.state = SubscriptionTabState::Interrupted(TabRestoration::new(
+                        stream.schema.clone(),
+                    ));
                     tab.lines.push(TermLine::info(
                         "delivery interrupted; restoring on the next connection",
                     ));
                 }
-                SubscriptionTabState::Restoring => tab.state = SubscriptionTabState::Interrupted,
+                SubscriptionTabState::Restoring(restoration)
+                | SubscriptionTabState::RetryWaiting { restoration, .. } => {
+                    let mut restoration = restoration.clone();
+                    restoration.reconnect();
+                    tab.state = SubscriptionTabState::Interrupted(restoration);
+                }
                 SubscriptionTabState::Pending
-                | SubscriptionTabState::Interrupted
+                | SubscriptionTabState::Interrupted(_)
                 | SubscriptionTabState::Ended
                 | SubscriptionTabState::Resubscribing
                 | SubscriptionTabState::Closing(_) => {}
@@ -3566,7 +3600,7 @@ fn apply_subscribe_outcome(
                 };
                 match tab.state.clone() {
                     SubscriptionTabState::Pending
-                    | SubscriptionTabState::Restoring
+                    | SubscriptionTabState::Restoring(_)
                     | SubscriptionTabState::Resubscribing => {
                         tab.state = SubscriptionTabState::Open(stream.clone());
                         opened = true;
@@ -3576,7 +3610,8 @@ fn apply_subscribe_outcome(
                         close_after_open = true;
                     }
                     SubscriptionTabState::Open(_)
-                    | SubscriptionTabState::Interrupted
+                    | SubscriptionTabState::Interrupted(_)
+                    | SubscriptionTabState::RetryWaiting { .. }
                     | SubscriptionTabState::Ended
                     | SubscriptionTabState::Closing(Some(_)) => {}
                 }
@@ -3600,10 +3635,10 @@ fn apply_subscribe_outcome(
                 signals.create.completed(attempt, draft_revision);
             }
         }
-        SubscribeDisposition::Refused(_) => {
+        SubscribeDisposition::Refused(refusal) => {
             let reason = message.clone();
             let lines = failed_lines(message, diagnostics, statement);
-            fail_subscription_start(signals, tab_id, lines);
+            fail_subscription_start(signals, tab_id, origin, Some(refusal), lines);
             fail_subscription_origin(signals, origin, reason);
         }
     }
@@ -3715,7 +3750,13 @@ fn fail_request(signals: WebConsoleSignals, request: ConsoleRequest, reason: Str
             signals.backups.backup_refused(&command, reason);
         }
         ConsoleRequest::SubscriptionStart { tab_id, origin, .. } => {
-            fail_subscription_start(signals, tab_id, vec![TermLine::error(reason.clone())]);
+            fail_subscription_start(
+                signals,
+                tab_id,
+                origin,
+                None,
+                vec![TermLine::error(reason.clone())],
+            );
             fail_subscription_origin(signals, origin, reason);
         }
         ConsoleRequest::SubscriptionStop { tab_id, .. } => {
@@ -3978,19 +4019,51 @@ fn cancellation_reason(cancelled: RequestCancelled) -> String {
     }
 }
 
-/// A creation failure leaves no live tab. A failed restoration keeps the acknowledged tab visible
-/// and interrupted, so it can be restored on the next connection. A failed resubscription leaves
-/// the tab ended, showing why, until the operator resubscribes or closes it.
-fn fail_subscription_start(signals: WebConsoleSignals, tab_id: u64, lines: Vec<TermLine>) {
+/// A failed restoration reports inside its tab, preserving the REPL's operator history. A
+/// terminal refusal ends it; every other failed attempt waits before the same contract is retried.
+fn fail_subscription_start(
+    signals: WebConsoleSignals,
+    tab_id: u64,
+    origin: SubscriptionOrigin,
+    refusal: Option<SubscriptionRefusal>,
+    lines: Vec<TermLine>,
+) {
     let mut remove = false;
+    let mut report_in_repl = origin != SubscriptionOrigin::Restoration;
+    let now = signals.subscription_retry_tick.get_untracked();
     signals.subscription_tabs.update(|tabs| {
+        // The operator explicitly controls the number of tabs in this console.
         let Some(tab) = tabs.iter_mut().find(|tab| tab.id == tab_id) else {
             return;
         };
         match tab.state.clone() {
             SubscriptionTabState::Pending | SubscriptionTabState::Closing(None) => remove = true,
-            SubscriptionTabState::Restoring => {
-                tab.state = SubscriptionTabState::Interrupted;
+            SubscriptionTabState::Restoring(mut restoration) => {
+                report_in_repl = false;
+                let cause = match refusal {
+                    Some(refusal) => format!("{refusal:?}"),
+                    None => "request failed".to_string(),
+                };
+                let terminal = matches!(
+                    refusal,
+                    Some(
+                        SubscriptionRefusal::DomainNotFound
+                            | SubscriptionRefusal::RelayNotFound
+                            | SubscriptionRefusal::RelayChanged
+                    )
+                );
+                if terminal {
+                    tab.state = SubscriptionTabState::Ended;
+                    tab.lines
+                        .push(TermLine::error(format!("restoration ended ({cause})")));
+                } else {
+                    let wait = restoration.refused(now);
+                    tab.lines.push(TermLine::error(format!(
+                        "restoration refused ({cause}); retry in {}s",
+                        wait.delay.as_secs()
+                    )));
+                    tab.state = SubscriptionTabState::RetryWaiting { restoration, wait };
+                }
                 tab.lines.extend(lines.clone());
             }
             SubscriptionTabState::Resubscribing => {
@@ -3998,7 +4071,8 @@ fn fail_subscription_start(signals: WebConsoleSignals, tab_id: u64, lines: Vec<T
                 tab.lines.extend(lines.clone());
             }
             SubscriptionTabState::Open(_)
-            | SubscriptionTabState::Interrupted
+            | SubscriptionTabState::Interrupted(_)
+            | SubscriptionTabState::RetryWaiting { .. }
             | SubscriptionTabState::Ended
             | SubscriptionTabState::Closing(Some(_)) => {}
         }
@@ -4010,9 +4084,11 @@ fn fail_subscription_start(signals: WebConsoleSignals, tab_id: u64, lines: Vec<T
             tab_id,
         );
     }
-    signals
-        .terminal_lines
-        .update(|terminal| terminal.extend(lines));
+    if report_in_repl {
+        signals
+            .terminal_lines
+            .update(|terminal| terminal.extend(lines));
+    }
 }
 
 fn restore_failed_unsubscribe(
@@ -8190,6 +8266,7 @@ impl TermLineKind {
 mod tests {
     mod foreign_execution;
     mod reply_kind;
+    mod subscription_restoration;
     mod unreadable_reply;
 
     use leptos::prelude::Owner;
@@ -8430,6 +8507,7 @@ mod tests {
                 subscribe_command: "CREATE SUBSCRIPTION live TO orders;".to_string(),
                 lines: TermLineHistory::default(),
             }]),
+            subscription_retry_tick: RwSignal::new(RetryTick::default()),
             active_subscription_tab: RwSignal::new(Some(1)),
             domains_loaded: RwSignal::new(true),
             auth_token,
@@ -8441,6 +8519,10 @@ mod tests {
             backups,
             upload_base_url,
         }
+    }
+
+    fn test_restoration() -> TabRestoration {
+        TabRestoration::new(test_stream().schema)
     }
 
     fn test_stream() -> TabStream {
@@ -8678,8 +8760,16 @@ mod tests {
         let cases = [
             (SubscriptionTabState::Pending, "pending", false),
             (SubscriptionTabState::Open(stream.clone()), "active", true),
-            (SubscriptionTabState::Interrupted, "interrupted", true),
-            (SubscriptionTabState::Restoring, "restoring", true),
+            (
+                SubscriptionTabState::Interrupted(test_restoration()),
+                "interrupted",
+                true,
+            ),
+            (
+                SubscriptionTabState::Restoring(test_restoration()),
+                "restoring",
+                true,
+            ),
             (SubscriptionTabState::Ended, "ended", true),
             (SubscriptionTabState::Resubscribing, "resubscribing", true),
             (SubscriptionTabState::Closing(None), "closing", false),
@@ -8731,7 +8821,10 @@ mod tests {
 
             interrupt_subscription_tabs(signals);
             signals.subscription_tabs.with_untracked(|tabs| {
-                assert!(matches!(&tabs[0].state, SubscriptionTabState::Interrupted));
+                assert!(matches!(
+                    &tabs[0].state,
+                    SubscriptionTabState::Interrupted(_)
+                ));
                 assert!(!tabs[0].streams(&stream.subscription));
                 assert!(
                     tabs[0].lines.clone().into_lines()[0]
@@ -8747,7 +8840,7 @@ mod tests {
                 "one restoration is issued per interrupted tab"
             );
             assert!(signals.subscription_tabs.with_untracked(|tabs| {
-                matches!(&tabs[0].state, SubscriptionTabState::Restoring)
+                matches!(&tabs[0].state, SubscriptionTabState::Restoring(_))
             }));
             assert_eq!(restorations.len(), 1);
             let ConsoleRequest::SubscriptionStart {
@@ -8771,7 +8864,8 @@ mod tests {
     #[test]
     fn a_new_connection_attaches_its_clock_and_restores_its_tabs_before_its_transaction() {
         Owner::new().with(|| {
-            let signals = subscription_signals(SubscriptionTabState::Interrupted);
+            let signals =
+                subscription_signals(SubscriptionTabState::Interrupted(test_restoration()));
             let domain = domain_name("tenant");
             let transaction = TransactionStatus::new(
                 "attached".to_string(),
@@ -8830,7 +8924,8 @@ mod tests {
     #[test]
     fn a_restoration_ends_with_its_connection_and_the_next_connection_restores_the_tab() {
         Owner::new().with(|| {
-            let signals = subscription_signals(SubscriptionTabState::Interrupted);
+            let signals =
+                subscription_signals(SubscriptionTabState::Interrupted(test_restoration()));
             let mut requests = SessionRequests::new();
             for restoration in signals.begin_restorations() {
                 let issued = requests.issue(restoration);
@@ -8851,7 +8946,7 @@ mod tests {
             requests.end_connection();
             interrupt_subscription_tabs(signals);
             assert!(signals.subscription_tabs.with_untracked(|tabs| {
-                matches!(&tabs[0].state, SubscriptionTabState::Interrupted)
+                matches!(&tabs[0].state, SubscriptionTabState::Interrupted(_))
             }));
             requests.confirm_leader();
             let replayed = requests.release_held();
@@ -8914,7 +9009,7 @@ mod tests {
     fn closing_a_pending_interrupted_or_ended_tab_never_sends_a_stale_delete() {
         for state in [
             SubscriptionTabState::Pending,
-            SubscriptionTabState::Restoring,
+            SubscriptionTabState::Restoring(test_restoration()),
             SubscriptionTabState::Resubscribing,
         ] {
             Owner::new().with(|| {
@@ -8927,7 +9022,7 @@ mod tests {
             });
         }
         for state in [
-            SubscriptionTabState::Interrupted,
+            SubscriptionTabState::Interrupted(test_restoration()),
             SubscriptionTabState::Ended,
         ] {
             Owner::new().with(|| {
@@ -9588,7 +9683,7 @@ mod tests {
     #[test]
     fn a_failed_restore_remains_desired_and_reports_its_error() {
         Owner::new().with(|| {
-            let signals = subscription_signals(SubscriptionTabState::Restoring);
+            let signals = subscription_signals(SubscriptionTabState::Restoring(test_restoration()));
             let mut requests = SessionRequests::new();
             apply_subscribe_outcome(
                 signals,
@@ -9601,9 +9696,12 @@ mod tests {
                 },
             );
             signals.subscription_tabs.with_untracked(|tabs| {
-                assert!(matches!(&tabs[0].state, SubscriptionTabState::Interrupted));
+                assert!(matches!(
+                    &tabs[0].state,
+                    SubscriptionTabState::RetryWaiting { .. }
+                ));
                 assert!(
-                    tabs[0].lines.clone().into_lines()[0]
+                    tabs[0].lines.clone().into_lines()[1]
                         .line
                         .text
                         .contains("leader is changing")
@@ -9766,7 +9864,7 @@ mod tests {
         for restoring in [false, true] {
             Owner::new().with(|| {
                 let state = if restoring {
-                    SubscriptionTabState::Restoring
+                    SubscriptionTabState::Restoring(test_restoration())
                 } else {
                     SubscriptionTabState::Pending
                 };
@@ -9797,9 +9895,12 @@ mod tests {
                 assert!(matches!(step, SessionStep::Continue));
                 if restoring {
                     signals.subscription_tabs.with_untracked(|tabs| {
-                        assert!(matches!(&tabs[0].state, SubscriptionTabState::Interrupted));
+                        assert!(matches!(
+                            &tabs[0].state,
+                            SubscriptionTabState::RetryWaiting { .. }
+                        ));
                         assert!(
-                            tabs[0].lines.clone().into_lines()[0]
+                            tabs[0].lines.clone().into_lines()[1]
                                 .line
                                 .text
                                 .contains("subscription rejected")

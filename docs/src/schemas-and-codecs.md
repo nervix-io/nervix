@@ -295,6 +295,10 @@ CBOR. After `FROM WIRE SCHEMA`, completion offers only wire schemas of the forma
 The console's codec form presents these family and format choices and previews the same
 declaration that `SHOW CREATE CODEC <name>` returns.
 
+`DROP CODEC <name>` and `SHOW CREATE CODEC <name>` address the codec by its Model kind and name;
+they do not repeat its family or format. Codecs have no `ALTER` statement. Replace a codec with
+the required kind and its dependents in one transaction when its declaration must change.
+
 Schemaful codecs are type-strict. A JSON `string` wire field does not implicitly decode
 into an internal `DATETIME` field. Declare the wire conversion explicitly:
 
@@ -527,6 +531,10 @@ source records that went in. It sees only the member values, never the source ro
 state or headers, so it cannot reach a sensitive value that construction did not already leak.
 
 ### Batch Containers
+
+The [Emitter Batching](./emitter-batching.md#exact-bytes-and-bounded-subdivision) architecture
+chapter owns how selected members are packed, measured and subdivided under the encoded limit,
+and how their membership survives an uncertain publication.
 
 An emitter that declares a [batching clause](emitters.md#batch-payloads) publishes several records
 as one payload. Each record contributes one member value, exactly the value it would have been

@@ -140,6 +140,12 @@ A reader verifies an archive as a stream, without seeking:
 A section a reader does not decode is still read whole for its length and digest. `DESCRIBE BACKUP`
 runs this verification before it prints anything, and a restore runs it before it plans anything.
 
+Verification establishes structural validity and consistency with the archive's own manifest.
+Its BLAKE3 digests detect corruption and mismatched sections; the unsigned manifest does not
+authenticate an archive or prove that no one deliberately changed it. An operator establishes
+the provenance of a restore input. Command authentication and the interconnect own access and peer
+authentication, as the [cryptography register](cryptography.md#classification-register) describes.
+
 ### Compatibility
 
 The archive supports exactly one shape of each record: its current kind and version. There is no

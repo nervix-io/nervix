@@ -36,6 +36,15 @@ restart. It runs outside domain transactions and needs no selected domain. See
 [Node Settings](node-settings.md#committed-parameter-changes) for the parameter names, value types,
 transition checks and bootstrap seed rules.
 
+Creation selects the kind in one composed head, such as `HTTP ENDPOINT`, `WIRE JSON CODEC` or
+`KAFKA TOPIC INGESTOR`, followed by its name and that kind's body. Supported kinded alterations
+repeat the stored kind. Inspection and deletion address the Model kind alone, such as
+`SHOW CREATE CODEC` or `DROP ENDPOINT`; wire schemas keep their format because it is part of
+their identity. See the [statement-head contract](architecture.md#statement-heads-and-body-properties).
+Input acknowledgement is a body property: write `ATTACHED | DETACHED` after the complete inputs
+and optional collection policy, as the [processor](processors.md#shared-input-and-branch-contracts)
+and [emitter](emitters.md#statement-heads-and-external-names) synopses show.
+
 Core create statements:
 
 The `<json_type>` in a declared JSON wire schema is one of `string`, `number`, `integer`, `boolean`,
