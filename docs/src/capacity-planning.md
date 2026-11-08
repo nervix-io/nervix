@@ -255,3 +255,5 @@ history.
 For runtime ownership and snapshot boundaries, see [Data Plane](data-plane.md). For the current
 metric families and cardinality policy, see
 [Metrics And Observability](metrics-and-observability.md).
+
+An inferencer with `STATE` retains one immutable native F32 generation per concrete branch. Snapshot publication shares that generation by pointer; sealing copies values only at a checkpoint boundary on a charged bulk CPU worker. The declared state, shape vectors and derived rkyv framing must fit one configured snapshot section. `CREATE` refuses a larger declaration before storage; runtime preparation repeats the bound check. Encoding and restoration charge their bounded temporary buffers separately from the branch's native state.

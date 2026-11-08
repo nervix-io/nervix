@@ -333,6 +333,9 @@ class InventoryTests(unittest.TestCase):
             "registry-stored-models",
             "registry-stored-models-corruption",
             "runtime-state-keys",
+            "inferencer-state-snapshots",
+            "inferencer-state-snapshots-malformed",
+            "inferencer-native-snapshot-projection",
             "runtime-state-keys-malformed",
             "runtime-state-chunk-keys-malformed",
             "runtime-state-staging-namespaces",
@@ -511,12 +514,15 @@ class InventoryTests(unittest.TestCase):
             "plexus-format-text": 53,
             "models-archived-models": 54,
             "registry-archived-models": 49,
-            "consensus-state-records": 46,
-            "consensus-state-corruption": 46,
-            "consensus-raft-records": 45,
+            "consensus-state-records": 47,
+            "consensus-state-corruption": 47,
+            "consensus-raft-records": 46,
             "registry-stored-models": 42,
             "registry-stored-models-corruption": 42,
             "inferencer-tensor-columns": 1,
+            "inferencer-state-snapshots": 1,
+            "inferencer-state-snapshots-malformed": 1,
+            "inferencer-native-snapshot-projection": 1,
         }.items():
             with self.subTest(target=target):
                 self.assertEqual(versions[target], version)

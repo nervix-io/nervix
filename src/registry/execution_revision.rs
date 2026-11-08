@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use error_stack::{Report, ResultExt as _};
 use indexmap::IndexMap;
+use meticulous::ResultExt as _;
 use nervix_models::{
     ClusterNodeName, ClusterSchedule, DomainName, DomainSchedule, DynamicModelUpdate, FlushPolicy,
     KafkaPartitionSchedule, ModelKind, ModelName, NodeRef, NodeUnitRef, OwnershipStateComponent,
@@ -102,12 +103,35 @@ pub(crate) struct ExecutionNode {
     pub(crate) identity: NodeRef,
     pub(crate) resolved_branching: Option<ResolvedBranching>,
     pub(crate) schema_fingerprint: SchemaFingerprint,
+    pub(crate) inferencer_model: Option<nervix_models::InferencerModelFingerprint>,
     pub(crate) kafka_partition_schedule: Option<KafkaPartitionSchedule>,
     pub(crate) units: IndexMap<Unit, ExecutionUnit>,
     pub(crate) materialized_relay: bool,
     pub(crate) ownership_state_components: Vec<OwnershipStateComponent>,
     pub(crate) gate_relays: Vec<nervix_models::RelayName>,
     pub(crate) executes_on_every_cluster_node: bool,
+}
+
+/// The complete pinned model and ordered STATE declaration define one tensor-state lifetime.
+fn inferencer_model_fingerprint(
+    node: &ScheduledNode,
+) -> Option<nervix_models::InferencerModelFingerprint> {
+    let nervix_models::Model::Inferencer(model) = node.config.as_ref() else {
+        return None;
+    };
+    if model.state.is_empty() {
+        return None;
+    }
+    let bytes = serde_json::to_vec(&(
+        &model.resource,
+        model.resource_version,
+        &model.file,
+        &model.state,
+    ))
+    .assured("model names, pinned versions and bit-preserving STATE expressions serialize");
+    Some(nervix_models::InferencerModelFingerprint::from_digest(
+        nervix_crypto::digest::sha256(&bytes),
+    ))
 }
 
 impl ExecutionNode {
@@ -122,6 +146,7 @@ impl ExecutionNode {
             identity,
             resolved_branching: node.resolved_branching.clone(),
             schema_fingerprint: node.schema_fingerprint,
+            inferencer_model: inferencer_model_fingerprint(node),
             kafka_partition_schedule: node.kafka_partition_schedule.clone(),
             units: node
                 .units
@@ -626,8 +651,21 @@ impl ExecutionDelta {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        harness,
+        reason = "decision tests exercise semantic Models and language fixtures outside product \
+                  execution"
+    )
+)]
 mod tests {
-    use meticulous::{OptionExt as _, ResultExt as _};
+    //! Layer: test harness.
+    //! Owns: decision identities, placement and handoff consistency regressions.
+    //! Depends on: production decisions, vocabulary and semantic language fixtures.
+    //! Must not know: runtime execution or external services.
+
+    use meticulous::OptionExt as _;
     use nervix_arbitrary::{Arbitrary, Domain};
     use nervix_models::{CreateRelay, CreateSchema, Model, RelayBranching, SchemaField};
     use nonzero_ext::nonzero;
@@ -661,6 +699,98 @@ mod tests {
         )
         .with_resolved_branching(Some(ResolvedBranching::unbranched()));
         DomainSchedule::new(named("testing"), vec![schema, relay], Vec::new())
+    }
+
+    #[test]
+    fn inferencer_model_identity_covers_every_pinned_model_and_state_field() {
+        use nervix_models::{
+            AckMode, BranchSelection, CreateInferencer, InferencerStateBinding,
+            InferencerStateInitial, InferencerTensorDeclaration, InferencerTensorDimension,
+            InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
+            InferencerTensorSchema, ProcessorInputs, ProcessorOutputs,
+        };
+        let schema = |size| InferencerTensorSchema {
+            representation: InferencerTensorRepresentation::Dense,
+            element_type: InferencerTensorElementType::F32,
+            dimensions: vec![InferencerTensorDimension::Fixed(
+                std::num::NonZeroU32::new(size).expect("positive axis"),
+            )],
+        };
+        let base = CreateInferencer {
+            name: named("running"),
+            from: ProcessorInputs::single(named("features")),
+            output_routes: ProcessorOutputs::single(named("scored")),
+            branched_by: BranchSelection::Unbranched,
+            resource: named("inference"),
+            resource_version: 17,
+            file: "models/running_sum.onnx".into(),
+            inputs: vec![InferencerTensorMapping {
+                tensor: "features".into(),
+                schema: schema(2),
+                expression: nervix_plexus::parse_expression("input.vector")
+                    .expect("current mapping"),
+            }],
+            state: vec![InferencerStateBinding {
+                input: "state_in".into(),
+                output: "state_out".into(),
+                schema: schema(2),
+                initial: InferencerStateInitial::Zeros,
+            }],
+            output_schema: vec![InferencerTensorDeclaration {
+                tensor: "score".into(),
+                schema: schema(1),
+            }],
+            mode: AckMode::Attached,
+            filter_where: None,
+            materialized_state: vec![],
+        };
+        let identity = |model| {
+            inferencer_model_fingerprint(&ScheduledNode::new(
+                Model::Inferencer(model),
+                SchemaFingerprint::from_digest([7; 32]),
+            ))
+        };
+        let expected = identity(base.clone()).expect("stateful models have an identity");
+        assert_eq!(identity(base.clone()), Some(expected));
+        let mut changed = base.clone();
+        changed.resource = named("another_model");
+        assert_ne!(identity(changed), Some(expected));
+        let mut changed = base.clone();
+        changed.resource_version += 1;
+        assert_ne!(identity(changed), Some(expected));
+        let mut changed = base.clone();
+        changed.file = "models/another.onnx".into();
+        assert_ne!(identity(changed), Some(expected));
+        let mut changed = base.clone();
+        changed.state[0].input = "another_input".into();
+        assert_ne!(identity(changed), Some(expected));
+        let mut changed = base.clone();
+        changed.state[0].output = "another_output".into();
+        assert_ne!(identity(changed), Some(expected));
+        let mut changed = base.clone();
+        changed.state[0].schema = schema(3);
+        assert_ne!(identity(changed), Some(expected));
+        let mut changed = base.clone();
+        changed.state[0].initial = InferencerStateInitial::Constant(
+            nervix_plexus::parse_expression("[0.0, 0.0]").expect("current constant"),
+        );
+        let positive_zero = identity(changed.clone());
+        changed.state[0].initial = InferencerStateInitial::Constant(
+            nervix_plexus::parse_expression("[-0.0, 0.0]").expect("current constant"),
+        );
+        assert_ne!(identity(changed), positive_zero);
+        let mut ordered = base.clone();
+        let mut another = ordered.state[0].clone();
+        another.input = "second_input".into();
+        another.output = "second_output".into();
+        ordered.state.push(another);
+        let ordered_identity = identity(ordered.clone());
+        assert_ne!(ordered_identity, Some(expected));
+        ordered.state.reverse();
+        assert_ne!(identity(ordered), ordered_identity);
+        let mut stateless = base;
+        stateless.state.clear();
+        assert_eq!(identity(stateless), None);
     }
 
     #[test]

@@ -365,6 +365,7 @@ impl Arbitrary<'_> {
             OwnershipStateComponent::MaterializedRelay,
             OwnershipStateComponent::WasmProcessor,
             OwnershipStateComponent::WindowProcessor,
+            OwnershipStateComponent::Inferencer,
         ]);
         let cause = self.entropy.pick([
             OwnershipStateResetCause::MissingCheckpoint,

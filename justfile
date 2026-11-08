@@ -362,7 +362,7 @@ test-inferencer-state *args: build-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/inferencer_state.feature {{ quote(args) }}
+    cargo test --package nervix-scenarios --test scenarios -- --input 'tests/features/runtime/inferencer_state*.feature' {{ quote(args) }}
 
 # Exercise processor and generator partition ownership through the public interface.
 test-processor-partitions *args: build-deps
@@ -2144,6 +2144,16 @@ test-coverage-scenario-filter feature filter:
     cargo llvm-cov --no-report --package nervix-scenarios \
         --test scenarios -- --input {{ quote(feature) }} --name {{ quote(filter) }} \
         --concurrency 1 --retry 0
+
+# Reuse a compiled instrumented scenario executable while another coverage target builds.
+# The caller records which source produced the executable; this recipe compiles nothing.
+test-coverage-scenario-executable executable feature filter:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    source <(CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} cargo llvm-cov show-env --sh 2>/dev/null)
+    exec {{ quote(executable) }} --input {{ quote(feature) }} --name {{ quote(filter) }} --concurrency 1 --retry 0
 
 # Measure browser and CLI binary tests together with their public session scenarios.
 test-coverage-clients: tests-deps

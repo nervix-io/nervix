@@ -307,6 +307,7 @@ async fn a_replica_drops_the_branches_of_a_state_its_schedule_no_longer_names() 
         ),
         ScheduledStateAssignment {
             identity: ScheduledStateIdentity {
+                inferencer_model: None,
                 schema_fingerprint: SchemaFingerprint::from_digest([8; 32]),
                 wasm_state_generations: None,
             },

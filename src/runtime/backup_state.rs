@@ -548,6 +548,7 @@ impl Runtime {
                 }
                 RuntimeStateKind::BranchAggregated
                 | RuntimeStateKind::Correlator
+                | RuntimeStateKind::Inferencer
                 | RuntimeStateKind::KafkaOffset
                 | RuntimeStateKind::BranchLru => None,
             };
@@ -782,6 +783,9 @@ impl Runtime {
             };
             let branch_fingerprint = placement.branch_key.as_ref().map(BranchKey::fingerprint);
             match kind {
+                // Native tensor state is recovered through checkpoint replication. The archive
+                // contract does not yet carry inferencer tensors.
+                RuntimeStateKind::Inferencer => continue,
                 RuntimeStateKind::KafkaOffset | RuntimeStateKind::BranchLru => {
                     let stored_bytes = checkpoint.stored_bytes().change_context_lazy(|| {
                         BackupStateCaptureError::StateSize {
@@ -1259,6 +1263,7 @@ mod tests {
             nervix_models::DomainNodeRef::node_in(domain.clone(), kind, entity.clone()),
             super::super::ScheduledStateAssignment {
                 identity: super::super::ScheduledStateIdentity {
+                    inferencer_model: None,
                     schema_fingerprint: SchemaFingerprint::from_digest([4; 32]),
                     wasm_state_generations: Some(nervix_models::WasmStateGenerations::first()),
                 },
@@ -1520,6 +1525,7 @@ mod tests {
             nervix_models::DomainNodeRef::node_in(domain.clone(), kind, entity.clone()),
             super::super::ScheduledStateAssignment {
                 identity: super::super::ScheduledStateIdentity {
+                    inferencer_model: None,
                     schema_fingerprint: SchemaFingerprint::from_digest([4; 32]),
                     wasm_state_generations: None,
                 },

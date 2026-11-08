@@ -675,7 +675,8 @@ impl Runtime {
             RuntimeStateKind::Correlator
             | RuntimeStateKind::Deduplicator
             | RuntimeStateKind::WasmProcessor
-            | RuntimeStateKind::WindowProcessor => {
+            | RuntimeStateKind::WindowProcessor
+            | RuntimeStateKind::Inferencer => {
                 return Err(OwnershipHandoffError::state(format!(
                     "cannot synthesize empty branch-local {:?} state without a branch lifecycle \
                      checkpoint",
@@ -766,7 +767,9 @@ impl Runtime {
                         OwnershipStateComponent::BranchLifecycle,
                         recovered.reset_cause,
                     );
-                    if let Some(component) = Self::branch_state_component(scheduled.kind()) {
+                    if let Some(component) = Self::branch_recovery_state_component(&scheduled)
+                        .map(|(component, _)| component)
+                    {
                         resets.insert(component, OwnershipStateResetCause::ExpiredBranchMetadata);
                     }
                     checkpoints.push((
@@ -907,20 +910,23 @@ impl Runtime {
                 OwnershipStateComponent::BranchLifecycle
                 | OwnershipStateComponent::Deduplicator
                 | OwnershipStateComponent::WasmProcessor
-                | OwnershipStateComponent::WindowProcessor => continue,
+                | OwnershipStateComponent::WindowProcessor
+                | OwnershipStateComponent::Inferencer => continue,
             };
             components.push((component, state));
         }
         components
     }
 
-    fn branch_state_component(kind: ModelKind) -> Option<OwnershipStateComponent> {
-        Self::branch_recovery_state_component_kind(kind).map(|(component, _)| component)
-    }
-
     fn branch_recovery_state_component(
         scheduled: &ExecutionNode,
     ) -> Option<(OwnershipStateComponent, RuntimeStateKind)> {
+        if scheduled.inferencer_model.is_some() {
+            return Some((
+                OwnershipStateComponent::Inferencer,
+                RuntimeStateKind::Inferencer,
+            ));
+        }
         Self::branch_recovery_state_component_kind(scheduled.kind())
     }
 
@@ -960,6 +966,32 @@ impl Runtime {
                     .latest_snapshot(&self.inner.executor)
                     .await
                     .change_context(OwnershipHandoffError::Persistence)
+            }
+            RuntimeStateKind::Inferencer => {
+                let entry = crate::inferencer_state_snapshot::Snapshot {
+                    revision: 0,
+                    branch: None,
+                };
+                let executor = &self.inner.executor;
+                let limit = executor.limits().snapshot_section_bytes.as_u64();
+                let charge = executor
+                    .reserve(
+                        nervix_execution::MemoryClass::Bulk,
+                        crate::inferencer_state_snapshot::footprint([])
+                            .change_context(OwnershipHandoffError::Persistence)?,
+                    )
+                    .await
+                    .change_context(OwnershipHandoffError::Persistence)?;
+                let payload = executor
+                    .run_cpu(
+                        nervix_execution::CpuClass::Bulk,
+                        charge,
+                        move |_charge, cancellation| entry.encode(limit, cancellation),
+                    )
+                    .await
+                    .change_context(OwnershipHandoffError::Persistence)?
+                    .change_context(OwnershipHandoffError::Persistence)?;
+                Ok(PersistedRuntimeStateEntry { lsm: 0, payload })
             }
             RuntimeStateKind::WasmProcessor => Ok(PersistedRuntimeStateEntry {
                 lsm: 0,
@@ -1280,6 +1312,9 @@ impl Runtime {
             })?;
         expected.insert(branch_lru);
         let state_kind = match node.kind() {
+            ModelKind::Inferencer if node.inferencer_model.is_some() => {
+                Some(RuntimeStateKind::Inferencer)
+            }
             ModelKind::Deduplicator => Some(RuntimeStateKind::Deduplicator),
             ModelKind::WasmProcessor => Some(RuntimeStateKind::WasmProcessor),
             ModelKind::WindowProcessor => Some(RuntimeStateKind::WindowProcessor),
@@ -1499,6 +1534,9 @@ impl Runtime {
             }
             // A sealed window snapshot is opened only when its branch restores the window.
             RuntimeStateKind::WasmProcessor | RuntimeStateKind::WindowProcessor => {}
+            // Native frames travel opaquely after transport length/digest verification. Their
+            // bounded decoder and exact tensor-plan check run when the branch restores.
+            RuntimeStateKind::Inferencer => {}
             RuntimeStateKind::BranchLru => {
                 decode_branch_lru_snapshot(&snapshot.payload)
                     .map_err(|error| OwnershipHandoffError::state(error.to_string()))?;
@@ -2127,6 +2165,12 @@ impl Runtime {
                         .change_context_lazy(capture)?;
                     return Ok(snapshot.after(after_lsm));
                 }
+                ReplicatedState::Inferencer(state) => {
+                    return state
+                        .snapshot_after(after_lsm, &self.inner.executor)
+                        .await
+                        .change_context_lazy(capture);
+                }
                 ReplicatedState::WindowProcessor(state) => {
                     return state
                         .snapshot_after(after_lsm, &self.inner.executor)
@@ -2634,6 +2678,89 @@ impl Runtime {
             state
         };
         ReplicatedMaterializedRelayState::bind(&state, roles, local_node)
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "installs a retained inference state at branch construction"
+        )
+    )]
+    pub(in crate::runtime) async fn replicated_inferencer_state(
+        &self,
+        placement: RuntimeStatePlacement,
+        plan: &crate::registry::InferencerStatePlan,
+    ) -> error_stack::Result<Arc<ReplicatedInferencerState>, RuntimePersistenceError> {
+        let transferred = self.take_transferred_runtime_state_snapshot(&placement);
+        if transferred.is_none()
+            && let Some(route) = self.inner.state_replication_routing.resolve(&placement)
+            && let Some(existing) = route.state()
+            && let ReplicatedState::Inferencer(state) = existing.as_ref()
+        {
+            return Ok(state.clone());
+        }
+        let limit = plan
+            .snapshot_bytes()
+            .change_context(RuntimePersistenceError::InferencerSnapshot)?;
+        let working_bytes = crate::inferencer_state_snapshot::working_bytes(limit)
+            .change_context(RuntimePersistenceError::StorageAdmission)?;
+        let initial = match &self.inner.state_store {
+            None => match transferred {
+                None => None,
+                Some(snapshot) => {
+                    let charge = self
+                        .inner
+                        .executor
+                        .reserve(nervix_execution::MemoryClass::Bulk, working_bytes)
+                        .await
+                        .change_context(RuntimePersistenceError::StorageAdmission)?;
+                    Some((snapshot, charge))
+                }
+            },
+            Some(store) => {
+                let store = store.clone();
+                let placement = placement.clone();
+                let charge = self
+                    .inner
+                    .executor
+                    .reserve(
+                        nervix_execution::MemoryClass::Bulk,
+                        RuntimeStateStore::bounded_snapshot_working_bytes(limit)?,
+                    )
+                    .await
+                    .change_context(RuntimePersistenceError::StorageAdmission)?;
+                self.inner
+                    .executor
+                    .run_storage(
+                        nervix_execution::StorageClass::Filesystem,
+                        charge,
+                        move |charge, cancellation| {
+                            cancellation
+                                .check()
+                                .change_context(RuntimePersistenceError::Cancelled)?;
+                            Ok::<_, Report<RuntimePersistenceError>>(
+                                store
+                                    .select_latest_snapshot(&placement, transferred, limit)?
+                                    .map(|snapshot| (snapshot, charge)),
+                            )
+                        },
+                    )
+                    .await
+                    .change_context(RuntimePersistenceError::StorageExecution)??
+            }
+        };
+        let catalog = self.branch_checkpoint_catalog(&placement);
+        let state = Arc::new(
+            ReplicatedInferencerState::new(placement.clone(), initial, plan, &self.inner.executor)
+                .await?
+                .cataloged(&catalog),
+        );
+        self.publish_state_replication_route(
+            &placement,
+            ReplicatedState::Inferencer(state.clone()),
+        );
+        Ok(state)
     }
 
     #[cfg_attr(

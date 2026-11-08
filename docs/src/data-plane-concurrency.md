@@ -998,12 +998,12 @@ can proceed while the current task continues processing rows.
 ### Periodically snapshotted branch state
 
 `ReplicatedBranchState<C>` is the shared data-plane owner for the published state of a
-deduplicator or window branch. Its snapshot codec selects the immutable published value and
+deduplicator, window or stateful inferencer branch. Its snapshot codec selects the immutable published value and
 implements persistence; the owner retains the placement, `PublishedGenerations`,
 `CheckpointReplication` and branch checkpoint-catalog registration together. Publishing replaces
 the generation before recording its revision in the catalog, and persistence advances only after
 the codec's write succeeds. Dropping the state drops its exact catalog registration. The concrete
-deduplicator and window state types are specializations of this carrier, with no additional
+deduplicator, window and inferencer state types are specializations of this carrier, with no additional
 allocation or shared handle. Their live state, snapshot codecs, branch-incarnation checks and
 restore/rebuild logic remain with their processor owners.
 
@@ -1013,6 +1013,14 @@ branch's publication at the replication cadence, persists at the snapshot cadenc
 last publication when the branch stops, even when its task is already gone. A window codec keeps
 its resident or quota-owned segmented write; the deduplicator keeps its resident key checkpoint.
 Neither a snapshot nor a replica takes the live branch state from its task.
+
+A stateful inferencer publishes the native tensor generation after each admitted batch. The
+publication retains the immutable native tensors; encoding extracts their shapes and exact float
+bits on the bounded CPU workers. It neither copies tensors per output route nor routes them
+through Arrow. Capturing a generation retains that exact value while later model invocations
+advance the branch. The final write uses the same carrier, and eviction publishes an empty
+generation before its exact replication route retires. Restoration validates the snapshot frame,
+model identity and branch incarnation before installing native tensors into a new session.
 
 `StateSnapshotTasks`, `CheckpointWriter` and `SnapshotCadence` also provide the task lifetime,
 domain tracking, periodic cadence and final-write signal for Kafka domain offsets. Offsets keep

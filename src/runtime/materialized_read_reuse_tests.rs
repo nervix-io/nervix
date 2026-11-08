@@ -371,6 +371,7 @@ async fn a_partition_handoff_hides_only_its_materialized_dependency_until_the_fe
             ),
             ScheduledStateAssignment {
                 identity: ScheduledStateIdentity {
+                    inferencer_model: None,
                     schema_fingerprint: nervix_models::SchemaFingerprint::from_digest([7; 32]),
                     wasm_state_generations: None,
                 },

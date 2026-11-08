@@ -1133,6 +1133,7 @@ strongly consistent, selected runtime state is checkpointed, and the hot path is
 | Published consensus snapshots | Reopen from the current manifest; a marked installation is finished before state is exposed | Reopen from the current manifest; a marked installation is redone before state is exposed |
 | Durable handoff and forced-recovery preparations | Preserved, then reconciled or activated | Preserved, then reconciled or activated |
 | Runtime-state checkpoints: Kafka domain offsets, deduplicator and window state, materialized relay records | Written once more before their domain's stop completes: Kafka domain offsets and materialized relay records once the tasks that change them have ended, and a deduplicator or window branch what it published last, including a branch ended at its stop grace; a materialized relay, and a window whose retained rows exceed one 8 MiB snapshot section, are sealed to quota-owned files and written as segments synchronized before their header | Reopen at the last completed periodic checkpoint |
+| Stateful inferencer tensors | The branch's final published tensor generation is persisted before its stop completes; `STOP` and `START` retain it | Reopen at the newest surviving snapshot for the same model identity and branch incarnation; admitted inputs after that snapshot are not replayed |
 | WASM guest-state checkpoints | Every checkpoint that released an acknowledgement is already synchronized | Reopen at the newest checkpoint on the node's storage, which covers every acknowledged input |
 | Restored backup state: materialized relay rows, WASM guest saves, Kafka domain offsets, branch lifecycle, deduplicator keys and window state | A restore synchronizes a complete chunked namespace and its atomic active-generation pointer before releasing the stopped domain's START gate or resuming its archived lifecycle | Reopens pointer and checkpoints from one complete database view on each assigned owner and replica; a durable pointer alone does not release an incomplete replicated installation gate. A resumed domain retains every restored kind. A normal START continues saved guest state, ingestor positions, branch incarnations, deduplicator keys and windows, and resets materialized rows |
 | External ingestor offsets and emitter commits | Complete when the drain succeeds | Only the external connector's own delivery and transaction guarantee applies |
@@ -1185,6 +1186,9 @@ Durability is not uniform across those rows, and the difference is operationally
 
 Branch-local processor state survives only to its latest publication. A branch task aborted after
 exceeding its grace period keeps what it had published and loses the changes it made afterwards.
+Stateful inference publishes after every admitted batch. Eviction publishes an empty final
+generation, so a returning branch begins with `INITIAL`; dropping the inferencer removes its
+snapshots.
 
 ## Restart And Recovery
 
@@ -1313,7 +1317,10 @@ materialized relay state, branch lifecycle records, and WASM guest state, is key
 fingerprint of the schemas its entity lays records out by, and WASM guest state also by its
 generation. Window state additionally includes the current window model in its identity, so a
 replacement that changes `WIDTH`, `STEP`, or aggregate expressions begins with an empty window even
-when its schemas are unchanged. A checkpoint written under a replaced fingerprint is never restored
+when its schemas are unchanged. Inferencer state additionally names an `InferencerModelFingerprint`
+over the resource, pinned version, file and ordered `STATE` declarations, so a different binding
+cannot reopen its tensors. Its frame records the snapshot revision, tensor shapes, exact float
+bits and branch incarnation. A checkpoint written under a replaced fingerprint is never restored
 as the new layout, served, replicated, handed over, or selected by a forced recovery. Applying the
 committed schedule of a running domain removes it. Until the node has applied a schedule that names
 an entity,

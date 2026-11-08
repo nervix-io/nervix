@@ -729,3 +729,5 @@ same fence; an idempotent retry only rejoins retained progress and never reappli
 The metadata encoding has one current identity. Data from a different stored shape fails decoding
 with a typed error asking for node-state recreation. Parameter durations and numeric bounds are
 validated on archive recovery as well as construction. No migration or second decoder is present.
+
+The current schedule archive includes the inferencer ownership-state component. Native tensor checkpoints remain node-owned runtime state, never consensus records. Their placement combines the schema fingerprint and the decision layer's typed fingerprint of the pinned resource, file and ordered `STATE` declarations. Schedule application removes checkpoints whose model identity was replaced. The interconnect, consensus schedule and runtime storage identifiers name this one current shape; stored state in another shape must be recreated.

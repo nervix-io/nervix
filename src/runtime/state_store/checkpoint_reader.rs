@@ -724,6 +724,7 @@ pub(super) mod tests {
             ),
             ScheduledStateAssignment {
                 identity: ScheduledStateIdentity {
+                    inferencer_model: None,
                     schema_fingerprint: nervix_models::SchemaFingerprint::from_digest([7; 32]),
                     wasm_state_generations: Some(generations),
                 },

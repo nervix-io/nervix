@@ -182,6 +182,7 @@ pub(in crate::runtime) enum ReplicatedState {
     BranchAggregated(Arc<ReplicatedBranchAggregatedState>),
     BranchLru(Arc<ReplicatedBranchLifecycle>),
     Deduplicator(Arc<ReplicatedDeduplicatorState>),
+    Inferencer(Arc<ReplicatedInferencerState>),
     KafkaOffset(Arc<ReplicatedKafkaOffsetState>),
     MaterializedRelay(Arc<ReplicatedMaterializedRelayState>),
     WasmProcessor(Arc<ReplicatedWasmProcessorState>),
@@ -194,6 +195,7 @@ impl ReplicatedState {
             Self::BranchAggregated(state) => state.replication(),
             Self::BranchLru(state) => state.replication(),
             Self::Deduplicator(state) => state.replication(),
+            Self::Inferencer(state) => state.replication(),
             Self::KafkaOffset(state) => state.replication(),
             Self::MaterializedRelay(state) => state.replication(),
             Self::WasmProcessor(state) => state.replication(),
@@ -477,6 +479,26 @@ impl StateReplicationRouting {
         {
             published.retire(ended);
         }
+    }
+
+    /// Retire only the carrier whose final empty checkpoint was just flushed. A replacement
+    /// under the same placement is a different lifetime and survives a late eviction cleanup.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "exact branch eviction ends only its retained inference state"
+        )
+    )]
+    pub(in crate::runtime) fn retire_inferencer(&self, expected: &Arc<ReplicatedInferencerState>) {
+        self.current.rcu(|current| {
+            let mut next = current.as_ref().clone();
+            let matches = next.routes.get(&expected.placement).and_then(|route| route.state()).is_some_and(|state| {
+                matches!(state.as_ref(), ReplicatedState::Inferencer(current) if Arc::ptr_eq(current, expected))
+            });
+            if matches && let Some(route) = next.routes.remove(&expected.placement) { route.end(); }
+            next
+        });
     }
 
     #[cfg_attr(

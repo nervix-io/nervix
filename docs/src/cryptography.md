@@ -93,6 +93,11 @@ A site that uses a non-approved hash records its non-security purpose where it i
 register lists it with the site and the hash. The count recognises no recorded BLAKE3 purpose yet,
 so it holds every BLAKE3 site as unclassified.
 
+The inferencer model identity in `src/registry/execution_revision.rs` uses the boundary's SHA-256
+over the resource, pinned version, file and ordered `STATE` declarations. This is a non-security
+cache and placement identity; it neither authenticates model contents nor authorizes a resource.
+The vocabulary carries only the resulting `InferencerModelFingerprint` bytes.
+
 The expression function `md5()` in `crates/nervix-vm/src/runtime.rs` is a non-security checksum
 over UTF-8 text. It establishes no authenticity, authorization or collision-resistance guarantee;
 expressions needing collision resistance use the boundary-backed `sha256()` function.

@@ -492,6 +492,12 @@ native decoding; an unrepresentable count fails decoding. Window processor state
 runtime-state kind tag `8`, and its bulk snapshot codec validates the `NVXWIN64` frame signature
 before decoding histogram delayed-removal bucket indices in the same count representation.
 
+Stateful inferencer checkpoints use branch-local runtime-state kind tag `6`. Their placement
+carries both the schema fingerprint and an `InferencerModelFingerprint`; checkpoint descriptions,
+catalog pages, fetches and acknowledgements retain that exact identity. The native frame records
+the revision, branch incarnation, tensor shapes and float bits. The interconnect moves the opaque
+bounded frame through the existing snapshot bulk quota; the inferencer codec validates its shape.
+
 Emitter statements exchanged through the control plane use explicit `KEY` expressions and
 `PARTITION FROM BRANCH`, and SQS FIFO groups have one expression shape. The current
 `WIRE_CONTRACT` fingerprint identifies that archived Model layout; peers must match it exactly.
