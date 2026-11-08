@@ -74,8 +74,9 @@ confirm or message durability from routing alone.
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
 contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and
-completion status messages. For connector expression completion, including filters, HTTP request
-expressions, ALTER constructions, metadata fields and entity-specific header functions, follow
+completion status messages, and completing multi-word creation heads. For connector expression
+completion, including filters, HTTP request expressions, ALTER constructions, metadata fields and
+entity-specific header functions, follow
 the CLI's Completion section.
 For live subscription, clock and notice output while editing, and terminal omission notices,
 follow the CLI's [Asynchronous Output](../../../docs/src/client-tools-cli.md#asynchronous-output)

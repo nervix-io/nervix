@@ -205,6 +205,11 @@ after that word. The CLI reads successive bounded pages when the server has more
 missing or stale domain or transaction context does not produce candidates from a different
 configuration.
 
+Multi-word creation heads are offered as one item, such as `PACED DOMAIN`, `WIRE JSON SCHEMA`,
+`SIGNALING PROTOCOL`, `WINDOW PROCESSOR`, and `WASM PROCESSOR`. This also applies after
+`CREATE IF NOT EXISTS`. Once part of a head is written, completion continues from that position;
+after its name, suggestions follow that kind's body.
+
 Connector completion follows the selected entity's declaration: delivery modes, options,
 envelope clauses, property keys and client configuration keys stay specific to that entity.
 Expression positions offer ordinary functions, ingestor expressions also offer the header reads
