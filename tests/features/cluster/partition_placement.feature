@@ -53,15 +53,6 @@ Feature: Placement policies apply to corresponding execution units
       """
       class=identity
       """
-    When these Plexus commands fail
-      """
-      RELOCATE JUNCTION forward PARTITION 2
-        ONTO NODE <destination> IGNORE PREFERENCES;
-      """
-    Then the last command error contains
-      """
-      partition 2
-      """
     When these Plexus commands are executed on the leader node
       """
       DESCRIBE RELOCATION JUNCTION forward PARTITION 0
@@ -106,6 +97,15 @@ Feature: Placement policies apply to corresponding execution units
       """
       key={"tenant":"eta"} payload={"id":3,"tenant":"eta"}
       key={"tenant":"acme"} payload={"id":4,"tenant":"acme"}
+      """
+    When these Plexus commands fail
+      """
+      RELOCATE JUNCTION forward PARTITION 2
+        ONTO NODE <destination> IGNORE PREFERENCES;
+      """
+    Then the last command error contains
+      """
+      partition 2
       """
 
     Examples:
@@ -234,6 +234,58 @@ Feature: Placement policies apply to corresponding execution units
       | 3            | PREFER COLOCATION  |
       | 1            | SUGGEST SEPARATION |
       | 3            | SUGGEST SEPARATION |
+
+  Scenario Outline: A many-to-single reingestor hop refuses colocation and permits separation
+    Given the production sticky scheduler is configured
+    And a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event (tenant STRING, id I64);
+      CREATE SCHEMA tenant_key (tenant STRING);
+      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
+      CREATE RELAY incoming SCHEMA event BRANCHED BY tenants;
+      CREATE RELAY collapsed SCHEMA event UNBRANCHED;
+      CREATE REINGESTOR collapse FROM incoming
+        TO collapsed INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      """
+    When these Plexus commands fail
+      """
+      CREATE PLACEMENT invalid_hop FROM incoming TO collapse <policy>;
+      """
+    Then the last command error contains
+      """
+      single↔many
+      """
+    And the last command error contains
+      """
+      incoming
+      """
+    And the last command error contains
+      """
+      collapse
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE PLACEMENT spread FROM incoming TO collapse SUGGEST SEPARATION;
+      SHOW PLACEMENTS;
+      """
+    Then the last command output contains
+      """
+      class=single↔many
+      """
+    And the last command output contains
+      """
+      SUGGEST SEPARATION
+      """
+
+    Examples:
+      | cluster_size | policy             |
+      | 1            | REQUIRE COLOCATION |
+      | 3            | REQUIRE COLOCATION |
+      | 1            | PREFER COLOCATION  |
+      | 3            | PREFER COLOCATION  |
 
   Scenario Outline: Altering instancing revalidates the existing rule against the candidate graph
     Given the production sticky scheduler is configured

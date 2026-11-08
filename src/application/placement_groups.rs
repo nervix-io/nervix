@@ -1,8 +1,8 @@
 //! Lookup of committed hard groups by their exact execution units.
 //!
 //! Layer: control plane.
-//! - **Owns.** A borrowed index of the disjoint groups in one schedule.
-//! - **Depends on.** Scheduled groups and shared unit identities.
+//! - **Owns.** Borrowed indices and assignment views of the disjoint groups in one schedule.
+//! - **Depends on.** Scheduled groups, node assignments and shared unit identities.
 //! - **Must not know.** Placement policy, runtime tasks, transport or locks.
 
 #![cfg_attr(
@@ -11,7 +11,48 @@
 )]
 
 use ahash::{HashMap, HashSet};
-use nervix_models::{NodeUnitRef, PlacementGroupSchedule};
+use meticulous::OptionExt as _;
+use nervix_models::{
+    ClusterNodeName, DomainSchedule, NodeUnitRef, PlacementGroupSchedule, ScheduledNodes,
+};
+
+/// Assignment mutation can update node units and only the already matched group's primary.
+pub(in crate::application) struct PlacementGroupAssignments<'a> {
+    nodes: &'a mut ScheduledNodes,
+    group: Option<&'a mut PlacementGroupSchedule>,
+}
+
+impl<'a> PlacementGroupAssignments<'a> {
+    pub fn new(schedule: &'a mut DomainSchedule, index: Option<usize>) -> Self {
+        let group = match index {
+            Some(index) => Some(
+                schedule
+                    .placement_groups
+                    .get_mut(index)
+                    .verified("the group index was resolved in this schedule"),
+            ),
+            None => None,
+        };
+        Self {
+            nodes: &mut schedule.nodes,
+            group,
+        }
+    }
+
+    pub fn nodes(&self) -> &ScheduledNodes {
+        self.nodes
+    }
+
+    pub fn nodes_mut(&mut self) -> &mut ScheduledNodes {
+        self.nodes
+    }
+
+    pub fn place_primary(&mut self, primary: ClusterNodeName) {
+        if let Some(group) = self.group.as_mut() {
+            group.primary_node = Some(primary);
+        }
+    }
+}
 
 pub(in crate::application) struct PlacementGroupIndex<'a> {
     groups: &'a [PlacementGroupSchedule],
@@ -51,6 +92,7 @@ impl<'a> PlacementGroupIndex<'a> {
 
 #[cfg(test)]
 mod tests {
+    use meticulous::ResultExt as _;
     use nervix_models::{ModelKind, ModelName, NodeRef, Unit};
 
     use super::*;
@@ -59,7 +101,7 @@ mod tests {
         NodeUnitRef::new(
             NodeRef::new(
                 ModelKind::Relay,
-                ModelName::try_from(name).expect("valid relay name"),
+                ModelName::try_from(name).assured("valid relay name"),
             ),
             Unit::partition(partition),
         )

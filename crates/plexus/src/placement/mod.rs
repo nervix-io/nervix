@@ -243,6 +243,7 @@ pub fn suggest_alter_placement(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use meticulous::ResultExt as _;
     use nervix_models::{Model, Statement};
     use nonzero_ext::nonzero;
 
@@ -284,16 +285,16 @@ mod tests {
                 "cReAtE pLaCeMeNt domain_rule dOmAiN wIdE {policy} RANK {};",
                 u64::MAX
             ))
-            .expect("domain-wide form parses case-insensitively");
+            .assured("domain-wide form parses case-insensitively");
             assert_eq!(parsed.scope, PlacementScope::DomainWide);
             assert_eq!(parsed.rank.map(|rank| rank.get()), Some(u64::MAX));
             let text = parsed
                 .body
                 .to_canonical_plexus()
-                .expect("the model renders");
+                .assured("the model renders");
             assert_eq!(
                 parse_create_placement(&text)
-                    .expect("canonical form parses")
+                    .assured("canonical form parses")
                     .body,
                 parsed.body
             );
@@ -301,7 +302,7 @@ mod tests {
         let alter = parse_alter_placement(
             "ALTER PLACEMENT domain_rule SET DOMAIN WIDE, SET POLICY NEUTRAL, SET FROM a TO b;",
         )
-        .expect("ordered scope edits parse");
+        .assured("ordered scope edits parse");
         assert_eq!(alter.operations[0], AlterPlacementOperation::SetDomainWide);
         assert!(matches!(
             alter.operations[2],

@@ -244,6 +244,7 @@ pub fn suggest_describe_relocation(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use meticulous::ResultExt as _;
     use nervix_models::{ClusterNodeName, Statement};
 
     use super::*;
@@ -354,7 +355,7 @@ mod tests {
             u64::MAX
         );
         let relocation =
-            parse_relocate(&text).expect("unit selectors parse independently of graph validity");
+            parse_relocate(&text).assured("unit selectors parse independently of graph validity");
         let RelocationSelection::List(members) = &relocation.selection else {
             panic!("expected listed units");
         };
@@ -368,7 +369,7 @@ mod tests {
         );
         assert_eq!(
             parse_relocate(&format!("RELOCATE {};", relocation.to_plexus_clauses()))
-                .expect("canonical selection parses"),
+                .assured("canonical selection parses"),
             relocation
         );
         let input = "RELOCATE JUNCTION compute ";

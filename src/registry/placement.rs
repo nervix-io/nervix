@@ -841,6 +841,7 @@ fn placement_rule_claim_cmp(
 mod tests {
     use std::fs;
 
+    use meticulous::ResultExt as _;
     use nervix_models::{
         AlterPlacement, AlterPlacementOperation, ClusterNodeName, DropModel, HttpEndpointIngestor,
         HttpIngestor, IngestorEntity, MaterializedRelayState, MaterializedStateDependency,
@@ -965,8 +966,8 @@ mod tests {
 
         for target in ["p99", "emit"] {
             let path = temp_db_path();
-            let registry = Registry::open(&path).expect("registry opens");
-            let domain = DomainName::parse("partition_bonds").expect("valid domain");
+            let registry = Registry::open(&path).assured("registry opens");
+            let domain = DomainName::parse("partition_bonds").assured("valid domain");
             let mut models = full_graph_batch();
             for model in &mut models {
                 if let Model::Branch(branch) = model {
@@ -980,10 +981,10 @@ mod tests {
                 PlacementPolicy::RequireColocation,
                 None,
             ));
-            registry.apply_batch(&domain, models).expect("valid graph");
+            registry.apply_batch(&domain, models).assured("valid graph");
             let plan = registry
                 .active_graph(&domain)
-                .expect("active graph")
+                .assured("active graph")
                 .placement_plan();
             let fiber = target == "emit";
             assert_eq!(plan.require_groups.len(), if fiber { 1 } else { 2 });
@@ -1017,7 +1018,7 @@ mod tests {
                 assert_eq!(group.bonds.len(), expected.len());
             }
             drop(registry);
-            fs::remove_dir_all(path).expect("remove test database");
+            fs::remove_dir_all(path).assured("remove test database");
         }
     }
 
@@ -1105,18 +1106,20 @@ mod tests {
             domain: error_domain,
             left_rule,
             right_rule,
+            left_kind,
             left_identifier,
+            right_kind,
             right_identifier,
-            ..
         } = error.current_context()
         else {
             panic!("unexpected error: {error:#}");
         };
         assert_eq!(error_domain, domain.as_str());
         assert_eq!([left_rule.as_str(), right_rule.as_str()], ["cut", "glue"]);
+        assert_eq!([*left_kind, *right_kind], ["ingestor", "relay"]);
         assert_eq!(
             [left_identifier.as_str(), right_identifier.as_str()],
-            ["p99_proc", "ing"]
+            ["ing", "notifications"]
         );
 
         let _ = fs::remove_dir_all(path);
@@ -1382,7 +1385,7 @@ mod tests {
     fn domain_wide_require_forms_a_connected_component_from_per_hop_claims() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = DomainName::parse("placement_domain_require").expect("valid domain");
+        let domain = DomainName::parse("placement_domain_require").assured("valid domain");
         let mut models = full_graph_batch();
         models.push(Model::Placement(CreatePlacement::domain_wide(
             named("domain_rule"),

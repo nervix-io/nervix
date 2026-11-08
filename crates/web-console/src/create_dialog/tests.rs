@@ -114,7 +114,7 @@ fn a_domain_wide_placement_keeps_its_scope_policy_and_full_width_rank() {
         });
         let submitted = signals
             .submission()
-            .expect("the placement draft is complete");
+            .assured("the placement draft is complete");
         assert_eq!(command_domain(&submitted), Some(&scope));
         assert_eq!(
             command_query(&submitted),
@@ -130,7 +130,7 @@ fn a_domain_wide_placement_keeps_its_scope_policy_and_full_width_rank() {
         assert!(signals.submission().is_err());
         signals.placement.update(|draft| draft.rank = String::new());
         assert_eq!(
-            command_query(&signals.submission().expect("rank is optional")),
+            command_query(&signals.submission().assured("rank is optional")),
             "CREATE IF NOT EXISTS PLACEMENT whole_domain DOMAIN WIDE PREFER COLOCATION;"
         );
         assert_eq!(

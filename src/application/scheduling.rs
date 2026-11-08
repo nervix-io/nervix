@@ -51,7 +51,7 @@ use super::{
         AssignmentRelocation, DrainMove, PlannedOwnershipHandoff, format_planned_ownership_move,
         mark_complete_ownership_transitions, planned_ownership_moves,
     },
-    placement_groups::PlacementGroupIndex,
+    placement_groups::{PlacementGroupAssignments, PlacementGroupIndex},
     schedule_planning::{DomainSchedulePlanningSnapshot, PreparedDomainSchedule},
     session_service::SessionServiceImpl,
     shutdown::{ShutdownDeadline, ShutdownPhaseOutcome},
@@ -1576,10 +1576,9 @@ impl SessionServiceImpl {
             if needs_relocation {
                 let current_group_index = current_groups.index_of(&group.members);
                 return Self::relocate_placement_group_assignment(
-                    schedule,
+                    PlacementGroupAssignments::new(schedule, current_group_index),
                     desired,
                     group,
-                    current_group_index,
                     node_id,
                     live_nodes,
                     target_nodes,
@@ -1655,10 +1654,9 @@ impl SessionServiceImpl {
     }
 
     fn relocate_placement_group_assignment(
-        schedule: &mut nervix_models::DomainSchedule,
+        mut current: PlacementGroupAssignments<'_>,
         desired: &nervix_models::DomainSchedule,
         group: &PlacementGroupSchedule,
-        current_group_index: Option<usize>,
         unavailable_node_id: &ClusterNodeName,
         live_nodes: &BTreeSet<ClusterNodeName>,
         target_nodes: &BTreeSet<ClusterNodeName>,
@@ -1667,7 +1665,7 @@ impl SessionServiceImpl {
         let current_nodes = group
             .members
             .iter()
-            .map(|member| schedule.nodes.get(&member.node))
+            .map(|member| current.nodes().get(&member.node))
             .collect::<Option<Vec<_>>>()?;
         let desired_nodes = group
             .members
@@ -1745,6 +1743,11 @@ impl SessionServiceImpl {
                 .iter()
                 .all(|unit| unit.assigned_nodes.contains(&target)))
         .then(|| target.clone());
+        struct UnitAssignmentUpdate {
+            member: NodeUnitRef,
+            assigned_nodes: Vec<ClusterNodeName>,
+            transition: Option<nervix_models::OwnershipTransition>,
+        }
         let mut updates = Vec::with_capacity(group.members.len());
         for (((member, current_node), current_unit), desired_unit) in group
             .members
@@ -1779,11 +1782,20 @@ impl SessionServiceImpl {
                 )),
                 _ => None,
             };
-            updates.push((member.clone(), assigned_nodes, transition));
+            updates.push(UnitAssignmentUpdate {
+                member: member.clone(),
+                assigned_nodes,
+                transition,
+            });
         }
-        for (member, assigned_nodes, transition) in updates {
-            let node = schedule
-                .nodes
+        for UnitAssignmentUpdate {
+            member,
+            assigned_nodes,
+            transition,
+        } in updates
+        {
+            let node = current
+                .nodes_mut()
                 .get_mut(&member.node)
                 .verified("every group member was resolved above");
             if let Some(transition) = transition {
@@ -1797,9 +1809,7 @@ impl SessionServiceImpl {
             }
             node.place_unit(member.unit, Some(target.clone()), assigned_nodes);
         }
-        if let Some(index) = current_group_index {
-            schedule.placement_groups[index].primary_node = Some(target.clone());
-        }
+        current.place_primary(target.clone());
 
         let fallback_node = if primary_changed && promoted_replica.is_none() {
             Some(target)
@@ -2032,10 +2042,9 @@ impl SessionServiceImpl {
             };
             let desired_group = desired_groups.find(&group.members).unwrap_or(&group);
             if let Some(failover_move) = Self::relocate_placement_group_assignment(
-                schedule,
+                PlacementGroupAssignments::new(schedule, Some(group_index)),
                 desired,
                 desired_group,
-                Some(group_index),
                 &unavailable_node_id,
                 live_nodes,
                 target_nodes,

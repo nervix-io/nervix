@@ -449,9 +449,11 @@ impl SessionServiceImpl {
         if let Some(plan) = placement_plan {
             let schedule = self.inner.consensus.current_schedule().await;
             let domain_schedule = schedule.domain(domain);
-            let group_index = PlacementGroupIndex::new(
-                domain_schedule.map_or(&[], |schedule| schedule.placement_groups.as_slice()),
-            );
+            let groups = match domain_schedule {
+                Some(schedule) => schedule.placement_groups.as_slice(),
+                None => &[],
+            };
+            let group_index = PlacementGroupIndex::new(groups);
             for rule in &plan.rules {
                 lines.push(format!(
                     "  {} scope={} policy={}",
@@ -660,9 +662,11 @@ impl SessionServiceImpl {
         }
         let schedule = self.inner.consensus.current_schedule().await;
         let domain_schedule = schedule.domain(domain);
-        let group_index = PlacementGroupIndex::new(
-            domain_schedule.map_or(&[], |schedule| schedule.placement_groups.as_slice()),
-        );
+        let groups = match domain_schedule {
+            Some(schedule) => schedule.placement_groups.as_slice(),
+            None => &[],
+        };
+        let group_index = PlacementGroupIndex::new(groups);
         for group in placement_groups_claimed_by_rule(&plan, rule) {
             lines.push(format!(
                 "group members: {}",

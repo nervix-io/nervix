@@ -660,11 +660,12 @@ fn planned_relocation_schedule(
         }
     }
 
+    let moved_members = moved.iter().collect::<ahash::HashSet<_>>();
     for group in &mut planned.placement_groups {
         if group
             .members
             .iter()
-            .any(|group_member| moved.contains(group_member))
+            .any(|group_member| moved_members.contains(group_member))
         {
             group.primary_node = Some(destination.clone());
         }
@@ -689,11 +690,9 @@ fn unsatisfied_preference_lines(
     let mut lines = Vec::new();
     for preference in &unit.preferences {
         let owner = |member: &NodeUnitRef| {
-            schedule
-                .nodes
-                .get(&member.node)
-                .and_then(|node| node.unit(member.unit))
-                .and_then(|unit| unit.execution_node())
+            let node = schedule.nodes.get(&member.node)?;
+            let unit = node.unit(member.unit)?;
+            unit.execution_node()
         };
         let (Some(left), Some(right)) = (owner(&preference.left), owner(&preference.right)) else {
             continue;
@@ -728,16 +727,16 @@ fn relocation_member_owner<'a>(
     member: &NodeUnitRef,
     live_nodes: &BTreeSet<ClusterNodeName>,
 ) -> error_stack::Result<&'a ClusterNodeName, RelocationError> {
-    let scheduled = schedule
-        .nodes
-        .get(&member.node)
-        .and_then(|node| node.unit(member.unit))
-        .ok_or_else(|| {
-            Report::new(RelocationError::MemberNotScheduled {
-                domain: domain.clone(),
-                member: member.node.clone(),
-            })
-        })?;
+    let scheduled = match schedule.nodes.get(&member.node) {
+        Some(node) => node.unit(member.unit),
+        None => None,
+    };
+    let scheduled = scheduled.ok_or_else(|| {
+        Report::new(RelocationError::MemberNotScheduled {
+            domain: domain.clone(),
+            member: member.node.clone(),
+        })
+    })?;
     let owner = scheduled.execution_node().ok_or_else(|| {
         Report::new(RelocationError::MemberWithoutOwner {
             domain: domain.clone(),
@@ -917,7 +916,7 @@ mod tests {
                 &NodeUnitRef::new(member("route"), Unit::SINGLE),
                 &live(&["node-1"])
             )
-            .expect("a live owner must resolve"),
+            .assured("a live owner must resolve"),
             &node_name("node-1")
         );
     }
@@ -972,14 +971,14 @@ mod tests {
             panic!("the fixture is a junction");
         };
         model.branched_by = BranchSelection::BranchedBy {
-            branch: "tenants".try_into().expect("valid name"),
+            branch: "tenants".try_into().assured("valid name"),
         };
         node = node.with_resolved_branching(Some(ResolvedBranching::branched(
-            "tenants".try_into().expect("valid name"),
+            "tenants".try_into().assured("valid name"),
             CreateSchema {
-                name: "tenant_key".try_into().expect("valid name"),
+                name: "tenant_key".try_into().assured("valid name"),
                 fields: vec![SchemaField {
-                    name: "tenant".try_into().expect("valid name"),
+                    name: "tenant".try_into().assured("valid name"),
                     ty: ParseAsType::String,
                     optional: false,
                     sensitive: false,
@@ -1005,7 +1004,7 @@ mod tests {
             })
             .collect();
         let current = DomainSchedule::new(
-            "relocation_test".try_into().expect("valid name"),
+            "relocation_test".try_into().assured("valid name"),
             [node],
             groups,
         );
@@ -1013,7 +1012,7 @@ mod tests {
             &current,
             &current,
             &node_name("node-2"),
-            &[moved.clone()],
+            std::slice::from_ref(&moved),
             1,
             &live(&["node-1", "node-2", "node-3"]),
             &live(&["node-1", "node-2", "node-3"]),

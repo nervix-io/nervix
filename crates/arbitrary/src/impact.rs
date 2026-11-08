@@ -1438,7 +1438,7 @@ mod tests {
     const BYTES: usize = 8192;
 
     /// Every variant, family and shape the generators promise to reach, as [`Walk`] names them.
-    const EXPECTED: [&str; 109] = [
+    const EXPECTED: [&str; 104] = [
         "TransactionImpactReport::empty",
         "TransactionOperationRange::single",
         "TransactionOperationRange::several",

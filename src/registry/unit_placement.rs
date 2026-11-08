@@ -138,10 +138,10 @@ impl UnitCorrespondence {
     pub fn decide(left: &ActiveNode, right: &ActiveNode) -> Self {
         let lhs = UnitLayout::of(left);
         let rhs = UnitLayout::of(right);
-        let class = if lhs.count() == 1 && rhs.count() == 1 {
-            HopClass::Identity
-        } else if matches!(&left.ingestor_units, Some(IngestorUnits::PerPartition { relays, .. }) if right.kind == ModelKind::Relay && relays.iter().any(|relay| relay.as_str() == right.identifier.as_str()))
-        {
+        let singleton_pair = lhs.count() == 1 && rhs.count() == 1;
+        let partition_intake = !singleton_pair
+            && matches!(&left.ingestor_units, Some(IngestorUnits::PerPartition { relays, .. }) if right.kind == ModelKind::Relay && relays.iter().any(|relay| relay.as_str() == right.identifier.as_str()));
+        let class = if singleton_pair || partition_intake {
             HopClass::Identity
         } else if (left.kind == ModelKind::Ingestor || left.kind == ModelKind::Reingestor)
             && rhs.count() > 1
@@ -192,7 +192,10 @@ impl UnitCorrespondence {
                 ),
                 HopClass::Fiber if from_left => {
                     let partner = index % self.right.count();
-                    (partner, partner + 1, 1)
+                    let end = partner
+                        .checked_add(1)
+                        .verified("a fiber partner is below its nonzero recipient count");
+                    (partner, end, 1)
                 }
                 HopClass::Fiber => (index, self.left.count(), self.right.count()),
                 HopClass::SingleMany if own.count() == 1 => (0, other.count(), 1),
@@ -402,8 +405,8 @@ mod tests {
             right: UnitLayout::Partitions(nonzero!(2u16)),
         };
         for index in 0..2 {
-            let instance = Unit::try_instance(index).expect("small instance");
-            let partition = Unit::partition(u32::try_from(index).expect("small partition"));
+            let instance = Unit::try_instance(index).assured("small instance");
+            let partition = Unit::partition(u32::try_from(index).assured("small partition"));
             assert_eq!(
                 correspondence.partners(true, instance).collect::<Vec<_>>(),
                 [partition]

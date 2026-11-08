@@ -152,11 +152,9 @@ impl ActiveGraph {
         };
         let placement = self.placement.effective();
         let hard = UnitPlacementGroups::decide(self, &placement);
-        let hard_group = |member: &NodeUnitRef| {
-            hard.by_member
-                .get(member)
-                .map(|index| hard.groups[*index].clone())
-                .unwrap_or_else(|| vec![member.clone()])
+        let hard_group = |member: &NodeUnitRef| match hard.by_member.get(member) {
+            Some(index) => hard.groups[*index].clone(),
+            None => vec![member.clone()],
         };
         let mut groups = Vec::<UnitGroup>::new();
         let mut group_by_member = HashMap::default();

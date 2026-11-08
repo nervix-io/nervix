@@ -862,9 +862,19 @@ mod tests {
             0,
         );
 
+        let intake = scheduled_node(&schedule, ModelKind::Ingestor, "ing")
+            .assigned_single_node()
+            .assured("the intake has an owner");
+        let relay = scheduled_node(&schedule, ModelKind::Relay, "notifications")
+            .assigned_single_node()
+            .assured("the relay has an owner");
+        let processor = scheduled_node(&schedule, ModelKind::Deduplicator, "p99_proc")
+            .assigned_single_node()
+            .assured("the processor has an owner");
+        assert_ne!(intake, relay, "the intake-to-relay hop prefers separation");
         assert_ne!(
-            scheduled_node(&schedule, ModelKind::Ingestor, "ing").assigned_single_node(),
-            scheduled_node(&schedule, ModelKind::Deduplicator, "p99_proc").assigned_single_node()
+            relay, processor,
+            "the relay-to-processor hop prefers separation"
         );
 
         let _ = fs::remove_dir_all(path);

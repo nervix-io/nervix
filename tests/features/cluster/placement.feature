@@ -631,8 +631,7 @@ Feature: Placement policies
     Then the background Plexus execution succeeds
     Then the last command output contains
       """
-      quiesce level: ENTITY_PAUSE
-      planned relocations:
+      quiesce level: ENTITY_PAUSE; planned relocations:
       """
     When these Plexus commands are executed on the leader node
       """

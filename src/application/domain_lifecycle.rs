@@ -1016,10 +1016,13 @@ impl SessionServiceImpl {
 
 #[cfg(test)]
 mod tests {
-    use meticulous::{OptionExt as _, ResultExt as _};
+    #[cfg(feature = "testing")]
+    use meticulous::OptionExt as _;
+    use meticulous::ResultExt as _;
     #[cfg(feature = "testing")]
     use nervix_consensus::{ConsensusError, ConsensusTestProbe, StorageBoundary};
     use nervix_models::{DomainConfig, DomainPace};
+    #[cfg(feature = "testing")]
     use nervix_recovery::Discarded as _;
 
     #[cfg(feature = "testing")]
