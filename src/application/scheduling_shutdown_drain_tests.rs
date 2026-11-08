@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** Coverage of what the leader does for the node that asks, of how the asking node
 //!   reads an answer that never arrives, and of how long and when the asking node waits for the
-//!   release of its drain cordon.
+//!   release of its drain cordon, including the leadership observation an interrupted drain logs.
 //! - **Depends on.** The scheduling control plane, the shutdown deadline and the server test
 //!   fixture.
 //! - **Must not know.** Connector implementations or runtime execution details.
@@ -28,12 +28,14 @@ use nervix_recovery::Discarded as _;
 use super::super::test_fixtures::build_test_service_with_fault_injection;
 use super::{
     super::{
+        command_result::{CommandDisposition, CommandResult, LeaderRedirect, NodeLocation},
         shutdown::{ShutdownCoordinator, ShutdownDeadline, ShutdownRequestOutcome},
         test_fixtures::{TestService, build_test_service, node_named},
     },
     SHUTDOWN_CORDON_RELEASE_GRACE, SessionServiceImpl, ShutdownDrainAnswer, ShutdownDrainBudget,
     ShutdownDrainCordon, ShutdownOwnershipMove, ShutdownPhaseOutcome, ShutdownReleaseQuorum,
 };
+use crate::captured_logs::CapturedLogs;
 
 /// A shutdown deadline `timeout` from now, from the stop request a fresh coordinator accepts.
 fn shutdown_deadline_after(timeout: Duration) -> ShutdownDeadline {
@@ -62,6 +64,79 @@ fn every_answer(leader: &ClusterNodeName) -> [ShutdownDrainAnswer; 3] {
         }),
     };
     [completed, failed, unanswered]
+}
+
+/// Captures the production drain retry response without starting another drain or election.
+fn stopping_node_drain_retry_log(disposition: CommandDisposition) -> String {
+    let node = node_named("node-2");
+    let drained = CommandResult::new(disposition, "drain report".to_string());
+    let logs = CapturedLogs::of(|| {
+        assert_eq!(
+            SessionServiceImpl::stopping_node_drain_retry_response(&node, &drained),
+            StoppingNodeDrainResponse::NotLeader,
+        );
+    });
+    assert!(logs.contains("INFO"), "{logs}");
+    assert!(logs.contains("node_id=node-2"), "{logs}");
+    assert!(logs.contains("report=drain report"), "{logs}");
+    logs
+}
+
+#[test]
+fn a_stopping_node_drain_with_an_unconfirmed_lease_reports_that_the_same_leader_may_still_lead() {
+    let logs = stopping_node_drain_retry_log(CommandDisposition::NotLeader(
+        LeaderRedirect::UnconfirmedLease { term: 7 },
+    ));
+    assert!(
+        logs.contains(
+            "stopping-node drain interrupted: the leader could not confirm its lease in term 7 \
+             and may still lead; remaining work will be retried at the observed leader"
+        ),
+        "{logs}"
+    );
+}
+
+#[test]
+fn a_stopping_node_drain_redirect_reports_the_observed_leader() {
+    let logs = stopping_node_drain_retry_log(CommandDisposition::NotLeader(
+        LeaderRedirect::Leader(NodeLocation {
+            node: node_named("node-3"),
+            grpc_url: None,
+            web_console_url: None,
+        }),
+    ));
+    assert!(
+        logs.contains(
+            "stopping-node drain interrupted: leadership moved to node 'node-3'; remaining work \
+             will be retried at the observed leader"
+        ),
+        "{logs}"
+    );
+}
+
+#[test]
+fn a_stopping_node_drain_redirect_reports_when_no_leader_is_known() {
+    let logs =
+        stopping_node_drain_retry_log(CommandDisposition::NotLeader(LeaderRedirect::NoLeader));
+    assert!(
+        logs.contains(
+            "stopping-node drain interrupted: leadership moved, and no leader is known yet; \
+             remaining work will be retried at the observed leader"
+        ),
+        "{logs}"
+    );
+}
+
+#[test]
+fn a_stopping_node_drain_reports_a_leadership_change_observed_after_its_failure() {
+    let logs = stopping_node_drain_retry_log(CommandDisposition::Failed);
+    assert!(
+        logs.contains(
+            "stopping-node drain interrupted: leadership moved; remaining work will be retried at \
+             the observed leader"
+        ),
+        "{logs}"
+    );
 }
 
 #[test]

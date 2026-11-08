@@ -1471,12 +1471,7 @@ impl SessionServiceImpl {
                     || self.inner.consensus.current_leader().await.as_ref()
                         != Some(self.inner.consensus.local_node_id())
                 {
-                    info!(
-                        node_id = %node_id,
-                        report = %drained.message,
-                        "stopping-node drain lost leadership; remaining work needs the next leader"
-                    );
-                    StoppingNodeDrainResponse::NotLeader
+                    Self::stopping_node_drain_retry_response(&node_id, &drained)
                 } else {
                     StoppingNodeDrainResponse::Failed {
                         report: drained.message,
@@ -1500,6 +1495,19 @@ impl SessionServiceImpl {
                 Self::cordon_release_response(&node_id, released)
             }
         }
+    }
+
+    /// Reports an interrupted drain before asking the stopping node to observe its leader again.
+    fn stopping_node_drain_retry_response(
+        node_id: &ClusterNodeName,
+        drained: &CommandResult,
+    ) -> StoppingNodeDrainResponse {
+        info!(
+            node_id = %node_id,
+            report = %drained.message,
+            "stopping-node drain lost leadership; remaining work needs the next leader"
+        );
+        StoppingNodeDrainResponse::NotLeader
     }
 
     /// The answer to stopping node `node_id`'s request to release its drain cordon, from what this
