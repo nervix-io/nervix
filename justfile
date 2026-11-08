@@ -539,6 +539,13 @@ test-cli-streams *args: build-deps build-test-cli
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/tools/cli_session*.feature") }} --tags '@cli_stream_termination or @cli_stream_recovery' {{ quote(args) }}
 
+# Observe interactive output without sending keys to wake the prompt or preparing unrelated guests.
+test-cli-repl tags="@cli_repl_output" *args: build-web-console download-onnxruntime build-test-cli
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/tools/cli_session*.feature") }} --tags {{ quote(tags) }} {{ quote(args) }}
+
 # Select codec round trips or browser cases with the same ordinary runner and prepared tools.
 test-codec-scenarios input *args: build-codec-heads
     #!/usr/bin/env bash
