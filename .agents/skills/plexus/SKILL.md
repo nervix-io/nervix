@@ -33,6 +33,10 @@ reference. `DESCRIBE CLIENT <name>` shows effective defaults and configured valu
 For delivery durations and direct-value mappings, follow the Ingestors delivery-mode and Emitters
 direct-value sections. Nervix validates the entity's declared limits and exact mapping types at
 `CREATE` and `ALTER`; correct a refused declaration before starting the domain.
+For statement heads, endpoint and codec kinds, addressing and input acknowledgement, read
+`Plexus Overview` → `Statement catalog`, `Schemas And Codecs` → `Codecs` and the processor or
+emitter input synopsis. Select the full kinded head before assembling its body; use only the
+alteration operations that the owning chapter supports.
 For MQTT ingestors, read [Ingestors → MQTT](../../../docs/src/ingestors.md#mqtt) for the session/QoS/mode
 pairings and the broker's shared-subscription requirement, including with one instance. Read its
 session and identity rules before sharing a client between entities or promising recovery after an
@@ -502,7 +506,8 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   Include every dependent wire, internal, codec, and node mutation required for the candidate graph
   to validate in the same transaction.
 - Treat JSON, CBOR, and AVRO wire schemas as distinct entity kinds. Their names may coincide, so
-  every create, alter, show, drop, and codec reference must include the exact format.
+  creation, alteration and addressing must select the exact format. For codec reference syntax,
+  follow `Schemas And Codecs` → `Codecs`; its head supplies the wire format.
 - Use `BYTES` for arbitrary octets, including `ARRAY` and `VEC` elements. Keep branch key schemas
   free of `BYTES`. Check the wire representation and required encoding rule in `Schemas And
   Codecs` → `Codecs`; CBOR and AVRO `bytes` fields need no rule. A cast never converts `BYTES`; use

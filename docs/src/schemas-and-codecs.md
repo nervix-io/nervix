@@ -295,6 +295,10 @@ CBOR. After `FROM WIRE SCHEMA`, completion offers only wire schemas of the forma
 The console's codec form presents these family and format choices and previews the same
 declaration that `SHOW CREATE CODEC <name>` returns.
 
+`DROP CODEC <name>` and `SHOW CREATE CODEC <name>` address the codec by its Model kind and name;
+they do not repeat its family or format. Codecs have no `ALTER` statement. Replace a codec with
+the required kind and its dependents in one transaction when its declaration must change.
+
 Schemaful codecs are type-strict. A JSON `string` wire field does not implicitly decode
 into an internal `DATETIME` field. Declare the wire conversion explicitly:
 

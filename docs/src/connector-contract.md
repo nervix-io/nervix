@@ -23,6 +23,9 @@ that serves one entity still names that entity explicitly.
 
 ### Statement heads and references
 
+The general [statement-head contract](architecture.md#statement-heads-and-body-properties) owns
+kind selection, body properties and addressing. Connector declarations specialize that contract.
+
 Plexus selects these identities in the statement head:
 
 | Statement family | Head examples |

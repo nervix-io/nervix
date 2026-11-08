@@ -11,6 +11,7 @@ A typical emitter:
 CREATE IF NOT EXISTS KAFKA TOPIC EMITTER kafka_notifications
   FROM notifications
   COLLECT FOR 10ms MAX BATCH SIZE 1MiB
+  ATTACHED
   TO kafka_main TOPIC 'notifications_out'
     MODE ACK PARALLEL MAX 1000 ACK TIMEOUT 30s
       RETRY POLICY BACKOFF 250ms MAX 30s
@@ -72,6 +73,8 @@ The optional input acknowledgement clause follows the complete `FROM` list and i
 policy, before materialized-state dependencies and `TO`. Omitting it selects `ATTACHED`.
 Canonical Plexus and `SHOW CREATE EMITTER` always write the mode explicitly in that position.
 `ALTER <CONNECTOR> <ENTITY> EMITTER ... SET ATTACHED | SET DETACHED` changes the same input contract.
+The head keeps the emitter's connector and entity while that operation changes its body property;
+see the [statement-head contract](architecture.md#statement-heads-and-body-properties).
 
 External locators are string literals and retain their exact spelling, including case. Each
 entity validates its own name: Kafka and Pulsar topics, RabbitMQ and SQS queues, RabbitMQ

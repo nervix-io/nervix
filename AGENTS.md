@@ -164,11 +164,17 @@ violates instead of softening the contract to match today's imports.
   treat as one item.
 - Grammar labels use underscore style (`field_name`, `string_literal`); completion labels of
   composed keyword phrases use their space-separated human-readable form.
-- Ingestor and emitter statement heads name the connector and entity, even when the connector serves
-  one entity; client heads name the connector. An ingestor or emitter `ALTER` repeats its stored
-  connector and entity. The head selects the kind, and the body writes that entity's declared
-  reference, locator and options. Each pair owns its grammar body and Model variant, and completion
-  composes its head from the shared tokens and the vocabulary declaration.
+- A `CREATE` head names the entity's kind as one composed keyword phrase and selects that kind's
+  own grammar and semantic Model. A kind never enters a generic statement through `TYPE`,
+  `FROM <KIND>` or a grammar-selecting `FORMAT` clause, and a combination the selected kind cannot
+  express never waits for registry rejection. An alterable property belongs in the body and pairs
+  with its corresponding `ALTER` operation, never in the head. A supported kinded `ALTER` repeats
+  the stored kind; addressing statements name the Model kind alone unless the kind is part of the identity,
+  as with wire schemas. Connector heads name connector and entity even for a single-entity
+  connector; client heads name the connector. Shared tokens and vocabulary declarations compose
+  heads for parsing and completion. [Statement heads and body
+  properties](docs/src/architecture.md#statement-heads-and-body-properties) owns the contract,
+  existing body-format choices and the checklist for adding a kind.
 
 ### Control plane and runtime
 
@@ -410,6 +416,9 @@ debt only decreases ([the ratchet](#the-ratchet)).
 Each chapter below is the authoritative reference for its area, and any change within that area
 keeps the chapter current in the same change. Where areas meet, each chapter keeps its own contract.
 
+- [Architecture Overview](docs/src/architecture.md#statement-heads-and-body-properties): the
+  language-to-Model boundary, statement heads and body properties, kind-preserving alterations,
+  addressing identities and adding a statement kind.
 - [Connector Crates And The Connector Contract](docs/src/connector-contract.md): a connector crate,
   the shared connector contract, connector planning or composition, host ingestor and emitter
   execution.

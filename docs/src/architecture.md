@@ -191,3 +191,73 @@ drain and force flush, ownership handoff during shutdown, connector acknowledgem
 boundaries, terminal teardown, what survives each ending, and restart recovery.
 
 The rest of this section splits control-plane semantics from data-plane semantics because that distinction is fundamental to how Nervix behaves.
+
+## Statement heads and body properties
+
+Plexus parses text once into structured semantic Models. A `CREATE` head selects the entity's
+kind as one composed keyword phrase; that kind owns the body grammar and the semantic shape it
+can produce. The registry then validates references, exact types and graph contracts. It does not
+repair a body that belongs to another kind or reject a combination the selected kind cannot
+express in the first place.
+
+| Selected head after `CREATE [IF NOT EXISTS]` | Contract selected by the head |
+| --- | --- |
+| `HTTP ENDPOINT` | A VHOST and path, with no signaling field |
+| `WEBSOCKETS ENDPOINT` | A VHOST and path, with an optional signaling protocol |
+| `WIRE JSON CODEC`, `WIRE CBOR CODEC`, `WIRE AVRO CODEC` | A reference to a wire schema of that format and its binding to an internal schema |
+| `JAQ JSON CODEC`, `JAQ YAML CODEC`, `JAQ TOML CODEC`, `JAQ XML CODEC`, `JAQ CBOR CODEC` | Directed transformations over the selected format |
+| `PROTOBUF CODEC`, `SYSLOG CODEC` | The resource-backed Protobuf contract or the predefined Syslog contract |
+| A connector/entity phrase followed by `INGESTOR` or `EMITTER` | That declared pair's reference, locator, options and delivery contract |
+
+The endpoint Model carries HTTP and WebSockets as distinct variants. Only the WebSockets variant
+can hold signaling. A wire codec's `FROM WIRE SCHEMA` resolves the format its head selected;
+the body does not select the codec family again. The [codec manual](schemas-and-codecs.md#codecs)
+and [connector contract](connector-contract.md#statement-heads-and-references) own the detailed
+bodies and declaration rules.
+
+### Properties and alterations
+
+An alterable property stays in the body and pairs with its corresponding alteration operation.
+Input acknowledgement is the optional `ATTACHED | DETACHED` body clause on junctions,
+deduplicators, reorderers, window processors, correlators, inferencers, WASM processors,
+reingestors and emitters. It follows the complete input list and optional `COLLECT FOR`; on a
+correlator it follows the `RIGHT FROM` list and its collection policy. Omission means `ATTACHED`.
+Canonical rendering writes the clause explicitly there. The supported `SET ATTACHED | SET
+DETACHED` operations change the same property; this does not introduce an `ALTER` statement for
+window processors, correlators, inferencers or WASM processors.
+
+A supported kinded `ALTER` repeats the stored kind. For example, an ingestor or emitter alteration
+retains its connector and entity, and a wire-schema alteration retains its format. Changing a
+kind requires dropping and creating the entity. Endpoints and codecs currently have no `ALTER`.
+Other body properties, such as collection, filtering, branch selection and batching, keep their
+own supported alteration operations and execution semantics.
+
+Addressing statements use the named Model's identity: `DROP ENDPOINT`, `DESCRIBE ENDPOINT`,
+`SHOW CREATE ENDPOINT`, `DROP CODEC` and `SHOW CREATE CODEC` need no kind selector. Wire schemas
+are the exception because each format is a separate Model kind and their names can coincide:
+`DROP WIRE JSON SCHEMA`, for example, includes the format in the identity. A codec reference
+uses the format already selected by its head.
+
+The existing `SIGNALING PROTOCOL ... FORMAT ...` and `UDF ... WITH ROTO_0_13` choices stay within
+their respective statement families. Each family owns those body alternatives, neither has an
+`ALTER`, and both are referenced generically. They do not grant a new endpoint, codec or connector
+kind a body selector under a generic head.
+
+### Adding a kind
+
+1. Define the kind and its valid semantic payload in the vocabulary. Keep kind-specific fields
+   inside their variant; derive the kind from that variant rather than storing another selector.
+   A connector entity also declares its references, options and capabilities there.
+2. Compose the full head from shared case-insensitive keyword tokens and phrase primitives. Give
+   the kind its own body grammar, reusing focused shared clauses. Parsing converts once into its
+   public semantic Model; runtime execution receives typed plans rather than executable text.
+3. Keep alterable properties in the body and add their supported alteration operations. Decide
+   whether the kind participates in identity before defining addressing and reference forms.
+4. Derive completion from the composed top-level grammar. Offer a complete head as one item and
+   restrict following clauses and references to that head. Canonical rendering and console
+   previews use the same selected kind and body order.
+5. Cover parsing, cross-kind body boundaries, completion contexts and canonical/Model round
+   trips through their production owners; register changed representation properties. A command
+   with application or runtime behavior also needs public scenarios. Update fixtures, examples,
+   manuals and skill routing in the same change. Apply the alpha one-shape policy to every
+   replaced form, including stored and protocol boundaries it changes.

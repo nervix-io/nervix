@@ -18,6 +18,11 @@ not a second grammar.
 
 Always read `Plexus Overview`. Add the indexed topics relevant to the requested graph:
 
+Its `Statement catalog` explains kinded heads and addressing. Read `Schemas And Codecs` → `Codecs`
+for the complete codec head and wire reference, `Ingestors` for endpoint declarations, and the
+`Processors` or `Emitters` input synopsis for acknowledgement placement and supported alterations.
+Keep detailed grammar in those chapters when reviewing a configuration.
+
 | User need | Documentation index entry |
 | --- | --- |
 | Domain timing and lifecycle | `Domains And Time` |
