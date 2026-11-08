@@ -1121,10 +1121,14 @@ impl SessionServiceImpl {
                 ),
             });
         }
+        let nervix_models::Model::Ingestor(config) = node.config.as_ref() else {
+            unreachable!("ingestor inspection was resolved as an ingestor");
+        };
+        let ingestor_kind = config.input.entity_kind();
         let summary = self
             .inner
             .runtime
-            .describe_local_ingestor(&request.domain, &request.name, request.unit)
+            .describe_local_ingestor(&request.domain, &request.name, request.unit, ingestor_kind)
             .map_err(|reason| {
                 RemoteOperationFailure::failed(
                     RemoteOperationSubject::entity(

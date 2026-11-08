@@ -50,6 +50,7 @@ pub(in crate::application) fn runtime_ingestor_describe_to_envelope(
     metrics: Vec<String>,
 ) -> IngestorDescribeEnvelope {
     IngestorDescribeEnvelope {
+        source_metrics: summary.source_metrics,
         running: summary.running,
         ready: summary.ready,
         quiesce_state: summary.quiesce_state,
@@ -94,6 +95,7 @@ pub(in crate::application) fn runtime_ingestor_describe_from_envelope(
 ) -> (RuntimeIngestorDescribe, Vec<String>) {
     (
         RuntimeIngestorDescribe {
+            source_metrics: summary.source_metrics,
             running: summary.running,
             ready: summary.ready,
             quiesce_state: summary.quiesce_state,
@@ -370,6 +372,7 @@ pub(in crate::application) fn format_ingestor_describe_output(
             "quiesce state: {}",
             summary.quiesce_state.as_deref().unwrap_or("none")
         ),
+        "source:".to_string(),
         format!(
             "nervix_ingestor_quiesce_buffered_records: {}",
             summary.quiesce_counters.buffered_records
@@ -399,6 +402,12 @@ pub(in crate::application) fn format_ingestor_describe_output(
             summary.oversized_payloads_total
         ),
     ]);
+    lines.extend(
+        summary
+            .source_metrics
+            .iter()
+            .map(|line| format!("  {line}")),
+    );
     let last_decode_rejection = match summary.last_decode_rejection.as_ref() {
         Some(rejection) => rejection.to_string(),
         None => "-".to_string(),
@@ -1780,6 +1789,7 @@ mod tests {
         use super::super::test_fixtures::{named, scheduled_node};
 
         let summary = RuntimeIngestorDescribe {
+            source_metrics: Vec::new(),
             running: true,
             ready: true,
             quiesce_state: None,

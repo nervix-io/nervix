@@ -535,7 +535,14 @@ pub(super) mod tests {
             .await
             .expect("the refused body is reported to the node's observers");
         let described = runtime
-            .describe_local_ingestor(&domain, &ingestor, nervix_models::Unit::SINGLE)
+            .describe_local_ingestor(
+                &domain,
+                &ingestor,
+                nervix_models::Unit::SINGLE,
+                nervix_models::IngestorEntityKind::Http(
+                    nervix_models::HttpIngestorEntity::Endpoint,
+                ),
+            )
             .expect("the fixture's ingestor describes itself");
         let rejection = described
             .last_decode_rejection
@@ -575,6 +582,7 @@ pub(super) mod tests {
             &ingestor,
             Unit::SINGLE,
             dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+            nervix_models::IngestorEntityKind::Http(nervix_models::HttpIngestorEntity::Endpoint),
         );
 
         route.count_dropped_header_values(0);
@@ -639,7 +647,14 @@ pub(super) mod tests {
             .collect::<Vec<_>>();
         assert_eq!(bound, vec![runtime_key]);
         let describe = runtime
-            .describe_local_ingestor(&domain, &ingestor, nervix_models::Unit::SINGLE)
+            .describe_local_ingestor(
+                &domain,
+                &ingestor,
+                nervix_models::Unit::SINGLE,
+                nervix_models::IngestorEntityKind::Http(
+                    nervix_models::HttpIngestorEntity::Endpoint,
+                ),
+            )
             .expect("describe should represent the running ingestor");
         assert!(describe.running);
         assert!(describe.ready);
@@ -724,6 +739,22 @@ pub(super) mod tests {
                 rejected: 1,
                 retry_after: None,
             })
+        );
+        assert_eq!(
+            runtime
+                .inner
+                .metrics
+                .ingestor_unfolding_refused(
+                    &domain,
+                    &ingestor,
+                    Unit::SINGLE,
+                    None,
+                    nervix_models::IngestorEntityKind::Http(
+                        nervix_models::HttpIngestorEntity::Endpoint
+                    ),
+                )
+                .get(),
+            1
         );
 
         filled.release().await;
