@@ -1442,6 +1442,14 @@ mod tests {
         assert_eq!(keyed.active, 2);
         keyed.move_active(false);
         assert_eq!(keyed.active, 2);
+        *keyed
+            .active_expression_mut()
+            .assured("the last expression is active") = "input.last".into();
+        keyed.active = 0;
+        keyed.move_active(false);
+        assert_eq!(keyed.active, 1);
+        assert_eq!(keyed.active_expression().map(String::as_str), Some(""));
+        keyed.active = 2;
         keyed.remove_active();
         assert_eq!(keyed.active, 1);
         assert_eq!(keyed.expressions.len(), 2);

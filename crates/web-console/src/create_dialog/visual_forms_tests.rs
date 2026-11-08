@@ -1604,6 +1604,7 @@ fn deduplicator_and_reorderer_forms_edit_ordered_keys_after_their_node_branch() 
     struct KeyedForm {
         kind: CreateKind,
         prerequisite: &'static str,
+        unnamed: &'static str,
         heading: &'static str,
         branch_label: &'static str,
         statement: &'static str,
@@ -1629,6 +1630,14 @@ fn deduplicator_and_reorderer_forms_edit_ordered_keys_after_their_node_branch() 
             dialog.to_html()
         };
 
+        assert_eq!(
+            signals
+                .choice_query(ChoiceControl::ProcessorInputRelay)
+                .err(),
+            Some("Open a junction, deduplicator, reorderer or reingestor form first")
+        );
+        assert!(!ChoiceControl::ProcessorBranch.applies_to(CreateKind::Emitter));
+        assert_eq!(CreateKind::Emitter.processor_family(), None);
         signals.open(
             CreateKind::Junction,
             Some(domain.clone()),
@@ -1642,6 +1651,7 @@ fn deduplicator_and_reorderer_forms_edit_ordered_keys_after_their_node_branch() 
             KeyedForm {
                 kind: CreateKind::Deduplicator,
                 prerequisite: "Choose the deduplicator branch before its input relays",
+                unnamed: "Choose the named deduplicator branch before its input relays",
                 heading: "Ordered DEDUPLICATE ON expressions",
                 branch_label: "Deduplicator branch",
                 statement: "CREATE DEDUPLICATOR keyed_orders",
@@ -1651,6 +1661,7 @@ fn deduplicator_and_reorderer_forms_edit_ordered_keys_after_their_node_branch() 
             KeyedForm {
                 kind: CreateKind::Reorderer,
                 prerequisite: "Choose the reorderer branch before its input relays",
+                unnamed: "Choose the named reorderer branch before its input relays",
                 heading: "Ordered BY expressions",
                 branch_label: "Reorderer branch",
                 statement: "CREATE REORDERER keyed_orders",
@@ -1673,7 +1684,24 @@ fn deduplicator_and_reorderer_forms_edit_ordered_keys_after_their_node_branch() 
                 Some(form.prerequisite)
             );
 
+            draft.update(|state| state.choose_unbranched());
+            assert_eq!(
+                signals
+                    .choice_query(ChoiceControl::ProcessorInputRelay)
+                    .assured("an unbranched processor needs no branch choice")
+                    .target,
+                ChoiceTarget::IngestUnbranchedRelay
+            );
+            assert!(
+                !open_form_controls(signals, form.kind).contains(&ChoiceControl::ProcessorBranch)
+            );
             draft.update(|state| state.choose_branched());
+            assert_eq!(
+                signals
+                    .choice_query(ChoiceControl::ProcessorInputRelay)
+                    .err(),
+                Some(form.unnamed)
+            );
             assert!(
                 open_form_controls(signals, form.kind).contains(&ChoiceControl::ProcessorBranch)
             );
@@ -1745,6 +1773,18 @@ fn deduplicator_and_reorderer_forms_edit_ordered_keys_after_their_node_branch() 
                 panic!("processor creation must use the command dispatcher");
             };
             assert_eq!(command.domain, Some(domain.clone()));
+
+            let elsewhere = DomainName::parse("elsewhere").assured("valid domain");
+            signals.change_scope(Some(elsewhere));
+            let changed = draft.get_untracked();
+            let keyed = changed.keyed().assured("a keyed form keeps its keys");
+            assert_eq!(
+                keyed.active_expression().map(String::as_str),
+                Some("input.id")
+            );
+            assert_eq!(keyed.max_time, "10m");
+            assert!(changed.current_first_input().is_none());
+            assert!(signals.submission().is_err());
         }
     });
 }
