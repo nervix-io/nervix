@@ -2127,6 +2127,15 @@ DashMap accesses and browser timers are untracked by Deloxide. The browser retry
 task owner; deterministic owner tests and public one- and three-node scenarios check its ordering,
 backoff and retained session attachments.
 
+The orphaned-pause fixture's `OrphanedDomainPauses` owner retains one test-only entry per domain. An
+admitted model command claims it before preflight, releases the map guard before proposing the pause
+under its mutation lease, and records delivery only after consensus confirms the pause. An
+unconfirmed test proposal rearms the entry and fails the fixture request, so its delivery assertion
+distinguishes that failure from the pause-recovery regression. The public scenario reads the
+retained delivery observation; its injector's drop disposes the map. These accesses are outside
+ordinary builds and recurring data-plane paths, and DashMap internals and the asynchronous consensus
+wait remain untracked by Deloxide.
+
 ### Complete analysis and qualification
 
 The isolated tooling workspace uses `nightly-2026-09-17`; product builds use stable. The twelve
