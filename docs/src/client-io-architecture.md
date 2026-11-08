@@ -370,6 +370,14 @@ The inventory accounts for every test after teardown. Java compiler elements res
 references to the binding's declared public members; the guide includes compiled, executed suite
 examples. JNI representation properties remain a separate instrument.
 
+The Ruby minitest suite and its [guide](client-library-ruby.md) exercise the native gem, including
+GVL release, collection, retained buffer slices, typed failures and explicit or block-scoped close.
+The boundary tier runs the prepared gem without a cluster, including a fresh installed archive;
+the cluster tier uses the same one-/three-node TLS and plaintext fixture. Results are reported
+after teardown and judged against the common inventory. The source check reads magnus registrations
+and Prism syntax with receiver identity; it rejects missing references rather than counting names
+in strings or comments. Representation properties remain with the native binding owner.
+
 The JNI edge leases every input before a blocking host call, then releases the Java handle's
 monitor. Cleaner cleanup and explicit `close()` release each allocation once, after any admitted
 short call returns; reentrant close ends new admission immediately, and nested access is refused.

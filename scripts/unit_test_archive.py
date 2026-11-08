@@ -43,6 +43,7 @@ MESSAGES = Path("target/unit-tests/cargo-messages.jsonl")
 PROGRAMS = Path("target/unit-tests/programs.json")
 MANIFEST = Path("target/unit-tests/manifest.json")
 JVM_ARTIFACTS = Path("target/client-conformance/java")
+RUBY_ARTIFACTS = Path("target/llvm-cov-target/client-conformance")
 NATIVE_ARTIFACTS = Path("target/client-conformance")
 
 
@@ -111,6 +112,34 @@ def jvm_inputs(root: Path, programs: Sequence[TestProgram]) -> list[Path]:
     return [jar, *(path.relative_to(root) for path in sorted((root / classes).rglob("*.class")))]
 
 
+def ruby_inputs(root: Path, programs: Sequence[TestProgram]) -> list[Path]:
+    """Carry both the extracted gem and its separately installed fresh GEM_HOME."""
+    if not any(program.directory == "crates/client-ruby"
+               and Path(program.executable).name.startswith("host_suite-") for program in programs):
+        return []
+    extracted = RUBY_ARTIFACTS / "ruby/lib"
+    fresh = RUBY_ARTIFACTS / "ruby-fresh"
+    required = [extracted / "nervix_client.rb", extracted / "nervix_client/build.rb"]
+    for path in required:
+        if not (root / path).is_file():
+            raise shards.ShardError(f"{path} is missing; run the Ruby preparation in just test-coverage-binaries")
+    for pattern in (
+        "ruby/lib/nervix_client_ruby.*",
+        "ruby-fresh/specifications/nervix-client-*.gemspec",
+        "ruby-fresh/gems/*/lib/nervix_client.rb",
+        "ruby-fresh/gems/*/lib/nervix_client/build.rb",
+        "ruby-fresh/gems/*/lib/nervix_client_ruby.*",
+    ):
+        matches = list((root / RUBY_ARTIFACTS).glob(pattern))
+        if len(matches) != 1 or not matches[0].is_file():
+            raise shards.ShardError(f"{RUBY_ARTIFACTS}/{pattern} must name one prepared Ruby input")
+    paths = []
+    for directory in (extracted, fresh / "gems", fresh / "specifications"):
+        paths.extend(path.relative_to(root) for path in sorted((root / directory).rglob("*"))
+                     if path.is_file())
+    return paths
+
+
 def native_inputs(root: Path, programs: Sequence[TestProgram]) -> list[Path]:
     """Carry both C/C++ instrumentation modes and the library their run paths resolve."""
     selected = any(program.directory == "crates/client-ffi"
@@ -136,17 +165,18 @@ def pack(root: Path, archive: Path) -> shards.Manifest:
     kept = [path for path in objects if path != suite]
     held = {path.as_posix() for path in kept}
     programs = read_programs(root)
+    ruby = ruby_inputs(root, programs)
     for program in programs:
         if program.executable not in held:
             raise shards.ShardError(f"the build left no {program.executable}")
-    host_inputs = [*jvm_inputs(root, programs), *native_inputs(root, programs)]
+    host_inputs = [*jvm_inputs(root, programs), *ruby, *native_inputs(root, programs)]
     return shards.write_archive(
         root,
         archive,
         MANIFEST,
         [*kept, *shards.generated_inputs(root),
          *(path for path in host_inputs if path.as_posix() not in held), PROGRAMS],
-        stripped=kept,
+        stripped=[*kept, *ruby],
     )
 
 
@@ -179,6 +209,8 @@ def run(root: Path) -> None:
         print(f"[{index}/{len(programs)}] {program.executable} in {program.directory}", flush=True)
         directory = root / program.directory
         environment = {**os.environ, "CARGO_MANIFEST_DIR": str(directory), "LD_LIBRARY_PATH": loader_path}
+        if program.directory == "crates/client-ruby":
+            environment["NERVIX_CLIENT_RUBY_TEST_ARTIFACTS"] = str(root / RUBY_ARTIFACTS)
         completed = subprocess.run([str(root / program.executable)], cwd=directory, env=environment)
         if completed.returncode != 0:
             failed.append(f"{program.executable} exited {completed.returncode}")

@@ -5,6 +5,7 @@ require 'fileutils'
 require 'pathname'
 require 'rbconfig'
 require 'rubygems/package'
+require 'rubygems/installer'
 
 target = Pathname.new(ARGV.fetch(0)).expand_path
 artifacts = target.join('client-conformance')
@@ -56,5 +57,10 @@ archive = artifacts.join(gem)
 FileUtils.mv(staging.join(gem), archive)
 FileUtils.rm_rf(installed)
 Gem::Package.new(archive.to_s).extract_files(installed.to_s)
+fresh = artifacts.join('ruby-fresh')
+FileUtils.rm_rf(fresh)
+Gem::Installer.at(archive.to_s, install_dir: fresh.to_s, ignore_dependencies: true,
+                  document: [], wrappers: false).install
 puts "Native gem: #{archive}"
 puts "Probe load path: #{installed.join('lib')}"
+puts "Fresh GEM_HOME: #{fresh}"

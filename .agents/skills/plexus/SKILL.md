@@ -77,6 +77,7 @@ confirm or message durability from routing alone.
 
 For applications submitting Plexus, use [Client Libraries](../../../docs/src/client-libraries.md)
 to select the host guide; Java and JVM programs follow [JVM Client Library](../../../docs/src/client-library-jvm.md),
+Ruby applications follow [Ruby Client Library](../../../docs/src/client-library-ruby.md),
 and C and C++ programs follow [C And C++ Client Library](../../../docs/src/client-library-c.md).
 Read its execution, clock and endpoint sections before choosing application-side lifecycle handling.
 
