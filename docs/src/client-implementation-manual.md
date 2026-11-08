@@ -1185,7 +1185,12 @@ The conformance probes are complete, runnable clients, and each prints the same 
 other probe. They are qualification clients rather than supported SDKs. A host binding's
 language-level suite is the other instrument: it holds one package to the behaviour its guide
 documents, in that host's own test framework, and every code block of the guide is one of its
-tests. The Python package's suite is `tests/client_conformance/python/suite`, and its guide is the
+tests. A host suite can ask its scenario for the declared subscription-opening refusal through
+the request/confirmation exchange in [Client Suites](integration-test-lifecycle.md#client-suites).
+Python's `test_a_refused_subscription_restoration_reports_its_cause_and_recovers` observes the
+interruption, unavailable restoration with its message and retry wait, and later row delivery
+through the live cluster. The Python package's suite is `tests/client_conformance/python/suite`,
+and its guide is the
 [Python Client Library](client-library-python.md); `tests/client-suites-inventory.toml` registers
 every suite test. The Go and TypeScript probes
 each keep one request in flight. They use a harness-supplied UUIDv7 reference for the leader-only

@@ -315,6 +315,7 @@ test: tests-deps build-client-jvm-tests
     just test-capability-docs
     just test-turmoil
     just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-python-api
+    just test-client-suite-actions
 
 # Check capability examples with rustdoc, including runtime exports enabled only for tests.
 test-capability-docs: build-web-console
@@ -384,6 +385,19 @@ test-emitter-native-metrics *args: build-deps
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/{client_emitters,emitter_batch_databases,http_emitter,iceberg_emission,otel_export_retries}.feature") }} --tags '@emitter_payload_observations' {{ quote(args) }}
+
+# Complete batch values and explicit sensitivity leakage through one- and three-node public graphs.
+build-emitter-batch-boundaries: build-deps
+    cargo test --package nervix-scenarios --test scenarios --no-run
+
+test-emitter-batch-boundaries *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input 'tests/features/runtime/{emitter_batch_containers,sensitive_data}.feature' \
+        --name 'ON EMITTING BATCH maps, wraps and expands the array of member values|Sensitive external emission requires explicit leakage' \
+        {{ quote(args) }}
 
 # Exercise NATS authentication through real brokers and one-/three-node public graphs.
 test-nats-authentication *args: build-deps
@@ -521,6 +535,13 @@ test-cli-streams *args: build-deps build-test-cli
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/tools/cli_session*.feature") }} --tags '@cli_stream_termination or @cli_stream_recovery' {{ quote(args) }}
+
+# Observe interactive output without sending keys to wake the prompt or preparing unrelated guests.
+test-cli-repl tags="@cli_repl_output" *args: build-web-console download-onnxruntime build-test-cli
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/tools/cli_session*.feature") }} --tags {{ quote(tags) }} {{ quote(args) }}
 
 # Select codec round trips or browser cases with the same ordinary runner and prepared tools.
 test-codec-scenarios input *args: build-codec-heads
@@ -1129,7 +1150,7 @@ test-deloxide-replay record launch:
 # Hold every source file that acquires a tracked blocking lock in a diagnostic build to its owner
 # record in tests/deloxide-inventory.toml, using the compiler catalog `just ratchet` writes.
 validate-deloxide-applicability: ratchet
-    python3 -m scripts.deloxide_lane applicability --catalog {{ quote(cargo_target_dir + "/typed-ratchet/gate.json") }}
+    python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} applicability --catalog {{ quote(cargo_target_dir + "/typed-ratchet/gate.json") }}
 
 # Check workload registration without building or running a diagnostic lane.
 validate-deloxide-inventory:
@@ -2746,6 +2767,18 @@ bench-smoke-bodies:
 bench-admitted-work *args: build-web-console
     cargo bench --package nervix-server --bench admitted_work --features benchmarks -- {{ args }}
 
+# Real RabbitMQ write costs. Serialize measurements across checkouts of this repository.
+bench-rabbitmq-publish *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    benchmark_lock="$(git rev-parse --path-format=absolute --git-common-dir)/nervix-benchmark.lock"
+    flock --exclusive --timeout 60 "$benchmark_lock" \
+        cargo bench --package nervix-connector-rabbitmq --features benchmarks --bench publish -- {{ quote(args) }}
+
+# Exercise the same real-broker fixture and publication/count oracles once per benchmark body.
+test-rabbitmq-publish-benchmark:
+    cargo bench --profile dev --package nervix-connector-rabbitmq --features benchmarks --bench publish -- --test
+
 # Measure ordinary native atomic, publication, lock and reference-count costs on this host.
 # Model and diagnostic builds have different instrumentation and are not performance baselines.
 bench-primitives *args:
@@ -3317,6 +3350,7 @@ ratchet *args: typed-ratchet-build typed-ratchet-source-build install-cargo-crap
 test-ratchet-units: typed-ratchet-source-build install-cargo-crap
     just ratchet-tests lib
     just ratchet-tests audit
+    just ratchet-tests applicability
     just test-typed-ratchet-reports
     python3 -m unittest scripts.tests.test_validation_entrypoint scripts.tests.test_clock_boundaries
 
@@ -3457,7 +3491,7 @@ test-ratchet-runner *args:
 
 # Focused local tooling counters for patch review; the existing native producer collects CI.
 coverage-ratchet-runner *args:
-    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/coverage cargo +1.99 llvm-cov test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-ratchet --lib --test wrapper --test audit --no-report -- {{ args }}
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/coverage cargo +1.99 llvm-cov test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-ratchet --lib --test wrapper --test audit --test applicability --no-report -- {{ args }}
     just coverage-ratchet-report-owner
 
 [private]
@@ -3930,6 +3964,10 @@ validate-skill:
 # mypy run checks the suite and the paced simulation driver with `--strict`.
 validate-client-suites:
     uv run --locked python -m scripts.client_suites validate
+
+# Exercise the host suite's bounded action adapter over real pipes, without a cluster.
+test-client-suite-actions:
+    uv run --locked python -m unittest scripts.tests.test_client_suite_actions
 
 # Collect the line coverage of the client suite check and its tests.
 coverage-client-suites-runner:

@@ -644,6 +644,11 @@ A label change acts through the events each workflow runs on, and the two differ
 `just ratchet`, `just validate` and `just validate-ci` run the same source-driven compiler
 architecture gate in the isolated `tools/nervix-lint` workspace. Product builds
 remain stable. Tooling, analysis and product artifacts occupy separate target directories.
+The workspace contains the compiler driver, shared report vocabulary and `nervix-ratchet` binary;
+its separate fixture and fixture-macro crates qualify the diagnostics. Compiler-evidence readers
+and writers belong there in Rust, with shared types. Python source validators and coverage, Bolero
+and CI runners retain their own contracts and may delegate to the binary without decoding its
+compiler evidence.
 Install the declared toolchains with `just toolchains-install`, including the pinned analysis
 compiler's `wasm32-unknown-unknown` standard library for browser analysis. Prepare the ordinary
 server build prerequisites, including `just build-web-console`.
@@ -712,7 +717,7 @@ compiled configurations and generated/external exclusions. It is generated evide
 gate needs the complete matrix and complete current compiler/Cargo evidence, including zero.
 
 The workspace wrapper nests beneath configured kache. Completion identities cover current source,
-annotations, rule code, compiler, driver, validator, dependencies, Cargo configuration and flags.
+annotations, rule code, compiler, driver and ratchet binaries, dependencies, Cargo configuration and flags.
 Cargo-fresh artifacts reuse matching complete side reports. Missing reports establish analysis
 using `KACHE_KEY_SALT` and rebuild only isolated authored artifacts. `--fresh` reruns Cargo;
 `--recompile` discards those authored artifacts to execute the callback. Every path preserves
@@ -731,7 +736,7 @@ language references, awaited cluster access and declared identity/installation s
 and exact `value`, `identity` and `state` roles at their semantic owners. The
 [architecture contracts](./data-plane-concurrency.md#resolved-architecture-boundaries) and
 [typed-state contracts](./typed-states.md#source-owned-identity-and-installation-contracts) state the
-supported scope. `just test-typed-ratchet-contracts <unittest selector...>` runs focused pass/fail
+supported scope. `just test-typed-ratchet-contracts <test filter...>` runs focused pass/fail
 compiler fixtures after preparing `just test-typed-ratchet-compiler`. `just test-ratchet-units`
 also qualifies language provenance before resolution; `just ratchet` prints current
 source/manifest violations. Calibration logs and complete matrix/coverage outputs

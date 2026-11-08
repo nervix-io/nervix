@@ -139,8 +139,9 @@ Their combined report remains separate from the ordinary workspace merge.
 
 ## Native Collection
 
-The extra checks that execute Nervix code natively in ordinary mode, the compiler fixtures, benchmark bodies, primitive boundary conformance and Plexus completion walk, also measure which source
-lines they execute. Run them the way CI does:
+The extra checks that execute Nervix code natively in ordinary mode, the compiler fixtures,
+benchmark bodies, primitive boundary conformance and Plexus completion walk, also measure which
+source lines they execute. Run the default registered checks:
 
 ```bash
 just coverage-native-extras
@@ -156,6 +157,7 @@ and exports only after its
 `lane.json` records a complete run, including successful build and workload stages with their
 separate budgets and measured durations. The builds stay in that same instrumented target and
 preserve kache; moving them before the workload clock does not move them outside instrumentation.
+
 The build stage measures an initial and a warm pass over the selected builds with identical
 features and compiler context; both fit inside the same build budget, before workloads start.
 An instrumented record missing either measurement fails completion. A build-only measurement's
@@ -170,6 +172,14 @@ just coverage-native-extras test-turmoil
 just coverage-native-extras test-shuttle --filter cancellation
 just coverage-loom target/loom.lcov execution.cancellation
 ```
+
+`test-rabbitmq-publish-benchmark` is an additional local ordinary producer. It executes the
+publication benchmark's real-broker count checks once per body; instrumented timings are not
+performance evidence. It is available through `coverage-native-extras` without adding broker
+startup to CI's in-memory benchmark smoke lane. Its report records that local scope and is not a
+required CI workspace merge input. Select it explicitly with
+`just coverage-native-extras test-rabbitmq-publish-benchmark`; a run without producer names keeps
+the CI producer selection.
 
 A producer runs its check exactly as `just <producer>` does and fails when the check fails.
 `rust-toolchain.toml` includes the `llvm-tools` component because only the compiler's own LLVM
