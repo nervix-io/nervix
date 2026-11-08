@@ -7098,6 +7098,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shuttle",
+ "strum 0.26.3",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

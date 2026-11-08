@@ -36,8 +36,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_dataflow_graph::{DataflowBranchStatistics, DataflowMetricRef, DataflowStatistics};
 use nervix_models::{
-    BranchKeyFingerprint, BranchName, ClusterNodeName, DomainName, EmitterName, IngestorName,
-    ModelKind, ModelName, NodeUnitRef, RelayName, Timestamp, Unit,
+    BranchKeyFingerprint, BranchName, ClusterNodeName, DomainName, DomainNodeRef, EmitterName,
+    IngestorName, ModelKind, ModelName, NodeUnitRef, RelayName, Timestamp, Unit,
 };
 use nervix_primitives::{
     collections::{DashMap, dash_map::Entry},
@@ -156,8 +156,14 @@ const PROMETHEUS_LABELS: &[&str] = &[
 const BRANCH_PROMETHEUS_LABELS: &[&str] = &["domain", "branch", "physical_node_id"];
 const BRANCH_EVICTION_PROMETHEUS_LABELS: &[&str] =
     &["domain", "branch", "physical_node_id", "reason"];
-const INGESTOR_QUIESCE_PROMETHEUS_LABELS: &[&str] =
-    &["domain", "ingestor", "physical_node_id", "instance"];
+const INGESTOR_QUIESCE_PROMETHEUS_LABELS: &[&str] = &[
+    "domain",
+    "ingestor",
+    "physical_node_id",
+    "instance",
+    "connector",
+    "entity",
+];
 const SESSION_SUBSCRIPTION_PROMETHEUS_LABELS: &[&str] = &["domain", "relay"];
 const CLIENT_INGESTOR_PROMETHEUS_LABELS: &[&str] = &["domain", "ingestor"];
 const CLIENT_EMITTER_PROMETHEUS_LABELS: &[&str] = &["domain", "emitter"];
@@ -3557,13 +3563,18 @@ impl RuntimeMetrics {
         ingestor: &IngestorName,
         unit: Unit,
         physical_node_id: Option<&ClusterNodeName>,
+        kind: nervix_models::IngestorEntityKind,
     ) -> IngestorQuiesceMetrics {
+        let _reads = self.register_ingestor_reads(domain, ingestor, unit, physical_node_id, kind);
+        let connector = kind.connector().to_string();
         let instance = instance_label(unit);
         let values = [
             domain.as_str(),
             ingestor.as_str(),
             physical_node_label(physical_node_id),
             instance.as_ref(),
+            connector.as_str(),
+            kind.entity_keyword(),
         ];
         let prometheus = &self.series.prometheus;
         let series = IngestorQuiesceSeries {
@@ -3737,6 +3748,7 @@ impl RuntimeMetrics {
         ingestor: &IngestorName,
         unit: Unit,
         physical_node_id: Option<&ClusterNodeName>,
+        kind: nervix_models::IngestorEntityKind,
     ) -> IntCounter {
         self.series
             .prometheus
@@ -3746,6 +3758,8 @@ impl RuntimeMetrics {
                 ingestor.as_str(),
                 physical_node_label(physical_node_id),
                 instance_label(unit).as_ref(),
+                kind.connector().as_ref(),
+                kind.entity_keyword(),
             ])
     }
 
@@ -3758,6 +3772,7 @@ impl RuntimeMetrics {
         ingestor: &IngestorName,
         unit: Unit,
         physical_node_id: Option<&ClusterNodeName>,
+        kind: nervix_models::IngestorEntityKind,
     ) -> IntCounter {
         self.series
             .prometheus
@@ -3767,6 +3782,8 @@ impl RuntimeMetrics {
                 ingestor.as_str(),
                 physical_node_label(physical_node_id),
                 instance_label(unit).as_ref(),
+                kind.connector().as_ref(),
+                kind.entity_keyword(),
             ])
     }
 
@@ -3779,6 +3796,7 @@ impl RuntimeMetrics {
         ingestor: &IngestorName,
         unit: Unit,
         physical_node_id: Option<&ClusterNodeName>,
+        kind: nervix_models::IngestorEntityKind,
     ) -> IntCounter {
         self.series
             .prometheus
@@ -3788,6 +3806,8 @@ impl RuntimeMetrics {
                 ingestor.as_str(),
                 physical_node_label(physical_node_id),
                 instance_label(unit).as_ref(),
+                kind.connector().as_ref(),
+                kind.entity_keyword(),
             ])
     }
 
@@ -3800,6 +3820,7 @@ impl RuntimeMetrics {
         ingestor: &IngestorName,
         unit: Unit,
         physical_node_id: Option<&ClusterNodeName>,
+        kind: nervix_models::IngestorEntityKind,
     ) -> IntCounter {
         self.series
             .prometheus
@@ -3809,6 +3830,8 @@ impl RuntimeMetrics {
                 ingestor.as_str(),
                 physical_node_label(physical_node_id),
                 instance_label(unit).as_ref(),
+                kind.connector().as_ref(),
+                kind.entity_keyword(),
             ])
     }
 
@@ -3821,6 +3844,7 @@ impl RuntimeMetrics {
         ingestor: &IngestorName,
         unit: Unit,
         physical_node_id: Option<&ClusterNodeName>,
+        kind: nervix_models::IngestorEntityKind,
     ) -> IntCounter {
         self.series
             .prometheus
@@ -3830,6 +3854,8 @@ impl RuntimeMetrics {
                 ingestor.as_str(),
                 physical_node_label(physical_node_id),
                 instance_label(unit).as_ref(),
+                kind.connector().as_ref(),
+                kind.entity_keyword(),
             ])
     }
 
@@ -3841,6 +3867,7 @@ impl RuntimeMetrics {
         ingestor: &IngestorName,
         unit: Unit,
         physical_node_id: Option<&ClusterNodeName>,
+        kind: nervix_models::IngestorEntityKind,
     ) -> IntCounter {
         self.series
             .prometheus
@@ -3850,6 +3877,8 @@ impl RuntimeMetrics {
                 ingestor.as_str(),
                 physical_node_label(physical_node_id),
                 instance_label(unit).as_ref(),
+                kind.connector().as_ref(),
+                kind.entity_keyword(),
             ])
     }
 
@@ -4164,35 +4193,44 @@ impl RuntimeMetrics {
         self.series
             .branch_histograms
             .retain(|key, _| !belongs(&key.key));
-        let instance = instance_label(unit);
-        let labels = [
-            domain.as_str(),
-            ingestor.as_str(),
-            physical_node_label(physical_node),
-            instance.as_ref(),
-        ];
-        let prometheus = &self.series.prometheus;
-        for gauge in [
-            &prometheus.ingestor_quiesce_buffered_records,
-            &prometheus.ingestor_quiesce_buffered_bytes,
-        ] {
-            gauge
-                .remove_label_values(&labels)
-                .discarded(WITHDRAWN_SERIES_MAY_NOT_EXIST);
-        }
-        for counter in [
-            &prometheus.ingestor_quiesce_dropped_total,
-            &prometheus.ingestor_quiesce_rejected_total,
-            &prometheus.ingestor_unfolding_refused_total,
-            &prometheus.ingestor_transport_redeliveries_total,
-            &prometheus.ingestor_decode_rejections_total,
-            &prometheus.ingestor_oversized_payloads_total,
-            &prometheus.ingestor_header_values_dropped_total,
-            &prometheus.ingestor_read_ahead_dropped_payloads_total,
-        ] {
-            counter
-                .remove_label_values(&labels)
-                .discarded(WITHDRAWN_SERIES_MAY_NOT_EXIST);
+        let entity = nervix_models::DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor),
+            unit,
+        );
+        for kind in self.remove_ingestor_read_metrics(&entity, physical_node) {
+            let connector = kind.connector().to_string();
+            let instance = instance_label(unit);
+            let labels = [
+                domain.as_str(),
+                ingestor.as_str(),
+                physical_node_label(physical_node),
+                instance.as_ref(),
+                connector.as_str(),
+                kind.entity_keyword(),
+            ];
+            let prometheus = &self.series.prometheus;
+            for gauge in [
+                &prometheus.ingestor_quiesce_buffered_records,
+                &prometheus.ingestor_quiesce_buffered_bytes,
+            ] {
+                gauge
+                    .remove_label_values(&labels)
+                    .discarded(WITHDRAWN_SERIES_MAY_NOT_EXIST);
+            }
+            for counter in [
+                &prometheus.ingestor_quiesce_dropped_total,
+                &prometheus.ingestor_quiesce_rejected_total,
+                &prometheus.ingestor_unfolding_refused_total,
+                &prometheus.ingestor_transport_redeliveries_total,
+                &prometheus.ingestor_decode_rejections_total,
+                &prometheus.ingestor_oversized_payloads_total,
+                &prometheus.ingestor_header_values_dropped_total,
+                &prometheus.ingestor_read_ahead_dropped_payloads_total,
+            ] {
+                counter
+                    .remove_label_values(&labels)
+                    .discarded(WITHDRAWN_SERIES_MAY_NOT_EXIST);
+            }
         }
     }
 
@@ -4217,6 +4255,7 @@ impl RuntimeMetrics {
             )
             .filter(|key| key_matches_unit(key, domain, "INGESTOR", &target, key.unit))
             .map(|key| key.unit)
+            .chain(self.ingestor_read_units(domain, ingestor, physical_node))
             .collect::<BTreeSet<_>>();
         for unit in units {
             self.remove_ingestor_unit(domain, ingestor, unit, physical_node);
@@ -6044,6 +6083,7 @@ mod tests {
             &ingestor,
             nervix_models::Unit::SINGLE,
             None,
+            nervix_models::IngestorEntityKind::Http(nervix_models::HttpIngestorEntity::Endpoint),
         );
         metrics.set_ingestor_quiesce_buffered(&children, 2, 13);
         metrics.increment_ingestor_quiesce_dropped(&children, 3);
@@ -6682,7 +6722,15 @@ mod tests {
             Unit::try_instance(1).assured("the fixture index fits the execution-unit range"),
         ]
         .map(|unit| {
-            metrics.register_ingestor_quiesce(&domain, &source, unit, Some(&physical));
+            metrics.register_ingestor_quiesce(
+                &domain,
+                &source,
+                unit,
+                Some(&physical),
+                nervix_models::IngestorEntityKind::Http(
+                    nervix_models::HttpIngestorEntity::Endpoint,
+                ),
+            );
             metrics.resolve_node_batch_metrics(NodeBatchMetricsSpec {
                 domain: &domain,
                 kind: ModelKind::Ingestor,
