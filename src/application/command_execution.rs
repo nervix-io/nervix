@@ -19,6 +19,7 @@ use std::{collections::BTreeSet, time::Duration};
 
 use ahash::RandomState;
 use arch_into::ArchInto as _;
+/// Non-security BLAKE3: request identity checks are separate from authentication/reference admission.
 use blake3::Hasher;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -254,6 +255,7 @@ pub(in crate::application) enum PersistentCommandRequestError {
 }
 
 impl PersistentCommandRequest {
+    /// Non-security BLAKE3: detects changed authenticated requests; password checks remain separate.
     pub(in crate::application) fn from_operations(
         operations: &[SessionCommandOperation],
         request_domain: Option<&DomainName>,
@@ -385,6 +387,7 @@ impl PersistentCommandRequest {
     /// The request of a restore of `archive`, which owns the domains in `targets` while it
     /// applies. The request's identity covers the statement and the archive's size and digest, so
     /// the same reference sent with another archive is another request.
+    /// Non-security BLAKE3: binds the request to selected archive bytes; it does not authenticate them.
     pub(in crate::application) fn restore(
         restore: Restore,
         archive: RestoreArchive,
@@ -417,6 +420,7 @@ impl PersistentCommandRequest {
         })
     }
 
+    /// Non-security BLAKE3: detects changed text from the same authenticated command owner.
     pub(in crate::application) fn transaction_digest(
         query: &str,
     ) -> Result<[u8; 32], Report<PersistentCommandRequestError>> {

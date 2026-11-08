@@ -143,6 +143,13 @@ class InventoryTests(unittest.TestCase):
     def test_inventory_has_current_targets_and_exact_corpus_paths(self) -> None:
         inventory = bolero.load_inventory()
         self.assertEqual({target.id for target in inventory.targets}, {
+            "licensing-protocol-json-roundtrip",
+            "licensing-conditions-resolution",
+            "licensing-jws-malformed",
+            "licensing-trust-chain",
+            "licensing-impact-assessment",
+            "licensing-request-digest",
+            "benchmark-metrics-report",
             "crypto-p256-keys",
             "crypto-p256-signatures",
             "runtime-kafka-unit-layouts",
@@ -437,6 +444,7 @@ class InventoryTests(unittest.TestCase):
             "dns-operation-budget",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
+            "nervix-benchmark",
             "nervix-connector-nats",
             "nervix-client-core",
             "nervix-client-wire",
@@ -488,6 +496,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-connector-redis",
             "nervix-web-console",
             "nervix-dns",
+            "nervix-licensing-protocol",
             "nervix-crypto",
         })
         for target in inventory.targets:
@@ -495,7 +504,7 @@ class InventoryTests(unittest.TestCase):
             self.assertTrue(target.corpus.is_dir())
             self.assertIn(
                 target.test_target,
-                {"lib", "test:representations", "test:connectors", "bin:nervix-web-console"},
+                {"lib", "test:representations", "test:connectors", "test:metrics_report_properties", "bin:nervix-web-console"},
             )
             self.assertEqual(target.corpus.parent.name, target.test.replace("::", "__"))
             self.assertGreater(target.random_iterations, 0)
@@ -505,6 +514,7 @@ class InventoryTests(unittest.TestCase):
             target.id: target.domain_version for target in bolero.load_inventory().targets
         }
         for target, version in {
+            "benchmark-metrics-report": 1,
             "plexus-model": 54,
             "plexus-archive-model": 56,
             "plexus-statement": 55,

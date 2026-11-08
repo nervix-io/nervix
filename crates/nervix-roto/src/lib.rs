@@ -74,6 +74,7 @@ pub struct UdfProgram {
 }
 
 impl UdfProgram {
+    /// Non-security BLAKE3: identifies admitted UDF source; execution policy remains independent.
     pub fn new(
         name: UdfName,
         language: UdfLanguage,

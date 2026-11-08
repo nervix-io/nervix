@@ -1693,10 +1693,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "tools/nervix-lint/report/src/source/__fuzz__/source__crypto_tests__bolero_non_aws_lc_crypto_preserves_every_authored_site/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "typed-non-aws-lc-crypto"
-invariant = "Bounded current Rust cryptography syntax retains the complete path, line, column and rule of every authored non-AWS-LC cryptography site, including inactive, renamed, macro and boundary source, with exact input/site JSON round trips."
+invariant = "Bounded current Rust cryptography syntax retains the complete path, line, column and rule of every authored non-AWS-LC cryptography site, including inactive, renamed, macro and boundary source, nonempty BLAKE3 purposes and empty-purpose controls, with exact input/site JSON round trips."
 manifest = "tools/nervix-lint/Cargo.toml"
 max_input_bytes = 32
 package = "nervix-lint-report"
@@ -4451,3 +4451,108 @@ random_iterations = 128
 source = "crates/web-console/src/create_dialog/codec_draft.rs"
 test = "create_dialog::codec_draft::tests::bolero_codec_drafts_preserve_complete_models_and_family_heads"
 test_target = "bin:nervix-web-console"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/licensing-protocol/src/__fuzz__/representation_properties__bolero_protocol_json_roundtrip/corpus"
+domain_version = 1
+features = []
+id = "licensing-protocol-json-roundtrip"
+invariant = "Every current signed decision status, operation, stream ticket, trust document, response, key, condition and problem detail preserves the complete typed value and canonical payload bytes, including Unicode, optional fields and unknown external values."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-licensing-protocol"
+random_iterations = 128
+source = "crates/licensing-protocol/src/representation_properties.rs"
+test = "representation_properties::bolero_protocol_json_roundtrip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/licensing-protocol/src/__fuzz__/policy_properties__bolero_conditions_resolution/corpus"
+domain_version = 1
+features = []
+id = "licensing-conditions-resolution"
+invariant = "Complete valid plans and partial overrides resolve to the independent complete expected conditions, preserve every field, and have insertion-order-independent SHA-256 digests."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-licensing-protocol"
+random_iterations = 128
+source = "crates/licensing-protocol/src/policy_properties.rs"
+test = "policy_properties::bolero_conditions_resolution"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/licensing-protocol/src/__fuzz__/trust_properties__bolero_jws_malformed/corpus"
+domain_version = 1
+features = []
+id = "licensing-jws-malformed"
+invariant = "Bounded arbitrary framing refuses without a panic, every signature-bit mutation is refused, and the untouched original verifies to the complete decision."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-licensing-protocol"
+random_iterations = 128
+source = "crates/licensing-protocol/src/trust_properties.rs"
+test = "trust_properties::bolero_jws_malformed"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/licensing-protocol/src/__fuzz__/trust_properties__bolero_trust_chain/corpus"
+domain_version = 1
+features = []
+id = "licensing-trust-chain"
+invariant = "Distinct threshold signatures authorize the working key with complete trust-document round trips; insufficient and repeated signers never grant trust, and revocation refuses apply while reload retains verified state."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-licensing-protocol"
+random_iterations = 128
+source = "crates/licensing-protocol/src/trust_properties.rs"
+test = "trust_properties::bolero_trust_chain"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/licensing-protocol/src/__fuzz__/policy_properties__bolero_impact_assessment/corpus"
+domain_version = 1
+features = []
+id = "licensing-impact-assessment"
+invariant = "A bounded quota reduction grants exactly the newly affected amount with a deterministic identity and deadline, preserves complete transition records, and removes the allowance exactly at that deadline."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-licensing-protocol"
+random_iterations = 128
+source = "crates/licensing-protocol/src/policy_properties.rs"
+test = "policy_properties::bolero_impact_assessment"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/licensing-protocol/src/__fuzz__/policy_properties__bolero_request_digest/corpus"
+domain_version = 1
+features = []
+id = "licensing-request-digest"
+invariant = "Every current request operation and stream ticket keeps the same complete logical digest across challenge/timestamp refreshes, while each tested meaningful field mutation changes identity."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-licensing-protocol"
+random_iterations = 128
+source = "crates/licensing-protocol/src/policy_properties.rs"
+test = "policy_properties::bolero_request_digest"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/benchmark/tests/__fuzz__/bolero_metrics_report_round_trip/corpus"
+domain_version = 1
+features = []
+id = "benchmark-metrics-report"
+invariant = "The complete current metric report survives the production TOML file writer and reader, including series order, every label/counter/optional physical node, single/partition/instance identity and exact finite percentile bits."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-benchmark"
+random_iterations = 256
+source = "crates/benchmark/tests/metrics_report_properties.rs"
+test = "bolero_metrics_report_round_trip"
+test_target = "test:metrics_report_properties"

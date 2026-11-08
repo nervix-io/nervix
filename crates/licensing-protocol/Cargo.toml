@@ -1,0 +1,28 @@
+[package]
+description = "The shared signed licensing contract for Nervix and its licensing service"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-licensing-protocol"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+base64 = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+error-stack = { workspace = true }
+jose-b64 = { workspace = true }
+jose-jws = { workspace = true }
+meticulous = { workspace = true }
+nervix-bounded-write = { workspace = true }
+nervix-crypto = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+url = { workspace = true, features = ["serde"] }
+uuid = { workspace = true, features = ["serde", "v8"] }
+zeroize = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+bolero = { workspace = true }

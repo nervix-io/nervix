@@ -39,6 +39,7 @@ impl DomainClockAuthorityCandidates {
         }
     }
 
+    /// Non-security BLAKE3: chooses an owner among admitted identities; it is not admission proof.
     pub(crate) fn owner_for(&self, domain: &DomainName) -> Option<ClusterNodeIdentity> {
         if self.identities.is_empty() {
             return None;
