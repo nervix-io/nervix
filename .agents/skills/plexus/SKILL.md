@@ -76,7 +76,8 @@ the queue/default-exchange and named-exchange choices, `MANDATORY`, persistence,
 confirm or message durability from routing alone.
 
 For applications submitting Plexus, use [Client Libraries](../../../docs/src/client-libraries.md)
-to select the host guide; Java and JVM programs follow [JVM Client Library](../../../docs/src/client-library-jvm.md).
+to select the host guide; Java and JVM programs follow [JVM Client Library](../../../docs/src/client-library-jvm.md),
+and C and C++ programs follow [C And C++ Client Library](../../../docs/src/client-library-c.md).
 Read its execution, clock and endpoint sections before choosing application-side lifecycle handling.
 
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
@@ -121,7 +122,7 @@ for record outcomes, retry causes and waits, acquisition, pool waits, finish out
 current failure gauge in `/metrics` and `DESCRIBE EMITTER`.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
-Roto UDFs, ingestors for every connector and entity pair, junctions, reingestors, and session
+Roto UDFs, ingestors and emitters for every connector and entity pair, junctions, reingestors, and session
 subscriptions; use the same web-console chapter for their typed fields, resource versions, program
 editors, reference lookup, and transaction behavior.
 

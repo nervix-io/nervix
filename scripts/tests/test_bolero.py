@@ -439,6 +439,7 @@ class InventoryTests(unittest.TestCase):
             "console-client-drafts",
             "console-codec-drafts",
             "console-endpoint-drafts",
+            "console-emitter-drafts",
             "runtime-window-sketch-panes",
             "kafka-partition-offsets",
             "kafka-destination-partitions",
@@ -539,6 +540,8 @@ class InventoryTests(unittest.TestCase):
             "registry-stored-models": 43,
             "registry-stored-models-corruption": 43,
             "inferencer-tensor-columns": 1,
+            "console-emitter-drafts": 2,
+            "client-requests": 8,
         }.items():
             with self.subTest(target=target):
                 self.assertEqual(versions[target], version)

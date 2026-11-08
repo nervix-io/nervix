@@ -94,8 +94,18 @@ scenario suite. `just validate-client-suites`, part of `just validate`, types th
 paced simulation driver with `mypy --strict` against the stub through the repository's uv project,
 and holds the suite, its inventory, the stub and the
 [Python Client Library](client-library-python.md) chapter to the package's source. The
-`client-conformance` CI job builds every host's artifacts, runs the JVM, Ruby and Python boundary tiers,
+`client-conformance` CI job builds every host's artifacts, runs the JVM, Ruby, Python, C and C++ boundary tiers,
 then runs the probes and the suites' cluster rows together.
+
+The C ABI application suites use C11 and C++17 compilers with POSIX threads, AddressSanitizer and
+UndefinedBehaviorSanitizer. `just build-client-c-suites` builds the shared binding and both ordinary
+and sanitized programs; `just test-client-c-api` and `just test-client-cpp-api` run their boundary
+tiers through a bounded Cargo integration harness. Ordinary workspace tests run the same harness.
+`just test-client-c-cluster` runs both hosts' HTTP/HTTPS one-/three-node cluster examples. The
+surface checker needs Clang and reads resolved declarations and references from each translation
+unit, holding both programs to every function, typedef and enumerator of `nervix_client.h`.
+`just validate-client-c-suites` checks that surface, the test tables, inventory and
+[C and C++ guide](client-library-c.md) without building a cluster. No test invokes a compiler.
 
 `just build-web-console` builds the console the server embeds. trunk uses a `wasm-bindgen` CLI
 from `PATH` when its version equals the one `Cargo.lock` locks, and otherwise downloads it from
@@ -588,12 +598,12 @@ compares it with the workflows.
 | `shuttle` | Check | The Shuttle checks and their replay check |
 | `loom` | Check | The Loom models and their weakening qualification |
 | `turmoil` | Check | The Turmoil simulation suite and its replay check |
-| `client-conformance` | Check | The cross-language client probes and the host suites' cluster tiers against one- and three-node clusters, and the JVM, Ruby and Python boundary tiers |
+| `client-conformance` | Check | The cross-language client probes and the host suites' cluster tiers against one- and three-node clusters, and the JVM, Ruby, Python, C and C++ boundary tiers |
 | `bolero-random` | Check, through Bolero | Bolero's randomized properties and corpus replay, which a manual run of the Bolero workflow always runs |
 | `extra-doctests` | Check | Capability doctests |
 | `extra-miri` | Check | Miri over the expiry map |
 | `extra-mutation` | Check | Mutation tests of the expiry map |
-| `extra-runners` | Check | Python coverage of the reporters, gates and collectors: patch coverage, the ordinary merge, the CRAP report, the full union, the paced simulation policy, the release gate, the deployment controller, the kache contract, the connector matrix renderer, the test selection, the wasm-bindgen tool, the external binding chaos controls, the native collector and the primitive source validator |
+| `extra-runners` | Check | Python coverage of the reporters, gates and collectors: patch coverage, the ordinary merge, the CRAP report, the full union, the paced simulation policy, the release gate, the deployment controller, the kache contract, the connector matrix renderer, the test selection, the wasm-bindgen tool, the external binding chaos controls, the native collector, the client suite readers with the unit-test archive, and the primitive source validator |
 | `extra-compiler` | Check | Source contracts, compiler diagnostics, the Rust runner/gate/audit owners, paired API doctests, compiler cache qualification and the Python coverage of the ratchet's callers |
 | `extra-bench-smoke` | Check | Benchmark smoke tests |
 | `extra-primitives` | Check | Primitive boundary conformance in ordinary, Shuttle, Loom and Turmoil modes, plus ordinary documentation and browser checks. `coverage-full` then requires those collections |
