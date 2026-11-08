@@ -2580,7 +2580,10 @@ The protocol makes a client's view of its own work explicit rather than inferred
   and each restoration refused for good as the end the server would have sent.
   `Client::subscription_lifecycle` reads each subscription's state, including `Ended` for one the
   server ended. The web console shows each tab's state on the tab: pending, active, interrupted,
-  restoring, ended, resubscribing, or closing. Each node exports `nervix_session_subscriptions`, the
+  restoring, ended, resubscribing, or closing. Console restoration carries the acknowledged
+  schema and ends a tab on `DomainNotFound`, `RelayNotFound` or `RelayChanged`. Other failures
+  report their typed cause, diagnostics and bounded retry wait only in that tab, leaving REPL
+  history intact; see [Web Console](./client-tools-web-console.md). Each node exports `nervix_session_subscriptions`, the
   number of subscription leases it holds per relay, and
   `nervix_session_subscription_dropped_rows_total`, the rows its `DROPPING` subscriptions discarded,
   both labeled by `domain` and `relay`; see [Metrics And
