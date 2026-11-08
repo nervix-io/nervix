@@ -1150,7 +1150,7 @@ test-deloxide-replay record launch:
 # Hold every source file that acquires a tracked blocking lock in a diagnostic build to its owner
 # record in tests/deloxide-inventory.toml, using the compiler catalog `just ratchet` writes.
 validate-deloxide-applicability: ratchet
-    python3 -m scripts.deloxide_lane applicability --catalog {{ quote(cargo_target_dir + "/typed-ratchet/gate.json") }}
+    python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} applicability --catalog {{ quote(cargo_target_dir + "/typed-ratchet/gate.json") }}
 
 # Check workload registration without building or running a diagnostic lane.
 validate-deloxide-inventory:
@@ -3333,6 +3333,7 @@ ratchet *args: typed-ratchet-build typed-ratchet-source-build install-cargo-crap
 test-ratchet-units: typed-ratchet-source-build install-cargo-crap
     just ratchet-tests lib
     just ratchet-tests audit
+    just ratchet-tests applicability
     just test-typed-ratchet-reports
     python3 -m unittest scripts.tests.test_validation_entrypoint scripts.tests.test_clock_boundaries
 
@@ -3473,7 +3474,7 @@ test-ratchet-runner *args:
 
 # Focused local tooling counters for patch review; the existing native producer collects CI.
 coverage-ratchet-runner *args:
-    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/coverage cargo +1.99 llvm-cov test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-ratchet --lib --test wrapper --test audit --no-report -- {{ args }}
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/coverage cargo +1.99 llvm-cov test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-ratchet --lib --test wrapper --test audit --test applicability --no-report -- {{ args }}
     just coverage-ratchet-report-owner
 
 [private]

@@ -2746,7 +2746,9 @@ compiler finds a tracked blocking acquisition in a diagnostic configuration. Eac
 registered workloads whose processes reach its tracked locks, the path the lane does not reach and
 why, or both. `just validate-deloxide-applicability`, part of `just validate` and CI's `checks`
 job, reads the acquisition catalog `just ratchet` writes and fails on an owner without a record and
-on a record whose file no longer acquires a tracked lock. It reports how many owners registered
+on a record whose file no longer acquires a tracked lock. The lane validates its inventory, then
+delegates the comparison to `nervix-ratchet applicability`, which consumes the shared Rust
+`MatrixReport` and finding types; Python never decodes the compiler catalog. It reports how many owners registered
 workloads reach and how many record a path the lane does not reach. The catalog is the compiler's
 resolution of the Deloxide adapters' operations, not a search for lock names. Every diagnostic
 library and binary configuration enables `testing`, as the lane's server builds do, so acquisitions
