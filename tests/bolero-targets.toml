@@ -4541,3 +4541,18 @@ random_iterations = 128
 source = "crates/licensing-protocol/src/policy_properties.rs"
 test = "policy_properties::bolero_request_digest"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/benchmark/tests/__fuzz__/bolero_metrics_report_round_trip/corpus"
+domain_version = 1
+features = []
+id = "benchmark-metrics-report"
+invariant = "The complete current metric report survives the production TOML file writer and reader, including series order, every label/counter/optional physical node, single/partition/instance identity and exact finite percentile bits."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-benchmark"
+random_iterations = 256
+source = "crates/benchmark/tests/metrics_report_properties.rs"
+test = "bolero_metrics_report_round_trip"
+test_target = "test:metrics_report_properties"
