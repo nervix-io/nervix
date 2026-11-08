@@ -32,6 +32,7 @@
   - [Python Client Library](./client-library-python.md)
   - [Ruby Client Library](./client-library-ruby.md)
   - [JVM Client Library](./client-library-jvm.md)
+  - [C And C++ Client Library](./client-library-c.md)
 - [Plexus Agent Skill](./plexus-agent-skill.md)
 - [Manual](./manual.md)
   - [What It Is Not](./what-it-is-not.md)

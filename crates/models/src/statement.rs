@@ -1620,7 +1620,10 @@ impl CodecWireFormat {
             }
         }
     }
+}
 
+impl<Version> CodecWireFormat<Version> {
+    /// Whether this codec can encode outgoing payloads, independent of resource version state.
     pub fn supports_encoding(&self) -> bool {
         match self {
             Self::Json { .. } | Self::Cbor { .. } | Self::Avro { .. } | Self::Syslog => true,
@@ -1632,9 +1635,7 @@ impl CodecWireFormat {
             }) => transformations.on_emitting.is_some(),
         }
     }
-}
 
-impl<Version> CodecWireFormat<Version> {
     /// Whether this codec can decode incoming payloads, independent of resource version state.
     pub fn supports_decoding(&self) -> bool {
         match self {

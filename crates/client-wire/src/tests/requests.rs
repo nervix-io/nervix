@@ -593,3 +593,52 @@ fn names_are_limited_by_their_own_grammar() {
     };
     assert_eq!(round_trip_client(&message), message);
 }
+
+#[test]
+fn emitter_choices_preserve_each_target_dependency_order_and_cursor_identity() {
+    use std::collections::BTreeSet;
+
+    use crate::choice::ALL_CHOICE_TARGETS;
+    let mut identities = BTreeSet::new();
+    for target in ALL_CHOICE_TARGETS {
+        assert!(
+            identities.insert(target.cursor_tag()),
+            "each target has its own cursor identity"
+        );
+        let choice = ChoiceLookupRequest::new(
+            *target,
+            vec![
+                ChoiceSelection {
+                    value: ChoiceValue::Domain(name("tenant")),
+                },
+                ChoiceSelection {
+                    value: ChoiceValue::Model(nervix_models::NodeRef::new(
+                        nervix_models::ModelKind::Relay,
+                        name::<nervix_models::ModelName>("first"),
+                    )),
+                },
+                ChoiceSelection {
+                    value: ChoiceValue::Model(nervix_models::NodeRef::new(
+                        nervix_models::ModelKind::Relay,
+                        name::<nervix_models::ModelName>("second"),
+                    )),
+                },
+            ],
+            "field".to_string(),
+        );
+        let message = ClientMessage {
+            request_id: request(7),
+            request: ClientRequest::Choice(choice),
+        };
+        assert_eq!(round_trip_client(&message), message);
+    }
+    for kind in nervix_models::EmitterEntityKind::all() {
+        let target = ChoiceTarget::for_emitter_reference(kind);
+        if kind.capabilities().reference == nervix_models::EmitterReferenceKind::Schema {
+            assert_eq!(target.emitter_reference_entity(), None);
+            assert_eq!(target, ChoiceTarget::Schema);
+        } else {
+            assert_eq!(target.emitter_reference_entity(), Some(kind));
+        }
+    }
+}

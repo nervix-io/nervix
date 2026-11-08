@@ -41,7 +41,7 @@ pub(super) struct InputDraft {
 }
 
 impl InputDraft {
-    fn select_relay(&mut self, node: &NodeRef) {
+    pub(super) fn select_relay(&mut self, node: &NodeRef) {
         if node.kind == ModelKind::Relay {
             self.relay = Some(SelectedReference::chosen(RelayName::from(&node.identifier)));
         }
@@ -53,7 +53,7 @@ impl InputDraft {
             .and_then(SelectedReference::current_name)
     }
 
-    fn invalidate(&mut self) {
+    pub(super) fn invalidate(&mut self) {
         if let Some(relay) = &mut self.relay {
             relay.invalidate();
         }
@@ -153,7 +153,7 @@ impl StateDependencyDraft {
             .and_then(SelectedReference::current_name)
     }
 
-    fn invalidate(&mut self) {
+    pub(super) fn invalidate(&mut self) {
         if let Some(relay) = &mut self.relay {
             relay.invalidate();
         }
@@ -164,7 +164,7 @@ impl StateDependencyDraft {
         }
     }
 
-    fn build(
+    pub(super) fn build(
         &self,
         index: usize,
     ) -> error_stack::Result<MaterializedStateDependency, ProcessorDraftError> {
@@ -946,6 +946,7 @@ mod tests {
                     FieldName::parse("message").assured("valid field"),
                 )),
                 expression: "'fallback'".into(),
+                ..AssignmentDraft::default()
             }]);
         let built = complete.build_junction().assured("default state builds");
         assert!(

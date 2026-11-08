@@ -730,3 +730,272 @@ tier = "boundary"
 host = "ruby"
 identity = "RubySuite::EndpointsTest#test_endpoint_blocks_close_on_normal_return_and_exception"
 tier = "cluster"
+
+# C: checked native programs over the shared C ABI.
+
+[[test]]
+host = "c"
+identity = "test_boundary_fields_and_arguments"
+tier = "boundary"
+
+[[test]]
+host = "c"
+identity = "test_boundary_public_enumeration_domains"
+tier = "boundary"
+
+[[test]]
+host = "c"
+identity = "test_boundary_silent_peer_deadline"
+tier = "boundary"
+
+[[test]]
+host = "c"
+identity = "test_boundary_connect_cancelled_from_another_thread"
+tier = "boundary"
+
+[[test]]
+host = "c"
+identity = "test_b1_prepare_once_and_recover_cancelled_execution"
+tier = "cluster"
+
+[[test]]
+host = "c"
+identity = "test_b1_cancel_an_admitted_commit_and_recover_its_recorded_outcome"
+tier = "cluster"
+
+[[test]]
+host = "c"
+identity = "test_b2_objects_outlive_their_session_and_release_once"
+tier = "cluster"
+
+[[test]]
+host = "c"
+identity = "test_b3_event_references_keep_borrowed_frames_alive"
+tier = "cluster"
+
+[[test]]
+host = "c"
+identity = "test_b4_strings_options_tls_authentication_and_seeds"
+tier = "cluster"
+
+[[test]]
+host = "c"
+identity = "test_b5_calls_run_on_native_host_threads"
+tier = "cluster"
+
+[[test]]
+host = "c"
+identity = "test_b6_columns_use_size_queries_and_pointer_lengths"
+tier = "cluster"
+
+[[test]]
+host = "c"
+identity = "test_completion_pages_have_utf8_byte_ranges"
+tier = "cluster"
+
+[[test]]
+host = "c"
+identity = "test_inspection_retains_typed_state_after_its_outcome_is_released"
+tier = "cluster"
+
+[[test]]
+host = "c"
+identity = "test_b7_subscription_gap_end_and_variant_accessors"
+tier = "cluster"
+
+[[test]]
+host = "c"
+identity = "test_b8_backup_recovers_under_its_execution_reference"
+tier = "cluster"
+
+[[test]]
+host = "c"
+identity = "test_b9_clock_events_retain_release_and_restore_after_a_gap"
+tier = "cluster"
+
+[[test]]
+host = "c"
+identity = "test_b10_restore_streams_the_archive_and_reports_its_steps"
+tier = "cluster"
+
+[[test]]
+host = "c"
+identity = "test_b11_read_the_attached_clock_before_ticks_and_project_it"
+tier = "cluster"
+
+[[test]]
+host = "c"
+identity = "test_b12_exact_fields_and_typed_open_refusals"
+tier = "cluster"
+
+[[test]]
+host = "c"
+identity = "test_b13_builders_copy_every_level_and_batches_keep_their_owners"
+tier = "cluster"
+
+[[test]]
+host = "c"
+identity = "test_b14_take_or_release_each_submission_and_read_its_outcome_class"
+tier = "cluster"
+
+[[test]]
+host = "c"
+identity = "test_b15_delivery_identity_settlements_and_retained_buffers"
+tier = "cluster"
+
+[[test]]
+host = "c"
+identity = "test_b16_consumer_gaps_and_contract_changes_require_checked_reopens"
+tier = "cluster"
+
+[[test]]
+host = "c"
+identity = "test_a_complete_application_keeps_endpoints_alive_after_session_release"
+tier = "cluster"
+
+# CPP: checked native programs over the shared C ABI.
+
+[[test]]
+host = "cpp"
+identity = "test_boundary_fields_and_arguments"
+tier = "boundary"
+
+[[test]]
+host = "cpp"
+identity = "test_boundary_public_enumeration_domains"
+tier = "boundary"
+
+[[test]]
+host = "cpp"
+identity = "test_boundary_silent_peer_deadline"
+tier = "boundary"
+
+[[test]]
+host = "cpp"
+identity = "test_boundary_connect_cancelled_from_another_thread"
+tier = "boundary"
+
+[[test]]
+host = "cpp"
+identity = "test_b1_prepare_once_and_recover_cancelled_execution"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_b1_cancel_an_admitted_commit_and_recover_its_recorded_outcome"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_b2_objects_outlive_their_session_and_release_once"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_b3_event_references_keep_borrowed_frames_alive"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_b4_strings_options_tls_authentication_and_seeds"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_b5_calls_run_on_native_host_threads"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_b6_columns_use_size_queries_and_pointer_lengths"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_completion_pages_have_utf8_byte_ranges"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_inspection_retains_typed_state_after_its_outcome_is_released"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_b7_subscription_gap_end_and_variant_accessors"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_b8_backup_recovers_under_its_execution_reference"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_b9_clock_events_retain_release_and_restore_after_a_gap"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_b10_restore_streams_the_archive_and_reports_its_steps"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_b11_read_the_attached_clock_before_ticks_and_project_it"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_b12_exact_fields_and_typed_open_refusals"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_b13_builders_copy_every_level_and_batches_keep_their_owners"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_b14_take_or_release_each_submission_and_read_its_outcome_class"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_b15_delivery_identity_settlements_and_retained_buffers"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_b16_consumer_gaps_and_contract_changes_require_checked_reopens"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_a_complete_application_keeps_endpoints_alive_after_session_release"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_cpp_unique_ptr_releases_on_an_exception"
+tier = "boundary"
+
+[[test]]
+host = "cpp"
+identity = "test_cpp_raii_keeps_a_retained_batch_across_a_thread"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_cpp_application_owns_endpoints_and_delivery_with_typed_deleters"
+tier = "cluster"
+
+[[test]]
+host = "c"
+identity = "test_b7_refused_subscription_restoration_reports_its_cause_and_recovers"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_b7_refused_subscription_restoration_reports_its_cause_and_recovers"
+tier = "cluster"

@@ -3631,11 +3631,11 @@ and keeps the same 5-minute reserve.
 
 `client_suites.feature` runs a host binding's own test suite, in its host's test framework, against
 a scenario's cluster: the cluster tier of the suite under `tests/client_conformance/<host>/suite`.
-Each host's rows cover TLS and plaintext listeners. The step that starts a suite waits for every node
+Each example names HTTP or HTTPS for its session listener. The step that starts a suite waits for every node
 to agree on its leader and starts it on a follower when the cluster has one, so its sessions follow
 a leader redirect. It starts the host's runner as one child process with piped standard input,
 its target in the probe's `NERVIX_PROBE_*` variables and what a suite needs beside them in
-`NERVIX_SUITE_*` ones: the leader's listener, which the suite relays a session through to cut it,
+`NERVIX_SUITE_*` ones: the leader's listener, port and scheme, which the suite relays a session through to cut it,
 every node's listener as seeds, the fixture certificate authority, and a backup directory the step
 creates and removes once it reads the run. The runner prints one `NERVIX-SUITE <outcome> <identity>`
 line per test, and the fixture keeps every line it read.
@@ -3682,6 +3682,19 @@ loads the installed gem in a fresh `GEM_HOME`, then runs every remaining cluster
 order seed. Its reporter emits a result only after teardown, keeps completed failure diagnostics
 on the captured output, and excludes minitest's progress dots from protocol lines. The boundary
 tier uses the same inventory judge through the Rust `host_suite` test and already-prepared gem.
+
+`just test-client-c-cluster` runs the C and C++ rows. Each native runner is a checked C11 or C++17
+program with a registered table of named test functions. It prints a result only after the case's
+owned handles and worker threads have been released. The cluster adapter starts the prepared
+ASan/UBSan program; the boundary tier runs ordinary and sanitized programs separately.
+
+The native boundary harness, `crates/client-ffi/tests/native_suites.rs`, runs as an ordinary Cargo
+integration target. It starts prepared programs with a 180-second budget and checks their complete
+result inventory with a bounded judge process; it never compiles a program or installs a dependency.
+The ordinary coverage build prepares both programs against the instrumented shared binding and
+packs all four executables and that binding in the unit-test archive. The restored runner therefore
+uses the same files, without compiling. C/C++ source lines are outside Rust coverage; sanitizers
+check the hosts' memory and undefined behavior.
 
 ## The Suite Watchdog
 
@@ -3817,6 +3830,13 @@ fixtures. The unit archive includes the jar and every compiled fixture class, in
 classes; packing refuses a missing jar or fixture entry class. Both the build and unit-test jobs
 install Java 21, and the restored runner uses those packaged inputs without compiling. The
 scenario archive has no JVM fixture dependency.
+
+The same build prepares the C11 and C++17 application boundary programs against the instrumented
+shared binding, in ordinary and ASan/UBSan variants. The native integration target needs all four
+programs at `target/client-conformance` and `libnervix_client_ffi.so` at the instrumented build's
+debug root. Packing verifies each input and stores the shared library once even when object
+discovery also found it. The restored runner keeps their absolute loader paths valid and runs
+their inventory judge from the checked-out sources. It invokes no native compiler.
 
 The `tests` job needs that build, and restores the archive with `just test-coverage-unpack`, under
 the checks a shard's restore makes. `just test-coverage-run` then compiles nothing. Cargo would
