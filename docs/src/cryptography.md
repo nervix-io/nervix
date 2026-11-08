@@ -240,7 +240,9 @@ Nervix-owned nonce-signing operation.
 `r` followed by the 32-byte `s`. AWS-LC hashes the complete message with SHA-256 and obtains
 its signing nonce from its system-seeded generator; the caller supplies neither a digest nor a
 nonce. Verification retains the typed backend refusal for malformed keys/signatures and altered
-messages. The cryptographic boundary owns no JWK or JWS syntax.
+messages. `nervix_crypto::jws` owns the maintained JWS library's AWS-LC provider, ES256 signing and
+verification, and RFC 7638 SHA-256 thumbprints. The [shared licensing protocol](./licensing-protocol.md)
+owns its exact header/public-JWK profile, document shapes and trust policy.
 
 Key generation and export return an unencrypted PKCS#8 v1 DER `Pkcs8PrivateKey`, whose maintained
 AWS-LC document zeroizes its byte allocation on drop. `EcdsaP256KeyPair` owns the native key;
@@ -263,6 +265,16 @@ including invalid signatures, changed messages and changed public keys. Register
 properties cover message/signature bit changes and complete PKCS#8 round trips. These are algorithm
 and representation checks; they do not claim a FIPS-qualified build. Cross-build signature
 qualification belongs to the licensing service's FIPS lane.
+
+The JWS adapter uses `jsonwebtoken` 11 with default features disabled and only `aws_lc_rs` enabled.
+It installs that library's native AWS-LC provider once. A provider installed beforehand by an
+external caller causes a typed refusal, rather than silently choosing the external default.
+An exact permitted `unmodeled::sync::OnceLock` keeps only this process-initialization result;
+it carries no licensing state or modeled protocol. Signing-key DER is owned by the maintained
+library's zeroizing allocation and its `Debug` is redacted. Verification preserves the native typed
+error beneath its context and disables generic JWT time/audience policy; callers supply their
+own document validation. The protocol's `jose-jws`/`jose-b64` edges are format-only and enable no
+cryptographic backend.
 
 ## What The FIPS Migration Will Refuse
 
