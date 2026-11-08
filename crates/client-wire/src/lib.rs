@@ -136,3 +136,5 @@ pub use upload::{
 
 #[cfg(test)]
 mod tests;
+
+mod row_batch;
