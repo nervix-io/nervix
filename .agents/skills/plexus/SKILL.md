@@ -71,6 +71,10 @@ the queue/default-exchange and named-exchange choices, `MANDATORY`, persistence,
 `PROPERTIES` types and envelope alterations. Do not promise consumer completion from a publisher
 confirm or message durability from routing alone.
 
+For applications submitting Plexus, use [Client Libraries](../../../docs/src/client-libraries.md)
+to select the host guide; Java and JVM programs follow [JVM Client Library](../../../docs/src/client-library-jvm.md).
+Read its execution, clock and endpoint sections before choosing application-side lifecycle handling.
+
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
 contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and

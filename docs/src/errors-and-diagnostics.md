@@ -2817,6 +2817,13 @@ command disposition as a thrown operation error. A JNI library error stays at JN
 boundary; an already pending Java exception is preserved. Checked native exports contain Rust
 unwinds at that boundary. Restoration events expose the shared client's message and retry wait.
 
+The shared Arrow delivery decoder reports `EmitterBatchDecodeError`: an unreadable stream, a
+schema mismatch, a missing or extra batch, an unreadable batch, or a row-count mismatch. An Arrow
+library error stays typed beneath its decoder context. A received delivery adds
+`ClientError::DecodeEmitterBatch`, which host bindings classify as `Protocol`. A host's local
+`Batch::decode` instead projects the same complete report into `InvalidArgument` at its reporting
+boundary. Neither path changes the exact schema, single-batch or member-count checks.
+
 Resource archive construction returns its first I/O failure beneath `BuildUploadArchive`.
 Reusing an upload identity for another archive returns the typed `UploadFailure::IdentityConflict`
 and the version already assigned to that identity. The diagnostic keeps the digest conflict's

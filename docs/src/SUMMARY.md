@@ -30,6 +30,7 @@
 - [Client Libraries](./client-libraries.md)
   - [Rust Client Library](./client-library.md)
   - [Python Client Library](./client-library-python.md)
+  - [JVM Client Library](./client-library-jvm.md)
 - [Plexus Agent Skill](./plexus-agent-skill.md)
 - [Manual](./manual.md)
   - [What It Is Not](./what-it-is-not.md)

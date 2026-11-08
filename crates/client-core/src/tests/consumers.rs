@@ -135,6 +135,33 @@ async fn a_consumer_reports_a_gap_then_reads_through_a_fresh_attachment() {
     assert_eq!(consumer.connection(), ConsumerConnection::Active);
 }
 
+#[cfg(feature = "arrow")]
+#[nervix_primitives::test]
+async fn a_received_emitter_batch_keeps_delivery_context_above_the_typed_decoder_cause() {
+    let mut loopback = Loopback::new(Some(domain("tenant")));
+    let consumer = StdArc::new(open(&mut loopback).await);
+    let reading = nervix_primitives::task::spawn({
+        let consumer = consumer.clone();
+        async move { consumer.next_batch().await }
+    });
+    let request = loopback.next_request().await;
+    loopback.answer(request.request_id, received()).await;
+    let delivery = reading
+        .await
+        .assured("the read task ends")
+        .assured("the read receives a delivery")
+        .assured("the reply carries a batch");
+    let error = delivery
+        .record_batch()
+        .expect_err("the received bytes are malformed IPC");
+    assert!(matches!(
+        error.current_context(),
+        ClientError::DecodeEmitterBatch
+    ));
+    assert!(error.contains::<crate::EmitterBatchDecodeError>());
+    assert!(error.contains::<arrow_schema::ArrowError>());
+}
+
 #[nervix_primitives::test]
 async fn an_ended_consumer_attachment_reopens_when_its_contract_is_unchanged() {
     let mut loopback = Loopback::new(Some(domain("tenant")));

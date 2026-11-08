@@ -1887,6 +1887,9 @@ authentication rejection; operator-visible hash failures keep their separate dia
 The Rust client's terminal subscription close keeps the queue-end report beneath `SessionClosed`.
 The shared C binding declares its host-visible failure as a fixed ABI outcome; conversion from a
 client report renders the whole chain into that outcome's message at the binding boundary.
+Canonical Arrow batches use one shared decoder with typed failures. A malformed received delivery
+is a protocol failure; malformed IPC passed to a local batch constructor is an invalid argument.
+Both retain the decoder's complete cause chain, including an originating Arrow error.
 Local archive readers and feeders report their actual failure before the stream produces its
 fixed refusal; a client download's file-install worker retains its join error in the I/O cause.
 

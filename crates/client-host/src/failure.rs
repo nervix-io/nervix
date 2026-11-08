@@ -162,6 +162,7 @@ impl Failure {
                 FailureKind::Cancelled
             }
             ClientError::UnexpectedReply { .. }
+            | ClientError::DecodeEmitterBatch
             | ClientError::InvalidUploadReply
             | ClientError::InvalidRestoreReply
             | ClientError::ExecutionReferenceMismatch { .. }
@@ -317,6 +318,20 @@ mod call_cancellation_tests {
     };
 
     use super::*;
+
+    #[test]
+    fn an_invalid_received_emitter_batch_is_a_protocol_failure_with_its_decoder_cause() {
+        let report = Report::new(nervix_client_core::EmitterBatchDecodeError::RowCount {
+            expected: 2,
+            actual: 1,
+        })
+        .change_context(ClientError::DecodeEmitterBatch);
+        let failure = Failure::from(report);
+        assert_eq!(failure.kind(), FailureKind::Protocol);
+        assert!(failure.message().contains("the caller declared 2"));
+        assert_eq!(failure.execution_reference(), None);
+        assert_eq!(failure.open_refusal(), None);
+    }
 
     #[test]
     fn a_cancelled_call_is_cancelled_unless_it_may_have_taken_effect() {
