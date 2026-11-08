@@ -261,6 +261,8 @@ FROM builder AS chaos-client-build
 # the product image; the released runtime targets never copy it or its Python interpreter.
 ARG TARGETARCH
 
+COPY LICENSE.md ./
+
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/app/target,sharing=locked \
