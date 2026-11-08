@@ -67,11 +67,6 @@ pub enum TransactionCommitStepKind {
         model_gate: TransactionEntityGatePlan,
         ownership_gate: TransactionEntityGatePlan,
     },
-    AlterDomain {
-        next: Box<crate::DomainState>,
-        schedule: Option<Box<DomainSchedule>>,
-        ownership_gate: TransactionEntityGatePlan,
-    },
     StartDomain {
         resolved: TransactionResolvedDomainStart,
     },

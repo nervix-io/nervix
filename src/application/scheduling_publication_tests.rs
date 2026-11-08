@@ -15,7 +15,7 @@ use meticulous::ResultExt as _;
 use nervix_client_wire::CommandRequest;
 #[cfg(feature = "testing")]
 use nervix_consensus::{ConsensusTestProbe, StorageBoundary};
-use nervix_models::{DomainName, DomainSchedule, PlacementPolicy};
+use nervix_models::{DomainName, DomainSchedule};
 use nervix_recovery::Discarded as _;
 
 #[cfg(feature = "testing")]
@@ -86,9 +86,7 @@ async fn schedule_publication_keeps_the_basis_it_prepared() {
         .consensus
         .domain_planning_inputs(&domain)
         .await;
-    let prepared = service
-        .prepare_domain_schedule(inputs, None, PlacementPolicy::Neutral)
-        .await;
+    let prepared = service.prepare_domain_schedule(inputs, None).await;
     assert!(prepared.inputs.schedule().is_some());
     assert!(prepared.schedule.is_none());
 

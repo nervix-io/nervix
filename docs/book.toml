@@ -52,6 +52,7 @@ include = [
   "client-library.md",
   "client-library-python.md",
   "client-library-jvm.md",
+  "client-library-c.md",
   "examples.md",
   "paced-simulation-drivers.md",
 ]

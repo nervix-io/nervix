@@ -27,5 +27,7 @@ bytes = { workspace = true }
 error-stack = { workspace = true }
 nervix-arbitrary = { workspace = true }
 serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["process"] }
 tonic = { workspace = true }
 uuid = { workspace = true }

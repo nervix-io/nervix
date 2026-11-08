@@ -439,6 +439,7 @@ class InventoryTests(unittest.TestCase):
             "console-client-drafts",
             "console-codec-drafts",
             "console-endpoint-drafts",
+            "console-emitter-drafts",
             "runtime-window-sketch-panes",
             "kafka-partition-offsets",
             "kafka-destination-partitions",
@@ -518,27 +519,29 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(target.corpus.parent.name, target.test.replace("::", "__"))
             self.assertGreater(target.random_iterations, 0)
 
-    def test_inferencer_state_domains_include_the_required_model_field(self) -> None:
+    def test_model_domains_cover_current_placement_scopes_and_unit_selectors(self) -> None:
         versions = {
             target.id: target.domain_version for target in bolero.load_inventory().targets
         }
         for target, version in {
             "benchmark-metrics-report": 1,
-            "ingestor-describe-envelope": 8,
-            "plexus-model": 57,
-            "plexus-archive-model": 59,
-            "plexus-statement": 58,
-            "plexus-statement-text": 57,
-            "plexus-format-document": 57,
-            "plexus-format-text": 56,
-            "models-archived-models": 57,
-            "registry-archived-models": 52,
-            "consensus-state-records": 49,
-            "consensus-state-corruption": 49,
-            "consensus-raft-records": 48,
-            "registry-stored-models": 45,
-            "registry-stored-models-corruption": 45,
+            "ingestor-describe-envelope": 9,
+            "plexus-model": 58,
+            "plexus-archive-model": 60,
+            "plexus-statement": 59,
+            "plexus-statement-text": 58,
+            "plexus-format-document": 58,
+            "plexus-format-text": 57,
+            "models-archived-models": 58,
+            "registry-archived-models": 53,
+            "consensus-state-records": 50,
+            "consensus-state-corruption": 50,
+            "consensus-raft-records": 49,
+            "registry-stored-models": 46,
+            "registry-stored-models-corruption": 46,
             "inferencer-tensor-columns": 1,
+            "console-emitter-drafts": 3,
+            "client-requests": 9,
         }.items():
             with self.subTest(target=target):
                 self.assertEqual(versions[target], version)
@@ -547,7 +550,7 @@ class InventoryTests(unittest.TestCase):
         targets = {target.id: target for target in bolero.load_inventory().targets}
         for name in ("client-state-inspection", "state-inspection-cursor"):
             with self.subTest(target=name):
-                self.assertEqual(targets[name].domain_version, 2)
+                self.assertEqual(targets[name].domain_version, 3)
                 self.assertEqual(targets[name].max_input_bytes, 512)
                 self.assertEqual(targets[name].random_iterations, 128)
 

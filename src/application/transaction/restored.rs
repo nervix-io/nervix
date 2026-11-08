@@ -97,9 +97,8 @@ impl SessionServiceImpl {
             statements,
             0,
             false,
-            |graph, placement, current, attribution| {
-                let prepared =
-                    schedule_inputs.prepare(&planning_inputs, &domain, graph, placement, current);
+            |graph, current, attribution| {
+                let prepared = schedule_inputs.prepare(&planning_inputs, &domain, graph, current);
                 let ownership_moves = planned_ownership_moves(current, prepared.schedule.as_ref())
                     .into_iter()
                     .map(|moved| OwnershipMoveImpact {

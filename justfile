@@ -15,6 +15,8 @@ cargo_target_dir := env("CARGO_TARGET_DIR", justfile_directory() + "/target")
 # Java fixtures belong to the caller's build root, including when LLVM or Bolero builds Rust
 # in a separate instrumented directory.
 export NERVIX_CLIENT_JVM_TEST_ARTIFACTS := env("NERVIX_CLIENT_JVM_TEST_ARTIFACTS", cargo_target_dir + "/client-conformance/java")
+export NERVIX_CLIENT_SUITE_ROOT := justfile_directory()
+export NERVIX_CLIENT_C_TEST_ARTIFACTS := cargo_target_dir + "/client-conformance"
 turmoil_failures := cargo_target_dir + "/turmoil-failures"
 coverage_tools_dir := cargo_target_dir + "/llvm-cov-tools"
 default_jobs := num_jobs() || "4"
@@ -270,7 +272,7 @@ paced-simulation-python *args:
     just cargo_target_dir={{ quote(cargo_target_dir) }} build-paced-simulation-python release
     {{ quote(cargo_target_dir + "/paced-simulation/python/bin/python") }} examples/paced-simulation/python/paced_simulation.py {{ quote(args) }}
 
-test: tests-deps build-client-jvm-tests
+test: tests-deps build-client-jvm-tests build-client-c-suites
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
@@ -409,6 +411,13 @@ test-endpoint-heads *args: build-deps build-plexus-format build-test-cli build-d
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/kinded_endpoint_heads.feature {{ quote(args) }}
+
+# Placement and console scenarios use native nodes and public clients, without paced simulation.
+test-partition-placement feature="tests/features/cluster/partition_placement.feature" *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(feature) }} {{ quote(args) }}
 
 # Exercise emitter destination keys and partitions without unrelated client-tool preparation.
 test-emitter-destinations *args: build-deps
@@ -1832,14 +1841,13 @@ coverage-client-jvm output="lcov-client-jvm.info": build-client-jvm-tests
 # linked against it, the JNI jar and Java probe, the native Ruby gem, the Python package in its virtual environment,
 # the Go probe with its generated FlatBuffers code, and the TypeScript probe bundled with its generated code for Node.js
 # and Bun. Every generated file lands under the artifacts directory, never in the source tree.
-build-client-conformance: build-client-python build-client-jvm-tests build-client-ruby
+build-client-conformance: build-client-python build-client-jvm-tests build-client-ruby build-client-c-suites
     #!/usr/bin/env bash
     set -euo pipefail
     artifacts={{ quote(cargo_target_dir + "/client-conformance") }}
     library_dir={{ quote(cargo_target_dir + "/debug") }}
     schema="${PWD}/crates/client-wire/schema/session.fbs"
     mkdir -p "${artifacts}"
-    cargo build --package nervix-client-ffi
     cc -std=c11 -Wall -Wextra -Werror -pthread -I crates/client-ffi/include \
         tests/client_conformance/c/probe.c \
         -L "${library_dir}" -lnervix_client_ffi -Wl,-rpath,"${library_dir}" \
@@ -1860,6 +1868,72 @@ build-client-conformance: build-client-python build-client-jvm-tests build-clien
     (cd "${artifacts}/node-src" && npm ci --no-audit --no-fund && \
         ./node_modules/.bin/esbuild probe.ts --bundle --platform=node --format=esm \
             --target=es2022 --outfile="${artifacts}/node/probe.mjs")
+
+# The two native host programs use the public header and the caller's Rust shared-library build.
+# Sanitizers instrument host ownership and buffers; Rust coverage instruments the binding separately.
+build-client-c-suites:
+    cargo build --package nervix-client-ffi
+    just cargo_target_dir={{ quote(cargo_target_dir) }} build-client-c-suites-hosts
+
+# Compile only the host programs after the binding has been built. No test invokes a compiler.
+build-client-c-suites-hosts:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    artifacts={{ quote(cargo_target_dir + "/client-conformance") }}
+    library_dir={{ quote(cargo_target_dir + "/debug") }}
+    mkdir -p "${artifacts}"
+    for host in c cpp; do
+        if [[ "${host}" == c ]]; then
+            compiler="${CC:-cc}"
+            standard=c11
+            source=tests/client_conformance/c/suite/main.c
+        else
+            compiler="${CXX:-c++}"
+            standard=c++17
+            source=tests/client_conformance/cpp/suite/main.cpp
+        fi
+        "${compiler}" -std="${standard}" -Wall -Wextra -Werror -pthread \
+            -I crates/client-ffi/include "${source}" -L "${library_dir}" \
+            -lnervix_client_ffi -Wl,-rpath,"${library_dir}" -o "${artifacts}/${host}-suite"
+        "${compiler}" -std="${standard}" -Wall -Wextra -Werror -pthread -g -O1 \
+            -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+            -I crates/client-ffi/include "${source}" -L "${library_dir}" \
+            -lnervix_client_ffi -Wl,-rpath,"${library_dir}" -o "${artifacts}/${host}-suite-sanitized"
+    done
+
+# Each boundary tier is held to the inventory once in each instrumentation mode.
+test-client-c-api:
+    just cargo_target_dir={{ quote(cargo_target_dir) }} build-client-c-suites
+    cargo test --package nervix-client-ffi --test native_suites c_application_suite -- --exact --nocapture
+
+test-client-cpp-api:
+    just cargo_target_dir={{ quote(cargo_target_dir) }} build-client-c-suites
+    cargo test --package nervix-client-ffi --test native_suites cpp_application_suite -- --exact --nocapture
+
+# Run one native host's boundary tier from its prepared ordinary and sanitized programs, without
+# building them, and hold each run to the inventory.
+test-client-native-api-run host:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    host={{ quote(host) }}
+    case "${host}" in c|cpp) ;; *) echo "unknown native suite host: ${host}" >&2; exit 2 ;; esac
+    artifacts={{ quote(cargo_target_dir + "/client-conformance") }}
+    for suffix in '' '-sanitized'; do
+        results="${artifacts}/${host}${suffix}-boundary-results.txt"
+        status=0
+        "${artifacts}/${host}-suite${suffix}" boundary | tee "${results}" || status=$?
+        uv run --locked python -m scripts.client_suites check-run --host "${host}" \
+            --tier boundary "${results}"
+        if [[ "${status}" != 0 ]]; then exit "${status}"; fi
+    done
+
+# A focused native suite run builds no JVM/Python/independent-client artifacts.
+test-client-c-cluster *args: tests-deps build-client-c-suites
+    cargo test --no-run --package nervix-scenarios --test scenarios
+    just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-conformance-run '@client_suite_c or @client_suite_cpp' {{ args }}
+
+validate-client-c-suites:
+    uv run --locked python -m scripts.client_suites validate --host c --host cpp
 
 # Build the probes, the client library and the scenario suite the conformance run starts, so
 # `test-client-conformance-run` compiles nothing when it follows.
@@ -1957,6 +2031,17 @@ test-coverage-binaries: tests-deps build-client-jvm-tests
     # binary current.
     source <(cargo llvm-cov show-env --sh 2>/dev/null)
     export CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }}
+    # The boundary integration harness starts prepared native programs. Build their shared
+    # library under these same flags, then keep the programs at the archive's stable host path;
+    # their run paths still name the instrumented library in llvm-cov-target/debug.
+    just cargo_target_dir={{ quote(cargo_target_dir + "/llvm-cov-target") }} build-client-c-suites
+    mkdir -p {{ quote(cargo_target_dir + "/client-conformance") }}
+    for host in c cpp; do
+        for suffix in '' '-sanitized'; do
+            install -m 755 "${CARGO_TARGET_DIR}/client-conformance/${host}-suite${suffix}" \
+                {{ quote(cargo_target_dir + "/client-conformance") }}/"${host}-suite${suffix}"
+        done
+    done
     messages={{ quote(justfile_directory() + "/target/unit-tests/cargo-messages.jsonl") }}
     mkdir -p "$(dirname "${messages}")"
     : > "${messages}"
@@ -3471,6 +3556,11 @@ lint-targets: build-web-console lint-inner
 audit:
     cargo audit
 
+# Inspect the pinned complexity analyzer on one source path during a focused edit. The full
+# ratchet remains the complete workspace gate and reads no coverage for its complexity verdict.
+complexity-path path: typed-ratchet-source-build install-cargo-crap
+    {{ quote(cargo_target_dir / "typed-ratchet/source/debug/nervix-ratchet") }} crap run -- --path {{ quote(path) }} --no-default-excludes --format json --sort file
+
 # Count the architecture debt and fail when a count is above its baseline in debt-baseline.json.
 ratchet *args: typed-ratchet-build typed-ratchet-source-build install-cargo-crap
     #!/usr/bin/env bash
@@ -4110,7 +4200,7 @@ validate-client-suites: build-client-suite-java-checker
 
 # Resolve the JVM reader's positive/negative controls beside the shared suite and report checks.
 test-client-suites: build-client-suite-java-checker
-    NERVIX_CLIENT_SUITE_JAVA_CHECKER={{ quote(cargo_target_dir + "/client-suites/java") }} NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }} uv run --locked python -m unittest scripts.tests.test_client_suites scripts.tests.test_client_suites_java
+    NERVIX_CLIENT_SUITE_JAVA_CHECKER={{ quote(cargo_target_dir + "/client-suites/java") }} NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }} uv run --locked python -m unittest scripts.tests.test_client_suites scripts.tests.test_client_suites_java scripts.tests.test_client_suites_c
 
 # Exercise the host suite's bounded action adapter over real pipes, without a cluster.
 test-client-suite-actions:
@@ -4119,8 +4209,9 @@ test-client-suite-actions:
 # Collect the line coverage of the client suite check and its tests.
 coverage-client-suites-runner: build-client-suite-java-checker
     mkdir -p target/client-suites
-    NERVIX_CLIENT_SUITE_JAVA_CHECKER={{ quote(cargo_target_dir + "/client-suites/java") }} NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }} COVERAGE_FILE=target/client-suites/.coverage uv run --locked --with coverage==7.11.0 coverage run --branch --source=scripts.client_suites,scripts.client_suites_mypy_plugin -m unittest scripts.tests.test_client_suites scripts.tests.test_client_suites_java
+    NERVIX_CLIENT_SUITE_JAVA_CHECKER={{ quote(cargo_target_dir + "/client-suites/java") }} NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }} COVERAGE_FILE=target/client-suites/.coverage uv run --locked --with coverage==7.11.0 coverage run --branch --source=scripts.client_suites,scripts.client_suites_mypy_plugin,scripts.client_suites_c,scripts.unit_test_archive -m unittest scripts.tests.test_client_suites scripts.tests.test_client_suites_java scripts.tests.test_client_suites_c scripts.tests.test_unit_test_archive
     COVERAGE_FILE=target/client-suites/.coverage uv run --locked --with coverage==7.11.0 coverage report -m
+    COVERAGE_FILE=target/client-suites/.coverage uv run --locked --with coverage==7.11.0 coverage lcov -o target/client-suites/python.lcov
 
 book-pdf version="0.1.0-dev" output="":
     #!/usr/bin/env bash
