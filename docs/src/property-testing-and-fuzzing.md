@@ -66,6 +66,7 @@ records their scope without treating a passing qualification as a completed camp
 
 | ID | Package and invariant | Domain | Ordinary cases | Input limit |
 | --- | --- | --- | ---: | ---: |
+| `benchmark-metrics-report` | `nervix-benchmark` complete report equality through the production TOML file writer and reader, with bit-exact percentiles | three to six batch targets and relay buffers each, all execution-unit kinds, optional physical nodes, escaped Unicode labels, signed zeros, subnormal/normal/extreme finite percentiles and signed-TOML integer boundaries, v1 | 256 | 1024 bytes |
 | `crypto-p256-keys` | `nervix-crypto` complete PKCS#8 DER equality, public-point/coordinate equality and signing capability through import/export | valid nonzero P-256 scalars from up to 32 bytes, v1 | 128 | 32 bytes |
 | `crypto-p256-signatures` | `nervix-crypto` fixed P-256/SHA-256 signatures bind the complete message and public key, refuse flipped message/signature bits and preserve all 64 signature bytes | binary messages, including empty and 4096-byte boundaries, v1 | 128 | 4096 bytes |
 | `crypto-sha2-digests` | `nervix-crypto` complete SHA-256/SHA-512 equality against independent RustCrypto digests and incremental SHA-256 segmentation equality | arbitrary binary inputs and updates split at 1, 7, 64 and 128 bytes, v1 | 256 | 4096 bytes |
