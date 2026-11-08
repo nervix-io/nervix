@@ -2041,6 +2041,14 @@ jobs:
         if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-primitive-boundary
 
+      # The readers' tests resolve the JVM suite through Java 21 compiler trees, as validation does.
+      - name: Setup Java for the client suite readers
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
       - name: Client suite surface and inventory reader coverage
         if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-client-suites-runner
