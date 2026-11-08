@@ -1065,6 +1065,16 @@ detector and its numeric entry go at the same cutover.
 
 ### Analysis toolchain
 
+Repository enforcement that reads or writes compiler evidence belongs in the isolated
+`tools/nervix-lint` Rust workspace: the driver, report vocabulary, ratchet binary and compiler
+fixtures with their macro crate. Matrix reports, compiler side reports, compilation records,
+completion evidence and audit reports are consumed through their shared Rust types; Python under
+`scripts/` neither reads nor writes them. Add a structural count or gate rule to `nervix-ratchet`,
+and give each tooling encode/decode pair its registered bounded Bolero property. Source validators
+for primitives, clocks, typed errors and mode dependencies, and the coverage, Bolero and CI runners,
+keep their own inputs and evidence; they may invoke the Rust owner as a process without interpreting
+its compiler evidence.
+
 The synchronization driver, its isolated artifacts and Bolero's sanitizer campaigns use
 `nightly-2026-09-17`; product builds stay stable. An upgrade moves every declaration of that nightly
 in one change that keeps every compiler fixture's result. The driver's workspace wrapper composes
