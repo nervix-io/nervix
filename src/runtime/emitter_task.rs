@@ -53,6 +53,8 @@ pub(in crate::runtime) struct EmitterConnectorContext {
     pub(super) metrics_dirty: BranchMetricsMark,
     /// The status registry retains this owner for DESCRIBE and drain observations.
     pub(super) status: Arc<task_status::TaskStatus<EmitterRetryStatus>>,
+    /// Cold observers retain this exact task's readiness, separately from pending-work errors.
+    pub(super) readiness: Arc<AtomicBool>,
     /// Drain observers retain the registered counter independently of this context.
     pub(super) confirmation_waits: Arc<AtomicUsize>,
     /// The process-local metric store independently retains these children for inspection.
@@ -129,6 +131,12 @@ pub(in crate::runtime) enum EmitterRuntimeError {
     InvalidConnectorConfig,
     #[error("failed to initialize emitter connector")]
     InitializeConnector,
+    #[error("failed to resume emitter connector")]
+    ResumeConnector,
+    #[error("emitter transport is waiting for readiness")]
+    ConnectorWaiting,
+    #[error("failed to close emitter connector")]
+    CloseConnector,
     #[error("emitter connector client is not initialized")]
     ConnectorNotInitialized,
     #[error("emitter flush policy is not initialized")]
@@ -211,6 +219,8 @@ impl EmitterRuntimeError {
     pub(super) fn is_retryable_publish_failure(&self) -> bool {
         match self {
             Self::ConnectorNotInitialized
+            | Self::ResumeConnector
+            | Self::ConnectorWaiting
             | Self::PublishBatch
             | Self::PublishStalled
             | Self::EncodingRefused
@@ -232,6 +242,7 @@ impl EmitterRuntimeError {
             | Self::RowPreparation { .. }
             | Self::InvalidConnectorConfig
             | Self::InitializeConnector
+            | Self::CloseConnector
             | Self::FaultInjected
             | Self::ShutdownWhileStalled
             | Self::StopDeadlineElapsed
@@ -323,6 +334,23 @@ impl EmitterConnectorContext {
             error,
             "failed to initialize emitter connector"
         );
+    }
+
+    pub(super) fn report_close_error(
+        &self,
+        kind: nervix_models::EmitterEntityKind,
+        error: &Report<EmitterRuntimeError>,
+    ) {
+        let reason = emitter_error_message(error);
+        self.runtime.events().report_error(format!(
+            "failed to close {} emitter '{}' in domain '{}': {reason}",
+            kind.connector().to_string().to_ascii_lowercase(),
+            self.emitter.as_str(),
+            self.domain.as_str(),
+        ));
+        warn!(domain = self.domain.as_str(), emitter = self.emitter.as_str(), error = %reason,
+            "failed to close emitter connector");
+        self.record_failure(reason);
     }
 
     fn report_publish_error(&self, connector: &str, error: &str) {
@@ -461,6 +489,16 @@ impl EmitterTransientErrorStatus for EmitterConnectorContext {
 
     fn clear_transient_error(&self) {
         self.status.clear_connector();
+    }
+}
+
+impl nervix_connector::EmitterReadiness for EmitterConnectorContext {
+    fn mark_ready(&self) {
+        self.readiness.store(true, Ordering::Relaxed);
+    }
+
+    fn mark_unready(&self) {
+        self.readiness.store(false, Ordering::Relaxed);
     }
 }
 
@@ -641,7 +679,7 @@ impl EmitterTaskState {
             retry.defer(
                 context,
                 EmitterRetryDeferral {
-                    wait: backoff.take_next_delay(),
+                    wait: connector.installation_retry_delay(&mut backoff),
                     acks: EmitterAcknowledgements::default(),
                     waiting_for_stall_clear: false,
                     reason: Some(reason),
@@ -689,6 +727,7 @@ impl EmitterTaskState {
         deadline: Option<Instant>,
     ) {
         let Some(deadline) = deadline else {
+            self.connector.record_unfinished_ending();
             debug!(
                 domain = context.domain.as_str(),
                 emitter = context.emitter.as_str(),
@@ -755,7 +794,7 @@ impl EmitterTaskState {
                         reason: Some(&reason),
                     },
                 );
-                self.reconnect_on_wake = self.connector.reconnect_after(&error);
+                self.reconnect_on_wake = self.connector.reconnect_after(&error, context);
                 outcome_context.report_error(context, &reason);
             }
             Err(failure) => {
@@ -782,8 +821,8 @@ struct EmitterTaskLoop<'a> {
     state: EmitterTaskState,
     retention: EmitterBranchRetention,
     interaction: RelayInteraction<EmitterTaskCommand>,
-    plan: &'a EmitterStartPlan,
     connector_label: String,
+    plan: &'a EmitterStartPlan,
     input_schema: &'a CompiledSchema,
     output_schema: &'a Arc<CompiledSchema>,
     codec: Option<&'a Arc<CompiledCodec>>,
@@ -1020,6 +1059,7 @@ impl EmitterTask {
             let status = runtime.emitter_status(&emitter_key);
             let confirmation_waits = runtime.emitter_confirmation_counter(&emitter_key);
             let context = EmitterConnectorContext {
+                readiness: runtime.register_emitter_readiness(&emitter_key),
                 routing: shared_routing,
                 metrics_dirty: runtime.branch_metrics_mark(
                     &task_domain,
@@ -1076,8 +1116,8 @@ impl EmitterTask {
                 state,
                 retention,
                 interaction,
-                plan: &plan,
                 connector_label,
+                plan: &plan,
                 input_schema: &input_schema,
                 output_schema: &output_compiled_schema,
                 codec: codec.as_ref(),
@@ -1124,6 +1164,7 @@ impl EmitterTaskLoop<'_> {
                 self.finish_after_loop(ending).await;
             }
         }
+        self.state.connector.close_transport(self.context).await;
     }
 
     /// Finishes the emitter once the loop ended without a stop, by the deadline on the task's stop
@@ -1456,14 +1497,29 @@ impl EmitterTaskLoop<'_> {
                     if self.state.reconnect_on_wake
                         || self.state.connector.unavailable_reason().is_some()
                     {
-                        self.state.connector = EmitterConnectorState::open_until_cancelled(
-                            self.plan,
-                            self.context,
-                            self.input_schema,
-                            self.output_schema,
-                            self.codec,
-                            &mut *self.work_cancel_rx,
-                        )
+                        let acks = self.state.connector.pending_acks(&self.state.buffer);
+                        super::emitter_publishing::await_emitter_confirmation(&acks, async {
+                            if self.state.connector.retries_installation() {
+                                self.state.connector = EmitterConnectorState::open_until_cancelled(
+                                    self.plan,
+                                    self.context,
+                                    self.input_schema,
+                                    self.output_schema,
+                                    self.codec,
+                                    &mut *self.work_cancel_rx,
+                                )
+                                .await;
+                            } else {
+                                self.state
+                                    .connector
+                                    .resume_until_cancelled(self.context, &mut *self.work_cancel_rx)
+                                    .await
+                                    .discarded(
+                                        "the retained connector records its resume failure for \
+                                         the host retry",
+                                    );
+                            }
+                        })
                         .await;
                         self.state
                             .buffer
@@ -1472,7 +1528,10 @@ impl EmitterTaskLoop<'_> {
                             self.state.retry.defer(
                                 self.context,
                                 EmitterRetryDeferral {
-                                    wait: self.state.backoff.take_next_delay(),
+                                    wait: self
+                                        .state
+                                        .connector
+                                        .installation_retry_delay(&mut self.state.backoff),
                                     acks: self.state.connector.pending_acks(&self.state.buffer),
                                     waiting_for_stall_clear: false,
                                     reason: Some(reason),
@@ -1482,7 +1541,6 @@ impl EmitterTaskLoop<'_> {
                             continue;
                         }
                         self.state.reconnect_on_wake = false;
-                        self.context.status.clear();
                     }
                     let publish_result = {
                         let EmitterTaskState {
@@ -2167,6 +2225,7 @@ mod tests {
         buffer.set_flush_policy(RuntimeFlushPolicy::Immediate);
         EmitterTaskState::new(
             EmitterConnectorState::Unavailable {
+                retry_open: false,
                 reason: "test emitter is unavailable".to_string(),
             },
             buffer,
@@ -2240,6 +2299,8 @@ mod tests {
     fn emitter_error_classification_is_explicit_for_every_context() {
         for retryable in [
             EmitterRuntimeError::ConnectorNotInitialized,
+            EmitterRuntimeError::ResumeConnector,
+            EmitterRuntimeError::ConnectorWaiting,
             EmitterRuntimeError::PublishBatch,
             EmitterRuntimeError::PublishStalled,
             EmitterRuntimeError::UnansweredEmitterRecords {
@@ -2253,6 +2314,7 @@ mod tests {
         for terminal in [
             EmitterRuntimeError::InvalidConnectorConfig,
             EmitterRuntimeError::InitializeConnector,
+            EmitterRuntimeError::CloseConnector,
             EmitterRuntimeError::FlushPolicyNotInitialized,
             EmitterRuntimeError::FaultInjected,
             EmitterRuntimeError::EncodeBatch,
@@ -2972,6 +3034,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn an_emitter_without_an_open_emitter_holds_nothing_to_finish() {
         let mut connector = EmitterConnectorState::Unavailable {
+            retry_open: false,
             reason: "test emitter is unavailable".to_string(),
         };
 

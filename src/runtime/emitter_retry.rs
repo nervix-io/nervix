@@ -296,7 +296,7 @@ impl EmitterRetrySchedule {
 ///
 /// A delay whose end the monotonic clock cannot represent asks for an attempt that could never be
 /// scheduled, so it contributes nothing and the declared backoff alone decides the wait.
-fn emitter_minimum_retry_delay(error: &Report<EmitterRuntimeError>) -> Duration {
+pub(super) fn emitter_minimum_retry_delay(error: &Report<EmitterRuntimeError>) -> Duration {
     let Some(attachment) = error.downcast_ref::<EmitterRetryDelay>() else {
         return Duration::ZERO;
     };

@@ -10,6 +10,8 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
+use nervix_connector::EmitterConnector as _;
+
 use super::*;
 
 const _: () = assert!(matches!(
@@ -33,7 +35,7 @@ impl EmitterConnectorStarter {
                 udfs: context.udfs.as_ref(),
             })?;
             let mapped_schema = projection.value_schema();
-            let opened = IcebergTableEmitter::new(
+            let opened = IcebergTableEmitter::open(
                 IcebergTableEmitterConfig {
                     backend: connector.backend,
                     dns: context.dns()?,

@@ -10,6 +10,8 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
+use nervix_connector::EmitterConnector as _;
+
 use super::*;
 
 const _: () = assert!(matches!(
@@ -18,7 +20,7 @@ const _: () = assert!(matches!(
 ));
 
 impl EmitterConnectorStarter {
-    pub(super) fn mqtt(
+    pub(super) async fn mqtt(
         connector: &MqttTopicEmitterPlan,
         context: &EmitterConnectorContext,
         codec: Option<&Arc<CompiledCodec>>,
@@ -30,7 +32,7 @@ impl EmitterConnectorStarter {
             label,
             codec,
             batch,
-            MqttTopicEmitter::new(
+            MqttTopicEmitter::open(
                 MqttTopicEmitterConfig {
                     config: connector.client.config.entries.clone(),
                     topic: connector.topic.clone(),
@@ -44,7 +46,8 @@ impl EmitterConnectorStarter {
                     dns: context.dns()?,
                 },
                 context.emitter_host(),
-            ),
+            )
+            .await,
         )?;
         Ok(opened)
     }

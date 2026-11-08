@@ -6274,3 +6274,61 @@ invariant = "A completed restore with an undecodable or differently correlated r
 invocation = "stress-restore-scenarios"
 scenario = "A <client> recovers a completed restore after <reply> on <cluster_size> nodes"
 selections = ["deloxide-stress-restore"]
+
+[[invocation]]
+bound_seconds = 120
+evidence = true
+features = ["testing"]
+id = "emitter-retained-lifecycle"
+kind = "libtest-each"
+marker = "runtime::emitter_lifecycle::tests::"
+package = "nervix-server"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+target = "lib"
+
+[[workload]]
+coverage = "The production retained lifecycle owner drives the fake emitter's selected observation mutex and the fake host's readiness observation mutex. Native transport reconnect and atomic memory ordering are outside detector evidence."
+id = "owner.emitter-retained-recovery"
+invariant = "Failed and waiting resumes retain one instance and completed suspension, and finish precedes terminal close."
+invocation = "emitter-retained-lifecycle"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+test = "runtime::emitter_lifecycle::tests::recovery_retains_one_open_through_failure_waiting_finish_and_close"
+
+[[workload]]
+coverage = "The production owner is cancelled inside a scripted asynchronous resume while observations use selected blocking mutexes. No driver or network is modeled."
+id = "owner.emitter-retained-cancellation"
+invariant = "Cancelling resume preserves the emitter and does not repeat a completed suspension before finish and close."
+invocation = "emitter-retained-lifecycle"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+test = "runtime::emitter_lifecycle::tests::cancellation_during_resume_keeps_the_suspension_completed_and_owner_retained"
+
+[[owner]]
+gap = "Other fake publish, preparation and staging scripts retain their separate ordinary/Shuttle tests; this workload drives lifecycle observations only."
+path = "crates/connector-fake/src/emitter.rs"
+workloads = [
+  "owner.emitter-retained-recovery",
+  "owner.emitter-retained-cancellation",
+]
+
+[[owner]]
+gap = "Native payload and subdivision observation callbacks have their connector owner tests; this workload exercises readiness publication only."
+path = "crates/connector-fake/src/emitter_host.rs"
+workloads = [
+  "owner.emitter-retained-recovery",
+  "owner.emitter-retained-cancellation",
+]

@@ -56,7 +56,7 @@ impl RabbitMqExchangeEmitter {
     /// Connects, opens the channel the emitter publishes through and checks that its exchange
     /// exists, every step within the client's `connect_timeout_ms`. An exchange the broker does not
     /// have is the contract's missing entity, which the host retries until it is declared.
-    pub async fn new(
+    async fn prepare(
         config: RabbitMqExchangeEmitterConfig,
         _host: EmitterHost,
     ) -> EmitterStartResult<Self> {
@@ -71,8 +71,7 @@ impl RabbitMqExchangeEmitter {
             dns,
             destination: RabbitMqDestination::Exchange(exchange),
             mode,
-        })
-        .await?;
+        })?;
         Ok(Self { publisher })
     }
 }
@@ -81,6 +80,26 @@ impl RabbitMqExchangeEmitter {
 impl EmitterLifecycle for RabbitMqExchangeEmitter {
     fn kind(&self) -> nervix_models::EmitterEntityKind {
         Self::KIND
+    }
+
+    fn needs_resume(&mut self) -> bool {
+        self.publisher.needs_resume()
+    }
+
+    fn suspend(&mut self) -> nervix_connector::EmitterLifecycleStep<'_, ()> {
+        self.publisher.suspend();
+        nervix_connector::EmitterLifecycleStep::ready(Ok(()))
+    }
+
+    fn resume(
+        &mut self,
+    ) -> nervix_connector::EmitterLifecycleStep<'_, nervix_connector::EmitterResume> {
+        if !self.needs_resume() {
+            return nervix_connector::EmitterLifecycleStep::ready(Ok(
+                nervix_connector::EmitterResume::Ready,
+            ));
+        }
+        nervix_connector::EmitterLifecycleStep::run(async move { self.publisher.resume().await })
     }
 
     async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
@@ -92,5 +111,13 @@ impl EmitterLifecycle for RabbitMqExchangeEmitter {
 impl RecordEmitter for RabbitMqExchangeEmitter {
     async fn publish(&mut self, records: Vec<EmitterRecord>) -> PerRecordOutcome<EmitterRecordId> {
         self.publisher.publish(records).await
+    }
+}
+
+impl nervix_connector::EmitterConnector for RabbitMqExchangeEmitter {
+    const KIND: nervix_models::EmitterEntityKind = Self::KIND;
+    type Plan = RabbitMqExchangeEmitterConfig;
+    async fn open(plan: Self::Plan, host: EmitterHost) -> EmitterStartResult<Self> {
+        Self::prepare(plan, host).await
     }
 }

@@ -14,6 +14,7 @@ use std::{
 use aws_sdk_sqs::{
     error::SdkError, operation::get_queue_url::GetQueueUrlError, types::error::QueueDoesNotExist,
 };
+use meticulous::ResultExt as _;
 use nervix_connector::{
     BrokerIngestorConnector as _, DeadlineElapsed, EmitterOpenError, EmitterRecord,
     EmitterRecordId, EmitterWriteError, IngestorBatch, IngestorBatchRequest,
@@ -488,7 +489,8 @@ async fn a_send_that_cannot_connect_fails_the_publish_without_answering_a_record
         .expect("the emitter client configuration is valid");
         let mut connector = SqsQueueEmitter {
             client,
-            queue_url: format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"),
+            queue_url: Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}")),
+            queue: SqsQueueName::parse(QUEUE).assured("fixture queue name is valid"),
             send,
         };
         let record = EmitterRecord::new(
@@ -1115,7 +1117,8 @@ async fn a_send_the_service_never_answers_ends_within_timeout_ms_in_both_modes()
             .expect("the emitter client configuration is valid");
         let mut connector = SqsQueueEmitter {
             client,
-            queue_url: format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"),
+            queue_url: Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}")),
+            queue: SqsQueueName::parse(QUEUE).assured("fixture queue name is valid"),
             send,
         };
         let record = EmitterRecord::new(

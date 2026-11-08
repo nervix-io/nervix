@@ -67,12 +67,13 @@ fn fixture_emitter(
     let executor = Executor::default();
     IcebergTableEmitter {
         host: nervix_connector_fake::FakeEmitterHost::on(executor.clone()).host(),
-        client: IcebergTableEmitterClient {
+        client: Some(IcebergTableEmitterClient {
             catalog,
             table,
             file_name_prefix: "columns-memory".to_string(),
             data_file_sequence: 0,
-        },
+        }),
+        prepared: None,
         commit_state: IcebergCommitState::default(),
         staged_schema: IcebergTableEmitter::staged_arrow_schema(mapped)
             .assured("the fixture's mapped columns are distinct"),

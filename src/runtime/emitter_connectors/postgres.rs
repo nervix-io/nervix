@@ -10,6 +10,8 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
+use nervix_connector::EmitterConnector as _;
+
 use super::*;
 
 const _: () = assert!(matches!(
@@ -38,15 +40,17 @@ impl EmitterConnectorStarter {
                     .change_context(EmitterRuntimeError::InitializeConnector)?;
             Self::row(
                 projection,
-                PostgresTableEmitter::new(
+                PostgresTableEmitter::open(
                     PostgresTableEmitterConfig {
                         table: connector.table.clone(),
                         conflict_action: connector.conflict_action.clone(),
                         batch: connector.batch,
+
+                        connections: Box::new(connections),
                     },
-                    Box::new(connections),
                     context.emitter_host(),
-                ),
+                )
+                .await,
             )?
         };
         Ok(opened)

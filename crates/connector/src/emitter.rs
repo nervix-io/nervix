@@ -21,7 +21,14 @@
     )
 )]
 
-use std::{num::NonZeroUsize, path::PathBuf, time::Duration};
+use std::{
+    future::{Future, Ready, ready},
+    num::NonZeroUsize,
+    path::PathBuf,
+    pin::Pin,
+    task::{Context, Poll},
+    time::Duration,
+};
 
 use arch_into::ArchInto as _;
 use arrow_array::RecordBatch;
@@ -738,6 +745,83 @@ pub type EmitterFinishResult = Result<EmitterFinish, Report<EmitterFinishError>>
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmitterRetryDelay(pub Duration);
 
+/// The result of acquiring an emitter's transport without replacing its owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmitterResume {
+    Ready,
+    Waiting { retry_after: Duration },
+}
+
+/// A failure of a retained emitter's transport lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum EmitterLifecycleError {
+    #[error("failed to suspend {connector} emitter")]
+    Suspend { connector: &'static str },
+    #[error("failed to resume {connector} emitter")]
+    Resume { connector: &'static str },
+    #[error("failed to close {connector} emitter")]
+    Close { connector: &'static str },
+}
+
+pub type EmitterLifecycleResult<T> = Result<T, Report<EmitterLifecycleError>>;
+
+/// One awaitable lifecycle operation. Immediate outcomes stay inline, so retaining a usable
+/// native client adds no allocation to recovery. Only asynchronous transport work owns a future.
+pub struct EmitterLifecycleStep<'a, T> {
+    operation: EmitterLifecycleOperation<'a, T>,
+}
+
+enum EmitterLifecycleOperation<'a, T> {
+    Ready(Ready<EmitterLifecycleResult<T>>),
+    Running(Pin<Box<dyn Future<Output = EmitterLifecycleResult<T>> + Send + 'a>>),
+}
+
+impl<'a, T> EmitterLifecycleStep<'a, T> {
+    pub fn ready(result: EmitterLifecycleResult<T>) -> Self {
+        Self {
+            operation: EmitterLifecycleOperation::Ready(ready(result)),
+        }
+    }
+
+    pub fn run(future: impl Future<Output = EmitterLifecycleResult<T>> + Send + 'a) -> Self {
+        Self {
+            operation: EmitterLifecycleOperation::Running(Box::pin(future)),
+        }
+    }
+}
+
+impl<T: Unpin> Future for EmitterLifecycleStep<'_, T> {
+    type Output = EmitterLifecycleResult<T>;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        match &mut self.get_mut().operation {
+            EmitterLifecycleOperation::Ready(result) => Pin::new(result).poll(context),
+            EmitterLifecycleOperation::Running(future) => future.as_mut().poll(context),
+        }
+    }
+}
+
+/// Creates one entity owner from its decided, owned configuration and host handles.
+///
+/// Opening performs local configuration and TLS preparation only. Transport acquisition belongs to
+/// `resume`, so a transient failure can never require another construction or lease.
+pub trait EmitterConnector: EmitterLifecycle + Sized {
+    const KIND: nervix_models::EmitterEntityKind;
+    type Plan: Send;
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "opens one emitter owner before records are admitted"
+        )
+    )]
+    fn open(
+        plan: Self::Plan,
+        host: EmitterHost,
+    ) -> impl std::future::Future<Output = EmitterStartResult<Self>> + Send;
+}
+
 /// Lifecycle policy shared by record and row emitters.
 #[async_trait]
 #[cfg_attr(
@@ -752,6 +836,26 @@ pub trait EmitterLifecycle: Send {
     /// The vocabulary entity implemented by this concrete connector.
     fn kind(&self) -> nervix_models::EmitterEntityKind;
 
+    /// Whether the retained transport needs acquisition before another publish.
+    fn needs_resume(&mut self) -> bool {
+        false
+    }
+
+    /// Suspends transport use, retaining confirmations, preparations and staged work.
+    fn suspend(&mut self) -> EmitterLifecycleStep<'_, ()> {
+        EmitterLifecycleStep::ready(Ok(()))
+    }
+
+    /// Acquires or repairs the transport. Drivers with native reconnect retain their client.
+    fn resume(&mut self) -> EmitterLifecycleStep<'_, EmitterResume> {
+        EmitterLifecycleStep::ready(Ok(EmitterResume::Ready))
+    }
+
+    /// Ends this exact instance, after the host has received its finish outcome.
+    fn close(&mut self) -> EmitterLifecycleStep<'_, ()> {
+        EmitterLifecycleStep::ready(Ok(()))
+    }
+
     /// Sends what the transport client still holds of the records a publish reported delivered, by
     /// `deadline`, and answers with what that did.
     ///
@@ -760,10 +864,6 @@ pub trait EmitterLifecycle: Send {
     /// possibly in the middle of a publish. Every emitter answers for what its own client holds, so
     /// this hook has no default.
     async fn finish(&mut self, deadline: Instant) -> EmitterFinishResult;
-
-    fn keeps_client_on_publish_failure(&self) -> bool {
-        false
-    }
 
     /// What this emitter holds for its next commit, absent while it has nothing staged.
     ///
@@ -1033,17 +1133,30 @@ pub trait EmitterBoundedExecution: Send + Sync + 'static {
     fn executor(&self) -> Executor;
 }
 
+/// Readiness of the exact emitter instance, independent of pending-work failures.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host publishes its retained instance readiness"
+    )
+)]
+pub trait EmitterReadiness: Send + Sync + 'static {
+    fn mark_ready(&self);
+    fn mark_unready(&self);
+}
+
 /// Every service exposed through one emitter host handle.
 #[cfg_attr(
     nervix_lint,
     nervix::context(
         recurring,
-        reason = "connector host drives this contract for admitted records, polls, commits or \
-                  acknowledgements"
+        reason = "connector callbacks use their retained host services"
     )
 )]
 pub trait EmitterHostServices:
     EmitterTransientErrorStatus
+    + EmitterReadiness
     + EmitterEventReporter
     + EmitterStagingDirectory
     + EmitterGeneralErrorHandler
@@ -1057,6 +1170,7 @@ pub trait EmitterHostServices:
 
 impl<T> EmitterHostServices for T where
     T: EmitterTransientErrorStatus
+        + EmitterReadiness
         + EmitterEventReporter
         + EmitterStagingDirectory
         + EmitterGeneralErrorHandler
@@ -1078,6 +1192,16 @@ pub struct EmitterHost {
     inner: Arc<EmitterHostInner>,
 }
 
+impl EmitterReadiness for EmitterHost {
+    fn mark_ready(&self) {
+        self.inner.services.mark_ready();
+    }
+
+    fn mark_unready(&self) {
+        self.inner.services.mark_unready();
+    }
+}
+
 impl EmitterHost {
     pub fn new(services: impl EmitterHostServices) -> Self {
         Self {
@@ -1095,6 +1219,14 @@ impl EmitterHost {
 
     pub fn clear_transient_error(&self) {
         self.inner.services.clear_transient_error();
+    }
+
+    pub fn mark_ready(&self) {
+        self.inner.services.mark_ready();
+    }
+
+    pub fn mark_unready(&self) {
+        self.inner.services.mark_unready();
     }
 
     /// Records a native payload once its encoder or file writer has prepared it.

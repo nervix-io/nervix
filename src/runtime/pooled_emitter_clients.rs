@@ -36,35 +36,33 @@ pub(super) struct PooledEmitterClient {
 
 impl PooledEmitterClient {
     /// Take this emitter's interest in the node's instance of `client`, opening it on first local use.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "installs the emitter's retained shared-client lease and pool-wait \
+                      publication"
+        )
+    )]
     pub(super) async fn lease(
         context: &EmitterConnectorContext,
         client: &EmitterClientSpec,
         pool: PooledClientPlan,
     ) -> Result<Self, Report<SharedClientError>> {
-        let lease = nervix_primitives::expect_lint!(
-            nervix::lifecycle_call,
-            "emitter initialization installs and retains one shared-client lease before \
-             publishing records",
-            context
-                .runtime
-                .lease_shared_client(&context.domain, client, pool)
-        )
-        .await?;
+        let lease = context
+            .runtime
+            .lease_shared_client(&context.domain, client, pool)
+            .await?;
         Ok(Self {
             lease,
             client: client.name.clone(),
-            wait: nervix_primitives::expect_lint!(
-                nervix::lifecycle_call,
-                "emitter initialization installs and retains its one pool-wait publication before \
-                 borrowing connections",
-                context.runtime.register_pool_wait(
-                    DomainNodeRef::node_in(
-                        context.domain.clone(),
-                        ModelKind::Emitter,
-                        context.emitter.clone(),
-                    ),
-                    client.name.clone(),
-                )
+            wait: context.runtime.register_pool_wait(
+                DomainNodeRef::node_in(
+                    context.domain.clone(),
+                    ModelKind::Emitter,
+                    context.emitter.clone(),
+                ),
+                client.name.clone(),
             ),
         })
     }
@@ -125,19 +123,22 @@ impl EmitterConnectorContext {
     ///
     /// The lease travels with the handle the emitter holds, so the pool stays open for exactly as
     /// long as the emitter publishes through it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "installs the emitter's retained Redis pool lease and pool-wait publication"
+        )
+    )]
     pub(super) async fn lease_redis_pool(
         &self,
         plan: &RedisPubSubEmitterPlan,
     ) -> EmitterRuntimeResult<RedisPoolHandle> {
-        let lease = nervix_primitives::expect_lint!(
-            nervix::lifecycle_call,
-            "emitter initialization installs and retains one shared-client lease before \
-             publishing records",
-            self.runtime
-                .lease_shared_client(&self.domain, &plan.client, plan.pooled_client())
-        )
-        .await
-        .map_err(|error| emitter_init_error(error.to_string()))?;
+        let lease = self
+            .runtime
+            .lease_shared_client(&self.domain, &plan.client, plan.pooled_client())
+            .await
+            .map_err(|error| emitter_init_error(error.to_string()))?;
         let pool = lease
             .client()
             .redis(&plan.client.name)
@@ -146,18 +147,13 @@ impl EmitterConnectorContext {
         Ok(RedisPoolHandle::new(LeasedRedisPool {
             _lease: lease,
             pool,
-            wait: nervix_primitives::expect_lint!(
-                nervix::lifecycle_call,
-                "emitter initialization installs and retains its one pool-wait publication before \
-                 borrowing connections",
-                self.runtime.register_pool_wait(
-                    DomainNodeRef::node_in(
-                        self.domain.clone(),
-                        ModelKind::Emitter,
-                        self.emitter.clone(),
-                    ),
-                    plan.client.name.clone(),
-                )
+            wait: self.runtime.register_pool_wait(
+                DomainNodeRef::node_in(
+                    self.domain.clone(),
+                    ModelKind::Emitter,
+                    self.emitter.clone(),
+                ),
+                plan.client.name.clone(),
             ),
         }))
     }

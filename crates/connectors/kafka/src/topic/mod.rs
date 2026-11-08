@@ -124,10 +124,17 @@ impl NativeClient for KafkaProducer {
     const DESTRUCTION: &'static str = "destroying a retired Kafka producer";
 }
 
+struct KafkaProducerPreparation {
+    config: ClientConfig,
+    executor: nervix_execution::Executor,
+    partitioned: bool,
+}
+
 pub struct KafkaTopicEmitter {
     /// Shared with the flush a finish runs on the runtime's blocking pool, which keeps the producer
     /// until librdkafka's flush returns, and whichever lets it go last retires it.
-    producer: Retiring<KafkaProducer>,
+    producer: Option<Retiring<KafkaProducer>>,
+    prepared: Option<KafkaProducerPreparation>,
     topic: Box<str>,
     partitioning: Option<Box<KafkaPartitionMetadata>>,
     mode: BrokerPublishingMode,
@@ -449,22 +456,18 @@ impl KafkaTopicEmitter {
     pub const KIND: nervix_models::EmitterEntityKind =
         nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic);
 
-    pub fn new(config: KafkaTopicEmitterConfig, host: EmitterHost) -> EmitterStartResult<Self> {
+    fn prepare(config: KafkaTopicEmitterConfig, host: EmitterHost) -> EmitterStartResult<Self> {
         let producer_config = Self::producer_config(&config.config, config.mode)?;
         let queue_capacity_bytes = Self::producer_queue_capacity(&producer_config)?;
-        let partitioning = if config.partition_from_branch {
-            Some(Box::new(KafkaPartitionMetadata::new(
-                &producer_config,
-                host.executor(),
-            )?))
-        } else {
-            None
-        };
-        let producer = Self::create_producer(&producer_config, host.executor())?;
         Ok(Self {
-            producer,
+            producer: None,
+            prepared: Some(KafkaProducerPreparation {
+                config: producer_config,
+                executor: host.executor(),
+                partitioned: config.partition_from_branch,
+            }),
             topic: config.topic.into_boxed_str(),
-            partitioning,
+            partitioning: None,
             mode: config.mode,
             queue_capacity_bytes,
         })
@@ -487,6 +490,12 @@ impl KafkaTopicEmitter {
             .checked_mul(1024)
             .assured("a C-integer kibibyte limit times 1024 fits u64");
         Ok(NonZeroU64::new(bytes).assured("librdkafka validates a positive queue byte limit"))
+    }
+
+    fn producer(&self) -> &Retiring<KafkaProducer> {
+        self.producer
+            .as_ref()
+            .verified("the host resumes the emitter before publishing")
     }
 
     fn invalid_configuration(error: KafkaError) -> Report<EmitterOpenError> {
@@ -581,6 +590,7 @@ impl KafkaTopicEmitter {
     /// its queue delivers it.
     async fn publish_unconfirmed(
         &self,
+        producer: &Retiring<KafkaProducer>,
         records: Vec<EmitterRecord>,
         partitions: Option<u32>,
     ) -> PerRecordOutcome<EmitterRecordId> {
@@ -598,7 +608,7 @@ impl KafkaTopicEmitter {
                     continue;
                 }
             };
-            match self.hand_over(&record, create_time, None, partitions) {
+            match self.hand_over(producer, &record, create_time, None, partitions) {
                 Ok(()) => outcome.deliver(record.id),
                 Err(error) if Self::is_record_rejection(&error) => {
                     outcome.reject(record.rejected(format!("kafka rejected record: {error}")));
@@ -620,6 +630,7 @@ impl KafkaTopicEmitter {
     /// A full producer queue waits for an outstanding answer before trying the same record again.
     async fn publish_confirmed(
         &self,
+        producer: &Retiring<KafkaProducer>,
         records: Vec<EmitterRecord>,
         settings: AckConfirmation,
         partitions: Option<u32>,
@@ -641,6 +652,7 @@ impl KafkaTopicEmitter {
             };
             let answer = match self
                 .hand_over_confirmed(
+                    producer,
                     &record,
                     create_time,
                     &mut window,
@@ -672,6 +684,7 @@ impl KafkaTopicEmitter {
     /// a separate admission deadline, without extending any handed-over record's deadline.
     async fn hand_over_confirmed(
         &self,
+        producer: &Retiring<KafkaProducer>,
         record: &EmitterRecord,
         create_time: Option<KafkaCreateTime>,
         window: &mut ConfirmationWindow<KafkaAnswer>,
@@ -682,7 +695,7 @@ impl KafkaTopicEmitter {
         loop {
             nervix_primitives::task::consume_budget().await;
             let (answer, report) = oneshot::channel();
-            match self.hand_over(record, create_time, Some(answer), partitions) {
+            match self.hand_over(producer, record, create_time, Some(answer), partitions) {
                 Ok(()) => return Ok(KafkaAnswer { report }),
                 Err(error @ KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull)) => {
                     if window.settle_next().await?.is_some() {
@@ -736,12 +749,13 @@ impl KafkaTopicEmitter {
     /// retained: its delivery opaque comes back with the refusal and is dropped here.
     fn hand_over(
         &self,
+        producer: &Retiring<KafkaProducer>,
         message: &EmitterRecord,
         create_time: Option<KafkaCreateTime>,
         answer: Option<oneshot::Sender<KafkaDeliveryReport>>,
         partitions: Option<u32>,
     ) -> Result<(), KafkaError> {
-        let handed_over = self.producer.context().retain(answer);
+        let handed_over = producer.context().retain(answer);
         let mut record = BaseRecord::<[u8], [u8], Box<HandedOverRecord>>::with_opaque_to(
             self.topic.as_ref(),
             handed_over,
@@ -766,9 +780,7 @@ impl KafkaTopicEmitter {
         if let Some(create_time) = create_time {
             record = record.timestamp(create_time.unix_millis);
         }
-        self.producer
-            .send(record)
-            .map_err(|(source, _record)| source)
+        producer.send(record).map_err(|(source, _record)| source)
     }
 
     /// The record headers a record's header writes become: every write in the order written, a
@@ -856,7 +868,10 @@ impl KafkaTopicEmitter {
     /// The errors, statistics and other events waiting in the producer's queue are not records, so
     /// this is not librdkafka's own out-queue length, which counts them too.
     fn retained_records(&self) -> u64 {
-        self.producer.context().retained_records()
+        match &self.producer {
+            Some(producer) => producer.context().retained_records(),
+            None => 0,
+        }
     }
 
     fn is_record_rejection(error: &KafkaError) -> bool {
@@ -880,6 +895,45 @@ impl EmitterLifecycle for KafkaTopicEmitter {
         Self::KIND
     }
 
+    fn needs_resume(&mut self) -> bool {
+        self.producer.is_none()
+    }
+
+    fn resume(
+        &mut self,
+    ) -> nervix_connector::EmitterLifecycleStep<'_, nervix_connector::EmitterResume> {
+        if !self.needs_resume() {
+            return nervix_connector::EmitterLifecycleStep::ready(Ok(
+                nervix_connector::EmitterResume::Ready,
+            ));
+        }
+        nervix_connector::EmitterLifecycleStep::run(async move {
+            if let Some(KafkaProducerPreparation {
+                config,
+                executor,
+                partitioned,
+            }) = &self.prepared
+            {
+                let partitioning = if *partitioned {
+                    Some(Box::new(
+                        KafkaPartitionMetadata::new(config, executor.clone()).change_context(
+                            nervix_connector::EmitterLifecycleError::Resume { connector: KAFKA },
+                        )?,
+                    ))
+                } else {
+                    None
+                };
+                let producer = Self::create_producer(config, executor.clone()).change_context(
+                    nervix_connector::EmitterLifecycleError::Resume { connector: KAFKA },
+                )?;
+                self.partitioning = partitioning;
+                self.producer = Some(producer);
+                self.prepared = None;
+            }
+            Ok(nervix_connector::EmitterResume::Ready)
+        })
+    }
+
     /// Flushes the producer's queue, which holds the records a `NO ACK` publish delivered and
     /// librdkafka has not sent yet, and any record a publish handed over and then gave up on. A
     /// flush sends them at once, whatever `linger.ms` says.
@@ -893,7 +947,7 @@ impl EmitterLifecycle for KafkaTopicEmitter {
         if self.retained_records() == 0 {
             return Ok(EmitterFinish::NothingHeld);
         }
-        let producer = self.producer.clone();
+        let producer = self.producer().clone();
         let flushing =
             nervix_primitives::task::spawn_blocking(move || Self::flush_until(&producer, deadline));
         let flushed = flushing.await.map_err(|source| {
@@ -922,18 +976,21 @@ impl EmitterLifecycle for KafkaTopicEmitter {
             }
         }
     }
-
-    fn keeps_client_on_publish_failure(&self) -> bool {
-        true
-    }
 }
 
 #[async_trait]
 impl RecordEmitter for KafkaTopicEmitter {
     async fn publish(&mut self, records: Vec<EmitterRecord>) -> PerRecordOutcome<EmitterRecordId> {
+        let Some(producer) = self.producer.as_ref() else {
+            let mut outcome = PerRecordOutcome::with_capacity(records.len());
+            outcome.fail(Report::new(EmitterWriteError::NotInitialized {
+                connector: KAFKA,
+            }));
+            return outcome;
+        };
         let partitions = match &self.partitioning {
             None => None,
-            Some(metadata) => match metadata.partition_count(&self.producer, &self.topic).await {
+            Some(metadata) => match metadata.partition_count(producer, &self.topic).await {
                 Ok(count) => Some(count),
                 Err(failure) => {
                     let mut outcome = PerRecordOutcome::with_capacity(records.len());
@@ -943,11 +1000,23 @@ impl RecordEmitter for KafkaTopicEmitter {
             },
         };
         match self.mode {
-            BrokerPublishingMode::NoAck => self.publish_unconfirmed(records, partitions).await,
+            BrokerPublishingMode::NoAck => {
+                self.publish_unconfirmed(producer, records, partitions)
+                    .await
+            }
             BrokerPublishingMode::Ack(settings) => {
-                self.publish_confirmed(records, settings, partitions).await
+                self.publish_confirmed(producer, records, settings, partitions)
+                    .await
             }
         }
+    }
+}
+
+impl nervix_connector::EmitterConnector for KafkaTopicEmitter {
+    const KIND: nervix_models::EmitterEntityKind = Self::KIND;
+    type Plan = KafkaTopicEmitterConfig;
+    async fn open(plan: Self::Plan, host: EmitterHost) -> EmitterStartResult<Self> {
+        Self::prepare(plan, host)
     }
 }
 

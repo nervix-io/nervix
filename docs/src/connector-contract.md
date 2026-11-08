@@ -179,6 +179,12 @@ columns and retain column names and selected row order. Payload preparation and 
 preparation run through the real host adapters, as do staged writes and commits. A failed
 commit retains its staged work and acknowledgements until a successful commit.
 
+A public graph scenario can explicitly observe an emitter's construction count. The cold
+composition boundary records an attempt only for an emitter that the scenario armed, across the
+nodes sharing its injector. The scenario checks this count alongside actual publication and
+acknowledgement; the observation supplies no connector, publication answer or retry decision.
+Its keyed counter ends with that scenario and is absent from ordinary builds.
+
 The fake's channels, synchronization and ownership come from `nervix-primitives`; the server's
 Shuttle and Loom features propagate through its dev-dependency. Host unit tests check policy
 and value retention. Its shared assertion logs serialize one synchronous observation update
@@ -466,7 +472,7 @@ names no host. One owner reads the address before a client is committed and agai
 connection: it refuses an address whose scheme is not `amqp` or `amqps`, that names no host or that
 names port 0, leaves the credentials, virtual host and query options to Lapin's grammar, and never
 repeats the address in a refusal. Every connection resolves that host again through the node resolver: an emitter's start, its
-reopening after a failed publish, and each ingestor instance's resume. A literal IPv4 or IPv6 address
+resumption after a failed connection, and each ingestor instance's resume. A literal IPv4 or IPv6 address
 is its own answer. The connector tries the answers in resolution order, each within an equal share
 of what remains of the client's `connect_timeout_ms`, 30 seconds by default, and for `amqps`
 completes the TLS handshake within what is left. The handshake verifies the broker certificate against the host `addr` names, whichever of its
@@ -505,7 +511,7 @@ of the budget is reported beneath the ingestor's or emitter's own context for th
 elapsed deadline as its typed cause. An ingestor reports the failure as a resume failure and retries on
 its declared `RETRY POLICY`. An emitter reports an invalid address, CA file, client certificate,
 private key or deadline key as a configuration failure and every other connection failure as an
-initialization failure, and the emitter host reopens it on its backoff. Neither path
+resume failure, and the emitter host resumes the retained publisher on its backoff. Neither path
 acknowledges undelivered data: an ingestor that cannot connect holds no delivery, and an emitter that
 cannot connect confirms nothing, so the input stays unacknowledged until a later connection
 delivers it.
@@ -2277,7 +2283,35 @@ also converts OTEL resource literals and the Iceberg commit cadence and size int
 Initial startup, reassignment and an entity swap use that same plan. A swap publishes new ingestor and
 remote consumer edges from the new plan; it does not reconstruct the emitter from a Model in the
 host. The host resolves resource mounts and binds the lowered VM programs to installed schemas and
-UDFs when it starts the task. A retry reopens the emitter with the same typed configuration.
+UDFs when it starts the task. `EmitterConnector::open(plan, host)` consumes the typed configuration
+and host handles once. It performs local validation and TLS preparation without network I/O.
+The awaitable `suspend`, `resume` and `close` hooks return `EmitterLifecycleStep`: immediate outcomes
+stay inline, and only asynchronous transport work owns a boxed future. A retained usable client
+therefore adds no allocation to recovery. The host protocol borrows its existing readiness service.
+
+`EmitterLifecycle::resume` acquires the connection; a transient publish failure calls `suspend`
+then `resume` on that same instance after the policy's backoff. A failed resume retains that owner,
+its prepared configuration, pool lease, staged data and pending confirmations for another attempt.
+An explicit local configuration refusal is not retried as transport acquisition. Composition may
+retry before any instance exists when host pool acquisition or bounded local preparation refused
+without judging the configuration; after an instance exists it is never opened again. A resume
+failure retains a typed lifecycle context and
+its driver cause and is transient. A resume may return `Waiting { retry_after }`; the host waits
+at least that long before trying again. Drivers that own reconnect keep their native client and its
+existing internal reconnect behavior; the host never repeats connector configuration preparation.
+
+RabbitMQ isolates an uncertain publish's connection and channel before recovery and repeats its
+passive destination-existence check under the original connect budget. This is readiness validation,
+not repeating configuration or resolving an SQS queue URL. A missing queue or exchange must still
+refuse recovery before the next write; otherwise an unrouteable `NO ACK` write could be discarded.
+
+Readiness is reported through `EmitterHost::mark_ready` and `mark_unready`, independently of
+transient failures. The host marks the instance unready before suspension and ready after a ready
+resume. Its scalar handle belongs to the exact task lifetime; retirement removes only that handle,
+so a predecessor cannot change its replacement's readiness. Successful resumption does not clear
+the failure of unresolved work: publication or commit must resolve that work first. A retry during
+a drain uses the same protocol, ACK keepalive and original stop deadline. Cancelling a resume keeps
+the instance and its completed suspension, so a later attempt resumes it without constructing again.
 
 A `CLIENT CONSUMER EMITTER ... TO SCHEMA` is a native emitter plan, not an external connector plan. Its typed
 plan carries the exact output schema, declared `BATCH` limit and required ACK window, timeout and
@@ -2296,7 +2330,7 @@ the host assigned each record of the write. For each new payload, the host calls
 The connector either returns its external bytes or refuses the payload with a definitive
 structured message error. The ordinary preparation returns the codec's bytes unchanged. The host
 retains the successful preparation with its source members for both single-row and batch payloads;
-retries and reopened connectors receive those same bytes without re-encoding or preparing again.
+retries receive those same bytes without re-encoding or preparing again.
 A **row emitter** receives a run of host-projected Arrow
 carriers of one source relay and concrete branch, the target columns their mapped columns are
 written to, and each carrier's selected rows, execution time and, for an emitter that retains them,
@@ -2434,12 +2468,17 @@ and metrics. The connector owns the external
 operation and its completion point. A receiver-requested delay, which a connector attaches to the
 attempt's failure, can extend, but cannot shorten, the host's retry backoff; the backoff sequence
 advances as it would without it. The host ignores a delay whose end its monotonic clock cannot
-represent, so the backoff alone decides that wait. An emitter may keep its client after a
-publish failure when reopening it would discard staged work or a persistent session, or, as the
-HTTP request emitter does, when it holds nothing between attempts and reopening it would clear the
+represent, so the backoff alone decides that wait. Every emitter retains its instance across
+transient failures; lifecycle recovery never discards staged work, a persistent session or the
 transient failure its pending work is still waiting out.
 
 ### Finishing an emitter
+
+The host calls `close` only after it has received the terminal finish outcome, or after an ending
+without a finish deadline has been explicitly reported unfinished. Close ends the exact instance
+and marks it unready. The host bounds close by the existing task shutdown grace. A failed or
+expired stop drain retains the running instance; it does not close or replace its staged work.
+
 
 Every emitter implements `finish`, and no emitter inherits a default. A publish reports a record
 delivered at the completion point its mode declares, and for `NO ACK` on Kafka, Pulsar and MQTT
@@ -2720,7 +2759,7 @@ or its declared `other` default. A codec-supplied platform is preserved. The str
 schema requires a positive request timeout, and its native DSN parser runs at the existing
 pre-commit offline boundary without network I/O. Both the
 envelope header and the event carry that identity, and every attempt sends the retained envelope
-byte for byte, including after the host reopens the emitter. Preparation checks the final event
+byte for byte, including after the host resumes the emitter. Preparation checks the final event
 against the vocabulary-owned 1 MB decompressed event limit. It writes every other member with the value it
 read, a number exactly within the 64-bit integer range and otherwise as the nearest 64-bit float. Both classify a definite local refusal as a record rejection;
 their transport and service failures retain their existing retry boundaries.
@@ -2736,7 +2775,7 @@ force flush or a drain, writes it again byte for byte with the same members, ahe
 packed after it, and never writes a payload the emitter already confirmed or rejected. The retry
 schedule keeps the members' acknowledgements alive while they wait, and the buffer counts them as
 work the node still holds until they resolve. The retained payloads live with the buffer rather
-than the connector, so reopening a connector between attempts keeps them; only a failure that ends
+than the connector, and transport resumption keeps them; only a failure that ends
 the attempt for good releases them, and their members then follow the error policy with every other
 unresolved row. A row emitter names every member itself, so its retry writes only the rows it left
 unresolved; MongoDB's per-document results shrink a retried bulk write this way. That includes a
@@ -2833,7 +2872,7 @@ The shared client owns that file through its last clone; its final drop deletes 
 The generated path and combined contents
 are not added to stored client configuration. Uploaded resources keep their own storage contract.
 `sentry-prepared-envelopes` checks complete event preservation, defaults, framing and attempt
-bytes; the one- and three-node Sentry scenarios qualify those bytes through a reopened connector
+bytes; the one- and three-node Sentry scenarios qualify those bytes through a resumed connector
 after a mock endpoint's `503` response. See
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md#behavioral-properties).
 
@@ -2898,7 +2937,7 @@ receiver refuses rejects every row it carries with one shared error reference, a
 again. A request whose outcome the connector did not learn stays retained with its bytes and rows,
 and so does every request after it in that write. The next attempt, whether a retry, a force flush
 or a drain, sends it byte for byte, observed timestamps included, through whichever connector the
-emitter holds by then; the host reopens an OTEL connector after a failed publish, which is why the
+emitter holds by then; the host resumes the retained OTEL connector after a failed publish, and the
 retained request lives with the buffer. Its rows are never mapped, converted or regrouped again.
 A receiver's `partial_success` still acknowledges the whole request with a warning, because OTLP
 does not identify the rejected members.
@@ -3271,13 +3310,13 @@ sequenceDiagram
   message written before it, and the answer delivers the write; a write costs that one round trip,
   not one per message. When the client sets `timeout_ms`, a round trip the broker does not answer
   within it fails the write with that bound as its typed cause, the write's messages stay
-  unresolved for the host's retry, and the host reopens the emitter; without the key the round trip
+  unresolved for the host's retry, and the host resumes the emitter; without the key the round trip
   waits as long as the connection lives. A broker that closes the channel names its reason, and
   Lapin hands it only to what was waiting on the channel at that moment, so the emitter reads the
   reason from its connection's events, once for every channel it loses. The size refusal leaves the
   connection open, and the emitter opens its next channel on it; a message the broker had not
   confirmed ahead of the refused one may be in its queue, so the attempt then fails for the host's
-  retry. Any other loss is an infrastructure failure, and the host reopens the emitter. Lapin logs
+  retry. Any other loss is an infrastructure failure, and the host resumes the emitter. Lapin logs
   every message the broker returns at `warn` with the whole message, its body and properties
   included, so the node drops that event beneath every trace filter
   ([The Node's Log](./errors-and-diagnostics.md#the-nodes-log)), and what the log carries about a

@@ -111,6 +111,14 @@ impl EmitterConnectorStarter {
     }
 
     /// Opens the connector `plan` names.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "installs one emitter instance before publishing through it; recovery \
+                      retains that instance and never calls this constructor"
+        )
+    )]
     pub(super) async fn start(
         plan: &EmitterStartPlan,
         context: &EmitterConnectorContext,
@@ -119,16 +127,21 @@ impl EmitterConnectorStarter {
         codec: Option<&Arc<CompiledCodec>>,
     ) -> EmitterRuntimeResult<Box<dyn EmitterConnector>> {
         let label = &plan.label;
+        context
+            .runtime
+            .inner
+            .fault_injection
+            .record_emitter_open(&context.emitter);
         let batch = plan.connector.batch();
         let connector: Box<dyn EmitterConnector> = match &plan.connector {
             EmitterConnectorPlan::Client(ClientEmitterPlan::Consumer(connector)) => {
                 Self::client(connector, context, output_schema, plan)?
             }
             EmitterConnectorPlan::Http(HttpEmitterPlan::Request(connector)) => {
-                Self::http(connector, context, codec)?
+                Self::http(connector, context, codec).await?
             }
             EmitterConnectorPlan::Kafka(KafkaEmitterPlan::Topic(connector)) => {
-                Self::kafka(connector, context, codec, label, batch)?
+                Self::kafka(connector, context, codec, label, batch).await?
             }
             EmitterConnectorPlan::Pulsar(PulsarEmitterPlan::Topic(connector)) => {
                 Self::pulsar(connector, context, codec, label, batch).await?
@@ -143,7 +156,7 @@ impl EmitterConnectorStarter {
                 Self::redis(connector, context, codec, label, batch).await?
             }
             EmitterConnectorPlan::Mqtt(MqttEmitterPlan::Topic(connector)) => {
-                Self::mqtt(connector, context, codec, label, batch, plan)?
+                Self::mqtt(connector, context, codec, label, batch, plan).await?
             }
             EmitterConnectorPlan::Nats(NatsEmitterPlan::Subject(connector)) => {
                 Self::nats(connector, context, codec, label, batch, plan).await?
@@ -161,11 +174,13 @@ impl EmitterConnectorStarter {
                 Self::sqs(connector, context, codec, label, batch).await?
             }
             EmitterConnectorPlan::Sentry(SentryEmitterPlan::Event(connector)) => {
-                Self::sentry(connector, context, codec, label, batch)?
+                Self::sentry(connector, context, codec, label, batch).await?
             }
-            EmitterConnectorPlan::Otel(connector) => Self::otel(connector, context, input_schema)?,
+            EmitterConnectorPlan::Otel(connector) => {
+                Self::otel(connector, context, input_schema).await?
+            }
             EmitterConnectorPlan::ClickHouse(ClickHouseEmitterPlan::Table(connector)) => {
-                Self::clickhouse(connector, context, input_schema)?
+                Self::clickhouse(connector, context, input_schema).await?
             }
             EmitterConnectorPlan::Postgres(PostgresEmitterPlan::Table(connector)) => {
                 Self::postgres(connector, context, input_schema).await?

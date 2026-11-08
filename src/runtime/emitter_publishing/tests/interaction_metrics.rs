@@ -29,6 +29,71 @@ fn encoded_connector(
     ))
 }
 
+#[nervix_primitives::test]
+async fn a_stop_drain_recovers_the_same_instance_and_finishes_before_close() {
+    use nervix_connector::{EmitterConnector as _, ParsedRetryPolicy};
+    use nervix_connector_fake::{
+        EmitterLifecycleOperation as Op, FakeEmitter, PublishAnswer, Records,
+    };
+
+    let context = emitter_context();
+    let plan = FakeEmitter::<Records>::new([PublishAnswer::Fail, PublishAnswer::ConfirmAll]);
+    let observations = plan.observations();
+    let driver = FakeEmitter::open(plan, context.emitter_host())
+        .await
+        .assured("fixture opens");
+    let schema = crate::runtime::test_fixtures::EntrypointTestDomain {
+        relays: &[],
+        fields: &[("value", ParseAsType::I64)],
+        branch_fields: &[],
+    };
+    let mut connector = EmitterConnectorState::opened(Box::new(
+        crate::runtime::emitter_encoding::EncodedRecordEmitter {
+            connector: Box::new(driver),
+            codec: schema.codec(),
+            batch: None,
+        },
+    ));
+    let mut buffer = measured_buffer(&context);
+    buffer
+        .push(
+            &context,
+            EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100)),
+        )
+        .assured("the fixture batch is buffered");
+    let faults = ConfiguredFaultInjection::default();
+    let mut backoff = RuntimeReconnectBackoff::from_policy(ParsedRetryPolicy {
+        backoff: Duration::from_millis(1),
+        max_backoff: Duration::from_millis(2),
+    });
+    let (_shutdown, mut shutdown_rx) = watch::channel(false);
+    let (_stop, mut stop_rx) = watch::channel(None);
+    let mut control = EmitterPublishControl {
+        fault_injection: &faults,
+        shutdown_rx: &mut shutdown_rx,
+        stop_rx: &mut stop_rx,
+        backoff: &mut backoff,
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let drained = connector
+        .drain_for_stop("scripted", &context, &mut control, &mut buffer, deadline)
+        .await;
+    let EmitterStopDrainOutcome::Finished { report, .. } = drained else {
+        panic!("the retained emitter must recover and drain by its original stop deadline");
+    };
+    assert_eq!(report.map(|report| report.messages), Some(1));
+    assert!(buffer.is_empty());
+    connector.close_transport(&context).await;
+    let observed = observations.lock();
+    assert_eq!(
+        observed.lifecycle,
+        [Op::Open, Op::Suspend, Op::Resume, Op::Finish, Op::Close]
+    );
+    assert_eq!(observed.finishes, [deadline]);
+    assert_eq!(observed.payloads().len(), 2);
+    assert_eq!(observed.payloads()[0], observed.payloads()[1]);
+}
+
 struct DestinationProbe<'a> {
     context: &'a EmitterConnectorContext,
 }

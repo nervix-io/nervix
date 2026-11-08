@@ -149,7 +149,8 @@ const STAGED_WRITE_RESERVATION_BYTES: u64 = 1;
 /// appends every staged batch to its table in one catalog commit.
 pub struct IcebergTableEmitter {
     host: EmitterHost,
-    client: IcebergTableEmitterClient,
+    client: Option<IcebergTableEmitterClient>,
+    prepared: Option<Box<IcebergConnectionPreparation>>,
     commit_state: IcebergCommitState,
     /// The exact Arrow schema every staging file is written and read back with, which is the
     /// host's mapped schema with datetime columns narrowed to the microsecond resolution Iceberg
@@ -520,9 +521,22 @@ struct IcebergEncryptedTable;
 /// What an emitter opens its REST catalog with: the properties the pairing of its two clients
 /// yields, the catalog client's TLS configuration, and the storage factory its tables' file I/O
 /// uses.
+struct IcebergConnectionPreparation {
+    catalog_name: String,
+    properties: BTreeMap<String, String>,
+    tls: StdArc<rustls::ClientConfig>,
+    storage: DnsStorageFactory,
+    dns: DnsResolver,
+    namespace: nervix_models::IcebergNamespace,
+    table: IcebergTableName,
+    location: String,
+    file_name_prefix: String,
+    catalog: Option<StdArc<dyn Catalog>>,
+}
+
 struct IcebergCatalogConnection<'a> {
     name: &'a str,
-    properties: IcebergCatalogProperties<'a>,
+    properties: &'a BTreeMap<String, String>,
     tls: &'a rustls::ClientConfig,
     storage: DnsStorageFactory,
 }
@@ -531,7 +545,7 @@ impl IcebergTableEmitter {
     pub const KIND: nervix_models::EmitterEntityKind =
         nervix_models::EmitterEntityKind::Iceberg(nervix_models::IcebergEmitterEntity::Table);
 
-    pub async fn new(
+    async fn prepare(
         config: IcebergTableEmitterConfig,
         host: EmitterHost,
     ) -> EmitterStartResult<Self> {
@@ -556,7 +570,10 @@ impl IcebergTableEmitter {
         let storage_deadline = ConfiguredDeadline::timeout(&storage_config)
             .change_context(EmitterOpenError::InvalidConfiguration { connector: ICEBERG })?;
         let properties = IcebergCatalogProperties::pair(backend, &storage_config, &catalog_config)
-            .change_context(EmitterOpenError::InvalidConfiguration { connector: ICEBERG })?;
+            .change_context(EmitterOpenError::InvalidConfiguration { connector: ICEBERG })?
+            .iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect();
         let catalog_tls = IcebergClientTlsError::Catalog.client_config(&catalog_config)?;
         let storage_tls = IcebergClientTlsError::ObjectStore.client_config(&storage_config)?;
         let initialize_catalog = |error: IcebergError| {
@@ -567,45 +584,26 @@ impl IcebergTableEmitter {
         let storage =
             DnsStorageFactory::new(backend, &dns, &storage_root, storage_deadline, &storage_tls)
                 .map_err(initialize_catalog)?;
-        let catalog: StdArc<dyn Catalog> = StdArc::new(
-            IcebergCatalogConnection {
-                name: &catalog_name,
-                properties,
-                tls: &catalog_tls,
-                storage,
-            }
-            .open(&dns)
-            .await
-            .map_err(initialize_catalog)?,
-        );
-        let catalog_table = IcebergCatalogTable {
-            namespace: &namespace,
-            table: &table,
+        let prepared = IcebergConnectionPreparation {
+            catalog_name,
+            properties,
+            tls: catalog_tls,
+            storage,
+            dns,
+            namespace,
+            location,
+            file_name_prefix: format!(
+                "{writer}-{}-{}-{}",
+                table.as_str(),
+                actual_utc_now().unix_nanos(),
+                fastrand::u64(..)
+            ),
+            table,
+            catalog: None,
         };
-        let loaded = catalog_table.load(catalog.as_ref()).await?;
-        if loaded.metadata().location() != location {
-            return Err(
-                Report::new(EmitterOpenError::InvalidConfiguration { connector: ICEBERG })
-                    .attach_printable(format!(
-                        "table '{}' is registered at '{}' but emitter location is '{location}'",
-                        loaded.identifier(),
-                        loaded.metadata().location()
-                    )),
-            );
-        }
-        Self::validate_table_schema(&staged_schema, loaded.metadata().current_schema())?;
         Ok(Self {
-            client: IcebergTableEmitterClient {
-                catalog,
-                table: loaded,
-                file_name_prefix: format!(
-                    "{writer}-{}-{}-{}",
-                    table.as_str(),
-                    actual_utc_now().unix_nanos(),
-                    fastrand::u64(..)
-                ),
-                data_file_sequence: 0,
-            },
+            client: None,
+            prepared: Some(Box::new(prepared)),
             commit_state: IcebergCommitState::default(),
             staged_schema,
             commit_policy: commit,
@@ -1092,6 +1090,82 @@ impl EmitterLifecycle for IcebergTableEmitter {
         Self::KIND
     }
 
+    fn needs_resume(&mut self) -> bool {
+        self.client.is_none()
+    }
+
+    fn resume(
+        &mut self,
+    ) -> nervix_connector::EmitterLifecycleStep<'_, nervix_connector::EmitterResume> {
+        if !self.needs_resume() {
+            return nervix_connector::EmitterLifecycleStep::ready(Ok(
+                nervix_connector::EmitterResume::Ready,
+            ));
+        }
+        nervix_connector::EmitterLifecycleStep::run(async move {
+            let Some(prepared) = &mut self.prepared else {
+                return Ok(nervix_connector::EmitterResume::Ready);
+            };
+            let resuming = nervix_connector::EmitterLifecycleError::Resume { connector: ICEBERG };
+            if prepared.catalog.is_none() {
+                let catalog = IcebergCatalogConnection {
+                    name: &prepared.catalog_name,
+                    properties: &prepared.properties,
+                    tls: &prepared.tls,
+                    storage: prepared.storage.clone(),
+                }
+                .open(&prepared.dns)
+                .await;
+                let catalog = match catalog {
+                    Ok(catalog) => catalog,
+                    Err(error) => {
+                        let description = format!(
+                            "failed to initialize Iceberg catalog '{}': {error}",
+                            prepared.catalog_name
+                        );
+                        return Err(Report::new(error)
+                            .change_context(resuming)
+                            .attach_printable(description));
+                    }
+                };
+                prepared.catalog = Some(StdArc::new(catalog));
+            }
+            let catalog = prepared
+                .catalog
+                .as_ref()
+                .verified("catalog acquisition completed");
+            let loaded = IcebergCatalogTable {
+                namespace: &prepared.namespace,
+                table: &prepared.table,
+            }
+            .load(catalog.as_ref())
+            .await
+            .change_context(resuming)?;
+            if loaded.metadata().location() != prepared.location {
+                return Err(Report::new(EmitterOpenError::InvalidConfiguration {
+                    connector: ICEBERG,
+                })
+                .attach_printable(format!(
+                    "table '{}' is registered at '{}' but emitter location is '{}'",
+                    loaded.identifier(),
+                    loaded.metadata().location(),
+                    prepared.location
+                ))
+                .change_context(resuming));
+            }
+            Self::validate_table_schema(&self.staged_schema, loaded.metadata().current_schema())
+                .change_context(resuming)?;
+            self.client = Some(IcebergTableEmitterClient {
+                catalog: catalog.clone(),
+                table: loaded,
+                file_name_prefix: std::mem::take(&mut prepared.file_name_prefix),
+                data_file_sequence: 0,
+            });
+            self.prepared = None;
+            Ok(nervix_connector::EmitterResume::Ready)
+        })
+    }
+
     /// The catalog and object-store clients hold nothing between writes. Rows wait staged for
     /// the commit, which a stop asks for before it finishes the emitter.
     async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
@@ -1100,10 +1174,6 @@ impl EmitterLifecycle for IcebergTableEmitter {
 
     /// A staged batch outlives its catalog client, so a publish failure keeps the client rather
     /// than reopening it and losing what is already on disk.
-    fn keeps_client_on_publish_failure(&self) -> bool {
-        true
-    }
-
     fn staged_commit(&self) -> Option<EmitterStagedCommit> {
         if self.staged_batches.is_empty() {
             return None;
@@ -1177,7 +1247,12 @@ impl IcebergTableEmitter {
     ) -> EmitterWriteResult<nervix_connector::RowRequests<()>> {
         let projection = IcebergTableProjection::plan(
             &self.staged_schema,
-            self.client.table.metadata().current_schema(),
+            self.client
+                .as_ref()
+                .verified("the host resumes the emitter before publishing")
+                .table
+                .metadata()
+                .current_schema(),
         )
         .map_err(IcebergColumnError::publish_failure)?;
         let projected = projection
@@ -1380,6 +1455,8 @@ impl IcebergTableEmitter {
             .await?;
             let data_files = self
                 .client
+                .as_mut()
+                .verified("the host resumes the emitter before committing")
                 .write_data_files(&self.staged_schema, batches, self.batch_policy)
                 .await?;
             // The rows the charge covered are in data files now.
@@ -1394,7 +1471,11 @@ impl IcebergTableEmitter {
             }
             preparation.record_written(group.batches, data_files);
         }
-        self.client.commit_prepared(preparation).await?;
+        self.client
+            .as_mut()
+            .verified("the host resumes the emitter before committing")
+            .commit_prepared(preparation)
+            .await?;
         let covered = preparation.covered;
         self.commit_state.preparation = None;
         Ok(self.publish_committed(covered).await)
@@ -1788,6 +1869,14 @@ impl IcebergCatalogConnection<'_> {
             .with_storage_factory(StdArc::new(self.storage))
             .load(self.name, properties.collect())
             .await
+    }
+}
+
+impl nervix_connector::EmitterConnector for IcebergTableEmitter {
+    const KIND: nervix_models::EmitterEntityKind = Self::KIND;
+    type Plan = IcebergTableEmitterConfig;
+    async fn open(plan: Self::Plan, host: EmitterHost) -> EmitterStartResult<Self> {
+        Self::prepare(plan, host).await
     }
 }
 

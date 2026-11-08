@@ -114,6 +114,7 @@ pub trait PostgresConnections: Send + Sync + 'static {
 
 /// What one Postgres emitter inserts with, from its typed emitter plan.
 pub struct PostgresTableEmitterConfig {
+    pub connections: Box<dyn PostgresConnections>,
     pub table: PostgresTableName,
     pub conflict_action: PostgresConflictAction,
     /// The emitter's `BATCH` limits, which bound the rows and the measured bytes of every insert.
@@ -496,12 +497,9 @@ impl PostgresTableEmitter {
             reason = "external Arrow access and PostgreSQL driver preparation own their effects"
         )
     )]
-    pub fn new(
-        config: PostgresTableEmitterConfig,
-        connections: Box<dyn PostgresConnections>,
-        host: EmitterHost,
-    ) -> EmitterStartResult<Self> {
+    fn prepare(config: PostgresTableEmitterConfig, host: EmitterHost) -> EmitterStartResult<Self> {
         let PostgresTableEmitterConfig {
+            connections,
             table,
             conflict_action,
             batch,
@@ -1290,6 +1288,14 @@ impl<'a> MappedTextColumn<'a> {
 fn float_text(value: f64) -> Option<String> {
     let number = serde_json::Number::from_f64(value)?;
     Some(number.to_string())
+}
+
+impl nervix_connector::EmitterConnector for PostgresTableEmitter {
+    const KIND: nervix_models::EmitterEntityKind = Self::KIND;
+    type Plan = PostgresTableEmitterConfig;
+    async fn open(plan: Self::Plan, host: EmitterHost) -> EmitterStartResult<Self> {
+        Self::prepare(plan, host)
+    }
 }
 
 #[cfg(test)]

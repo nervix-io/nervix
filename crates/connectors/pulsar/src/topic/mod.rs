@@ -30,6 +30,14 @@ mod connection;
 mod ingestor;
 mod message_times;
 
+impl nervix_connector::EmitterConnector for PulsarTopicEmitter {
+    const KIND: nervix_models::EmitterEntityKind = Self::KIND;
+    type Plan = PulsarTopicEmitterConfig;
+    async fn open(plan: Self::Plan, host: EmitterHost) -> EmitterStartResult<Self> {
+        Self::prepare(plan, host).await
+    }
+}
+
 #[cfg(test)]
 mod message_times_tests;
 #[cfg(test)]
@@ -42,7 +50,7 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use connection::PulsarClientConnection;
 pub use connection::{PulsarClientError, PulsarRefusal};
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use futures_util::{FutureExt, StreamExt as _, stream::FuturesUnordered};
 pub use ingestor::{
     PulsarAckReceipts, PulsarMessageProperties, PulsarTopicIngestor, PulsarTopicIngestorError,
@@ -51,6 +59,8 @@ pub use ingestor::{
 };
 use message_times::{PulsarMessageTimeError, PulsarMessageTimes};
 use meticulous::OptionExt as _;
+#[cfg(test)]
+use nervix_connector::EmitterConnector as _;
 use nervix_connector::{
     AckConfirmation, BrokerAnswer, BrokerPublishingMode, BrokerVerdict, ConfirmationWindow,
     ConfirmationWindowError, EmitterFinish, EmitterFinishError, EmitterFinishResult, EmitterHost,
@@ -173,8 +183,15 @@ pub struct PulsarTopicEmitterConfig {
     pub partition_from_branch: bool,
 }
 
+struct PulsarProducerPreparation {
+    connection: connection::PreparedPulsarClient,
+    topic: String,
+    policy: RoutingPolicy,
+}
+
 pub struct PulsarTopicEmitter {
-    producer: pulsar::Producer<TokioExecutor>,
+    producer: Option<pulsar::Producer<TokioExecutor>>,
+    prepared: Option<PulsarProducerPreparation>,
     publishing: PulsarPublishing,
 }
 
@@ -425,7 +442,7 @@ where
 }
 
 impl PulsarTopicEmitter {
-    pub async fn new(
+    async fn prepare(
         config: PulsarTopicEmitterConfig,
         _host: EmitterHost,
     ) -> EmitterStartResult<Self> {
@@ -451,8 +468,14 @@ impl PulsarTopicEmitter {
             })),
             None => RoutingPolicy::RoundRobin,
         };
-        let producer =
-            Self::producer_from_config(&config.config, &config.topic, config.mode, policy).await?;
+        let operation_timeout = match config.mode {
+            BrokerPublishingMode::NoAck => None,
+            BrokerPublishingMode::Ack(settings) => Some(settings.timeout),
+        };
+        let connection = PulsarClientConnection::new(&config.config, operation_timeout)
+            .prepare()
+            .map_err(Self::client_error)?;
+        let topic_name = qualified_topic(&config.config, &config.topic);
         let publishing = match (config.mode, selected) {
             (mode, None) => mode.into(),
             (BrokerPublishingMode::NoAck, Some(selected)) => PulsarPublishing::RoutedNoAck {
@@ -464,37 +487,14 @@ impl PulsarTopicEmitter {
             }
         };
         Ok(Self {
-            producer,
+            producer: None,
+            prepared: Some(PulsarProducerPreparation {
+                connection,
+                topic: topic_name,
+                policy,
+            }),
             publishing,
         })
-    }
-
-    async fn producer_from_config(
-        config: &[ClientConfigEntry],
-        topic: &PulsarTopicName,
-        mode: BrokerPublishingMode,
-        policy: RoutingPolicy,
-    ) -> EmitterStartResult<pulsar::Producer<TokioExecutor>> {
-        // A publish's acknowledgement timeout bounds what the driver waits for on its behalf.
-        let operation_timeout = match mode {
-            BrokerPublishingMode::NoAck => None,
-            BrokerPublishingMode::Ack(settings) => Some(settings.timeout),
-        };
-        let pulsar = PulsarClientConnection::new(config, operation_timeout)
-            .open()
-            .await
-            .map_err(Self::client_error)?;
-        let topic_name = qualified_topic(config, topic);
-        pulsar
-            .producer()
-            .with_topic(topic_name)
-            .with_options(ProducerOptions {
-                routing_policy: Some(policy),
-                ..ProducerOptions::default()
-            })
-            .build()
-            .await
-            .map_err(Self::start_error)
     }
 
     /// Every way an ACK publish ends goes through the shared window, which settles answers
@@ -627,6 +627,51 @@ impl EmitterLifecycle for PulsarTopicEmitter {
         Self::KIND
     }
 
+    fn needs_resume(&mut self) -> bool {
+        self.producer.is_none()
+    }
+
+    fn resume(
+        &mut self,
+    ) -> nervix_connector::EmitterLifecycleStep<'_, nervix_connector::EmitterResume> {
+        if !self.needs_resume() {
+            return nervix_connector::EmitterLifecycleStep::ready(Ok(
+                nervix_connector::EmitterResume::Ready,
+            ));
+        }
+        nervix_connector::EmitterLifecycleStep::run(async move {
+            if let Some(PulsarProducerPreparation {
+                connection,
+                topic,
+                policy,
+            }) = &self.prepared
+            {
+                let resuming = nervix_connector::EmitterLifecycleError::Resume {
+                    connector: PULSAR.keyword(),
+                };
+                let client = connection
+                    .open()
+                    .await
+                    .map_err(Self::client_error)
+                    .change_context(resuming)?;
+                let producer = client
+                    .producer()
+                    .with_topic(topic.clone())
+                    .with_options(ProducerOptions {
+                        routing_policy: Some(policy.clone()),
+                        ..ProducerOptions::default()
+                    })
+                    .build()
+                    .await
+                    .map_err(Self::start_error)
+                    .change_context(resuming)?;
+                self.producer = Some(producer);
+                self.prepared = None;
+            }
+            Ok(nervix_connector::EmitterResume::Ready)
+        })
+    }
+
     /// Producer acceptance completes NO ACK records, while finish waits for their receipts before
     /// dropping the producer. An ACK publish already settled all answers it could observe.
     async fn finish(&mut self, deadline: Instant) -> EmitterFinishResult {
@@ -645,12 +690,26 @@ impl RecordEmitter for PulsarTopicEmitter {
         let settings = match publishing {
             PulsarPublicationRef::NoAck(receipts) => {
                 return receipts
-                    .publish(&mut self.producer, records, selected)
+                    .publish(
+                        self.producer
+                            .as_mut()
+                            .verified("the host resumes the emitter before publishing"),
+                        records,
+                        selected,
+                    )
                     .await;
             }
             PulsarPublicationRef::Ack(settings) => settings,
         };
-        Self::publish_confirmed(&mut self.producer, records, settings, selected).await
+        Self::publish_confirmed(
+            self.producer
+                .as_mut()
+                .verified("the host resumes the emitter before publishing"),
+            records,
+            settings,
+            selected,
+        )
+        .await
     }
 }
 
@@ -1177,6 +1236,11 @@ mod tests {
     /// A host that ignores what the emitter reports, for tests that only read its publish outcomes.
     struct SilentHost;
 
+    impl nervix_connector::EmitterReadiness for SilentHost {
+        fn mark_ready(&self) {}
+        fn mark_unready(&self) {}
+    }
+
     impl nervix_connector::EmitterTransientErrorStatus for SilentHost {
         fn record_transient_error(&self, _reason: String, _retry_after: Duration) {}
 
@@ -1224,9 +1288,14 @@ mod tests {
             topic: PulsarTopicName::parse("limited").expect("the test topic is a valid topic name"),
             mode,
         };
-        PulsarTopicEmitter::new(config, EmitterHost::new(SilentHost))
+        let mut emitter = PulsarTopicEmitter::open(config, EmitterHost::new(SilentHost))
             .await
-            .expect("the fake broker serves the producer handshake")
+            .assured("the fake broker configuration is valid");
+        emitter
+            .resume()
+            .await
+            .assured("the fake broker serves the producer handshake");
+        emitter
     }
 
     fn confirmed(max_in_flight: usize) -> BrokerPublishingMode {
@@ -1344,7 +1413,7 @@ mod tests {
                 timeout: Duration::MAX,
             }),
         };
-        let Err(failure) = PulsarTopicEmitter::new(config, EmitterHost::new(SilentHost)).await
+        let Err(failure) = PulsarTopicEmitter::open(config, EmitterHost::new(SilentHost)).await
         else {
             panic!("the driver's timer must not receive a timeout past the clock range");
         };

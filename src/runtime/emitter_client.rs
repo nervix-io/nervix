@@ -286,10 +286,6 @@ impl EmitterLifecycle for ClientConsumerConnector {
     async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
         Ok(EmitterFinish::NothingHeld)
     }
-
-    fn keeps_client_on_publish_failure(&self) -> bool {
-        false
-    }
 }
 
 #[async_trait]

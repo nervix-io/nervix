@@ -339,8 +339,15 @@ async fn iceberg_catalog_authentication_uses_the_node_dns_client() {
             .assured("the object-store client can be built without a request");
     let catalog = IcebergCatalogConnection {
         name: "fixture",
-        properties: IcebergCatalogProperties::pair(IcebergStorageBackend::S3, &[], &catalog_config)
-            .assured("a catalog paired with an empty storage client sets no shared property"),
+        properties: &IcebergCatalogProperties::pair(
+            IcebergStorageBackend::S3,
+            &[],
+            &catalog_config,
+        )
+        .assured("a catalog paired with an empty storage client sets no shared property")
+        .iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect(),
         tls: &tls,
         storage,
     }
