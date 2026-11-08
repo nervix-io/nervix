@@ -403,11 +403,13 @@ pub(super) fn test_ingestor_quiesce_control(
     ingestor: &IngestorName,
     mode: IngestQuiesceMode,
 ) -> Arc<super::IngestorQuiesceControl> {
-    let metric_labels =
-        runtime
-            .inner
-            .metrics
-            .register_ingestor_quiesce(domain, ingestor, Unit::SINGLE, None);
+    let metric_labels = runtime.inner.metrics.register_ingestor_quiesce(
+        domain,
+        ingestor,
+        Unit::SINGLE,
+        None,
+        nervix_models::IngestorEntityKind::Http(nervix_models::HttpIngestorEntity::Endpoint),
+    );
     Arc::new(super::IngestorQuiesceControl::new(
         mode,
         runtime.inner.metrics.clone(),
@@ -427,7 +429,6 @@ pub(super) fn paced_domain_state(raw: &str) -> DomainState {
                     .parse()
                     .assured("250 milliseconds fits the fixture skew representation"),
             },
-            placement: nervix_models::PlacementPolicy::Neutral,
         },
         status: DomainStatus::Running,
         start_version: 0,
@@ -441,7 +442,6 @@ pub(super) fn unpaced_domain_state(raw: &str) -> DomainState {
         id: domain(raw),
         config: DomainConfig {
             pace: DomainPace::Unpaced,
-            placement: nervix_models::PlacementPolicy::Neutral,
         },
         status: DomainStatus::Running,
         start_version: 0,

@@ -121,10 +121,17 @@ Nervix records these raw metric families:
   overflow, memory-pressure zero-capacity behavior, or an interrupting termination
 - `nervix_ingestor_quiesce_rejected_total`: endpoint requests or connections refused while an
   ingestor cannot accept them
-- `nervix_ingestor_unfolding_refused_total`: payloads an ingestor handed over without an
-  acknowledgement that an ingestor did not deliver because the node's extension workers had no room
-  to unfold them, for an ingestor whose transport would not survive a held loop; see
-  [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full)
+- `nervix_ingestor_reads_total`: completed broker reads and scheduled polls, with bounded
+  `outcome` values `delivered`, `empty`, `failed` and `interrupted`
+- `nervix_ingestor_read_payloads_total` and `nervix_ingestor_read_bytes_total`: raw payloads and
+  their bytes handed over by broker reads or paced polls, before decoding, filtering and timestamp
+  admission. Transport redelivery counts again; replay of an internal quiesce buffer does not.
+- `nervix_ingestor_poll_duration_seconds`: elapsed wall seconds around paced polls, including
+  failed or interrupted polls. Broker reads have no duration observation because their wait is idle
+  time, rather than the cost of a scheduled operation.
+- `nervix_ingestor_unfolding_refused_total`: raw payloads refused because extension-worker
+  admission had no place, including acknowledged intake and endpoint requests. A retained payload
+  waiting for a place is not a refusal. See [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).
 - `nervix_ingestor_transport_redeliveries_total`: pending acknowledgements and rejections an
   ingestor discarded after its RabbitMQ, SQS or MQTT ingestor reconnected. The broker redelivers what
   the lost connection did not acknowledge, so each counted position is ingested again
@@ -187,7 +194,9 @@ The ingestor families `nervix_ingestor_unfolding_refused_total`,
 `nervix_ingestor_transport_redeliveries_total`, `nervix_ingestor_decode_rejections_total`,
 `nervix_ingestor_oversized_payloads_total`, `nervix_ingestor_header_values_dropped_total`
 and `nervix_ingestor_read_ahead_dropped_payloads_total`
-use `domain`, `ingestor`, and `physical_node_id` labels.
+use `domain`, `ingestor`, `physical_node_id`, `instance`, `connector` and `entity` labels.
+The same label set applies to the four quiesce families and the read/poll families; reads add
+`outcome`. Connector and entity values come from the vocabulary, such as `KAFKA` and `TOPIC`.
 Buffer families are gauges; dropped, rejected, refused, redelivered, decode-rejection, oversized
 and invalid-header families are monotonic counters. They are process-local: quiesce buffers do not
 migrate during termination or failover.
@@ -763,7 +772,8 @@ planned handoff or failover.
 `DESCRIBE INGESTOR` queries each unit's current owner and reports its global index, owner, running
 state and readiness. Its edge metric lines render `instance=<i>`. Ingestor-specific quiesce,
 redelivery, decode-rejection, oversize, header-drop, read-ahead-drop and unfolding-refusal metrics
-use `domain`, `ingestor`, `physical_node_id` and `instance`; a `Single` ingestor uses `instance="-"`.
+use `domain`, `ingestor`, `physical_node_id`, `instance`, `connector` and `entity`; a `Single`
+ingestor uses `instance="-"`.
 
 A `BranchAggregated` checkpoint belongs to an exact execution unit. Capture includes that unit's
 series with each series' physical-node attribution intact. Installation replaces only that unit's
@@ -774,3 +784,31 @@ their local assignment lifetime and are not restored from checkpoints; durable s
 metrics use the checkpoint store.
 Inspection discovers the current units through a key-only checkpoint listing, including before a
 stopped ingestor is restarted, and never substitutes one sibling's measurements for another's.
+
+## Ingestor Source Interactions
+
+`DESCRIBE INGESTOR` groups its existing seven quiesce, redelivery, decode-rejection and oversized
+lines under `source:`, followed by read/poll interaction lines. Each unit reports its own counters
+through its execution owner; remote inspection carries the same ordered lines. Counter lines
+include totals and wall rates in the connector-interaction format; domain rates are `-`. The poll
+histogram reports `count` and `sum_seconds`, using the same duration buckets as emitter interactions.
+
+A returned nonempty message batch is `delivered`; a successful answer carrying no payload, including
+an oversized-only answer, a resume request or end of input, is `empty`. A read returning an error is
+`failed`. A broker's interrupted answer is `interrupted` even when it returns a gathered prefix;
+that prefix still contributes its raw payloads and bytes and follows the existing intake path.
+A paced poll cancelled by a quiesce change or stop is `interrupted`. Partial per-record poll
+failures retain their existing error reporting; the poll's payload presence determines its
+successful read outcome. A driver error that prevents a poll is `failed`.
+
+Raw payload and byte totals measure the batches a broker read or paced poll returned, before
+decoding, filtering, timestamp admission or waiting for unfolding capacity. Replaying a retained
+buffer does not increment them; a transport redelivery is a new read and does. Request-scoped
+endpoints and client producers perform no transport read or scheduled poll, so their read counters
+stay zero. Their intake and refusal counters keep their own meaning. Only paced polls contribute
+duration samples: a broker read waits for arrivals, so its elapsed time is not measured.
+
+All bounded children start at zero. Read recording touches retained atomic children, with no label
+resolution or registry access. Counters are process-local observations, not durable delivery
+positions; a completed read does not imply that decoding, filtering or graph execution accepted its
+payload. Retirement withdraws only the exact unit's series and leaves siblings intact.

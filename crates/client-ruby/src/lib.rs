@@ -29,6 +29,7 @@ mod gvl;
 mod schema;
 mod sessions;
 mod subscriptions;
+mod value_object;
 mod values;
 
 use magnus::{Error, RClass, RModule, Ruby, prelude::*};

@@ -10,7 +10,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     BranchKeyFingerprint, ClusterNodeName, CreateSchema, DomainClockAuthority, DomainConfig,
     DomainName, DomainPace, DomainStartPoint, DomainState, DomainStatus, FieldName, ModelKind,
-    ModelName, ParseAsType, PlacementPolicy, RelayName, SchemaName, Timestamp,
+    ModelName, ParseAsType, RelayName, SchemaName, Timestamp,
 };
 use nervix_primitives::{
     sync::{mpsc, watch},
@@ -108,7 +108,6 @@ impl RelayInteractionBenchmark {
                 id: domain,
                 config: DomainConfig {
                     pace: DomainPace::Unpaced,
-                    placement: PlacementPolicy::Neutral,
                 },
                 status: DomainStatus::Running,
                 start_version: 0,

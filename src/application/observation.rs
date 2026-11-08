@@ -62,16 +62,17 @@ use super::{
         format_ingestor_describe_output, format_ingestor_listing_line,
         format_junction_describe_output, format_lookup_describe_output,
         format_placement_runtime_node, format_placement_runtime_nodes,
-        format_placement_runtime_nodes_in_context, format_reingestor_describe_output,
-        format_relay_describe_output, format_reorderer_describe_output,
-        format_resource_description, format_resource_entry_lines, format_resource_usage_lines,
-        format_wasm_processor_describe_output, format_window_processor_describe_output,
-        ordered_placement_corridor, placement_claim_owner, placement_group_host,
+        format_placement_runtime_nodes_in_context, format_placement_unit_nodes,
+        format_reingestor_describe_output, format_relay_describe_output,
+        format_reorderer_describe_output, format_resource_description, format_resource_entry_lines,
+        format_resource_usage_lines, format_wasm_processor_describe_output,
+        format_window_processor_describe_output, ordered_placement_corridor, placement_claim_owner,
         placement_groups_claimed_by_rule, placement_rule_coverage_status,
-        placement_rule_endpoint_nodes, placement_rule_runtime_nodes,
+        placement_rule_endpoint_nodes, placement_rule_runtime_nodes, placement_rule_scope,
         runtime_ingestor_describe_to_envelope,
     },
     model_mutation::{command_error, command_failure, command_ok},
+    placement_groups::PlacementGroupIndex,
     session_service::SessionServiceImpl,
     subscription::{
         SubscriptionTarget, branch_key_from_filter, parse_subscription_literal,
@@ -439,14 +440,7 @@ impl SessionServiceImpl {
         }
         lines.extend(self.inner.runtime.describe_domain_statistics(domain));
         lines.push("placement:".to_string());
-        lines.push(format!(
-            "  default policy: {}",
-            domain_state.config.placement.as_ref()
-        ));
-        let placement_plan = self
-            .inner
-            .registry
-            .placement_plan(domain, domain_state.config.placement);
+        let placement_plan = self.inner.registry.placement_plan(domain);
         let rule_count = match placement_plan.as_ref() {
             Some(plan) => plan.rules.len(),
             None => 0,
@@ -455,13 +449,35 @@ impl SessionServiceImpl {
         if let Some(plan) = placement_plan {
             let schedule = self.inner.consensus.current_schedule().await;
             let domain_schedule = schedule.domain(domain);
+            let groups = match domain_schedule {
+                Some(schedule) => schedule.placement_groups.as_slice(),
+                None => &[],
+            };
+            let group_index = PlacementGroupIndex::new(groups);
+            for rule in &plan.rules {
+                lines.push(format!(
+                    "  {} scope={} policy={}",
+                    rule.name,
+                    placement_rule_scope(rule),
+                    rule.policy
+                ));
+            }
+            for hop in &plan.effective_pairs {
+                lines.push(format!(
+                    "  hop: {} -> {} class={} effective={}",
+                    hop.left.identifier, hop.right.identifier, hop.class, hop.policy
+                ));
+            }
             for (index, group) in plan.require_groups.iter().enumerate() {
                 lines.push(format!("  group {}:", index + 1));
                 lines.push(format!(
                     "    members: {}",
-                    format_placement_runtime_nodes(&group.members)
+                    format_placement_unit_nodes(&group.members)
                 ));
-                let host = match placement_group_host(domain_schedule, &group.members) {
+                let host = match group_index
+                    .find(&group.members)
+                    .and_then(|group| group.primary_node.as_ref())
+                {
                     Some(host) => host.as_str(),
                     None => "(unassigned)",
                 };
@@ -469,8 +485,22 @@ impl SessionServiceImpl {
                 for bond in &group.bonds {
                     lines.push(format!(
                         "    bond: {} <-> {} ({})",
-                        format_placement_runtime_node(&bond.left, &group.members),
-                        format_placement_runtime_node(&bond.right, &group.members),
+                        format_placement_runtime_node(
+                            &bond.left,
+                            &group
+                                .members
+                                .iter()
+                                .map(|member| member.node.clone())
+                                .collect::<Vec<_>>()
+                        ),
+                        format_placement_runtime_node(
+                            &bond.right,
+                            &group
+                                .members
+                                .iter()
+                                .map(|member| member.node.clone())
+                                .collect::<Vec<_>>()
+                        ),
                         placement_claim_owner(&bond.winning_rules),
                     ));
                 }
@@ -483,14 +513,10 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
     ) -> CommandResult {
-        let Some(domain_state) = self.inner.consensus.current_domain(domain).await else {
+        let Some(_) = self.inner.consensus.current_domain(domain).await else {
             return command_error(format!("domain '{}' does not exist", domain.as_str()));
         };
-        let Some(plan) = self
-            .inner
-            .registry
-            .placement_plan(domain, domain_state.config.placement)
-        else {
+        let Some(plan) = self.inner.registry.placement_plan(domain) else {
             return command_ok("no placements".to_string());
         };
         if plan.rules.is_empty() {
@@ -506,13 +532,27 @@ impl SessionServiceImpl {
                     None => "unranked".to_string(),
                 };
                 format!(
-                    "{} policy={} rank={} coverage={coverage}",
+                    "{} scope={} policy={} rank={} coverage={coverage}",
                     rule.name.as_str(),
+                    placement_rule_scope(rule),
                     rule.policy.as_ref(),
                     rank,
                 )
             })
             .collect::<Vec<_>>();
+        let mut lines = lines;
+        for rule in &plan.rules {
+            for claim in &rule.claims {
+                lines.push(format!(
+                    "{} hop={} -> {} class={} effective={}",
+                    rule.name.as_str(),
+                    claim.left.identifier,
+                    claim.right.identifier,
+                    claim.class,
+                    claim.effective_policy
+                ));
+            }
+        }
         command_ok(lines.join("\n"))
     }
 
@@ -521,14 +561,10 @@ impl SessionServiceImpl {
         domain: &DomainName,
         describe: DescribePlacement,
     ) -> CommandResult {
-        let Some(domain_state) = self.inner.consensus.current_domain(domain).await else {
+        let Some(_) = self.inner.consensus.current_domain(domain).await else {
             return command_error(format!("domain '{}' does not exist", domain.as_str()));
         };
-        let Some(plan) = self
-            .inner
-            .registry
-            .placement_plan(domain, domain_state.config.placement)
-        else {
+        let Some(plan) = self.inner.registry.placement_plan(domain) else {
             return command_error(format!("placement '{}' not found", describe.name.as_str()));
         };
         // The plan was just built for this describe and is walked once for the single named rule,
@@ -556,6 +592,7 @@ impl SessionServiceImpl {
         if let Some(form) = form {
             lines.push(format!("form: {form}"));
         }
+        lines.push(format!("scope: {}", placement_rule_scope(rule)));
         lines.push(format!("policy: {}", rule.policy.as_ref()));
         let rank = match rule.rank {
             Some(rank) => rank.to_string(),
@@ -602,9 +639,10 @@ impl SessionServiceImpl {
         }
         for claim in &rule.claims {
             lines.push(format!(
-                "effective pair: {} <-> {}",
+                "effective pair: {} <-> {} class={}",
                 format_placement_runtime_node(&claim.left, &rule_runtime_nodes),
                 format_placement_runtime_node(&claim.right, &rule_runtime_nodes),
+                claim.class,
             ));
             lines.push(format!(
                 "effective policy: {}",
@@ -624,12 +662,20 @@ impl SessionServiceImpl {
         }
         let schedule = self.inner.consensus.current_schedule().await;
         let domain_schedule = schedule.domain(domain);
+        let groups = match domain_schedule {
+            Some(schedule) => schedule.placement_groups.as_slice(),
+            None => &[],
+        };
+        let group_index = PlacementGroupIndex::new(groups);
         for group in placement_groups_claimed_by_rule(&plan, rule) {
             lines.push(format!(
                 "group members: {}",
-                format_placement_runtime_nodes(&group.members)
+                format_placement_unit_nodes(&group.members)
             ));
-            let host = match placement_group_host(domain_schedule, &group.members) {
+            let host = match group_index
+                .find(&group.members)
+                .and_then(|group| group.primary_node.as_ref())
+            {
                 Some(host) => host.as_str(),
                 None => "(unassigned)",
             };
@@ -637,8 +683,22 @@ impl SessionServiceImpl {
             for bond in &group.bonds {
                 lines.push(format!(
                     "bond: {} <-> {} ({})",
-                    format_placement_runtime_node(&bond.left, &group.members),
-                    format_placement_runtime_node(&bond.right, &group.members),
+                    format_placement_runtime_node(
+                        &bond.left,
+                        &group
+                            .members
+                            .iter()
+                            .map(|member| member.node.clone())
+                            .collect::<Vec<_>>()
+                    ),
+                    format_placement_runtime_node(
+                        &bond.right,
+                        &group
+                            .members
+                            .iter()
+                            .map(|member| member.node.clone())
+                            .collect::<Vec<_>>()
+                    ),
                     placement_claim_owner(&bond.winning_rules),
                 ));
             }
@@ -1061,10 +1121,14 @@ impl SessionServiceImpl {
                 ),
             });
         }
+        let nervix_models::Model::Ingestor(config) = node.config.as_ref() else {
+            unreachable!("ingestor inspection was resolved as an ingestor");
+        };
+        let ingestor_kind = config.input.entity_kind();
         let summary = self
             .inner
             .runtime
-            .describe_local_ingestor(&request.domain, &request.name, request.unit)
+            .describe_local_ingestor(&request.domain, &request.name, request.unit, ingestor_kind)
             .map_err(|reason| {
                 RemoteOperationFailure::failed(
                     RemoteOperationSubject::entity(
@@ -2789,7 +2853,6 @@ mod tests {
                     id: DomainName::parse("default").expect("valid domain"),
                     config: DomainConfig {
                         pace: DomainPace::Unpaced,
-                        placement: nervix_models::PlacementPolicy::Neutral,
                     },
                     status: DomainStatus::Stopped,
                     start_version: 0,

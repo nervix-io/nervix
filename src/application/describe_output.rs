@@ -25,15 +25,15 @@ use nervix_interconnect::{
     LookupDescribeEnvelope, TransportPositionEnvelope,
 };
 use nervix_models::{
-    BranchSelection, CanonicalPlexusError, ClusterNodeName, CreateCorrelator, CreateDeduplicator,
-    CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction, CreateReingestor,
-    CreateReorderer, CreateWindowProcessor, EmitterBody, EmitterPayloadPresentation, FieldPath,
-    HeaderModel, IcebergTableEmitter, IngestTimestampSource, IngestorEntity, IngestorInput,
-    KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, Model, ModelKind, ModelName, NodeRef,
-    NodeUnitRef, PlacementName, PlacementPolicy, ProcessorInputs, ProcessorOutputs,
-    RequestedResourceVersion, ResourceDescription, ResourceEntryContent, ResourceManifestEntry,
-    ResourceUsage, ResourceVersionEntries, ScheduledNode, Unit, WasmStateInspection,
-    WasmUnitStateInspection, expression_to_plexus,
+    BranchSelection, CanonicalPlexusError, CreateCorrelator, CreateDeduplicator, CreateEmitter,
+    CreateEndpoint, CreateIngestor, CreateJunction, CreateReingestor, CreateReorderer,
+    CreateWindowProcessor, EmitterBody, EmitterPayloadPresentation, FieldPath, HeaderModel,
+    IcebergTableEmitter, IngestTimestampSource, IngestorEntity, IngestorInput, KafkaIngestor,
+    KafkaOffsetMode, KafkaTopicIngestor, Model, ModelKind, ModelName, NodeRef, NodeUnitRef,
+    PlacementName, PlacementPolicy, ProcessorInputs, ProcessorOutputs, RequestedResourceVersion,
+    ResourceDescription, ResourceEntryContent, ResourceManifestEntry, ResourceUsage,
+    ResourceVersionEntries, ScheduledNode, Unit, WasmStateInspection, WasmUnitStateInspection,
+    expression_to_plexus,
 };
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, WindowArguments};
 use sorted_vec::SortedSet;
@@ -50,6 +50,7 @@ pub(in crate::application) fn runtime_ingestor_describe_to_envelope(
     metrics: Vec<String>,
 ) -> IngestorDescribeEnvelope {
     IngestorDescribeEnvelope {
+        source_metrics: summary.source_metrics,
         running: summary.running,
         ready: summary.ready,
         quiesce_state: summary.quiesce_state,
@@ -94,6 +95,7 @@ pub(in crate::application) fn runtime_ingestor_describe_from_envelope(
 ) -> (RuntimeIngestorDescribe, Vec<String>) {
     (
         RuntimeIngestorDescribe {
+            source_metrics: summary.source_metrics,
             running: summary.running,
             ready: summary.ready,
             quiesce_state: summary.quiesce_state,
@@ -370,6 +372,7 @@ pub(in crate::application) fn format_ingestor_describe_output(
             "quiesce state: {}",
             summary.quiesce_state.as_deref().unwrap_or("none")
         ),
+        "source:".to_string(),
         format!(
             "nervix_ingestor_quiesce_buffered_records: {}",
             summary.quiesce_counters.buffered_records
@@ -399,6 +402,12 @@ pub(in crate::application) fn format_ingestor_describe_output(
             summary.oversized_payloads_total
         ),
     ]);
+    lines.extend(
+        summary
+            .source_metrics
+            .iter()
+            .map(|line| format!("  {line}")),
+    );
     let last_decode_rejection = match summary.last_decode_rejection.as_ref() {
         Some(rejection) => rejection.to_string(),
         None => "-".to_string(),
@@ -1442,14 +1451,6 @@ pub(in crate::application) fn format_placement_unit_nodes(units: &[NodeUnitRef])
         .join(", ")
 }
 
-pub(in crate::application) fn placement_unit_members_equal(
-    left: &[NodeUnitRef],
-    right: &[NodeUnitRef],
-) -> bool {
-    let right = right.iter().collect::<HashSet<_>>();
-    left.len() == right.len() && left.iter().all(|member| right.contains(member))
-}
-
 pub(in crate::application) fn format_placement_runtime_nodes_in_context(
     nodes: &[NodeRef],
     context: &[NodeRef],
@@ -1489,6 +1490,13 @@ pub(in crate::application) fn placement_rule_runtime_nodes(
             }
         }
     }
+    for claim in &rule.claims {
+        for node in [&claim.left, &claim.right] {
+            if !nodes.contains(node) {
+                nodes.push(node.clone());
+            }
+        }
+    }
     nodes
 }
 
@@ -1510,6 +1518,13 @@ pub(in crate::application) fn placement_rule_endpoint_nodes(
     nodes
 }
 
+pub(in crate::application) fn placement_rule_scope(rule: &PlacementRulePlan) -> &'static str {
+    match rule.scope {
+        nervix_models::PlacementScope::DomainWide => "domain-wide",
+        nervix_models::PlacementScope::Corridor { .. } => "corridor",
+    }
+}
+
 pub(in crate::application) fn placement_rule_coverage_status(
     rule: &PlacementRulePlan,
 ) -> &'static str {
@@ -1518,7 +1533,9 @@ pub(in crate::application) fn placement_rule_coverage_status(
         .iter()
         .filter(|pair| pair.connected)
         .count();
-    if connected_pairs == 0 {
+    if connected_pairs == 0
+        && (rule.scope != nervix_models::PlacementScope::DomainWide || rule.claims.is_empty())
+    {
         return "empty";
     }
 
@@ -1603,7 +1620,7 @@ pub(in crate::application) fn ordered_placement_corridor(
 
 pub(in crate::application) fn placement_claim_owner(rules: &[PlacementName]) -> String {
     if rules.is_empty() {
-        "domain default".to_string()
+        "unconstrained".to_string()
     } else {
         rules
             .iter()
@@ -1611,22 +1628,6 @@ pub(in crate::application) fn placement_claim_owner(rules: &[PlacementName]) -> 
             .collect::<Vec<_>>()
             .join(", ")
     }
-}
-
-pub(in crate::application) fn placement_group_host<'a>(
-    schedule: Option<&'a nervix_models::DomainSchedule>,
-    members: &[NodeRef],
-) -> Option<&'a ClusterNodeName> {
-    let schedule = schedule?;
-    let group = schedule.placement_groups.iter().find(|group| {
-        let logical = group
-            .members
-            .iter()
-            .map(|member| member.node.clone())
-            .collect::<HashSet<_>>();
-        logical.len() == members.len() && members.iter().all(|member| logical.contains(member))
-    })?;
-    group.primary_node.as_ref()
 }
 
 pub(in crate::application) fn placement_groups_claimed_by_rule<'a>(
@@ -1644,7 +1645,11 @@ pub(in crate::application) fn placement_groups_claimed_by_rule<'a>(
         .iter()
         .filter(|group| {
             require_claims.iter().any(|claim| {
-                group.members.contains(&claim.left) && group.members.contains(&claim.right)
+                group.members.iter().any(|member| member.node == claim.left)
+                    && group
+                        .members
+                        .iter()
+                        .any(|member| member.node == claim.right)
             })
         })
         .collect()
@@ -1660,6 +1665,7 @@ mod properties;
 #[cfg(test)]
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
+    use nervix_models::ClusterNodeName;
 
     use super::{super::test_fixtures::placement_member, *};
 
@@ -1783,6 +1789,7 @@ mod tests {
         use super::super::test_fixtures::{named, scheduled_node};
 
         let summary = RuntimeIngestorDescribe {
+            source_metrics: Vec::new(),
             running: true,
             ready: true,
             quiesce_state: None,

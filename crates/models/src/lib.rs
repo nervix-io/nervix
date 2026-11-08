@@ -49,6 +49,7 @@ mod name_spelling;
 mod names;
 mod node_endpoint;
 mod node_ref;
+mod placement;
 mod prerequisites;
 mod processor;
 mod quiesce;
@@ -287,6 +288,10 @@ pub use node_endpoint::{
     NodeEndpoint, NodeEndpointParseError, NodeServiceUrl, NodeServiceUrlParseError,
 };
 pub use node_ref::{DomainNodeRef, NodeRef};
+pub use placement::{
+    AlterPlacement, AlterPlacementError, AlterPlacementOperation, CreatePlacement, PlacementPolicy,
+    PlacementScope,
+};
 pub use prerequisites::{
     ConsensusFloors, DescribedPrerequisite, FingerprintTextError, NodePrerequisites, Prerequisite,
     PrerequisiteMismatch, PrerequisiteRecordError, PrerequisiteTimings, RaftLogDurability,
@@ -376,14 +381,13 @@ pub use state_inspection_settings::{
     StateInspectionSettings, StateInspectionSettingsError,
 };
 pub use statement::{
-    AckWindow, AlterBranch, AlterBranchError, AlterBranchOperation, AlterDomain, AlterGenerator,
+    AckWindow, AlterBranch, AlterBranchError, AlterBranchOperation, AlterGenerator,
     AlterGeneratorError, AlterGeneratorOperation, AlterIngestor, AlterIngestorError,
-    AlterIngestorOperation, AlterPlacement, AlterPlacementError, AlterPlacementOperation,
-    AlterRelay, AlterRelayError, AlterRelayOperation, AlterTransportIngestorOperation,
-    BranchEviction, BranchPartitions, BranchSelection, CodecBatchContainer, CodecEncoding,
-    CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
-    CodecWireFormat, CordonNode, CreateBranch, CreateCodec, CreateDomain, CreateEndpoint,
-    CreateGenerator, CreateIngestor, CreateLookup, CreatePlacement, CreateRelay, CreateResource,
+    AlterIngestorOperation, AlterRelay, AlterRelayError, AlterRelayOperation,
+    AlterTransportIngestorOperation, BranchEviction, BranchPartitions, BranchSelection,
+    CodecBatchContainer, CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations,
+    CodecProtobufConfig, CodecWireFormat, CordonNode, CreateBranch, CreateCodec, CreateDomain,
+    CreateEndpoint, CreateGenerator, CreateIngestor, CreateLookup, CreateRelay, CreateResource,
     CreateSignalingProtocol, CreateStatement, CreateSubscription, CreateUser, CreateVhost,
     DeleteSubscription, DescribeClient, DescribeCluster, DescribeCorrelator, DescribeDeduplicator,
     DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction,
@@ -392,9 +396,9 @@ pub use statement::{
     DescribeWindowProcessor, DomainConfig, DomainPace, DomainStartPoint, DomainState, DomainStatus,
     DomainTick, DrainNode, DropModel, DropNode, EndpointKind, EndpointType, ErrorPolicies,
     GeneralErrorPolicy, IngestTimestampSource, InspectionFormat, LookupQuery,
-    MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, PartitionSeed, PlacementPolicy,
-    RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
-    RelocationPreferenceStrategy, RelocationSelection, ResolvedBranching, ResolvedCodecWireFormat,
+    MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, PartitionSeed, RelayBranching,
+    Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
+    RelocationSelection, RelocationUnitSelection, ResolvedBranching, ResolvedCodecWireFormat,
     RetryPolicy, ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowPlacements,
     ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SignalingProtobufConfig,
     SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat, StartDomain,

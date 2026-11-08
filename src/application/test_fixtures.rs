@@ -530,7 +530,6 @@ pub(in crate::application) async fn create_test_domain(consensus: &Proposer, raw
                     .parse()
                     .assured("one second fits the fixture skew representation"),
             },
-            placement: nervix_models::PlacementPolicy::Neutral,
         },
         status: DomainStatus::Stopped,
         start_version: 0,

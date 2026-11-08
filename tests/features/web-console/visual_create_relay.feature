@@ -474,7 +474,7 @@ Feature: Web console visual relay and subscription creation
     When the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
-    And selector ".create-menu [data-create-kind='domain']" is clicked
+    And selector ".create-menu [data-create-kind='placement']" is clicked
     Then selector ".create-placement-options .create-choice-more" exists
     When these Plexus commands are executed on the leader node
       """

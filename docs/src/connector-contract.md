@@ -3529,6 +3529,14 @@ The ingestor host resolves its interaction counter children once at startup for 
 unit. The retained group preserves each instance's counters, including decode rejections, without
 resolving labels or looking up a shared registry while recording a payload outcome.
 
+Broker read results and scheduled polls are observed once through the host's typed
+`IngestorReadOutcome`. The host counts returned raw payloads and bytes before decoding and only
+times paced polls; internal buffer replay is not another transport read. Neither observation
+changes delivery, cancellation, acknowledgement, error reporting or retry policy. An actual
+extension-worker unfolding refusal is counted on acknowledged, unacknowledged and endpoint intake;
+waiting for admission is not a refusal. [Ingestor Source Interactions](metrics-and-observability.md#ingestor-source-interactions)
+owns the outcome and inspection contracts.
+
 The emitter host observes one publish or due staged-commit attempt through retained metric
 children. Its existing typed result selects `succeeded`, `transient`, `misconfigured` or
 `violation`; cancellation before a definitive answer is transient. A settled record rejection

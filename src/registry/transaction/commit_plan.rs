@@ -82,15 +82,6 @@ impl PlannedTransactionStepKind {
                     ownership_gate: plan.ownership_gate.commit_gate_plan(),
                 }
             }
-            Self::AlterDomain { plan } => TransactionCommitStepKind::AlterDomain {
-                next: Box::new(plan.next.clone()),
-                schedule: Self::committed_schedule(
-                    plan.schedule.clone(),
-                    ownership_moves,
-                    ownership_transition_id,
-                ),
-                ownership_gate: plan.ownership_gate.commit_gate_plan(),
-            },
             Self::StartDomain { .. } => {
                 let resolved = resolved_starts.get(&operation).cloned().verified(
                     "commit preparation resolves every start step in this same complete plan",

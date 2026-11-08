@@ -421,7 +421,6 @@ fn malformed_assignments_do_not_escape_into_another_statement_family() {
         "ALTER CLUSTER SET UDF_CODE_BYTES = 5s;",
         "ALTER CLUSTER SET RAFT_HEARTBEAT_INTERVAL = 1s;",
         "ALTER CLUSTER SET made_up_parameter = 1;",
-        "ALTER DOMAIN SET REPLICA_COUNT = 2;",
     ] {
         assert!(parse_statement(input).is_err(), "{input}");
     }

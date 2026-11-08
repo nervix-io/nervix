@@ -699,7 +699,6 @@ mod tests {
                 id: domain.clone(),
                 config: DomainConfig {
                     pace: DomainPace::Unpaced,
-                    placement: nervix_models::PlacementPolicy::Neutral,
                 },
                 status: DomainStatus::Running,
                 start_version: 0,
@@ -817,7 +816,14 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let describe = runtime
-                .describe_local_ingestor(&domain, &ingestor, Unit::FIRST_INSTANCE)
+                .describe_local_ingestor(
+                    &domain,
+                    &ingestor,
+                    Unit::FIRST_INSTANCE,
+                    nervix_models::IngestorEntityKind::Mqtt(
+                        nervix_models::MqttIngestorEntity::Topic,
+                    ),
+                )
                 .expect("describe should succeed for scheduled ingestor");
             assert!(describe.running);
             let reported = describe.transient_error.as_deref().is_some_and(|error| {
@@ -845,7 +851,6 @@ mod tests {
                 id: domain.clone(),
                 config: DomainConfig {
                     pace: DomainPace::Unpaced,
-                    placement: nervix_models::PlacementPolicy::Neutral,
                 },
                 status: DomainStatus::Running,
                 start_version: 0,
@@ -967,7 +972,12 @@ mod tests {
             "failed scheduled ingestor start must not leave an ingestor runtime"
         );
         let describe = runtime
-            .describe_local_ingestor(&domain, &ingestor, Unit::FIRST_INSTANCE)
+            .describe_local_ingestor(
+                &domain,
+                &ingestor,
+                Unit::FIRST_INSTANCE,
+                nervix_models::IngestorEntityKind::Mqtt(nervix_models::MqttIngestorEntity::Topic),
+            )
             .expect("describe should represent the stopped ingestor");
         assert!(!describe.running);
         assert!(!describe.ready);
@@ -995,7 +1005,12 @@ mod tests {
             "unexpected rebuild error: {clock_error}"
         );
         let describe = runtime
-            .describe_local_ingestor(&domain, &ingestor, Unit::FIRST_INSTANCE)
+            .describe_local_ingestor(
+                &domain,
+                &ingestor,
+                Unit::FIRST_INSTANCE,
+                nervix_models::IngestorEntityKind::Mqtt(nervix_models::MqttIngestorEntity::Topic),
+            )
             .expect("describe should represent the stopped ingestor");
         assert_eq!(
             describe.transient_error.as_deref(),
