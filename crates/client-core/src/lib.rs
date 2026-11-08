@@ -65,10 +65,12 @@ pub use nervix_client_wire::{
     DomainClockObserved, DomainClockTicked, DomainInfo, DomainPaceChoice, EmitterSettlement,
     ExecutionReferenceConflict, LeaderRedirect, Leadership, NodeEndpoints, NoticeKind, NoticeLevel,
     OutcomeOrigin, ProducerId, RestoreUploadFailure, RowConformanceError, RowSchema, SourceSpan,
-    StatementDisposition, StatementOutcome, SubscriptionDeliveryLost, SubscriptionEnded,
-    SubscriptionHandle, SubscriptionOpened, SubscriptionRefusal, SubscriptionRows,
-    SubscriptionRowsSkipped, SuggestionKind, SuggestionStatus, TextEdit, UnknownOutcomeCause,
-    UploadFailure,
+    StateInspection, StateInspectionCounts, StateInspectionOrigin, StateInspectionPage,
+    StateInspectionRejection, StateInspectionResult, StateInspectionSection, StateInspectionStage,
+    StateInspectionUnit, StateRowFrame, StateWatermarkColumns, StatementDisposition,
+    StatementOutcome, SubscriptionDeliveryLost, SubscriptionEnded, SubscriptionHandle,
+    SubscriptionOpened, SubscriptionRefusal, SubscriptionRows, SubscriptionRowsSkipped,
+    SuggestionKind, SuggestionStatus, TextEdit, UnknownOutcomeCause, UploadFailure,
 };
 pub use nervix_models::{
     AckWindow, ArchiveDigest, BackupArchiveSummary, BackupDomainSummary, BackupResources,

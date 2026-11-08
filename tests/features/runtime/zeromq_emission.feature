@@ -149,7 +149,7 @@ Feature: ZeroMQ emission
       """
     Then within "5s" node "node-1" eventually reports materialized state for relay "state_notifications" containing
       """
-      key={"user_id":42} payload={"source":"state","user_id":42}
+      {"branch":{"user_id":42},"fields":{"source":"state","user_id":42}}
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
       """

@@ -82,6 +82,8 @@ pub(crate) enum MaterializedSnapshotError {
     Admission,
     #[error("materialized row views exceed one relay's 8 MiB metadata limit")]
     MetadataTooLarge,
+    #[error("metadata for {records} materialized row views cannot fit an addressable allocation")]
+    MetadataAddressability { records: usize },
     #[error("the snapshot could not be admitted for execution")]
     Execution,
     #[error("failed to encode the materialized relay snapshot: {reason}")]

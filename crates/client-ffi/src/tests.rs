@@ -44,6 +44,7 @@ mod connect_options;
 mod domain_clock;
 mod endpoints;
 mod field_descriptors;
+mod inspections;
 mod properties;
 
 const ROWS: i32 = 1;
@@ -973,6 +974,7 @@ fn command_outcome(disposition: CommandDisposition, subscription: bool) -> Comma
         transaction_admission: None,
         inspection: None,
         wasm_state: None,
+        state: None,
         resource: None,
         subscription: subscription.then(|| Box::new(opened)),
         resource_upload: None,
