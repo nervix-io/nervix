@@ -2,7 +2,7 @@
 //!
 //! Layer: language.
 //!
-//! - **Owns.** Parsing domain creation, placement changes, starts, pauses, resumes and stops.
+//! - **Owns.** Parsing domain creation, starts, pauses, resumes and stops.
 //! - **Depends on.** Shared Plexus tokens and validated domain vocabulary models.
 //! - **Must not know.** Registry state, consensus, runtime clocks or execution tasks.
 
@@ -14,8 +14,8 @@
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    AlterDomain, CreateDomain, CreateStatement, DomainClockSkew, DomainConfig, DomainPace,
-    DomainStartPoint, DomainTimeRate, PlacementPolicy, StartDomain, StopDomain, Timestamp,
+    CreateDomain, CreateStatement, DomainClockSkew, DomainConfig, DomainPace, DomainStartPoint,
+    DomainTimeRate, StartDomain, StopDomain, Timestamp,
 };
 
 use crate::{
@@ -59,20 +59,15 @@ fn clock_skew_lit<'src>()
 pub fn create_domain_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateDomain>, extra::Err<ParseError<'src>>> + Clone
 {
-    let placement = kw(Identifier::Placement)
-        .ignore_then(crate::placement::placement_policy_parser())
-        .or_not()
-        .map(|policy| policy.unwrap_or(PlacementPolicy::Neutral));
-    let default_unpaced = kw(Identifier::Domain)
-        .ignore_then(domain_name())
-        .then(placement.clone())
-        .map(|(id, placement)| CreateDomain {
-            id,
-            config: DomainConfig {
-                pace: DomainPace::Unpaced,
-                placement,
-            },
-        });
+    let default_unpaced =
+        kw(Identifier::Domain)
+            .ignore_then(domain_name())
+            .map(|id| CreateDomain {
+                id,
+                config: DomainConfig {
+                    pace: DomainPace::Unpaced,
+                },
+            });
     let paced = kw_phrase2(Identifier::Paced, Identifier::Domain)
         .ignore_then(domain_name())
         .then_ignore(kw(Identifier::With))
@@ -80,22 +75,18 @@ pub fn create_domain_parser<'src>()
         .then(domain_clock_period_lit())
         .then_ignore(kw(Identifier::Skew))
         .then(clock_skew_lit())
-        .then(placement.clone())
-        .map(|(((id, period), skew), placement)| CreateDomain {
+        .map(|((id, period), skew)| CreateDomain {
             id,
             config: DomainConfig {
                 pace: DomainPace::Paced { period, skew },
-                placement,
             },
         });
     let unpaced = kw_phrase2(Identifier::Unpaced, Identifier::Domain)
         .ignore_then(domain_name())
-        .then(placement)
-        .map(|(id, placement)| CreateDomain {
+        .map(|id| CreateDomain {
             id,
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
-                placement,
             },
         });
 
@@ -104,17 +95,6 @@ pub fn create_domain_parser<'src>()
         .then(choice((paced, unpaced, default_unpaced)))
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(|(if_not_exists, create)| CreateStatement::new(create, if_not_exists))
-}
-
-pub fn alter_domain_parser<'src>()
--> impl Parser<'src, &'src [Token], AlterDomain, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Alter)
-        .ignore_then(kw(Identifier::Domain))
-        .ignore_then(kw(Identifier::Set))
-        .ignore_then(kw(Identifier::Placement))
-        .ignore_then(crate::placement::placement_policy_parser())
-        .map(|policy| AlterDomain { policy })
-        .then_ignore(tok(Token::Semicolon).or_not())
 }
 
 pub fn start_domain_parser<'src>()
@@ -184,7 +164,6 @@ pub fn suggest_domain_statement(input: &str, cursor: usize) -> Vec<String> {
     };
     let out = choice((
         create_domain_parser().to(()),
-        alter_domain_parser().to(()),
         start_domain_parser().to(()),
         stop_domain_parser().to(()),
     ))
@@ -201,7 +180,7 @@ mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::{
         DomainClockPeriod, DomainClockSkew, DomainPace, DomainStartPoint, DomainTimeRate,
-        PlacementPolicy, Statement, Timestamp,
+        Statement, Timestamp,
     };
 
     use crate::statement::{parse_statement, suggest_statement};
@@ -225,67 +204,6 @@ mod tests {
                     .assured("the fixture skew fits the domain clock representation"),
             }
         );
-        assert_eq!(domain.config.placement, PlacementPolicy::Neutral);
-    }
-
-    #[test]
-    fn parses_domain_placement_on_every_create_form() {
-        for (source, expected) in [
-            (
-                "CREATE DOMAIN plain PLACEMENT PREFER COLOCATION;",
-                PlacementPolicy::PreferColocation,
-            ),
-            (
-                "CREATE UNPACED DOMAIN unpaced PLACEMENT SUGGEST SEPARATION;",
-                PlacementPolicy::SuggestSeparation,
-            ),
-            (
-                "CREATE PACED DOMAIN paced WITH PERIOD 30s SKEW 1s PLACEMENT REQUIRE COLOCATION;",
-                PlacementPolicy::RequireColocation,
-            ),
-        ] {
-            let Statement::CreateDomain(domain) =
-                parse_statement(source).expect("domain placement must parse")
-            else {
-                panic!("expected create domain");
-            };
-            assert_eq!(domain.config.placement, expected);
-        }
-    }
-
-    #[test]
-    fn parses_nameless_alter_domain_placement() {
-        let Statement::AlterDomain(alter) =
-            parse_statement("ALTER DOMAIN SET PLACEMENT NEUTRAL;").expect("must parse")
-        else {
-            panic!("expected alter domain");
-        };
-        assert_eq!(alter.policy, PlacementPolicy::Neutral);
-        assert!(
-            parse_statement("ALTER DOMAIN prod SET PLACEMENT NEUTRAL;").is_err(),
-            "ALTER DOMAIN is nameless"
-        );
-    }
-
-    #[test]
-    fn domain_placement_completion_is_policy_scoped() {
-        let input = "ALTER DOMAIN SET PLACEMENT ";
-        let suggestions = suggest_statement(input, input.len());
-        for expected in [
-            "REQUIRE COLOCATION",
-            "PREFER COLOCATION",
-            "NEUTRAL",
-            "SUGGEST SEPARATION",
-        ] {
-            assert!(suggestions.contains(&expected.to_string()));
-        }
-        assert!(!suggestions.contains(&"REQUIRE SEPARATION".to_string()));
-        assert!(!suggestions.contains(&"DOMAIN".to_string()));
-
-        let input = "CREATE DOMAIN prod ";
-        let suggestions = suggest_statement(input, input.len());
-        assert!(suggestions.contains(&"PLACEMENT".to_string()));
-        assert!(!suggestions.contains(&"RANK".to_string()));
     }
 
     #[test]
@@ -314,6 +232,21 @@ mod tests {
             panic!("expected create domain");
         };
         assert_eq!(domain.id.as_str(), "prod");
+    }
+
+    #[test]
+    fn complete_domain_forms_offer_statement_termination() {
+        for input in [
+            "CREATE DOMAIN prod ",
+            "CREATE UNPACED DOMAIN prod ",
+            "CREATE PACED DOMAIN prod WITH PERIOD 30s SKEW 1s ",
+        ] {
+            assert_eq!(suggest_statement(input, input.len()), [";"]);
+            assert_eq!(
+                crate::client_statement::suggest_client_statement(input, input.len()),
+                [";"]
+            );
+        }
     }
 
     #[test]

@@ -75,6 +75,21 @@ representation properties. All-features workspace tests enable `ruby-tests` too,
 restored unit jobs provision the same Ruby version. `ruby/setup-ruby` provides CI's interpreter,
 headers and shared library. No buffer or generated gem is written into the source tree.
 
+The minitest suite in `tests/client_conformance/ruby/suite` uses Ruby's bundled minitest and Prism,
+without another gem download. `just test-client-ruby-api` prepares the gem and runs its boundary
+tier through the native `host_suite` test; that test also runs in ordinary workspace unit jobs.
+`just test-client-ruby-cluster` runs the one- and three-node TLS/plaintext cluster rows.
+Packaging prepares a fresh `GEM_HOME` beside the extracted gem, and each tier loads that installed
+archive first. The coverage build prepares both forms from its instrumented extension and carries
+them in the unit-test archive. `NERVIX_CLIENT_RUBY_TEST_ARTIFACTS` selects those prepared artifacts;
+no test invokes a compiler or package manager. `just test-client-ruby-api-run` runs the prepared
+boundary tier directly. `just validate-client-suites` compares native magnus registrations with
+Prism-parsed constant and typed-receiver references, inventories every minitest identity and
+checks the [Ruby guide](client-library-ruby.md)'s anchored includes. `just test-client-ruby-suite-reader`
+checks registration, receiver, inventory, guide and actual minitest reporter controls.
+The conformance job calls `just test-client-ruby-run` after its artifact build, preserving the
+embedded tests and boundary tier without packaging that same gem twice.
+
 The Python package builds with maturin, which `just build-client-python` runs as
 `uvx --from maturin==1.16.0 maturin`, into an abi3 wheel for CPython 3.12 and later under
 `target/client-conformance/wheels`, with its typed stub `crates/client-python/nervix_client.pyi`
@@ -94,8 +109,18 @@ scenario suite. `just validate-client-suites`, part of `just validate`, types th
 paced simulation driver with `mypy --strict` against the stub through the repository's uv project,
 and holds the suite, its inventory, the stub and the
 [Python Client Library](client-library-python.md) chapter to the package's source. The
-`client-conformance` CI job builds every host's artifacts, runs the JVM, Ruby and Python boundary tiers,
+`client-conformance` CI job builds every host's artifacts, runs the JVM, Ruby, Python, C and C++ boundary tiers,
 then runs the probes and the suites' cluster rows together.
+
+The C ABI application suites use C11 and C++17 compilers with POSIX threads, AddressSanitizer and
+UndefinedBehaviorSanitizer. `just build-client-c-suites` builds the shared binding and both ordinary
+and sanitized programs; `just test-client-c-api` and `just test-client-cpp-api` run their boundary
+tiers through a bounded Cargo integration harness. Ordinary workspace tests run the same harness.
+`just test-client-c-cluster` runs both hosts' HTTP/HTTPS one-/three-node cluster examples. The
+surface checker needs Clang and reads resolved declarations and references from each translation
+unit, holding both programs to every function, typedef and enumerator of `nervix_client.h`.
+`just validate-client-c-suites` checks that surface, the test tables, inventory and
+[C and C++ guide](client-library-c.md) without building a cluster. No test invokes a compiler.
 
 `just build-web-console` builds the console the server embeds. trunk uses a `wasm-bindgen` CLI
 from `PATH` when its version equals the one `Cargo.lock` locks, and otherwise downloads it from
@@ -588,12 +613,12 @@ compares it with the workflows.
 | `shuttle` | Check | The Shuttle checks and their replay check |
 | `loom` | Check | The Loom models and their weakening qualification |
 | `turmoil` | Check | The Turmoil simulation suite and its replay check |
-| `client-conformance` | Check | The cross-language client probes and the host suites' cluster tiers against one- and three-node clusters, and the JVM, Ruby and Python boundary tiers |
+| `client-conformance` | Check | The cross-language client probes and the host suites' cluster tiers against one- and three-node clusters, and the JVM, Ruby, Python, C and C++ boundary tiers |
 | `bolero-random` | Check, through Bolero | Bolero's randomized properties and corpus replay, which a manual run of the Bolero workflow always runs |
 | `extra-doctests` | Check | Capability doctests |
 | `extra-miri` | Check | Miri over the expiry map |
 | `extra-mutation` | Check | Mutation tests of the expiry map |
-| `extra-runners` | Check | Python coverage of the reporters, gates and collectors: patch coverage, the ordinary merge, the CRAP report, the full union, the paced simulation policy, the release gate, the deployment controller, the kache contract, the connector matrix renderer, the test selection, the wasm-bindgen tool, the native collector and the primitive source validator |
+| `extra-runners` | Check | Python coverage of the reporters, gates and collectors: patch coverage, the ordinary merge, the CRAP report, the full union, the paced simulation policy, the release gate, the deployment controller, the kache contract, the connector matrix renderer, the test selection, the wasm-bindgen tool, the native collector, the client suite readers with the unit-test archive, and the primitive source validator |
 | `extra-compiler` | Check | Source contracts, compiler diagnostics, the Rust runner/gate/audit owners, paired API doctests, compiler cache qualification and the Python coverage of the ratchet's callers |
 | `extra-bench-smoke` | Check | Benchmark smoke tests |
 | `extra-primitives` | Check | Primitive boundary conformance in ordinary, Shuttle, Loom and Turmoil modes, plus ordinary documentation and browser checks. `coverage-full` then requires those collections |

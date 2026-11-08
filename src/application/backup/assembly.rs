@@ -120,7 +120,6 @@ fn plan_domain(
     let record = DomainRecord {
         domain: domain.clone(),
         pace: state.config.pace,
-        placement: state.config.placement,
         status: state.status.clone(),
         start_version: state.start_version,
         start_point: state.last_start.clone(),
@@ -404,8 +403,8 @@ mod tests {
     use nervix_consensus::{AppliedLogPosition, UserCredentials};
     use nervix_models::{
         ClusterNodeName, ClusterSchedule, DomainConfig, DomainPace, DomainStartPoint,
-        PlacementPolicy, ResourceUpload, ResourceUploadIdentity, ResourceUploadKey,
-        ResourceUploads, ResourceVersionCounter, ScheduledNode, SchemaFingerprint, UserName,
+        ResourceUpload, ResourceUploadIdentity, ResourceUploadKey, ResourceUploads,
+        ResourceVersionCounter, ScheduledNode, SchemaFingerprint, UserName,
     };
     use sorted_vec::SortedVec;
 
@@ -428,7 +427,6 @@ mod tests {
             id: domain(name),
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
-                placement: PlacementPolicy::Neutral,
             },
             status,
             start_version: 2,

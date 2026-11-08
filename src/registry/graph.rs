@@ -27,7 +27,7 @@ use nervix_models::ScheduledNode;
 use nervix_models::{
     ConcreteBranchCoverage, CreateSchema, DomainName, DomainSchedule, ImpactEdgeKind,
     ImpactNodeCoverage, IngestorInput, Model, ModelIndex, ModelKind, ModelName, NodeRef,
-    ParseAsType, PlacementPolicy, RelayName, ResolvedBranching, SchemaField, SchemaFingerprint,
+    ParseAsType, RelayName, ResolvedBranching, SchemaField, SchemaFingerprint,
 };
 use nervix_primitives::sync::Arc;
 use petgraph::{
@@ -78,11 +78,8 @@ impl ActiveGraph {
         DomainState::build(&schedule.domain, &models).map(|state| state.graph)
     }
 
-    pub(in crate::registry) fn placement_plan(
-        &self,
-        default_policy: PlacementPolicy,
-    ) -> PlacementPlan {
-        self.placement.plan(default_policy)
+    pub(in crate::registry) fn placement_plan(&self) -> PlacementPlan {
+        self.placement.plan(self)
     }
 
     pub(crate) fn node(&self, kind: ModelKind, identifier: &ModelName) -> Option<&ActiveNode> {
@@ -160,14 +157,6 @@ impl ActiveGraph {
             .get(seed)
             .copied()
             .into_iter()
-            .collect::<HashSet<_>>();
-        self.impact_for_indices(&indices)
-    }
-
-    pub(crate) fn nodes_impact(&self, selected: &BTreeSet<NodeRef>) -> UnattributedImpactTopology {
-        let indices = selected
-            .iter()
-            .filter_map(|node| self.indices.get(node).copied())
             .collect::<HashSet<_>>();
         self.impact_for_indices(&indices)
     }
@@ -365,7 +354,8 @@ impl ActiveGraph {
             )
             .with_resolved_branching(node.resolved_branching.clone());
             if let Some(instancing) = &node.ingestor_units {
-                scheduled = scheduled.with_units(&instancing.units());
+                scheduled =
+                    scheduled.with_units(&instancing.unit_layout().units().collect::<Vec<_>>());
             }
             nodes.push(scheduled);
         }
@@ -556,28 +546,9 @@ pub(crate) struct ActiveNode {
 
 impl ActiveNode {
     pub(in crate::registry) fn placement_units(&self) -> Vec<nervix_models::Unit> {
-        if let Some(instancing) = &self.ingestor_units {
-            return instancing.units();
-        }
-        if matches!(
-            self.config.as_ref(),
-            Model::Relay(_)
-                | Model::Junction(_)
-                | Model::Deduplicator(_)
-                | Model::Reorderer(_)
-                | Model::WindowProcessor(_)
-                | Model::Correlator(_)
-                | Model::Inferencer(_)
-                | Model::WasmProcessor(_)
-                | Model::Generator(_)
-        ) && let Some(partitions) = self
-            .resolved_branching
-            .as_ref()
-            .and_then(|branch| branch.partitions())
-        {
-            return partitions.units();
-        }
-        vec![nervix_models::Unit::SINGLE]
+        super::unit_placement::UnitLayout::of(self)
+            .units()
+            .collect()
     }
 
     /// How this node is addressed: the kind it is and the name it carries, together.

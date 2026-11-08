@@ -78,7 +78,6 @@ fn typed_drafts_render_the_canonical_statements_the_dispatcher_sends() {
     let domain_draft = DomainDraft {
         name: "orders".to_string(),
         if_not_exists: true,
-        placement: PlacementPolicy::PreferColocation,
         ..DomainDraft::default()
     };
     let submission = domain_draft
@@ -86,7 +85,7 @@ fn typed_drafts_render_the_canonical_statements_the_dispatcher_sends() {
         .assured("the domain draft is valid");
     assert_eq!(
         command_query(&submission),
-        "CREATE IF NOT EXISTS UNPACED DOMAIN orders PLACEMENT PREFER COLOCATION;"
+        "CREATE IF NOT EXISTS UNPACED DOMAIN orders;"
     );
 
     let resource = ResourceDraft {
@@ -99,6 +98,46 @@ fn typed_drafts_render_the_canonical_statements_the_dispatcher_sends() {
         .assured("the resource draft and scope are valid");
     assert_eq!(command_query(&submission), "CREATE RESOURCE bundle;");
     assert_eq!(command_domain(&submission), Some(&scope));
+}
+
+#[test]
+fn a_domain_wide_placement_keeps_its_scope_policy_and_full_width_rank() {
+    Owner::new().with(|| {
+        let signals = CreateSignals::new();
+        let scope = domain("orders");
+        signals.open(CreateKind::Placement, Some(scope.clone()), "trigger");
+        signals.placement.update(|draft| {
+            draft.name = "whole_domain".to_owned();
+            draft.policy = PlacementPolicy::PreferColocation;
+            draft.rank = u64::MAX.to_string();
+            draft.if_not_exists = true;
+        });
+        let submitted = signals
+            .submission()
+            .assured("the placement draft is complete");
+        assert_eq!(command_domain(&submitted), Some(&scope));
+        assert_eq!(
+            command_query(&submitted),
+            format!(
+                "CREATE IF NOT EXISTS PLACEMENT whole_domain DOMAIN WIDE PREFER COLOCATION RANK \
+                 {};",
+                u64::MAX
+            )
+        );
+        signals
+            .placement
+            .update(|draft| draft.rank = "0".to_owned());
+        assert!(signals.submission().is_err());
+        signals.placement.update(|draft| draft.rank = String::new());
+        assert_eq!(
+            command_query(&signals.submission().assured("rank is optional")),
+            "CREATE IF NOT EXISTS PLACEMENT whole_domain DOMAIN WIDE PREFER COLOCATION;"
+        );
+        assert_eq!(
+            open_form_controls(signals, CreateKind::Placement),
+            [ChoiceControl::PlacementPolicy]
+        );
+    });
 }
 
 #[test]
@@ -136,51 +175,54 @@ fn a_resource_requires_the_scope_captured_when_the_dialog_opened() {
 fn independent_choice_controls_discard_older_drafts_and_session_generations() {
     Owner::new().with(|| {
         let signals = CreateSignals::new();
-        signals.open(CreateKind::Domain, None, "trigger");
+        signals.open(CreateKind::Relay, Some(domain("orders")), "trigger");
         let revision = signals.revision.get_untracked();
         let pace_context = ChoiceRequestContext {
-            control: ChoiceControl::DomainPace,
+            control: ChoiceControl::RelaySchema,
             draft_revision: revision,
             session_generation: 7,
             append: false,
         };
         let placement_context = ChoiceRequestContext {
-            control: ChoiceControl::PlacementPolicy,
+            control: ChoiceControl::RelayBranch,
             ..pace_context
         };
-        let pace = signals.choices.domain_pace.load;
-        let placement = signals.choices.placement_policy.load;
+        let pace = signals.choices.relay_schema.load;
+        let placement = signals.choices.relay_branch.load;
 
         signals.apply_choice(
             placement_context,
             7,
             outcome(
-                ChoiceValue::PlacementPolicy(PlacementPolicy::Neutral),
-                "NEUTRAL",
+                ChoiceValue::Model(node(ModelKind::Branch, "tenant")),
+                "tenant",
             ),
         );
         signals.apply_choice(
             pace_context,
             7,
             outcome(
-                ChoiceValue::DomainPace(DomainPaceChoice::Unpaced),
-                "UNPACED",
+                ChoiceValue::Model(node(ModelKind::Schema, "event")),
+                "event",
             ),
         );
         assert!(matches!(
             pace.get_untracked(),
-            ChoiceLoad::Ready { choices, .. } if choices[0].presentation.label == "UNPACED"
+            ChoiceLoad::Ready { choices, .. } if choices[0].presentation.label == "event"
         ));
         assert!(matches!(
             placement.get_untracked(),
-            ChoiceLoad::Ready { choices, .. } if choices[0].presentation.label == "NEUTRAL"
+            ChoiceLoad::Ready { choices, .. } if choices[0].presentation.label == "tenant"
         ));
 
         signals.edit();
         signals.apply_choice(
             pace_context,
             7,
-            outcome(ChoiceValue::DomainPace(DomainPaceChoice::Paced), "PACED"),
+            outcome(
+                ChoiceValue::Model(node(ModelKind::Schema, "revised")),
+                "revised",
+            ),
         );
         signals.apply_choice(
             ChoiceRequestContext {
@@ -189,17 +231,17 @@ fn independent_choice_controls_discard_older_drafts_and_session_generations() {
             },
             8,
             outcome(
-                ChoiceValue::PlacementPolicy(PlacementPolicy::RequireColocation),
-                "REQUIRE COLOCATION",
+                ChoiceValue::Model(node(ModelKind::Branch, "region")),
+                "region",
             ),
         );
         assert!(matches!(
             pace.get_untracked(),
-            ChoiceLoad::Ready { choices, .. } if choices[0].presentation.label == "UNPACED"
+            ChoiceLoad::Ready { choices, .. } if choices[0].presentation.label == "event"
         ));
         assert!(matches!(
             placement.get_untracked(),
-            ChoiceLoad::Ready { choices, .. } if choices[0].presentation.label == "NEUTRAL"
+            ChoiceLoad::Ready { choices, .. } if choices[0].presentation.label == "tenant"
         ));
     });
 }
@@ -506,6 +548,7 @@ fn choice_requests_preserve_control_context_and_report_unavailable_channels() {
         assert_eq!(request.page_cursor(), Some("page-two"));
         assert!(context.append);
 
+        signals.open(CreateKind::Placement, Some(domain("orders")), "trigger");
         request_choices(
             signals,
             ChoiceControl::PlacementPolicy,
@@ -519,8 +562,9 @@ fn choice_requests_preserve_control_context_and_report_unavailable_channels() {
         else {
             panic!("the create dialog sends a typed choice request");
         };
-        assert_eq!(request.dependencies().len(), 1);
+        assert!(request.dependencies().is_empty());
 
+        signals.open(CreateKind::Domain, None, "trigger");
         let unavailable = RwSignal::new(None);
         request_choices(signals, ChoiceControl::DomainPace, unavailable, 8, false);
         assert_eq!(
@@ -564,7 +608,7 @@ fn typed_choice_selection_updates_only_the_draft_its_control_edits() {
         );
         assert_eq!(signals.domain.get_untracked().pace, DomainPaceChoice::Paced);
         assert_eq!(
-            signals.domain.get_untracked().placement,
+            signals.placement.get_untracked().policy,
             PlacementPolicy::RequireColocation
         );
         select_choice(
@@ -1023,7 +1067,7 @@ fn each_form_asks_only_the_questions_its_draft_needs() {
         let signals = CreateSignals::new();
         assert_eq!(
             open_form_controls(signals, CreateKind::Domain),
-            [ChoiceControl::DomainPace, ChoiceControl::PlacementPolicy]
+            [ChoiceControl::DomainPace]
         );
         assert_eq!(
             open_form_controls(signals, CreateKind::Branch),
@@ -1083,7 +1127,6 @@ fn creation_components_render_each_typed_draft_and_accessible_status() {
         signals.domain.update(|draft| {
             draft.name = "analytics".to_string();
             draft.if_not_exists = true;
-            draft.placement = PlacementPolicy::PreferColocation;
         });
         signals.open(CreateKind::Domain, None, "global-create-button");
         let render = || {
@@ -1110,21 +1153,6 @@ fn creation_components_render_each_typed_draft_and_accessible_status() {
                     }],
                     page_cursor: Some("more-pace".to_string()),
                 });
-                signals
-                    .choices
-                    .placement_policy
-                    .load
-                    .set(ChoiceLoad::Ready {
-                        choices: vec![Choice {
-                            value: ChoiceValue::PlacementPolicy(PlacementPolicy::PreferColocation),
-                            presentation: ChoicePresentation {
-                                label: "PREFER COLOCATION".to_string(),
-                                detail: None,
-                                group: None,
-                            },
-                        }],
-                        page_cursor: None,
-                    });
             }
             if signals.open.get_untracked() == Some(CreateKind::Subscription) {
                 signals
@@ -1150,9 +1178,7 @@ fn creation_components_render_each_typed_draft_and_accessible_status() {
         let domain_markup = render();
         assert!(domain_markup.contains("role=\"dialog\""));
         assert!(domain_markup.contains("Create domain"));
-        assert!(domain_markup.contains(
-            "CREATE IF NOT EXISTS UNPACED DOMAIN analytics PLACEMENT PREFER COLOCATION;"
-        ));
+        assert!(domain_markup.contains("CREATE IF NOT EXISTS UNPACED DOMAIN analytics;"));
         assert!(domain_markup.contains("UNPACED"));
         assert!(domain_markup.contains("Load more"));
 

@@ -12776,7 +12776,7 @@ mod tests {
                     attempt,
                     draft_revision: revision,
                     kind: CreateKind::Domain,
-                    presentation: "CREATE UNPACED DOMAIN created PLACEMENT NEUTRAL;".to_string(),
+                    presentation: "CREATE UNPACED DOMAIN created;".to_string(),
                     domain: None,
                     resource: None,
                     created_domain: Some(created_domain.clone()),
