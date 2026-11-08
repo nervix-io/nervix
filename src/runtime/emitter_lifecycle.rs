@@ -129,6 +129,28 @@ mod tests {
 
     use super::*;
 
+    // Each diagnostic workload runs in a fresh process and installs the detector before the
+    // ordinary async test entry point constructs its runtime or any fixture creates a mutex.
+    #[cfg(feature = "deloxide")]
+    #[test]
+    fn diagnostic_recovery_retains_one_owner() {
+        let directory = std::env::var_os("NERVIX_DEADLOCK_EVIDENCE")
+            .map(nervix_deadlock::EvidenceDirectory::new);
+        nervix_deadlock::DiagnosticRun::start(directory)
+            .assured("the retained recovery diagnostic process starts its detector once");
+        recovery_retains_one_open_through_failure_waiting_finish_and_close();
+    }
+
+    #[cfg(feature = "deloxide")]
+    #[test]
+    fn diagnostic_cancellation_retains_one_owner() {
+        let directory = std::env::var_os("NERVIX_DEADLOCK_EVIDENCE")
+            .map(nervix_deadlock::EvidenceDirectory::new);
+        nervix_deadlock::DiagnosticRun::start(directory)
+            .assured("the retained cancellation diagnostic process starts its detector once");
+        cancellation_during_resume_keeps_the_suspension_completed_and_owner_retained();
+    }
+
     #[nervix_primitives::test]
     async fn recovery_retains_one_open_through_failure_waiting_finish_and_close() {
         let fixture = FakeEmitterHost::default();

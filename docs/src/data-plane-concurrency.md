@@ -3564,6 +3564,14 @@ finish outcome is received. A failed stop withdraws that close permission; a dea
 ending records its unfinished disposition explicitly. It models no native
 transport or reference-count ordering.
 
+The diagnostic catalogue compiles the fake connector library directly in
+`deloxide-connector-harness`, since it is otherwise only a test dependency of the server. The
+registered retained-lifecycle workloads reach its emitter and host observation mutexes. The
+diagnostic drivers install the detector before invoking the ordinary async test entry points,
+which then construct their runtimes and fixtures. The
+inventory records the fake ingestor's observation locks separately as unreached by those
+workloads; ordinary and Shuttle ingestor tests do not establish a Deloxide result for them.
+
 `RuntimeInner::emitter_readiness` is a cold lifetime registry keyed by the existing emitter identity.
 Installation inserts a fresh `Arc<AtomicBool>`, host callbacks store only that instance's scalar
 readiness, and task registration removes it only by pointer identity. Inspection loads the scalar

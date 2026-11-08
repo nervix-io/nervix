@@ -110,7 +110,10 @@ a fixed constant could not be a setting or that an outcome hides no failure; rev
 Compiler coverage is precisely `tools/nervix-lint/configurations.toml`: the ordinary workspace's
 libraries and binaries, browser root, testing library and separate legal Shuttle, Loom, Turmoil
 and Deloxide configurations. The diagnostic variants have their own library and binary
-invocations. They are never combined with `--all-features`. Every expected target and report
+invocations. The focused `deloxide-connector-harness` configuration also compiles the fake connector
+library with diagnostic primitives: product library targets do not compile that test dependency,
+and its tracked observation locks need their own catalogue evidence. They are never combined with
+`--all-features`. Every expected target and report
 must be present, current and complete. Authored macro expansion and captured caller tokens retain
 provenance; generated build-directory code and external definitions are explicit exclusions.
 The compiler does not infer the APIs of code that no declared configuration compiles.

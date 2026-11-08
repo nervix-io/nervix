@@ -6281,7 +6281,7 @@ evidence = true
 features = ["testing"]
 id = "emitter-retained-lifecycle"
 kind = "libtest-each"
-marker = "runtime::emitter_lifecycle::tests::"
+marker = "runtime::emitter_lifecycle::tests::diagnostic_"
 package = "nervix-server"
 selections = [
   "deloxide",
@@ -6302,7 +6302,7 @@ selections = [
   "deloxide-stress",
   "deloxide-stress-restore",
 ]
-test = "runtime::emitter_lifecycle::tests::recovery_retains_one_open_through_failure_waiting_finish_and_close"
+test = "runtime::emitter_lifecycle::tests::diagnostic_recovery_retains_one_owner"
 
 [[workload]]
 coverage = "The production owner is cancelled inside a scripted asynchronous resume while observations use selected blocking mutexes. No driver or network is modeled."
@@ -6315,7 +6315,7 @@ selections = [
   "deloxide-stress",
   "deloxide-stress-restore",
 ]
-test = "runtime::emitter_lifecycle::tests::cancellation_during_resume_keeps_the_suspension_completed_and_owner_retained"
+test = "runtime::emitter_lifecycle::tests::diagnostic_cancellation_retains_one_owner"
 
 [[owner]]
 gap = "Other fake publish, preparation and staging scripts retain their separate ordinary/Shuttle tests; this workload drives lifecycle observations only."
@@ -6324,6 +6324,11 @@ workloads = [
   "owner.emitter-retained-recovery",
   "owner.emitter-retained-cancellation",
 ]
+
+[[owner]]
+gap = "The retained-emitter workloads do not instantiate fake ingestors. Their scripted intake and acknowledgement observations remain covered by the ordinary connector and ingestor-host tests and the registered ingestor-host Shuttle checks, not by a diagnostic workload; no Deloxide claim covers those locks."
+path = "crates/connector-fake/src/ingestor.rs"
+workloads = []
 
 [[owner]]
 gap = "Native payload and subdivision observation callbacks have their connector owner tests; this workload exercises readiness publication only."
