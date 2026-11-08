@@ -197,6 +197,7 @@ where
 /// Measures a section as its bytes pass: how many there were and their BLAKE3 digest.
 #[derive(Debug, Clone, Default)]
 pub struct SectionDigester {
+    /// Non-security BLAKE3: detects section corruption against the unsigned archive manifest.
     hasher: blake3::Hasher,
     length: u64,
 }

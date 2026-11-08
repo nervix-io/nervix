@@ -400,12 +400,14 @@ fn start_matches(start: &BackupArchiveStart, summary: &BackupArchiveSummary) -> 
 struct DownloadFile {
     staged: NamedTempFile,
     file: File,
+    /// Non-security BLAKE3: checks download consistency against the selected server summary.
     hasher: blake3::Hasher,
     written: u64,
     destination: PathBuf,
 }
 
 impl DownloadFile {
+    /// Non-security BLAKE3: starts a download checksum; session/transport policy owns trust.
     async fn beside(destination: &Path) -> Result<Self, Report<BackupDownloadError>> {
         let directory = match destination.parent() {
             Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
@@ -432,6 +434,7 @@ impl DownloadFile {
     }
 
     /// Empties the file for a download that starts again from the first byte.
+    /// Non-security BLAKE3: restarts the same download consistency check, not authentication.
     async fn restart(&mut self) -> Result<(), Report<BackupDownloadError>> {
         if let Err(error) = self.file.set_len(0).await {
             return Err(write_failure(&self.destination, error));

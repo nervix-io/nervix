@@ -1577,6 +1577,23 @@ test-client-wire *args:
 test-client-core *args:
     cargo test --package nervix-client-core --features arrow,autocomplete --lib -- {{ args }}
 
+# Build the native Ruby extension through the configured compiler cache.
+build-client-ruby:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir) }} cargo build --package nervix-client-ruby
+    just cargo_target_dir={{ quote(cargo_target_dir) }} package-client-ruby
+
+# Package the current Ruby interpreter's native gem and extract that exact archive for probes.
+package-client-ruby:
+    ruby crates/client-ruby/package.rb {{ quote(cargo_target_dir) }}
+
+# Each property executable owns one embedded Ruby interpreter; the unit executable owns one too.
+test-client-ruby *args:
+    BOLERO_RANDOM_SEED="${BOLERO_RANDOM_SEED:-2026110803}" cargo test --package nervix-client-ruby --features ruby-tests --all-targets -- {{ args }}
+
+# Collect the binding itself, executed by embedded Ruby, in the ordinary coverage toolchain.
+coverage-client-ruby output=(cargo_target_dir / "client-ruby.lcov"):
+    BOLERO_RANDOM_SEED="${BOLERO_RANDOM_SEED:-2026110803}" cargo llvm-cov --package nervix-client-ruby --features ruby-tests --all-targets --lcov --output-path {{ quote(output) }}
+
 # Run the C ABI's unit tests, which read every accessor as a host does through the header's types.
 test-client-ffi *args:
     cargo test --package nervix-client-ffi --lib -- {{ args }}
@@ -1724,10 +1741,10 @@ coverage-client-jvm output="lcov-client-jvm.info": build-client-jvm-tests
     CARGO_TARGET_DIR={{ quote(cargo_target_dir) }} cargo llvm-cov --package nervix-client-jvm --features jvm-tests --lib --lcov --output-path {{ quote(output) }}
 
 # Build what the cross-language client probes run: the shared Rust binding, the C and C++ probes
-# linked against it, the JNI jar and Java probe, the Python package in its virtual environment,
+# linked against it, the JNI jar and Java probe, the native Ruby gem, the Python package in its virtual environment,
 # the Go probe with its generated FlatBuffers code, and the TypeScript probe bundled with its generated code for Node.js
 # and Bun. Every generated file lands under the artifacts directory, never in the source tree.
-build-client-conformance: build-client-python build-client-jvm-tests
+build-client-conformance: build-client-python build-client-jvm-tests build-client-ruby
     #!/usr/bin/env bash
     set -euo pipefail
     artifacts={{ quote(cargo_target_dir + "/client-conformance") }}
@@ -3121,7 +3138,7 @@ clippy_build_directory(lane) := cargo_target_dir / "clippy" / lane
 # libraries and engines below them, and the cluster's network stack.
 clippy_language_packages_1 := ["nervix-plexus", "nervix-plexus-format", "nervix-roto", "nervix-vm", "nervix-web-console"]
 
-clippy_language_packages_2 := ["nervix-benchmark", "nervix-cli", "nervix-client-ffi", "nervix-client-host", "nervix-client-jvm", "nervix-client-python"]
+clippy_language_packages_2 := ["nervix-benchmark", "nervix-cli", "nervix-client-ffi", "nervix-client-host", "nervix-client-jvm", "nervix-client-python", "nervix-client-ruby"]
 
 clippy_foundation_packages_1 := ["nervix-approx-into", "nervix-bounded-write", "nervix-crypto", "nervix-dataflow-graph", "nervix-expiry-map", "nervix-primitives-macros", "nervix-recovery"]
 
@@ -3136,7 +3153,7 @@ clippy_foundation_packages_2 := [
     "nervix-models",
 ]
 
-clippy_foundation_packages_3 := ["nervix-simd-kernels", "nervix-wasm-protocol", "nervix-wasm-sdk"]
+clippy_foundation_packages_3 := ["nervix-licensing-protocol", "nervix-simd-kernels", "nervix-wasm-protocol", "nervix-wasm-sdk"]
 
 clippy_cluster_packages := ["nervix-dns", "nervix-test-environment"]
 

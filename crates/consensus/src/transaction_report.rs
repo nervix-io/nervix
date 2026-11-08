@@ -61,6 +61,7 @@ const TOPOLOGY_EDGE_TAG: u8 = b'q';
 pub struct ImpactTopologyId([u8; 32]);
 
 impl ImpactTopologyId {
+    /// Non-security BLAKE3: deduplicates trusted control-plane topology content.
     fn for_topology(
         topology: &ImpactTopology,
     ) -> Result<Self, Report<TransactionReportArchiveError>> {

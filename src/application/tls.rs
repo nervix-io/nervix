@@ -20,6 +20,7 @@ use std::{
     time::Duration,
 };
 
+/// Non-security BLAKE3: detects operator-owned TLS file changes; rustls authenticates peers.
 use blake3::Hasher;
 use error_stack::{Report, ResultExt as _};
 use nervix_interconnect::{
@@ -79,6 +80,7 @@ impl InterconnectTlsPaths {
 }
 
 impl InterconnectTlsMaterial {
+    /// Non-security BLAKE3: detects TLS material changes, not certificate validity or peer identity.
     pub(in crate::application) fn fingerprint(&self) -> blake3::Hash {
         let mut hasher = Hasher::new();
         hasher.update(b"interconnect-ca\0");
@@ -102,6 +104,7 @@ impl InterconnectTlsMaterial {
     }
 }
 
+/// Non-security BLAKE3: compares file-change fingerprints; rustls validates the material.
 pub(in crate::application) async fn reload_interconnect_tls(
     transport: Transport,
     cluster: Arc<ClusterHandle>,

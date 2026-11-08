@@ -1,8 +1,9 @@
 //! Cancellation and deadlines of blocking calls.
 //!
+//! Layer: edges.
 //! - **Owns.** The token a host triggers from any thread, its optional deadline, and bounding a
 //!   blocking call by both.
-//! - **Depends on.** Tokio's cancellation token and timer.
+//! - **Depends on.** Selected cancellation, monotonic instant and timer primitives.
 //! - **Must not know.** What the bounded call does, or what cancelling it means for admitted
 //!   work; the session decides that.
 
@@ -23,6 +24,15 @@ pub struct Cancel {
 }
 
 impl Cancel {
+    /// A call-local token that inherits this token's cancellation and exact deadline.
+    /// Interrupting the child never interrupts its parent or another child.
+    pub fn child(&self) -> Self {
+        Self {
+            token: self.token.child_token(),
+            deadline: self.deadline,
+        }
+    }
+
     /// A token that also expires `deadline` from now.
     pub fn with_deadline(deadline: Duration) -> Result<Self, Failure> {
         if deadline > MAX_DEADLINE {
@@ -72,6 +82,37 @@ mod tests {
 
     use super::*;
     use crate::failure::FailureKind;
+
+    #[test]
+    fn a_child_keeps_its_deadline_and_cancellation_without_cancelling_its_siblings() {
+        let runtime = nervix_primitives::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .assured("a test runtime starts");
+        let parent = Cancel::with_deadline(Duration::from_secs(1))
+            .assured("one second is within the token's declared deadline bound");
+        let child = parent.child();
+        let sibling = parent.child();
+        assert_eq!(child.deadline, parent.deadline);
+        child.trigger();
+        assert_eq!(
+            runtime
+                .block_on(child.bound(async { Ok(()) }))
+                .expect_err("the interrupted child refuses its call")
+                .kind(),
+            FailureKind::Cancelled
+        );
+        assert!(runtime.block_on(sibling.bound(async { Ok(()) })).is_ok());
+        assert!(runtime.block_on(parent.bound(async { Ok(()) })).is_ok());
+        parent.trigger();
+        assert_eq!(
+            runtime
+                .block_on(sibling.bound(async { Ok(()) }))
+                .expect_err("parent cancellation reaches the sibling")
+                .kind(),
+            FailureKind::Cancelled
+        );
+    }
 
     #[test]
     fn a_token_bounds_a_call_by_cancellation_and_by_deadline() {

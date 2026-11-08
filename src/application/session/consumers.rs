@@ -79,6 +79,7 @@ impl Drop for ConsumerCapacityReservation {
 }
 
 impl SessionConsumers {
+    /// Non-security BLAKE3: detects endpoint contract changes; authentication/admission are separate.
     fn endpoint_contract(
         &self,
         mut model: CreateEmitter,

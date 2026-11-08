@@ -44,7 +44,7 @@ with `aws-lc-rs` and librdkafka, preserving the single-module rule.
 | Secure randomness | `nervix_crypto::random` obtains bytes and unsigned 64-bit values from AWS-LC's operating-system-seeded generator, for interconnect entropy and password salts. |
 | Password derivation | Argon2, for user passwords. |
 | NATS user authentication | `nervix-crypto` prepares the Ed25519 signing key and signs the nonce with AWS-LC. The NATS connector owns seed and credentials decoding, public-key encoding and the driver callback. |
-| Other digests | BLAKE3, for backups, resources, checkpoints, archives, identities and fingerprints. No product site is classified yet. |
+| Other digests | BLAKE3, for the non-security content checks, identities, fingerprints, sampling and sketches in the classification register below. |
 
 ## Algorithm Policy
 
@@ -94,8 +94,56 @@ of one, is a defect, and [the gate](#the-count) refuses it.
 ## Classification Register
 
 A site that uses a non-approved hash records its non-security purpose where it is written, and this
-register lists it with the site and the hash. The count recognises no recorded BLAKE3 purpose yet,
-so it holds every BLAKE3 site as unclassified.
+register lists it with the site and the hash. A BLAKE3 operation, import or field records a Rustdoc
+line beginning `Non-security BLAKE3:` followed by its reason. The stable source parser reads that
+comment as a `doc` attribute. Ordinary body comments, string contents, empty reasons, and comments
+on crates, modules, implementations, structs or enums do not classify their children. Nested items
+and fields require their own reasons. The classification applies only to BLAKE3; it cannot excuse
+another counted algorithm, entropy source or TLS-provider installation.
+
+```rust
+/// Non-security BLAKE3: checks transfer consistency; the interconnect authenticates the peer.
+fn checkpoint_checksum(bytes: &[u8]) -> blake3::Hash {
+    blake3::hash(bytes)
+}
+```
+
+Review establishes the truth of the reason. The parser checks its written form and lexical owner,
+not the threat model. A new security purpose moves that operation to the boundary's SHA-256 rather
+than keeping its non-security classification.
+
+All current authored BLAKE3 operations have the following non-security purposes. Classification
+preserves their digest bytes, ordering, prefixes and stored representations.
+
+| Owners | Purpose and trust boundary |
+| --- | --- |
+| `crates/backup/src/section.rs`: `SectionDigester` | Detect section corruption and mismatches against the manifest. The manifest is in the same archive, not a signature or trusted statement of origin. |
+| `crates/client-core/src/backup.rs`: `DownloadFile`; `crates/web-console/src/backup_dialog/archive_download.rs`: `ArchiveReceipt` | Check download consistency against the selected server's summary. Session authentication and the configured transport establish the connection's trust. |
+| `crates/client-core/src/restore.rs` and `crates/web-console/src/backup_dialog/restore_stream.rs`: `measure_archive` | Bind a restore attempt to the operator-selected file's bytes. The digest does not authenticate the file or authorize a restore. |
+| `src/resource.rs`: archive staging, bundle construction, extraction and manifest checksums | Identify immutable content and detect mismatched copies. The authenticated user and committed catalog own the upload; the interconnect authenticates replicas. Archives and manifests are not signed. |
+| `src/runtime/snapshot_staging.rs` and `snapshot_staging/encoding.rs` | Identify and measure an immutable staged artifact for its selected checkpoint or archive section. Staging ownership and the selected descriptor determine where it belongs. |
+| `src/runtime/state_checkpoint_transfer.rs` | Compare fetched bytes with the exact descriptor selected over the authenticated interconnect. Peer and placement admission are independent. |
+| `src/runtime/state_store/{generation,checkpoint_reader,checkpoint_stream,backup}.rs` | Check segmented checkpoint consistency against node-owned metadata during reading, publication and restore. The database and installation authority select the generation; the digest does not authenticate an adversarially rewritten store. |
+| `crates/models/src/schema_fingerprint.rs` and `src/registry/graph.rs` | Identify schema-dependent state and domain-start generations. Configuration admission and schema validation happen independently. |
+| `crates/models/src/window_model_digest.rs` | Identify a canonical window definition for state matching, not authorize it. |
+| `crates/models/src/quiesce/impact.rs`: `BranchKeyFingerprint` | Identify a typed branch and derive its partition seed. The fingerprint neither encrypts nor authenticates branch values. |
+| `crates/models/src/command.rs`: `CommandExecutionReference::derive_step`; `src/runtime/wasm_guest_state_reset.rs` | Derive bounded deterministic statement/reset identities. Command ownership and the selected branch/generation scope the operation; the digest is not a credential or secret capability. |
+| `crates/models/src/udf.rs` and `crates/nervix-roto/src/lib.rs` | Identify admitted UDF source and check stored source/hash consistency. Declaration, compilation and execution policy decide what may execute; the hash is not a code signature. |
+| `crates/consensus/src/transaction.rs` and `src/application/command_execution.rs` | Detect changed repetitions of an authenticated owner's request. Owner identity, reference admission and password verification are separate checks; digest equality grants no authority. |
+| `crates/consensus/src/transaction_report.rs`, `src/application/transaction.rs` and `src/registry/execution_revision.rs` | Identify topology, planning inputs and scheduled revisions for deduplication, freshness and predecessor matching in the trusted control plane. |
+| `src/application/{configured_choices,session_service}.rs` | Bind a page to its query, candidates and configuration revision. Cursors check freshness; authentication and candidate selection run independently. |
+| `src/registry/ingestor_plan.rs` and `src/application/session/consumers.rs` | Detect changes to a client endpoint's schema and execution contract. Authentication, domain generations and endpoint admission remain separate. |
+| `src/application/tls.rs` | Detect changes to operator-owned certificate/key files. Rustls validates and uses the material; the fingerprint does not validate certificates or authenticate peers. |
+| `src/domain_clock_authority.rs` | Choose a clock authority deterministically from admitted live identities. Membership and clock authority validation are separate. |
+| `src/application/subscription.rs`: `SubscriptionSampler::passes` | Distribute sampling draws from a sequence and branch key. This is not security randomness or an access-control decision. |
+| `src/runtime/window_accumulator/sketches.rs`: `HyperLogLog::admit` | Distribute values into sketch registers for approximate cardinality. |
+| `src/registry/scheduler.rs`: `RandomAssignmentPlanner`; `crates/consensus/src/storage/generators.rs`; `src/runtime/state_store/store_properties.rs`: `GeneratedCheckpoint::metadata` | Deterministic test placement and controlled generated fixture bytes, not security randomness. |
+
+An archive or resource checksum is not a tamper-proof seal. Someone able to replace both the data
+and its checksum can construct a different, self-consistent input. Parsing, path and quota checks,
+authenticated command ownership, and transport security retain their own contracts. Operators
+establish the provenance of files they restore. No current BLAKE3 operation requires a
+security-digest migration under this trust model.
 
 The expression function `md5()` in `crates/nervix-vm/src/runtime.rs` is a non-security checksum
 over UTF-8 text. It establishes no authenticity, authorization or collision-resistance guarantee;
@@ -125,7 +173,7 @@ Nervix's own crates bring:
 | --- | --- | --- | --- |
 | `argon2`, with `blake2` | `nervix-server` | User password hashing | Security |
 | `md5` | `nervix-vm` | The expression function `md5()` | Non-security checksum |
-| `blake3` | `nervix-server`, `nervix-backup`, `nervix-consensus`, `nervix-models`, `nervix-roto` | Backup, resource, checkpoint and archive digests, identities and fingerprints | Unclassified |
+| `blake3` | `nervix-server`, `nervix-backup`, `nervix-consensus`, `nervix-models`, `nervix-roto` | Content checks, identities, fingerprints, sampling and sketches recorded above | Non-security |
 
 Libraries bring:
 
@@ -172,7 +220,8 @@ a name a `use` declaration imports, an `extern crate` item, or a path of two or 
 inside a macro or outside one, that names:
 
 - the `argon2`, `sha1`, `sha2`, `hmac` or `pbkdf2` crate, anywhere;
-- the `blake3` crate, at every site, since the count recognises no classification yet;
+- the `blake3` crate, unless the operation, import or field records the non-security purpose
+  described in the [classification register](#classification-register);
 - outside `crates/crypto`, the boundary's own directory: the `getrandom` crate, the
   operating-system generator `OsRng` of `rand_core` or of a crate that re-exports it, or
   `default_provider` in `aws_lc_rs` or in `rustls::crypto::aws_lc_rs`.
@@ -240,7 +289,9 @@ Nervix-owned nonce-signing operation.
 `r` followed by the 32-byte `s`. AWS-LC hashes the complete message with SHA-256 and obtains
 its signing nonce from its system-seeded generator; the caller supplies neither a digest nor a
 nonce. Verification retains the typed backend refusal for malformed keys/signatures and altered
-messages. The cryptographic boundary owns no JWK or JWS syntax.
+messages. `nervix_crypto::jws` owns the maintained JWS library's AWS-LC provider, ES256 signing and
+verification, and RFC 7638 SHA-256 thumbprints. The [shared licensing protocol](./licensing-protocol.md)
+owns its exact header/public-JWK profile, document shapes and trust policy.
 
 Key generation and export return an unencrypted PKCS#8 v1 DER `Pkcs8PrivateKey`, whose maintained
 AWS-LC document zeroizes its byte allocation on drop. `EcdsaP256KeyPair` owns the native key;
@@ -263,6 +314,16 @@ including invalid signatures, changed messages and changed public keys. Register
 properties cover message/signature bit changes and complete PKCS#8 round trips. These are algorithm
 and representation checks; they do not claim a FIPS-qualified build. Cross-build signature
 qualification belongs to the licensing service's FIPS lane.
+
+The JWS adapter uses `jsonwebtoken` 11 with default features disabled and only `aws_lc_rs` enabled.
+It installs that library's native AWS-LC provider once. A provider installed beforehand by an
+external caller causes a typed refusal, rather than silently choosing the external default.
+An exact permitted `unmodeled::sync::OnceLock` keeps only this process-initialization result;
+it carries no licensing state or modeled protocol. Signing-key DER is owned by the maintained
+library's zeroizing allocation and its `Debug` is redacted. Verification preserves the native typed
+error beneath its context and disables generic JWT time/audience policy; callers supply their
+own document validation. The protocol's `jose-jws`/`jose-b64` edges are format-only and enable no
+cryptographic backend.
 
 ## What The FIPS Migration Will Refuse
 
