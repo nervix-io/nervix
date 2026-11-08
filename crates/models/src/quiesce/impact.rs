@@ -651,6 +651,7 @@ pub struct BranchKeyFingerprint(#[serde(with = "fingerprint_hex")] [u8; 32]);
 
 impl BranchKeyFingerprint {
     /// Fingerprint the canonical typed key text used by runtime branch keys and reset selectors.
+    /// Non-security BLAKE3: identifies/partitions a branch; it neither encrypts nor authenticates it.
     pub fn of_canonical_text(text: &str) -> Self {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"nervix/branch-key");

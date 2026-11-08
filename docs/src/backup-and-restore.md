@@ -6,8 +6,15 @@ A backup writes a whole cluster, or one domain, into one archive file on the
 machine of the client that ran it. The archive holds each domain's committed models as Plexus, each
 domain's lifecycle and clock, its resource catalog with the original bytes of every resource
 version, and, for a cluster backup, every user. The archive is a public format: a tar stream whose
-sections standard tools can list and extract, and whose records every reader validates before it
-trusts them.
+sections standard tools can list and extract, and whose records every reader validates before
+using them.
+
+Archive verification checks structure, lengths and BLAKE3 consistency with the unsigned manifest.
+It detects corruption and mismatched sections, and does not authenticate an archive's origin or
+prove that no one deliberately replaced both a section and its checksum. Restore files need
+operator-established provenance; command authentication and configured transport security keep
+their separate contracts. [Cryptography](./cryptography.md#classification-register) records these
+checksum purposes.
 
 A normal backup pauses each running domain in turn, waits for its intake and acknowledged work to
 drain, then captures its committed configuration, WASM guest checkpoints, Kafka ingestor offsets,

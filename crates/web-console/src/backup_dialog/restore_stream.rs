@@ -364,6 +364,7 @@ fn redirect_console(redirect: &LeaderRedirect) -> Option<Url> {
 
 /// Reads the whole archive once to measure and digest it, telling `progress` every count of bytes
 /// read and the file's size.
+/// Non-security BLAKE3: identifies operator-selected restore bytes, not their provenance.
 pub(crate) async fn measure_archive<F: ArchiveFile>(
     file: &F,
     progress: impl Fn(u64, u64),

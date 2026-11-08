@@ -28,6 +28,7 @@ use std::{
 use arch_into::ArchInto as _;
 #[cfg(test)]
 use async_tar::{Builder as AsyncTarBuilder, EntryType, Header, HeaderMode};
+/// Non-security BLAKE3: resource content checks use authenticated uploads/catalog ownership.
 use blake3::Hasher;
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -867,6 +868,7 @@ impl ResourceStore {
     }
 
     /// Create a temporary archive and open it on the filesystem worker pool.
+    /// Non-security BLAKE3: starts an immutable content checksum, not a signature.
     pub async fn create_archive_stager(
         &self,
     ) -> Result<ResourceArchiveStager, Report<ResourceStoreError>> {
@@ -1613,6 +1615,7 @@ impl std::io::Write for ArchiveStagingWriter<'_> {
     }
 }
 
+/// Non-security BLAKE3: identifies a controlled upload bundle; authentication owns upload access.
 fn build_bundle_archive(
     root: &Path,
     limits: ResourceStoreLimits,
@@ -1773,6 +1776,7 @@ fn collect_staged_bundle_entries_recursive(
     Ok(())
 }
 
+/// Non-security BLAKE3: checks upload/replication consistency, not author authenticity.
 fn copy_archive_to_staging(
     source: &ArchiveSource,
     destination: &Path,
@@ -1821,6 +1825,7 @@ fn copy_archive_to_staging(
     Ok((encode_hex(hasher.finalize().as_bytes()), total))
 }
 
+/// Non-security BLAKE3: records extracted-file consistency inside the admitted archive.
 fn extract_archive(
     archive_path: &Path,
     content_root: &Path,
@@ -2217,6 +2222,7 @@ async fn checksum_path(path: &Path) -> Result<String, Report<ResourceStoreError>
     Ok(encode_hex(hash.as_bytes()))
 }
 
+/// Non-security BLAKE3: identifies controlled manifest content, not a signed statement.
 fn manifest_checksum(
     entries: &[ResourceManifestEntry],
 ) -> Result<String, Report<ResourceStoreError>> {

@@ -64,6 +64,10 @@ records their scope without treating a passing qualification as a completed camp
 
 ## Target And Representation Register
 
+The Rust runner, gate, audit and diagnostic-owner applicability check consume the same typed
+compiler evidence. The runner properties below own its persisted representations; readers add
+deterministic checks of their projections without introducing a second report shape or decoder.
+
 | ID | Package and invariant | Domain | Ordinary cases | Input limit |
 | --- | --- | --- | ---: | ---: |
 | `benchmark-metrics-report` | `nervix-benchmark` complete report equality through the production TOML file writer and reader, with bit-exact percentiles | three to six batch targets and relay buffers each, all execution-unit kinds, optional physical nodes, escaped Unicode labels, signed zeros, subnormal/normal/extreme finite percentiles and signed-TOML integer boundaries, v1 | 256 | 1024 bytes |
@@ -229,14 +233,10 @@ records their scope without treating a passing qualification as a completed camp
 | `typed-gate-baseline` | `nervix-ratchet` structural baseline file round trip | every declared count with independently generated bounded values, v1 | 256 | 32 bytes |
 | `typed-gate-product-graph` | `nervix-ratchet` exact depth-prefixed release-tree edges and malformed-depth refusal | up to two trees of twelve generated package edges each with bounded nesting, v1 | 256 | 32 bytes |
 | `typed-audit-report` | `nervix-ratchet audit` complete report equality, deterministic JSON and Markdown | all eight patterns, five suggestions, nullable contexts, spans/origins, rules, rewrites and summaries with Unicode, v1 | 256 | 32 bytes |
-
-The Rust runner, gate, audit and diagnostic-owner applicability check consume the same typed
-compiler evidence. The runner properties above own its persisted representations; readers add
-deterministic checks of their projections without introducing a second report shape or decoder.
 | `typed-site-union` | `nervix-lint-report` authored-site deduplication preserves every configuration | repeated ordinary/modeled findings over bounded current sites, with complete current reports, v3 | 256 | 32 bytes |
 | `typed-source-syntax` | `nervix-lint-report` exact cast/field counts and complete source/site representation equality | bounded inactive Rust casts, testing-gated tuple fields, raw identifiers and Unicode comments with exact locations, v1 | 256 | 32 bytes |
 | `typed-hidden-tunables` | `nervix-lint-report` complete numeric policy site equality and source/site JSON round trips | bounded numeric constants, literal capacities, inactive and macro source, fixed contracts and test exclusions with exact locations, v1 | 256 | 32 bytes |
-| `typed-non-aws-lc-crypto` | `nervix-lint-report` complete authored cryptography site equality and source/site JSON round trips | bounded crate imports and renames, provider and entropy paths inside and outside the boundary, inactive, macro and tracing-argument source, look-alike paths and test exclusions with exact locations, v1 | 256 | 32 bytes |
+| `typed-non-aws-lc-crypto` | `nervix-lint-report` complete authored cryptography site equality and source/site JSON round trips | bounded crate imports and renames, provider and entropy paths inside and outside the boundary, inactive, macro and tracing-argument source, nonempty BLAKE3 purposes and empty-purpose controls, look-alike paths and test exclusions with exact locations, v2 | 256 | 32 bytes |
 | `expiry-map-operations` | `nervix-expiry-map` operation sequences against an `IndexMap` reference: iteration order, lengths, oldest entry, lookups, renewal, shared key allocations and one drop per value | up to 480 weighted insert, shared insert, keyed and oldest removal, lookup, renewal, shared-key copy and clear steps over 96 keys, v2 | 256 | 1024 bytes |
 | `authentication-quota-clock` | `nervix-server` authentication bucket reanchoring against a persistent governor limiter: every decision, exact wait and complete theoretical arrival mark | rates 1–256 and up to 511 monotonic steps with repeated instants, nanosecond/refill boundaries and week-long idle advances, v1 | 256 | 512 bytes |
 | `rate-limit-quota-bounds` | `nervix-rate-limit` quota construction and replenishment against a wide-integer oracle | raw and bounded count, nanosecond period and burst, including zero, maximum burst and horizon overflow, v1 | 256 | 32 bytes |
