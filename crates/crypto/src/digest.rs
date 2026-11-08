@@ -1,7 +1,7 @@
 //! SHA-2 digests obtained from AWS-LC.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** SHA-256 and SHA-512 byte digests and incremental SHA-256 computation.
+//! - **Owns.** SHA-2 digests, incremental SHA-256 and constant-time digest comparison.
 //! - **Depends on.** AWS-LC's maintained digest implementation.
 //! - **Must not know.** Encodings, fingerprints, schemas, credentials or runtime policy.
 
@@ -9,6 +9,12 @@ use std::mem::MaybeUninit;
 
 use aws_lc_rs::digest;
 use meticulous::{OptionExt as _, ResultExt as _};
+
+/// Compare equal-width digests in constant time with respect to their contents.
+#[must_use]
+pub fn equal<const N: usize>(left: &[u8; N], right: &[u8; N]) -> bool {
+    aws_lc_rs::constant_time::verify_slices_are_equal(left, right).is_ok()
+}
 
 /// Hash the complete input with SHA-256, without allocating an output buffer on the heap.
 #[must_use]

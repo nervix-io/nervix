@@ -37,6 +37,12 @@ rustls failures. Ed25519 key preparation and signing retain AWS-LC's typed cause
 cryptography context; the NATS owner adds its configuration context or hands the complete report
 to the driver's authentication callback error, without rendering credentials.
 
+P-256 key generation, PKCS#8 import/export, signing and verification retain AWS-LC's typed
+`KeyRejected` or `Unspecified` cause beneath the corresponding `EcdsaP256Error` operation.
+Neither these contexts nor the private-key owners' `Debug` output contain key bytes. Digest
+inequality is a boolean outcome, and backend FIPS status is a typed observation rather than a
+key, signature or authentication refusal.
+
 Client CONFIG validation keeps vocabulary `ClientConfigSchemaError` beneath the registry's
 client/domain context. The server's changed-model binding validation runs connector-owned offline
 checks before standalone mutation or transaction commit. `OfflineClientConfigError` retains typed
