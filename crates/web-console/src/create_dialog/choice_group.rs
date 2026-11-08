@@ -132,6 +132,9 @@ pub(super) fn selected_choice(
     control: ChoiceControl,
     value: &ChoiceValue,
 ) -> bool {
+    if control.form() == super::CreateKind::Emitter {
+        return signals.emitter_selected(control, value);
+    }
     match (control, value) {
         (ChoiceControl::DomainPace, ChoiceValue::DomainPace(value)) => {
             signals.domain.get().pace == *value
@@ -354,6 +357,11 @@ pub(super) fn selected_choice(
 /// Applies `value` to the draft `control` edits. A value of another kind than the control asks
 /// for changes nothing.
 pub(super) fn select_choice(signals: CreateSignals, control: ChoiceControl, value: ChoiceValue) {
+    if control.form() == super::CreateKind::Emitter {
+        signals.select_emitter_choice(control, value);
+        return;
+    }
+
     match (control, value) {
         (ChoiceControl::DomainPace, ChoiceValue::DomainPace(value)) => {
             signals.domain.update(|draft| draft.pace = value);

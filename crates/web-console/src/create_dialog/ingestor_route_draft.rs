@@ -1,9 +1,9 @@
-//! Ordered output-route drafts for a visual ingestor.
+//! Shared construction drafts and ordered output routes for visual ingestors and emitters.
 //!
 //! Layer: edges.
 //!
 //! - **Owns.** Browser-local route construction, branch keys, flush and message error selections,
-//!   and conversion of each complete route to the current semantic Model.
+//!   shared by processor and emitter forms, and conversion to current semantic Models.
 //! - **Depends on.** Typed route Models, expression parsing, and selected browser references.
 //! - **Must not know.** Relay execution, registry state, or connector acknowledgements.
 
@@ -14,24 +14,36 @@
 
 use error_stack::{Report, ResultExt as _};
 use nervix_models::{
-    Assignment, AssignmentTarget, BranchName, BuiltinFunctionName, FieldName, FlushPolicy,
-    Inheritance, InheritedField, Invocation, MessageErrorPolicy, ModelKind, NodeRef, OutputBranch,
-    ProcessorOutput, RelayName, RouteConstruction,
+    Assignment, AssignmentTarget, AssignmentTargetScope, BranchName, BuiltinFunctionName,
+    FieldName, FlushPolicy, Inheritance, InheritedField, Invocation, MessageErrorPolicy, ModelKind,
+    NodeRef, OutputBranch, ProcessorOutput, RelayName, RouteConstruction,
 };
 use nervix_plexus::parse_expression;
 use thiserror::Error;
 
 use super::SelectedReference;
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AssignmentDraft {
+    pub(super) scope: AssignmentTargetScope,
     pub(super) field: Option<SelectedReference<FieldName>>,
     pub(super) expression: String,
+}
+
+impl Default for AssignmentDraft {
+    fn default() -> Self {
+        Self {
+            scope: AssignmentTargetScope::Bare,
+            field: None,
+            expression: String::new(),
+        }
+    }
 }
 
 impl AssignmentDraft {
     pub(super) fn selected(field: FieldName) -> Self {
         Self {
+            scope: AssignmentTargetScope::Bare,
             field: Some(SelectedReference::chosen(field)),
             expression: String::new(),
         }
@@ -47,7 +59,10 @@ impl AssignmentDraft {
         let value = parse_expression(self.expression.trim())
             .change_context(IngestRouteDraftError::Expression)?;
         Ok(Assignment {
-            target: AssignmentTarget::bare(field.clone()),
+            target: AssignmentTarget {
+                scope: self.scope,
+                field: field.clone(),
+            },
             value,
         })
     }
@@ -66,7 +81,7 @@ pub(super) struct InvocationDraft {
 }
 
 impl InvocationDraft {
-    fn build(&self) -> error_stack::Result<Invocation, IngestRouteDraftError> {
+    pub(super) fn build(&self) -> error_stack::Result<Invocation, IngestRouteDraftError> {
         let function = BuiltinFunctionName::parse(self.function.trim())
             .map_err(|cause| cause.change_context(IngestRouteDraftError::InvocationFunction))?;
         let mut arguments = Vec::new();
@@ -100,6 +115,73 @@ pub(super) struct InheritedFieldDraft {
 }
 
 impl InheritDraft {
+    pub(super) fn field_count(&self) -> usize {
+        match self {
+            Self::AllExcept(fields) => fields.len(),
+            Self::Fields(fields) => fields.len(),
+            _ => 0,
+        }
+    }
+    pub(super) fn field_name(&self, index: usize) -> Option<&FieldName> {
+        match self {
+            Self::AllExcept(fields) => fields.get(index).map(|field| field.name()),
+            Self::Fields(fields) => fields.get(index).map(|field| field.field.name()),
+            _ => None,
+        }
+    }
+    pub(super) fn field_current(&self, index: usize) -> bool {
+        match self {
+            Self::AllExcept(fields) => fields.get(index).is_some_and(|field| field.is_current()),
+            Self::Fields(fields) => fields
+                .get(index)
+                .is_some_and(|field| field.field.is_current()),
+            _ => false,
+        }
+    }
+    pub(super) fn leak_at(&self, index: usize) -> Option<bool> {
+        match self {
+            Self::Fields(fields) => fields.get(index).map(|field| field.leak_sensitive),
+            _ => None,
+        }
+    }
+    pub(super) fn set_leak(&mut self, index: usize, leak: bool) {
+        if let Self::Fields(fields) = self
+            && let Some(field) = fields.get_mut(index)
+        {
+            field.leak_sensitive = leak;
+        }
+    }
+    pub(super) fn remove_field(&mut self, index: usize) {
+        if index >= self.field_count() {
+            return;
+        }
+        match self {
+            Self::AllExcept(fields) => {
+                fields.remove(index);
+            }
+            Self::Fields(fields) => {
+                fields.remove(index);
+            }
+            _ => {}
+        }
+    }
+    pub(super) fn move_field(&mut self, index: usize, up: bool) {
+        let other = if up {
+            index.checked_sub(1)
+        } else {
+            index.checked_add(1)
+        };
+        if let Some(other) = other
+            && index < self.field_count()
+            && other < self.field_count()
+        {
+            match self {
+                Self::AllExcept(fields) => fields.swap(index, other),
+                Self::Fields(fields) => fields.swap(index, other),
+                _ => {}
+            }
+        }
+    }
     pub(super) fn key(&self) -> &'static str {
         match self {
             Self::Unselected => "unselected",
@@ -147,7 +229,7 @@ impl InheritDraft {
         }
     }
 
-    fn build(&self) -> error_stack::Result<Option<Inheritance>, IngestRouteDraftError> {
+    pub(super) fn build(&self) -> error_stack::Result<Option<Inheritance>, IngestRouteDraftError> {
         match self {
             Self::Unselected => Err(Report::new(IngestRouteDraftError::Inheritance)),
             Self::None => Ok(None),
@@ -308,7 +390,7 @@ pub(super) enum FlushDraft {
 }
 
 impl FlushDraft {
-    fn build(&self) -> error_stack::Result<FlushPolicy, IngestRouteDraftError> {
+    pub(super) fn build(&self) -> error_stack::Result<FlushPolicy, IngestRouteDraftError> {
         match self {
             Self::Unselected => Err(Report::new(IngestRouteDraftError::Flush)),
             Self::Immediate => Ok(FlushPolicy::Immediate),
@@ -380,7 +462,7 @@ impl MessageErrorDraft {
         }
     }
 
-    fn build(&self) -> error_stack::Result<MessageErrorPolicy, IngestRouteDraftError> {
+    pub(super) fn build(&self) -> error_stack::Result<MessageErrorPolicy, IngestRouteDraftError> {
         match self {
             Self::Unselected => Err(Report::new(IngestRouteDraftError::MessageError)),
             Self::Ignore => Ok(MessageErrorPolicy::Ignore),
