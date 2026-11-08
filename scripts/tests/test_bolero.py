@@ -227,6 +227,7 @@ class InventoryTests(unittest.TestCase):
             "restore-staging-kept-measurement",
             "typed-report", "typed-source-contract", "typed-site-union", "typed-source-syntax", "typed-hidden-tunables",
             "typed-non-aws-lc-crypto",
+            "crypto-sha2-digests",
             "nats-user-authentication",
             "nats-authentication-malformed",
             "nats-subject-grammar",
@@ -485,6 +486,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-connector-redis",
             "nervix-web-console",
             "nervix-dns",
+            "nervix-crypto",
         })
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())

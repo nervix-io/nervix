@@ -1449,9 +1449,24 @@ test-otel-declarations:
     cargo test --package nervix-models --lib --features arrow connector::otel::
     cargo test --package nervix-plexus --lib emitter::
 
-# Run the cryptography boundary's provider and signing unit tests.
+# Run the cryptography boundary's provider, signing, digest and randomness unit tests.
 test-crypto *args:
     cargo test --package nervix-crypto --lib -- {{ args }}
+
+# Run the boundary's registered properties with canonical corpus and case accounting. They have
+# no server or console assets, so this focused owner does not need bolero-deps.
+test-crypto-properties:
+    python3 -c 'from scripts.bolero import load_inventory, select, test_targets; inventory = load_inventory(); selected = select(inventory, "crypto-"); test_targets(inventory, selected)'
+
+# Qualify digest output, password salts and transport identity through their existing public cases.
+test-crypto-scenarios *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input {{ quote(justfile_directory() / "tests/features/{runtime/bytes_functions,cluster/authentication,cluster/internal_tls}.feature") }} \
+        --name 'Binary values survive conversion and hashing across the public data path|Encoding and hashing sensitive bytes keeps subscription values masked|Client authentication requires a valid user password|Resources replicate over the authenticated interconnect|Interconnect peers connect with certificate identities|Interconnect certificate authority rotates without restarting the cluster' \
+        --concurrency 2 --retry 0 {{ quote(args) }}
 
 # Run the node transport's production owners and their protocol fixtures.
 test-interconnect *args:
