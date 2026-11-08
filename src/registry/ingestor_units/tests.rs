@@ -7,7 +7,8 @@
 
 use std::collections::BTreeSet;
 
-use nervix_models::{BranchPartitions, IngestorInput, Model, PlacementPolicy};
+use meticulous::ResultExt as _;
+use nervix_models::{BranchPartitions, IngestorInput, Model, ModelKind, NodeRef, NodeUnitRef};
 use nonzero_ext::nonzero;
 
 use super::*;
@@ -88,7 +89,6 @@ fn one_instance_exposes_its_single_execution_and_several_instances_keep_distinct
         &named("instances"),
         std::slice::from_ref(&owner),
         0,
-        PlacementPolicy::Neutral,
         &crate::registry::uniform_capabilities(std::slice::from_ref(&owner)),
     );
     let identity = NodeRef::new(ModelKind::Ingestor, named::<ModelName>("source"));
@@ -117,7 +117,6 @@ fn one_instance_exposes_its_single_execution_and_several_instances_keep_distinct
         &named("instances"),
         std::slice::from_ref(&owner),
         0,
-        PlacementPolicy::Neutral,
         &crate::registry::uniform_capabilities(std::slice::from_ref(&owner)),
     );
     let source = &schedule.nodes[&identity];
@@ -134,7 +133,6 @@ fn independent_instances_spread_primaries_and_keep_their_own_replicas() {
         &named("instances"),
         &nodes,
         1,
-        PlacementPolicy::Neutral,
         &crate::registry::uniform_capabilities(&nodes),
     );
     let source = &schedule.nodes[&NodeRef::new(ModelKind::Ingestor, named::<ModelName>("source"))];
@@ -162,7 +160,7 @@ fn independent_instances_spread_primaries_and_keep_their_own_replicas() {
 #[test]
 fn per_partition_groups_bind_only_the_corresponding_instance_and_relay_unit() {
     let graph = graph(IngestorInstances::PerPartition, true);
-    let groups = UnitPlacementGroups::decide(&graph, &[]);
+    let groups = UnitPlacementGroups::decide(&graph, &graph.placement.effective());
     assert_eq!(groups.groups.len(), 4);
     for index in 0..4 {
         let source = NodeUnitRef::new(
@@ -185,7 +183,6 @@ fn per_partition_groups_bind_only_the_corresponding_instance_and_relay_unit() {
         &named("instances"),
         &[named("node-1"), named("node-2"), named("node-3")],
         1,
-        PlacementPolicy::Neutral,
         &crate::registry::uniform_capabilities(&[
             named("node-1"),
             named("node-2"),
@@ -213,18 +210,4 @@ fn per_partition_groups_bind_only_the_corresponding_instance_and_relay_unit() {
             .len(),
         3
     );
-}
-
-#[test]
-fn whole_entity_colocation_joins_every_declared_unit() {
-    let graph = graph(IngestorInstances::Count(nonzero!(3u64)), false);
-    let groups = UnitPlacementGroups::decide(
-        &graph,
-        &[vec![
-            NodeRef::new(ModelKind::Ingestor, named::<ModelName>("source")),
-            NodeRef::new(ModelKind::Relay, named::<ModelName>("events")),
-        ]],
-    );
-    assert_eq!(groups.groups.len(), 1);
-    assert_eq!(groups.groups[0].len(), 4);
 }

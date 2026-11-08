@@ -248,7 +248,7 @@ impl Arbitrary<'_> {
         }
     }
 
-    /// A placement between two non-empty groups of runtime nodes, each member named once.
+    /// A domain-wide placement or a corridor with non-empty, distinct endpoint lists.
     ///
     /// `ALTER PLACEMENT` sets the same groups, and reads a comma before a bare operation keyword as
     /// the next operation, so in the Plexus domain no member is named like one.
@@ -267,7 +267,11 @@ impl Arbitrary<'_> {
         } else {
             None
         };
-        CreatePlacement::new(name, from, to, policy, rank)
-            .verified("both member lists are non-empty and hold each member once")
+        if self.entropy.flag() {
+            CreatePlacement::domain_wide(name, policy, rank)
+        } else {
+            CreatePlacement::new(name, from, to, policy, rank)
+                .verified("both member lists are non-empty and hold each member once")
+        }
     }
 }

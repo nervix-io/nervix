@@ -30,6 +30,8 @@ use nervix_models::{
 
 use super::session_service::hash_choice_text;
 
+mod emitter;
+
 /// A question a structured control asks about one domain's configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::application) enum ConfiguredQuestion {
@@ -55,6 +57,13 @@ pub(in crate::application) enum ConfiguredQuestion {
     ProcessorCompatibleInputRelays(NodeRef),
     ProcessorInputBranchRelays(NodeRef),
     ProcessorMaterializedRelays(NodeRef),
+    EmitterEntity(nervix_models::EmitterEntityKind),
+    EmitterCatalog,
+    EmitterCodecs,
+    EmitterCompatibleInputs(NodeRef),
+    EmitterMaterializedRelays(Vec<NodeRef>),
+    EmitterErrorRelays(Vec<NodeRef>),
+    SchemaFields(NodeRef),
 }
 
 /// The domain a lookup reads, and what it asks of that domain's configuration.
@@ -123,6 +132,33 @@ impl<'a> ConfiguredQuery<'a> {
                     ConfiguredQuestion::ProcessorMaterializedRelays,
                 );
             }
+            ChoiceTarget::EmitterHttpRequestReference
+            | ChoiceTarget::EmitterKafkaTopicReference
+            | ChoiceTarget::EmitterPulsarTopicReference
+            | ChoiceTarget::EmitterRabbitMqQueueReference
+            | ChoiceTarget::EmitterRabbitMqExchangeReference
+            | ChoiceTarget::EmitterRedisPubSubReference
+            | ChoiceTarget::EmitterMqttTopicReference
+            | ChoiceTarget::EmitterNatsSubjectReference
+            | ChoiceTarget::EmitterNatsStreamReference
+            | ChoiceTarget::EmitterZeroMqPushReference
+            | ChoiceTarget::EmitterSqsQueueReference
+            | ChoiceTarget::EmitterSentryEventReference
+            | ChoiceTarget::EmitterSyslogCollectorReference
+            | ChoiceTarget::EmitterOtelLogsReference
+            | ChoiceTarget::EmitterOtelTracesReference
+            | ChoiceTarget::EmitterOtelMetricsReference
+            | ChoiceTarget::EmitterClickHouseTableReference
+            | ChoiceTarget::EmitterPostgresTableReference
+            | ChoiceTarget::EmitterMySqlTableReference
+            | ChoiceTarget::EmitterMongoDbCollectionReference
+            | ChoiceTarget::EmitterIcebergTableReference
+            | ChoiceTarget::EmitterIcebergCatalog
+            | ChoiceTarget::EmitterCodec
+            | ChoiceTarget::EmitterCompatibleInputRelay
+            | ChoiceTarget::EmitterMaterializedRelay
+            | ChoiceTarget::EmitterErrorRelay
+            | ChoiceTarget::SchemaField => return Self::emitter(request),
             ChoiceTarget::DomainPace | ChoiceTarget::PlacementPolicy => return None,
             ChoiceTarget::IngestHttpRequestSource
             | ChoiceTarget::IngestHttpEndpointSource
@@ -344,6 +380,13 @@ impl ConfiguredChoices {
             | ConfiguredQuestion::ProcessorCompatibleInputRelays(_)
             | ConfiguredQuestion::ProcessorInputBranchRelays(_)
             | ConfiguredQuestion::ProcessorMaterializedRelays(_) => self.models(question, &search),
+            ConfiguredQuestion::EmitterEntity(_)
+            | ConfiguredQuestion::EmitterCatalog
+            | ConfiguredQuestion::EmitterCodecs
+            | ConfiguredQuestion::EmitterCompatibleInputs(_)
+            | ConfiguredQuestion::EmitterMaterializedRelays(_)
+            | ConfiguredQuestion::EmitterErrorRelays(_) => self.models(question, &search),
+            ConfiguredQuestion::SchemaFields(schema) => self.codec_fields(schema, &search),
             ConfiguredQuestion::RelayFields(relay) => self.relay_fields(relay, &search),
             ConfiguredQuestion::CodecFields(codec) => self.codec_fields(codec, &search),
             ConfiguredQuestion::BranchFields(branch) => self.branch_fields(branch, &search),
@@ -360,6 +403,7 @@ impl ConfiguredChoices {
         question: &ConfiguredQuestion,
         search: &str,
     ) -> Result<ResolvedChoices, ChoiceStatus> {
+        let emitter_context = self.emitter_context(question)?;
         let input = match question {
             ConfiguredQuestion::ProcessorCompatibleInputRelays(input)
             | ConfiguredQuestion::ProcessorInputBranchRelays(input)
@@ -485,6 +529,18 @@ impl ConfiguredChoices {
                             .to_canonical_plexus(),
                     )?
                 }
+                (
+                    ConfiguredQuestion::EmitterEntity(_)
+                    | ConfiguredQuestion::EmitterCatalog
+                    | ConfiguredQuestion::EmitterCodecs
+                    | ConfiguredQuestion::EmitterCompatibleInputs(_)
+                    | ConfiguredQuestion::EmitterMaterializedRelays(_)
+                    | ConfiguredQuestion::EmitterErrorRelays(_),
+                    _,
+                ) => match self.emitter_candidate(question, model, &emitter_context)? {
+                    Some(candidate) => candidate,
+                    None => continue,
+                },
                 _ => continue,
             };
             if candidate.matches(search) {
@@ -499,6 +555,18 @@ impl ConfiguredChoices {
         });
         let mut digest = blake3::Hasher::new();
         if let Some(input) = input {
+            let definition = input
+                .to_canonical_plexus()
+                .inspect_err(|error| {
+                    nervix_recovery::Reported::reported(
+                        Err::<(), _>(error),
+                        "resolve configured choices",
+                    )
+                })
+                .map_err(|_| ChoiceStatus::LookupFailed)?;
+            hash_choice_text(&mut digest, &definition);
+        }
+        for input in &emitter_context.inputs {
             let definition = input
                 .to_canonical_plexus()
                 .inspect_err(|error| {
@@ -672,14 +740,17 @@ impl ConfiguredChoices {
 
     /// Non-security BLAKE3: checks codec/schema-page freshness, not access permission.
     fn codec_fields(&self, codec: &NodeRef, search: &str) -> Result<ResolvedChoices, ChoiceStatus> {
-        let Some(Model::Codec(codec)) = self.models.get(codec) else {
-            return Err(ChoiceStatus::MissingContext);
+        let reference = self.models.get(codec).ok_or(ChoiceStatus::MissingContext)?;
+        let (schema_name, label) = match reference {
+            Model::Codec(codec) => (&codec.schema, "Codec field"),
+            Model::Schema(schema) => (&schema.name, "Schema field"),
+            _ => return Err(ChoiceStatus::MissingContext),
         };
-        let schema_ref = NodeRef::new(ModelKind::Schema, &codec.schema);
+        let schema_ref = NodeRef::new(ModelKind::Schema, schema_name);
         let Some(Model::Schema(schema)) = self.models.get(&schema_ref) else {
             return Err(ChoiceStatus::LookupFailed);
         };
-        let codec_definition = codec
+        let codec_definition = reference
             .to_canonical_plexus()
             .inspect_err(|error| {
                 nervix_recovery::Reported::reported(
@@ -703,7 +774,7 @@ impl ConfiguredChoices {
         let choices = schema
             .fields
             .iter()
-            .map(|field| Self::field_choice(field, "Codec field"))
+            .map(|field| Self::field_choice(field, label))
             .filter(|choice| choice.presentation.label.to_lowercase().contains(search))
             .collect();
         Ok(ResolvedChoices {
@@ -1786,5 +1857,190 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    #[test]
+    fn emitter_inputs_share_payload_schema_without_requiring_the_same_branch() {
+        let orders = relay_node("orders");
+        assert_eq!(
+            labels(
+                &ConfiguredQuestion::EmitterCompatibleInputs(orders.clone()),
+                ""
+            ),
+            ["audit", "orders"]
+        );
+        assert_eq!(
+            labels(
+                &ConfiguredQuestion::EmitterMaterializedRelays(vec![orders.clone()]),
+                ""
+            ),
+            ["orders"]
+        );
+        assert_eq!(
+            labels(
+                &ConfiguredQuestion::EmitterErrorRelays(vec![orders.clone()]),
+                ""
+            ),
+            ["orders"]
+        );
+        for question in [
+            ConfiguredQuestion::EmitterMaterializedRelays(vec![
+                orders.clone(),
+                relay_node("audit"),
+            ]),
+            ConfiguredQuestion::EmitterErrorRelays(vec![orders, relay_node("audit")]),
+        ] {
+            assert!(
+                labels(&question, "").is_empty(),
+                "a target must accept every input's concrete branch"
+            );
+        }
+        let missing = configuration().resolve(
+            &ConfiguredQuestion::EmitterCompatibleInputs(relay_node("missing")),
+            "",
+        );
+        assert!(matches!(missing, Err(ChoiceStatus::MissingContext)));
+    }
+
+    #[test]
+    fn emitter_questions_have_exact_typed_dependencies_and_current_reference_kinds() {
+        use nervix_models::{ClientEmitterEntity, EmitterEntityKind};
+        let in_domain = vec![ChoiceSelection {
+            value: ChoiceValue::Domain(domain()),
+        }];
+        for kind in EmitterEntityKind::all() {
+            let target = ChoiceTarget::for_emitter_reference(kind);
+            let request = ChoiceLookupRequest::new(target, in_domain.clone(), String::new());
+            let query = ConfiguredQuery::of(&request)
+                .assured("an emitter reference requires its domain only");
+            if kind == EmitterEntityKind::Client(ClientEmitterEntity::Consumer) {
+                assert_eq!(query.question, ConfiguredQuestion::Schemas);
+            } else {
+                assert_eq!(query.question, ConfiguredQuestion::EmitterEntity(kind));
+            }
+            assert!(
+                ConfiguredQuery::of(&ChoiceLookupRequest::new(target, Vec::new(), String::new()))
+                    .is_none()
+            );
+        }
+        for target in [
+            ChoiceTarget::EmitterCompatibleInputRelay,
+            ChoiceTarget::EmitterMaterializedRelay,
+            ChoiceTarget::EmitterErrorRelay,
+            ChoiceTarget::SchemaField,
+        ] {
+            assert!(
+                ConfiguredQuery::of(&ChoiceLookupRequest::new(
+                    target,
+                    in_domain.clone(),
+                    String::new()
+                ))
+                .is_none()
+            );
+            let mut wrong = in_domain.clone();
+            wrong.push(ChoiceSelection {
+                value: ChoiceValue::Model(NodeRef::new(
+                    ModelKind::Codec,
+                    ModelName::parse("codec").assured("valid name"),
+                )),
+            });
+            assert!(
+                ConfiguredQuery::of(&ChoiceLookupRequest::new(target, wrong, String::new()))
+                    .is_none()
+            );
+        }
+        let mut inputs = in_domain;
+        inputs.push(ChoiceSelection {
+            value: ChoiceValue::Model(relay_node("orders")),
+        });
+        inputs.push(ChoiceSelection {
+            value: ChoiceValue::Model(relay_node("audit")),
+        });
+        let request = ChoiceLookupRequest::new(
+            ChoiceTarget::EmitterMaterializedRelay,
+            inputs,
+            String::new(),
+        );
+        assert_eq!(
+            ConfiguredQuery::of(&request)
+                .assured("all inputs remain dependencies")
+                .question,
+            ConfiguredQuestion::EmitterMaterializedRelays(vec![
+                relay_node("orders"),
+                relay_node("audit")
+            ])
+        );
+    }
+
+    #[test]
+    fn encoding_choices_accept_a_different_output_schema_and_schema_fields_keep_sensitivity() {
+        use nervix_models::{CodecJaqFormat, CodecJaqTransformations};
+        let mut models = vec![
+            schema("input", vec![]),
+            schema(
+                "output",
+                vec![
+                    field("secret", ParseAsType::String, false, true),
+                    field("public", ParseAsType::I64, true, false),
+                ],
+            ),
+        ];
+        for (name, encoding) in [("decoding_only", false), ("output_encoder", true)] {
+            let transformations = if encoding {
+                CodecJaqTransformations {
+                    on_emitting: Some(".".to_string()),
+                    ..CodecJaqTransformations::default()
+                }
+            } else {
+                CodecJaqTransformations {
+                    on_ingestion: Some(".".to_string()),
+                    ..CodecJaqTransformations::default()
+                }
+            };
+            models.push(Model::Codec(CreateCodec {
+                name: CodecName::parse(name).assured("valid codec name"),
+                schema: SchemaName::parse("output").assured("valid schema name"),
+                wire_format: CodecWireFormat::JaqNative {
+                    format: CodecJaqFormat::Json,
+                    transformations,
+                },
+                encoding_rules: Vec::new(),
+            }));
+        }
+        let choices = ConfiguredChoices::new(
+            domain(),
+            models,
+            ResourceVersionStatus::default(),
+            Vec::new(),
+        );
+        let encoders = choices
+            .resolve(&ConfiguredQuestion::EmitterCodecs, "")
+            .assured("encoding choices resolve");
+        assert_eq!(
+            encoders
+                .choices
+                .iter()
+                .map(|choice| choice.presentation.label.as_str())
+                .collect::<Vec<_>>(),
+            ["output_encoder"]
+        );
+        let fields = choices
+            .resolve(
+                &ConfiguredQuestion::SchemaFields(NodeRef::new(
+                    ModelKind::Schema,
+                    ModelName::parse("output").assured("valid schema"),
+                )),
+                "",
+            )
+            .assured("schema field choices resolve");
+        assert_eq!(fields.choices.len(), 2);
+        assert!(fields.choices.iter().any(|choice| {
+            choice.presentation.label == "secret"
+                && choice
+                    .presentation
+                    .detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.contains("SENSITIVE"))
+        }));
     }
 }

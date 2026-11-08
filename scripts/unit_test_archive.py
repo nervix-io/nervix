@@ -43,6 +43,7 @@ MESSAGES = Path("target/unit-tests/cargo-messages.jsonl")
 PROGRAMS = Path("target/unit-tests/programs.json")
 MANIFEST = Path("target/unit-tests/manifest.json")
 JVM_ARTIFACTS = Path("target/client-conformance/java")
+NATIVE_ARTIFACTS = Path("target/client-conformance")
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,24 @@ def jvm_inputs(root: Path, programs: Sequence[TestProgram]) -> list[Path]:
     return [jar, *(path.relative_to(root) for path in sorted((root / classes).rglob("*.class")))]
 
 
+def native_inputs(root: Path, programs: Sequence[TestProgram]) -> list[Path]:
+    """Carry both C/C++ instrumentation modes and the library their run paths resolve."""
+    selected = any(program.directory == "crates/client-ffi"
+                   and Path(program.executable).name.startswith("native_suites-")
+                   for program in programs)
+    if not selected:
+        return []
+    required = [NATIVE_ARTIFACTS / f"{host}-suite{suffix}"
+                for host in ("c", "cpp") for suffix in ("", "-sanitized")]
+    required.append(shards.COVERAGE_DEBUG / "libnervix_client_ffi.so")
+    for path in required:
+        if not (root / path).is_file():
+            raise shards.ShardError(
+                f"{path} is missing; run `just test-coverage-binaries` before packing native suites"
+            )
+    return required
+
+
 def pack(root: Path, archive: Path) -> shards.Manifest:
     """Write the archive of the unit tests' build and the generated inputs they read."""
     objects = shards.coverage_objects(root, shards.object_pattern(shards.workspace_targets(root)))
@@ -120,11 +139,13 @@ def pack(root: Path, archive: Path) -> shards.Manifest:
     for program in programs:
         if program.executable not in held:
             raise shards.ShardError(f"the build left no {program.executable}")
+    host_inputs = [*jvm_inputs(root, programs), *native_inputs(root, programs)]
     return shards.write_archive(
         root,
         archive,
         MANIFEST,
-        [*kept, *shards.generated_inputs(root), *jvm_inputs(root, programs), PROGRAMS],
+        [*kept, *shards.generated_inputs(root),
+         *(path for path in host_inputs if path.as_posix() not in held), PROGRAMS],
         stripped=kept,
     )
 

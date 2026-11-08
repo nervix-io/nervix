@@ -185,7 +185,34 @@ enum ChoiceTarget : ubyte {
   /// Materialized relays with the same exact branch as one selected input relay.
   ProcessorMaterializedRelay,
   /// The configured NATS clients a NATS STREAM source reads a durable consumer through.
-  IngestNatsStreamSource
+  IngestNatsStreamSource,
+  EmitterHttpRequestReference,
+  EmitterKafkaTopicReference,
+  EmitterPulsarTopicReference,
+  EmitterRabbitMqQueueReference,
+  EmitterRabbitMqExchangeReference,
+  EmitterRedisPubSubReference,
+  EmitterMqttTopicReference,
+  EmitterNatsSubjectReference,
+  EmitterNatsStreamReference,
+  EmitterZeroMqPushReference,
+  EmitterSqsQueueReference,
+  EmitterSentryEventReference,
+  EmitterSyslogCollectorReference,
+  EmitterOtelLogsReference,
+  EmitterOtelTracesReference,
+  EmitterOtelMetricsReference,
+  EmitterClickHouseTableReference,
+  EmitterPostgresTableReference,
+  EmitterMySqlTableReference,
+  EmitterMongoDbCollectionReference,
+  EmitterIcebergTableReference,
+  EmitterIcebergCatalog,
+  EmitterCodec,
+  EmitterCompatibleInputRelay,
+  EmitterMaterializedRelay,
+  EmitterErrorRelay,
+  SchemaField,
 }
 
 enum DomainPaceChoice : ubyte {
@@ -470,9 +497,6 @@ table DropConfigurationOperation {
   node: NodeRef (required);
 }
 
-table AlterDomainOperation {
-  domain: string (required);
-}
 
 table StartDomainOperation {
   domain: string (required);
@@ -514,15 +538,14 @@ table ResetWasmStateOperation {
 }
 
 union TransactionOperation {
-  CreateConfigurationOperation,
-  AlterConfigurationOperation,
-  DropConfigurationOperation,
-  AlterDomainOperation,
-  StartDomainOperation,
-  StopDomainOperation,
-  CreateResourceOperation,
-  RebindResourceOperation,
-  ResetWasmStateOperation
+  CreateConfigurationOperation = 1,
+  AlterConfigurationOperation = 2,
+  DropConfigurationOperation = 3,
+  StartDomainOperation = 5,
+  StopDomainOperation = 6,
+  CreateResourceOperation = 7,
+  RebindResourceOperation = 8,
+  ResetWasmStateOperation = 9
 }
 
 enum ModelChangeAspect : ubyte {
@@ -611,7 +634,6 @@ table ConfigurationReason {
   aspect: ModelChangeAspect = null;
 }
 
-table DomainPlacementReason {}
 
 table DomainStartReason {}
 
@@ -633,13 +655,12 @@ table WasmStateResetReason {
 }
 
 union OperationImpactReason {
-  ConfigurationReason,
-  DomainPlacementReason,
-  DomainStartReason,
-  DomainStopReason,
-  ResourceCatalogReason,
-  ResourceRebindingReason,
-  WasmStateResetReason
+  ConfigurationReason = 1,
+  DomainStartReason = 3,
+  DomainStopReason = 4,
+  ResourceCatalogReason = 5,
+  ResourceRebindingReason = 6,
+  WasmStateResetReason = 7
 }
 
 table OperationReason {

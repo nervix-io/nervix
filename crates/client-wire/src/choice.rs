@@ -73,6 +73,33 @@ pub enum ChoiceTarget {
     ProcessorCompatibleInputRelay,
     ProcessorInputBranchRelay,
     ProcessorMaterializedRelay,
+    EmitterHttpRequestReference,
+    EmitterKafkaTopicReference,
+    EmitterPulsarTopicReference,
+    EmitterRabbitMqQueueReference,
+    EmitterRabbitMqExchangeReference,
+    EmitterRedisPubSubReference,
+    EmitterMqttTopicReference,
+    EmitterNatsSubjectReference,
+    EmitterNatsStreamReference,
+    EmitterZeroMqPushReference,
+    EmitterSqsQueueReference,
+    EmitterSentryEventReference,
+    EmitterSyslogCollectorReference,
+    EmitterOtelLogsReference,
+    EmitterOtelTracesReference,
+    EmitterOtelMetricsReference,
+    EmitterClickHouseTableReference,
+    EmitterPostgresTableReference,
+    EmitterMySqlTableReference,
+    EmitterMongoDbCollectionReference,
+    EmitterIcebergTableReference,
+    EmitterIcebergCatalog,
+    EmitterCodec,
+    EmitterCompatibleInputRelay,
+    EmitterMaterializedRelay,
+    EmitterErrorRelay,
+    SchemaField,
 }
 
 wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
@@ -113,9 +140,196 @@ wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
     ProcessorCompatibleInputRelay,
     ProcessorInputBranchRelay,
     ProcessorMaterializedRelay,
+    EmitterHttpRequestReference,
+    EmitterKafkaTopicReference,
+    EmitterPulsarTopicReference,
+    EmitterRabbitMqQueueReference,
+    EmitterRabbitMqExchangeReference,
+    EmitterRedisPubSubReference,
+    EmitterMqttTopicReference,
+    EmitterNatsSubjectReference,
+    EmitterNatsStreamReference,
+    EmitterZeroMqPushReference,
+    EmitterSqsQueueReference,
+    EmitterSentryEventReference,
+    EmitterSyslogCollectorReference,
+    EmitterOtelLogsReference,
+    EmitterOtelTracesReference,
+    EmitterOtelMetricsReference,
+    EmitterClickHouseTableReference,
+    EmitterPostgresTableReference,
+    EmitterMySqlTableReference,
+    EmitterMongoDbCollectionReference,
+    EmitterIcebergTableReference,
+    EmitterIcebergCatalog,
+    EmitterCodec,
+    EmitterCompatibleInputRelay,
+    EmitterMaterializedRelay,
+    EmitterErrorRelay,
+    SchemaField,
 });
 
 impl ChoiceTarget {
+    /// The configured reference named by one emitter entity's body.
+    pub fn for_emitter_reference(kind: nervix_models::EmitterEntityKind) -> Self {
+        match kind {
+            nervix_models::EmitterEntityKind::Client(
+                nervix_models::ClientEmitterEntity::Consumer,
+            ) => Self::Schema,
+            nervix_models::EmitterEntityKind::Http(nervix_models::HttpEmitterEntity::Request) => {
+                Self::EmitterHttpRequestReference
+            }
+            nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic) => {
+                Self::EmitterKafkaTopicReference
+            }
+            nervix_models::EmitterEntityKind::Pulsar(nervix_models::PulsarEmitterEntity::Topic) => {
+                Self::EmitterPulsarTopicReference
+            }
+            nervix_models::EmitterEntityKind::RabbitMq(
+                nervix_models::RabbitMqEmitterEntity::Queue,
+            ) => Self::EmitterRabbitMqQueueReference,
+            nervix_models::EmitterEntityKind::RabbitMq(
+                nervix_models::RabbitMqEmitterEntity::Exchange,
+            ) => Self::EmitterRabbitMqExchangeReference,
+            nervix_models::EmitterEntityKind::Redis(nervix_models::RedisEmitterEntity::PubSub) => {
+                Self::EmitterRedisPubSubReference
+            }
+            nervix_models::EmitterEntityKind::Mqtt(nervix_models::MqttEmitterEntity::Topic) => {
+                Self::EmitterMqttTopicReference
+            }
+            nervix_models::EmitterEntityKind::Nats(nervix_models::NatsEmitterEntity::Subject) => {
+                Self::EmitterNatsSubjectReference
+            }
+            nervix_models::EmitterEntityKind::Nats(nervix_models::NatsEmitterEntity::Stream) => {
+                Self::EmitterNatsStreamReference
+            }
+            nervix_models::EmitterEntityKind::ZeroMq(nervix_models::ZeroMqEmitterEntity::Push) => {
+                Self::EmitterZeroMqPushReference
+            }
+            nervix_models::EmitterEntityKind::Sqs(nervix_models::SqsEmitterEntity::Queue) => {
+                Self::EmitterSqsQueueReference
+            }
+            nervix_models::EmitterEntityKind::Sentry(nervix_models::SentryEmitterEntity::Event) => {
+                Self::EmitterSentryEventReference
+            }
+            nervix_models::EmitterEntityKind::Syslog(
+                nervix_models::SyslogEmitterEntity::Collector,
+            ) => Self::EmitterSyslogCollectorReference,
+            nervix_models::EmitterEntityKind::Otel(nervix_models::OtelEmitterEntity::Logs) => {
+                Self::EmitterOtelLogsReference
+            }
+            nervix_models::EmitterEntityKind::Otel(nervix_models::OtelEmitterEntity::Traces) => {
+                Self::EmitterOtelTracesReference
+            }
+            nervix_models::EmitterEntityKind::Otel(nervix_models::OtelEmitterEntity::Metrics) => {
+                Self::EmitterOtelMetricsReference
+            }
+            nervix_models::EmitterEntityKind::ClickHouse(
+                nervix_models::ClickHouseEmitterEntity::Table,
+            ) => Self::EmitterClickHouseTableReference,
+            nervix_models::EmitterEntityKind::Postgres(
+                nervix_models::PostgresEmitterEntity::Table,
+            ) => Self::EmitterPostgresTableReference,
+            nervix_models::EmitterEntityKind::MySql(nervix_models::MySqlEmitterEntity::Table) => {
+                Self::EmitterMySqlTableReference
+            }
+            nervix_models::EmitterEntityKind::MongoDb(
+                nervix_models::MongoDbEmitterEntity::Collection,
+            ) => Self::EmitterMongoDbCollectionReference,
+            nervix_models::EmitterEntityKind::Iceberg(
+                nervix_models::IcebergEmitterEntity::Table,
+            ) => Self::EmitterIcebergTableReference,
+        }
+    }
+
+    /// The emitter declaration a reference question consumes.
+    pub fn emitter_reference_entity(self) -> Option<nervix_models::EmitterEntityKind> {
+        match self {
+            Self::EmitterHttpRequestReference => Some(nervix_models::EmitterEntityKind::Http(
+                nervix_models::HttpEmitterEntity::Request,
+            )),
+            Self::EmitterKafkaTopicReference => Some(nervix_models::EmitterEntityKind::Kafka(
+                nervix_models::KafkaEmitterEntity::Topic,
+            )),
+            Self::EmitterPulsarTopicReference => Some(nervix_models::EmitterEntityKind::Pulsar(
+                nervix_models::PulsarEmitterEntity::Topic,
+            )),
+            Self::EmitterRabbitMqQueueReference => {
+                Some(nervix_models::EmitterEntityKind::RabbitMq(
+                    nervix_models::RabbitMqEmitterEntity::Queue,
+                ))
+            }
+            Self::EmitterRabbitMqExchangeReference => {
+                Some(nervix_models::EmitterEntityKind::RabbitMq(
+                    nervix_models::RabbitMqEmitterEntity::Exchange,
+                ))
+            }
+            Self::EmitterRedisPubSubReference => Some(nervix_models::EmitterEntityKind::Redis(
+                nervix_models::RedisEmitterEntity::PubSub,
+            )),
+            Self::EmitterMqttTopicReference => Some(nervix_models::EmitterEntityKind::Mqtt(
+                nervix_models::MqttEmitterEntity::Topic,
+            )),
+            Self::EmitterNatsSubjectReference => Some(nervix_models::EmitterEntityKind::Nats(
+                nervix_models::NatsEmitterEntity::Subject,
+            )),
+            Self::EmitterNatsStreamReference => Some(nervix_models::EmitterEntityKind::Nats(
+                nervix_models::NatsEmitterEntity::Stream,
+            )),
+            Self::EmitterZeroMqPushReference => Some(nervix_models::EmitterEntityKind::ZeroMq(
+                nervix_models::ZeroMqEmitterEntity::Push,
+            )),
+            Self::EmitterSqsQueueReference => Some(nervix_models::EmitterEntityKind::Sqs(
+                nervix_models::SqsEmitterEntity::Queue,
+            )),
+            Self::EmitterSentryEventReference => Some(nervix_models::EmitterEntityKind::Sentry(
+                nervix_models::SentryEmitterEntity::Event,
+            )),
+            Self::EmitterSyslogCollectorReference => {
+                Some(nervix_models::EmitterEntityKind::Syslog(
+                    nervix_models::SyslogEmitterEntity::Collector,
+                ))
+            }
+            Self::EmitterOtelLogsReference => Some(nervix_models::EmitterEntityKind::Otel(
+                nervix_models::OtelEmitterEntity::Logs,
+            )),
+            Self::EmitterOtelTracesReference => Some(nervix_models::EmitterEntityKind::Otel(
+                nervix_models::OtelEmitterEntity::Traces,
+            )),
+            Self::EmitterOtelMetricsReference => Some(nervix_models::EmitterEntityKind::Otel(
+                nervix_models::OtelEmitterEntity::Metrics,
+            )),
+            Self::EmitterClickHouseTableReference => {
+                Some(nervix_models::EmitterEntityKind::ClickHouse(
+                    nervix_models::ClickHouseEmitterEntity::Table,
+                ))
+            }
+            Self::EmitterPostgresTableReference => {
+                Some(nervix_models::EmitterEntityKind::Postgres(
+                    nervix_models::PostgresEmitterEntity::Table,
+                ))
+            }
+            Self::EmitterMySqlTableReference => Some(nervix_models::EmitterEntityKind::MySql(
+                nervix_models::MySqlEmitterEntity::Table,
+            )),
+            Self::EmitterMongoDbCollectionReference => {
+                Some(nervix_models::EmitterEntityKind::MongoDb(
+                    nervix_models::MongoDbEmitterEntity::Collection,
+                ))
+            }
+            Self::EmitterIcebergTableReference => Some(nervix_models::EmitterEntityKind::Iceberg(
+                nervix_models::IcebergEmitterEntity::Table,
+            )),
+            _ => None,
+        }
+    }
+
+    /// The wire-owned target identity used to bind a structured-choice cursor.
+    pub fn cursor_tag(self) -> u8 {
+        let target: wire::ChoiceTarget = self.into();
+        target.0
+    }
+
     /// The choices of what a source names: its client or endpoint, or, for a client source, the
     /// input schema its producers' batches carry.
     pub const fn for_ingest_source(kind: IngestorEntityKind) -> Self {
@@ -209,7 +423,34 @@ impl ChoiceTarget {
             | Self::BranchField
             | Self::ProcessorCompatibleInputRelay
             | Self::ProcessorInputBranchRelay
-            | Self::ProcessorMaterializedRelay => None,
+            | Self::ProcessorMaterializedRelay
+            | Self::EmitterHttpRequestReference
+            | Self::EmitterKafkaTopicReference
+            | Self::EmitterPulsarTopicReference
+            | Self::EmitterRabbitMqQueueReference
+            | Self::EmitterRabbitMqExchangeReference
+            | Self::EmitterRedisPubSubReference
+            | Self::EmitterMqttTopicReference
+            | Self::EmitterNatsSubjectReference
+            | Self::EmitterNatsStreamReference
+            | Self::EmitterZeroMqPushReference
+            | Self::EmitterSqsQueueReference
+            | Self::EmitterSentryEventReference
+            | Self::EmitterSyslogCollectorReference
+            | Self::EmitterOtelLogsReference
+            | Self::EmitterOtelTracesReference
+            | Self::EmitterOtelMetricsReference
+            | Self::EmitterClickHouseTableReference
+            | Self::EmitterPostgresTableReference
+            | Self::EmitterMySqlTableReference
+            | Self::EmitterMongoDbCollectionReference
+            | Self::EmitterIcebergTableReference
+            | Self::EmitterIcebergCatalog
+            | Self::EmitterCodec
+            | Self::EmitterCompatibleInputRelay
+            | Self::EmitterMaterializedRelay
+            | Self::EmitterErrorRelay
+            | Self::SchemaField => None,
         }
     }
 }

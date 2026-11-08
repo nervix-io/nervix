@@ -138,7 +138,7 @@ it after a leader change. Its `PACED` state and advancing ticks establish restor
 
 The top bar's **Create** menu opens keyboard-accessible forms for domains, users, resource
 catalogs, schemas, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps, Roto UDFs,
-relays, branches, ingestors, junctions, reingestors, and subscriptions. The resource group in the
+relays, branches, ingestors, junctions, reingestors, emitters, and subscriptions. The resource group in the
 sidebar also provides a contextual create action. A form keeps its unfinished draft when it closes,
 restores focus to the action that opened it, reports validation and server failures inline, and
 shows the canonical Plexus statement before submission. An expression typed into a form, such as a
@@ -335,6 +335,26 @@ output and error relays to the required branch and offer only materialized relay
 changed domain or dependent reference keeps the draft visible and requires the affected choice to
 be selected again. The preview and durable submission use the completed semantic Model; registry
 validation reports any remaining schema, branch, sensitivity, or graph error inline.
+
+An emitter form starts with its connector and entity, then selects the configured client or the
+schema a client consumer publishes. Its searchable input list preserves written order and offers
+additional relays with the same payload schema; those relays may have different branch
+declarations. Input predicates, optional collection bounds and attachment are explicit controls.
+The form offers the publishing modes, envelope clauses, properties and batching choices declared
+by that entity. Acknowledged broker and client modes require a sequential or bounded parallel
+window and an acknowledgement timeout; every mode requires its retry policy. Database emitters
+require their declared batching bounds, and Iceberg requires its catalog, location and commit
+cadence. External names retain their spelling, and configured client keys remain with the client.
+
+Payload controls choose a compatible encoding codec, direct ordered `VALUES` mappings, native
+client output, or HTTP `WITHOUT BODY`, as the entity permits. HTTP method and path expressions
+and supported header invocations remain editable independently of the body. Ordered construction,
+materialized dependencies, flush and error policies use the same semantic Models as the REPL.
+Materialized-state and error-relay choices must fit every input's branch declaration. Changing a
+domain or prerequisite selection invalidates dependent references while retaining the draft.
+The canonical preview and submission use the existing command path, including transaction
+prefixes, final registry validation and reconnect recovery. See [Emitters](emitters.md) for the
+entity-specific types, sensitivity rules, external provisioning and delivery guarantees.
 
 ## The Execution Graph
 

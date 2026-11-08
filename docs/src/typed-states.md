@@ -344,7 +344,7 @@ transport offset conversion. The SDK's indexed authoring and typed-inspection vi
 empty JSON value arrays. These driver representations never enter semantic Models or plans.
 
 A NATS ingestor or emitter Model distinguishes `NATS SUBJECT` and `NATS STREAM` entities in its archived union.
-The registry's `NERVIX KIND KEYS` archive signature identifies the current Model layout, including
+The registry's `NERVIX HOP RULES` archive signature identifies the current Model layout, including
 that union, the endpoint kind, the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
 encoding, a Pulsar subscription's required type and an owned subscription's required start position,
 a Kafka consumer group's required start position, the required 16-bit branch partition count,
@@ -355,8 +355,11 @@ service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of s
 emitter writes beside its publishing mode, its retained-publication flag and MQTT 5 property
 mappings, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a `PATTERN`,
 that header state, and inferencer state bindings with their initial expressions.
-Consensus's `raft_kind_key_` keyspaces and current `ClusterState`
-metadata encoding, 14, identify its stored shapes, including the partition count of every resolved branch
+Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
+rule. Domain configuration contains its pace; named placement rules belong to the Model index.
+Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
+Consensus's `raft_hop_rule_` keyspaces and current `ClusterState`
+metadata encoding, 15, identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations. The runtime state store's
 `ranked-intake-unit-checkpoint-segments` format identifies the checkpoints it keeps, including the
@@ -366,7 +369,7 @@ registry's instancing boundary checks native count conversion and the layout of 
 unit entries before materialization. An unaddressable declaration is a typed validation failure;
 its full-width Model remains representable independently of the target's execution capacity. The
 client placement union carries an instance index as an unsigned 64-bit value. Backup format
-major `5` and its unit-bearing record versions own an eight-byte primitive unit rank. The native
+major `6` and its unit-bearing record versions own an eight-byte primitive unit rank. The native
 `NervixKafkaState` checkpoint contains
 positions and an optional applied explicit-start generation. Pending canonical starts and
 subsequent unit-owned progress use that current shape. An unrecognized signature, namespace or

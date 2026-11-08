@@ -47,7 +47,6 @@ use tracing::{info, warn};
 use super::{
     command_result::{CommandDiagnostic, CommandDisposition, CommandResult, OutcomeUnknownCause},
     domain_clock::{current_timestamp, subtract_timestamp_duration},
-    domain_lifecycle::DomainAlterError,
     model_mutation::{
         LatestResolutionReport, append_command_output, command_error, command_ok,
         command_ok_already_existed, quiesce_level_message, rebind_resource_message,
@@ -649,8 +648,7 @@ pub(in crate::application) fn is_queueable_transaction_statement(statement: &Sta
     statement.is_model_mutation()
         || matches!(
             statement,
-            Statement::AlterDomain(_)
-                | Statement::StartDomain(_)
+            Statement::StartDomain(_)
                 | Statement::StopDomain(_)
                 | Statement::CreateResource(_)
                 | Statement::ResetWasmState(_)
@@ -1137,12 +1135,11 @@ impl SessionServiceImpl {
             statements,
             first_operation_index,
             allow_incomplete_final_model_run,
-            |graph, placement, current, attribution| {
+            |graph, current, attribution| {
                 let prepared = schedule_inputs.prepare(
                     &control.planning_inputs,
                     &planning_domain,
                     graph,
-                    placement,
                     current,
                 );
                 let ownership_moves = planned_ownership_moves(current, prepared.schedule.as_ref())
@@ -1210,8 +1207,7 @@ impl SessionServiceImpl {
             PlannedTransactionStepKind::CreateResource {
                 already_existed, ..
             } => *already_existed,
-            PlannedTransactionStepKind::AlterDomain { .. }
-            | PlannedTransactionStepKind::StartDomain { .. }
+            PlannedTransactionStepKind::StartDomain { .. }
             | PlannedTransactionStepKind::StopDomain
             | PlannedTransactionStepKind::ResetWasmState { .. } => false,
         };
@@ -2004,7 +2000,6 @@ impl SessionServiceImpl {
                 first_statement,
                 planned_step,
                 stored_step.inputs,
-                stored_step.eligibility,
                 admitted_kind,
             ))
             .await?;
@@ -2194,7 +2189,6 @@ impl SessionServiceImpl {
         statement_index: usize,
         planned_step: PlannedTransactionStep,
         inputs: DomainPlanningInputs,
-        eligibility: TransactionScheduleEligibility,
         admitted_kind: TransactionCommitStepKind,
     ) -> Result<ReplicatedTransaction, Report<TransactionCommitError>> {
         transaction.statements.get(statement_index).verified(
@@ -2208,95 +2202,8 @@ impl SessionServiceImpl {
             TransactionCommitStepKind::StartDomain { resolved, .. } => Some(resolved),
             _ => None,
         };
-        let mut ownership_handoff = None;
         let domain_id = &transaction.domain;
-        let _alter_guard = if let PlannedTransactionStepKind::AlterDomain { .. } = &planned_kind {
-            let Some(guard) = self.inner.runtime.try_begin_domain_alter(domain_id) else {
-                return self
-                    .record_transaction_step(
-                        transaction,
-                        impact,
-                        command_error(
-                            DomainAlterError::ConcurrentAlter {
-                                domain: domain_id.clone(),
-                            }
-                            .to_string(),
-                        ),
-                        None,
-                    )
-                    .await;
-            };
-            Some(guard)
-        } else {
-            None
-        };
-        if matches!(planned_kind, PlannedTransactionStepKind::AlterDomain { .. }) {
-            if let Err(error) = self.validate_domain_planning_inputs(&inputs).await {
-                return self
-                    .record_transaction_planning_conflict(transaction, impact, error)
-                    .await;
-            }
-            if let Err(error) = self
-                .validate_transaction_schedule_eligibility(&eligibility)
-                .await
-            {
-                return self
-                    .record_transaction_planning_conflict(transaction, impact, error)
-                    .await;
-            }
-        }
         let (result, effect) = match planned_kind {
-            PlannedTransactionStepKind::AlterDomain { plan } => {
-                let placement = plan.next.config.placement;
-                let quiesce_level = impact.planned().pause.level();
-                let relocations = impact.planned().effects.ownership_moves.len();
-                if plan.previous.config.placement == placement {
-                    (
-                        command_ok(format!(
-                            "domain '{}' placement is already {}; {}\nplanned relocations: 0",
-                            domain_id.as_str(),
-                            placement.as_ref(),
-                            quiesce_level_message(quiesce_level)
-                        )),
-                        None,
-                    )
-                } else {
-                    let schedule = plan.schedule;
-                    let ownership_gate = plan.ownership_gate;
-                    let handoff = if relocations > 0 {
-                        self.begin_planned_ownership_handoff_with_exact_gate(
-                            domain_id,
-                            plan.expected_schedule.as_ref(),
-                            schedule.as_ref(),
-                            &ownership_gate,
-                            Some((&actual, impact.planned().pause.clone())),
-                        )
-                        .await
-                    } else {
-                        Ok(None)
-                    };
-                    match handoff {
-                        Ok(handoff) => {
-                            ownership_handoff = handoff;
-                            (
-                                command_ok(format!(
-                                    "set domain '{}' placement to {}; {}\nplanned relocations: \
-                                     {relocations}",
-                                    domain_id.as_str(),
-                                    placement.as_ref(),
-                                    quiesce_level_message(quiesce_level)
-                                )),
-                                Some(TransactionStepEffect::PutDomainAndSchedule {
-                                    inputs: Box::new(inputs),
-                                    domain: Box::new(plan.next),
-                                    schedule: schedule.map(Box::new),
-                                }),
-                            )
-                        }
-                        Err(error) => (command_error(error.to_string()), None),
-                    }
-                }
-            }
             PlannedTransactionStepKind::CreateResource {
                 resource,
                 already_existed,
@@ -2373,10 +2280,6 @@ impl SessionServiceImpl {
         {
             Ok(advanced) => advanced,
             Err(error) => {
-                if let Some(handoff) = ownership_handoff.take() {
-                    self.abort_planned_ownership_handoff(domain_id, handoff, Some(&actual))
-                        .await;
-                }
                 let Some(reason) = error.current_context().planning_input_conflict(&error) else {
                     return Err(error);
                 };
@@ -2438,36 +2341,6 @@ impl SessionServiceImpl {
                         .assured("the index names a statement of a transaction held in memory")
                 ));
             }
-            if let Some(handoff) = ownership_handoff.take() {
-                if let Some(error) = &activation_error {
-                    self.defer_planned_ownership_handoff_release(
-                        domain_id,
-                        handoff,
-                        error,
-                        Some(&actual),
-                    );
-                } else if let Err(error) = self
-                    .finish_planned_ownership_handoff(domain_id, handoff, Some(&actual))
-                    .await
-                {
-                    application_failure = Some(format!(
-                        "transaction '{}' committed step {}, but ownership activation did not \
-                         complete: {error:#}",
-                        transaction.id,
-                        statement_index
-                            .checked_add(1)
-                            .assured("the index names a statement of a transaction held in memory")
-                    ));
-                    self.broadcast_error(format!(
-                        "failed to confirm ownership state activation after transaction '{}' step \
-                         {}: {error:#}",
-                        transaction.id,
-                        statement_index
-                            .checked_add(1)
-                            .assured("the index names a statement of a transaction held in memory")
-                    ));
-                }
-            }
             if let Some(error) = activation_error
                 && !matches!(
                     error.current_context(),
@@ -2484,10 +2357,6 @@ impl SessionServiceImpl {
                         .assured("the index names a statement of a transaction held in memory")
                 ));
             }
-        }
-        if let Some(handoff) = ownership_handoff {
-            self.abort_planned_ownership_handoff(domain_id, handoff, Some(&actual))
-                .await;
         }
         let runtime_revision = match &advanced.state {
             TransactionState::Committing(progress) => match &progress.applying {

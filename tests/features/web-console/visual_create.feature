@@ -10,14 +10,12 @@ Feature: Web console visual creation
     Then selector ".create-dialog" contains "Create domain"
     And selector ".create-pace-options" contains "UNPACED"
     And selector ".create-pace-options" contains "PACED"
-    And selector ".create-placement-options" contains "PREFER COLOCATION"
     When selector ".create-name" is filled with "{{domain}}"
-    And selector ".create-placement-options [data-value='PREFER COLOCATION']" is pressed with "Enter"
     And selector ".create-if-not-exists" is clicked
-    Then selector ".create-preview" contains "CREATE IF NOT EXISTS UNPACED DOMAIN {{domain}} PLACEMENT PREFER COLOCATION;"
+    Then selector ".create-preview" contains "CREATE IF NOT EXISTS UNPACED DOMAIN {{domain}};"
     When selector ".create-submit" is pressed with "Enter"
     Then selector ".create-status" contains "Completed"
-    And selector ".terminal" contains "CREATE IF NOT EXISTS UNPACED DOMAIN {{domain}} PLACEMENT PREFER COLOCATION;"
+    And selector ".terminal" contains "CREATE IF NOT EXISTS UNPACED DOMAIN {{domain}};"
     And selector ".terminal" contains "created domain '{{domain}}'"
     When selector ".create-close" is pressed with "Enter"
 

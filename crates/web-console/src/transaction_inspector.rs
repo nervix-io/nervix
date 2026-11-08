@@ -841,7 +841,6 @@ fn operation_label(operation: &OperationImpactReport) -> String {
         TransactionOperation::DropConfiguration { node, .. } => {
             format!("DROP {} {}", node.kind.keyword_phrase(), node.identifier)
         }
-        TransactionOperation::AlterDomain { domain } => format!("ALTER DOMAIN {domain}"),
         TransactionOperation::StartDomain { domain } => format!("START DOMAIN {domain}"),
         TransactionOperation::StopDomain { domain } => format!("STOP DOMAIN {domain}"),
         TransactionOperation::CreateResource { resource, .. } => {
@@ -1682,12 +1681,6 @@ mod tests {
                     node,
                 },
                 "DROP SCHEMA inspected_event",
-            ),
-            (
-                TransactionOperation::AlterDomain {
-                    domain: domain.clone(),
-                },
-                "ALTER DOMAIN inspected",
             ),
             (
                 TransactionOperation::StartDomain {

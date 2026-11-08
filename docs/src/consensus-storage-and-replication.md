@@ -512,8 +512,8 @@ the bounded storage executor, but consensus has its own single ordered worker.
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_capability_logs`, `raft_capability_meta`, `raft_capability_state`, and
-`raft_capability_snapshots`. Opening it validates the complete keyspace namespace before reading
+`raft_capability_hop_logs`, `raft_capability_hop_meta`, `raft_capability_hop_state`, and
+`raft_capability_hop_snapshots`. Opening it validates the complete keyspace namespace before reading
 any records. This namespace identifies the current Model shape, including the separate JSON
 and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec encoding, a Pulsar
 subscription's required type, an owned Pulsar subscription's required start position, a Kafka
@@ -535,7 +535,9 @@ parameters, the durable restore installation gate and the unit-keyed
 committed schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,
 typed ingestor instancing, exact-unit placement-group members
-and entity-versus-unit transaction gate targets. Native counts in commands, queued transactions,
+and entity-versus-unit transaction gate targets. Placement Models carry corridor or domain-wide
+coverage; domain records carry pace, and relocation statements retain exact partition or instance
+selectors. Native counts in commands, queued transactions,
 progress, outcomes, and plan, report and topology
 headers are archived as fixed-width 64-bit values with checked native decoding. Log replay, state
 recovery and snapshot installation therefore retain their complete magnitudes. See

@@ -185,6 +185,7 @@ mod node_settings;
 mod observability_http;
 mod observation;
 mod ownership_handoff;
+mod placement_groups;
 mod preflight;
 mod public_listener;
 mod relocation;
@@ -1575,7 +1576,7 @@ impl Application {
                                 {
                                     continue;
                                 }
-                                let Some(domain_state) =
+                                let Some(_) =
                                     automatic_schedule_input.runtime_state().domains.get(&domain)
                                 else {
                                     continue;
@@ -1585,7 +1586,6 @@ impl Application {
                                     &domain,
                                     &schedulable_node_ids,
                                     usize::try_from(automatic_schedule_input.runtime_state().parameters.verified("scheduling starts after parameter seeding").values.replica_count()).assured("the committed replica count fits a supported target"),
-                                    domain_state.config.placement,
                                     scheduler_mode,
                                  &scheduling_capabilities,);
                                 #[cfg(not(feature = "testing"))]
@@ -1593,7 +1593,6 @@ impl Application {
                                     &domain,
                                     &schedulable_node_ids,
                                     usize::try_from(automatic_schedule_input.runtime_state().parameters.verified("scheduling starts after parameter seeding").values.replica_count()).assured("the committed replica count fits a supported target"),
-                                    domain_state.config.placement,
                                  &scheduling_capabilities,);
                                 let current_domain = current_schedule.domain(&domain);
                                 let mut failover_existing = current_domain.cloned();

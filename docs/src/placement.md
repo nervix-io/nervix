@@ -13,8 +13,8 @@ Nervix distinguishes two kinds of nodes throughout this chapter:
 - A **cluster node** is a machine participating in the Nervix cluster.
 
 A named placement rule marks the directed paths between existing runtime nodes. For example, this
-rule keeps `feature_normalizer`, `risk_scorer`, and every runtime node on a path between them on
-one cluster node:
+rule keeps corresponding units of `feature_normalizer`, `risk_scorer`, and every runtime node
+on a path between them together:
 
 ```plexus
 CREATE PLACEMENT scoring_local
@@ -34,7 +34,7 @@ no hard-separation policy.
 
 | Policy | Scheduling effect | Existing assignments |
 | --- | --- | --- |
-| `REQUIRE COLOCATION` | Every runtime node within each captured corridor executes on the same cluster node. | A newly effective requirement can relocate runtime nodes. |
+| `REQUIRE COLOCATION` | Corresponding units on every covered hop share a primary owner. | A newly effective requirement can relocate unit groups. |
 | `PREFER COLOCATION` | New placement decisions favor the same cluster node. | The preference does not move existing assignments by itself. |
 | `NEUTRAL` | The placement rule expresses no preference, so ordinary scheduler heuristics remain active. | It does not move assignments by itself. |
 | `SUGGEST SEPARATION` | New placement decisions favor different cluster nodes. | The suggestion does not move existing assignments by itself. |
@@ -49,46 +49,54 @@ upstream-locality preference. It remains advisory: cluster availability and the 
 placement inputs can still produce a different result. `NEUTRAL` means "no placement opinion";
 it does not randomize placement or disable the scheduler's normal heuristics.
 
-## Setting The Domain Default
+## Execution Units And Hop Classes
 
-Every domain has a fallback placement policy. Declare it when creating the domain:
+A runtime node has one or more execution units. Unbranched work and a branch with one partition
+have one unit. A branch with several partitions has one unit per partition index. An instanced
+ingestor has one unit per instance index. Each unit has its own primary owner, replicas and
+ownership transition. Concrete branch keys within one partition share that partition's owner.
 
-```plexus,ignore
-CREATE [IF NOT EXISTS] UNPACED DOMAIN <domain_name>
-  [PLACEMENT <policy>];
+Nervix classifies each directed hop before applying its effective policy:
 
-CREATE [IF NOT EXISTS] PACED DOMAIN <domain_name>
-  WITH PERIOD <duration> SKEW <duration>
-  [PLACEMENT <policy>];
-```
+| Hop class | Correspondence | Applicable policies |
+| --- | --- | --- |
+| `identity` | Both sides are single, or their partition structures correspond index for index. An intake declared `INSTANCES PER PARTITION` maps instance `p` to relay partition `p`. | All four policies. |
+| `fiber` | A declared mapping determines the destination unit without inspecting a record. A partitioned relay feeding a single emitter maps every partition to that emitter. | All four policies, applied to each fiber. |
+| `single↔many` | One side has one unit and the other has several, without an identity or fiber contract. | `NEUTRAL` and `SUGGEST SEPARATION`. |
+| `data-dependent` | The unit reached depends on record data or competing consumption. Examples are a competing-consumer ingestor feeding partitions and a re-sharding reingestor's output. | `NEUTRAL` only. |
 
-`CREATE DOMAIN` remains the short spelling for `CREATE UNPACED DOMAIN` and accepts the same
-placement clause. Omitting `PLACEMENT` selects `NEUTRAL`.
+An identity requirement joins partition `p` only to its corresponding units; it does not join
+partition `p` to another partition. A fiber requirement joins all units that map to the same
+recipient. For example, requiring locality at a single emitter necessarily joins its input
+partitions with that emitter. That is the declared correspondence, and inspection shows the class.
 
-```plexus
-CREATE UNPACED DOMAIN realtime
-  PLACEMENT PREFER COLOCATION;
-```
+Validation uses the winning policy after rank resolution. A stronger `NEUTRAL` rule can therefore
+carve an inapplicable hop out of a broader requirement. A refusal names the hop and its class.
+Every candidate graph is checked, including changes to instancing, branch partitions, branch
+selection and routes. An alteration cannot silently invalidate an existing placement rule.
 
-The default applies to directly connected runtime nodes when no named placement rule claims that
-relationship. Relays are runtime nodes, so producer-to-relay and relay-to-consumer are separate
-hops. The default is deliberately per hop:
+## Defining A Domain-Wide Rule
 
-- `REQUIRE COLOCATION` places each connected graph component on one cluster node unless a stronger
-  named rule carves out part of it.
-- `PREFER COLOCATION` adds a locality preference to each uncovered hop.
-- `SUGGEST SEPARATION` adds a spreading preference to each uncovered hop.
-- `NEUTRAL` leaves each uncovered hop to ordinary scheduler behavior.
-
-Change the default for the session's active domain with the nameless `ALTER DOMAIN` statement:
+A domain-wide rule covers every eligible message or state hop in the active domain:
 
 ```plexus
-ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
+CREATE PLACEMENT local_execution DOMAIN WIDE REQUIRE COLOCATION RANK 2;
 ```
 
-Changing a running domain's default activates a new schedule. A newly effective
-`REQUIRE COLOCATION` default can relocate runtime nodes; changing only a soft default does not
-migrate existing assignments.
+It is an ordinary named rule, with the same rank resolution, hop validation, inspection and
+lifecycle as a corridor rule. A graph containing an intake whose partition is chosen by record data
+needs a stronger `NEUTRAL` corridor on that intake before the broad requirement can be created.
+Hops without a named rule contribute no placement score and use ordinary scheduler heuristics.
+
+Create the domain separately, then declare the rule in that domain:
+
+```plexus
+CREATE UNPACED DOMAIN realtime;
+CREATE PLACEMENT prefer_local DOMAIN WIDE PREFER COLOCATION;
+```
+
+Changing a running domain's rules activates a new schedule. A newly effective hard requirement can
+relocate units; changing only a soft policy preserves existing assignments.
 
 ## Defining A Named Corridor
 
@@ -146,7 +154,8 @@ feature_normalizer -> enrich_features -> risk_scorer
 ```
 
 a rule from `feature_normalizer` to `risk_scorer` covers all four runtime nodes. The policy applies
-across the runtime nodes captured by that corridor, not only to its two named endpoints.
+on each direct hop within that corridor, with the correspondence of that hop; it is not a pairwise
+requirement between every captured node.
 
 Placement follows the relationships that can deliver messages or state:
 
@@ -158,8 +167,8 @@ Placement follows the relationships that can deliver messages or state:
   that declares `USING MATERIALIZED STATE`.
 
 Relays are corridor members. A producer-to-relay or relay-to-consumer relationship is one placement
-hop, so a domain default applies independently on both sides and a named path captures relay nodes
-between its endpoints.
+hop. A domain-wide rule covers both independently, and a corridor captures relay nodes between
+its endpoints.
 
 A disconnected endpoint pair contributes no coverage. A rule for which every endpoint pair is
 disconnected is valid and remains available for inspection with `coverage=empty`. Nervix does not
@@ -183,18 +192,20 @@ Precedence is:
 
 1. rank 1;
 2. rank 2, rank 3, and subsequent explicit ranks in ascending numeric order;
-3. the unranked tier; and
-4. the domain default.
+3. the unranked tier.
+
+Domain-wide and corridor rules use this same order. A domain-wide rule is not weaker merely
+because its scope is broader.
 
 Every explicitly ranked rule outranks every unranked rule, regardless of the numeric value. All
-unranked rules share one tier. At the strongest rank affecting a runtime-node relationship,
+unranked rules share one tier. At the strongest rank affecting a hop,
 equal-rank rules with the same policy agree. Different policies at that strongest rank conflict,
 and Nervix rejects the candidate graph activation with the rule names and an affected runtime-node
 pair. Weaker overridden rules do not conflict with one another.
 
-Effective `REQUIRE COLOCATION` relationships are transitive. If one requirement joins `a` to `b`
-and another joins `b` to `c`, all three form one colocation group. A stronger soft or neutral rule
-can remove specific hard relationships, but a runtime node remains in the group while any other
+Effective `REQUIRE COLOCATION` unit bonds are transitive. If one requirement joins unit `a` to
+unit `b` and another joins unit `b` to unit `c`, all three form one colocation group. A stronger soft or neutral rule
+can remove specific hard relationships, but an execution unit remains in the group while any other
 effective `REQUIRE COLOCATION` chain still connects it.
 
 For example, first declare a scheduler-managed archive corridor:
@@ -207,13 +218,13 @@ CREATE PLACEMENT archive_scheduler_managed
   RANK 1;
 ```
 
-Then make hard colocation the domain fallback:
+Then declare a weaker domain-wide requirement:
 
 ```plexus
-ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
+CREATE PLACEMENT domain_local DOMAIN WIDE REQUIRE COLOCATION RANK 2;
 ```
 
-The named `NEUTRAL` rule overrides the default within its connected corridor. It does not guarantee
+The rank-1 `NEUTRAL` rule overrides the rank-2 requirement on its connected corridor's hops. It does not guarantee
 that the archive stages run on different cluster nodes; it returns those relationships to ordinary
 scheduler heuristics. Use `SUGGEST SEPARATION` instead when the carve-out should also express a
 soft spreading preference.
@@ -253,29 +264,28 @@ failure, and activation behavior.
 
 Explicit relocation with `RELOCATE` is the third planned ownership change: it moves a selected
 subgraph onto a cluster node you name, through the same handoff, and leaves every runtime node
-outside its unit untouched.
+outside the selected unit groups untouched.
 
 Drain, colocation consolidation, and explicit relocation use a planned handoff and restart only
 runtime nodes whose primary owner changed. A runtime node that keeps its assignment continues on every cluster node,
 including the former and new owners of a moved neighbor: it keeps buffered work, retained
 `REQUIRED WAIT` messages, branch-local state, and external ingestor sessions. Its neighbors re-point
-at the committed revision. Draining a host moves hard groups and independent nodes one at a time in
-canonical kind/name order. Failover uses immediate termination because the former owner is already
+at the committed revision. Draining a host moves hard groups and independent execution units one at a time in
+canonical kind/name/unit order. Failover uses immediate termination because the former owner is already
 unavailable.
 
 Placement constrains primary owners. It does not control replica count or replica placement. An
 ordinary relay has no replicas; a materialized relay's replicas contain only materialized state.
-Concrete branches have no separate placement dimension: every concrete relay branch is owned by the
-owner of its relay, and every processor branch executes within that processor's assignment.
+Concrete branch keys do not have separate placement: their declared partition is the unit of
+ownership. The scheduler balances primary counts across eligible cluster nodes before comparing
+ordinary assignment load, then uses round-robin ordering to break ties. Replicas do not count as
+additional active consumers. Existing live assignments remain sticky.
 
-A relay, processor or generator whose branch declares several partitions is placed one partition at a time. Each partition
-is a unit with its own primary and replicas; the scheduler places the units least loaded first and
-then round-robin, so a relay's partitions spread over the eligible cluster nodes. Inside a
-`REQUIRE COLOCATION` group every partition stays with the group's cluster node. `PREFER COLOCATION`,
-`SUGGEST SEPARATION` remain logical-node preferences. Upstream locality scores matching partition
-indices, so a consumer partition prefers the corresponding producer partition's owner. Failover and drain move each
-partition on its own: losing a node moves only the partitions that node owned, and the relay's other
-partitions keep flowing. See [Relay Partitions](relay.md#relay-partitions).
+A hard identity group is placed independently for each partition index, so corresponding relay and
+processor partitions stay together while different groups can spread. Soft policies also score
+corresponding units. Upstream locality favors matching partition owners. Failover and drain move
+only the affected unit's complete hard group, preserving every unaffected unit's owner, state and
+WASM generation. See [Relay Partitions](relay.md#relay-partitions).
 
 ## Relocating Runtime Nodes
 
@@ -287,12 +297,12 @@ executing it:
 RELOCATE <selection>
   ONTO NODE <node_id>
   FOLLOW PREFERENCES | IGNORE PREFERENCES
-  [FOR <kind> <name> FOLLOW PREFERENCES | IGNORE PREFERENCES ...];
+  [FOR <kind> <name> [PARTITION <p> | INSTANCE <i>] FOLLOW PREFERENCES | IGNORE PREFERENCES ...];
 
 DESCRIBE RELOCATION <selection>
   ONTO NODE <node_id>
   FOLLOW PREFERENCES | IGNORE PREFERENCES
-  [FOR <kind> <name> FOLLOW PREFERENCES | IGNORE PREFERENCES ...];
+  [FOR <kind> <name> [PARTITION <p> | INSTANCE <i>] FOLLOW PREFERENCES | IGNORE PREFERENCES ...];
 ```
 
 `DESCRIBE RELOCATION` accepts exactly the clauses of `RELOCATE` after the verb, so a plan can be
@@ -328,15 +338,24 @@ same spelling as `SHOW CREATE <kind> <name>`:
 | `RELAY` | The named relay, materialized or not. |
 
 Any other kind keyword is a parse error. Names resolve in the session's active domain, duplicate
-members collapse, and an ingestor with several `INSTANCES` is one runtime node whose instances move
-together. A corridor whose every endpoint pair is disconnected is rejected; a partially connected
+members collapse. An unqualified member selects all its units. In an explicit list, append
+`PARTITION <p>` or `INSTANCE <i>` to select one exact unit:
+
+```plexus
+RELOCATE JUNCTION risk_scorer PARTITION 0
+  ONTO NODE node-2 IGNORE PREFERENCES;
+```
+
+The selector must name an existing unit of the requested kind; an invalid index is refused before
+execution. A corridor whose every endpoint pair is disconnected is rejected; a partially connected
 corridor is valid and the plan reports each pair's connectivity. The destination must be a Raft
 voter that is live and not cordoned.
 
 ### Building The Unit
 
 The set of hard groups a statement moves is its unit. `REQUIRE COLOCATION` is not a preference: a
-selected runtime node always moves with its whole hard group. Soft preferences are shaped by the
+selected execution unit always moves with its whole hard group. A selection of one partition
+does not select its sibling partitions. Soft preferences are shaped by the
 strategy:
 
 - `FOLLOW PREFERENCES` moves each `PREFER COLOCATION` partner of the group along and holds each
@@ -345,15 +364,17 @@ strategy:
   neither captured nor held back by it.
 
 The strategy after `ONTO NODE` is mandatory and applies to every hard group. A `FOR` clause names
-one runtime node and sets the strategy of that runtime node's whole hard group, because a group
+a runtime node or one exact unit and sets the strategy of every selected hard group, because a group
 cannot be moved in pieces and its preferences are one set. Two `FOR` clauses that disagree within
 one hard group are rejected, and a `FOR` clause naming a runtime node outside the plan is rejected.
+An unqualified `FOR` member addresses all its declared units; every one must belong to the plan.
+Use an exact selector when the relocation contains only one partition or instance of that node.
 
 Capture is transitive and follows the statement default. A captured group inherits that default, so
 `FOLLOW PREFERENCES` closes the unit over `PREFER COLOCATION` relationships until a
 `FOR ... IGNORE PREFERENCES` cuts the chain, while `IGNORE PREFERENCES` with a
-`FOR ... FOLLOW PREFERENCES` opens capture at one group only. Under a `PREFER COLOCATION` domain
-default, a `FOLLOW PREFERENCES` relocation therefore moves the whole connected component reachable
+`FOR ... FOLLOW PREFERENCES` opens capture at one group only. Under an effective `PREFER COLOCATION` domain-wide
+rule, a `FOLLOW PREFERENCES` relocation therefore moves the whole connected component reachable
 from the selection. Soft preferences never cause a rejection on their own; the plan reports every
 preference the move leaves unsatisfied.
 
@@ -382,16 +403,16 @@ unsatisfied preferences: 1
 owner; a member that moves also reports its new replicas and whether the destination was already a
 replica. `unsatisfied preferences` counts, after the move, every `PREFER COLOCATION` relationship
 touching the unit whose two owners differ and every `SUGGEST SEPARATION` relationship touching the
-unit whose two owners are the same, naming the winning rule or `domain default`.
+unit whose two owners are the same, naming the winning rule.
 
 `kind` and `name` use the schedule spelling shown by `SHOW CLUSTER STATUS`, so a `HASH MAP` member
 appears as `kind=lookup` and a `RELAY` member as `kind=relay`.
 
 ### Executing The Move
 
-A relocation in a running domain that moves at least one runtime node is a planned ownership change
+A relocation in a running domain that moves at least one execution unit is a planned ownership change
 and executes as one unit, one hold, one commit: the hold gates exactly the relays the plan lists,
-every moved runtime node drains its admitted work, one schedule write assigns the whole unit to the
+every moved execution unit drains its admitted work, one schedule write assigns the whole selection to the
 destination, and the gates open once the destination has activated the revision. The unit is
 atomic, because the plan is what you inspected and approved; a unit containing a runtime node that
 cannot drain is excluded with a narrower selection or `IGNORE PREFERENCES`, or the stall is
@@ -413,7 +434,7 @@ repetition plans the unit again from the schedule committed by then. A relocatio
 stale before its write, for example because the schedule changed, fails, and you retry the
 statement.
 
-The reported quiesce level is `ENTITY_PAUSE` when the plan moves at least one runtime node in a
+The reported quiesce level is `ENTITY_PAUSE` when the plan moves at least one execution unit in a
 running domain, and `DYNAMIC` when the plan moves nothing or the domain is stopped. A stopped
 domain keeps its schedule, so its runtime nodes are relocated without a hold and execute on the
 destination when the domain starts. A unit member whose owner is already the destination is
@@ -447,6 +468,7 @@ ALTER PLACEMENT <placement>
   | SET RANK <positive_integer>
   | DROP RANK
   | SET FROM <runtime_node> [, ...] TO <runtime_node> [, ...]
+  | SET DOMAIN WIDE
   | RENAME TO <placement_name>
   [, <operation> ...];
 
@@ -454,7 +476,8 @@ DROP PLACEMENT <placement>;
 ```
 
 Operations execute in written order, and the complete statement is applied atomically. `SET FROM
-... TO ...` replaces both member lists. This makes it possible to change policy, precedence,
+... TO ...` replaces the coverage with a corridor; `SET DOMAIN WIDE` covers every eligible hop
+and releases endpoint pins. This makes it possible to change policy, precedence,
 membership, and name in one statement:
 
 ```plexus
@@ -464,7 +487,7 @@ ALTER PLACEMENT scoring_local
   RENAME TO scoring_preferred;
 ```
 
-A placement pins the entities named in its `FROM` and `TO` lists even when its current coverage is
+A corridor placement pins the entities named in its `FROM` and `TO` lists even when its current coverage is
 empty. Dropping a referenced runtime node is blocked until every pinning placement is altered or
 dropped. A change that would make a member ineligible, such as changing an ingestor to an endpoint
 or Syslog ingestor, is blocked in the same way. Adding or dropping a relay's materialized state does
@@ -496,24 +519,25 @@ DESCRIBE DOMAIN;
 ```
 
 `SHOW CREATE PLACEMENT` renders the normalized stored rule as canonical Plexus and omits the
-creation-time `IF NOT EXISTS` modifier. `SHOW PLACEMENTS` lists each rule's policy, rank, and one
+creation-time `IF NOT EXISTS` modifier. `SHOW PLACEMENTS` lists each rule's scope, policy, rank, per-hop classes and effective policies, and one
 of these coverage states:
 
 | Coverage | Meaning |
 | --- | --- |
-| `empty` | No `FROM`/`TO` endpoint pair currently has a directed path. |
+| `empty` | No covered hop exists; for a corridor, no endpoint pair has a directed path. |
 | `effective` | All endpoint pairs are connected and all of the rule's resulting relationships win rank resolution. |
 | `partial` | Only some endpoint pairs are connected, or only some resulting relationships remain effective. |
 | `overridden` | Connected coverage exists, but stronger rules win every resulting relationship. |
 
 `DESCRIBE PLACEMENT` provides the stored form, policy, rank, resolved members, connectivity and
 covered runtime nodes for each endpoint pair, witness paths for captured intermediates, and the
-effective policy and winning or overriding rule for each affected relationship. For effective
+hop class, effective policy and winning or overriding rule for every covered hop. Domain-wide
+rules report their scope and hops directly, without synthetic endpoints. For effective
 hard requirements it also reports the colocation group and its current host cluster node.
 
-`DESCRIBE DOMAIN` reports the domain default, named-rule count, and every effective colocation
-group. Each group includes its runtime-node members, host cluster node, and the effective hard
-relationships holding it together. Use those relationships to diagnose why a runtime node remains
+`DESCRIBE DOMAIN` reports named rules, their domain-wide or corridor scope, the per-hop classes and
+effective policies, and every effective colocation group. Each group includes its exact unit
+members, host cluster node, and the effective hard bonds holding it together. Use those relationships to diagnose why a runtime node remains
 in a larger group after a carve-out.
 
 `SHOW CLUSTER STATUS` provides the complete scheduled-owner view when you need to compare placement
@@ -525,6 +549,7 @@ with other runtime nodes outside hard colocation groups.
 | --- | --- |
 | A rule shows `coverage=empty`. | Confirm the route direction and that a directed message or state path exists from a `FROM` member to a `TO` member. Disconnected rules are valid. |
 | A rule is `partial` or `overridden`. | Run `DESCRIBE PLACEMENT` and inspect the winning rule for each affected relationship. |
+| Activation reports an inapplicable policy. | Inspect the named hop's class. Choose a permitted policy or add a stronger neutral carve-out before applying a broad requirement. |
 | Activation reports a placement conflict. | Two overlapping rules have different policies at the strongest rank for an affected relationship. Change one policy or give one rule a stronger rank. A topology edit can expose a previously latent overlap. |
 | `SUGGEST SEPARATION` still leaves stages together. | The policy is advisory and never migrates existing assignments by itself. Re-evaluate it on a new placement decision; do not use it as an isolation control. |
 | A soft-policy change did not move anything. | This is expected. Use `REQUIRE COLOCATION` only when movement is justified by a hard locality requirement. |
@@ -593,8 +618,9 @@ Placement policies do not provide:
 `RELOCATE` moves work onto a named cluster node once. It is not pinning: nothing keeps the moved
 runtime node there, and a later failover, drain, or hard-group consolidation may move it again. It
 also does not relocate endpoint or Syslog ingestors, an individual replica, an individual branch, a
-unit spanning domains, and it never applies a selection in part. A selected partitioned node moves
-every partition in the same handoff; each retains its unit identity, state and replica choice.
+unit spanning domains, and it never applies a selection in part. An unqualified partitioned node
+selects every partition; an exact selector moves only that unit and its hard-group mates. Each
+retains its unit identity, state and replica choice.
 
 Use `SUGGEST SEPARATION` as a performance hint only. Security, tenant isolation, and failure-domain
 requirements need controls outside placement policies.
@@ -631,11 +657,7 @@ make one primary appear to be several active consumers. Existing live assignment
 
 `INSTANCES PER PARTITION` introduces an exact colocation component for each index: ingestor instance
 `p` and partition `p` of every relay whose branch it constructs. These components move independently.
-An explicit `REQUIRE COLOCATION` corridor expands logical members to all their units and joins the
-components it captures. Placement groups therefore store exact `NodeUnitRef` members, including
-different unit kinds within one component. Shared group drain and failover update only those members;
-ordinary relay members need no state replica in order to move with a stateful ingestor.
-
-Current `RELOCATE` selection accepts only members with one execution unit. A multi-instance ingestor
-is refused there rather than treating one instance as the logical ingestor. Automatic scheduling,
-drain and failover retain exact unit ownership. See [Instancing](ingestors.md#instancing).
+Named rules add bonds only through each hop's validated correspondence. Placement groups store
+exact `NodeUnitRef` members, including different unit kinds within one component. Shared group
+drain, failover and explicit relocation update only those members; ordinary relay members need no
+state replica to move with a stateful ingestor. See [Instancing](ingestors.md#instancing).

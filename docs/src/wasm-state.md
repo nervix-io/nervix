@@ -459,8 +459,9 @@ Failover](./control-plane.md#planned-ownership-handoffs-and-failover).
 
 ### Forced Recovery
 
-When an owner is lost, the leader publishes the new owner together with a new generation for every
-branch. The destination prepares the recovery within five seconds: for each branch it collects the
+When a unit's owner is lost, the leader publishes the new owner together with a new generation
+for every branch of that unit. Other partitions keep their generations, saved checkpoints and
+recovery state, including when the moved unit belongs to a hard colocation group. The destination prepares the recovery within five seconds: for each branch it collects the
 checkpoints of the generation being replaced from its own storage and from every other node the new
 schedule assigns the processor, and stages the newest valid one. Two different checkpoints at the
 same highest revision are a conflict, and the branch is reset. A branch with no surviving checkpoint

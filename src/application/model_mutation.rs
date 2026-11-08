@@ -1188,12 +1188,8 @@ impl SessionServiceImpl {
                 let inputs = captured_inputs
                     .take()
                     .verified("a direct model plan carries the inputs it validated");
-                let prepared = Box::pin(self.prepare_domain_schedule(
-                    inputs,
-                    planned.candidate_graph(),
-                    domain_state.config.placement,
-                ))
-                .await;
+                let prepared =
+                    Box::pin(self.prepare_domain_schedule(inputs, planned.candidate_graph())).await;
                 ScheduleTransition {
                     expected_schedule: prepared.inputs.schedule().cloned(),
                     prepared_schedule: prepared.schedule,
@@ -2198,12 +2194,6 @@ impl SessionServiceImpl {
 
         match statement {
             Statement::CreateDomain(create) => self.create_domain(create).await,
-            Statement::AlterDomain(alter) => {
-                let domain = domain
-                    .as_ref()
-                    .verified("this statement requires a request domain, which was resolved above");
-                self.alter_domain(domain, alter).await
-            }
             Statement::CreateUser(create) => self.create_user(create).await,
             Statement::CreateResource(create) => {
                 self.create_resource(
