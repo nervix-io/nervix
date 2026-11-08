@@ -339,6 +339,10 @@ An ingestor accepts only the modes it can honor, and completion of its body offe
 | `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT` | `REJECT RETRY AFTER ...`; `BUFFER MAX SIZE ...` only with `MODE NO ACK` |
 | `CLIENT PRODUCER` | `SUSPEND` |
 
+For `SYSLOG LISTENER`, suspension retains frames already held by the listener, while UDP arrivals
+remain subject to the kernel receive buffer. Resuming the same listener and replacing or stopping
+it have different retention outcomes; see [Syslog quiesce](syslog.md#quiesce) before relying on them.
+
 The mode is consulted for resumable model-alteration `ENTITY_PAUSE` holds, `DOMAIN_PAUSE` batches,
 and memory-pressure shedding. `STOP` and `DROP INGESTOR` terminate the ingestor session. Unexpected
 owner loss also terminates it immediately; volatile quiesce buffers and in-memory ACK state do not
@@ -2681,7 +2685,8 @@ See the [SYSLOG LISTENER capability and mirror reference](connector-capabilities
 <!-- connector-matrix:ingest-syslog-listener:end -->
 
 The client binds a UDP, TCP, or TLS listener. UDP treats one datagram as one message; TCP detects
-RFC 6587 octet-counted or LF-terminated framing per frame; TLS uses RFC 5425 octet counting.
+RFC 6587 octet-counted or LF-terminated framing per frame unless the client selects one with
+`framing`; TLS uses RFC 5425 octet counting.
 Messages expose optional `STRING` fields `metadata.peer_addr`, `metadata.transport` (`udp`, `tcp`
 or `tls`) and `metadata.tls_peer` (the verified TLS client certificate's subject, null without a
 verified client identity). Routes may select a transport in `WHERE` and assign these values to
