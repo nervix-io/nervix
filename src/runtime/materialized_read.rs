@@ -341,29 +341,45 @@ impl Runtime {
     ) -> HashMap<RelayName, MaterializedRelayReads> {
         let mut publications = HashMap::default();
         for (relay, spec) in specs {
-            let entity = DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay);
-            let partitioning = RelayPartitioning::of(Some(&spec.branching));
-            let mut by_unit = BTreeMap::new();
-            for unit in partitioning.units() {
-                let published = self
-                    .inner
-                    .state_replication_routing
-                    .materialized_unit(&DomainNodeUnitRef::new(entity.clone(), unit))
-                    .assured(
-                        "each unit's materialized relay assignment is registered before routing \
-                         is staged",
-                    );
-                by_unit.insert(unit, published);
-            }
             publications.insert(
                 relay.clone(),
-                MaterializedRelayReads {
-                    partitioning,
-                    by_unit,
-                },
+                self.materialized_relay_publication(domain, relay, spec),
             );
         }
         publications
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "routing binds one relay's installed-state publication during schedule apply"
+        )
+    )]
+    pub(super) fn materialized_relay_publication(
+        &self,
+        domain: &DomainName,
+        relay: &RelayName,
+        spec: &RuntimeMaterializedRelaySpec,
+    ) -> MaterializedRelayReads {
+        let entity = DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay);
+        let partitioning = RelayPartitioning::of(Some(&spec.branching));
+        let mut by_unit = BTreeMap::new();
+        for unit in partitioning.units() {
+            let published = self
+                .inner
+                .state_replication_routing
+                .materialized_unit(&DomainNodeUnitRef::new(entity.clone(), unit))
+                .assured(
+                    "each unit's materialized relay assignment is registered before routing is \
+                     staged",
+                );
+            by_unit.insert(unit, published);
+        }
+        MaterializedRelayReads {
+            partitioning,
+            by_unit,
+        }
     }
 
     /// Find the branch's record wherever this node keeps it.
