@@ -2,7 +2,7 @@
 //!
 //! Outside the layer order: a test harness.
 //! - **Owns.** Answering one producer's open, submit and close with typed wire replies.
-//! - **Depends on.** The session codec, tonic and selected runtime/network primitives.
+//! - **Depends on.** The session codec, tonic, selected primitives and peer-withdrawal reporting.
 //! - **Must not know.** Ruby values, binding layouts or the client's recovery state machine.
 
 use std::{
@@ -30,6 +30,7 @@ use nervix_primitives::{
     stream::wrappers::{ReceiverStream, TcpListenerStream},
     sync::mpsc,
 };
+use nervix_recovery::NoReceiver as _;
 use tonic::{
     Request, Response, Status, Streaming,
     body::Body,
@@ -120,9 +121,10 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for PeerService {
                             })
                         }
                         _ => {
-                            let _ = sender
+                            sender
                                 .send(Err(Status::invalid_argument("unexpected fixture request")))
-                                .await;
+                                .await
+                                .means_peer_left("the Ruby lifetime fixture client");
                             return;
                         }
                     };
@@ -135,7 +137,10 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for PeerService {
                     let ReplyDelivery::Frame(reply) = reply else {
                         panic!("the small fixture reply fits one frame");
                     };
-                    if sender.send(Ok(reply)).await.is_err() {
+                    let sent = sender.send(Ok(reply)).await;
+                    let peer_left = sent.is_err();
+                    sent.means_peer_left("the Ruby lifetime fixture client");
+                    if peer_left {
                         return;
                     }
                 }

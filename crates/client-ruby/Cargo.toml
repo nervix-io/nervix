@@ -33,6 +33,7 @@ rb-sys-env = { workspace = true }
 
 [dev-dependencies]
 bolero = { workspace = true }
+nervix-recovery = { workspace = true }
 tonic = { workspace = true }
 
 [[test]]

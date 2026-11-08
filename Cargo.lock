@@ -6950,6 +6950,7 @@ dependencies = [
  "nervix-client-host",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "rb-sys",
  "rb-sys-env",
  "tonic 0.13.1",
