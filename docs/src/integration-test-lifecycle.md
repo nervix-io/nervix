@@ -3627,12 +3627,31 @@ and keeps the same 5-minute reserve.
 a scenario's cluster: the cluster tier of the suite under `tests/client_conformance/<host>/suite`.
 The cluster serves its session listener over TLS. The step that starts a suite waits for every node
 to agree on its leader and starts it on a follower when the cluster has one, so its sessions follow
-a leader redirect. It starts the host's runner as one child process with its standard input closed,
+a leader redirect. It starts the host's runner as one child process with piped standard input,
 its target in the probe's `NERVIX_PROBE_*` variables and what a suite needs beside them in
 `NERVIX_SUITE_*` ones: the leader's listener, which the suite relays a session through to cut it,
 every node's listener as seeds, the fixture certificate authority, and a backup directory the step
 creates and removes once it reads the run. The runner prints one `NERVIX-SUITE <outcome> <identity>`
 line per test, and the fixture keeps every line it read.
+
+A running suite can request a declared testing-build action by flushing
+`NERVIX-SUITE-ACTION <sequence> <action>` on standard output. Sequences start at one and increase
+by one across the runner's entire cluster tier. The scenario performs the action, then flushes
+`NERVIX-SUITE-CONFIRMED <sequence> <action>` to the runner's standard input. Requests and
+confirmations are single ASCII lines, at most 256 bytes including the newline. The declared action
+`refuse-next-subscription-opening` arms every node to refuse its next subscription
+opening as unavailable, since a restored session can reach any seed. The second declared action,
+`clear-subscription-opening-refusals`, clears any unused refusals on every node; the fault fixture
+requests it in teardown even when the test failed, so a refusal cannot reach a later test.
+An unknown action, malformed or repeated sequence, failed action or undelivered confirmation fails
+the scenario. The host
+adapter waits at most 120 seconds for its exact confirmation; the scenario's whole-run deadline
+also bounds writing it. EOF, a mismatched confirmation or an oversized one fails the host test.
+The Python runner duplicates stdin and stdout before starting pytest. Its action fixture borrows
+those copies, so requests and confirmations bypass capture while pytest keeps its ordinary fd
+capture of Python and native stdout and stderr. The runner closes both copies after pytest's
+teardowns, including on failure. Hosts reuse this exchange without
+another dependency; it is a test harness contract, with no product endpoint.
 
 The step that reads the run waits for the runner to end, for the duration the step names and never
 longer than 600 seconds, so a suite that stops making progress fails with its own report inside the
