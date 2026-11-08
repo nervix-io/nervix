@@ -243,7 +243,9 @@ than a claimed live host-suite observation.
 | C++17 | The same build with the C++17 compiler and its own native executable | `just test-client-cpp-api`, also the ordinary Cargo native integration target | `just test-client-c-cluster`, or `@client_suite_cpp` | The C ABI cases compiled and run independently as C++17, plus typed custom-deleter `std::unique_ptr` owners, exception unwinding and a retained batch moved across a thread | Ordinary workspace tests and `client-conformance` | [C and C++ Client Library](../docs/src/client-library-c.md) |
 
 The native boundary tiers run both ordinary and ASan/UBSan programs; cluster tiers run their
-sanitized programs over HTTP and HTTPS on one and three nodes. Their fixed ownership registry is
+sanitized programs over HTTP and HTTPS on one and three nodes. Both programs restore SIGPIPE's
+default action before their first test, so a session relay their cases cut while the client writes
+would end the process if the binding raised SIGPIPE. Their fixed ownership registry is
 bounded to 512 entries per test and teardown joins every owned host thread before reporting.
 The C ABI probes and in-process Rust probe remain independent evidence. Rust coverage observes
 the binding and harness, while sanitizers judge host memory and undefined behavior; Deloxide does

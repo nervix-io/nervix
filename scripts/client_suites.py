@@ -855,7 +855,11 @@ def validate(root: Path, hosts: list[Host]) -> list[str]:
     registered = read_inventory(root)
     for host in hosts:
         if host.name in {"c", "cpp"}:
-            problems.extend(NativeSuite(root, host.name).check(registered.get(host.name, {})))
+            inspection = NativeSuite(root, host.name).inspect()
+            problems.extend(inspection.problems)
+            for missing in sorted(inspection.missing):
+                problems.add(f"the {host.name} suite never references header member {missing}")
+            problems.extend(compare_inventory(host, registered.get(host.name, {}), inspection.tests))
             problems.extend(check_guide(root, host))
             continue
         if host.name == "java":

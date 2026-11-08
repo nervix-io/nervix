@@ -1814,15 +1814,11 @@ build-client-c-suites-hosts:
     done
 
 # Each boundary tier is held to the inventory once in each instrumentation mode.
-test-client-c-api: test-client-c-api-body
-
-test-client-c-api-body:
+test-client-c-api:
     just cargo_target_dir={{ quote(cargo_target_dir) }} build-client-c-suites
     cargo test --package nervix-client-ffi --test native_suites c_application_suite -- --exact --nocapture
 
-test-client-cpp-api: test-client-cpp-api-body
-
-test-client-cpp-api-body:
+test-client-cpp-api:
     just cargo_target_dir={{ quote(cargo_target_dir) }} build-client-c-suites
     cargo test --package nervix-client-ffi --test native_suites cpp_application_suite -- --exact --nocapture
 
@@ -1848,53 +1844,6 @@ test-client-c-cluster *args: tests-deps build-client-c-suites
 
 validate-client-c-suites:
     uv run --locked python -m scripts.client_suites validate --host c --host cpp
-
-# A local line view of the integration harness from completed native collections. The collector's
-# product-source report excludes harnesses; CI's ordinary workspace report already includes them.
-# This exports existing profiles and starts no test or build.
-coverage-client-native-harness c_attempt cpp_attempt output="target/client-suites/native-harness.lcov":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    python3 - {{ quote(justfile_directory()) }} {{ quote(c_attempt) }} {{ quote(cpp_attempt) }} {{ quote(output) }} <<'PY'
-    import json
-    from pathlib import Path
-    import sys
-    root = Path(sys.argv[1])
-    sys.path.insert(0, str(root))
-    from scripts import native_coverage as native
-    attempts = [Path(path) for path in sys.argv[2:4]]
-    records = [json.loads((path / native.RECORD).read_text()) for path in attempts]
-    commands = native.Commands(root)
-    toolchain = native.load_toolchain(commands)
-    for record, producer in zip(records, ("test-client-c-api", "test-client-cpp-api"), strict=True):
-        if (record["verdict"] != "complete" or record["mode"] != "ordinary"
-                or record["producer"] != producer or record["toolchain"] != toolchain.describe()):
-            raise SystemExit("both native collections must be complete and use the current toolchain")
-    executions = [record["selection"]["executions"] for record in records]
-    if any(len(group) != 1 for group in executions):
-        raise SystemExit("each collection must execute one native harness")
-    # Arguments select different tests, while executable identity must stay the same.
-    identities = [{key: group[0][key] for key in ("executable", "build_id")} for group in executions]
-    if identities[0] != identities[1]:
-        raise SystemExit("the two collections must execute the same native harness build")
-    execution = executions[0][0]
-    executable = root / execution["executable"]
-    if native.build_id(executable) != execution["build_id"]:
-        raise SystemExit("the native harness changed after collection")
-    output = Path(sys.argv[4])
-    output.parent.mkdir(parents=True, exist_ok=True)
-    profile = output.with_suffix(".profdata")
-    merged = commands.capture([str(toolchain.tool("llvm-profdata")), "merge", "-sparse", "--failure-mode=any",
-        "-o", str(profile), *(str(path / native.MERGED_PROFILE) for path in attempts)])
-    if merged.status:
-        raise SystemExit(merged.stderr)
-    exported = commands.export([str(toolchain.tool("llvm-cov")), "export", "-format=lcov",
-        f"-instr-profile={profile}", str(executable), str(root / "crates/client-ffi/tests/native_suites.rs")], output)
-    output.with_suffix(".export.log").write_text(exported.stderr)
-    if exported.status or "crates/client-ffi/tests/native_suites.rs" not in output.read_text():
-        raise SystemExit(f"native harness export failed: {exported.stderr}")
-    print(output)
-    PY
 
 # Build the probes, the client library and the scenario suite the conformance run starts, so
 # `test-client-conformance-run` compiles nothing when it follows.

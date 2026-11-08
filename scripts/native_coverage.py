@@ -328,11 +328,11 @@ LOCAL_PRODUCERS: tuple[Producer, ...] = (
     # selections collect a focused local view without duplicating their CI execution.
     Producer(
         name="test-client-c-api", mode="ordinary", prepare=(),
-        instrumented="test-client-c-api-body", finish=(), explicit_only=True,
+        instrumented="test-client-c-api", finish=(), explicit_only=True,
     ),
     Producer(
         name="test-client-cpp-api", mode="ordinary", prepare=(),
-        instrumented="test-client-cpp-api-body", finish=(), explicit_only=True,
+        instrumented="test-client-cpp-api", finish=(), explicit_only=True,
     ),
     # This real-broker benchmark is explicitly selected for local qualification. Adding it does
     # not start a broker in the existing in-memory benchmark smoke lane.

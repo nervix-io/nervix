@@ -2,6 +2,7 @@
  * The fixed cleanup stack bounds a test's live allocations and preserves teardown on failure. */
 #define _POSIX_C_SOURCE 200809L
 #include <setjmp.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -70,6 +71,12 @@ static const struct suite_test suite_tests[] = { SUITE_CONTRACT_TESTS };
 int main(int argc, char **argv) {
     if (argc != 2 || (strcmp(argv[1], "boundary") && strcmp(argv[1], "cluster"))) {
         fprintf(stderr, "usage: c-suite boundary|cluster\n");
+        return 2;
+    }
+    /* An embedding application may keep SIGPIPE's default action, which ends the process. The
+     * binding must never raise it, so every test runs with that action whatever the parent set. */
+    if (signal(SIGPIPE, SIG_DFL) == SIG_ERR) {
+        perror("signal");
         return 2;
     }
     size_t ran = 0;

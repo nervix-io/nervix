@@ -139,20 +139,20 @@ class NativeSuiteTests(unittest.TestCase):
         self.assertTrue(self.check_source(source).problems)
 
     def test_inventory_checks_missing_extra_and_misclassified_tests(self):
-        self.check_source(SOURCE)
-        self.assertEqual(self.suite.check({"test_handles": "boundary"}), [])
-        self.assertTrue(any("does not register" in p for p in self.suite.check({})))
-        self.assertTrue(any("missing" in p for p in self.suite.check({"test_missing": "boundary"})))
-        self.assertTrue(any("not boundary" in p for p in self.suite.check({"test_handles": "cluster"})))
+        tests = self.check_source(SOURCE).tests
+        host = client_suites.HOSTS["c"]
+        self.assertEqual(client_suites.compare_inventory(host, {"test_handles": "boundary"}, tests), [])
+        self.assertTrue(any("does not register c test test_handles" in p
+                            for p in client_suites.compare_inventory(host, {}, tests)))
+        extra = {"test_handles": "boundary", "test_missing": "boundary"}
+        self.assertTrue(any("test_missing, which the suite lacks" in p
+                            for p in client_suites.compare_inventory(host, extra, tests)))
+        self.assertTrue(any("as cluster, but it is boundary" in p
+                            for p in client_suites.compare_inventory(host, {"test_handles": "cluster"}, tests)))
 
     def test_header_references_cannot_be_replaced_by_suite_definitions(self):
         self.assertTrue(any("defines binding function" in p for p in
                             self.check_source(SOURCE + "\nvoid nx_close(nx_handle *handle) { (void)handle; }\n").problems))
-
-    def test_missing_header_references_are_reported_by_the_inventory_check(self):
-        self.check_source(SOURCE.replace("nx_close(handle);", "(void)handle;"))
-        self.assertTrue(any("never references header member nx_close" in p for p in
-                            self.suite.check({"test_handles": "boundary"})))
 
     def test_the_validation_command_checks_both_hosts_and_their_combined_guide(self):
         self.check_source(SOURCE)

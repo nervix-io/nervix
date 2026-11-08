@@ -328,10 +328,6 @@ They add no separate CI artifact or full-union requirement: the ordinary unit pr
 executes the harness. C/C++ program source lines are outside Rust LCOV, and sanitizer verdicts are
 recorded separately from line coverage.
 
-`coverage-client-native-harness <c-attempt> <cpp-attempt>` exports a local line view of the Rust
-integration harness from two complete collections of the same build. It starts no execution and
-does not replace the ordinary workspace report; CI already includes those harness lines there.
-
 The scenario suite runs in
 [shards](./integration-test-lifecycle.md#scenario-shards): each shard restores its archive and runs
 `test-scenarios-coverage-shard`, which runs its share of the suite and exports the pair from that

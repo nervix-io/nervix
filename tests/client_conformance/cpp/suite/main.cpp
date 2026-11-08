@@ -1,5 +1,6 @@
 // The same C ABI contract compiled as C++17, with RAII ownership and typed C++ examples.
 #include <algorithm>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -145,6 +146,12 @@ static const struct suite_test suite_tests[] = {
 int main(int argc, char **argv) {
     if (argc != 2 || (std::strcmp(argv[1], "boundary") && std::strcmp(argv[1], "cluster"))) {
         std::fprintf(stderr, "usage: cpp-suite boundary|cluster\n");
+        return 2;
+    }
+    // An embedding application may keep SIGPIPE's default action, which ends the process. The
+    // binding must never raise it, so every test runs with that action whatever the parent set.
+    if (std::signal(SIGPIPE, SIG_DFL) == SIG_ERR) {
+        std::perror("signal");
         return 2;
     }
     std::size_t ran = 0;

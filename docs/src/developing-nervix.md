@@ -97,7 +97,6 @@ and holds the suite, its inventory, the stub and the
 `client-conformance` CI job builds every host's artifacts, runs the JVM, Ruby, Python, C and C++ boundary tiers,
 then runs the probes and the suites' cluster rows together.
 
-
 The C ABI application suites use C11 and C++17 compilers with POSIX threads, AddressSanitizer and
 UndefinedBehaviorSanitizer. `just build-client-c-suites` builds the shared binding and both ordinary
 and sanitized programs; `just test-client-c-api` and `just test-client-cpp-api` run their boundary

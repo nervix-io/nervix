@@ -945,6 +945,10 @@ examples, including explicit C cleanup and C++ custom-deleter ownership:
   `NX_ERROR_REOPEN_REQUIRED` as the end of the handle, read why with the handle's reopen reason,
   and open a new one only after checking the endpoint it now expects.
 
+The binding never raises SIGPIPE. A write to a connection whose peer has gone fails with the
+transport error that the waiting call reports or that the client recovers from, so a host MAY keep
+SIGPIPE's default action and needs no handler for the binding's sake.
+
 ## Using The Ruby Gem
 
 A Ruby 3.3+ host loads `nervix-client` with `require 'nervix_client'` and uses `Nervix::Client`.

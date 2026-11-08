@@ -156,7 +156,8 @@ class InventoryTests(unittest.TestCase):
         for host in ("c", "cpp"):
             producer = next(p for p in native_coverage.LOCAL_PRODUCERS
                             if p.name == f"test-client-{host}-api")
-            self.assertIn(f"{producer.name}: {producer.instrumented}\n", justfile)
+            self.assertEqual(producer.instrumented, producer.name)
+            self.assertIn(f"\n{producer.name}:\n", justfile)
             self.assertIn(f"just test-client-native-api-run {host}\n", conformance)
 
     def test_a_check_composed_otherwise_than_its_producer_is_refused(self) -> None:

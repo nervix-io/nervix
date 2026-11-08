@@ -338,7 +338,10 @@ it has returned. Cancellation does not consume a pending producer outcome or an 
 ```
 
 B-5 forbids calling the binding from a thread driving a Tokio runtime. Use ordinary application
-threads for blocking calls. Sessions, producers, consumers, deliveries and batches may be shared;
+threads for blocking calls. The binding never raises SIGPIPE, so your program may keep its default
+action, which would end the process: a connection that breaks while the client writes fails with a
+transport error, which the waiting call reports or the client recovers from by reconnecting. Both
+suite programs restore the default action before their first test to hold the binding to this. Sessions, producers, consumers, deliveries and batches may be shared;
 field lists and builders are used from one thread at a time. Never release a handle while another
 thread still uses that same owned reference. An independently retained event, clock, delivery or
 batch reference may be released on any host thread.

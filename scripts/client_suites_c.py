@@ -212,17 +212,3 @@ class NativeSuite:
             report.tests[identity] = tier
         for identity in sorted(set(definitions) - set(report.tests)):
             report.problems.append(f"suite function {identity} is not in its test table")
-
-    def check(self, registered: dict[str, str]) -> list[str]:
-        report = self.inspect()
-        problems = list(report.problems)
-        for member in sorted(report.missing):
-            problems.append(f"the {self.host} suite never references header member {member}")
-        for identity in sorted(set(registered) - set(report.tests)):
-            problems.append(f"the inventory registers missing {self.host} test {identity}")
-        for identity, tier in report.tests.items():
-            if identity not in registered:
-                problems.append(f"the inventory does not register {self.host} test {identity}")
-            elif registered[identity] != tier:
-                problems.append(f"the inventory registers {identity} in {registered[identity]}, not {tier}")
-        return problems
