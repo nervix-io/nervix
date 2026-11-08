@@ -1,4 +1,5 @@
 mod byte_pace;
+mod paced_connection;
 mod paced_interconnect;
 mod snapshot_receive;
 mod status;

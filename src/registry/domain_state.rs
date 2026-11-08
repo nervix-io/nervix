@@ -44,10 +44,11 @@ use crate::registry::{
             effective_emitter_filter_map_schema, effective_ingestor_output_filter_map_schema,
             ensure_ingestor_timestamp_source, ensure_signaling_protocol_is_valid,
             validate_direct_value_mappings, validate_emitter_batch_container,
-            validate_emitter_envelope_expressions, validate_emitter_publishing_contract,
-            validate_endpoint_paths, validate_http_emitter_client,
-            validate_http_literal_request_fields, validate_http_request_expressions,
-            validate_iceberg_client_pairing, validate_ingestor_filter_where_for_internal_schemas,
+            validate_emitter_client, validate_emitter_envelope_expressions,
+            validate_emitter_publishing_contract, validate_endpoint_paths,
+            validate_http_emitter_client, validate_http_literal_request_fields,
+            validate_http_request_expressions, validate_iceberg_client_pairing,
+            validate_ingestor_client, validate_ingestor_filter_where_for_internal_schemas,
             validate_ingestor_source, validate_sqs_fifo_group_expression, validate_vhost_hostnames,
         },
         expression::add_udf_dependency_edges,
@@ -653,6 +654,12 @@ impl DomainState {
                                             },
                                         ));
                                     }
+                                    validate_ingestor_client(
+                                        domain,
+                                        identifier,
+                                        &input.source,
+                                        client_model,
+                                    )?;
                                     if let (
                                         nervix_models::IngestorEntity::Http(
                                             nervix_models::HttpIngestor::Request(polled),
@@ -1503,6 +1510,7 @@ impl DomainState {
                                 ),
                             }));
                         }
+                        validate_emitter_client(domain, identifier, emitter, client_model)?;
                         if let nervix_models::EmitterEntity::Iceberg(
                             nervix_models::IcebergEmitter::Table(table),
                         ) = emitter.connector.as_ref()

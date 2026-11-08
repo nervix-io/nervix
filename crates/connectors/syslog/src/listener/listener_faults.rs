@@ -45,10 +45,10 @@ impl ConfiguredListenerFaults {
         }
     }
 
-    pub(super) fn stream_accept(&self, bind_addr: &str) -> ConfiguredStreamAccept {
+    pub(super) fn stream_accept(&self, bind_addr: SocketAddr) -> ConfiguredStreamAccept {
         ConfiguredStreamAccept {
             faults: self.faults.as_ref().map(|faults| faults.subscribe()),
-            bind_addr: bind_addr.to_owned(),
+            bind_addr: bind_addr.to_string(),
         }
     }
 }

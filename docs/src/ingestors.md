@@ -339,6 +339,10 @@ An ingestor accepts only the modes it can honor, and completion of its body offe
 | `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT` | `REJECT RETRY AFTER ...`; `BUFFER MAX SIZE ...` only with `MODE NO ACK` |
 | `CLIENT PRODUCER` | `SUSPEND` |
 
+For `SYSLOG LISTENER`, suspension retains frames already held by the listener, while UDP arrivals
+remain subject to the kernel receive buffer. Resuming the same listener and replacing or stopping
+it have different retention outcomes; see [Syslog quiesce](syslog.md#quiesce) before relying on them.
+
 The mode is consulted for resumable model-alteration `ENTITY_PAUSE` holds, `DOMAIN_PAUSE` batches,
 and memory-pressure shedding. `STOP` and `DROP INGESTOR` terminate the ingestor session. Unexpected
 owner loss also terminates it immediately; volatile quiesce buffers and in-memory ACK state do not
@@ -718,7 +722,7 @@ Transport-specific schemes and keys:
   certificate it could trust. An SQS connection presents no client certificate, so
   `CREATE SQS CLIENT` refuses `tls_cert_file` and `tls_key_file`; see [SQS](#sqs).
 - `SYSLOG`: select `'protocol' = 'tls'`. An ingestor requires `tls_cert_file` and
-  `tls_key_file`; optional `tls_ca_file` enables required client-certificate verification.
+  `tls_key_file`; optional `tls_client_ca_file` enables required client-certificate verification.
 
 `HTTP REQUEST` and `PROMETHEUS QUERY` ingestors resolve endpoint names through the node's
 configured DNS resolver.
@@ -2681,7 +2685,8 @@ See the [SYSLOG LISTENER capability and mirror reference](connector-capabilities
 <!-- connector-matrix:ingest-syslog-listener:end -->
 
 The client binds a UDP, TCP, or TLS listener. UDP treats one datagram as one message; TCP detects
-RFC 6587 octet-counted or LF-terminated framing per frame; TLS uses RFC 5425 octet counting.
+RFC 6587 octet-counted or LF-terminated framing per frame unless the client selects one with
+`framing`; TLS uses RFC 5425 octet counting.
 Messages expose optional `STRING` fields `metadata.peer_addr`, `metadata.transport` (`udp`, `tcp`
 or `tls`) and `metadata.tls_peer` (the verified TLS client certificate's subject, null without a
 verified client identity). Routes may select a transport in `WHERE` and assign these values to
@@ -2689,8 +2694,10 @@ schema fields; quiesce buffering retains the complete row. The ingestor takes no
 and has no application acknowledgment. Every live cluster node runs the listener; it is independent
 of the leader and restarts or joins with its owning node. See [Syslog](syslog.md) for the client keys,
 cluster lifecycle, framing, TLS, limits, and failure semantics.
-An invalid client setting or unreadable TLS file fails listener startup with the Syslog key or
-file and its underlying cause. A frame or connection failure keeps its cause in the ingestor
+A client key the listener does not read, a host name in its `addr` or a TLS client without a server
+identity refuses the statement that binds the client. A TLS file that holds no usable certificate or
+key fails listener startup with the file and its underlying cause. A frame or connection failure
+keeps its cause in the ingestor
 diagnostic. These failures do not acknowledge a message; Syslog has no application ACK.
 
 ### SQS

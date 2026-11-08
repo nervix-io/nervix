@@ -2,6 +2,12 @@
 
 *Plexus, the Nervix graph definition language.*
 
+Secure random values come from `nervix-crypto`. Its pinned AWS-LC generator returns complete
+random bytes or aborts if sufficient entropy cannot be obtained; it has no recoverable entropy
+failure to classify as a record, authentication or transport rejection. No default value replaces
+an unavailable random draw. Digest computation and the deterministic transport-entropy callback
+retain their infallible contracts.
+
 The allowance engine returns `Admission` decisions separately from input and conversion errors.
 `WaitUntil`, `NeverAdmissible` and `KeyBudgetExhausted` are ordinary outcomes, not decode failures
 or dropped payloads. `QuotaError` identifies invalid rates, bursts, costs, TTLs and horizon ranges;
@@ -1090,10 +1096,13 @@ A Syslog frame write that runs out of the client's `timeout_ms` keeps `DeadlineE
 listener's connection whose TLS handshake runs out of `connect_timeout_ms`, or which sends nothing
 for its `idle_timeout_ms`, ends with `DeadlineElapsed` beneath the listener's connection failure.
 That failure closes only the connection and is logged at debug level; it is never the ingestor's
-transient error. A Syslog client that sets a deadline key its direction and protocol never wait on
-is refused as `SyslogConfigError::InapplicableDeadlineKey`, naming the key and the clients it
-applies to. When several keys are inapplicable, the first refusal follows the shared deadline-key
-order, independently of the order of the client's entries.
+transient error. A deadline key a Syslog client's side or protocol never waits on refuses the
+statement that binds the client: `timeout_ms` on a listener's client and `idle_timeout_ms` on a
+collector's are `ClientConfigSchemaError::ReadByOtherSide`, naming the key and the side that reads
+it, and `connect_timeout_ms` on a UDP or TCP listener's client, like `idle_timeout_ms` over UDP, is
+`ClientConfigSchemaError::RequiresChoice`, naming the key and the protocols it applies to. The
+refusal is beneath the binding's `RegistryError::IngestorClientConfig` or
+`RegistryError::EmitterClientConfig`, which names the entity and the client.
 
 An MQTT client configuration the vocabulary cannot carry is refused as an
 `MqttClientConfigError`, which names the key without its value: an empty or NUL-bearing identity, a

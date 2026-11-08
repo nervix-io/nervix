@@ -28,7 +28,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Roto language syntax for UDF bodies | `Roto Language Reference` |
 | Branches, relays, capacity, TTL, and materialized state | `Relay` |
 | Resources, uploads, mounts, and TLS files | `Resources` |
-| Syslog wire schema, codec fields, UDP/TCP/TLS framing, per-connection versus total buffer bounds, clients, sources, and emitters | `Common` → `Syslog`, and `Connector Capabilities` |
+| Syslog wire schema, codec fields, UDP/TCP/TLS framing and frame limits, buffer bounds, per-direction client keys, listener quiesce and collector delivery | `Common` → `Syslog`, then `Ingestors` → `Syslog`, `Emitters` → `Syslog` and `Connector Capabilities` |
 | Ingestor transports, delivery modes, headers, and routes | `Ingestors` |
 | HTTP polling requests and client secrets, responses, failed polls, the response bound, and the `HTTP CLIENT` keys, redirects and proxy both directions share | `Ingestors` → `HTTP REQUEST`, then `Emitters` → `HTTP client transport` |
 | Client, ingestor and emitter heads, their connector/entity choice, and kind-preserving ALTER | `Plexus Overview` → `Statement catalog`, then `Connector Capabilities` and the entity's manual section |
@@ -250,11 +250,15 @@ current connection, retry and deadline limits.
   unfolds into several messages is decoded, acknowledged, and redelivered as a whole.
 - Every codec using the SYSLOG wire schema uses a `SYSLOG CODEC` head and only the exact fixed fields
   documented in `Common` → `Syslog`; keep the format separate from the `SYSLOG CLIENT` transport,
-  use only `MODE NO ACK` on a `SYSLOG LISTENER` ingestor and `NO ACK` on a syslog emitter,
+  use only `MODE NO ACK` on a `SYSLOG LISTENER` ingestor and a `SYSLOG COLLECTOR` emitter,
   configure TLS identity for the client direction that consumes it, and set a key only one side
-  reads, such as `framing` or `idle_timeout_ms`, only on a client that side uses; the SYSLOG
-  client reference in `Connector Capabilities` names those keys. Read `Common` → `Syslog` →
+  reads, such as `max_message_size`, `idle_timeout_ms`, `tls_client_ca_file`, `timeout_ms` or
+  `tls_ca_file`, only on a client that side uses, because the statement that binds a client refuses
+  the other side's keys. A listener's `addr` is a literal IP address and port; the SYSLOG client
+  reference in `Connector Capabilities` names those keys. Read `Common` → `Syslog` →
   `Ingestor` for transport metadata and when a TLS connection exposes a verified client subject.
+  Check its `Quiesce` section before promising retention and its `Emitter` section before sizing
+  the complete codec payload or interpreting a local write as delivery.
 - Every relay declares a schema and explicit branch selection. Its `CAPACITY` is the cluster-wide
   owner-buffer bound, once per partition when its branch declares `PARTITIONS <n>`, not a
   per-branch or per-consumer bound; nonowner producer and remote consumer nodes each have one

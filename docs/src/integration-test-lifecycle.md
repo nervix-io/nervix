@@ -53,6 +53,15 @@ This focused check covers incarnation-bound progress, completion through a push 
 clock delivery after attachment changes; the complete ordinary and mode suites remain separate
 qualification evidence.
 
+The held-query case keeps the sampled revision replies outstanding while reports complete the
+command. The held-report-and-query case releases either path explicitly and measures completion
+from that release. Clock cases exercise receiver attachment ahead of graph readiness. These are
+separate witnesses for the [completion barrier](./command-completion.md#all-live-node-barriers)
+and [authority delivery](./domain-clock.md#tick-production-and-progress-delivery); membership gossip
+remains available for topology and subscription interest. The measured nine- and twenty-second
+control-probe budgets and their margins are recorded under
+[Product Deadlines And Harness Deadlines](#product-deadlines-and-harness-deadlines).
+
 ## Focused Native Command Recovery
 
 `just test-client-foreign-execution` runs exactly the native-client and CLI foreign-reference
@@ -119,6 +128,16 @@ inferencers and WASM processors. The recipe prepares the ONNX fixtures/runtime, 
 console assets and test CLI used for resource uploads. Additional arguments reach the ordinary
 runner unchanged; broad scenario and CI runs retain their full prerequisites.
 
+## Focused Kinded Head Qualification
+
+`just test-kinded-heads` runs the endpoint-head, codec-head and acknowledgement-clause features
+together through the ordinary in-process harness, with four run slots and no retries. The cases
+cover kind-specific bodies and references, canonical `SHOW CREATE` output, session completion,
+and processor/emitter acknowledgement modes after their complete input declarations on one and
+three nodes. Preparation includes the console, ONNX fixtures/runtime, WASM guests and native tools
+used for resource uploads and completion. Additional arguments reach the runner unchanged; the
+complete ordinary suite, completion walks and concurrency checks retain their separate verdicts.
+
 ## Delayed Consensus Heartbeat Answers
 
 The leader-lease regression uses a testing-only control on each follower's consensus probe. The
@@ -157,6 +176,11 @@ fixture cannot survive its node specification.
 A scenario can release the byte cadence once. That wakes every delayed chunk and leaves existing
 sockets, buffered bytes and the reserved listener intact; future connections also run without
 pacing. A release does not parse the stream, fabricate a product response or replace a connection.
+
+Both proxy sockets preserve the interconnect's `TCP_NODELAY` policy. The accepted socket and the
+connection to the private listener disable Nagle coalescing before forwarding, so small writes
+follow the fixture's explicit byte cadence and its release. Focused socket-owner tests check both
+options and preserve request and response bytes across the two distinct connection legs.
 
 The rate-limited case transfers leadership to node-2 while the stopped follower has only its
 initial log, making the new leader recover an unconfirmed previous-log boundary. The scenario
@@ -4530,6 +4554,7 @@ tasks, most of them on a paused clock, stand-in executable images and stand-in c
 | A failed server process startup keeps what its readiness probes saw and what the still-running process was doing, within a bound | `a_history_without_probes_says_none_completed`, `consecutive_probes_of_one_kind_form_one_run`, `a_kind_that_returns_starts_a_new_run`, `a_long_history_keeps_its_first_and_latest_runs`, `a_sleeping_child_is_described_with_its_thread_and_its_host`, `a_stopped_child_is_described_as_stopped`, `a_reaped_child_is_described_as_ended`, `a_description_lists_a_bounded_number_of_groups_and_names`, `a_description_orders_groups_from_the_largest` |
 | Synchronous step work leaves the runner task polling, and a stall of that task is measured | `a_step_job_leaves_the_runner_task_polling_other_scenarios`, `a_step_job_returns_its_result_to_the_step`, `a_step_job_fails_its_step_with_its_own_panic`, `a_step_that_blocks_the_runner_task_is_reported_with_its_length` |
 | The actual Syslog TLS sender completes its handshake and full write while its runner stops polling it, under the unchanged one-second peer deadline | `a_syslog_tls_publication_finishes_while_the_runner_is_unpolled`, `a_syslog_tls_split_write_finishes_while_the_runner_is_unpolled` |
+| The actual Syslog TLS sender, presenting no certificate, observes a peer that requires one refuse it, whether as its handshake's failure or as the alert or end its session's first read returns | `a_syslog_tls_sender_without_a_certificate_observes_a_peer_that_requires_one_refuse_it` |
 | Every tick's lateness adds up beside the stalls, and the summary reports the runner thread's CPU and run-queue time and the runtime workers' busy time | `the_lateness_of_every_tick_adds_up_beside_the_stalls`, `a_tick_below_the_bound_counts_as_lateness_and_not_as_a_stall`, `a_thread_schedstat_reads_its_cpu_time_and_run_queue_wait`, `the_runner_thread_reads_the_cpu_time_it_spent_since_it_was_named`, `the_suite_summary_adds_up_every_runner_tick_beside_its_stalls` |
 | A stall lists only the scenarios that hold run slots, and a suite timeout counts only the scenarios still queued or running | `the_running_scenarios_are_those_that_hold_their_run_slots`, `a_suite_timeout_does_not_count_a_finished_attempt_as_active` |
 | jemalloc purges freed memory on its background threads once the scenario process asks, so the runner thread does not wait for a purge | `freed_memory_is_purged_on_jemalloc_background_threads` |

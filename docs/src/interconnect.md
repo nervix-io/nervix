@@ -61,7 +61,8 @@ one production behavior, which is what every node uses:
   by, as described in [Peer Identity And Authentication](#peer-identity-and-authentication).
   Production bundles use the system clock.
 - **Identity entropy.** The process epoch and relay grant identifiers are drawn from the transport's
-  configured entropy, which in production is the operating system's secure random source.
+  configured entropy, which in production takes AWS-LC's secure random values through
+  `nervix-crypto`. A simulation supplies its deterministic callback through the same seam.
 - **Deadlines.** Every transport deadline is an instant of the boundary's clock,
   `nervix_primitives::time`, whose timers are Tokio's, so it follows the clock of the runtime it
   runs on: connection setup, request and progress timeouts, reconnect backoff, relay grant
@@ -1270,6 +1271,12 @@ acknowledgements, such as a detached send, completes at admission as before.
 
 ## Membership, Consensus, And Bulk Transfer
 
+Gossip carries membership-scoped state: node identities and endpoints, prerequisites, admission
+verdicts, committed cluster parameters, termination and subscription interest. A member's published
+state can change while its incarnation stays live. Application readiness travels through
+[progress reports and queries](#application-progress), and clock installation through
+[receiver attachments](#domain-clock-progress). Neither becomes a per-revision gossip key.
+
 Cluster membership gossip uses management discovery capacity. It discovers topology and
 incarnations but does not replace application health checks. Gossip payloads remain below the
 management-event bound, so discovery cannot allocate an arbitrary wire message. A node that cannot
@@ -2099,6 +2106,20 @@ observation outcome, and derived availability. Its `connected` status means the 
 probe is healthy, rather than merely that a transport pool exists.
 
 ## Application Progress
+
+The progress operations share reserved management progress capacity and two-second physical
+request deadlines:
+
+| Request | Direction | Result |
+| --- | --- | --- |
+| `application_progress` | Reporting incarnation to its observed leader and term | A typed receipt for its newest progress record |
+| `application_revision` | Barrier to a required incarnation | That answering incarnation's current progress record |
+| `application_completion_peers` | Barrier to the current leader | The leader's identity and term, required incarnations and received progress |
+| `domain_clock_attach` | Installed clock receiver to its authority | A typed attachment outcome for the addressed authority fence |
+
+The last operation establishes [clock delivery](#domain-clock-progress). The first three carry the
+observations the [command barrier](./command-completion.md#all-live-node-barriers) uses. Request
+deadlines bound transport attempts; the barrier keeps its existing command deadline.
 
 Command completion reads the leader's effective availability view through the
 `application_completion_peers` management progress request. The response names the leader's

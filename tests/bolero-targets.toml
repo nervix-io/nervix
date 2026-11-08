@@ -11,6 +11,21 @@ sanitizer = "address"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/crypto/src/__fuzz__/digest_tests__bolero_sha2_digests_match_the_reference/corpus"
+domain_version = 1
+features = []
+id = "crypto-sha2-digests"
+invariant = "AWS-LC SHA-256 and SHA-512 equal the complete independent RustCrypto digests over bounded arbitrary binary inputs, and every tested segmentation of incremental SHA-256 equals the one-shot digest."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-crypto"
+random_iterations = 256
+source = "crates/crypto/src/digest_tests.rs"
+test = "digest_tests::bolero_sha2_digests_match_the_reference"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "tools/nervix-lint/ratchet/src/__fuzz__/representations__bolero_lease_round_trip/corpus"
 domain_version = 1
 features = []
@@ -1363,10 +1378,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/connectors/syslog/src/listener/__fuzz__/listener__tests__bolero_stream_framing_matches_the_reference_however_reads_split_it/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "syslog-stream-framing"
-invariant = "However reads split a generated RFC 6587 stream, the stream decoder yields exactly the frames and the ending, clean, incomplete or the typed framing failure, that framing the whole stream defines."
+invariant = "However reads split a generated RFC 6587 stream, under a connection's declared framing or none, the stream decoder yields exactly the frames and the ending, clean, incomplete or the typed framing failure, that framing the whole stream defines."
 manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-connector-syslog"
@@ -3942,6 +3957,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/models/src/connector/syslog/__fuzz__/connector__syslog__client__tests__bolero_each_side_reads_back_every_valid_client_and_refuses_the_other_sides_keys/corpus"
+domain_version = 1
+features = []
+id = "syslog-client-sides"
+invariant = "Every bounded valid SYSLOG client of either side preserves its complete address, transport, framing, message bound and TLS files through the entries that declare it, and a key only the other side reads refuses the client by name."
+manifest = "Cargo.toml"
+max_input_bytes = 16
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/src/connector/syslog/client_tests.rs"
+test = "connector::syslog::client::tests::bolero_each_side_reads_back_every_valid_client_and_refuses_the_other_sides_keys"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__endpoint__metadata_tests__bolero_endpoint_request_and_frame_metadata_retain_and_project_exactly/corpus"
 domain_version = 1
 features = []
@@ -4018,7 +4048,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/src/connector/__fuzz__/connector__config_schema__tests__bolero_schema_checked_client_entries_round_trip/corpus"
-domain_version = 30
+domain_version = 31
 features = []
 id = "client-config-schema"
 invariant = "Bounded entries drawn from every current client key schema, choosing zero or one key of a declared exclusion group, preserve complete values and acceptance through JSON and archive round trips; effective defaults preserve authored entries and are idempotent, as is public inspection."

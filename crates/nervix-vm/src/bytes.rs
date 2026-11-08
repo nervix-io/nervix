@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** Encoding, decoding, hashing and UTF-8 conversion of binary columns, including
 //!   per-row failures and Arrow offset bounds.
-//! - **Depends on.** Arrow columns, VM row errors and SIMD-backed encoding kernels.
+//! - **Depends on.** Arrow, VM row errors, SIMD encoders and the cryptography boundary.
 //! - **Must not know.** Plexus syntax, routes, schemas or connectors.
 
 #![cfg_attr(
@@ -22,7 +22,6 @@ use arrow_array::{
     builder::{BinaryBuilder, StringBuilder, UInt64Builder},
 };
 use meticulous::OptionExt as _;
-use sha2::{Digest as _, Sha256};
 
 use crate::{
     RowErrors, SideError, SideErrorReason, error::BytesOperation, program::Span,
@@ -218,7 +217,7 @@ pub(crate) fn sha256(input: &BinaryArray, errors: &mut RowErrors, span: Span) ->
             );
             continue;
         };
-        let digest = Sha256::digest(input.value(row));
+        let digest = nervix_crypto::digest::sha256(input.value(row));
         output.append_value(digest);
         used = next;
     }

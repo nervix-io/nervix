@@ -2257,18 +2257,26 @@ async fn an_owner_reads_storage_only_for_a_placement_it_holds_no_state_for() {
 
 /// The owner lists the branch checkpoints of the branch states it owns for an entity, and answers
 /// that it holds none for an entity whose branch state it never held.
-#[test]
-fn an_owner_lists_the_branch_checkpoints_of_the_states_it_owns() {
+#[rstest::rstest]
+#[case::deduplicator(ModelKind::Deduplicator)]
+#[case::window(ModelKind::WindowProcessor)]
+fn an_owner_lists_the_branch_checkpoints_of_the_states_it_owns(#[case] kind: ModelKind) {
     let runtime = Runtime::default();
-    let deduplicator = RuntimeState::Deduplicator {
-        schema: unchanged_schema_fingerprint(),
+    let state_kind = match kind {
+        ModelKind::Deduplicator => RuntimeState::Deduplicator {
+            schema: unchanged_schema_fingerprint(),
+        },
+        ModelKind::WindowProcessor => RuntimeState::WindowProcessor {
+            schema: unchanged_schema_fingerprint(),
+        },
+        _ => panic!("the cases select a periodically snapshotted processor"),
     };
     let lifecycle = owned_placement(
         RuntimeState::BranchLru {
             schema: unchanged_schema_fingerprint(),
         },
-        ModelKind::Deduplicator,
-        "dedup_orders",
+        kind,
+        "orders",
         None,
     );
     assert_eq!(
@@ -2277,15 +2285,20 @@ fn an_owner_lists_the_branch_checkpoints_of_the_states_it_owns() {
     );
 
     let acme = string_branch_key("tenant", "acme");
-    let acme_placement = owned_placement(
-        deduplicator,
-        ModelKind::Deduplicator,
-        "dedup_orders",
-        acme.clone(),
-    );
-    let acme_state = runtime
-        .replicated_deduplicator_state(acme_placement)
-        .expect("deduplicator state should initialize");
+    let placement = owned_placement(state_kind, kind, "orders", acme.clone());
+    let state = match kind {
+        ModelKind::Deduplicator => PublishedBranchState::Deduplicator(
+            runtime
+                .replicated_deduplicator_state(placement)
+                .expect("deduplicator state should initialize"),
+        ),
+        ModelKind::WindowProcessor => PublishedBranchState::WindowProcessor(
+            runtime
+                .replicated_window_processor_state(placement)
+                .expect("window state should initialize"),
+        ),
+        _ => panic!("the cases select a periodically snapshotted processor"),
+    };
     let OwnerCheckpointListing::Listed(CheckpointListing::Restarted(first)) =
         runtime.branch_checkpoint_listing(&lifecycle, None)
     else {
@@ -2295,29 +2308,45 @@ fn an_owner_lists_the_branch_checkpoints_of_the_states_it_owns() {
         first.revised,
         vec![CatalogedCheckpoint {
             branch: acme.clone(),
-            state: deduplicator,
+            state: state_kind,
             lsm: 0,
         }]
     );
 
-    let mut keyspace = ReplicatedDeduplicatorState::keyspace(&acme_state);
-    assert!(keyspace.reserve_new_key(
-        DeduplicatorKey::new(vec![ReorderKeyPart::Utf8("txn-1".to_string())]),
-        Timestamp::from_unix_nanos(1),
-        Duration::from_secs(600),
-    ));
-    keyspace.publish();
+    let revision = match &state {
+        PublishedBranchState::Deduplicator(state) => {
+            let mut keyspace = ReplicatedDeduplicatorState::keyspace(state);
+            assert!(keyspace.reserve_new_key(
+                DeduplicatorKey::new(vec![ReorderKeyPart::Utf8("txn-1".to_string())]),
+                Timestamp::from_unix_nanos(1),
+                Duration::from_secs(600),
+            ));
+            keyspace.publish();
+            state.generations.load().revision
+        }
+        PublishedBranchState::WindowProcessor(state) => {
+            let plan = window_plan(
+                "SET count = COUNT(input.latency)",
+                ParseAsType::I64,
+                &[("count", ParseAsType::I64)],
+            );
+            let window = WindowProcessorState::new(&plan, 1);
+            state.replace_state(&window).expect("the window publishes");
+            state.generations.load().revision
+        }
+    };
     let OwnerCheckpointListing::Listed(CheckpointListing::Continued(next)) =
         runtime.branch_checkpoint_listing(&lifecycle, Some(first.cursor))
     else {
         panic!("a read from the previous cursor lists what changed after it");
     };
+    assert_eq!(revision, 1);
     assert_eq!(
         next.revised,
         vec![CatalogedCheckpoint {
             branch: acme,
-            state: deduplicator,
-            lsm: acme_state.generations.load().revision,
+            state: state_kind,
+            lsm: revision,
         }]
     );
 }
