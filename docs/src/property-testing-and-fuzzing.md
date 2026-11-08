@@ -103,6 +103,8 @@ deterministic checks of their projections without introducing a second report sh
 | `client-host-typed-field-descriptors` | `nervix-client-host` typed field description equality: a binding's level-by-level description of `FieldType` levels becomes the complete original field, and every scalar level names its scalar back through its type's kind | every scalar inside 0 to 32 `LIST` and `FIXED_LIST` levels of 1 to `INT32_MAX` elements, either nullability and sensitivity, names from the whole name rule, v2 | 256 | 2048 bytes |
 | `client-jvm-columns` | `nervix-client-jvm` complete Java builder/reader and IPC equality through the current JNI implementations registered in an embedded JVM, including derived direct-buffer ownership | all scalar widths and float bit patterns, UTF-8/NUL and byte columns, nullable/sensitive fields, up to six rows and list/fixed-list columns, v1 | 256 | 1024 bytes |
 | `client-jvm-fields` | `nervix-client-jvm` complete Java field descriptions and the snapshot leased by endpoint opens | one to four fields, every scalar inside up to four list/fixed-list levels of one to four elements, both nullability and sensitivity, v1 | 256 | 256 bytes |
+| `client-ruby-columns` | `nervix-client-ruby` complete native Ruby builder/reader and IPC logical-value equality | every scalar width and significant float bit, UTF-8/NUL, binary bytes, nullable/sensitive fields, zero to seven rows and nested list/fixed-list columns, v1 | 256 | 1024 bytes |
+| `client-ruby-fields` | `nervix-client-ruby` complete field descriptions and immutable snapshots | zero to seven fields, every scalar under up to three list/fixed-list levels of one to four elements, both flags and complete order, v1 | 256 | 256 bytes |
 | `client-processor-choice-request` | `nervix-client-wire` processor choice request round-trip equality | current targets with relay context, search, page and identity, v1 | 128 | 32 bytes |
 | `plexus-expression` | `nervix-plexus` expression render and reparse equality through a statement and the standalone expression, expression-list and route-construction readers | Plexus expressions of every form, v11 | 256 | 512 bytes |
 | `connector-entity-presentation` | `nervix-plexus` declared phrases and ordered inspection rows, canonical reparsing to the complete configured Model | every current ingestor and emitter entity, options, modes, headers, mappings and error policies, v31 | 128 | 2048 bytes |
@@ -952,3 +954,9 @@ harness's checked native method table before making Java calls, so sanitizer and
 exercise the current JNI implementation rather than the jar's separately compiled library.
 The Java properties keep complete field/type/flag/order and column-byte oracles; no invalid-input
 filtering supplies a passing case. JNI artifact paths stay below `target/client-conformance/java`.
+
+The Ruby targets require CRuby 3.3+ development headers and shared library. Each integration-test
+executable owns one embedded interpreter and registers the current Rust binding before calling
+its complete Ruby oracle; no separately loaded extension supplies the implementation. These two
+bounded properties target the large scalar-bit and nested-shape domains that fixed examples do
+not exhaust. Their normal test budget is 256 cases per target; focused evidence records the seed.
