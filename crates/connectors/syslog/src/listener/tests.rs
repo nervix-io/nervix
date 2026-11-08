@@ -1143,7 +1143,8 @@ async fn an_oversized_datagram_is_dropped_and_the_next_one_received() {
 #[test]
 fn a_message_hands_over_every_declared_field_and_names_its_peer_position() {
     use nervix_connector::{
-        IngestTransportPosition, RetainedIngestMetadata, RetainedIngestMetadataValue as Value,
+        IngestMessageMetadata as _, IngestTransportPosition, RetainedIngestMetadata,
+        RetainedIngestMetadataValue as Value,
     };
     use nervix_models::{IngestorEntityKind, SyslogIngestorEntity};
 
@@ -1152,12 +1153,14 @@ fn a_message_hands_over_every_declared_field_and_names_its_peer_position() {
     let metadata = message.metadata();
 
     let retained = RetainedIngestMetadata::capture(metadata.fields);
+    assert_eq!(retained.payload_bytes(), message.payload().len());
     assert_eq!(
         retained.values(),
         [
             Value::String("192.0.2.7:5514".to_string()),
             Value::String("udp".to_string()),
-            Value::Absent
+            Value::Absent,
+            Value::String("192.0.2.7".to_string()),
         ]
     );
     let declared = IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener)

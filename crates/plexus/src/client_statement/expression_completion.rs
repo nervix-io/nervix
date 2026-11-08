@@ -131,16 +131,15 @@ impl<'a> ExpressionCompletion<'a> {
     }
 
     fn payload_fields(&self) -> Vec<CompletionExpectation> {
-        self.ingestor
-            .map(|kind| {
-                kind.capabilities()
-                    .payload
-                    .fields()
-                    .iter()
-                    .map(|field| CompletionExpectation::Literal(field.name().to_string()))
-                    .collect()
-            })
-            .unwrap_or_default()
+        let Some(kind) = self.ingestor else {
+            return Vec::new();
+        };
+        kind.capabilities()
+            .payload
+            .fields()
+            .iter()
+            .map(|field| CompletionExpectation::Literal(field.name().to_string()))
+            .collect()
     }
 
     fn metadata_fields(

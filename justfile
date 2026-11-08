@@ -369,6 +369,16 @@ test-ingestor-payload *args: build-deps build-plexus-format build-test-cli build
 test-ingestor-payload-language:
     cargo test --package nervix-plexus --lib semantic_program::tests::payload_
     cargo test --package nervix-plexus --lib client_statement::connector_completion_tests::
+    cargo test --package nervix-plexus --lib lexer::tests::the_generators_spell_a_name_like_every_keyword
+
+# Verify current metadata/capability declarations and every keyword-shaped generated name.
+test-ingestor-payload-declarations:
+    cargo test --package nervix-models --test connectors --features arrow -- --skip bolero
+    cargo test --package nervix-arbitrary --lib a_name_spells_every_keyword
+
+# Verify the complete Syslog message handover through the production retention boundary.
+test-ingestor-payload-syslog:
+    cargo test --package nervix-connector-syslog --lib listener::tests::a_message_hands_over_every_declared_field_and_names_its_peer_position -- --exact
 
 # Exercise lazy payload projection, registry admission and scalar retention through their owners.
 test-ingestor-payload-owners: download-onnxruntime build-web-console

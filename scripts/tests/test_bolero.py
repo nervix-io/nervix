@@ -524,20 +524,20 @@ class InventoryTests(unittest.TestCase):
         }
         for target, version in {
             "benchmark-metrics-report": 1,
-            "ingestor-describe-envelope": 7,
-            "plexus-model": 56,
-            "plexus-archive-model": 58,
-            "plexus-statement": 57,
-            "plexus-statement-text": 56,
-            "plexus-format-document": 56,
-            "plexus-format-text": 55,
-            "models-archived-models": 56,
-            "registry-archived-models": 51,
-            "consensus-state-records": 48,
-            "consensus-state-corruption": 48,
-            "consensus-raft-records": 47,
-            "registry-stored-models": 44,
-            "registry-stored-models-corruption": 44,
+            "ingestor-describe-envelope": 8,
+            "plexus-model": 57,
+            "plexus-archive-model": 59,
+            "plexus-statement": 58,
+            "plexus-statement-text": 57,
+            "plexus-format-document": 57,
+            "plexus-format-text": 56,
+            "models-archived-models": 57,
+            "registry-archived-models": 52,
+            "consensus-state-records": 49,
+            "consensus-state-corruption": 49,
+            "consensus-raft-records": 48,
+            "registry-stored-models": 45,
+            "registry-stored-models-corruption": 45,
             "inferencer-tensor-columns": 1,
         }.items():
             with self.subTest(target=target):
@@ -547,7 +547,7 @@ class InventoryTests(unittest.TestCase):
         targets = {target.id: target for target in bolero.load_inventory().targets}
         for name in ("client-state-inspection", "state-inspection-cursor"):
             with self.subTest(target=name):
-                self.assertEqual(targets[name].domain_version, 1)
+                self.assertEqual(targets[name].domain_version, 2)
                 self.assertEqual(targets[name].max_input_bytes, 512)
                 self.assertEqual(targets[name].random_iterations, 128)
 
