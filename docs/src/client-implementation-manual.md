@@ -924,9 +924,6 @@ A host of the C ABI, `nervix-client-ffi`, follows the contract in
   their type's exact width or as UTF-8 text. It MAY reuse or free its buffers as soon as each
   builder call returns. A host submitting its own Arrow IPC MUST write one canonical stream of the
   producer's schema, P-3's, and MAY reuse the buffer once `nx_producer_submit_ipc` returns.
-  Importing IPC with `nx_batch_from_ipc` validates the exact Arrow schema, single batch and row
-  count locally; invalid input is `NX_ERROR_INVALID_ARGUMENT`. Malformed received delivery data
-  remains `NX_ERROR_PROTOCOL`.
 - **B-14.** A host MUST take every submission's outcome with `nx_producer_rejoin`, or let it go
   with `nx_producer_release`, since a submission holds its credit until then. A
   `nx_producer_submit` that ends with `NX_ERROR_CANCELLED` or `NX_ERROR_DEADLINE` submitted
