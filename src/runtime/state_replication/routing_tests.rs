@@ -69,6 +69,7 @@ fn materialized_relay_publication_retains_exact_routes_and_reclaims_ended_branch
             RuntimeValue::I64(i64::try_from(index).assured("three placements")),
         )]);
         let state = Arc::new(ReplicatedMaterializedRelayState::new(
+            1,
             placement.clone(),
             row.arrow_schema(),
         ));
@@ -108,6 +109,7 @@ fn materialized_relay_publication_retains_exact_routes_and_reclaims_ended_branch
         .assured("installed exact route");
     let row = test_runtime_row([("value".to_string(), RuntimeValue::I64(7))]);
     let state = Arc::new(ReplicatedMaterializedRelayState::new(
+        1,
         placements[1].clone(),
         row.arrow_schema(),
     ));
@@ -168,6 +170,7 @@ fn a_materialized_branch_publication_owns_absence_beside_the_relay_snapshot() {
     };
     let row = |value| test_runtime_row([("value".to_string(), RuntimeValue::I64(value))]);
     let root = Arc::new(ReplicatedMaterializedRelayState::new(
+        1,
         root_placement.clone(),
         row(7).arrow_schema(),
     ));
@@ -192,6 +195,7 @@ fn a_materialized_branch_publication_owns_absence_beside_the_relay_snapshot() {
         ..root_placement.clone()
     };
     let branch = Arc::new(ReplicatedMaterializedRelayState::new(
+        1,
         branch_placement.clone(),
         row(9).arrow_schema(),
     ));

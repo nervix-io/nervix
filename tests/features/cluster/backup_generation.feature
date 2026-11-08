@@ -103,7 +103,7 @@ Feature: Bounded complete restore generations
       """
     Then within "120s" node "restored-1" eventually reports materialized state for relay "raw_metrics" containing
       """
-      key={"tenant":"restore-tenant-0"} payload={"tenant":"restore-tenant-0","value":2}
+      {"branch":{"tenant":"restore-tenant-0"},"fields":{"tenant":"restore-tenant-0","value":2}}
       """
     When these Plexus commands are executed through the client on the leader node
       """
@@ -112,7 +112,7 @@ Feature: Bounded complete restore generations
       """
     Then within "120s" node "restored-1" eventually reports materialized state for relay "raw_metrics" containing
       """
-      relay 'raw_metrics' materialized state is empty
+      rows: 0
       """
     Then within "120s" DESCRIBE INGESTOR "metric_ingestor" on the leader node contains
       """

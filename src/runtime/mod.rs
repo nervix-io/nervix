@@ -333,6 +333,8 @@ mod runtime_lifecycle;
 mod runtime_settings;
 mod schedule_apply;
 mod snapshot_staging;
+pub(crate) mod state_inspection_exchange;
+mod state_inspection_read;
 #[cfg(feature = "benchmarks")]
 #[doc(hidden)]
 pub mod task_handle_benchmark;
@@ -525,12 +527,11 @@ use lookup_hash_map::{
     compile_lookup_hash_map_calls, rewrite_lookup_hash_map_program,
 };
 pub(crate) use materialized_snapshot::{
-    MaterializedGeneration, materialized_columns_frame, materialized_container_header,
-    materialized_identity_section,
+    MaterializedGeneration, MaterializedGenerationRecord, materialized_columns_frame,
+    materialized_container_header, materialized_identity_section,
 };
 use materialized_snapshot::{
-    MaterializedGenerationRecord, RestoredMaterializedSnapshot, SealedSource,
-    empty_sealed_container, inspect_sealed_container,
+    RestoredMaterializedSnapshot, SealedSource, empty_sealed_container, inspect_sealed_container,
 };
 use materialized_state::{
     MaterializedRelaySnapshotInstaller, MaterializedRelayStateAssignment,
@@ -996,10 +997,12 @@ use ingest_task_handles::IngestTaskHandles;
 pub(crate) use ingestor_quiesce::IngestorQuiesceCounters;
 pub(crate) use ingestors::IngestorStartError;
 pub(crate) use local_drain::LocalGraphDrainOutcome;
-pub(crate) use materialized_read::MaterializedReadError;
-pub(crate) use materialized_state::MaterializedRecordReport;
 use message_error_decode::DecodeRejections;
 pub(crate) use message_error_decode::{DecodeRejection, TransportPosition};
+pub use nervix_models::{
+    StateInspectionMaxRows, StateInspectionMaxSections, StateInspectionReadTimeout,
+    StateInspectionSettings, StateInspectionSettingsError,
+};
 pub use node::{DEFAULT_TEMP_DIR, Runtime};
 use observability::BranchMetricsMark;
 pub(crate) use observability::{IngestorDescribe, KafkaDomainOffsetDescribe};
@@ -1011,6 +1014,9 @@ use relay_subscription::{RelaySubscriptionRefusal, RelaySubscriptions};
 pub(crate) use runtime_settings::RuntimeEnvironment;
 pub use runtime_settings::{RestoreStagingMaxBytes, RuntimeSettings, StateSnapshotInterval};
 use state_assignment::{CheckpointOwners, ScheduledStateAssignment, SharedStateAssignment};
+pub(crate) use state_inspection_read::{
+    MaterializedInspectionPage, MaterializedPageBounds, StatePageReadError,
+};
 pub(crate) use state_replication::StateSyncAck;
 pub(crate) use state_snapshot_transfer::{DescribeStateSnapshot, FetchStateSnapshot};
 pub(crate) use state_store::{

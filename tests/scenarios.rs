@@ -574,6 +574,7 @@ struct ScenarioWorld {
     /// The whole outcome of the last command a named client ran, for assertions that read more
     /// than its message.
     last_client_outcome: Option<ClientCommandOutcome>,
+    inspection_observations: materialized_state_inspection::Observations,
     /// The exact source of the last request a named client submitted, which the spans of that
     /// request's diagnostics index.
     last_client_request: Option<String>,
@@ -19886,6 +19887,7 @@ async fn when_these_plexus_commands_are_executed_through_the_client_on_node(
     node_id: String,
     #[step] step: &Step,
 ) {
+    world.last_client_outcome = None;
     world.last_command_error = None;
     world.last_command_output = None;
     world.last_server_error = None;
@@ -19915,7 +19917,8 @@ async fn when_these_plexus_commands_are_executed_through_the_client_on_node(
             "client command must succeed: {command}: {}",
             outcome.message
         );
-        world.last_command_output = Some(outcome.message);
+        world.last_command_output = Some(outcome.message.clone());
+        world.last_client_outcome = Some(outcome);
     }
 }
 
@@ -27613,53 +27616,6 @@ async fn then_within_duration_node_eventually_reports_describe_resource_as(
             Instant::now() < deadline,
             "timed out waiting for node '{node_id}' to report describe resource as '{expected}'. \
              last output: {:?}, last error: {:?}",
-            world.last_command_output,
-            world.last_command_error,
-        );
-        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-#[then(
-    expr = "within {string} node {string} eventually reports materialized state for relay \
-            {string} containing"
-)]
-async fn then_within_duration_node_eventually_reports_materialized_state_containing(
-    world: &mut ScenarioWorld,
-    duration: String,
-    node_id: String,
-    relay: String,
-    #[step] step: &Step,
-) {
-    let timeout = parse_duration_text(&duration).expect("step duration must be a valid duration");
-    let node_id = expand_placeholders(world, &node_id);
-    let expected = expand_placeholders(world, docstring(step));
-    let command = format!(
-        "SHOW RELAY {} MATERIALIZED STATE;",
-        expand_placeholders(world, &relay)
-    );
-    let deadline = Instant::now() + timeout;
-
-    loop {
-        nervix_primitives::task::consume_budget().await;
-        match run_plexus_commands_on_node(world, &node_id, &command).await {
-            Ok(output) if output.contains(expected.trim()) => {
-                world.last_command_output = Some(output);
-                return;
-            }
-            Ok(output) => {
-                world.last_command_output = Some(output);
-            }
-            Err(error) => {
-                world.last_command_error = Some(error.clone());
-            }
-        }
-
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for node '{node_id}' to report materialized state containing {}. \
-             last output: {:?}, last error: {:?}",
-            expected.trim(),
             world.last_command_output,
             world.last_command_error,
         );

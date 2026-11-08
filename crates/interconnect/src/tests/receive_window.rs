@@ -33,7 +33,10 @@ struct WindowedBulkStream;
 impl InterconnectStreamRequest for WindowedBulkStream {
     const NAME: &'static str = "test_windowed_bulk_stream";
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const TIMEOUT: Duration = Duration::from_secs(10);
+    #[inline]
+    fn default_timeout() -> Duration {
+        Duration::from_secs(10)
+    }
 }
 
 /// A replica fetching a guest save, or a node fetching a resource archive, reads a bulk response
@@ -164,7 +167,10 @@ struct UnbackedBulkStream;
 impl InterconnectStreamRequest for UnbackedBulkStream {
     const NAME: &'static str = "test_unbacked_bulk_stream";
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const TIMEOUT: Duration = Duration::from_millis(500);
+    #[inline]
+    fn default_timeout() -> Duration {
+        Duration::from_millis(500)
+    }
 }
 
 /// A node whose windows are all held sends no further bulk request: the request waits for a

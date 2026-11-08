@@ -60,7 +60,7 @@ use std::collections::BTreeMap;
 
 use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     AttachDomainClockRequest, AttachTransactionRequest, CancelOutcome, CancelRequest, CancelState,
     CancellationStage, ChoiceLookupRequest, ClientFrame, ClientMessage, ClientRequest,
@@ -323,9 +323,18 @@ impl SessionShared {
     /// Encodes and queues one reply, splitting it into transfer parts when it is larger than a
     /// frame. A reply that cannot be encoded is replaced by a typed rejection, never truncated.
     async fn reply(&self, request_id: RequestId, body: ReplyBody) -> QueuedReply {
+        self.reply_presented(request_id, body, None).await
+    }
+
+    async fn reply_presented(
+        &self,
+        request_id: RequestId,
+        body: ReplyBody,
+        state_format: Option<nervix_models::InspectionFormat>,
+    ) -> QueuedReply {
         let ending = ReplyEnding::of(&body);
         let reply = Reply { request_id, body };
-        let (delivery, queued) = match self.encode_reply(reply).await {
+        let (delivery, queued) = match self.encode_reply(reply, state_format).await {
             Ok(delivery) => {
                 self.traffic().reply(self.transport, ending);
                 (delivery, QueuedReply::Reply)
@@ -375,10 +384,14 @@ impl SessionShared {
 
     /// Encodes a reply. A reply carrying an impact report can be large, so it is encoded on the
     /// bulk workers under the bulk memory class; every other reply is small and encoded in place.
-    async fn encode_reply(&self, reply: Reply) -> Result<ReplyDelivery, ReplyEncodingFailure> {
+    async fn encode_reply(
+        &self,
+        reply: Reply,
+        state_format: Option<nervix_models::InspectionFormat>,
+    ) -> Result<ReplyDelivery, ReplyEncodingFailure> {
         let carries_report = match &reply.body {
             ReplyBody::Inspection(InspectionOutcome::Inspected(_)) => true,
-            ReplyBody::Command(outcome) => outcome.inspection.is_some(),
+            ReplyBody::Command(outcome) => outcome.inspection.is_some() || outcome.state.is_some(),
             _ => false,
         };
         if !carries_report {
@@ -390,16 +403,24 @@ impl SessionShared {
         // The charge admits the job onto the bulk workers. The reply it produces is bounded by the
         // session transfer limit, which the encoder enforces as the reply grows.
         let chunk_bytes = executor.limits().bulk_chunk_bytes.as_u64();
-        let reservation = executor
-            .reserve(MemoryClass::Bulk, chunk_bytes)
-            .await
-            .map_err(ReplyEncodingFailure::Memory)?;
+        let reservation = if state_format.is_some() {
+            executor
+                .try_reserve(MemoryClass::Bulk, chunk_bytes)
+                .map_err(ReplyEncodingFailure::Memory)?
+        } else {
+            executor
+                .reserve(MemoryClass::Bulk, chunk_bytes)
+                .await
+                .map_err(ReplyEncodingFailure::Memory)?
+        };
         let limits = *self.limits();
         let encoded = executor
             .run_cpu(
                 CpuClass::Bulk,
                 reservation,
-                move |_charge, _cancellation| reply.encode(&limits),
+                move |_charge, _cancellation| {
+                    encode_presented_state_reply(reply, &limits, state_format)
+                },
             )
             .await
             .map_err(ReplyEncodingFailure::Workers)?;
@@ -1140,6 +1161,7 @@ async fn serve_command(
     let Ok(response) = processed else {
         return None;
     };
+    let state_format = response.result.state.as_ref().map(|state| state.format);
     let outcome = command_outcome(execution_reference, response);
     #[cfg(not(feature = "testing"))]
     let body = ReplyBody::Command(Box::new(outcome));
@@ -1159,7 +1181,11 @@ async fn serve_command(
     } else {
         None
     };
-    let queued = shared.finish_with(request_id, body).await;
+    let queued = if shared.finish(request_id) {
+        shared.reply_presented(request_id, body, state_format).await
+    } else {
+        QueuedReply::Nothing
+    };
     if queued == QueuedReply::Reply {
         disposition
     } else {
@@ -1315,4 +1341,45 @@ fn single_create_subscription(
         ClientStatement::CreateSubscription(subscription) => Some(subscription),
         _ => None,
     }
+}
+
+/// Build the complete reply under the actual session limits, replacing only an oversized state
+/// page with its typed refusal before a byte is queued. Other outcomes keep their existing path.
+fn encode_presented_state_reply(
+    mut reply: Reply,
+    limits: &SessionLimits,
+    format: Option<nervix_models::InspectionFormat>,
+) -> Result<ReplyDelivery, Report<WireEncodeError>> {
+    match reply.encode(limits) {
+        Ok(encoded) => return Ok(encoded),
+        Err(error) => {
+            let bounded = matches!(
+                error.current_context(),
+                WireEncodeError::FrameTooLarge { .. }
+                    | WireEncodeError::StringTooLong { .. }
+                    | WireEncodeError::TooManyEntries { .. }
+                    | WireEncodeError::NestingTooDeep { .. }
+            );
+            if format.is_none() || !bounded {
+                return Err(error);
+            }
+        }
+    }
+    let ReplyBody::Command(outcome) = &mut reply.body else {
+        return reply.encode(limits);
+    };
+    let Some(state) = &mut outcome.state else {
+        return reply.encode(limits);
+    };
+    state.result = nervix_client_wire::StateInspectionResult::Rejected(
+        nervix_models::StateInspectionRejection::ReplyTooLarge,
+    );
+    outcome.message = match format {
+        Some(nervix_models::InspectionFormat::Json) => state.to_json(),
+        _ => state
+            .display_text()
+            .assured("a refusal contains no Row frames and only infallible String writes"),
+    };
+    outcome.disposition = nervix_client_wire::CommandDisposition::Failed;
+    reply.encode(limits)
 }

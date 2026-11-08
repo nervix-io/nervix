@@ -50,7 +50,7 @@ async fn successful_observations_are_limited_to_four_relays_on_three_nodes() {
     let mut queried = Vec::new();
     let observations = observe(&nodes, 0..40, |node, relay| {
         queried.push((node.clone(), relay));
-        future::ready(Ok("relay materialized state is empty".to_string()))
+        future::ready(Ok(inspection(None)))
     })
     .await;
     assert_eq!(queried.len(), 12);
@@ -58,7 +58,7 @@ async fn successful_observations_are_limited_to_four_relays_on_three_nodes() {
     assert_eq!(
         observations
             .iter()
-            .filter(|line| *line == "relay materialized state is empty")
+            .filter(|line| line.contains("rows: 0"))
             .count(),
         12
     );
@@ -71,7 +71,7 @@ async fn a_failed_public_query_does_not_discard_the_next_nodes_observation() {
         future::ready(if node.as_str() == "restored-1" {
             Err(io::Error::other("node is stopping"))
         } else {
-            Ok("owner: restored-2".to_string())
+            Ok(inspection(None))
         })
     })
     .await;
@@ -80,67 +80,114 @@ async fn a_failed_public_query_does_not_discard_the_next_nodes_observation() {
             .iter()
             .any(|line| line == "public materialized state query failed: node is stopping")
     );
-    assert_eq!(observations.last(), Some(&"owner: restored-2".to_string()));
-}
-
-#[test]
-fn large_fixture_rows_retain_placement_round_and_watermarks() {
-    let value = "a".repeat(512 * 1024);
-    let payload = serde_json::json!({
-        "tenant": "restore-tenant-1", "round": 2, "value": value,
-        "occurred_at": "1970-01-01T00:00:02Z",
-    });
-    let output = format!(
-        "materialized relay: state_11\nkind: RELAY\nowner: restored-2\nreplicas: \
-         restored-3\nkey={{\"tenant\":\"restore-tenant-1\"}} payload={payload} low=2 high=2"
-    );
-    assert_eq!(
-        summarize(&output),
-        "materialized relay: state_11\nkind: RELAY\nowner: restored-2\nreplicas: \
-         restored-3\nkey={\"tenant\":\"restore-tenant-1\"} round=2 value_bytes=524288 low=2 high=2"
-    );
-}
-
-#[test]
-fn every_row_keeps_its_branch_and_value_byte_length() {
-    assert_eq!(
-        summarize(
-            "key={\"tenant\":\"restore-tenant-0\"} payload={\"round\":1,\"value\":\"é\"} low=1 \
-             high=2\nkey={\"tenant\":\"restore-tenant-1\"} payload={\"round\":2,\"value\":\"text \
-             low=inside\"} low=3 high=4"
-        ),
-        "key={\"tenant\":\"restore-tenant-0\"} round=1 value_bytes=2 low=1 \
-         high=2\nkey={\"tenant\":\"restore-tenant-1\"} round=2 value_bytes=15 low=3 high=4"
-    );
-}
-
-#[test]
-fn empty_public_state_keeps_its_placement_and_outcome() {
-    let output = "materialized relay: state_11\nowner: restored-2\nreplicas: restored-3\nrelay \
-                  'state_11' materialized state is empty";
-    assert_eq!(summarize(output), output);
-}
-
-#[test]
-fn an_unreadable_observation_reports_the_boundary_it_could_not_read() {
-    assert_eq!(
-        summarize("key=(root)"),
-        "unrecognized public materialized row: no payload boundary"
-    );
-    assert_eq!(
-        summarize("key=(root) payload={}"),
-        "unrecognized public materialized row: no watermark boundary"
-    );
     assert!(
-        summarize("key=(root) payload={ low=1 high=1")
-            .starts_with("unreadable public materialized row:")
+        observations
+            .last()
+            .is_some_and(|line| line.contains("owner: restored-2"))
     );
-    assert_eq!(
-        summarize("key=(root) payload={\"value\":\"a\"} low=1 high=1"),
-        "key=(root): fixture round is not a number"
+}
+
+fn inspection(value: Option<&str>) -> nervix_client_wire::StateInspection {
+    use nervix_client_wire::*;
+    use nervix_models::{
+        ClusterNodeIdentity, ClusterNodeIncarnation, DomainNodeRef, ModelKind, ParseAsType,
+        SchemaField, Timestamp, Unit,
+    };
+    let schema = RowSchema {
+        branch: None,
+        fields: [
+            ("round", ParseAsType::I64),
+            ("value", ParseAsType::String),
+            ("low", ParseAsType::Datetime),
+            ("high", ParseAsType::Datetime),
+        ]
+        .into_iter()
+        .map(|(name, ty)| SchemaField {
+            name: nervix_models::FieldName::parse(name).assured("fixture name"),
+            ty,
+            optional: false,
+            sensitive: false,
+        })
+        .collect(),
+    };
+    let sections = value
+        .map(|value| {
+            let limits = SessionLimits::DEFAULT;
+            let mut rows = StateRowsEncoder::unbranched(&limits);
+            rows.push_row(|cells| {
+                cells.push_i64(2)?;
+                cells.push_string(value)?;
+                cells.push_datetime(Timestamp::from_unix_nanos(7))?;
+                cells.push_datetime(Timestamp::from_unix_nanos(11))
+            })
+            .assured("bounded fixture cells");
+            StateInspectionSection {
+                name: "records".to_string(),
+                schema,
+                frames: vec![rows.finish(&limits).assured("accepted fixture row")],
+                omitted_rows: 0,
+                watermarks: Some(StateWatermarkColumns { low: 2, high: 3 }),
+            }
+        })
+        .into_iter()
+        .collect();
+    let counts = StateInspectionCounts {
+        rows: u64::from(value.is_some()),
+        ..StateInspectionCounts::default()
+    };
+    StateInspection {
+        entity: DomainNodeRef::node_in(
+            nervix_models::DomainName::parse("fixture").assured("domain"),
+            ModelKind::Relay,
+            nervix_models::RelayName::parse("state_11").assured("relay"),
+        ),
+        result: StateInspectionResult::Page(StateInspectionPage {
+            counts,
+            unit_count: 1,
+            continuation: None,
+            units: vec![StateInspectionUnit {
+                unit: Unit::SINGLE,
+                owner: node("restored-2"),
+                replicas: vec![node("restored-3")],
+                origin: StateInspectionOrigin {
+                    node: ClusterNodeIdentity::new(
+                        node("restored-2"),
+                        ClusterNodeIncarnation::new(1),
+                    ),
+                    fingerprint: [1; 32],
+                    generation: 2,
+                    revision: 3,
+                    stage: StateInspectionStage::Stored,
+                },
+                counts,
+                sections,
+            }],
+        }),
+    }
+}
+
+#[test]
+fn large_fixture_rows_retain_placement_round_and_watermarks_without_the_payload() {
+    let value = "a".repeat(512 * 1024);
+    let summarized = summarize(&inspection(Some(&value)));
+    assert!(summarized.contains("owner: restored-2"));
+    assert!(summarized.contains("restored-3"));
+    assert!(summarized.contains("round=2 value_bytes=524288 low=Some(7) high=Some(11)"));
+    assert!(summarized.len() < 1024);
+}
+
+#[test]
+fn a_multibyte_fixture_keeps_its_utf8_byte_length_and_typed_watermarks() {
+    assert!(
+        summarize(&inspection(Some("é")))
+            .contains("round=2 value_bytes=2 low=Some(7) high=Some(11)")
     );
-    assert_eq!(
-        summarize("key=(root) payload={\"round\":2} low=1 high=1"),
-        "key=(root): fixture value is not a string"
-    );
+}
+
+#[test]
+fn empty_public_state_keeps_placement_and_zero_rows() {
+    let output = summarize(&inspection(None));
+    assert!(output.contains("rows: 0"));
+    assert!(output.contains("owner: restored-2"));
+    assert!(output.contains("restored-3"));
 }

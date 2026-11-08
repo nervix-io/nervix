@@ -106,7 +106,7 @@ Feature: Explicit branches
       """
     Then within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
-      key={"tenant":"acme"} payload={"message":"first","tenant":"acme"}
+      {"branch":{"tenant":"acme"},"fields":{"message":"first","tenant":"acme"}}
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
       """
@@ -114,7 +114,7 @@ Feature: Explicit branches
       """
     Then within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
-      key={"tenant":"beta"} payload={"message":"second","tenant":"beta"}
+      {"branch":{"tenant":"beta"},"fields":{"message":"second","tenant":"beta"}}
       """
     And within "5s" node "node-1" eventually reports describe relay as "not exists"
       """
