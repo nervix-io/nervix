@@ -516,6 +516,16 @@ impl EmitterPublishBatch {
         self.batch.message_count()
     }
 
+    fn unresolved_messages(&self) -> u64 {
+        let mut messages = 0;
+        for row in &self.rows {
+            if !row.is_resolved() {
+                messages += 1;
+            }
+        }
+        messages
+    }
+
     fn domain_timestamp(&self) -> Option<Timestamp> {
         self.batch.domain_timestamp()
     }
@@ -571,16 +581,16 @@ impl EmitterPublishBatch {
 
     /// Resolves `row` as rejected. A row resolves once, so rejecting a row already resolved
     /// changes nothing, and a delivered row stays delivered.
-    fn mark_rejected(&mut self, row: usize) -> EmitterRuntimeResult<()> {
+    fn mark_rejected(&mut self, row: usize) -> EmitterRuntimeResult<bool> {
         let row_count = self.rows.len();
         let state = self.rows.get_mut(row).ok_or_else(|| {
             Report::new(EmitterRuntimeError::RejectionRowOutOfBounds { row, row_count })
         })?;
         if state.is_resolved() {
-            return Ok(());
+            return Ok(false);
         }
         *state = BufferedRow::Rejected;
-        Ok(())
+        Ok(true)
     }
 
     /// Records that a retained batch payload, HTTP request or prepared row request carries `row`,
@@ -617,7 +627,7 @@ impl EmitterPublishBatch {
         &mut self,
         row: usize,
         delivery: impl std::future::Future<Output = ()>,
-    ) -> EmitterRuntimeResult<()> {
+    ) -> EmitterRuntimeResult<bool> {
         delivery.await;
         self.mark_rejected(row)
     }
@@ -787,6 +797,15 @@ impl EmitterBatchBuffer {
         if let Some(work) = &mut self.observations {
             work.set(EmitterWorkKind::Staged, messages);
         }
+    }
+
+    /// Counts only rows still owned by a publish, without allocating a resolution bitmap.
+    pub(super) fn unresolved_messages(&self) -> u64 {
+        let mut messages = 0;
+        for batch in &self.pending {
+            messages += batch.unresolved_messages();
+        }
+        messages
     }
 
     pub(super) fn reconfigure(

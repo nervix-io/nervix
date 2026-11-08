@@ -559,6 +559,23 @@ During branch compaction, a temporary observation owns payloads still held by th
 and the store owns the survivors already reinserted. Cancelling that future withdraws the
 temporary contribution without clearing the surviving store's work.
 
+Emitter outcome recording keeps pre-resolved counter children. A rejection-routing future owns
+its local per-class accumulation and publishes completed settlements when that scope ends,
+including cancellation. The classified rejection retains one error body, with the source position
+and existing policy error intact. Retry observations receive the existing typed attempt decision
+and count unresolved members after acquisition. A pending pool borrow retains its original start
+instant in its guard through success, failure or cancellation.
+
+Failure collection loads the current task's observation and samples the coherent `TaskStatus`
+publication. The task's binding withdraws only its own source by identity through the publication's
+read-copy-update operation. Ending a predecessor preserves a replacement's source; ending the
+current task makes later samples zero even when an in-flight collection retains its earlier
+snapshot. Registration publishes the source at task startup. Recording continues through retained
+children and task-local accumulators; source collection belongs to inspection and metric scraping.
+Ordinary owner tests qualify lifetime orderings, including collection across task end, and public
+one-/three-node scenarios qualify the exported observations. Standard shared ownership and the
+Prometheus counters remain outside modeled reference-count ordering.
+
 An Iceberg emitter retains the first table's `FileIO` while replacing catalog metadata. Its storage
 factory initializes one operator for the configured object-store root; data, manifest and metadata
 files use that same initialized storage after refreshes, successful commits and ambiguous-result

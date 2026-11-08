@@ -2328,6 +2328,17 @@ the failure of unresolved work: publication or commit must resolve that work fir
 a drain uses the same protocol, ACK keepalive and original stop deadline. Cancelling a resume keeps
 the instance and its completed suspension, so a later attempt resumes it without constructing again.
 
+The host observes record refusals, terminal failures and retried source membership through its
+retained emitter metric handle. Typed refusal sites carry their observation class alongside one
+owned error body; routing accumulates completed outcomes locally and records each class once when
+that routing scope ends. Retry delays are observed at successful scheduling. A pending pool borrow
+owns its elapsed-time guard through success, failure or cancellation. Acquisition includes initial
+resume and retained recovery, and finish records its typed answer and exact unsent count. The
+shared confirmation window supplies its typed timeout cause; the host classifies that report.
+The failure gauge projects the existing host and connector failure publication for the exact task
+lifetime. [Emitter outcomes and lifecycle](metrics-and-observability.md#emitter-outcomes-and-lifecycle)
+defines the families, labels, units and owner-routed inspection.
+
 A `CLIENT CONSUMER EMITTER ... TO SCHEMA` is a native emitter plan, not an external connector plan. Its typed
 plan carries the exact output schema, declared `BATCH` limit and required ACK window, timeout and
 retry pacing, with no client object or codec. The host constructs Arrow IPC from the projected
