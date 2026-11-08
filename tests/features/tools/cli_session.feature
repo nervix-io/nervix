@@ -158,7 +158,171 @@ Feature: CLI public session dispatch
       | 1            |
       | 3            |
 
-  @slots_2
+  @cli_repl_output @cli_repl_idle
+  Scenario Outline: The CLI prints rows and notices while preserving input, completion and history
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA metric ( value I32 );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE VHOST edge http-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI REPL is started on node "{{leader}}"
+    And the CLI REPL runs "CREATE SUBSCRIPTION watch TO raw_metrics;"
+    Then the CLI REPL eventually displays "created subscription 'watch'"
+    When the CLI REPL types "LIST " without pressing Enter
+    Then the CLI REPL eventually displays "LIST "
+    When http payload is posted to node "{{leader}}" with host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":1,"extra":true}
+      """
+    Then the CLI REPL eventually displays "[events] runtime ERROR: ingestor 'raw_metrics_ingestor' general error in domain '{{domain}}': decode rejection"
+    When http payload is posted to node "{{leader}}" with host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":7}
+      """
+    Then the CLI REPL eventually displays '[events] subscription [watch] from [raw_metrics]: {"value":7}'
+    When the CLI REPL runs "DOMAINS;"
+    Then the CLI REPL eventually displays "{{domain}} pace=UNPACED"
+    When the CLI REPL runs "CREATE SCHEMA edited ("
+    Then the CLI REPL eventually displays "....[{{domain}}]"
+    When http payload is posted to node "{{leader}}" with host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":8}
+      """
+    Then the CLI REPL eventually displays '[events] subscription [watch] from [raw_metrics]: {"value":8}'
+    When the CLI REPL runs "value I32);"
+    Then the CLI REPL eventually displays "quiesce level: DYNAMIC; planned relocations: 0"
+    When these Plexus commands are executed on the leader node
+      """
+      SHOW CREATE SCHEMA edited;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA edited (
+        value I32
+      );
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA menu_alpha ( menu_value BOOL );
+      CREATE SCHEMA menu_beta ( menu_value BOOL );
+      """
+    And the CLI REPL types "SHOW CREATE SCHEMA menu_" without pressing Enter
+    And the CLI REPL presses "Tab"
+    Then the CLI REPL eventually displays "menu_beta"
+    When http payload is posted to node "{{leader}}" with host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":9}
+      """
+    Then the CLI REPL eventually displays '[events] subscription [watch] from [raw_metrics]: {"value":9}'
+    When the CLI REPL presses "Enter"
+    And the CLI REPL runs ";"
+    Then the CLI REPL eventually displays "  menu_value BOOL"
+    When these Plexus commands are executed on the leader node
+      """
+      DROP SCHEMA menu_alpha;
+      DROP SCHEMA menu_beta;
+      CREATE SCHEMA menu_alpha ( history_value BOOL );
+      CREATE SCHEMA menu_beta ( history_value BOOL );
+      """
+    And the CLI REPL presses "Ctrl-R"
+    And the CLI REPL types "SHOW CREATE SCHEMA menu_" without pressing Enter
+    Then the CLI REPL eventually displays "(reverse-search: SHOW CREATE SCHEMA menu_)"
+    When http payload is posted to node "{{leader}}" with host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":10}
+      """
+    Then the CLI REPL eventually displays '[events] subscription [watch] from [raw_metrics]: {"value":10}'
+    When the CLI REPL presses "Enter"
+    And the CLI REPL presses "Enter"
+    Then the CLI REPL eventually displays "  history_value BOOL"
+    When the CLI REPL runs "exit"
+    Then the CLI REPL ends successfully
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @cli_repl_output
+  Scenario Outline: The CLI prints a new clock generation and its ticks at an idle prompt
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 1s SKEW 100ms;
+      START AT '2030-01-01T00:00:00Z' TIME RATE 2.0;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI REPL is started on node "{{leader}}"
+    And the CLI REPL runs "ATTACH DOMAIN CLOCK;"
+    Then the CLI REPL eventually displays "attached to the clock of domain '{{domain}}': generation 1, paced"
+    When the CLI REPL types "LIST " without pressing Enter
+    Then the CLI REPL eventually displays "LIST "
+    When these Plexus commands are executed on the leader node
+      """
+      STOP;
+      START AT '2030-01-01T01:00:00Z' TIME RATE 2.0;
+      """
+    Then the CLI REPL eventually displays "[events] domain clock [{{domain}}]: generation 2, paced"
+    And the CLI REPL eventually displays "[events] domain clock [{{domain}}] tick: generation 2, id "
+    When the CLI REPL runs "DOMAINS;"
+    Then the CLI REPL eventually displays "{{domain}} pace=PACED"
+    When the CLI REPL runs "exit"
+    Then the CLI REPL ends successfully
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @cli_repl_output
+  Scenario Outline: The CLI reports an event gap after a burst while a statement is running
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA metric ( value I32 );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE VHOST edge http-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 60s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI REPL is started on node "{{leader}}"
+    And the CLI REPL runs "CREATE SUBSCRIPTION watch TO raw_metrics;"
+    Then the CLI REPL eventually displays "created subscription 'watch'"
+    Given command admission on node "{{leader}}" pauses before proposal
+    When the CLI REPL runs "CREATE RESOURCE held_output;"
+    Then the command admission pause on node "{{leader}}" is reached
+    When 270 metric http payloads are posted with acknowledgement, 4 at a time, to host "http-{{test_id}}.example.com" path "/metrics"
+    And the command admission pause on node "{{leader}}" is released
+    Then the CLI REPL eventually displays "created resource 'held_output'"
+    And the CLI REPL eventually displays "event lines were omitted because terminal output could not keep up"
+    When http payload is acknowledged within "60s" by node "{{leader}}" with host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":271}
+      """
+    Then the CLI REPL eventually displays '[events] subscription [watch] from [raw_metrics]: {"value":271}'
+    When the CLI REPL runs "exit"
+    Then the CLI REPL ends successfully
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @cli_repl_output @slots_2
   Scenario Outline: CLI keeps printing notices and new subscription rows after its node restarts
     Given a <cluster_size> node nervix cluster is started
     When these Plexus commands are executed on the leader node
@@ -203,6 +367,7 @@ Feature: CLI public session dispatch
       | 1            |
       | 3            |
 
+  @cli_repl_output
   Scenario: The CLI labels each notice by its kind and prints one membership event per node change
     Given a 3 node nervix cluster is started
     Then the current leader node is saved as placeholder "observer"
@@ -491,6 +656,7 @@ Feature: CLI public session dispatch
       | 1            |
       | 3            |
 
+  @cli_repl_output
   Scenario Outline: The CLI REPL survives a cancelled and an uncertain command, and running the uncertain one again recovers it
     Given a <cluster_size> node nervix cluster is started
     When these Plexus commands are executed on the leader node
@@ -524,6 +690,7 @@ Feature: CLI public session dispatch
       | 1            |
       | 3            |
 
+  @cli_repl_output
   Scenario Outline: The CLI REPL refuses an upload inside a transaction and recovers an uncertain upload by running it again
     Given a <cluster_size> node nervix cluster is started
     And node "node-1" has resource directory "repl_bundle" containing
