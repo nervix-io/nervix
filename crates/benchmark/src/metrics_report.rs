@@ -1,3 +1,10 @@
+//! Projection of current runtime metrics into benchmark observations.
+//!
+//! Outside the layer order: a benchmark harness.
+//! - **Owns.** Strict scrape parsing, execution-unit series and persisted metric reports.
+//! - **Depends on.** Vocabulary identities, typed reporting, serialization and the filesystem.
+//! - **Must not know.** Connector implementations, placement decisions or graph execution.
+
 use std::{
     collections::BTreeMap,
     fmt, fs,
@@ -7,7 +14,7 @@ use std::{
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
-use nervix_models::ClusterNodeName;
+use nervix_models::{ClusterNodeName, Unit};
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -32,6 +39,8 @@ const REQUIRED_LABELS: &[&str] = &[
     "relay",
     "peer_kind",
     "peer",
+    "partition",
+    "instance",
 ];
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -46,6 +55,7 @@ pub struct BatchTargetMetrics {
     pub target_kind: String,
     pub target: String,
     pub physical_node_id: Option<ClusterNodeName>,
+    pub unit: Unit,
     pub direction: String,
     pub relay: String,
     pub messages_total: u64,
@@ -84,6 +94,7 @@ pub struct RelayBufferMetrics {
     pub domain: String,
     pub relay: String,
     pub physical_node_id: Option<ClusterNodeName>,
+    pub unit: Unit,
     pub direction: String,
     pub observations: u64,
     pub p50: f64,
@@ -215,6 +226,17 @@ pub enum PrometheusSampleError {
     #[error("label 'physical_node_id' value '{value}' is not a cluster node name")]
     InvalidPhysicalNode { value: String },
 
+    /// The integer parser's failure is beneath.
+    #[error("label 'partition' value '{value}' is not a partition index")]
+    InvalidPartition { value: String },
+
+    /// The integer parser's or execution-unit constructor's failure is beneath.
+    #[error("label 'instance' value '{value}' is not an execution instance index")]
+    InvalidInstance { value: String },
+
+    #[error("a metric series cannot name both partition '{partition}' and instance '{instance}'")]
+    ConflictingUnitLabels { partition: String, instance: String },
+
     #[error("metric '{metric}' is missing label 'le'")]
     MissingBucketBound { metric: &'static str },
 
@@ -306,6 +328,7 @@ pub struct MetricSeries {
     pub direction: String,
     pub relay: String,
     pub physical_node_id: Option<ClusterNodeName>,
+    pub unit: Unit,
 }
 
 impl fmt::Display for MetricSeries {
@@ -316,8 +339,12 @@ impl fmt::Display for MetricSeries {
         };
         write!(
             formatter,
-            "{} '{}' direction '{}' relay '{}' on '{physical_node}'",
-            self.target_kind, self.target, self.direction, self.relay,
+            "{} '{}'{} direction '{}' relay '{}' on '{physical_node}'",
+            self.target_kind,
+            self.target,
+            self.unit.label_suffix(),
+            self.direction,
+            self.relay,
         )
     }
 }
@@ -347,6 +374,7 @@ struct SeriesKey {
     target_kind: String,
     target: String,
     physical_node_id: Option<ClusterNodeName>,
+    unit: Unit,
     direction: String,
     relay: String,
     peer_kind: String,
@@ -382,6 +410,9 @@ impl SeriesKey {
         let relay = take(REQUIRED_LABELS[5])?;
         let peer_kind = take(REQUIRED_LABELS[6])?;
         let peer = take(REQUIRED_LABELS[7])?;
+        let partition = take(REQUIRED_LABELS[8])?;
+        let instance = take(REQUIRED_LABELS[9])?;
+        let unit = parse_unit(partition, instance)?;
         if !labels.is_empty() {
             let unexpected = labels.into_keys().collect();
             return Err(Report::new(PrometheusSampleError::UnexpectedLabels {
@@ -393,6 +424,7 @@ impl SeriesKey {
             target_kind,
             target,
             physical_node_id,
+            unit,
             direction,
             relay,
             peer_kind,
@@ -407,6 +439,7 @@ impl SeriesKey {
             direction: self.direction.clone(),
             relay: self.relay.clone(),
             physical_node_id: self.physical_node_id.clone(),
+            unit: self.unit,
         }
     }
 
@@ -421,6 +454,7 @@ impl SeriesKey {
             target_kind: self.target_kind,
             target: self.target,
             physical_node_id: self.physical_node_id,
+            unit: self.unit,
             direction: self.direction,
             relay: self.relay,
             messages_total,
@@ -440,12 +474,40 @@ impl SeriesKey {
             domain: self.domain,
             relay: self.relay,
             physical_node_id: self.physical_node_id,
+            unit: self.unit,
             direction: self.direction,
             observations,
             p50: percentiles.p50,
             p90: percentiles.p90,
             p99: percentiles.p99,
         }
+    }
+}
+
+fn parse_unit(
+    partition: String,
+    instance: String,
+) -> error_stack::Result<Unit, PrometheusSampleError> {
+    match (partition.as_str(), instance.as_str()) {
+        (ABSENT_LABEL, ABSENT_LABEL) => Ok(Unit::SINGLE),
+        (_, ABSENT_LABEL) => partition
+            .parse::<u32>()
+            .map(Unit::partition)
+            .change_context(PrometheusSampleError::InvalidPartition { value: partition }),
+        (ABSENT_LABEL, _) => {
+            let index =
+                instance
+                    .parse::<u64>()
+                    .change_context(PrometheusSampleError::InvalidInstance {
+                        value: instance.clone(),
+                    })?;
+            Unit::try_instance(index)
+                .change_context(PrometheusSampleError::InvalidInstance { value: instance })
+        }
+        _ => Err(Report::new(PrometheusSampleError::ConflictingUnitLabels {
+            partition,
+            instance,
+        })),
     }
 }
 

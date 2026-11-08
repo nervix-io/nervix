@@ -11,6 +11,11 @@ Feature: Language-level client suites
   suite subscribes to. The suite creates what a test changes, such as a paced domain it stops and
   starts, or a relay it drops, itself.
 
+  A running suite can ask its scenario to perform a declared testing-build action and waits for
+  its numbered confirmation. Its subscription restoration test cuts the session relay, asks every
+  node to refuse its next subscription opening as unavailable, restores the relay, checks the
+  interruption and the refusal's cause, message and retry wait, then reads rows after recovery.
+
   Scenario Outline: A <runtime> client's suite passes its cluster tests over <transport> on <cluster_size> nodes
     Given client grpc transport is configured with mode "<transport>"
     And a <cluster_size> node nervix cluster is started

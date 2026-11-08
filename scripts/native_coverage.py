@@ -14,7 +14,10 @@ walks the Plexus completion graph. `test-shuttle` and `test-loom` collect the ca
 `test-deloxide`, `test-deloxide-order`, `test-deloxide-stress` and `test-deloxide-stress-restore`
 run the whole Deloxide diagnostic lane of each selection, each in the instrumented build of the
 diagnostic feature its selection compiles.
-`test-primitives` selects the native conformance producers of every mode. Without names every producer runs. A producer runs
+`test-rabbitmq-publish-benchmark` collects the explicitly selected local broker benchmark's count
+checks. It adds no work to CI's in-memory benchmark smoke lane.
+`test-primitives` selects the native conformance producers of every mode. Without names the CI
+producers run; local checks require their explicit names. A producer runs
 its check exactly as `just <producer>` does and fails when the check fails, which is why CI's
 jobs run those checks through this command instead of beside it.
 
@@ -222,6 +225,8 @@ class Producer:
     # The recipe that compiles, in the instrumented build, every executable the instrumented recipe
     # runs and runs none of them; `None` for a check that builds and runs in one step.
     build: str | None = None
+    # A local qualification check runs only when named, preserving the default collection's work.
+    explicit_only: bool = False
 
     def rerun(self, filter_text: str = "") -> str:
         command = f"just coverage-native-extras {self.name}"
@@ -233,7 +238,7 @@ class Producer:
         return [*self.prepare, self.instrumented, *self.finish]
 
 
-PRODUCERS: tuple[Producer, ...] = (
+CI_PRODUCERS: tuple[Producer, ...] = (
     Producer(
         name="test-typed-ratchet",
         mode="ordinary",
@@ -318,6 +323,17 @@ PRODUCERS: tuple[Producer, ...] = (
     ),
 )
 
+LOCAL_PRODUCERS: tuple[Producer, ...] = (
+    # This real-broker benchmark is explicitly selected for local qualification. Adding it does
+    # not start a broker in the existing in-memory benchmark smoke lane.
+    Producer(
+        name="test-rabbitmq-publish-benchmark", mode="ordinary", prepare=(),
+        instrumented="test-rabbitmq-publish-benchmark", finish=(), explicit_only=True,
+    ),
+)
+
+PRODUCERS: tuple[Producer, ...] = (*CI_PRODUCERS, *LOCAL_PRODUCERS)
+
 
 def dependency_names(recipe: Mapping[str, object]) -> list[str]:
     names: list[str] = []
@@ -394,7 +410,7 @@ def validate_composition(producer: Producer, recipes: Mapping[str, object]) -> N
 
 def select_producers(names: Sequence[str], producers: Sequence[Producer]) -> list[Producer]:
     if not names:
-        return list(producers)
+        return [producer for producer in producers if not producer.explicit_only]
     known = {producer.name: producer for producer in producers}
     selected: list[Producer] = []
     for name in names:

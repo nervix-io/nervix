@@ -221,6 +221,16 @@ test and on a test the inventory does not register. Each runner prints one
 binding's whole public surface, resolved by mypy for Python and Java compiler elements for the JVM,
 and its guide to the shared section list with every code block an include of an anchored test.
 
+The cluster runner can request a testing-build action on stdout and await its numbered confirmation
+on stdin, through the exchange [Client Suites](../docs/src/integration-test-lifecycle.md#client-suites)
+specifies. Python's registered
+`test_a_refused_subscription_restoration_reports_its_cause_and_recovers` cuts its session relay,
+asks the scenario to arm every node's next subscription-opening refusal, restores the relay, reads
+`INTERRUPTED` and `RESTORATION_FAILED` with `UNAVAILABLE`, a message and a positive retry wait,
+then reads rows after restoration succeeds. There is no corresponding declared clock-attachment
+refusal action; clock restoration-failure values remain covered by the binding owner tests rather
+than a claimed live host-suite observation.
+
 | Host | Build | Boundary tier | Cluster tier | Covers | Runs in | Guide |
 | --- | --- | --- | --- | --- | --- | --- |
 | CPython 3.12+ | `just build-client-python`: the wheel with pytest, pyarrow, polars and mypy in `target/client-conformance/python`, and alone in `target/client-conformance/python-bare` | `just test-client-python-api`, which `just test` runs | `just test-client-python-cluster`, or the `@client_suite_python` rows of `just test-client-conformance` | Connection over TLS with seeds and timeouts, execution and recovery by the same execution, completion, subscriptions and their events, domain clocks across generations and a lost session, producers and every outcome class, consumers and every settlement, backup and restore, `with` blocks and collection-driven lifetimes, threads, typed exceptions, Arrow exchange with pyarrow and polars, and the wheel's packaging | The `client-conformance` job, for a pull request labeled `client-conformance` | [Python Client Library](../docs/src/client-library-python.md) |

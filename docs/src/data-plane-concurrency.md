@@ -2569,6 +2569,14 @@ These async observations introduce no tracked blocking-lock owner. Deloxide cont
 the registered product locks, while the public scenarios and model checks exercise pause ordering
 at their applicable boundaries.
 
+The host suites' declared action channel arms subscription-opening refusals on every node and
+confirms their application before a suite restores its session relay. Its teardown action removes
+unused entries from the testing-only refusal map before another test can open a subscription.
+The map operations and the host's pipe waits are untracked; they add no blocking-lock owner or
+product synchronization protocol. The action owner's ordered-confirmation and deadline checks,
+the Python pipe-adapter checks and the one- and three-node `client_suites.feature` rows hold this
+harness exchange to its contract. Deloxide does not observe the host processes.
+
 The `@restore_client_inspection` one- and three-node examples fill the real filesystem execution
 class before an accepted restore applies its client configuration, then release capacity and require
 every restore step and the configured client to survive. Their active, order and restore-stress

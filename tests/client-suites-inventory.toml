@@ -338,6 +338,11 @@ tier = "cluster"
 
 [[test]]
 host = "python"
+identity = "cluster/test_subscriptions.py::test_a_refused_subscription_restoration_reports_its_cause_and_recovers"
+tier = "cluster"
+
+[[test]]
+host = "python"
 identity = "cluster/test_subscriptions.py::test_a_relay_dropped_while_the_session_was_lost_ends_the_subscription"
 tier = "cluster"
 

@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** Starting one host's suite runner on the cluster tier, with the environment a probe
 //!   reads and what a suite needs beside it, reading the one result line per test the runner
-//!   prints, and holding those results to the tests `tests/client-suites-inventory.toml` registers
+//!   prints, confirming declared scenario actions, and holding those results to the inventory
 //!   for the host's cluster tier.
 //! - **Depends on.** The suite sources under `tests/client_conformance/<host>/suite`, the
 //!   artifacts `just build-client-conformance` builds for them, and the inventory.
@@ -30,8 +30,13 @@ use serde::Deserialize;
 use tempfile::TempDir;
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncReadExt as _, BufReader},
-    process::{Child, Command},
+    process::{Child, ChildStdin, Command},
 };
+
+mod actions;
+
+pub(crate) use actions::SuiteAction;
+use actions::SuiteActions;
 
 /// The prefix of every result line a runner prints.
 const RESULT_PREFIX: &str = "NERVIX-SUITE ";
@@ -96,7 +101,7 @@ impl SuiteHost {
                 // The CPython the package was installed into, with pytest, pyarrow and polars.
                 let mut command = Command::new(artifacts.join("python/bin/python"));
                 command
-                    .args(["-m", "pytest", "cluster"])
+                    .args(["-m", "cluster_runner", "cluster"])
                     .current_dir(self.suite())
                     .env("PYTHONDONTWRITEBYTECODE", "1");
                 Ok(command)
@@ -223,7 +228,9 @@ fn registered(host: SuiteHost, tier: &str) -> io::Result<BTreeSet<String>> {
 pub(crate) struct ClientSuite {
     host: SuiteHost,
     lines: mpsc::UnboundedReceiver<String>,
+    input: ChildStdin,
     child: Child,
+    stdout: JoinHandle<io::Result<()>>,
     stderr: JoinHandle<io::Result<String>>,
     /// The target's backup directory, kept until the run is read.
     _backups: TempDir,
@@ -248,13 +255,17 @@ impl ClientSuite {
         let mut command = host.command()?;
         command
             .envs(target.environment())
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         let mut child = command.spawn().map_err(|error| {
             io::Error::other(format!("failed to start the {host} client suite: {error}"))
         })?;
+        let input = child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("the suite's stdin was not captured"))?;
         let stdout = child
             .stdout
             .take()
@@ -264,14 +275,18 @@ impl ClientSuite {
             .take()
             .ok_or_else(|| io::Error::other("the suite's stderr was not captured"))?;
         let (sender, lines) = mpsc::unbounded_channel();
-        nervix_primitives::task::spawn(async move {
+        let stdout = nervix_primitives::task::spawn(async move {
             let mut reader = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
+            loop {
                 nervix_primitives::task::consume_budget().await;
+                let Some(line) = reader.next_line().await? else {
+                    break;
+                };
                 if sender.send(line).is_err() {
                     break;
                 }
             }
+            Ok(())
         });
         let stderr = nervix_primitives::task::spawn(async move {
             let mut captured = String::new();
@@ -281,20 +296,32 @@ impl ClientSuite {
         Ok(Self {
             host,
             lines,
+            input,
             child,
+            stdout,
             stderr,
             _backups: backups,
         })
     }
 
     /// Waits for the runner to end and holds its results to the inventory's cluster tier.
-    pub(crate) async fn finish(mut self, within: Duration) -> io::Result<SuiteReport> {
+    pub(crate) async fn finish(
+        mut self,
+        within: Duration,
+        mut perform: impl FnMut(SuiteAction) -> io::Result<()>,
+    ) -> io::Result<SuiteReport> {
         let deadline = Instant::now() + within;
         let mut output = Vec::new();
+        let mut actions = SuiteActions::new();
         loop {
             nervix_primitives::task::consume_budget().await;
             match nervix_primitives::time::timeout_at(deadline, self.lines.recv()).await {
-                Ok(Some(line)) => output.push(line),
+                Ok(Some(line)) => {
+                    actions
+                        .handle(&line, &mut self.input, deadline, &mut perform)
+                        .await?;
+                    output.push(line);
+                }
                 Ok(None) => break,
                 Err(_) => {
                     return Err(io::Error::other(format!(
@@ -305,6 +332,10 @@ impl ClientSuite {
                 }
             }
         }
+        nervix_primitives::time::timeout_at(deadline, self.stdout)
+            .await
+            .map_err(io::Error::other)?
+            .map_err(io::Error::other)??;
         let status = nervix_primitives::time::timeout_at(deadline, self.child.wait())
             .await
             .map_err(|_| {
