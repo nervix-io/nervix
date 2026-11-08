@@ -90,7 +90,7 @@ fn a_stopping_node_drain_with_an_unconfirmed_lease_reports_that_the_same_leader_
     assert!(
         logs.contains(
             "stopping-node drain interrupted: the leader could not confirm its lease in term 7 \
-             and may still lead; remaining work will be retried at the observed leader"
+             and may still lead; remaining work can be retried at the observed leader"
         ),
         "{logs}"
     );
@@ -108,7 +108,7 @@ fn a_stopping_node_drain_redirect_reports_the_observed_leader() {
     assert!(
         logs.contains(
             "stopping-node drain interrupted: leadership moved to node 'node-3'; remaining work \
-             will be retried at the observed leader"
+             can be retried at the observed leader"
         ),
         "{logs}"
     );
@@ -121,7 +121,7 @@ fn a_stopping_node_drain_redirect_reports_when_no_leader_is_known() {
     assert!(
         logs.contains(
             "stopping-node drain interrupted: leadership moved, and no leader is known yet; \
-             remaining work will be retried at the observed leader"
+             remaining work can be retried at the observed leader"
         ),
         "{logs}"
     );
@@ -132,7 +132,7 @@ fn a_stopping_node_drain_reports_a_leadership_change_observed_after_its_failure(
     let logs = stopping_node_drain_retry_log(CommandDisposition::Failed);
     assert!(
         logs.contains(
-            "stopping-node drain interrupted: leadership moved; remaining work will be retried at \
+            "stopping-node drain interrupted: leadership moved; remaining work can be retried at \
              the observed leader"
         ),
         "{logs}"
