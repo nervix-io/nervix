@@ -186,7 +186,7 @@ pub(crate) struct UsersWire {
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
 pub(crate) struct UserWire {
     pub(crate) name: String,
-    pub(crate) password_hash: String,
+    pub(crate) password_credential: nervix_models::PasswordCredential,
 }
 
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]

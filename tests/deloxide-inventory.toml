@@ -678,6 +678,7 @@ tags = [
   "@client_wire_tombstone_recovery",
   "@deadlock_diagnostics",
   "@restore_installation",
+  "@password_credentials",
   "@client_ingestor_alter_drain",
   "@syslog_suspend_handoff",
   "@syslog_listener_rebind",
@@ -3837,6 +3838,8 @@ selections = ["deloxide-stress"]
 gap = "CPU-worker interruption between simulated callbacks belongs to the mutually exclusive Turmoil mode. Native blocking-task teardown before its first callback is not deterministically reached by these public scenarios. Native workloads reach normal FIFO admission, cancellation and draining; the ordinary interrupted-worker regression covers selected and queued destructor cleanup without claiming tracked-lock interleavings."
 path = "crates/execution/src/workers.rs"
 workloads = [
+  "scenario.password-credentials",
+  "stress.password-credentials",
   "scenario.snapshot-receive-admission",
   "stress.snapshot-receive-admission",
   "scenario.restore-client-inspection",
@@ -3998,6 +4001,8 @@ workloads = [
 [[owner]]
 path = "crates/consensus/src/lib.rs"
 workloads = [
+  "scenario.password-credentials",
+  "stress.password-credentials",
   "scenario.command-transaction-retention",
   "stress.command-transaction-retention",
   "scenario.command-transaction-retention-recovery",
@@ -4019,6 +4024,8 @@ workloads = [
 [[owner]]
 path = "crates/consensus/src/restore.rs"
 workloads = [
+  "scenario.password-credentials",
+  "stress.password-credentials",
   "scenario.restore-generation",
   "scenario.stale-restore-coordinator",
   "scenario.restore-staging-quota",
@@ -4039,6 +4046,8 @@ workloads = [
 [[owner]]
 path = "crates/consensus/src/storage.rs"
 workloads = [
+  "scenario.password-credentials",
+  "stress.password-credentials",
   "scenario.materialized-bulk-overlap",
   "stress.materialized-bulk-overlap",
   "scenario.resource-source-discovery",
@@ -6273,4 +6282,24 @@ id = "stress.client-restore-reply-validation-restore"
 invariant = "A completed restore with an undecodable or differently correlated reply remains uncertain under its own reference, ends only its originating session and recovers its recorded outcome."
 invocation = "stress-restore-scenarios"
 scenario = "A <client> recovers a completed restore after <reply> on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "One- and three-node public authentication reaches the credentials worker admission and consensus credential publication, then user backup, restore, restart and browser session admission. AWS-LC computation, async transport waits and browser internals are untracked."
+examples = 2
+feature = "tests/features/cluster/password_credentials.feature"
+id = "scenario.password-credentials"
+invariant = "The complete bounded credential and common verification work survive restore and restart; every listener accepts the password and refuses a wrong password."
+invocation = "scenarios"
+scenario = "A committed password policy creates credentials that survive restart and restore"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: One- and three-node public authentication reaches the credentials worker admission and consensus credential publication, then user backup, restore, restart and browser session admission. AWS-LC computation, async transport waits and browser internals are untracked."
+examples = 2
+feature = "tests/features/cluster/password_credentials.feature"
+id = "stress.password-credentials"
+invariant = "The complete bounded credential and common verification work survive restore and restart; every listener accepts the password and refuses a wrong password."
+invocation = "stress-restore-scenarios"
+scenario = "A committed password policy creates credentials that survive restart and restore"
 selections = ["deloxide-stress-restore"]

@@ -1282,3 +1282,12 @@ During node initialization, cluster status and description are available before 
 work. A durable command sent then can return `OutcomeUnknown(NotYetAuthoritative)`, including an
 exact retry of an execution that completed before restart. Keep the same execution reference and
 continue recovery; this response establishes neither success nor failure of that execution.
+
+### Password Credential Work
+
+Password authentication continues to use the existing Basic credentials and session identity.
+The server verifies bounded PBKDF2-HMAC-SHA-512 credentials through its isolated credentials
+worker. A successful Exchange or WebSocket establishes the user once for that session; commands
+and events reuse that identity. HTTP authentication probes deliberately verify the credentials
+they present. An unjudged attempt remains retryable through UNAVAILABLE or HTTP 503; a wrong
+password remains refused. Clients never receive a stored credential, salt or digest.

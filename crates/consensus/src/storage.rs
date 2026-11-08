@@ -95,10 +95,10 @@ const KEY_INSTALLING: &[u8] = b"installing";
 const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
-const KEYSPACE_LOGS: &str = "raft_kind_key_logs";
-const KEYSPACE_META: &str = "raft_kind_key_meta";
-const KEYSPACE_STATE_MACHINE: &str = "raft_kind_key_state";
-const KEYSPACE_SNAPSHOT: &str = "raft_kind_key_snapshots";
+const KEYSPACE_LOGS: &str = "raft_password_logs";
+const KEYSPACE_META: &str = "raft_password_meta";
+const KEYSPACE_STATE_MACHINE: &str = "raft_password_state";
+const KEYSPACE_SNAPSHOT: &str = "raft_password_snapshots";
 /// Working memory reserved for ordinary metadata and log storage relative to its operation unit.
 const STORAGE_RESERVATION_MULTIPLIER: u64 = 4;
 
@@ -230,7 +230,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    ClusterState = 14,
+    ClusterState = 15,
 }
 
 #[derive(Debug)]
@@ -240,6 +240,7 @@ struct StateMetadata {
     last_membership: Arc<StoredMembershipOf>,
     runtime_revision: u64,
     parameters: Option<nervix_models::ClusterParameterRecord>,
+    password_work: Option<nervix_models::PasswordCost>,
     command_retry_fence: Option<nervix_models::Timestamp>,
 }
 
@@ -250,6 +251,7 @@ struct StateMetadataRecord {
     last_membership: StoredMembershipRecord,
     runtime_revision: u64,
     parameters: Option<nervix_models::ClusterParameterRecord>,
+    password_work: Option<nervix_models::PasswordCost>,
     command_retry_fence: Option<nervix_models::Timestamp>,
 }
 
@@ -261,6 +263,7 @@ impl From<&StateMetadata> for StateMetadataRecord {
             last_membership: StoredMembershipRecord::from(value.last_membership.as_ref()),
             runtime_revision: value.runtime_revision,
             parameters: value.parameters,
+            password_work: value.password_work,
             command_retry_fence: value.command_retry_fence,
         }
     }
@@ -280,6 +283,7 @@ impl TryFrom<StateMetadataRecord> for StateMetadata {
             ),
             runtime_revision: value.runtime_revision,
             parameters: value.parameters,
+            password_work: value.password_work,
             command_retry_fence: value.command_retry_fence,
         })
     }
@@ -293,6 +297,7 @@ impl From<&StateMachineData> for StateMetadata {
             last_membership: state.last_membership.clone(),
             runtime_revision: state.runtime_revision,
             parameters: state.parameters,
+            password_work: state.password_work,
             command_retry_fence: state.command_executions.retry_fence(),
         }
     }
@@ -326,6 +331,7 @@ impl StateMachineData {
             last_membership,
             runtime_revision,
             parameters,
+            password_work,
             command_retry_fence,
         } = metadata;
         let state = Self {
@@ -333,6 +339,7 @@ impl StateMachineData {
             last_membership,
             runtime_revision,
             parameters,
+            password_work,
             schedule: ScheduleRecords {
                 domains: Records::load(b's', sm)?,
             },
@@ -360,6 +367,25 @@ impl StateMachineData {
             )?,
         };
         state.resources.check_recovered()?;
+        if let Some(parameters) = state.parameters {
+            let required =
+                nervix_models::PasswordCost::try_from(parameters.values.password_iterations())
+                    .map_err(|error| io::Error::other(error.into_error()))?;
+            if state
+                .password_work
+                .is_none_or(|work| work.get() < required.get())
+            {
+                return Err(io::Error::other(StorageFailure::InvalidState));
+            }
+        }
+        for (_, user) in state.users.iter() {
+            if state
+                .password_work
+                .is_none_or(|work| work.get() < user.password_credential.cost().get())
+            {
+                return Err(io::Error::other(StorageFailure::InvalidState));
+            }
+        }
         // Every family above read only the keys under its own tag, so a record under any other
         // key would otherwise be left in place unread. The metadata record is the one other key.
         let stored = sm.len().map_err(io::Error::other)?;

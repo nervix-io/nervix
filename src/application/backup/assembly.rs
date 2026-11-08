@@ -90,7 +90,7 @@ pub(super) fn plan_sections(
                 .values()
                 .map(|credentials| UserRecord {
                     name: credentials.name.clone(),
-                    password_hash: credentials.password_hash.clone(),
+                    password_credential: credentials.password_credential.clone(),
                 })
                 .collect(),
         };
@@ -502,7 +502,10 @@ mod tests {
                 user("alice"),
                 UserCredentials {
                     name: user("alice"),
-                    password_hash: "$argon2id$hash".to_string(),
+                    password_credential: nervix_models::PasswordCredential::from_parts(
+                        210000, [33; 16], [33; 64],
+                    )
+                    .assured("the fixed credential has a bounded iteration count"),
                 },
             )]),
             resources: ResourceVersionStatus {

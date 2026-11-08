@@ -484,6 +484,8 @@ cluster stop and start with all nodes on the same version.
 The subscription-interest visibility request includes the advertisement version, and its current
 wire fingerprint fences that request shape during connection setup.
 
+The fingerprint also fences typed PBKDF2-HMAC-SHA-512 credentials in consensus commands and the persisted uniform verification-work count in snapshot metadata. Cost validation occurs during decoding before any authentication work is admitted.
+
 The fingerprint covers endpoint kinds whose WebSockets variant alone carries an optional signaling
 reference, both in Models and in queued transaction statements.
 It also covers fixed-width 64-bit counts in Models, transaction commands and records,

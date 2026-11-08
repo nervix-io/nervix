@@ -336,7 +336,7 @@ fn plan_users(
         );
         users.push(UserCredentials {
             name: user.name.clone(),
-            password_hash: user.password_hash.clone(),
+            password_credential: user.password_credential.clone(),
         });
     }
     Ok(PlannedUsers {
@@ -699,11 +699,17 @@ mod tests {
                 users: vec![
                     UserRecord {
                         name: user("alice"),
-                        password_hash: "$argon2id$alice".to_string(),
+                        password_credential: nervix_models::PasswordCredential::from_parts(
+                            210000, [123; 16], [123; 64],
+                        )
+                        .assured("the fixed credential has a bounded iteration count"),
                     },
                     UserRecord {
                         name: user("bob"),
-                        password_hash: "$argon2id$bob".to_string(),
+                        password_credential: nervix_models::PasswordCredential::from_parts(
+                            210000, [170; 16], [170; 64],
+                        )
+                        .assured("the fixed credential has a bounded iteration count"),
                     },
                 ],
             }),
@@ -841,7 +847,11 @@ mod tests {
                 replaced: 0,
             }
         );
-        assert_eq!(users.users[0].password_hash, "$argon2id$alice");
+        assert_eq!(
+            users.users[0].password_credential,
+            nervix_models::PasswordCredential::from_parts(210000, [123; 16], [123; 64])
+                .assured("the fixture cost is bounded")
+        );
         let prod = &planned.domains[&domain("prod")];
         assert_eq!(prod.state.status, DomainStatus::Stopped);
         assert_eq!(prod.state.start_version, 4);

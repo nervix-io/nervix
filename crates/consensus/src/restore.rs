@@ -496,6 +496,7 @@ fn import_users(
         match (exists, policy) {
             (false, _) => {
                 restored.created = restored.created.checked_add(1).assured(USER_COUNT_BOUND);
+                state.raise_password_work(user.password_credential.cost());
                 state.users.insert(user.name.clone(), user.clone());
             }
             (true, ExistingUserPolicy::Skip) => {
@@ -503,6 +504,7 @@ fn import_users(
             }
             (true, ExistingUserPolicy::Replace) => {
                 restored.replaced = restored.replaced.checked_add(1).assured(USER_COUNT_BOUND);
+                state.raise_password_work(user.password_credential.cost());
                 state.users.insert(user.name.clone(), user.clone());
             }
             (true, ExistingUserPolicy::Fail) => {
@@ -606,10 +608,13 @@ mod tests {
             .assured("the test command reference is a UUIDv7 value")
     }
 
-    fn credentials(name: &str, hash: &str) -> UserCredentials {
+    fn credentials(name: &str, seed: u8) -> UserCredentials {
         UserCredentials {
             name: user(name),
-            password_hash: hash.to_string(),
+            password_credential: nervix_models::PasswordCredential::from_parts(
+                210000, [seed; 16], [seed; 64],
+            )
+            .assured("the fixture cost is bounded"),
         }
     }
 
@@ -715,10 +720,7 @@ mod tests {
 
     fn users_effect(policy: ExistingUserPolicy) -> RestoreStepEffect {
         RestoreStepEffect::Users {
-            users: vec![
-                credentials("alice", "$archived-alice"),
-                credentials("bob", "$bob"),
-            ],
+            users: vec![credentials("alice", 1), credentials("bob", 3)],
             policy,
         }
     }
@@ -1295,7 +1297,7 @@ mod tests {
             &reference,
             RestoreStep::Users,
             RestoreStepEffect::Users {
-                users: vec![credentials("carol", "$carol")],
+                users: vec![credentials("carol", 4)],
                 policy: ExistingUserPolicy::Replace,
             },
         );
@@ -1394,10 +1396,10 @@ mod tests {
 
     #[test]
     fn the_users_step_follows_its_policy() {
-        for (policy, alice_hash, expected) in [
+        for (policy, alice_seed, expected) in [
             (
                 ExistingUserPolicy::Skip,
-                "$current-alice",
+                2,
                 RestoredUsers {
                     created: 1,
                     skipped: 1,
@@ -1406,7 +1408,7 @@ mod tests {
             ),
             (
                 ExistingUserPolicy::Replace,
-                "$archived-alice",
+                1,
                 RestoredUsers {
                     created: 1,
                     skipped: 0,
@@ -1415,9 +1417,7 @@ mod tests {
             ),
         ] {
             let mut state = StateMachineData::default();
-            state
-                .users
-                .insert(user("alice"), credentials("alice", "$current-alice"));
+            state.users.insert(user("alice"), credentials("alice", 2));
             let reference = reference_at(3);
             admit(&mut state, &reference, cluster_restore(policy), &[]);
             let response = step(
@@ -1431,8 +1431,8 @@ mod tests {
                 state
                     .users
                     .get(&user("alice"))
-                    .map(|credentials| credentials.password_hash.as_str()),
-                Some(alice_hash),
+                    .map(|value| value.password_credential.clone()),
+                Some(credentials("alice", alice_seed).password_credential),
                 "{policy:?}"
             );
             assert!(state.users.contains_key(&user("bob")), "{policy:?}");
@@ -1447,9 +1447,7 @@ mod tests {
     #[test]
     fn an_existing_user_refuses_the_users_step_under_fail_and_writes_nothing() {
         let mut state = StateMachineData::default();
-        state
-            .users
-            .insert(user("alice"), credentials("alice", "$current-alice"));
+        state.users.insert(user("alice"), credentials("alice", 2));
         let reference = reference_at(4);
         admit(
             &mut state,

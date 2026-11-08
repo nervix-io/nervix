@@ -398,7 +398,9 @@ each job into a CPU or storage class, charges its memory, and gives it the cance
 between its bounded units. Operator-supplied code the node cannot bound, a Roto UDF call or a JAQ
 transformation, takes the extension class, so a program that never returns holds only that class's
 workers. Password hashing takes the credentials class and its own budget, so anyone who can reach a
-listener spends only those, and saturated data, extension or bulk work never delays a login. The
+listener spends only those, and saturated data, extension or bulk work never delays a login. A
+PBKDF2-HMAC-SHA-512 password operation charges its 64-byte verifier buffer; the Credentials memory
+class also carries mounted NATS credentials files and has a separate 19 MiB capacity. The
 executor's storage workers are the one built-in owner of the runtime's blocking pool, and no file
 owns `task::block_in_place`, which blocks the runtime worker thread that calls it.
 

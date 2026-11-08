@@ -1230,3 +1230,12 @@ therefore contribute checkpoints from several owners. Restore retains the global
 when staging and publishing those generations; final placement does not renumber it. The current
 archive major also identifies this interpretation of canonical fixed-count and per-partition
 Models. Manifest and individual state-record versions retain their own current contracts.
+
+### User Credential Records
+
+A users record has version 2, checked before its payload is decoded. It carries the complete
+current typed password credential, including algorithm, bounded iteration count, salt and digest.
+Restore preserves those values without re-deriving a password. Importing users raises the
+consensus verification-work count in the same publication, so restored costs and local users
+share one uniform authentication workload. Header or cost validation failures occur before
+installation, and diagnostics never include salt, digest or password values.

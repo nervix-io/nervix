@@ -25,7 +25,7 @@ use crate::{
 };
 
 /// The users record's format version.
-const USERS_VERSION: u16 = 1;
+const USERS_VERSION: u16 = 2;
 /// The domain record's format version.
 const DOMAIN_VERSION: u16 = 1;
 /// The resource version record's format version.
@@ -37,11 +37,11 @@ pub struct UsersRecord {
     pub users: Vec<UserRecord>,
 }
 
-/// One user: its name and its password hash, a PHC string. The password itself is never stored.
+/// One user and its complete typed credential. The password itself is never stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRecord {
     pub name: UserName,
-    pub password_hash: String,
+    pub password_credential: nervix_models::PasswordCredential,
 }
 
 /// A domain's lifecycle, clock and resource catalog.
@@ -122,7 +122,7 @@ impl ArchiveRecord for UsersRecord {
                 .iter()
                 .map(|user| UserWire {
                     name: user.name.as_str().to_string(),
-                    password_hash: user.password_hash.clone(),
+                    password_credential: user.password_credential.clone(),
                 })
                 .collect(),
         };
@@ -135,12 +135,9 @@ impl ArchiveRecord for UsersRecord {
         for user in wire.users {
             let name = UserName::parse(&user.name)
                 .map_err(|error| error.change_context(invalid_value(path, "user name")))?;
-            if user.password_hash.is_empty() {
-                return Err(Report::new(invalid_value(path, "password hash")));
-            }
             users.push(UserRecord {
                 name,
-                password_hash: user.password_hash,
+                password_credential: user.password_credential,
             });
         }
         Ok(Self { users })

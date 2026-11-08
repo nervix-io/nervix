@@ -17,14 +17,6 @@
 
 use std::num::NonZeroU32;
 
-#[cfg(feature = "testing")]
-use argon2::Algorithm;
-#[cfg(feature = "testing")]
-use argon2::Version;
-use argon2::{
-    Argon2, Params, PasswordHasher, PasswordVerifier,
-    password_hash::{PasswordHash, Salt, SaltString},
-};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use error_stack::{Report, ResultExt as _};
 use http_body_util::Full;
@@ -36,7 +28,7 @@ use hyper::{
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::UserCredentials;
 use nervix_execution::{AdmissionError, CpuClass, ExecutionError, Executor, MemoryClass};
-use nervix_models::{CreateStatement, CreateUser, UserName};
+use nervix_models::{CreateStatement, CreateUser, PasswordCost, PasswordCredential, UserName};
 use thiserror::Error;
 use tonic::{Status, metadata::MetadataMap};
 use tracing::{debug, warn};
@@ -181,8 +173,6 @@ impl From<AuthenticationRefusal> for GrpcAuthenticationError {
 
 #[derive(Debug, Error)]
 pub(in crate::application) enum PasswordHashError {
-    #[error("password hash computation failed")]
-    Compute,
     #[error("the node's bounded execution could not take the password hash now")]
     Busy,
     #[error("the password hash needs more working memory than the node's credentials budget holds")]
@@ -230,29 +220,16 @@ impl GrpcAuthenticationError {
     }
 }
 
-/// The working memory Argon2 allocates for one hash with `params`, whose memory cost is in KiB.
-fn argon2_working_bytes(params: &Params) -> u64 {
-    u64::from(params.m_cost())
-        .checked_mul(1024)
-        .assured("a KiB count held in a u32 is far below u64::MAX / 1024")
-}
-
-/// Hash `password` on the node's credentials worker, charged the working memory Argon2 allocates.
-///
-/// Argon2 is deliberately expensive in both time and memory, and anyone who can reach a listener
-/// can make a node hash or verify. The credentials class keeps that work apart from every other
-/// class: a burst of attempts never takes what control, data or bulk work needs, and saturated work
-/// there never keeps an operator from authenticating. Its budget bounds how much Argon2 memory the
-/// node holds at once, so a burst of hashes waits for room instead of allocating past it.
+/// Derive a credential on the isolated credentials worker, under the fixed workspace charge.
 async fn hash_password(
     executor: &Executor,
     password: String,
-) -> error_stack::Result<String, PasswordHashError> {
-    let argon2 = password_argon2();
+    cost: PasswordCost,
+) -> error_stack::Result<PasswordCredential, PasswordHashError> {
     let reservation = executor
         .reserve(
             MemoryClass::Credentials,
-            argon2_working_bytes(argon2.params()),
+            executor.limits().credential_working_bytes.as_u64(),
         )
         .await
         .map_err(PasswordHashError::from_admission)?;
@@ -264,42 +241,93 @@ async fn hash_password(
                 cancellation
                     .check()
                     .change_context(PasswordHashError::Cancelled)?;
-                let salt_bytes = nervix_crypto::random::bytes::<{ Salt::RECOMMENDED_LENGTH }>();
-                let salt = SaltString::encode_b64(&salt_bytes).assured(
-                    "the password-hash library's recommended salt length fits its base64 storage",
-                );
-                match argon2.hash_password(password.as_bytes(), &salt) {
-                    Ok(hash) => Ok(hash.to_string()),
-                    Err(cause) => {
-                        Err(Report::new(cause).change_context(PasswordHashError::Compute))
-                    }
-                }
+                let salt = nervix_crypto::random::bytes::<16>();
+                let digest =
+                    nervix_crypto::password::derive(cost.get(), &salt, password.as_bytes());
+                Ok(PasswordCredential::Pbkdf2HmacSha512 { cost, salt, digest })
             },
         )
         .await;
     match hashed {
-        Ok(hashed) => hashed,
+        Ok(value) => value,
         Err(error) => Err(PasswordHashError::from_execution(error)),
     }
 }
 
-/// Whether `password` matches `password_hash`, verified on the node's credentials worker under a
-/// charge of the working memory the stored hash's own parameters make Argon2 allocate. A hash that
-/// does not parse matches nothing, and neither does one whose parameters need more memory than the
-/// credentials budget holds.
-pub(in crate::application) async fn verify_password_hash(
+/// Replay compares only the admitted credential; public authentication performs uniform work.
+enum PasswordVerification {
+    Admitted(PasswordCredential),
+    Authentication(nervix_consensus::AuthenticationInput),
+}
+
+impl PasswordVerification {
+    fn verify(
+        self,
+        password: &[u8],
+        cancellation: &nervix_execution::Cancellation,
+    ) -> error_stack::Result<bool, PasswordHashError> {
+        match self {
+            Self::Admitted(credential) => Ok(nervix_crypto::password::verify(
+                credential.cost().get(),
+                credential.salt(),
+                password,
+                credential.digest(),
+            )),
+            Self::Authentication(input) => {
+                let work = input.work();
+                let (matched, cost) = match input.into_user() {
+                    Some(user) => {
+                        let credential = user.password_credential;
+                        let matched = nervix_crypto::password::verify(
+                            credential.cost().get(),
+                            credential.salt(),
+                            password,
+                            credential.digest(),
+                        );
+                        (matched, credential.cost())
+                    }
+                    None => {
+                        // No user is fabricated: this is only the same cryptographic workload.
+                        std::hint::black_box(nervix_crypto::password::verify(
+                            work.get(),
+                            &[0; 16],
+                            password,
+                            &[0; 64],
+                        ));
+                        (false, work)
+                    }
+                };
+                cancellation
+                    .check()
+                    .change_context(PasswordHashError::Cancelled)?;
+                // Every authentication does two native calls and the same total iteration work,
+                // including a credential written before the creation policy increased.
+                let padding = work
+                    .get()
+                    .get()
+                    .checked_sub(cost.get().get())
+                    .assured("the captured work count covers every credential in its publication")
+                    .checked_add(1)
+                    .assured("subtracting a positive cost leaves room for one iteration");
+                let padding =
+                    NonZeroU32::new(padding).assured("one padding iteration is always included");
+                std::hint::black_box(nervix_crypto::password::derive(padding, &[0; 16], password));
+                Ok(matched)
+            }
+        }
+    }
+}
+
+async fn verify_password(
     executor: &Executor,
-    password_hash: String,
+    verification: PasswordVerification,
     password: String,
 ) -> error_stack::Result<bool, PasswordHashError> {
-    let Ok(parsed_hash) = PasswordHash::new(&password_hash) else {
-        return Ok(false);
-    };
-    let Ok(params) = Params::try_from(&parsed_hash) else {
-        return Ok(false);
-    };
     let reservation = executor
-        .reserve(MemoryClass::Credentials, argon2_working_bytes(&params))
+        .reserve(
+            MemoryClass::Credentials,
+            executor.limits().credential_working_bytes.as_u64(),
+        )
         .await
         .map_err(PasswordHashError::from_admission)?;
     let verified = executor
@@ -310,60 +338,48 @@ pub(in crate::application) async fn verify_password_hash(
                 cancellation
                     .check()
                     .change_context(PasswordHashError::Cancelled)?;
-                let parsed_hash = PasswordHash::new(&password_hash)
-                    .verified("the same hash parsed before its verification was admitted");
-                let matched = password_argon2()
-                    .verify_password(password.as_bytes(), &parsed_hash)
-                    .is_ok();
-                Ok(matched)
+                verification.verify(password.as_bytes(), cancellation)
             },
         )
         .await;
     match verified {
-        Ok(verified) => verified,
+        Ok(value) => value,
         Err(error) => Err(PasswordHashError::from_execution(error)),
     }
 }
 
-#[cfg(feature = "testing")]
-const TESTING_ARGON2_MEMORY_COST: u32 = 8;
-
-#[cfg(feature = "testing")]
-const TESTING_ARGON2_TIME_COST: u32 = 1;
-
-#[cfg(feature = "testing")]
-const TESTING_ARGON2_PARALLELISM: u32 = 1;
-
-#[cfg(not(feature = "testing"))]
-fn password_argon2() -> Argon2<'static> {
-    Argon2::default()
-}
-
-#[cfg(feature = "testing")]
-fn password_argon2() -> Argon2<'static> {
-    let params = Params::new(
-        TESTING_ARGON2_MEMORY_COST,
-        TESTING_ARGON2_TIME_COST,
-        TESTING_ARGON2_PARALLELISM,
-        None,
+pub(in crate::application) async fn verify_password_credential(
+    executor: &Executor,
+    credential: PasswordCredential,
+    password: String,
+) -> error_stack::Result<bool, PasswordHashError> {
+    verify_password(
+        executor,
+        PasswordVerification::Admitted(credential),
+        password,
     )
-    .assured("the testing cost constants are inside the ranges Argon2 accepts");
-    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+    .await
 }
 
 pub(in crate::application) async fn user_credentials(
     executor: &Executor,
     name: UserName,
     password: String,
+    cost: PasswordCost,
 ) -> error_stack::Result<UserCredentials, PasswordHashError> {
-    let password_hash = hash_password(executor, password).await?;
+    let password_credential = hash_password(executor, password, cost).await?;
     Ok(UserCredentials {
         name,
-        password_hash,
+        password_credential,
     })
 }
 
 impl SessionServiceImpl {
+    pub(in crate::application) fn password_creation_cost(&self) -> PasswordCost {
+        PasswordCost::try_from(self.cluster_parameters().password_iterations())
+            .assured("the committed parameter validates its cost")
+    }
+
     pub(in crate::application) fn new_authentication_pacing() -> AuthenticationPacing {
         AuthenticationPacing::new(
             NonZeroU32::new(AUTH_RATE_LIMIT_PER_SECOND)
@@ -384,10 +400,9 @@ impl SessionServiceImpl {
 
     /// Whether `credentials` name a user and that user's password.
     ///
-    /// Every name costs the node the same work. A name that names no user, or that cannot name
-    /// one, has its password hashed the way creating a user hashes one, so the attempt charges the
-    /// credentials worker what verifying a stored hash charges it and takes as long: the answer,
-    /// and when it arrives, cannot tell an unknown user from a wrong password.
+    /// Every name receives the common bounded verification workload captured with its user
+    /// publication. Unknown and invalid names use the same credentials worker and memory charge
+    /// as known names; lower-cost credentials receive padding to that captured work count.
     async fn authenticate_basic_credentials(
         &self,
         credentials: &BasicAuthCredentials,
@@ -422,15 +437,16 @@ impl SessionServiceImpl {
         credentials: &BasicAuthCredentials,
         user_name: Option<UserName>,
     ) -> Result<UserName, AuthenticationRefusal> {
-        let Some(user_name) = user_name else {
-            return self.refuse_unknown_user(credentials).await;
+        let Some(input) = self
+            .inner
+            .consensus
+            .authentication_input(user_name.as_ref())
+        else {
+            return Err(AuthenticationRefusal::Unavailable);
         };
-        let Some(user) = self.inner.consensus.current_user(&user_name).await else {
-            return self.refuse_unknown_user(credentials).await;
-        };
-        let verified = verify_password_hash(
+        let verified = verify_password(
             self.inner.runtime.executor(),
-            user.password_hash,
+            PasswordVerification::Authentication(input),
             credentials.password.clone(),
         )
         .await;
@@ -440,36 +456,16 @@ impl SessionServiceImpl {
                 if let PasswordHashError::Busy = error.current_context() {
                     // Nothing judged the credentials, so the attempt neither paces the user nor
                     // clears a pacing it already has.
-                    debug!(user = user_name.as_str(), error = ?error, "credential verification was not admitted");
+                    debug!(error = %format_args!("{error:#}"), "credential verification was not admitted");
                     return Err(AuthenticationRefusal::Unavailable);
                 }
-                warn!(user = user_name.as_str(), error = ?error, "credential verification failed");
+                warn!(error = %format_args!("{error:#}"), "credential verification failed");
                 false
             }
         };
         if matched {
-            return Ok(user_name);
+            return Ok(user_name.assured("only a captured user can match a password"));
         }
-        Err(AuthenticationRefusal::Rejected)
-    }
-
-    /// Refuses credentials whose name names no user once the work verifying a user's password
-    /// takes is done: the presented password is hashed at the parameters every user's hash is
-    /// created with, on the credentials worker under the same charge, and the hash is discarded.
-    async fn refuse_unknown_user(
-        &self,
-        credentials: &BasicAuthCredentials,
-    ) -> Result<UserName, AuthenticationRefusal> {
-        let hashed =
-            hash_password(self.inner.runtime.executor(), credentials.password.clone()).await;
-        let Err(error) = hashed else {
-            return Err(AuthenticationRefusal::Rejected);
-        };
-        if let PasswordHashError::Busy = error.current_context() {
-            debug!(error = %format_args!("{error:#}"), "credential verification was not admitted");
-            return Err(AuthenticationRefusal::Unavailable);
-        }
-        warn!(error = %format_args!("{error:#}"), "credential verification failed");
         Err(AuthenticationRefusal::Rejected)
     }
 
@@ -504,6 +500,7 @@ impl SessionServiceImpl {
             self.inner.runtime.executor(),
             create.name.clone(),
             create.password,
+            self.password_creation_cost(),
         )
         .await
         {
@@ -589,9 +586,10 @@ mod tests {
 
     #[cfg(feature = "testing")]
     use nervix_consensus::{ConsensusTestProbe, StorageBoundary};
-    use nervix_execution::OperationLimits;
-    use nervix_models::{CreateStatement, CreateUser, UserName};
+    use nervix_execution::{ExecutionConfig, MemoryBudgets, OperationLimits};
+    use nervix_models::{CreateStatement, CreateUser, PasswordCost, UserName};
     use nervix_recovery::Discarded as _;
+    use ubyte::ByteUnit;
 
     use super::*;
     #[cfg(feature = "testing")]
@@ -634,43 +632,6 @@ mod tests {
         drop(service);
         drop(registry);
         let _ = std::fs::remove_dir_all(path);
-    }
-
-    #[nervix_primitives::test]
-    async fn testing_feature_hashes_passwords_with_lean_argon2_params() {
-        let executor = Executor::default();
-        let password_hash = hash_password(&executor, "secret".to_string())
-            .await
-            .expect("password hash should be created");
-        let parsed_hash =
-            PasswordHash::new(&password_hash).expect("password hash should parse as PHC");
-
-        assert_eq!(
-            parsed_hash
-                .params
-                .get("m")
-                .and_then(|value| value.decimal().ok()),
-            Some(TESTING_ARGON2_MEMORY_COST)
-        );
-        assert_eq!(
-            parsed_hash
-                .params
-                .get("t")
-                .and_then(|value| value.decimal().ok()),
-            Some(TESTING_ARGON2_TIME_COST)
-        );
-        assert_eq!(
-            parsed_hash
-                .params
-                .get("p")
-                .and_then(|value| value.decimal().ok()),
-            Some(TESTING_ARGON2_PARALLELISM)
-        );
-        assert!(
-            verify_password_hash(&executor, password_hash, "secret".to_string())
-                .await
-                .expect("the verification should be admitted")
-        );
     }
 
     #[nervix_primitives::test]
@@ -717,9 +678,10 @@ mod tests {
             service.inner.runtime.executor(),
             retained_name.clone(),
             "retained-secret".to_string(),
+            service.password_creation_cost(),
         )
         .await
-        .assured("the testing Argon2 parameters accept this password");
+        .assured("the admitted password cost is within its declared bound");
         let applied = service
             .apply_persistent_user_creation(false, retained.clone())
             .await;
@@ -737,9 +699,10 @@ mod tests {
             service.inner.runtime.executor(),
             retained_name,
             "different-secret".to_string(),
+            service.password_creation_cost(),
         )
         .await
-        .assured("the testing Argon2 parameters accept this password");
+        .assured("the admitted password cost is within its declared bound");
         let ignored_conflict = service
             .apply_persistent_user_creation(true, conflicting.clone())
             .await;
@@ -753,15 +716,6 @@ mod tests {
         assert!(rejected_conflict.message.contains("already exists"));
 
         let _ = std::fs::remove_dir_all(&path);
-    }
-
-    #[test]
-    fn argon2_is_charged_its_whole_working_memory() {
-        let argon2 = password_argon2();
-        assert_eq!(
-            argon2_working_bytes(argon2.params()),
-            u64::from(TESTING_ARGON2_MEMORY_COST) * 1024
-        );
     }
 
     #[test]
@@ -781,22 +735,34 @@ mod tests {
     }
 
     #[test]
-    fn the_credentials_budget_holds_one_default_hash() {
+    fn credential_operations_charge_one_profile_digest() {
         assert_eq!(
-            argon2_working_bytes(&Params::default()),
+            64,
             OperationLimits::default().credential_working_bytes.as_u64()
         );
     }
 
     #[nervix_primitives::test]
     async fn passwords_are_hashed_and_verified_on_the_credentials_worker() {
-        let executor = Executor::default();
-        let password_hash = hash_password(&executor, "secret".to_string())
-            .await
-            .expect("the credentials worker hashes the password");
-        let matched = verify_password_hash(&executor, password_hash, "secret".to_string())
-            .await
-            .expect("the credentials worker verifies the password");
+        let executor = Executor::new(ExecutionConfig {
+            budgets: MemoryBudgets {
+                credentials: ByteUnit::Byte(64),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .assured("one profile digest is enough working memory for password operations");
+        let password_credential = hash_password(
+            &executor,
+            "secret".to_string(),
+            PasswordCost::try_from(210000).assured("the test cost is within its definition"),
+        )
+        .await
+        .expect("the credentials worker hashes the password");
+        let matched =
+            verify_password_credential(&executor, password_credential, "secret".to_string())
+                .await
+                .expect("the credentials worker verifies the password");
 
         assert!(matched);
         let snapshot = executor.snapshot();
