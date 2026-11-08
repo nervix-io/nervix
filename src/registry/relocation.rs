@@ -28,6 +28,9 @@ use super::{
     unit_placement::{UnitLayout, UnitPlacementGroups},
 };
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
 #[strum(serialize_all = "lowercase")]
 pub(crate) enum RelocationMemberReason {
