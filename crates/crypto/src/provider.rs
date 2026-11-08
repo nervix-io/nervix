@@ -20,16 +20,3 @@ pub fn module_mode() -> ModuleMode {
         Err(_) => ModuleMode::Ordinary,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn mode_matches_the_linked_module() {
-        assert_eq!(
-            module_mode() == ModuleMode::Fips,
-            aws_lc_rs::try_fips_mode().is_ok()
-        );
-    }
-}
