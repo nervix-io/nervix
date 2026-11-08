@@ -53,9 +53,9 @@ impl RabbitMqExchangeEmitter {
     pub const KIND: nervix_models::EmitterEntityKind =
         nervix_models::EmitterEntityKind::RabbitMq(nervix_models::RabbitMqEmitterEntity::Exchange);
 
-    /// Connects, opens the channel the emitter publishes through and checks that its exchange
-    /// exists, every step within the client's `connect_timeout_ms`. An exchange the broker does not
-    /// have is the contract's missing entity, which the host retries until it is declared.
+    /// Prepares configuration and TLS material without opening a connection. Resume acquires the
+    /// channel and checks that the exchange exists within the client's `connect_timeout_ms`. A
+    /// missing exchange is the contract's missing entity, which resume retries until it is declared.
     async fn prepare(
         config: RabbitMqExchangeEmitterConfig,
         _host: EmitterHost,

@@ -51,8 +51,8 @@ impl RabbitMqQueueEmitter {
     pub const KIND: nervix_models::EmitterEntityKind =
         nervix_models::EmitterEntityKind::RabbitMq(nervix_models::RabbitMqEmitterEntity::Queue);
 
-    /// Connects, opens the channel the emitter publishes through and checks that its queue exists,
-    /// every step within the client's `connect_timeout_ms`.
+    /// Prepares configuration and TLS material without opening a connection. Resume acquires the
+    /// channel and checks that the queue exists within the client's `connect_timeout_ms`.
     async fn prepare(
         config: RabbitMqQueueEmitterConfig,
         _host: EmitterHost,
