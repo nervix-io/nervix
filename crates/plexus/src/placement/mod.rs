@@ -1,10 +1,22 @@
+//! Named placement grammar.
+//!
+//! Layer: language.
+//! - **Owns.** Corridor and domain-wide rule syntax, policies and completion.
+//! - **Depends on.** Shared language tokens and semantic placement Models.
+//! - **Must not know.** Graph topology, unit correspondence or scheduling.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the boundary declared above")
+)]
+
 use std::num::NonZeroU64;
 
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
     AlterPlacement, AlterPlacementOperation, CreatePlacement, CreateStatement, DescribePlacement,
-    ModelName, PlacementPolicy, ShowPlacements,
+    ModelName, PlacementPolicy, PlacementScope, ShowPlacements,
 };
 
 use crate::{
@@ -73,23 +85,30 @@ pub fn create_placement_parser<'src>()
         .ignore_then(if_not_exists_clause())
         .then_ignore(kw(Identifier::Placement))
         .then(placement_name())
-        .then_ignore(kw(Identifier::From))
-        .then(placement_members())
-        .then_ignore(kw(Identifier::To))
-        .then(placement_members())
+        .then(choice((
+            kw_phrase2(Identifier::Domain, Identifier::Wide).to(PlacementScope::DomainWide),
+            kw(Identifier::From)
+                .ignore_then(placement_members())
+                .then_ignore(kw(Identifier::To))
+                .then(placement_members())
+                .map(|(from, to)| PlacementScope::Corridor { from, to }),
+        )))
         .then(placement_policy_parser())
         .then(placement_rank().or_not())
         .then_ignore(tok(Token::Semicolon).or_not())
-        .try_map(
-            |(((((if_not_exists, name), from), to), policy), rank), span| {
-                let mapping_input = CreatePlacement::new(name, from, to, policy, rank)
-                    .map(|placement| CreateStatement::new(placement, if_not_exists));
-                match mapping_input {
-                    Ok(mapped_value) => Ok(mapped_value),
-                    Err(error) => Err(Rich::custom(span, error.to_string())),
+        .try_map(|((((if_not_exists, name), scope), policy), rank), span| {
+            let mapping_input = match scope {
+                PlacementScope::Corridor { from, to } => {
+                    CreatePlacement::new(name, from, to, policy, rank)
                 }
-            },
-        )
+                PlacementScope::DomainWide => Ok(CreatePlacement::domain_wide(name, policy, rank)),
+            }
+            .map(|placement| CreateStatement::new(placement, if_not_exists));
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err(Rich::custom(span, error.to_string())),
+            }
+        })
         .boxed()
 }
 
@@ -115,7 +134,18 @@ pub fn alter_placement_parser<'src>()
         .ignore_then(kw(Identifier::To))
         .ignore_then(placement_name())
         .map(|name| AlterPlacementOperation::RenameTo { name });
-    let operation = choice((set_policy, set_rank, drop_rank, set_members, rename)).boxed();
+    let set_domain_wide = kw(Identifier::Set)
+        .ignore_then(kw_phrase2(Identifier::Domain, Identifier::Wide))
+        .to(AlterPlacementOperation::SetDomainWide);
+    let operation = choice((
+        set_policy,
+        set_rank,
+        drop_rank,
+        set_members,
+        set_domain_wide,
+        rename,
+    ))
+    .boxed();
 
     kw(Identifier::Alter)
         .ignore_then(kw(Identifier::Placement))
@@ -229,16 +259,84 @@ mod tests {
 
         assert!(parsed.if_not_exists);
         assert_eq!(parsed.name.as_str(), "critical");
+        let PlacementScope::Corridor { from, .. } = &parsed.scope else {
+            panic!("expected corridor scope");
+        };
         assert_eq!(
-            parsed
-                .from
-                .iter()
+            from.iter()
                 .map(nervix_models::ModelName::as_str)
                 .collect::<Vec<_>>(),
             vec!["ingest", "enrich"]
         );
         assert_eq!(parsed.policy, PlacementPolicy::RequireColocation);
         assert_eq!(parsed.rank, Some(nonzero!(1u64)));
+    }
+
+    #[test]
+    fn domain_wide_scope_round_trips_policies_ranks_and_alter_order() {
+        for policy in [
+            PlacementPolicy::Neutral,
+            PlacementPolicy::RequireColocation,
+            PlacementPolicy::PreferColocation,
+            PlacementPolicy::SuggestSeparation,
+        ] {
+            let parsed = parse_create_placement(&format!(
+                "cReAtE pLaCeMeNt domain_rule dOmAiN wIdE {policy} RANK {};",
+                u64::MAX
+            ))
+            .expect("domain-wide form parses case-insensitively");
+            assert_eq!(parsed.scope, PlacementScope::DomainWide);
+            assert_eq!(parsed.rank.map(|rank| rank.get()), Some(u64::MAX));
+            let text = parsed
+                .body
+                .to_canonical_plexus()
+                .expect("the model renders");
+            assert_eq!(
+                parse_create_placement(&text)
+                    .expect("canonical form parses")
+                    .body,
+                parsed.body
+            );
+        }
+        let alter = parse_alter_placement(
+            "ALTER PLACEMENT domain_rule SET DOMAIN WIDE, SET POLICY NEUTRAL, SET FROM a TO b;",
+        )
+        .expect("ordered scope edits parse");
+        assert_eq!(alter.operations[0], AlterPlacementOperation::SetDomainWide);
+        assert!(matches!(
+            alter.operations[2],
+            AlterPlacementOperation::SetMembers { .. }
+        ));
+    }
+
+    #[test]
+    fn completes_composed_domain_wide_scope_and_its_policy() {
+        for input in ["CREATE PLACEMENT rule ", "ALTER PLACEMENT rule SET "] {
+            assert!(suggest_statement(input, input.len()).contains(&"DOMAIN WIDE".to_owned()));
+        }
+        let input = "CREATE PLACEMENT rule DOMAIN WIDE ";
+        for policy in [
+            "REQUIRE COLOCATION",
+            "PREFER COLOCATION",
+            "NEUTRAL",
+            "SUGGEST SEPARATION",
+        ] {
+            assert!(suggest_statement(input, input.len()).contains(&policy.to_owned()));
+        }
+    }
+
+    #[test]
+    fn completes_optional_rank_for_each_placement_scope() {
+        for input in [
+            "CREATE PLACEMENT rule DOMAIN WIDE NEUTRAL ",
+            "CREATE PLACEMENT rule FROM a TO b NEUTRAL ",
+        ] {
+            assert_eq!(suggest_statement(input, input.len()), [";", "RANK"]);
+            assert_eq!(
+                crate::client_statement::suggest_client_statement(input, input.len()),
+                [";", "RANK"]
+            );
+        }
     }
 
     #[test]

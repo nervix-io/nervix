@@ -1,37 +1,41 @@
-//! Building the unit a relocation moves.
+//! Exact execution units selected for a relocation.
 //!
-//! The unit is a graph question: which runtime nodes the statement selects, which hard groups
-//! those selections belong to, and which further groups their preferences capture. Owners,
-//! replicas, cluster liveness, and execution belong to the command that consumes this plan.
+//! Layer: decisions.
+//! - **Owns.** Selection, hard-group closure, preference capture and override validation.
+//! - **Depends on.** Validated topology, unit correspondence and vocabulary identities.
+//! - **Must not know.** Cluster liveness, runtime state, locks or transport.
 
-use std::fmt;
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the boundary declared above")
+)]
 
-use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
+use std::{collections::BTreeSet, fmt};
+
+use ahash::{HashMap, HashSet};
 use error_stack::Report;
-use meticulous::OptionExt as _;
 use nervix_models::{
-    DomainName, Model, ModelName, NodeRef, PlacementName, PlacementPolicy, RelocationMember,
+    DomainName, ModelName, NodeRef, NodeUnitRef, PlacementName, PlacementPolicy, RelocationMember,
     RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
+    RelocationUnitSelection, Unit,
 };
 use strum::AsRefStr;
 use thiserror::Error;
 
-use super::graph::ActiveGraph;
-use crate::registry::placement::{EffectivePlacementPlan, PlacementPair, ResolvedPlacementPair};
+use super::{
+    graph::ActiveGraph,
+    placement::{EffectivePlacementPlan, PlacementPair, PlacementTopology},
+    unit_placement::{UnitLayout, UnitPlacementGroups},
+};
 
-/// Why a runtime node is part of the unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
 #[strum(serialize_all = "lowercase")]
 pub(crate) enum RelocationMemberReason {
-    /// Named by the selection, directly or through corridor coverage.
     Selected,
-    /// A hard-group mate of a selected runtime node.
     Required,
-    /// Captured through a `PREFER COLOCATION` partner of a `FOLLOW PREFERENCES` group.
     Preferred,
 }
 
-/// One `FROM`/`TO` endpoint pair of a corridor selection and what it covered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RelocationCoverage {
     pub(crate) source: NodeRef,
@@ -40,128 +44,104 @@ pub(crate) struct RelocationCoverage {
     pub(crate) covered: usize,
 }
 
-/// One runtime node in the unit, with the hard group it belongs to and the strategy that group
-/// carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RelocationUnitMember {
-    pub(crate) runtime_node: NodeRef,
+    pub(crate) runtime_unit: NodeUnitRef,
     pub(crate) group: usize,
     pub(crate) strategy: RelocationPreferenceStrategy,
     pub(crate) reason: RelocationMemberReason,
 }
 
-/// An effective soft preference with at least one endpoint in the unit. The relocation reports it
-/// as unsatisfied when the owners after the move disagree with the policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RelocationPreference {
     pub(crate) policy: PlacementPolicy,
-    pub(crate) left: NodeRef,
-    pub(crate) right: NodeRef,
+    pub(crate) left: NodeUnitRef,
+    pub(crate) right: NodeUnitRef,
     pub(crate) winning_rules: Vec<PlacementName>,
-    pub(in crate::registry) from_domain_default: bool,
 }
 
-/// The graph-side result of planning a relocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RelocationUnit {
-    /// One entry per `FROM`/`TO` pair; empty for the list selection form.
     pub(crate) coverage: Vec<RelocationCoverage>,
-    /// Unit members ordered by hard group, selected groups before captured ones.
     pub(crate) members: Vec<RelocationUnitMember>,
-    /// Every effective `PREFER COLOCATION` and `SUGGEST SEPARATION` relationship touching the
-    /// unit, in canonical order.
     pub(crate) preferences: Vec<RelocationPreference>,
 }
 
-/// Why the graph refuses to build a relocation unit. Each variant names the runtime nodes the
-/// operator has to correct.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum RelocationPlanError {
-    #[error(
-        "{kind} '{name}' does not exist in domain '{domain}'",
-        kind = .member.kind.as_str(),
-        name = .member.identifier.as_str()
-    )]
+    #[error("{kind} '{name}' does not exist in domain '{domain}'", kind = .member.kind.as_str(), name = .member.identifier.as_str())]
     UnknownRuntimeNode { domain: DomainName, member: NodeRef },
+    #[error("{kind} '{name}' has no {selection} unit in domain '{domain}'", kind = .member.kind.as_str(), name = .member.identifier.as_str())]
+    UnknownUnit {
+        domain: DomainName,
+        member: NodeRef,
+        selection: RelocationUnitSelection,
+    },
     #[error(
-        "ingestor '{name}' cannot be relocated: server-listener ingestors execute on every \
-         cluster node",
-        name = .ingestor.as_str()
+        "ingestor '{ingestor}' cannot be relocated: server-listener ingestors execute on every \
+         cluster node"
     )]
     ServerListenerIngestor { ingestor: ModelName },
     #[error("relocation covers no runtime node: no FROM/TO pair is connected")]
     DisconnectedCorridor,
-    #[error(
-        "conflicting preference strategies for hard group [{members}]",
-        members = HardGroupMembers(.members)
-    )]
-    ConflictingGroupStrategies { members: Vec<NodeRef> },
-    #[error(
-        "{kind} '{name}' is not part of the relocation",
-        kind = .member.kind.as_str(),
-        name = .member.identifier.as_str()
-    )]
-    OverrideOutsideUnit { member: NodeRef },
+    #[error("conflicting preference strategies for hard group [{members}]", members = HardGroupMembers(.members))]
+    ConflictingGroupStrategies { members: Vec<NodeUnitRef> },
+    #[error("{kind} '{name}'{unit} is not part of the relocation", kind = .member.node.kind.as_str(), name = .member.node.identifier, unit = .member.unit.label_suffix())]
+    OverrideOutsideUnit { member: NodeUnitRef },
 }
 
-/// Renders the members of one hard group as `kind name` entries separated by commas.
-struct HardGroupMembers<'a>(&'a [NodeRef]);
-
+struct HardGroupMembers<'a>(&'a [NodeUnitRef]);
 impl fmt::Display for HardGroupMembers<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut separator = "";
-        for member in self.0 {
+        for (index, member) in self.0.iter().enumerate() {
+            if index != 0 {
+                formatter.write_str(", ")?;
+            }
             write!(
                 formatter,
-                "{separator}{} {}",
-                member.kind.as_str(),
-                member.identifier
+                "{} {}{}",
+                member.node.kind.as_str(),
+                member.node.identifier,
+                member.unit.label_suffix()
             )?;
-            separator = ", ";
         }
         Ok(())
     }
 }
 
-/// A hard group while the unit is being built.
-#[derive(Debug, Clone)]
 struct UnitGroup {
-    members: Vec<NodeRef>,
+    members: Vec<NodeUnitRef>,
     strategy: RelocationPreferenceStrategy,
     reason: RelocationMemberReason,
 }
 
 impl ActiveGraph {
-    /// Computes the unit a relocation moves from the domain's effective placement plan and the
-    /// currently active graph.
     pub(crate) fn relocation_unit(
         &self,
         domain: &DomainName,
-        default_policy: PlacementPolicy,
         selection: &RelocationSelection,
         default_strategy: RelocationPreferenceStrategy,
         overrides: &[RelocationPreferenceOverride],
     ) -> error_stack::Result<RelocationUnit, RelocationPlanError> {
-        // Every named runtime node is resolved before anything is planned, so a misspelled member
-        // reports that it does not exist rather than a consequence of leaving it out.
-        let mut resolved_overrides = Vec::with_capacity(overrides.len());
-        let mut override_by_key = HashMap::new();
-        for override_clause in overrides {
-            let key = self.resolve_relocation_member(domain, &override_clause.member)?;
-            override_by_key
-                .entry(key.clone())
-                .or_insert_with(Vec::new)
-                .push(override_clause.strategy);
-            resolved_overrides.push(key);
+        let mut override_by_key =
+            HashMap::<NodeUnitRef, Vec<RelocationPreferenceStrategy>>::default();
+        for clause in overrides {
+            for member in self.resolve_relocation_member(domain, &clause.member)? {
+                override_by_key
+                    .entry(member)
+                    .or_default()
+                    .push(clause.strategy);
+            }
         }
-
         let (selected, coverage) = match selection {
             RelocationSelection::List(members) => {
                 let mut selected = Vec::new();
+                let mut seen = HashSet::default();
                 for member in members {
-                    let key = self.resolve_relocation_member(domain, member)?;
-                    if !selected.contains(&key) {
-                        selected.push(key);
+                    for unit in self.resolve_relocation_member(domain, member)? {
+                        if seen.insert(unit.clone()) {
+                            selected.push(unit);
+                        }
                     }
                 }
                 (selected, Vec::new())
@@ -170,59 +150,47 @@ impl ActiveGraph {
                 self.relocation_corridor_selection(domain, from, to)?
             }
         };
-
-        let placement = self.placement.effective(default_policy);
-
-        let unit_groups =
-            super::unit_placement::UnitPlacementGroups::decide(self, &placement.require_groups);
-        let hard_group = |key: &NodeRef| -> Vec<NodeRef> {
-            let mut members = std::collections::BTreeSet::from([key.clone()]);
-            for group in &unit_groups.groups {
-                if group.iter().any(|member| &member.node == key) {
-                    members.extend(group.iter().map(|member| member.node.clone()));
-                }
-            }
-            members.into_iter().collect()
+        let placement = self.placement.effective();
+        let hard = UnitPlacementGroups::decide(self, &placement);
+        let hard_group = |member: &NodeUnitRef| {
+            hard.by_member
+                .get(member)
+                .map(|index| hard.groups[*index].clone())
+                .unwrap_or_else(|| vec![member.clone()])
         };
-
-        let mut groups: Vec<UnitGroup> = Vec::new();
-        let mut group_by_member = HashMap::new();
-        let selected_set = selected.iter().cloned().collect::<HashSet<_>>();
-        for key in &selected {
-            if group_by_member.contains_key(key) {
-                continue;
+        let mut groups = Vec::<UnitGroup>::new();
+        let mut group_by_member = HashMap::default();
+        for member in &selected {
+            if !group_by_member.contains_key(member) {
+                join_group(
+                    &mut groups,
+                    &mut group_by_member,
+                    hard_group(member),
+                    &override_by_key,
+                    default_strategy,
+                    RelocationMemberReason::Selected,
+                )?;
             }
-            let members = hard_group(key);
-            let strategy = Self::group_strategy(&members, &override_by_key, default_strategy)?;
-            let index = groups.len();
-            for member in &members {
-                group_by_member.insert(member.clone(), index);
-            }
-            groups.push(UnitGroup {
-                members,
-                strategy,
-                reason: RelocationMemberReason::Selected,
-            });
         }
-
-        self.capture_preferred_groups(
+        capture_preferred_groups(
             &placement,
+            &self.placement.topology,
             &hard_group,
             &override_by_key,
             default_strategy,
             &mut groups,
             &mut group_by_member,
         )?;
-
-        if let Some(member) = resolved_overrides
-            .iter()
-            .find(|key| !group_by_member.contains_key(*key))
+        if let Some(member) = override_by_key
+            .keys()
+            .filter(|member| !group_by_member.contains_key(*member))
+            .min()
         {
             return Err(Report::new(RelocationPlanError::OverrideOutsideUnit {
                 member: member.clone(),
             }));
         }
-
+        let selected_set = selected.iter().collect::<HashSet<_>>();
         let selected_set = &selected_set;
         let members = groups
             .iter()
@@ -232,7 +200,7 @@ impl ActiveGraph {
                     .members
                     .iter()
                     .map(move |member| RelocationUnitMember {
-                        runtime_node: member.clone(),
+                        runtime_unit: member.clone(),
                         group: index + 1,
                         strategy: group.strategy,
                         reason: if group.reason == RelocationMemberReason::Selected
@@ -244,10 +212,8 @@ impl ActiveGraph {
                         },
                     })
             })
-            .collect::<Vec<_>>();
-
-        let preferences = Self::unit_preferences(&placement.pairs, &group_by_member);
-
+            .collect();
+        let preferences = unit_preferences(&placement, &group_by_member);
         Ok(RelocationUnit {
             coverage,
             members,
@@ -255,238 +221,283 @@ impl ActiveGraph {
         })
     }
 
-    /// Resolves one kind-qualified member against the active graph.
+    fn resolve_relocation_node(
+        &self,
+        domain: &DomainName,
+        member: &NodeRef,
+    ) -> error_stack::Result<UnitLayout, RelocationPlanError> {
+        let node = self.node(member.kind, &member.identifier).ok_or_else(|| {
+            Report::new(RelocationPlanError::UnknownRuntimeNode {
+                domain: domain.clone(),
+                member: member.clone(),
+            })
+        })?;
+        if node.config.executes_on_every_cluster_node() {
+            return Err(Report::new(RelocationPlanError::ServerListenerIngestor {
+                ingestor: member.identifier.clone(),
+            }));
+        }
+        Ok(UnitLayout::of(node))
+    }
+
     fn resolve_relocation_member(
         &self,
         domain: &DomainName,
         member: &RelocationMember,
-    ) -> error_stack::Result<NodeRef, RelocationPlanError> {
-        let key = NodeRef::new(member.kind, member.name.clone());
-        let Some(node) = self.node(member.kind, &member.name) else {
-            return Err(Report::new(RelocationPlanError::UnknownRuntimeNode {
-                domain: domain.clone(),
-                member: key,
-            }));
+    ) -> error_stack::Result<Vec<NodeUnitRef>, RelocationPlanError> {
+        let layout = self.resolve_relocation_node(domain, &member.node)?;
+        let selected = match member.selection {
+            RelocationUnitSelection::All => {
+                return Ok(layout
+                    .units()
+                    .map(|unit| NodeUnitRef::new(member.node.clone(), unit))
+                    .collect());
+            }
+            RelocationUnitSelection::Partition(index) => Some(Unit::partition(index)),
+            RelocationUnitSelection::Instance(index) => Unit::try_instance(index).ok(),
         };
-        if let Model::Ingestor(_) = node.config.as_ref()
-            && node.config.executes_on_every_cluster_node()
-        {
-            return Err(Report::new(RelocationPlanError::ServerListenerIngestor {
-                ingestor: member.name.clone(),
-            }));
+        if let Some(unit) = selected.filter(|unit| layout.contains(*unit)) {
+            return Ok(vec![NodeUnitRef::new(member.node.clone(), unit)]);
         }
-        Ok(key)
+        Err(Report::new(RelocationPlanError::UnknownUnit {
+            domain: domain.clone(),
+            member: member.node.clone(),
+            selection: member.selection,
+        }))
     }
 
-    /// Covers each `FROM`/`TO` pair with the path-gated coverage placement rules use.
     fn relocation_corridor_selection(
         &self,
         domain: &DomainName,
-        from: &[RelocationMember],
-        to: &[RelocationMember],
-    ) -> error_stack::Result<(Vec<NodeRef>, Vec<RelocationCoverage>), RelocationPlanError> {
-        let mut selected = Vec::new();
+        from: &[NodeRef],
+        to: &[NodeRef],
+    ) -> error_stack::Result<(Vec<NodeUnitRef>, Vec<RelocationCoverage>), RelocationPlanError> {
+        // Resolve every endpoint, including a destination after a disconnected source.
+        for member in from.iter().chain(to) {
+            self.resolve_relocation_node(domain, member)?;
+        }
+        let mut selected = BTreeSet::new();
         let mut coverage = Vec::new();
-        let mut connected_pairs = 0usize;
         for source in from {
-            let source_key = self.resolve_relocation_member(domain, source)?;
             for destination in to {
-                let destination_key = self.resolve_relocation_member(domain, destination)?;
                 let endpoint = self
                     .placement
                     .topology
-                    .endpoint_analysis(source_key.clone(), destination_key.clone());
-                let connected = !endpoint.corridor.is_empty();
-                if connected {
-                    connected_pairs = connected_pairs
-                        .checked_add(1)
-                        .assured("the pairs counted here are graph endpoints held in memory");
-                }
-                for covered in &endpoint.corridor {
-                    if !selected.contains(covered) {
-                        selected.push(covered.clone());
-                    }
+                    .endpoint_analysis(source.clone(), destination.clone());
+                for member in &endpoint.corridor {
+                    let layout = self.resolve_relocation_node(domain, member)?;
+                    selected.extend(
+                        layout
+                            .units()
+                            .map(|unit| NodeUnitRef::new(member.clone(), unit)),
+                    );
                 }
                 coverage.push(RelocationCoverage {
-                    source: source_key.clone(),
-                    destination: destination_key.clone(),
-                    connected,
+                    source: source.clone(),
+                    destination: destination.clone(),
+                    connected: !endpoint.corridor.is_empty(),
                     covered: endpoint.corridor.len(),
                 });
             }
         }
-        if connected_pairs == 0 {
+        if !coverage.iter().any(|pair| pair.connected) {
             return Err(Report::new(RelocationPlanError::DisconnectedCorridor));
         }
-        selected.sort();
-        Ok((selected, coverage))
-    }
-
-    /// Repeats capture rounds until the unit stops growing.
-    fn capture_preferred_groups(
-        &self,
-        placement: &EffectivePlacementPlan,
-        hard_group: &impl Fn(&NodeRef) -> Vec<NodeRef>,
-        override_by_key: &HashMap<NodeRef, Vec<RelocationPreferenceStrategy>>,
-        default_strategy: RelocationPreferenceStrategy,
-        groups: &mut Vec<UnitGroup>,
-        group_by_member: &mut HashMap<NodeRef, usize>,
-    ) -> error_stack::Result<(), RelocationPlanError> {
-        loop {
-            let mut candidates = Vec::new();
-            let mut seen = HashSet::new();
-            for (pair, resolved) in &placement.pairs {
-                if resolved.policy != PlacementPolicy::PreferColocation {
-                    continue;
-                }
-                for (inside, outside) in [(&pair.left, &pair.right), (&pair.right, &pair.left)] {
-                    let Some(group_index) = group_by_member.get(inside) else {
-                        continue;
-                    };
-                    if !groups[*group_index].strategy.follows_preferences() {
-                        continue;
-                    }
-                    if group_by_member.contains_key(outside) {
-                        continue;
-                    }
-                    let candidate = hard_group(outside);
-                    let Some(first) = candidate.first() else {
-                        continue;
-                    };
-                    if seen.insert(first.clone()) {
-                        candidates.push(candidate);
-                    }
-                }
-            }
-            if candidates.is_empty() {
-                return Ok(());
-            }
-            candidates.sort_by(|left, right| {
-                left.first()
-                    .verified(
-                        "the empty-candidates branch above already returned and a group is never \
-                         built empty",
-                    )
-                    .cmp(right.first().verified(
-                        "the empty-candidates branch above already returned and a group is never \
-                         built empty",
-                    ))
-            });
-
-            let mut joined = false;
-            for candidate in candidates {
-                if candidate
-                    .iter()
-                    .any(|member| group_by_member.contains_key(member))
-                {
-                    continue;
-                }
-                if Self::separated_from_unit(placement, &candidate, groups, group_by_member) {
-                    continue;
-                }
-                let strategy = Self::group_strategy(&candidate, override_by_key, default_strategy)?;
-                let index = groups.len();
-                for member in &candidate {
-                    group_by_member.insert(member.clone(), index);
-                }
-                groups.push(UnitGroup {
-                    members: candidate,
-                    strategy,
-                    reason: RelocationMemberReason::Preferred,
-                });
-                joined = true;
-            }
-            if !joined {
-                return Ok(());
-            }
-        }
-    }
-
-    /// True when any candidate member is separated from a `FOLLOW PREFERENCES` group already in
-    /// the unit.
-    fn separated_from_unit(
-        placement: &EffectivePlacementPlan,
-        candidate: &[NodeRef],
-        groups: &[UnitGroup],
-        group_by_member: &HashMap<NodeRef, usize>,
-    ) -> bool {
-        placement.pairs.iter().any(|(pair, resolved)| {
-            if resolved.policy != PlacementPolicy::SuggestSeparation {
-                return false;
-            }
-            [(&pair.left, &pair.right), (&pair.right, &pair.left)]
-                .into_iter()
-                .any(|(outside, inside)| {
-                    candidate.contains(outside)
-                        && group_by_member
-                            .get(inside)
-                            .is_some_and(|index| groups[*index].strategy.follows_preferences())
-                })
-        })
-    }
-
-    /// A hard group carries one strategy, because it cannot be moved in pieces and its
-    /// preferences are one set.
-    fn group_strategy(
-        members: &[NodeRef],
-        override_by_key: &HashMap<NodeRef, Vec<RelocationPreferenceStrategy>>,
-        default_strategy: RelocationPreferenceStrategy,
-    ) -> error_stack::Result<RelocationPreferenceStrategy, RelocationPlanError> {
-        let mut chosen = None;
-        for member in members {
-            for strategy in override_by_key.get(member).into_iter().flatten() {
-                match chosen {
-                    None => chosen = Some(*strategy),
-                    Some(existing) if existing == *strategy => {}
-                    Some(_) => {
-                        return Err(Report::new(
-                            RelocationPlanError::ConflictingGroupStrategies {
-                                members: members.to_vec(),
-                            },
-                        ));
-                    }
-                }
-            }
-        }
-        Ok(chosen.unwrap_or(default_strategy))
-    }
-
-    /// Every effective soft preference with at least one endpoint in the unit.
-    fn unit_preferences(
-        pairs: &HashMap<PlacementPair, ResolvedPlacementPair>,
-        group_by_member: &HashMap<NodeRef, usize>,
-    ) -> Vec<RelocationPreference> {
-        let mut preferences = pairs
-            .iter()
-            .filter(|(pair, resolved)| {
-                matches!(
-                    resolved.policy,
-                    PlacementPolicy::PreferColocation | PlacementPolicy::SuggestSeparation
-                ) && (group_by_member.contains_key(&pair.left)
-                    || group_by_member.contains_key(&pair.right))
-            })
-            .map(|(pair, resolved)| RelocationPreference {
-                policy: resolved.policy,
-                left: pair.left.clone(),
-                right: pair.right.clone(),
-                winning_rules: resolved.winning_rules.clone(),
-                from_domain_default: resolved.from_domain_default,
-            })
-            .collect::<Vec<_>>();
-        preferences.sort_by(|left, right| {
-            left.policy
-                .as_ref()
-                .cmp(right.policy.as_ref())
-                .then_with(|| relocation_runtime_node_cmp(&left.left, &right.left))
-                .then_with(|| relocation_runtime_node_cmp(&left.right, &right.right))
-        });
-        preferences
+        Ok((selected.into_iter().collect(), coverage))
     }
 }
 
-fn relocation_runtime_node_cmp(left: &NodeRef, right: &NodeRef) -> std::cmp::Ordering {
-    left.kind
-        .as_str()
-        .cmp(right.kind.as_str())
-        .then_with(|| left.identifier.as_str().cmp(right.identifier.as_str()))
+fn capture_preferred_groups(
+    placement: &EffectivePlacementPlan,
+    topology: &PlacementTopology,
+    hard_group: &impl Fn(&NodeUnitRef) -> Vec<NodeUnitRef>,
+    override_by_key: &HashMap<NodeUnitRef, Vec<RelocationPreferenceStrategy>>,
+    default_strategy: RelocationPreferenceStrategy,
+    groups: &mut Vec<UnitGroup>,
+    group_by_member: &mut HashMap<NodeUnitRef, usize>,
+) -> error_stack::Result<(), RelocationPlanError> {
+    loop {
+        let mut candidates = BTreeSet::new();
+        for (member, index) in group_by_member.iter() {
+            if !groups[*index].strategy.follows_preferences() {
+                continue;
+            }
+            for partner in unit_partners(
+                placement,
+                topology,
+                member,
+                PlacementPolicy::PreferColocation,
+            ) {
+                if !group_by_member.contains_key(&partner) {
+                    candidates.insert(partner);
+                }
+            }
+        }
+        let mut joined = false;
+        for member in candidates {
+            if group_by_member.contains_key(&member) {
+                continue;
+            }
+            let candidate = hard_group(&member);
+            let separated = candidate.iter().any(|outside| {
+                unit_partners(
+                    placement,
+                    topology,
+                    outside,
+                    PlacementPolicy::SuggestSeparation,
+                )
+                .iter()
+                .any(|inside| {
+                    group_by_member
+                        .get(inside)
+                        .is_some_and(|index| groups[*index].strategy.follows_preferences())
+                })
+            });
+            if separated {
+                continue;
+            }
+            join_group(
+                groups,
+                group_by_member,
+                candidate,
+                override_by_key,
+                default_strategy,
+                RelocationMemberReason::Preferred,
+            )?;
+            joined = true;
+        }
+        if !joined {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn unit_preferences(
+    placement: &EffectivePlacementPlan,
+    group_by_member: &HashMap<NodeUnitRef, usize>,
+) -> Vec<RelocationPreference> {
+    let mut preferences = Vec::new();
+    let mut selected_by_node = HashMap::<&NodeRef, Vec<Unit>>::default();
+    for (pair, resolved) in &placement.pairs {
+        if matches!(
+            resolved.policy,
+            PlacementPolicy::PreferColocation | PlacementPolicy::SuggestSeparation
+        ) {
+            selected_by_node.entry(&pair.left).or_default();
+            selected_by_node.entry(&pair.right).or_default();
+        }
+    }
+    if selected_by_node.is_empty() {
+        return preferences;
+    }
+    for member in group_by_member.keys() {
+        if let Some(units) = selected_by_node.get_mut(&member.node) {
+            units.push(member.unit);
+        }
+    }
+    for (pair, resolved) in &placement.pairs {
+        if !matches!(
+            resolved.policy,
+            PlacementPolicy::PreferColocation | PlacementPolicy::SuggestSeparation
+        ) {
+            continue;
+        }
+        let mut append = |left, right| {
+            preferences.push(RelocationPreference {
+                policy: resolved.policy,
+                left: NodeUnitRef::new(pair.left.clone(), left),
+                right: NodeUnitRef::new(pair.right.clone(), right),
+                winning_rules: resolved.winning_rules.clone(),
+            });
+        };
+        // Enumerate partners of selected units in both directions. A narrow relocation never
+        // walks all sibling partitions of every soft hop merely to discard their preferences.
+        for left in selected_by_node.get(&pair.left).into_iter().flatten() {
+            for right in resolved.correspondence.partners(true, *left) {
+                append(*left, right);
+            }
+        }
+        for right in selected_by_node.get(&pair.right).into_iter().flatten() {
+            for left in resolved.correspondence.partners(false, *right) {
+                if !group_by_member.contains_key(&NodeUnitRef::new(pair.left.clone(), left)) {
+                    append(left, *right);
+                }
+            }
+        }
+    }
+    preferences.sort_by(|a, b| {
+        a.policy
+            .as_ref()
+            .cmp(b.policy.as_ref())
+            .then_with(|| a.left.cmp(&b.left))
+            .then_with(|| a.right.cmp(&b.right))
+    });
+    preferences
+}
+
+fn join_group(
+    groups: &mut Vec<UnitGroup>,
+    by_member: &mut HashMap<NodeUnitRef, usize>,
+    members: Vec<NodeUnitRef>,
+    overrides: &HashMap<NodeUnitRef, Vec<RelocationPreferenceStrategy>>,
+    default: RelocationPreferenceStrategy,
+    reason: RelocationMemberReason,
+) -> error_stack::Result<(), RelocationPlanError> {
+    let strategies = members
+        .iter()
+        .flat_map(|member| overrides.get(member).into_iter().flatten())
+        .copied()
+        .collect::<HashSet<_>>();
+    if strategies.len() > 1 {
+        return Err(Report::new(
+            RelocationPlanError::ConflictingGroupStrategies { members },
+        ));
+    }
+    let strategy = strategies.into_iter().next().unwrap_or(default);
+    for member in &members {
+        by_member.insert(member.clone(), groups.len());
+    }
+    groups.push(UnitGroup {
+        members,
+        strategy,
+        reason,
+    });
+    Ok(())
+}
+
+fn unit_partners(
+    placement: &EffectivePlacementPlan,
+    topology: &PlacementTopology,
+    member: &NodeUnitRef,
+    policy: PlacementPolicy,
+) -> Vec<NodeUnitRef> {
+    let mut partners = BTreeSet::new();
+    for (other, from_left) in topology.adjacent_hops(&member.node) {
+        let pair = if from_left {
+            PlacementPair {
+                left: member.node.clone(),
+                right: other.clone(),
+            }
+        } else {
+            PlacementPair {
+                left: other.clone(),
+                right: member.node.clone(),
+            }
+        };
+        let Some(resolved) = placement
+            .pairs
+            .get(&pair)
+            .filter(|resolved| resolved.policy == policy)
+        else {
+            continue;
+        };
+        partners.extend(
+            resolved
+                .correspondence
+                .partners(from_left, member.unit)
+                .map(|unit| NodeUnitRef::new(other.clone(), unit)),
+        );
+    }
+    partners.into_iter().collect()
 }

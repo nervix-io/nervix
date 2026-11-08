@@ -496,24 +496,24 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(target.corpus.parent.name, target.test.replace("::", "__"))
             self.assertGreater(target.random_iterations, 0)
 
-    def test_inferencer_state_domains_include_the_required_model_field(self) -> None:
+    def test_model_domains_cover_current_placement_scopes_and_unit_selectors(self) -> None:
         versions = {
             target.id: target.domain_version for target in bolero.load_inventory().targets
         }
         for target, version in {
-            "plexus-model": 54,
-            "plexus-archive-model": 56,
-            "plexus-statement": 55,
-            "plexus-statement-text": 54,
-            "plexus-format-document": 54,
-            "plexus-format-text": 53,
-            "models-archived-models": 54,
-            "registry-archived-models": 49,
-            "consensus-state-records": 46,
-            "consensus-state-corruption": 46,
-            "consensus-raft-records": 45,
-            "registry-stored-models": 42,
-            "registry-stored-models-corruption": 42,
+            "plexus-model": 55,
+            "plexus-archive-model": 57,
+            "plexus-statement": 56,
+            "plexus-statement-text": 55,
+            "plexus-format-document": 55,
+            "plexus-format-text": 54,
+            "models-archived-models": 55,
+            "registry-archived-models": 50,
+            "consensus-state-records": 47,
+            "consensus-state-corruption": 47,
+            "consensus-raft-records": 46,
+            "registry-stored-models": 43,
+            "registry-stored-models-corruption": 43,
             "inferencer-tensor-columns": 1,
         }.items():
             with self.subTest(target=target):

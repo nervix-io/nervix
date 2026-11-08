@@ -104,7 +104,8 @@ selection, adoption and seed release. Restore retains the pending cut, so a dela
 resume it after the lifecycle advances. Count redistribution prepares the newest canonical
 generation and each actual owner's progress on every target primary and replica.
 
-The current archive uses format major `5`. Each unit-bearing record owns an eight-byte primitive
+The current archive uses format major `6`. Its domain record is version `2` and carries the
+domain pace and lifecycle; named placement rules are canonical Models in the model document. Each unit-bearing record owns an eight-byte primitive
 rank with four-byte alignment. Rank zero is `Single`, ranks one through `2^32` select the full
 32-bit partition range, and subsequent ranks select instance indices from zero. Every rank is a
 valid unit, and the instance range includes every ingestor index an allocation can materialize.
@@ -124,7 +125,7 @@ A reader verifies an archive as a stream, without seeking:
 
 1. The first header must be the regular `manifest.rkyv` entry within the 64 MiB record limit;
    anything else is refused before the manifest is read.
-2. The manifest must hold archive format major version `5`, valid domain names, no duplicate path,
+2. The manifest must hold archive format major version `6`, valid domain names, no duplicate path,
    and a known record kind for every record section.
 3. Every following entry must be the next section the manifest names, with that exact length,
    within its content kind's bound, and with that digest once its bytes are drained. A missing,
@@ -581,7 +582,7 @@ already recorded; its output is the plan, or a typed refusal. It runs as admitte
   archived upload must match its root checksum, which the plan compares with the upload section's
   verified digest, and must lie within its resource's declared sequence.
 - **Pinning.** Every binding of every model must name an imported completed version by number.
-- **Lifecycle.** The target is created stopped, with its archived pace, default placement, start
+- **Lifecycle.** The target is created stopped, with its archived pace, start
   generation and latest start point, and no clock mapping. With `RESUME`, the plan also carries the
   activation: running, with the archived clock mapping. A paced archive without a committed mapping
   cannot resume and is refused.

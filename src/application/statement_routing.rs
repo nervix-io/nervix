@@ -97,7 +97,6 @@ pub(in crate::application) fn is_persistent_statement(statement: &Statement) -> 
             statement,
             Statement::AlterCluster(_)
                 | Statement::CreateDomain(_)
-                | Statement::AlterDomain(_)
                 | Statement::CreateUser(_)
                 | Statement::CreateResource(_)
                 | Statement::StartDomain(_)

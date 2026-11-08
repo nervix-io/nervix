@@ -47,7 +47,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | MySQL table path parts, exact value bindings, duplicate-key actions, placeholder and packet limits, operation deadlines, TLS verification and identity file formats, the declared checkout budget, connection lifetimes and maintained pool minimums | `Emitters` → `MySQL`, `Database Client Connection Pools`, then `Connector Capabilities` → `MYSQL client` |
 | Postgres table path parts, the catalog query before each write, value bindings and the column types that read them, conflict rules, which SQLSTATEs reject a row and which retry, the `sslmode` policy and TLS trust, URL options and the node defaults the driver fills in, statement versus checkout deadlines, connection lifetimes, the borrow and return tests, and prepared statements behind a pooler | `Emitters` → `Postgres`, `Database Client Connection Pools`, then `Connector Capabilities` → `POSTGRES client` |
 | Sentry platform options, event defaults and limit, batch transformations, strict DSN/timeout configuration, the inherited HTTP transport, rejected versus retried statuses and retry hints | `Emitters` → `Sentry`, then `Connector Capabilities` |
-| Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
+| Execution-unit colocation, spreading preferences, path-gated rules, and named domain-wide placement | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
 | Session subscriptions and domain clock attachment | `Sessions` |
 | Configuration backups, their archives, bounded waits and exact-reference recovery, `DESCRIBE BACKUP`, and `RESTORE` | `Backup And Restore`; cut timeout phases and their elapsed measurements: `Backup And Restore Architecture` → `Observability` |
@@ -98,7 +98,7 @@ Capture these decisions before choosing syntax:
 
 | Concern | Questions to answer |
 | --- | --- |
-| Domain | Is input paced by event time or admitted on arrival? What are period, skew, restart semantics, and the default placement policy? |
+| Domain | Is input paced by event time or admitted on arrival? What are period, skew and restart semantics? |
 | Input contract | What sample payload and wire format arrive? Which fields are optional or sensitive? |
 | Runtime record | What exact internal type and nullability does each field have? |
 | Isolation | Which fields form the branch key? How long should inactive branches live? Is an instance cap required? |
@@ -106,7 +106,7 @@ Capture these decisions before choosing syntax:
 | Processing | Which records are filtered, transformed, deduplicated, reordered, aggregated, correlated, inferred, enriched, or handled by a trusted Roto UDF? |
 | State | Which relays are materialized? Should missing state wait, skip, or use a typed default? |
 | Output | Which connector or native client emitter, publishing mode, confirmation window/timeout, retry pacing, payload shape and size, codec or direct mapping, headers, sensitivity leaks, and application ACK boundary are required? |
-| Placement | Which connected corridors need hard or preferred colocation, which should spread softly, and what rule ranks express precedence? |
+| Placement | Which domain-wide or corridor rules are applicable to the unit classes, which units should stay together or spread softly, and what ranks express precedence? |
 | Operations | What input collection and output flush size/cadence, error behavior, TLS resources, metrics, and subscriptions are required? |
 
 If the user supplied a real payload, derive wire and internal schemas field by field and call out
@@ -117,8 +117,7 @@ keys.
 
 Use separate execution phases so transaction and active-domain rules stay clear.
 
-1. **Domain bootstrap:** create one paced or unpaced domain, including its optional placement
-   default, as its own server command. `CREATE DOMAIN` is never transaction content.
+1. **Domain bootstrap:** create one paced or unpaced domain as its own server command. `CREATE DOMAIN` is never transaction content.
 2. **Domain selection:** run `USE <domain>;` as a client-local command outside a transaction. A
    transaction cannot open until a selected domain exists.
 3. **Resources:** create resource declarations, then upload local directories as separate client
@@ -213,10 +212,12 @@ current connection, retry and deadline limits.
   rules. Validate connector capability, count addressability, constructing branch structure and
   Kafka offset ownership; inspect each instance with `DESCRIBE INGESTOR`.
 - Every referenced name is declared in the active domain before use.
-- Every placement rule has non-empty `FROM` and `TO` sets whose members already exist and are
-  schedulable runtime nodes. Every relay is eligible and participates in corridor coverage,
-  whether or not it has materialized state. Treat coverage as path-gated, allow a valid
-  zero-effect rule, use lower `RANK` numbers for stronger claims, and never invent hard separation.
+- A corridor rule has non-empty `FROM` and `TO` sets of existing schedulable runtime nodes; a
+  domain-wide rule covers every eligible hop without endpoint pins. Every relay participates,
+  materialized or not. Read `Placement Policies` for path-gated coverage, hop classes and exact-unit
+  relocation. Validate the winning policy on every hop, allow a valid empty corridor, and use
+  lower `RANK` numbers for stronger claims. Colocation joins corresponding units, never all
+  partitions merely because they belong to the same runtime node.
 - `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER` ingestors follow live cluster
   membership because their listeners execute on every cluster node. Every other ingestor, a
   `WEBSOCKETS CONNECTION` included, keeps its existing live primary and replicas through ordinary
@@ -798,8 +799,8 @@ Choose checks relevant to the configured graph:
 - `SHOW UDFS`, `DESCRIBE UDF <name>`, and `SHOW CREATE UDF <name>` inspect trusted Roto functions.
   Creation itself is the test gate: a rejecting Roto `test` block prevents persistence.
 - `SHOW PLACEMENTS`, `DESCRIBE PLACEMENT <name>`, `SHOW CREATE PLACEMENT <name>`, and
-  `DESCRIBE DOMAIN` inspect placement coverage, precedence, effective colocation groups, hosts, and
-  the domain default.
+  `DESCRIBE DOMAIN` inspect placement coverage, hop classes, effective policies, exact unit
+  groups, their hosts, and domain-wide scope.
 - `DESCRIBE RELOCATION ...;` shows the unit, quiesce level, gated relays, corridor coverage, and
   unsatisfied preferences a `RELOCATE` with the same clauses would execute, without moving
   anything.

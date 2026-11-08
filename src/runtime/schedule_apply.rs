@@ -2181,7 +2181,6 @@ mod tests {
                 id: domain.clone(),
                 config: DomainConfig {
                     pace: DomainPace::Unpaced,
-                    placement: nervix_models::PlacementPolicy::Neutral,
                 },
                 status: DomainStatus::Running,
                 start_version: 1,
@@ -2243,7 +2242,6 @@ mod tests {
             id: domain.clone(),
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
-                placement: nervix_models::PlacementPolicy::Neutral,
             },
             status: DomainStatus::Running,
             start_version: 1,
@@ -2321,7 +2319,6 @@ mod tests {
                 id: domain.clone(),
                 config: DomainConfig {
                     pace: DomainPace::Unpaced,
-                    placement: nervix_models::PlacementPolicy::Neutral,
                 },
                 status: DomainStatus::Running,
                 start_version: 1,

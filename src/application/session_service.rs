@@ -17,10 +17,9 @@
 use ahash::RandomState;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
-    Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection, ChoiceStatus,
-    ChoiceTarget, ChoiceValue, CommandRequest, DomainPaceChoice, NoticeKind, NoticeLevel,
-    ServerNotice, SuggestOutcome, SuggestRequest, Suggestion, SuggestionKind, SuggestionStatus,
-    TextEdit,
+    Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceStatus, ChoiceTarget,
+    ChoiceValue, CommandRequest, DomainPaceChoice, NoticeKind, NoticeLevel, ServerNotice,
+    SuggestOutcome, SuggestRequest, Suggestion, SuggestionKind, SuggestionStatus, TextEdit,
 };
 use nervix_consensus::{Administrator, CommandExecutionTransactionTarget, Proposer};
 use nervix_interconnect::Transport;
@@ -820,47 +819,38 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
                 },
             },
         ],
-        ChoiceTarget::PlacementPolicy
-            if matches!(
-                request.dependencies(),
-                [ChoiceSelection {
-                    value: ChoiceValue::DomainPace(_),
-                }]
-            ) =>
-        {
-            vec![
-                (
-                    PlacementPolicy::RequireColocation,
-                    "REQUIRE COLOCATION",
-                    "Place all domain work together",
-                ),
-                (
-                    PlacementPolicy::PreferColocation,
-                    "PREFER COLOCATION",
-                    "Prefer placing domain work together",
-                ),
-                (
-                    PlacementPolicy::Neutral,
-                    "NEUTRAL",
-                    "Apply no placement preference",
-                ),
-                (
-                    PlacementPolicy::SuggestSeparation,
-                    "SUGGEST SEPARATION",
-                    "Prefer spreading domain work across nodes",
-                ),
-            ]
-            .into_iter()
-            .map(|(value, label, detail)| Choice {
-                value: ChoiceValue::PlacementPolicy(value),
-                presentation: ChoicePresentation {
-                    label: label.to_string(),
-                    detail: Some(detail.to_string()),
-                    group: Some("Placement".to_string()),
-                },
-            })
-            .collect()
-        }
+        ChoiceTarget::PlacementPolicy if request.dependencies().is_empty() => vec![
+            (
+                PlacementPolicy::RequireColocation,
+                "REQUIRE COLOCATION",
+                "Keep corresponding units together",
+            ),
+            (
+                PlacementPolicy::PreferColocation,
+                "PREFER COLOCATION",
+                "Prefer keeping corresponding units together",
+            ),
+            (
+                PlacementPolicy::Neutral,
+                "NEUTRAL",
+                "Apply no placement preference",
+            ),
+            (
+                PlacementPolicy::SuggestSeparation,
+                "SUGGEST SEPARATION",
+                "Prefer separating corresponding units",
+            ),
+        ]
+        .into_iter()
+        .map(|(value, label, detail)| Choice {
+            value: ChoiceValue::PlacementPolicy(value),
+            presentation: ChoicePresentation {
+                label: label.to_string(),
+                detail: Some(detail.to_string()),
+                group: Some("Placement".to_string()),
+            },
+        })
+        .collect(),
         ChoiceTarget::DomainPace
         | ChoiceTarget::PlacementPolicy
         | ChoiceTarget::Schema
@@ -1757,6 +1747,7 @@ mod tests {
 
     use std::time::Duration;
 
+    use nervix_client_wire::ChoiceSelection;
     use nervix_models::{
         ClientName, ConnectorKind, EndpointName, EndpointType, HttpIngestorEntity,
         IngestorEntityKind, ModelKind, NodeRef, SyslogIngestorEntity,
@@ -1821,27 +1812,25 @@ mod tests {
 
     #[test]
     fn choice_pages_bind_typed_dependencies_search_candidates_and_revision() {
-        let request = |pace, search: &str, cursor| {
+        let request = |search: &str, cursor| {
             ChoiceLookupRequest::new(
                 ChoiceTarget::PlacementPolicy,
-                vec![ChoiceSelection {
-                    value: ChoiceValue::DomainPace(pace),
-                }],
+                Vec::new(),
                 search.to_string(),
             )
             .with_page(3, cursor)
             .assured("three choices fit the bounded page size")
         };
-        let first_request = request(DomainPaceChoice::Paced, "", None);
+        let first_request = request("", None);
         let basis = ChoicePageBasis::new(&first_request, 42);
         let candidates =
-            choices_for(&first_request).assured("a placement lookup carries its pace dependency");
+            choices_for(&first_request).assured("placement policy choices need no dependencies");
         let first = basis.page(&first_request, candidates.clone());
         assert_eq!(first.status, ChoiceStatus::Ready);
         assert_eq!(first.choices.len(), 3);
         let cursor = first.page_cursor.assured("the fourth choice remains");
 
-        let next_request = request(DomainPaceChoice::Paced, "", Some(cursor.clone()));
+        let next_request = request("", Some(cursor.clone()));
         let second = basis.page(&next_request, candidates);
         assert_eq!(second.status, ChoiceStatus::Ready);
         assert_eq!(
@@ -1901,41 +1890,26 @@ mod tests {
             ChoiceStatus::StaleContext
         );
 
-        let changed_dependency = request(DomainPaceChoice::Unpaced, "", Some(cursor.clone()));
-        assert_eq!(
-            ChoicePageBasis::new(&changed_dependency, 42)
-                .page(
-                    &changed_dependency,
-                    choices_for(&changed_dependency)
-                        .assured("the changed request still has a typed pace dependency"),
-                )
-                .status,
-            ChoiceStatus::StaleContext
-        );
         assert_eq!(
             ChoicePageBasis::new(&next_request, 43)
                 .page(
                     &next_request,
                     choices_for(&next_request)
-                        .assured("the continued request has a typed pace dependency"),
+                        .assured("the continued policy lookup has no dependencies"),
                 )
                 .status,
             ChoiceStatus::StaleContext
         );
 
-        let searched = request(DomainPaceChoice::Paced, "spreading", None);
+        let searched = request("separating", None);
         let searched =
-            choices_for(&searched).assured("the searched request has a typed pace dependency");
+            choices_for(&searched).assured("the searched policy lookup has no dependencies");
         assert_eq!(searched.len(), 1);
         assert_eq!(searched[0].presentation.label, "SUGGEST SEPARATION");
     }
 
     #[test]
     fn choice_lookup_reports_missing_typed_dependencies() {
-        let placement =
-            ChoiceLookupRequest::new(ChoiceTarget::PlacementPolicy, Vec::new(), String::new());
-        assert_eq!(choices_for(&placement), Err(ChoiceStatus::MissingContext));
-
         let pace = ChoiceLookupRequest::new(
             ChoiceTarget::DomainPace,
             vec![ChoiceSelection {

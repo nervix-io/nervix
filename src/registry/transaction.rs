@@ -24,13 +24,13 @@ use nervix_models::{
     ImpactAttribution, ImpactDiagnostic, ImpactDiagnosticKind, ImpactEffects, ImpactNodeCoverage,
     ImpactPlanningBasis, ImpactReportCompleteness, ImpactReportError, ImpactTopology,
     ImpactTopologyEdge, ModelChangeAspect, ModelIndex, NodeRef, OperationImpactReason,
-    OperationImpactReport, OwnershipMoveImpact, PauseRequirement, PlacementPolicy,
-    PlannedExecutionStepImpact, QuiesceLevel, QuiesceSubgraph, RebuildImpact, RebuildReason,
-    RequestedResourceVersion, ResetWasmState, ResetWasmStateSelectionError, ResourceBindingImpact,
-    ResourceCatalogAction, ResourceCatalogImpact, ResourceName, ResourceUploads,
-    ResourceVersionResolutionError, StateResetImpact, Statement, TransactionCommitPlanStep,
-    TransactionCommitStepKind, TransactionImpactReport, TransactionOperation,
-    TransactionOperationNumber, TransactionOperationRange, TransactionPosition,
+    OperationImpactReport, OwnershipMoveImpact, PauseRequirement, PlannedExecutionStepImpact,
+    QuiesceLevel, QuiesceSubgraph, RebuildImpact, RebuildReason, RequestedResourceVersion,
+    ResetWasmState, ResetWasmStateSelectionError, ResourceBindingImpact, ResourceCatalogAction,
+    ResourceCatalogImpact, ResourceName, ResourceUploads, ResourceVersionResolutionError,
+    StateResetImpact, Statement, TransactionCommitPlanStep, TransactionCommitStepKind,
+    TransactionImpactReport, TransactionOperation, TransactionOperationNumber,
+    TransactionOperationRange, TransactionPosition,
 };
 use thiserror::Error;
 
@@ -81,9 +81,6 @@ pub(crate) enum PlannedTransactionStepKind {
     Models {
         plan: Box<PlannedModelTransactionStep>,
     },
-    AlterDomain {
-        plan: Box<PlannedAlterDomainTransactionStep>,
-    },
     StartDomain {
         previous: ControlDomainState,
     },
@@ -107,16 +104,6 @@ pub(crate) struct PlannedModelTransactionStep {
     pub(crate) schedule: Option<DomainSchedule>,
     pub(crate) no_op_operations: BTreeSet<TransactionOperationNumber>,
     pub(crate) model_gate: EntityGatePlan,
-    pub(crate) ownership_gate: EntityGatePlan,
-}
-
-/// The captured state transition and schedule decision for one domain alteration.
-#[derive(Debug, Clone)]
-pub(crate) struct PlannedAlterDomainTransactionStep {
-    pub(crate) previous: ControlDomainState,
-    pub(crate) next: ControlDomainState,
-    pub(crate) expected_schedule: Option<DomainSchedule>,
-    pub(crate) schedule: Option<DomainSchedule>,
     pub(crate) ownership_gate: EntityGatePlan,
 }
 
@@ -462,19 +449,6 @@ impl Registry {
                     }),
                 }
             }
-            TransactionCommitStepKind::AlterDomain {
-                next,
-                schedule,
-                ownership_gate,
-            } => PlannedTransactionStepKind::AlterDomain {
-                plan: Box::new(PlannedAlterDomainTransactionStep {
-                    previous,
-                    next: *next,
-                    expected_schedule,
-                    schedule: schedule.map(|schedule| *schedule),
-                    ownership_gate: EntityGatePlan::from_commit_plan(ownership_gate),
-                }),
-            },
             TransactionCommitStepKind::StartDomain { .. } => {
                 PlannedTransactionStepKind::StartDomain { previous }
             }
@@ -514,7 +488,6 @@ impl Registry {
     where
         F: FnMut(
             Option<ActiveGraph>,
-            PlacementPolicy,
             Option<&DomainSchedule>,
             &ImpactAttribution,
         ) -> TransactionScheduleDecision,
@@ -596,76 +569,6 @@ impl Registry {
             let kind;
             let pause;
             match statement {
-                Statement::AlterDomain(alter) => {
-                    ensure_domain_not_paused(&domain_state)?;
-                    operation = TransactionOperation::AlterDomain {
-                        domain: domain.clone(),
-                    };
-                    let previous = domain_state.clone();
-                    let changed = previous.config.placement != alter.policy;
-                    domain_state.config.placement = alter.policy;
-                    let expected_schedule = current_schedule.clone();
-                    let active_graph = if changed {
-                        Some(
-                            crate::registry::domain_state::DomainState::build(&domain, &models)
-                                .change_context(TransactionPlanningError::ModelPreflight {
-                                    operation: number,
-                                })?
-                                .graph,
-                        )
-                    } else {
-                        None
-                    };
-                    let schedule_decision = if let Some(graph) = &active_graph {
-                        schedule(
-                            (graph.node_count() > 0).then_some(graph.clone()),
-                            alter.policy,
-                            current_schedule.as_ref(),
-                            &attribution,
-                        )
-                    } else {
-                        TransactionScheduleDecision {
-                            schedule: current_schedule.clone(),
-                            ownership_moves: CanonicalImpactSet::default(),
-                        }
-                    };
-                    let ownership_moves = schedule_decision.ownership_moves;
-                    let completed = complete_placement_impact(
-                        &domain,
-                        active_graph.as_ref(),
-                        expected_schedule.as_ref(),
-                        schedule_decision.schedule.as_ref(),
-                        &ownership_moves,
-                        &attribution,
-                        matches!(domain_state.status, DomainStatus::Running),
-                    );
-                    pause = effective_pause(
-                        &domain,
-                        &domain_state.status,
-                        if ownership_moves.is_empty() {
-                            QuiesceLevel::Dynamic
-                        } else {
-                            QuiesceLevel::EntityPause
-                        },
-                        completed.subgraph,
-                    );
-                    reasons = if changed {
-                        vec![OperationImpactReason::DomainPlacement]
-                    } else {
-                        Vec::new()
-                    };
-                    contribution = completed.effects;
-                    current_schedule = schedule_decision.schedule.clone();
-                    kind = PlannedTransactionStepKind::AlterDomain {
-                        plan: Box::new(PlannedAlterDomainTransactionStep {
-                            previous,
-                            next: domain_state.clone(),
-                            expected_schedule,
-                            schedule: schedule_decision.schedule,
-                            ownership_gate: completed.ownership_gate,
-                        }),
-                    };
-                }
                 Statement::StartDomain(start) => {
                     ensure_domain_not_paused(&domain_state)?;
                     if let DomainStatus::Running = domain_state.status {
@@ -841,7 +744,6 @@ impl Registry {
     where
         F: FnMut(
             Option<ActiveGraph>,
-            PlacementPolicy,
             Option<&DomainSchedule>,
             &ImpactAttribution,
         ) -> TransactionScheduleDecision,
@@ -1004,7 +906,6 @@ impl Registry {
                 } else {
                     let decision = schedule(
                         planned.candidate_graph(),
-                        domain_state.config.placement,
                         current_schedule.as_ref(),
                         &attribution,
                     );
@@ -1511,140 +1412,6 @@ fn complete_model_impact(input: ModelImpactInput<'_>) -> CompletedModelImpact {
         model_gate,
         ownership_gate,
     }
-}
-
-fn complete_placement_impact(
-    domain: &DomainName,
-    graph: Option<&ActiveGraph>,
-    current_schedule: Option<&DomainSchedule>,
-    next_schedule: Option<&DomainSchedule>,
-    ownership_moves: &CanonicalImpactSet<OwnershipMoveImpact>,
-    attribution: &ImpactAttribution,
-    running: bool,
-) -> CompletedModelImpact {
-    let moved_entities = ownership_moves
-        .as_slice()
-        .iter()
-        .map(|moved| nervix_models::NodeUnitRef::new(moved.node.node.clone(), moved.unit));
-    let ownership_gate =
-        EntityGatePlan::for_ownership_handoff(current_schedule, next_schedule, moved_entities);
-    let mut pause_nodes =
-        BTreeMap::<ImpactNodeCoverage, BTreeSet<TransactionOperationNumber>>::new();
-    let mut pause_entity_operations =
-        BTreeMap::<NodeRef, BTreeSet<TransactionOperationNumber>>::new();
-    if running {
-        add_ownership_pause_nodes(
-            &ownership_gate,
-            current_schedule,
-            next_schedule,
-            ownership_moves,
-            attribution,
-            &mut pause_nodes,
-            &mut pause_entity_operations,
-        );
-    }
-    let no_ownership_gate = EntityGatePlan::default();
-    let reported_ownership_gate = if running {
-        &ownership_gate
-    } else {
-        &no_ownership_gate
-    };
-    let gate_boundaries = attributed_gate_boundaries(
-        &EntityGatePlan::default(),
-        reported_ownership_gate,
-        current_schedule,
-        next_schedule,
-        &pause_entity_operations,
-        attribution,
-    );
-    let subgraph = QuiesceSubgraph::new(
-        domain.clone(),
-        pause_nodes
-            .into_iter()
-            .map(|(coverage, operations)| AttributedImpactNode {
-                coverage,
-                attribution: impact_attribution(operations),
-            }),
-        gate_boundaries,
-    );
-
-    let mut effects = ImpactEffects {
-        ownership_moves: ownership_moves.clone(),
-        ..ImpactEffects::default()
-    };
-    if let Some(graph) = graph {
-        let affected = ownership_gate
-            .affected_entities()
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let affected = graph.nodes_impact(&affected);
-        let topology = graph.with_configuration_dependencies(&affected);
-        let mut before = ImpactTopologyBuilder::default();
-        before.add(topology.clone(), attribution);
-        let mut after = ImpactTopologyBuilder::default();
-        after.add(topology, attribution);
-        effects.topology = AffectedTopology {
-            before: before.into_topology(),
-            after: after.into_topology(),
-        };
-        if running && !ownership_moves.is_empty() {
-            effects.force_flushes = CanonicalImpactSet::new(
-                graph
-                    .whole_impact()
-                    .nodes
-                    .into_iter()
-                    .filter(|coverage| coverage.branches.is_some())
-                    .map(|node| ForceFlushImpact {
-                        node,
-                        attribution: attribution.clone(),
-                    }),
-            );
-        }
-    }
-
-    let mut activations = Vec::new();
-    let mut rebuilds = Vec::new();
-    for moved in ownership_moves {
-        let before = scheduled_coverage(current_schedule, &moved.node.node);
-        let after = scheduled_coverage(next_schedule, &moved.node.node);
-        if let Some(node) = before {
-            activations.push(ActivationImpact {
-                node,
-                action: ActivationAction::Deactivate,
-                attribution: moved.attribution.clone(),
-            });
-        }
-        if let Some(node) = after {
-            activations.push(ActivationImpact {
-                node: node.clone(),
-                action: ActivationAction::Activate,
-                attribution: moved.attribution.clone(),
-            });
-            rebuilds.push(RebuildImpact {
-                node,
-                reason: RebuildReason::Ownership,
-                attribution: moved.attribution.clone(),
-            });
-        }
-    }
-    effects.activations = CanonicalImpactSet::new(activations);
-    effects.rebuilds = CanonicalImpactSet::new(rebuilds);
-    CompletedModelImpact {
-        effects,
-        subgraph,
-        model_gate: EntityGatePlan::default(),
-        ownership_gate,
-    }
-}
-
-fn scheduled_coverage(
-    schedule: Option<&DomainSchedule>,
-    entity: &NodeRef,
-) -> Option<ImpactNodeCoverage> {
-    let schedule = schedule?;
-    let node = schedule.nodes.get(entity)?;
-    Some(scheduled_impact_coverage(node))
 }
 
 fn impact_for_change(

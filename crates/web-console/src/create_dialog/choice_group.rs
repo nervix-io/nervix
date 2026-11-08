@@ -137,7 +137,7 @@ pub(super) fn selected_choice(
             signals.domain.get().pace == *value
         }
         (ChoiceControl::PlacementPolicy, ChoiceValue::PlacementPolicy(value)) => {
-            signals.domain.get().placement == *value
+            signals.placement.get().policy == *value
         }
         (ChoiceControl::BranchSchema, ChoiceValue::Model(node)) => {
             signals.structured.get().branch.selects_schema(node)
@@ -359,7 +359,7 @@ pub(super) fn select_choice(signals: CreateSignals, control: ChoiceControl, valu
             signals.domain.update(|draft| draft.pace = value);
         }
         (ChoiceControl::PlacementPolicy, ChoiceValue::PlacementPolicy(value)) => {
-            signals.domain.update(|draft| draft.placement = value);
+            signals.placement.update(|draft| draft.policy = value);
         }
         (ChoiceControl::BranchSchema, ChoiceValue::Model(node)) => {
             signals

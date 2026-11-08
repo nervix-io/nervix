@@ -18,28 +18,28 @@ use ahash::{HashMap, HashMapExt, HashSet};
 use error_stack::Report;
 use meticulous::OptionExt;
 use nervix_models::{
-    CreatePlacement, DomainName, Model, ModelIndex, ModelKind, ModelName, NodeRef, PlacementName,
-    PlacementPolicy, RelayName,
+    CreatePlacement, DomainName, Model, ModelIndex, ModelKind, ModelName, NodeRef, NodeUnitRef,
+    PlacementName, PlacementPolicy, PlacementScope, RelayName,
 };
 use petgraph::{Direction, graph::DiGraph, prelude::NodeIndex, visit::EdgeRef};
 
 use crate::registry::{
     error::RegistryError,
-    graph::{ActiveNode, EdgeKind},
+    graph::{ActiveGraph, ActiveNode, EdgeKind},
+    unit_placement::{HopClass, UnitCorrespondence, UnitPlacementGroups},
     validation::materialized_state::model_materialized_state_dependencies,
 };
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PlacementPlan {
     pub(crate) rules: Vec<PlacementRulePlan>,
-    pub(in crate::registry) effective_pairs: Vec<PlacementEffectivePair>,
+    pub(crate) effective_pairs: Vec<PlacementEffectivePair>,
     pub(crate) require_groups: Vec<PlacementRequireGroupPlan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PlacementRulePlan {
     pub(crate) name: ModelName,
-    pub(in crate::registry) from: Vec<ModelName>,
-    pub(in crate::registry) to: Vec<ModelName>,
+    pub(crate) scope: PlacementScope,
     pub(crate) policy: PlacementPolicy,
     pub(crate) rank: Option<NonZeroU64>,
     pub(crate) endpoint_pairs: Vec<PlacementEndpointPairPlan>,
@@ -67,6 +67,7 @@ pub(crate) struct PlacementRuleClaimPlan {
     pub(crate) right: NodeRef,
     pub(crate) effective: bool,
     pub(crate) effective_policy: PlacementPolicy,
+    pub(crate) class: HopClass,
     pub(crate) winning_rules: Vec<PlacementName>,
 }
 
@@ -74,14 +75,14 @@ pub(crate) struct PlacementRuleClaimPlan {
 pub(crate) struct PlacementEffectivePair {
     pub(crate) left: NodeRef,
     pub(crate) right: NodeRef,
-    pub(in crate::registry) policy: PlacementPolicy,
+    pub(crate) policy: PlacementPolicy,
     pub(crate) winning_rules: Vec<PlacementName>,
-    pub(in crate::registry) from_domain_default: bool,
+    pub(crate) class: HopClass,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PlacementRequireGroupPlan {
-    pub(crate) members: Vec<NodeRef>,
+    pub(crate) members: Vec<NodeUnitRef>,
     pub(crate) bonds: Vec<PlacementEffectivePair>,
 }
 
@@ -93,17 +94,7 @@ pub(in crate::registry) struct PlacementPair {
 
 impl PlacementPair {
     fn new(left: NodeRef, right: NodeRef) -> Option<Self> {
-        if left == right {
-            return None;
-        }
-        if left <= right {
-            Some(Self { left, right })
-        } else {
-            Some(Self {
-                left: right,
-                right: left,
-            })
-        }
+        (left != right).then_some(Self { left, right })
     }
 
     fn runtime_nodes(&self) -> (NodeRef, NodeRef) {
@@ -135,16 +126,15 @@ struct PlacementClaim {
 
 #[derive(Debug, Clone)]
 pub(in crate::registry) struct ResolvedPlacementPair {
-    pub(in crate::registry) policy: PlacementPolicy,
+    pub(crate) policy: PlacementPolicy,
     pub(in crate::registry) winning_rules: Vec<PlacementName>,
-    pub(in crate::registry) from_domain_default: bool,
+    pub(in crate::registry) correspondence: UnitCorrespondence,
 }
 
 #[derive(Debug, Clone, Default)]
 pub(in crate::registry) struct PlacementAnalysis {
     rules: Vec<PlacementRuleAnalysis>,
     explicit_pairs: HashMap<PlacementPair, ResolvedPlacementPair>,
-    direct_pairs: HashSet<PlacementPair>,
     /// Retained so a relocation corridor can be covered between endpoints no placement rule
     /// names, using the same path-gated coverage the rules use.
     pub(in crate::registry) topology: PlacementTopology,
@@ -153,7 +143,6 @@ pub(in crate::registry) struct PlacementAnalysis {
 #[derive(Debug, Clone)]
 pub(in crate::registry) struct EffectivePlacementPlan {
     pub(in crate::registry) pairs: HashMap<PlacementPair, ResolvedPlacementPair>,
-    pub(in crate::registry) require_groups: Vec<Vec<NodeRef>>,
 }
 
 impl PlacementAnalysis {
@@ -173,6 +162,7 @@ impl PlacementAnalysis {
             .collect::<Vec<_>>();
         placement_models.sort_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
 
+        let direct_pairs = topology.direct_pairs();
         let mut rules = Vec::with_capacity(placement_models.len());
         let mut claims_by_pair = HashMap::<PlacementPair, Vec<PlacementClaim>>::new();
         for placement in placement_models {
@@ -183,49 +173,53 @@ impl PlacementAnalysis {
                 .get(&NodeRef::new(ModelKind::Placement, placement.name.clone()))
                 .copied()
                 .verified("the pass above added a graph node for every placement");
-            let from = resolve_placement_members(domain, &placement, &placement.from, models)?;
-            let to = resolve_placement_members(domain, &placement, &placement.to, models)?;
-
-            let mut pinned = HashSet::default();
-            for member in from.iter().chain(&to) {
-                if pinned.insert(member.pin.clone()) {
-                    let pin_index = indices.get(&member.pin).copied().verified(
-                        "resolve_placement_members resolved every pin against this same index map",
-                    );
-                    graph.add_edge(pin_index, placement_index, EdgeKind::RequiredBy);
-                }
-            }
-
             let mut endpoint_pairs = Vec::new();
             let mut claimed_pairs = HashSet::default();
-            for source in &from {
-                for destination in &to {
-                    let endpoint = topology
-                        .endpoint_analysis(source.runtime.clone(), destination.runtime.clone());
-                    for left_index in 0..endpoint.corridor.len() {
-                        for right_index in left_index + 1..endpoint.corridor.len() {
-                            let pair = PlacementPair::new(
-                                endpoint.corridor[left_index].clone(),
-                                endpoint.corridor[right_index].clone(),
-                            )
-                            .verified(
-                                "the two indices address different corridor positions, so the \
-                                 members differ",
-                            );
-                            if claimed_pairs.insert(pair.clone()) {
-                                claims_by_pair
-                                    .entry(pair)
-                                    .or_default()
-                                    .push(PlacementClaim {
-                                        rule: placement.name.clone(),
-                                        policy: placement.policy,
-                                        rank: placement.rank,
-                                    });
-                            }
+            match &placement.scope {
+                PlacementScope::DomainWide => claimed_pairs.extend(direct_pairs.iter().cloned()),
+                PlacementScope::Corridor { from, to } => {
+                    let from = resolve_placement_members(domain, &placement, from, models)?;
+                    let to = resolve_placement_members(domain, &placement, to, models)?;
+                    let mut pinned = HashSet::default();
+                    for member in from.iter().chain(&to) {
+                        if pinned.insert(member.pin.clone()) {
+                            let pin_index = indices
+                                .get(&member.pin)
+                                .copied()
+                                .verified("resolved placement pins belong to this graph");
+                            graph.add_edge(pin_index, placement_index, EdgeKind::RequiredBy);
                         }
                     }
-                    endpoint_pairs.push(endpoint);
+                    for source in &from {
+                        for destination in &to {
+                            let endpoint = topology.endpoint_analysis(
+                                source.runtime.clone(),
+                                destination.runtime.clone(),
+                            );
+                            let corridor = endpoint.corridor.iter().collect::<HashSet<_>>();
+                            claimed_pairs.extend(
+                                direct_pairs
+                                    .iter()
+                                    .filter(|pair| {
+                                        corridor.contains(&pair.left)
+                                            && corridor.contains(&pair.right)
+                                    })
+                                    .cloned(),
+                            );
+                            endpoint_pairs.push(endpoint);
+                        }
+                    }
                 }
+            }
+            for pair in &claimed_pairs {
+                claims_by_pair
+                    .entry(pair.clone())
+                    .or_default()
+                    .push(PlacementClaim {
+                        rule: placement.name.clone(),
+                        policy: placement.policy,
+                        rank: placement.rank,
+                    });
             }
             rules.push(PlacementRuleAnalysis {
                 model: placement,
@@ -269,54 +263,50 @@ impl PlacementAnalysis {
                 .map(|claim| claim.rule.clone())
                 .collect::<Vec<_>>();
             winning_rules.dedup();
+            let correspondence = hop_correspondence(&pair, indices, graph);
+            if !correspondence.class.permits(policy) {
+                return Err(Report::new(RegistryError::PlacementHopPolicy {
+                    domain: domain.clone(),
+                    from: pair.left.clone(),
+                    to: pair.right.clone(),
+                    class: correspondence.class,
+                    policy,
+                    rules: winning_rules,
+                }));
+            }
             explicit_pairs.insert(
                 pair,
                 ResolvedPlacementPair {
                     policy,
                     winning_rules,
-                    from_domain_default: false,
+                    correspondence,
                 },
             );
         }
 
+        for pair in direct_pairs {
+            let correspondence = hop_correspondence(&pair, indices, graph);
+            explicit_pairs.entry(pair).or_insert(ResolvedPlacementPair {
+                policy: PlacementPolicy::Neutral,
+                winning_rules: Vec::new(),
+                correspondence,
+            });
+        }
         Ok(Self {
             rules,
             explicit_pairs,
-            direct_pairs: topology.direct_pairs(),
             topology,
         })
     }
 
-    pub(in crate::registry) fn effective(
-        &self,
-        default_policy: PlacementPolicy,
-    ) -> EffectivePlacementPlan {
-        let mut pairs = self.explicit_pairs.clone();
-        for pair in &self.direct_pairs {
-            pairs
-                .entry(pair.clone())
-                .or_insert_with(|| ResolvedPlacementPair {
-                    policy: default_policy,
-                    winning_rules: Vec::new(),
-                    from_domain_default: true,
-                });
-        }
-
-        let require_pairs = pairs
-            .iter()
-            .filter_map(|(pair, resolved)| {
-                (resolved.policy == PlacementPolicy::RequireColocation).then_some(pair.clone())
-            })
-            .collect::<Vec<_>>();
-        let require_groups = placement_require_groups(&require_pairs);
+    pub(in crate::registry) fn effective(&self) -> EffectivePlacementPlan {
         EffectivePlacementPlan {
-            pairs,
-            require_groups,
+            pairs: self.explicit_pairs.clone(),
         }
     }
 
-    pub(in crate::registry) fn plan(&self, default_policy: PlacementPolicy) -> PlacementPlan {
-        let effective = self.effective(default_policy);
+    pub(in crate::registry) fn plan(&self, graph: &ActiveGraph) -> PlacementPlan {
+        let effective = self.effective();
         let mut effective_pairs = effective
             .pairs
             .iter()
@@ -342,6 +332,7 @@ impl PlacementAnalysis {
                             right,
                             effective: resolved.winning_rules.contains(&rule.model.name),
                             effective_policy: resolved.policy,
+                            class: resolved.correspondence.class,
                             winning_rules: resolved.winning_rules.clone(),
                         }
                     })
@@ -349,8 +340,7 @@ impl PlacementAnalysis {
                 claims.sort_by(placement_rule_claim_cmp);
                 PlacementRulePlan {
                     name: ModelName::from(&rule.model.name),
-                    from: rule.model.from.clone(),
-                    to: rule.model.to.clone(),
+                    scope: rule.model.scope.clone(),
                     policy: rule.model.policy,
                     rank: rule.model.rank,
                     endpoint_pairs: rule
@@ -364,21 +354,13 @@ impl PlacementAnalysis {
             .collect::<Vec<_>>();
         rules.sort_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
 
-        let require_groups = effective
-            .require_groups
+        let unit_groups = UnitPlacementGroups::decide(graph, &effective);
+        let bonds = placement_group_bonds(&unit_groups, &effective);
+        let require_groups = unit_groups
+            .groups
             .iter()
-            .map(|members| {
-                let member_set = members.iter().cloned().collect::<HashSet<_>>();
-                let mut bonds = effective
-                    .pairs
-                    .iter()
-                    .filter(|(pair, resolved)| {
-                        resolved.policy == PlacementPolicy::RequireColocation
-                            && member_set.contains(&pair.left)
-                            && member_set.contains(&pair.right)
-                    })
-                    .map(|(pair, resolved)| placement_effective_pair(pair, resolved))
-                    .collect::<Vec<_>>();
+            .zip(bonds)
+            .map(|(members, mut bonds)| {
                 bonds.sort_by(placement_effective_pair_cmp);
                 PlacementRequireGroupPlan {
                     members: members.to_vec(),
@@ -393,6 +375,51 @@ impl PlacementAnalysis {
             require_groups,
         }
     }
+}
+
+/// Every left unit on a hard hop is bonded to its corresponding right unit. Index the groups
+/// containing that left node once, and emit the hop once for each of those groups.
+fn placement_group_bonds(
+    groups: &UnitPlacementGroups,
+    effective: &EffectivePlacementPlan,
+) -> Vec<Vec<PlacementEffectivePair>> {
+    let mut by_node = HashMap::<&NodeRef, Vec<usize>>::default();
+    for (index, members) in groups.groups.iter().enumerate() {
+        for member in members {
+            let indices = by_node.entry(&member.node).or_default();
+            if indices.last() != Some(&index) {
+                indices.push(index);
+            }
+        }
+    }
+    let mut bonds = vec![Vec::new(); groups.groups.len()];
+    for (pair, resolved) in &effective.pairs {
+        if resolved.policy != PlacementPolicy::RequireColocation {
+            continue;
+        }
+        let indices = by_node
+            .get(&pair.left)
+            .verified("every validated hard hop belongs to a unit component");
+        let bond = placement_effective_pair(pair, resolved);
+        for index in indices {
+            bonds[*index].push(bond.clone());
+        }
+    }
+    bonds
+}
+
+fn hop_correspondence(
+    pair: &PlacementPair,
+    indices: &HashMap<NodeRef, NodeIndex>,
+    graph: &DiGraph<ActiveNode, EdgeKind>,
+) -> UnitCorrespondence {
+    let left = graph
+        .node_weight(indices[&pair.left])
+        .verified("a direct hop belongs to the validated graph");
+    let right = graph
+        .node_weight(indices[&pair.right])
+        .verified("a direct hop belongs to the validated graph");
+    UnitCorrespondence::decide(left, right)
 }
 
 #[derive(Debug, Clone)]
@@ -494,6 +521,24 @@ impl PlacementTopology {
             reverse.insert(target, sources);
         }
         Self { adjacency, reverse }
+    }
+
+    pub(in crate::registry) fn adjacent_hops<'a>(
+        &'a self,
+        subject: &'a NodeRef,
+    ) -> impl Iterator<Item = (&'a NodeRef, bool)> {
+        self.adjacency
+            .get(subject)
+            .into_iter()
+            .flatten()
+            .map(|other| (other, true))
+            .chain(
+                self.reverse
+                    .get(subject)
+                    .into_iter()
+                    .flatten()
+                    .map(|other| (other, false)),
+            )
     }
 
     fn direct_pairs(&self) -> HashSet<PlacementPair> {
@@ -770,7 +815,7 @@ fn placement_effective_pair(
         right,
         policy: resolved.policy,
         winning_rules: resolved.winning_rules.clone(),
-        from_domain_default: resolved.from_domain_default,
+        class: resolved.correspondence.class,
     }
 }
 
@@ -790,57 +835,6 @@ fn placement_rule_claim_cmp(
     left.left
         .cmp(&right.left)
         .then_with(|| left.right.cmp(&right.right))
-}
-
-fn placement_require_groups(require_pairs: &[PlacementPair]) -> Vec<Vec<NodeRef>> {
-    let mut parent = HashMap::<NodeRef, NodeRef>::new();
-    for pair in require_pairs {
-        parent
-            .entry(pair.left.clone())
-            .or_insert_with(|| pair.left.clone());
-        parent
-            .entry(pair.right.clone())
-            .or_insert_with(|| pair.right.clone());
-        placement_union(&mut parent, &pair.left, &pair.right);
-    }
-    let members = parent.keys().cloned().collect::<Vec<_>>();
-    let mut groups = HashMap::<NodeRef, Vec<NodeRef>>::new();
-    for member in members {
-        let root = placement_find(&mut parent, &member);
-        groups.entry(root).or_default().push(member);
-    }
-    let mut groups = groups.into_values().collect::<Vec<_>>();
-    for group in &mut groups {
-        group.sort();
-    }
-    groups.sort_by(|left, right| left[0].cmp(&right[0]));
-    groups
-}
-
-fn placement_find(parent: &mut HashMap<NodeRef, NodeRef>, member: &NodeRef) -> NodeRef {
-    let direct = parent
-        .get(member)
-        .cloned()
-        .verified("every member is inserted into the parent map before find runs over it");
-    if direct == *member {
-        return direct;
-    }
-    let root = placement_find(parent, &direct);
-    parent.insert(member.clone(), root.clone());
-    root
-}
-
-fn placement_union(parent: &mut HashMap<NodeRef, NodeRef>, left: &NodeRef, right: &NodeRef) {
-    let left_root = placement_find(parent, left);
-    let right_root = placement_find(parent, right);
-    if left_root == right_root {
-        return;
-    }
-    if left_root <= right_root {
-        parent.insert(right_root, left_root);
-    } else {
-        parent.insert(left_root, right_root);
-    }
 }
 
 #[cfg(test)]
@@ -865,7 +859,7 @@ mod tests {
     };
 
     #[test]
-    fn placement_corridor_claims_every_runtime_pair_and_reports_witnesses() {
+    fn placement_corridor_claims_direct_hops_and_reports_witnesses() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = DomainName::parse("placement_corridor").expect("valid domain");
@@ -884,7 +878,7 @@ mod tests {
         let plan = registry
             .active_graph(&domain)
             .expect("graph should be installed")
-            .placement_plan(PlacementPolicy::Neutral);
+            .placement_plan();
         let rule = &plan.rules[0];
         assert_eq!(rule.name, named("critical_path"));
         assert_eq!(rule.endpoint_pairs.len(), 1);
@@ -902,7 +896,11 @@ mod tests {
             corridor,
             vec!["emit", "ing", "notifications", "p99", "p99_proc"]
         );
-        assert_eq!(rule.claims.len(), 10, "a five-member corridor is a clique");
+        assert_eq!(
+            rule.claims.len(),
+            4,
+            "the five runtime nodes are joined by four direct hops"
+        );
         assert_eq!(endpoint.witnesses.len(), 3);
         let mut captured = endpoint
             .witnesses
@@ -949,7 +947,7 @@ mod tests {
         let plan = registry
             .active_graph(&domain)
             .expect("graph should be installed")
-            .placement_plan(PlacementPolicy::Neutral);
+            .placement_plan();
         assert_eq!(plan.rules.len(), 1);
         assert!(!plan.rules[0].endpoint_pairs[0].connected);
         assert!(plan.rules[0].endpoint_pairs[0].corridor.is_empty());
@@ -957,6 +955,70 @@ mod tests {
         assert!(plan.require_groups.is_empty());
 
         let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn placement_inspection_keeps_partition_bonds_aligned_and_deduplicates_a_fiber() {
+        use std::collections::BTreeSet;
+
+        use nervix_models::{BranchPartitions, UnitKind};
+
+        for target in ["p99", "emit"] {
+            let path = temp_db_path();
+            let registry = Registry::open(&path).expect("registry opens");
+            let domain = DomainName::parse("partition_bonds").expect("valid domain");
+            let mut models = full_graph_batch();
+            for model in &mut models {
+                if let Model::Branch(branch) = model {
+                    branch.partitions = BranchPartitions::Direct(nonzero!(2u16));
+                }
+            }
+            models.push(placement(
+                "local_units",
+                &["notifications"],
+                &[target],
+                PlacementPolicy::RequireColocation,
+                None,
+            ));
+            registry.apply_batch(&domain, models).expect("valid graph");
+            let plan = registry
+                .active_graph(&domain)
+                .expect("active graph")
+                .placement_plan();
+            let fiber = target == "emit";
+            assert_eq!(plan.require_groups.len(), if fiber { 1 } else { 2 });
+            for group in &plan.require_groups {
+                assert_eq!(group.members.len(), if fiber { 7 } else { 3 });
+                let partitions = group
+                    .members
+                    .iter()
+                    .filter_map(|member| match member.unit.kind() {
+                        UnitKind::Partition(index) => Some(index),
+                        _ => None,
+                    })
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(partitions.len(), if fiber { 2 } else { 1 });
+                let mut expected =
+                    BTreeSet::from([("notifications", "p99_proc"), ("p99_proc", "p99")]);
+                if fiber {
+                    expected.insert(("p99", "emit"));
+                }
+                let actual = group
+                    .bonds
+                    .iter()
+                    .map(|bond| {
+                        (
+                            bond.left.identifier.as_str(),
+                            bond.right.identifier.as_str(),
+                        )
+                    })
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(actual, expected);
+                assert_eq!(group.bonds.len(), expected.len());
+            }
+            drop(registry);
+            fs::remove_dir_all(path).expect("remove test database");
+        }
     }
 
     #[test]
@@ -988,7 +1050,7 @@ mod tests {
         let plan = registry
             .active_graph(&domain)
             .expect("graph should be installed")
-            .placement_plan(PlacementPolicy::Neutral);
+            .placement_plan();
         let effective = plan
             .effective_pairs
             .iter()
@@ -997,7 +1059,7 @@ mod tests {
                     pair.left.identifier.as_str(),
                     pair.right.identifier.as_str(),
                 ];
-                names.contains(&"ing") && names.contains(&"p99_proc")
+                names.contains(&"ing") && names.contains(&"notifications")
             })
             .expect("rule pair should be effective");
         assert_eq!(effective.policy, PlacementPolicy::SuggestSeparation);
@@ -1102,7 +1164,7 @@ mod tests {
         let plan = registry
             .active_graph(&domain)
             .expect("graph should be installed")
-            .placement_plan(PlacementPolicy::Neutral);
+            .placement_plan();
         let endpoint = &plan.rules[0].endpoint_pairs[0];
         assert!(endpoint.connected);
         assert_eq!(endpoint.source.kind, ModelKind::Relay);
@@ -1133,7 +1195,7 @@ mod tests {
         let relay_plan = relay_registry
             .active_graph(&relay_domain)
             .expect("relay graph should be installed")
-            .placement_plan(PlacementPolicy::Neutral);
+            .placement_plan();
         assert_eq!(
             relay_plan.rules[0].endpoint_pairs[0].source.kind,
             ModelKind::Relay
@@ -1317,23 +1379,33 @@ mod tests {
     }
 
     #[test]
-    fn placement_default_require_forms_a_connected_component_from_per_hop_claims() {
+    fn domain_wide_require_forms_a_connected_component_from_per_hop_claims() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
-        let domain = DomainName::parse("placement_default_require").expect("valid domain");
+        let domain = DomainName::parse("placement_domain_require").expect("valid domain");
+        let mut models = full_graph_batch();
+        models.push(Model::Placement(CreatePlacement::domain_wide(
+            named("domain_rule"),
+            PlacementPolicy::RequireColocation,
+            None,
+        )));
         registry
-            .apply_batch(&domain, full_graph_batch())
+            .apply_batch(&domain, models)
             .expect("graph should validate");
         let graph = registry
             .active_graph(&domain)
             .expect("graph should be installed");
-        let plan = graph.placement_plan(PlacementPolicy::RequireColocation);
+        let plan = graph.placement_plan();
 
-        assert_eq!(plan.effective_pairs.len(), 4, "the default is per-hop");
+        assert_eq!(
+            plan.effective_pairs.len(),
+            4,
+            "the named rule covers direct hops"
+        );
         assert!(
             plan.effective_pairs
                 .iter()
-                .all(|pair| pair.from_domain_default)
+                .all(|pair| pair.winning_rules == vec![named("domain_rule")])
         );
         assert_eq!(plan.require_groups.len(), 1);
         assert_eq!(plan.require_groups[0].members.len(), 5);
@@ -1344,7 +1416,6 @@ mod tests {
                 ClusterNodeName::parse("node-2").expect("valid name"),
             ],
             0,
-            PlacementPolicy::RequireColocation,
         );
         let owner = scheduled_node(&schedule, ModelKind::Ingestor, "ing")
             .assigned_single_node()

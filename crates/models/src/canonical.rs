@@ -50,12 +50,12 @@ use crate::{
     IngestTimestampSource, IngestorInput, Inheritance, InputCollectPolicy, InspectionFormat,
     Invocation, JsonType, Literal, MaterializedStateDependency, MaterializedStatePolicy,
     MembershipOperator, MessageErrorPolicy, Model, ModelName, MongoDbConflictAction,
-    MySqlConflictAction, NamePosition, OutputBranch, ParseAsType, PlacementPolicy,
-    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, RangeOperator,
-    RelayBranching, RelayName, Restore, RestoreLifecycle, RestoreMode, RestoreScope, RestoreState,
-    RetryPolicy, RouteConstruction, SchemaField, SignalingProtocolName, SignalingStep,
-    SignalingWaitStep, SignalingWireFormat, Statement, SubscriptionLiteral,
-    TransactionInspectionTarget, UnaryOperator, WindowBound, WindowStateLimit, WireSchemaField,
+    MySqlConflictAction, NamePosition, OutputBranch, ParseAsType, PostgresConflictAction,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, RangeOperator, RelayBranching,
+    RelayName, Restore, RestoreLifecycle, RestoreMode, RestoreScope, RestoreState, RetryPolicy,
+    RouteConstruction, SchemaField, SignalingProtocolName, SignalingStep, SignalingWaitStep,
+    SignalingWireFormat, Statement, SubscriptionLiteral, TransactionInspectionTarget,
+    UnaryOperator, WindowBound, WindowStateLimit, WireSchemaField,
 };
 
 /// The Plexus release canonical rendering writes.
@@ -688,6 +688,7 @@ impl AlterPlacement {
                 }
                 AlterPlacementOperation::SetRank { rank } => format!("SET RANK {rank}"),
                 AlterPlacementOperation::DropRank => "DROP RANK".to_string(),
+                AlterPlacementOperation::SetDomainWide => "SET DOMAIN WIDE".to_string(),
                 AlterPlacementOperation::SetMembers { from, to } => format!(
                     "SET FROM {} TO {}",
                     model_name_list(from),
@@ -752,15 +753,8 @@ impl Statement {
                         format!("UNPACED DOMAIN {}", create.body.id.as_str())
                     }
                 };
-                Ok(format!(
-                    "CREATE {modifier}{pacing}{};",
-                    placement_policy_suffix(config.placement)
-                ))
+                Ok(format!("CREATE {modifier}{pacing};"))
             }
-            Self::AlterDomain(alter) => Ok(format!(
-                "ALTER DOMAIN SET PLACEMENT {};",
-                alter.policy.as_ref()
-            )),
             Self::CreateUser(create) => {
                 let modifier = if create.if_not_exists {
                     "IF NOT EXISTS "
@@ -1090,15 +1084,6 @@ impl DescribeTransaction {
     }
 }
 
-/// Renders a trailing `PLACEMENT <policy>` clause, omitting the default policy.
-fn placement_policy_suffix(policy: PlacementPolicy) -> String {
-    if policy == PlacementPolicy::default() {
-        String::new()
-    } else {
-        format!(" PLACEMENT {}", policy.as_ref())
-    }
-}
-
 fn subscription_literal_to_plexus(literal: &SubscriptionLiteral) -> String {
     match literal {
         SubscriptionLiteral::String(value) => string_literal(value),
@@ -1200,20 +1185,24 @@ impl<Version: Display> Model<Version> {
 
 impl CreatePlacement {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        let scope = match &self.scope {
+            crate::PlacementScope::DomainWide => "DOMAIN WIDE".to_owned(),
+            crate::PlacementScope::Corridor { from, to } => format!(
+                "FROM {} TO {}",
+                from.iter()
+                    .map(ModelName::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                to.iter()
+                    .map(ModelName::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+        };
         let mut rendered = format!(
-            "CREATE PLACEMENT {} FROM {} TO {} {}",
+            "CREATE PLACEMENT {} {scope} {}",
             self.name.as_str(),
-            self.from
-                .iter()
-                .map(ModelName::as_str)
-                .collect::<Vec<_>>()
-                .join(", "),
-            self.to
-                .iter()
-                .map(ModelName::as_str)
-                .collect::<Vec<_>>()
-                .join(", "),
-            self.policy,
+            self.policy
         );
         if let Some(rank) = self.rank {
             rendered.push_str(&format!(" RANK {rank}"));
@@ -3471,18 +3460,18 @@ mod tests {
         MqttEmitter, MqttIngestMode, MqttQos, MqttSession, MqttTopicEmitter, MqttTopicIngestor,
         MySqlConflictAction, MySqlEmitter, MySqlTableEmitter, MySqlValueMapping, NatsEmitter,
         NatsIngestMode, NatsSubjectEmitter, NatsSubjectIngestor, OutputBranch, ParseAsType,
-        PlacementPolicy, PostgresConflictAction, PostgresEmitter, PostgresTableEmitter,
-        PostgresValueMapping, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-        PrometheusConfigEntry, PrometheusIngestMode, PrometheusQueryIngestor, PulsarEmitter,
-        PulsarIngestMode, PulsarSubscription, PulsarSubscriptionOwnership, PulsarSubscriptionType,
-        PulsarTopicEmitter, PulsarTopicIngestor, RabbitMqEmitter, RabbitMqExchangeEmitter,
-        RabbitMqIngestMode, RabbitMqQueueEmitter, RabbitMqQueueIngestor, RedisEmitter,
-        RedisPubSubEmitter, RedisPubSubIngestMode, RedisPubSubIngestor, RelayBranching,
-        RetryPolicy, RouteConstruction, SchemaField, SentryConfigEntry, SentryEmitter,
-        SentryEventEmitter, SignalingProtobufConfig, SignalingStep, SignalingWaitStep,
-        SignalingWireFormat, SqsEmitter, SqsIngestMode, SqsQueueEmitter, SqsQueueIngestor,
-        SyslogCollectorEmitter, SyslogEmitter, SyslogIngestMode, SyslogListenerIngestor,
-        UdfArgument, UdfLanguage, UdfReturn, WebsocketsConnectionIngestor,
+        PlacementPolicy, PlacementScope, PostgresConflictAction, PostgresEmitter,
+        PostgresTableEmitter, PostgresValueMapping, ProcessorInputs, ProcessorOutput,
+        ProcessorOutputs, PrometheusConfigEntry, PrometheusIngestMode, PrometheusQueryIngestor,
+        PulsarEmitter, PulsarIngestMode, PulsarSubscription, PulsarSubscriptionOwnership,
+        PulsarSubscriptionType, PulsarTopicEmitter, PulsarTopicIngestor, RabbitMqEmitter,
+        RabbitMqExchangeEmitter, RabbitMqIngestMode, RabbitMqQueueEmitter, RabbitMqQueueIngestor,
+        RedisEmitter, RedisPubSubEmitter, RedisPubSubIngestMode, RedisPubSubIngestor,
+        RelayBranching, RetryPolicy, RouteConstruction, SchemaField, SentryConfigEntry,
+        SentryEmitter, SentryEventEmitter, SignalingProtobufConfig, SignalingStep,
+        SignalingWaitStep, SignalingWireFormat, SqsEmitter, SqsIngestMode, SqsQueueEmitter,
+        SqsQueueIngestor, SyslogCollectorEmitter, SyslogEmitter, SyslogIngestMode,
+        SyslogListenerIngestor, UdfArgument, UdfLanguage, UdfReturn, WebsocketsConnectionIngestor,
         WebsocketsEndpointIngestor, WebsocketsIngestMode, WindowBound, WindowStateLimit,
         WireSchemaField, ZeroMqEmitter, ZeroMqIngestMode, ZeroMqPullIngestor, ZeroMqPushEmitter,
         expression_to_plexus,

@@ -115,7 +115,6 @@ JAQ-backed codecs require at least one direction. When both are present, `ON ING
 Core alter statements:
 
 ```plexus,ignore
-ALTER DOMAIN SET PLACEMENT
   REQUIRE COLOCATION|PREFER COLOCATION|NEUTRAL|SUGGEST SEPARATION;
 
 ALTER BRANCH <name>
@@ -300,9 +299,10 @@ kind: `DESCRIBE INGESTOR`, `SHOW CREATE EMITTER` and `DROP CLIENT`.
 The [Inferencer](processors.md#state-tensors) section defines its port pairs, fixed tensor shapes,
 initial expressions, per-branch invocation order and reset behavior.
 
-Domain creation may declare a placement default, and named placement rules may overlay paths in
-the active domain. Omission means `NEUTRAL`, which preserves ordinary scheduler heuristics. See
-[Placement Policies](placement.md) for the four policy levels and lifecycle commands.
+Named placement rules claim directed corridors or use `DOMAIN WIDE` to cover every eligible hop.
+Ordinary rank precedence selects each hop's policy, and validation checks that policy against its
+unit correspondence. Unclaimed hops use ordinary scheduler heuristics. See
+[Placement Policies](placement.md) for policies, execution units and lifecycle commands.
 
 Multiple Plexus statements in one request must be wrapped in an explicit
 transaction. `BEGIN` creates a replicated transaction and returns its id,

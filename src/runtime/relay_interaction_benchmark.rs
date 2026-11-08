@@ -108,7 +108,6 @@ impl RelayInteractionBenchmark {
                 id: domain,
                 config: DomainConfig {
                     pace: DomainPace::Unpaced,
-                    placement: PlacementPolicy::Neutral,
                 },
                 status: DomainStatus::Running,
                 start_version: 0,

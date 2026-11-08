@@ -37,6 +37,73 @@ fn archived_model_corpus_reaches_resumed_restore() {
 }
 
 #[test]
+fn placement_scopes_and_exact_relocation_selectors_keep_their_archived_values() {
+    use std::num::NonZeroU64;
+
+    use nervix_models::{
+        AlterPlacement, AlterPlacementOperation, CreatePlacement, ModelKind, PlacementPolicy,
+        Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
+        RelocationSelection, RelocationUnitSelection,
+    };
+
+    for policy in [
+        PlacementPolicy::Neutral,
+        PlacementPolicy::RequireColocation,
+        PlacementPolicy::PreferColocation,
+        PlacementPolicy::SuggestSeparation,
+    ] {
+        for rank in [None, NonZeroU64::new(u64::MAX)] {
+            for placement in [
+                CreatePlacement::new(
+                    "corridor".try_into().expect("valid name"),
+                    vec!["incoming".try_into().expect("valid name")],
+                    vec!["outgoing".try_into().expect("valid name")],
+                    policy,
+                    rank,
+                )
+                .expect("nonempty corridor"),
+                CreatePlacement::domain_wide(
+                    "domain_rule".try_into().expect("valid name"),
+                    policy,
+                    rank,
+                ),
+            ] {
+                let model: Model = Model::Placement(placement);
+                assert_eq!(crate::archive_round_trip!(&model, Model), model);
+            }
+        }
+    }
+
+    let alter = Statement::AlterPlacement(AlterPlacement {
+        placement: "corridor".try_into().expect("valid name"),
+        operations: vec![AlterPlacementOperation::SetDomainWide],
+    });
+    assert_eq!(crate::archive_round_trip!(&alter, Statement), alter);
+
+    let mut partition =
+        RelocationMember::new(ModelKind::Relay, "incoming".try_into().expect("valid name"));
+    partition.selection = RelocationUnitSelection::Partition(u32::MAX);
+    let mut instance = RelocationMember::new(
+        ModelKind::Ingestor,
+        "reader".try_into().expect("valid name"),
+    );
+    instance.selection = RelocationUnitSelection::Instance(u64::MAX);
+    let relocation = Statement::Relocate(Relocation {
+        selection: RelocationSelection::List(vec![partition, instance.clone()]),
+        destination: "node-3".try_into().expect("valid node name"),
+        strategy: RelocationPreferenceStrategy::Follow,
+        overrides: vec![RelocationPreferenceOverride {
+            member: instance,
+            strategy: RelocationPreferenceStrategy::Ignore,
+        }],
+    });
+    assert_eq!(
+        crate::archive_round_trip!(&relocation, Statement),
+        relocation
+    );
+}
+
+#[test]
 fn bolero_models_and_statements_round_trip_through_their_archives() {
     bolero::check!()
         .with_iterations(256)

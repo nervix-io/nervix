@@ -1,8 +1,20 @@
+//! Relocation selection grammar.
+//!
+//! Layer: language.
+//! - **Owns.** Kind-qualified endpoints, exact unit selectors and preference clauses.
+//! - **Depends on.** Shared tokens, identifier parsers and semantic relocation Models.
+//! - **Must not know.** Graph topology, cluster liveness or handoff execution.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the boundary declared above")
+)]
+
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    ModelKind, Relocation, RelocationMember, RelocationPreferenceOverride,
-    RelocationPreferenceStrategy, RelocationSelection,
+    ModelKind, NodeRef, Relocation, RelocationMember, RelocationPreferenceOverride,
+    RelocationPreferenceStrategy, RelocationSelection, RelocationUnitSelection,
 };
 
 use crate::{
@@ -11,55 +23,77 @@ use crate::{
         LexedInput, ParseError, ParseFromSourceError, boxed_choice, cluster_node_name,
         correlator_ref, deduplicator_ref, emitter_ref, generator_ref, inferencer_ref, ingestor_ref,
         into_parse_error, junction_ref, kw, kw_phrase2, lex_input, lookup_ref, reingestor_ref,
-        relay_ref, reorderer_ref, suggest_from, tok, wasm_processor_ref, window_processor_ref,
+        relay_ref, reorderer_ref, suggest_from, tok, u32_value, u64_value, wasm_processor_ref,
+        window_processor_ref,
     },
 };
 
 /// One kind-qualified runtime node. Only relocatable kinds are offered, because a relocation
 /// moves scheduled runtime nodes and a name is unique only within its kind.
-fn relocation_member<'src>()
--> impl Parser<'src, &'src [Token], RelocationMember, extra::Err<ParseError<'src>>> + Clone {
+fn relocation_endpoint<'src>()
+-> impl Parser<'src, &'src [Token], NodeRef, extra::Err<ParseError<'src>>> + Clone {
     boxed_choice!(
         kw(Identifier::Ingestor)
             .ignore_then(ingestor_ref())
-            .map(|name| RelocationMember::new(ModelKind::Ingestor, name.into())),
+            .map(|name| NodeRef::new(ModelKind::Ingestor, name)),
         kw(Identifier::Reingestor)
             .ignore_then(reingestor_ref())
-            .map(|name| RelocationMember::new(ModelKind::Reingestor, name.into())),
+            .map(|name| NodeRef::new(ModelKind::Reingestor, name)),
         kw(Identifier::Generator)
             .ignore_then(generator_ref())
-            .map(|name| RelocationMember::new(ModelKind::Generator, name.into())),
+            .map(|name| NodeRef::new(ModelKind::Generator, name)),
         kw(Identifier::Junction)
             .ignore_then(junction_ref())
-            .map(|name| RelocationMember::new(ModelKind::Junction, name.into())),
+            .map(|name| NodeRef::new(ModelKind::Junction, name)),
         kw(Identifier::Deduplicator)
             .ignore_then(deduplicator_ref())
-            .map(|name| RelocationMember::new(ModelKind::Deduplicator, name.into())),
+            .map(|name| NodeRef::new(ModelKind::Deduplicator, name)),
         kw(Identifier::Correlator)
             .ignore_then(correlator_ref())
-            .map(|name| RelocationMember::new(ModelKind::Correlator, name.into())),
+            .map(|name| NodeRef::new(ModelKind::Correlator, name)),
         kw(Identifier::Reorderer)
             .ignore_then(reorderer_ref())
-            .map(|name| RelocationMember::new(ModelKind::Reorderer, name.into())),
+            .map(|name| NodeRef::new(ModelKind::Reorderer, name)),
         kw_phrase2(Identifier::Window, Identifier::Processor)
             .ignore_then(window_processor_ref())
-            .map(|name| RelocationMember::new(ModelKind::WindowProcessor, name.into())),
+            .map(|name| NodeRef::new(ModelKind::WindowProcessor, name)),
         kw(Identifier::Inferencer)
             .ignore_then(inferencer_ref())
-            .map(|name| RelocationMember::new(ModelKind::Inferencer, name.into())),
+            .map(|name| NodeRef::new(ModelKind::Inferencer, name)),
         kw_phrase2(Identifier::Wasm, Identifier::Processor)
             .ignore_then(wasm_processor_ref())
-            .map(|name| RelocationMember::new(ModelKind::WasmProcessor, name.into())),
+            .map(|name| NodeRef::new(ModelKind::WasmProcessor, name)),
         kw(Identifier::Emitter)
             .ignore_then(emitter_ref())
-            .map(|name| RelocationMember::new(ModelKind::Emitter, name.into())),
+            .map(|name| NodeRef::new(ModelKind::Emitter, name)),
         kw_phrase2(Identifier::Hash, Identifier::Map)
             .ignore_then(lookup_ref())
-            .map(|name| RelocationMember::new(ModelKind::Lookup, name.into())),
+            .map(|name| NodeRef::new(ModelKind::Lookup, name)),
         kw(Identifier::Relay)
             .ignore_then(relay_ref())
-            .map(|name| RelocationMember::new(ModelKind::Relay, name.into())),
+            .map(|name| NodeRef::new(ModelKind::Relay, name)),
     )
+}
+
+fn relocation_member<'src>()
+-> impl Parser<'src, &'src [Token], RelocationMember, extra::Err<ParseError<'src>>> + Clone {
+    relocation_endpoint()
+        .then(
+            choice((
+                kw(Identifier::Partition)
+                    .ignore_then(u32_value("partition_index"))
+                    .map(RelocationUnitSelection::Partition),
+                kw(Identifier::Instance)
+                    .ignore_then(u64_value("instance_index"))
+                    .map(RelocationUnitSelection::Instance),
+            ))
+            .or_not(),
+        )
+        .map(|(node, selection)| RelocationMember {
+            node,
+            selection: selection.unwrap_or(RelocationUnitSelection::All),
+        })
+        .boxed()
 }
 
 fn relocation_members<'src>()
@@ -73,22 +107,14 @@ fn relocation_members<'src>()
 
 fn relocation_selection<'src>()
 -> impl Parser<'src, &'src [Token], RelocationSelection, extra::Err<ParseError<'src>>> + Clone {
+    let endpoints = relocation_endpoint()
+        .separated_by(tok(Token::Comma))
+        .at_least(1)
+        .collect::<Vec<_>>();
     let corridor = kw(Identifier::From)
-        .ignore_then(
-            relocation_member()
-                .then(
-                    tok(Token::Comma)
-                        .ignore_then(relocation_member())
-                        .repeated()
-                        .collect::<Vec<_>>(),
-                )
-                .map(|(first, mut rest)| {
-                    rest.insert(0, first);
-                    rest
-                }),
-        )
+        .ignore_then(endpoints.clone())
         .then_ignore(kw(Identifier::To))
-        .then(relocation_members())
+        .then(endpoints)
         .map(|(from, to)| RelocationSelection::Corridor { from, to });
 
     boxed_choice!(
@@ -284,11 +310,11 @@ mod tests {
         assert_eq!(
             from,
             &vec![
-                member(ModelKind::Junction, "feature_normalizer"),
-                member(ModelKind::Ingestor, "kafka_orders"),
+                member(ModelKind::Junction, "feature_normalizer").node,
+                member(ModelKind::Ingestor, "kafka_orders").node,
             ]
         );
-        assert_eq!(to, &vec![member(ModelKind::Junction, "risk_scorer")]);
+        assert_eq!(to, &vec![member(ModelKind::Junction, "risk_scorer").node]);
         assert_eq!(
             relocation.destination,
             ClusterNodeName::parse("nervix-1.internal").expect("valid name")
@@ -317,6 +343,42 @@ mod tests {
         )
         .expect("relocation must parse");
         assert_eq!(relocation.overrides.len(), 2);
+    }
+
+    #[test]
+    fn exact_unit_selectors_preserve_full_width_and_written_order() {
+        let text = format!(
+            "RELOCATE JUNCTION compute PARTITION {} , INGESTOR reader INSTANCE {} ONTO NODE \
+             node-2 FOLLOW PREFERENCES FOR JUNCTION compute PARTITION 0 IGNORE PREFERENCES;",
+            u32::MAX,
+            u64::MAX
+        );
+        let relocation =
+            parse_relocate(&text).expect("unit selectors parse independently of graph validity");
+        let RelocationSelection::List(members) = &relocation.selection else {
+            panic!("expected listed units");
+        };
+        assert_eq!(
+            members[0].selection,
+            RelocationUnitSelection::Partition(u32::MAX)
+        );
+        assert_eq!(
+            members[1].selection,
+            RelocationUnitSelection::Instance(u64::MAX)
+        );
+        assert_eq!(
+            parse_relocate(&format!("RELOCATE {};", relocation.to_plexus_clauses()))
+                .expect("canonical selection parses"),
+            relocation
+        );
+        let input = "RELOCATE JUNCTION compute ";
+        let suggestions = suggest_statement(input, input.len());
+        for expected in ["PARTITION", "INSTANCE", "ONTO NODE"] {
+            assert!(
+                suggestions.contains(&expected.to_owned()),
+                "{suggestions:?}"
+            );
+        }
     }
 
     #[test]

@@ -365,7 +365,7 @@ pub use settings::{
     ClusterParameters, NodeCapabilities, Prerequisites, Setting, SettingClass, SettingDefinition,
 };
 pub use statement::{
-    AckWindow, AlterBranch, AlterBranchError, AlterBranchOperation, AlterDomain, AlterGenerator,
+    AckWindow, AlterBranch, AlterBranchError, AlterBranchOperation, AlterGenerator,
     AlterGeneratorError, AlterGeneratorOperation, AlterIngestor, AlterIngestorError,
     AlterIngestorOperation, AlterPlacement, AlterPlacementError, AlterPlacementOperation,
     AlterRelay, AlterRelayError, AlterRelayOperation, AlterTransportIngestorOperation,
@@ -382,14 +382,14 @@ pub use statement::{
     DomainTick, DrainNode, DropModel, DropNode, EndpointKind, EndpointType, ErrorPolicies,
     GeneralErrorPolicy, IngestTimestampSource, InspectionFormat, LookupQuery,
     MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, PartitionSeed, PlacementPolicy,
-    RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
-    RelocationPreferenceStrategy, RelocationSelection, ResolvedBranching, ResolvedCodecWireFormat,
-    RetryPolicy, ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowPlacements,
-    ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SignalingProtobufConfig,
-    SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat, StartDomain,
-    Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral,
-    UncordonNode, UniquelyKindedModel, UploadResource, VhostTlsResource, WireSchemaLookup,
-    default_relay_buffer,
+    PlacementScope, RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
+    RelocationPreferenceStrategy, RelocationSelection, RelocationUnitSelection, ResolvedBranching,
+    ResolvedCodecWireFormat, RetryPolicy, ShowClusterStatus, ShowCreate, ShowEmitters,
+    ShowIngestors, ShowPlacements, ShowRelayMaterializedState, ShowTransactions, ShowUdfs,
+    SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
+    SignalingWireFormat, StartDomain, Statement, StopDomain, SubscriptionBinding,
+    SubscriptionDeliveryBehavior, SubscriptionLiteral, UncordonNode, UniquelyKindedModel,
+    UploadResource, VhostTlsResource, WireSchemaLookup, default_relay_buffer,
 };
 pub use timestamp::{AtomicTimestamp, Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};

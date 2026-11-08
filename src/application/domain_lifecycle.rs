@@ -19,16 +19,15 @@
 use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};
-use meticulous::ResultExt as _;
 use nervix_consensus::{ConsensusError, DomainMutationLease};
 use nervix_interconnect::{
     DomainDrainStatusEnvelope, RemoteOperationFailure,
     backup::{BackupDrainAction, BackupDrainStatus, BackupDrainStatusRequest},
 };
 use nervix_models::{
-    AlterDomain, ClusterNodeName, CoordinationIdentity, CreateDomain, CreateStatement,
-    DomainClockState, DomainName, DomainStartPoint, DomainState, DomainStatus, QuiesceLevel,
-    StartDomain, StopDomain, TimestampError,
+    ClusterNodeName, CoordinationIdentity, CreateDomain, CreateStatement, DomainClockState,
+    DomainName, DomainStartPoint, DomainState, DomainStatus, QuiesceLevel, StartDomain, StopDomain,
+    TimestampError,
 };
 use nervix_primitives::time::{Instant, interval};
 use thiserror::Error;
@@ -38,10 +37,7 @@ use super::{
     command_result::CommandResult,
     domain_clock::current_timestamp,
     entity_gate::DrainOutstanding,
-    model_mutation::{
-        command_error, command_ok, command_ok_already_existed, quiesce_level_message,
-    },
-    ownership_handoff::{mark_complete_ownership_transitions, planned_relocation_count},
+    model_mutation::{command_error, command_ok, command_ok_already_existed},
     session_service::{ApplicationBound, SessionServiceImpl},
     transaction::{QuiescenceAttempt, TransactionStepImpactRecorder},
 };
@@ -859,176 +855,6 @@ impl SessionServiceImpl {
         }
     }
 
-    pub(in crate::application) async fn alter_domain(
-        &self,
-        domain: &DomainName,
-        alter: AlterDomain,
-    ) -> CommandResult {
-        let _alter_guard = match self.inner.runtime.try_begin_domain_alter(domain) {
-            Some(guard) => guard,
-            None => {
-                return command_error(
-                    DomainAlterError::ConcurrentAlter {
-                        domain: domain.clone(),
-                    }
-                    .to_string(),
-                );
-            }
-        };
-        let inputs = self.inner.consensus.domain_planning_inputs(domain).await;
-        let Some(previous_state) = inputs.state().cloned() else {
-            return command_error(format!("domain '{}' does not exist", domain.as_str()));
-        };
-        if let DomainStatus::Paused = previous_state.status {
-            return command_error(format!(
-                "domain '{}' is paused by a model alteration",
-                domain.as_str()
-            ));
-        }
-        if previous_state.config.placement == alter.policy {
-            return match self.apply_current_cluster_state().await {
-                Ok(()) => command_ok(format!(
-                    "domain '{}' placement is already {}; {}\nplanned relocations: 0",
-                    domain.as_str(),
-                    alter.policy.as_ref(),
-                    quiesce_level_message(QuiesceLevel::Dynamic),
-                )),
-                Err(error) => command_error(format!(
-                    "domain '{}' already has placement {}, but it is not usable everywhere: \
-                     {error:#}",
-                    domain.as_str(),
-                    alter.policy.as_ref()
-                )),
-            };
-        }
-
-        let previous_schedule = inputs.schedule().cloned();
-        let planning = self
-            .capture_domain_schedule_planning_snapshot(&inputs)
-            .await;
-        let live_voters = planning.live_voters();
-        let cluster_nodes = planning.cluster_nodes();
-        let mut next_schedule = match self.inner.registry.active_graph(domain) {
-            Some(graph) => {
-                #[cfg(feature = "testing")]
-                let mut schedule = graph.schedule_for_domain_with_mode(
-                    domain,
-                    cluster_nodes,
-                    usize::try_from(self.cluster_parameters().replica_count())
-                        .assured("the committed count fits a supported target"),
-                    alter.policy,
-                    self.inner.runtime.scheduler_mode(),
-                );
-                #[cfg(not(feature = "testing"))]
-                let mut schedule = graph.schedule_for_domain(
-                    domain,
-                    cluster_nodes,
-                    usize::try_from(self.cluster_parameters().replica_count())
-                        .assured("the committed count fits a supported target"),
-                    alter.policy,
-                );
-                Self::merge_existing_schedule_data(
-                    &mut schedule,
-                    previous_schedule.as_ref(),
-                    live_voters,
-                );
-                Some(schedule)
-            }
-            None => None,
-        };
-        if let Some(next_schedule) = next_schedule.as_mut() {
-            mark_complete_ownership_transitions(previous_schedule.as_ref(), next_schedule);
-        }
-        let relocations =
-            planned_relocation_count(previous_schedule.as_ref(), next_schedule.as_ref());
-        let quiesce_level =
-            if matches!(previous_state.status, DomainStatus::Running) && relocations > 0 {
-                QuiesceLevel::EntityPause
-            } else {
-                QuiesceLevel::Dynamic
-            };
-        let mut next_state = previous_state.clone();
-        next_state.config.placement = alter.policy;
-
-        #[cfg(feature = "testing")]
-        if self
-            .inner
-            .runtime
-            .take_armed_schedule_publication_fault(domain)
-        {
-            return command_error(format!(
-                "injected schedule publication fault for domain '{}'",
-                domain.as_str()
-            ));
-        }
-        if let Err(error) = self.validate_domain_planning_inputs(&inputs).await {
-            return command_error(error.to_string());
-        }
-        if let Err(error) = planning.validate_eligibility(self).await {
-            return command_error(error.to_string());
-        }
-        let handoff = if relocations > 0 {
-            self.begin_planned_ownership_handoff(
-                domain,
-                previous_schedule.as_ref(),
-                next_schedule.as_ref(),
-            )
-            .await
-        } else {
-            Ok(None)
-        };
-        let handoff = match handoff {
-            Ok(handoff) => handoff,
-            Err(error) => return command_error(error.to_string()),
-        };
-        if let Err(error) = self
-            .inner
-            .consensus
-            .put_domain_and_schedule(inputs, next_state, next_schedule, None)
-            .await
-        {
-            if let Some(handoff) = handoff {
-                self.abort_planned_ownership_handoff(domain, handoff, None)
-                    .await;
-            }
-            return self
-                .consensus_report_response(
-                    &error,
-                    format!("failed to alter placement for domain '{}'", domain.as_str()),
-                )
-                .await;
-        }
-        let activation_error = self.apply_current_cluster_state().await.err();
-        if let Some(error) = activation_error {
-            if let Some(handoff) = handoff {
-                self.defer_planned_ownership_handoff_release(domain, handoff, &error, None);
-            }
-            return command_error(format!(
-                "committed placement and schedule for domain '{}', but the destination failed to \
-                 activate: {error:#}",
-                domain.as_str()
-            ));
-        }
-        if let Some(handoff) = handoff
-            && let Err(error) = self
-                .finish_planned_ownership_handoff(domain, handoff, None)
-                .await
-        {
-            return command_error(format!(
-                "committed placement and schedule for domain '{}', but ownership state activation \
-                 did not complete: {error:#}",
-                domain.as_str()
-            ));
-        }
-
-        command_ok(format!(
-            "set domain '{}' placement to {}; {}\nplanned relocations: {relocations}",
-            domain.as_str(),
-            alter.policy.as_ref(),
-            quiesce_level_message(quiesce_level),
-        ))
-    }
-
     pub(in crate::application) async fn resolve_domain_start(
         &self,
         domain_id: &DomainName,
@@ -1190,10 +1016,10 @@ impl SessionServiceImpl {
 
 #[cfg(test)]
 mod tests {
-    use meticulous::OptionExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
     #[cfg(feature = "testing")]
     use nervix_consensus::{ConsensusError, ConsensusTestProbe, StorageBoundary};
-    use nervix_models::{DomainConfig, DomainPace, PlacementPolicy};
+    use nervix_models::{DomainConfig, DomainPace};
     use nervix_recovery::Discarded as _;
 
     #[cfg(feature = "testing")]
@@ -1338,48 +1164,6 @@ mod tests {
 
     #[cfg(feature = "testing")]
     #[nervix_primitives::test]
-    async fn domain_placement_storage_failure_preserves_previous_policy() {
-        let probe = ConsensusTestProbe::default();
-        let TestService {
-            service,
-            registry,
-            path,
-        } = build_test_service_with_probe(true, probe.clone()).await;
-        let domain = DomainName::parse("default").assured("the test domain name is valid");
-        probe.storage_fault().fail_next(
-            "put-domain-and-schedule:default".to_string(),
-            StorageBoundary::BeforeCommit,
-        );
-
-        let result = service
-            .alter_domain(
-                &domain,
-                AlterDomain {
-                    policy: PlacementPolicy::RequireColocation,
-                },
-            )
-            .await;
-        assert!(!result.succeeded(), "{result:?}");
-        assert!(result.message.contains("consensus storage"), "{result:?}");
-        assert_eq!(
-            service
-                .inner
-                .consensus
-                .current_domain(&domain)
-                .await
-                .assured("the domain remains present")
-                .config
-                .placement,
-            PlacementPolicy::Neutral
-        );
-
-        drop(service);
-        drop(registry);
-        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
-    }
-
-    #[cfg(feature = "testing")]
-    #[nervix_primitives::test]
     async fn create_domain_storage_failure_keeps_domain_absent() {
         let probe = ConsensusTestProbe::default();
         let TestService {
@@ -1399,7 +1183,6 @@ mod tests {
                     id: domain.clone(),
                     config: DomainConfig {
                         pace: DomainPace::Unpaced,
-                        placement: PlacementPolicy::Neutral,
                     },
                 },
                 false,
@@ -1435,7 +1218,6 @@ mod tests {
                     id: DomainName::parse("prod").expect("valid domain"),
                     config: DomainConfig {
                         pace: DomainPace::Unpaced,
-                        placement: nervix_models::PlacementPolicy::Neutral,
                     },
                 },
                 false,
@@ -1450,7 +1232,6 @@ mod tests {
                     id: DomainName::parse("prod").expect("valid domain"),
                     config: DomainConfig {
                         pace: DomainPace::Unpaced,
-                        placement: nervix_models::PlacementPolicy::Neutral,
                     },
                 },
                 true,
@@ -1475,7 +1256,6 @@ mod tests {
                 .assured("the test domain is an identifier-shaped literal"),
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
-                placement: nervix_models::PlacementPolicy::Neutral,
             },
             status: DomainStatus::Stopped,
             start_version: 0,
@@ -1493,45 +1273,6 @@ mod tests {
         assert_eq!(resumed, first);
 
         let _ = std::fs::remove_dir_all(&path);
-    }
-
-    #[nervix_primitives::test]
-    async fn domain_placement_commit_uses_its_captured_planning_basis() {
-        let TestService {
-            service,
-            registry,
-            path,
-        } = build_test_service(true).await;
-        let domain = DomainName::parse("default").assured("the test domain name is valid");
-
-        let result = service
-            .alter_domain(
-                &domain,
-                AlterDomain {
-                    policy: PlacementPolicy::RequireColocation,
-                },
-            )
-            .await;
-
-        assert!(
-            result.succeeded(),
-            "placement alteration failed: {result:?}"
-        );
-        assert_eq!(
-            service
-                .inner
-                .consensus
-                .current_domain(&domain)
-                .await
-                .assured("the altered domain remains present")
-                .config
-                .placement,
-            PlacementPolicy::RequireColocation
-        );
-
-        drop(service);
-        drop(registry);
-        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
     }
 
     #[test]

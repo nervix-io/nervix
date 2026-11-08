@@ -694,7 +694,6 @@ mod tests {
             id: domain(name),
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
-                placement: PlacementPolicy::Neutral,
             },
             status: DomainStatus::Stopped,
             start_version: 3,

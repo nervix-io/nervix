@@ -211,7 +211,6 @@ impl TransformedEncodingBenchmark {
                 id: domain.clone(),
                 config: DomainConfig {
                     pace: DomainPace::Unpaced,
-                    placement: PlacementPolicy::Neutral,
                 },
                 status: DomainStatus::Running,
                 start_version: 0,

@@ -18,13 +18,12 @@ use nervix_models::{
     AffectedTopology, AttributedGateBoundary, AttributedImpactNode, BranchKeyFingerprint,
     CanonicalImpactSet, ClusterNodeIdentity, ClusterNodeIncarnation, CommandExecutionReference,
     ConcreteBranchCoverage, ConfigurationImpact, ConfigurationTransition, DomainClockState,
-    DomainConfig, DomainLifecycleAction, DomainLifecycleImpact, DomainName, DomainPace,
-    DomainSchedule, DomainStartPoint, DomainState, DomainStatus, ExecutionStepImpactReport,
-    ExecutionStepOutcome, ForceFlushImpact, ImpactAttribution, ImpactDiagnostic,
-    ImpactDiagnosticKind, ImpactEdgeKind, ImpactEffects, ImpactGateBoundary, ImpactNodeCoverage,
-    ImpactPlanningBasis, ImpactReportCompleteness, ImpactTopology, ImpactTopologyEdge,
-    ModelChangeAspect, ModelKind, ModelName, NodeRef, OperationImpactReason, OperationImpactReport,
-    OwnershipMoveImpact, PauseRequirement, PlacementGroupSchedule, PlacementPolicy,
+    DomainLifecycleAction, DomainLifecycleImpact, DomainName, DomainSchedule, DomainStartPoint,
+    ExecutionStepImpactReport, ExecutionStepOutcome, ForceFlushImpact, ImpactAttribution,
+    ImpactDiagnostic, ImpactDiagnosticKind, ImpactEdgeKind, ImpactEffects, ImpactGateBoundary,
+    ImpactNodeCoverage, ImpactPlanningBasis, ImpactReportCompleteness, ImpactTopology,
+    ImpactTopologyEdge, ModelChangeAspect, ModelKind, ModelName, NodeRef, OperationImpactReason,
+    OperationImpactReport, OwnershipMoveImpact, PauseRequirement, PlacementGroupSchedule,
     PlannedExecutionStepImpact, QuiesceSubgraph, QuiescenceOutcome, RebuildImpact, RebuildReason,
     RelayName, RequestedResourceVersion, ResetWasmState, ResourceBindingImpact,
     ResourceCatalogAction, ResourceCatalogImpact, ScheduledNode, SchemaFingerprint, StatePurge,
@@ -234,8 +233,7 @@ impl StepBoundary for TransactionOperation {
             | Self::AlterConfiguration { .. }
             | Self::DropConfiguration { .. }
             | Self::RebindResource { .. } => true,
-            Self::AlterDomain { .. }
-            | Self::StartDomain { .. }
+            Self::StartDomain { .. }
             | Self::StopDomain { .. }
             | Self::CreateResource { .. }
             | Self::ResetWasmState { .. } => false,
@@ -863,27 +861,26 @@ impl Arbitrary<'_> {
     /// and a resource rebinding binds the version it names, or any version for `LATEST`.
     pub fn transaction_operation(&mut self, domain: &DomainName) -> TransactionOperation {
         let domain = domain.clone();
-        match self.entropy.byte() % 9 {
+        match self.entropy.byte() % 8 {
             0 => TransactionOperation::StopDomain { domain },
             1 => TransactionOperation::StartDomain { domain },
-            2 => TransactionOperation::AlterDomain { domain },
-            3 => TransactionOperation::CreateResource {
+            2 => TransactionOperation::CreateResource {
                 domain,
                 resource: self.name(),
             },
-            4 => TransactionOperation::ResetWasmState {
+            3 => TransactionOperation::ResetWasmState {
                 domain,
                 processor: self.name(),
             },
-            5 => TransactionOperation::CreateConfiguration {
+            4 => TransactionOperation::CreateConfiguration {
                 domain,
                 node: self.any_node_ref(),
             },
-            6 => TransactionOperation::AlterConfiguration {
+            5 => TransactionOperation::AlterConfiguration {
                 domain,
                 node: self.any_node_ref(),
             },
-            7 => TransactionOperation::DropConfiguration {
+            6 => TransactionOperation::DropConfiguration {
                 domain,
                 node: self.any_node_ref(),
             },
@@ -903,8 +900,7 @@ impl Arbitrary<'_> {
 
     /// The ordered reasons `operation` contributes, each about what the operation names: up to
     /// three changed aspects of a configuration operation's node, up to three nodes a
-    /// rebinding moves to its version, the placement an `ALTER DOMAIN` changes unless it left the
-    /// policy as it was, the start or stop of the domain, the resource a `CREATE RESOURCE` adds
+    /// rebinding moves to its version, the start or stop of the domain, the resource a `CREATE RESOURCE` adds
     /// unless it already existed, and the guest state a reset replaces.
     pub fn operation_impact_reasons(
         &mut self,
@@ -941,13 +937,6 @@ impl Arbitrary<'_> {
                     });
                 }
                 reasons
-            }
-            TransactionOperation::AlterDomain { .. } => {
-                if self.entropy.flag() {
-                    vec![OperationImpactReason::DomainPlacement]
-                } else {
-                    Vec::new()
-                }
             }
             TransactionOperation::StartDomain { .. } => vec![OperationImpactReason::DomainStart],
             TransactionOperation::StopDomain { .. } => vec![OperationImpactReason::DomainStop],
@@ -1140,16 +1129,6 @@ impl Arbitrary<'_> {
         start.assured("statement_of builds the statement form it is asked for")
     }
 
-    /// The placement policy an `ALTER DOMAIN` statement sets.
-    fn altered_placement(&mut self) -> PlacementPolicy {
-        let statement = self.statement_of(StatementVariant::AlterDomain);
-        let policy = match statement {
-            Statement::AlterDomain(alter) => Some(alter.policy),
-            _ => None,
-        };
-        policy.assured("statement_of builds the statement form it is asked for")
-    }
-
     /// The reset a `RESET WASM PROCESSOR ... STATE` statement requests for `processor` of `domain`:
     /// its unbranched state, every branch, or the branch its fields select.
     fn requested_reset(
@@ -1185,14 +1164,6 @@ impl Arbitrary<'_> {
         ClusterNodeIdentity::new(node, incarnation)
     }
 
-    /// The clock mapping of a domain started at `start`: any wall instant it began at, and the
-    /// logical start and rate `start` resolves to there.
-    fn clock_mapping(&mut self, start: &DomainStartPoint) -> DomainClockState {
-        let wall_started_at = Timestamp::from_unix_nanos(self.entropy.any_i64());
-        let (logical_start, time_rate) = start.resolve_at(wall_started_at);
-        DomainClockState::new(wall_started_at, logical_start, time_rate)
-    }
-
     /// The clock start and authority commit admission resolves for a `START DOMAIN`: a start that
     /// asked for now becomes the logical instant it began at, and a paced domain records the clock
     /// mapping it began with and the authority it selected, while an unpaced one records neither.
@@ -1220,45 +1191,6 @@ impl Arbitrary<'_> {
             start,
             clock: Some(clock),
             authority: Some(authority),
-        }
-    }
-
-    /// The state an `ALTER DOMAIN` step installs for `domain`: any pace, the policy the statement
-    /// sets, and a stopped domain or a running one that has started at least once. A running paced
-    /// domain carries the clock mapping its last start began with.
-    fn altered_domain_state(&mut self, domain: &DomainName) -> DomainState {
-        let pace = if self.entropy.flag() {
-            let period = self.clock_period();
-            let skew = self.clock_skew();
-            DomainPace::Paced { period, skew }
-        } else {
-            DomainPace::Unpaced
-        };
-        let placement = self.altered_placement();
-        let running = self.entropy.flag();
-        let status = if running {
-            DomainStatus::Running
-        } else {
-            DomainStatus::Stopped
-        };
-        let start_version = if running {
-            self.entropy.boundary_biased(1..=u64::MAX)
-        } else {
-            self.entropy.any_u64()
-        };
-        let last_start = self.requested_start();
-        let clock = if running && pace.is_paced() {
-            Some(self.clock_mapping(&last_start))
-        } else {
-            None
-        };
-        DomainState {
-            id: domain.clone(),
-            config: DomainConfig { pace, placement },
-            status,
-            start_version,
-            last_start,
-            clock,
         }
     }
 
@@ -1379,23 +1311,6 @@ impl Arbitrary<'_> {
         }
     }
 
-    /// The decision for an `ALTER DOMAIN` of `domain`: the state it installs, the schedule it
-    /// publishes or none, and the gates its ownership moves engage.
-    fn alter_domain_commit_step(&mut self, domain: &DomainName) -> TransactionCommitStepKind {
-        let next = self.altered_domain_state(domain);
-        let schedule = if self.entropy.flag() {
-            Some(Box::new(self.published_schedule(domain)))
-        } else {
-            None
-        };
-        let ownership_gate = self.transaction_entity_gate_plan();
-        TransactionCommitStepKind::AlterDomain {
-            next: Box::new(next),
-            schedule,
-            ownership_gate,
-        }
-    }
-
     /// The decision for a reset of `processor` of `domain`: the reset requested, the reference of
     /// its request, and the schedule it publishes.
     fn reset_commit_step(
@@ -1429,7 +1344,6 @@ impl Arbitrary<'_> {
             | TransactionOperation::RebindResource { domain, .. } => {
                 self.models_commit_step(domain, operations)
             }
-            TransactionOperation::AlterDomain { domain } => self.alter_domain_commit_step(domain),
             TransactionOperation::StartDomain { .. } => TransactionCommitStepKind::StartDomain {
                 resolved: self.transaction_resolved_domain_start(),
             },
@@ -1493,15 +1407,14 @@ mod tests {
     use nervix_models::{
         ActivationAction, ActualExecutionStepImpact, ConcreteBranchCoverage,
         ConfigurationTransition, DomainLifecycleAction, DomainName, DomainSchedule,
-        DomainStartPoint, DomainState, DomainStatus, ExecutionStepImpactReport,
-        ExecutionStepOutcome, ImpactAttribution, ImpactDiagnostic, ImpactDiagnosticKind,
-        ImpactEdgeKind, ImpactEffects, ImpactNodeCoverage, ImpactReportCompleteness,
-        ImpactTopology, ModelChangeAspect, ModelKind, OperationImpactReason, OperationImpactReport,
-        PauseRequirement, QuiesceSubgraph, QuiescenceOutcome, RebuildReason,
-        RequestedResourceVersion, ResourceCatalogAction, StatePurge, TransactionCommitPlan,
-        TransactionCommitStepKind, TransactionEntityGatePlan, TransactionImpactReport,
-        TransactionModelTransition, TransactionOperation, TransactionOperationNumber,
-        TransactionOperationRange, TransactionResolvedDomainStart,
+        DomainStartPoint, ExecutionStepImpactReport, ExecutionStepOutcome, ImpactAttribution,
+        ImpactDiagnostic, ImpactDiagnosticKind, ImpactEdgeKind, ImpactEffects, ImpactNodeCoverage,
+        ImpactReportCompleteness, ImpactTopology, ModelChangeAspect, ModelKind,
+        OperationImpactReason, OperationImpactReport, PauseRequirement, QuiesceSubgraph,
+        QuiescenceOutcome, RebuildReason, RequestedResourceVersion, ResourceCatalogAction,
+        StatePurge, TransactionCommitPlan, TransactionCommitStepKind, TransactionEntityGatePlan,
+        TransactionImpactReport, TransactionModelTransition, TransactionOperation,
+        TransactionOperationNumber, TransactionOperationRange, TransactionResolvedDomainStart,
     };
     use rkyv::{
         Archive, Deserialize,
@@ -1532,14 +1445,12 @@ mod tests {
         "TransactionOperation::CreateConfiguration",
         "TransactionOperation::AlterConfiguration",
         "TransactionOperation::DropConfiguration",
-        "TransactionOperation::AlterDomain",
         "TransactionOperation::StartDomain",
         "TransactionOperation::StopDomain",
         "TransactionOperation::CreateResource",
         "TransactionOperation::RebindResource",
         "TransactionOperation::ResetWasmState",
         "OperationImpactReason::Configuration",
-        "OperationImpactReason::DomainPlacement",
         "OperationImpactReason::DomainStart",
         "OperationImpactReason::DomainStop",
         "OperationImpactReason::ResourceCatalog",
@@ -1615,7 +1526,6 @@ mod tests {
         "ExecutionStepOutcome::Applied",
         "ExecutionStepOutcome::Failed",
         "TransactionCommitStepKind::Models",
-        "TransactionCommitStepKind::AlterDomain",
         "TransactionCommitStepKind::StartDomain",
         "TransactionCommitStepKind::StopDomain",
         "TransactionCommitStepKind::CreateResource",
@@ -1629,8 +1539,6 @@ mod tests {
         "TransactionEntityGatePlan::relays",
         "DomainSchedule::entries",
         "DomainSchedule::placement_groups",
-        "DomainStatus::Running",
-        "DomainStatus::Stopped",
         "TransactionResolvedDomainStart::Resume",
         "TransactionResolvedDomainStart::At",
         "TransactionResolvedDomainStart::paced",
@@ -2102,9 +2010,6 @@ mod tests {
                 TransactionOperation::DropConfiguration { .. } => {
                     self.see("TransactionOperation::DropConfiguration");
                 }
-                TransactionOperation::AlterDomain { .. } => {
-                    self.see("TransactionOperation::AlterDomain");
-                }
                 TransactionOperation::StartDomain { .. } => {
                     self.see("TransactionOperation::StartDomain");
                 }
@@ -2158,10 +2063,6 @@ mod tests {
                     assert_eq!(resource, named);
                     assert_eq!(to_version, version);
                 }
-                (
-                    OperationImpactReason::DomainPlacement,
-                    TransactionOperation::AlterDomain { .. },
-                ) => self.see("OperationImpactReason::DomainPlacement"),
                 (OperationImpactReason::DomainStart, TransactionOperation::StartDomain { .. }) => {
                     self.see("OperationImpactReason::DomainStart");
                 }
@@ -2306,25 +2207,6 @@ mod tests {
             }
         }
 
-        /// The state is of `domain`, stopped or running; a running one has started, and only a
-        /// running paced one carries a clock mapping.
-        fn altered_state(&mut self, next: &DomainState, domain: &DomainName) {
-            assert_eq!(&next.id, domain);
-            let running = match next.status {
-                DomainStatus::Running => {
-                    self.see("DomainStatus::Running");
-                    assert!(next.start_version >= 1);
-                    true
-                }
-                DomainStatus::Stopped => {
-                    self.see("DomainStatus::Stopped");
-                    false
-                }
-                DomainStatus::Paused => panic!("an ALTER DOMAIN never installs a paused domain"),
-            };
-            assert_eq!(next.clock.is_some(), running && next.config.pace.is_paced());
-        }
-
         /// A resolved start never reads the clock again, and a paced one maps the clock from the
         /// start it records.
         fn resolved_start(&mut self, resolved: &TransactionResolvedDomainStart) {
@@ -2387,21 +2269,6 @@ mod tests {
                             assert!(within.contains(*number), "{number} is outside {within:?}");
                         }
                         self.gates(model_gate);
-                        self.gates(ownership_gate);
-                    }
-                    (
-                        TransactionCommitStepKind::AlterDomain {
-                            next,
-                            schedule,
-                            ownership_gate,
-                        },
-                        TransactionOperation::AlterDomain { .. },
-                    ) => {
-                        self.see("TransactionCommitStepKind::AlterDomain");
-                        self.altered_state(next, domain);
-                        if let Some(schedule) = schedule {
-                            self.schedule(schedule, domain);
-                        }
                         self.gates(ownership_gate);
                     }
                     (

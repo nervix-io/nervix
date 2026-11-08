@@ -1034,9 +1034,6 @@ pub enum TransactionOperation {
         domain: DomainName,
         node: NodeRef,
     },
-    AlterDomain {
-        domain: DomainName,
-    },
     StartDomain {
         domain: DomainName,
     },
@@ -1065,7 +1062,6 @@ impl TransactionOperation {
             Self::CreateConfiguration { domain, .. }
             | Self::AlterConfiguration { domain, .. }
             | Self::DropConfiguration { domain, .. }
-            | Self::AlterDomain { domain }
             | Self::StartDomain { domain }
             | Self::StopDomain { domain }
             | Self::CreateResource { domain, .. }
@@ -1099,7 +1095,6 @@ pub enum OperationImpactReason {
         node: NodeRef,
         aspect: ModelChangeAspect,
     },
-    DomainPlacement,
     DomainStart,
     DomainStop,
     ResourceCatalog {

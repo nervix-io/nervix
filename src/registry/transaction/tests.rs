@@ -26,7 +26,6 @@ fn domain_state(status: DomainStatus) -> ControlDomainState {
         id: named("default"),
         config: DomainConfig {
             pace: DomainPace::Unpaced,
-            placement: PlacementPolicy::Neutral,
         },
         status,
         start_version: 0,
@@ -62,7 +61,7 @@ pub(super) fn scheduled_snapshot(
         .graph;
     let node = ClusterNodeName::parse("node-a")
         .assured("the scheduler fixture node is an identifier-shaped literal");
-    let schedule = graph.schedule_for_domain(&domain, &[node], 0, PlacementPolicy::Neutral);
+    let schedule = graph.schedule_for_domain(&domain, &[node], 0);
     TransactionPlanningSnapshot {
         parameters: nervix_models::ClusterParameterValues::default(),
         domain: domain_state(status),
@@ -93,7 +92,6 @@ pub(super) fn node_ref(kind: ModelKind, name: &str) -> NodeRef {
 
 pub(super) fn preserve_schedule(
     _graph: Option<ActiveGraph>,
-    _placement: PlacementPolicy,
     current: Option<&DomainSchedule>,
     _attribution: &ImpactAttribution,
 ) -> TransactionScheduleDecision {
@@ -495,7 +493,7 @@ fn ownership_moves_raise_a_running_step_to_entity_pause() {
         &[statement],
         0,
         false,
-        move |_graph, _placement, current, attribution| TransactionScheduleDecision {
+        move |_graph, current, attribution| TransactionScheduleDecision {
             schedule: current.cloned(),
             ownership_moves: CanonicalImpactSet::new([OwnershipMoveImpact {
                 node: nervix_models::ImpactNodeCoverage::all_executions(moved.clone()),
@@ -545,9 +543,9 @@ fn stopped_schedule_move_keeps_the_execution_gate_without_reporting_a_pause() {
         &[statement],
         0,
         false,
-        move |graph, placement, _current, attribution| TransactionScheduleDecision {
+        move |graph, _current, attribution| TransactionScheduleDecision {
             schedule: graph.map(|graph| {
-                graph.schedule_for_domain(&domain, std::slice::from_ref(&destination), 0, placement)
+                graph.schedule_for_domain(&domain, std::slice::from_ref(&destination), 0)
             }),
             ownership_moves: CanonicalImpactSet::new([OwnershipMoveImpact {
                 node: ImpactNodeCoverage::all_executions(moved.clone()),
@@ -642,14 +640,9 @@ fn entity_pause_report_and_execution_share_the_exact_affected_graph() {
         &statements,
         0,
         false,
-        move |graph, placement, _current, _attribution| TransactionScheduleDecision {
+        move |graph, _current, _attribution| TransactionScheduleDecision {
             schedule: graph.map(|graph| {
-                graph.schedule_for_domain(
-                    &domain,
-                    std::slice::from_ref(&cluster_node),
-                    0,
-                    placement,
-                )
+                graph.schedule_for_domain(&domain, std::slice::from_ref(&cluster_node), 0)
             }),
             ownership_moves: CanonicalImpactSet::default(),
         },
@@ -771,9 +764,9 @@ fn schedule_reassignment_raises_a_dynamic_change_to_an_entity_pause() {
         &[statement],
         0,
         false,
-        move |graph, placement, _current, _attribution| TransactionScheduleDecision {
+        move |graph, _current, _attribution| TransactionScheduleDecision {
             schedule: graph.map(|graph| {
-                graph.schedule_for_domain(&domain, std::slice::from_ref(&destination), 0, placement)
+                graph.schedule_for_domain(&domain, std::slice::from_ref(&destination), 0)
             }),
             ownership_moves: CanonicalImpactSet::default(),
         },
@@ -822,14 +815,9 @@ fn schedule_rebuild_raises_entity_creation_to_a_domain_pause() {
         &[statement],
         0,
         false,
-        move |graph, placement, _current, _attribution| TransactionScheduleDecision {
+        move |graph, _current, _attribution| TransactionScheduleDecision {
             schedule: graph.map(|graph| {
-                graph.schedule_for_domain(
-                    &domain,
-                    std::slice::from_ref(&cluster_node),
-                    0,
-                    placement,
-                )
+                graph.schedule_for_domain(&domain, std::slice::from_ref(&cluster_node), 0)
             }),
             ownership_moves: CanonicalImpactSet::default(),
         },
@@ -886,14 +874,9 @@ fn drop_recreate_retains_both_sides_of_a_rewired_graph() {
         &statements,
         0,
         false,
-        move |graph, placement, _current, _attribution| TransactionScheduleDecision {
+        move |graph, _current, _attribution| TransactionScheduleDecision {
             schedule: graph.map(|graph| {
-                graph.schedule_for_domain(
-                    &domain,
-                    std::slice::from_ref(&cluster_node),
-                    0,
-                    placement,
-                )
+                graph.schedule_for_domain(&domain, std::slice::from_ref(&cluster_node), 0)
             }),
             ownership_moves: CanonicalImpactSet::default(),
         },

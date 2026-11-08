@@ -50,7 +50,6 @@ use crate::{
 pub enum Statement {
     AlterCluster(crate::AlterCluster),
     CreateDomain(CreateStatement<CreateDomain>),
-    AlterDomain(AlterDomain),
     CreateUser(CreateStatement<CreateUser>),
     CreateResource(CreateStatement<CreateResource>),
     RebindResource(RebindResource),
@@ -118,7 +117,6 @@ impl Statement {
             || matches!(
                 self,
                 Self::CreateDomain(_)
-                    | Self::AlterDomain(_)
                     | Self::StartDomain(_)
                     | Self::StopDomain(_)
                     | Self::DrainNode(_)
@@ -148,7 +146,6 @@ impl Statement {
             | Self::Drop(_) => true,
             Self::AlterCluster(_)
             | Self::CreateDomain(_)
-            | Self::AlterDomain(_)
             | Self::CreateUser(_)
             | Self::CreateResource(_)
             | Self::UploadResource(_)
@@ -442,13 +439,6 @@ pub struct CreateDomain {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct AlterDomain {
-    pub policy: PlacementPolicy,
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
 pub struct CreateUser {
     pub name: UserName,
     pub password: String,
@@ -493,9 +483,9 @@ pub struct StopDomain;
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
+#[serde(deny_unknown_fields)]
 pub struct DomainConfig {
     pub pace: DomainPace,
-    pub placement: PlacementPolicy,
 }
 
 #[derive(
@@ -698,18 +688,65 @@ pub struct DrainNode {
     RkyvDeserialize,
 )]
 pub struct RelocationMember {
-    pub kind: ModelKind,
-    pub name: ModelName,
+    pub node: NodeRef,
+    pub selection: RelocationUnitSelection,
+}
+
+/// The exact unit selector, or all of the named node's declared units.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum RelocationUnitSelection {
+    All,
+    Partition(u32),
+    Instance(u64),
+}
+
+impl std::fmt::Display for RelocationUnitSelection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::All => formatter.write_str("all declared"),
+            Self::Partition(index) => write!(formatter, "partition {index}"),
+            Self::Instance(index) => write!(formatter, "instance {index}"),
+        }
+    }
 }
 
 impl RelocationMember {
     pub fn new(kind: ModelKind, name: ModelName) -> Self {
-        Self { kind, name }
+        Self {
+            node: NodeRef::new(kind, name),
+            selection: RelocationUnitSelection::All,
+        }
     }
 
     /// The `<kind> <name>` spelling used in canonical Plexus and in diagnostics.
     pub fn to_plexus(&self) -> String {
-        format!("{} {}", self.kind.keyword_phrase(), self.name.as_str())
+        let mut rendered = format!(
+            "{} {}",
+            self.node.kind.keyword_phrase(),
+            self.node.identifier.as_str()
+        );
+        match self.selection {
+            RelocationUnitSelection::All => {}
+            RelocationUnitSelection::Partition(index) => {
+                rendered.push_str(&format!(" PARTITION {index}"))
+            }
+            RelocationUnitSelection::Instance(index) => {
+                rendered.push_str(&format!(" INSTANCE {index}"))
+            }
+        }
+        rendered
     }
 }
 
@@ -722,16 +759,16 @@ pub enum RelocationSelection {
     List(Vec<RelocationMember>),
     /// Every runtime node covered by a directed corridor between the endpoints.
     Corridor {
-        from: Vec<RelocationMember>,
-        to: Vec<RelocationMember>,
+        from: Vec<NodeRef>,
+        to: Vec<NodeRef>,
     },
 }
 
 impl RelocationSelection {
     /// Every member written in the statement, in written order.
-    pub fn members(&self) -> Vec<&RelocationMember> {
+    pub fn members(&self) -> Vec<&NodeRef> {
         match self {
-            Self::List(members) => members.iter().collect(),
+            Self::List(members) => members.iter().map(|member| &member.node).collect(),
             Self::Corridor { from, to } => from.iter().chain(to).collect(),
         }
     }
@@ -741,8 +778,8 @@ impl RelocationSelection {
             Self::List(members) => format_relocation_members(members),
             Self::Corridor { from, to } => format!(
                 "FROM {} TO {}",
-                format_relocation_members(from),
-                format_relocation_members(to)
+                format_relocation_endpoints(from),
+                format_relocation_endpoints(to)
             ),
         }
     }
@@ -824,6 +861,20 @@ impl Relocation {
         }
         rendered
     }
+}
+
+fn format_relocation_endpoints(members: &[NodeRef]) -> String {
+    members
+        .iter()
+        .map(|member| {
+            format!(
+                "{} {}",
+                member.kind.keyword_phrase(),
+                member.identifier.as_str()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn format_relocation_members(members: &[RelocationMember]) -> String {
@@ -1069,10 +1120,21 @@ pub enum SubscriptionLiteral {
 )]
 pub struct CreatePlacement {
     pub name: PlacementName,
-    pub from: Vec<ModelName>,
-    pub to: Vec<ModelName>,
+    pub scope: PlacementScope,
     pub policy: PlacementPolicy,
     pub rank: Option<NonZeroU64>,
+}
+
+/// The directed corridor or entire domain whose direct hops a rule claims.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum PlacementScope {
+    Corridor {
+        from: Vec<ModelName>,
+        to: Vec<ModelName>,
+    },
+    DomainWide,
 }
 
 #[derive(
@@ -1098,6 +1160,7 @@ pub enum AlterPlacementOperation {
         from: Vec<ModelName>,
         to: Vec<ModelName>,
     },
+    SetDomainWide,
     RenameTo {
         name: PlacementName,
     },
@@ -1126,14 +1189,26 @@ impl CreatePlacement {
     ) -> error_stack::Result<Self, AlterPlacementError> {
         let mut placement = Self {
             name,
-            from,
-            to,
+            scope: PlacementScope::Corridor { from, to },
             policy,
             rank,
         };
         placement.normalize_members();
         placement.validate()?;
         Ok(placement)
+    }
+
+    pub fn domain_wide(
+        name: PlacementName,
+        policy: PlacementPolicy,
+        rank: Option<NonZeroU64>,
+    ) -> Self {
+        Self {
+            name,
+            scope: PlacementScope::DomainWide,
+            policy,
+            rank,
+        }
     }
 
     pub fn apply_alter(
@@ -1154,9 +1229,14 @@ impl CreatePlacement {
                 AlterPlacementOperation::SetRank { rank } => candidate.rank = Some(*rank),
                 AlterPlacementOperation::DropRank => candidate.rank = None,
                 AlterPlacementOperation::SetMembers { from, to } => {
-                    candidate.from = from.clone();
-                    candidate.to = to.clone();
+                    candidate.scope = PlacementScope::Corridor {
+                        from: from.clone(),
+                        to: to.clone(),
+                    };
                     candidate.normalize_members();
+                }
+                AlterPlacementOperation::SetDomainWide => {
+                    candidate.scope = PlacementScope::DomainWide
                 }
                 AlterPlacementOperation::RenameTo { name } => candidate.name = name.clone(),
             }
@@ -1167,18 +1247,22 @@ impl CreatePlacement {
     }
 
     pub fn validate(&self) -> error_stack::Result<(), AlterPlacementError> {
-        if self.from.is_empty() {
-            return Err(Report::new(AlterPlacementError::EmptyFrom));
-        }
-        if self.to.is_empty() {
-            return Err(Report::new(AlterPlacementError::EmptyTo));
+        if let PlacementScope::Corridor { from, to } = &self.scope {
+            if from.is_empty() {
+                return Err(Report::new(AlterPlacementError::EmptyFrom));
+            }
+            if to.is_empty() {
+                return Err(Report::new(AlterPlacementError::EmptyTo));
+            }
         }
         Ok(())
     }
 
     fn normalize_members(&mut self) {
-        deduplicate_identifiers(&mut self.from);
-        deduplicate_identifiers(&mut self.to);
+        if let PlacementScope::Corridor { from, to } = &mut self.scope {
+            deduplicate_identifiers(from);
+            deduplicate_identifiers(to);
+        }
     }
 }
 

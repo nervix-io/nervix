@@ -1,11 +1,12 @@
 Feature: Placement policies
 
-  Scenario Outline: Placement rules and domain defaults are inspectable through Plexus
+  Scenario Outline: Placement rules and domain-wide rules are inspectable through Plexus
     Given the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     When these Plexus commands are executed on the leader node
       """
-      CREATE UNPACED DOMAIN {{domain}} PLACEMENT PREFER COLOCATION;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE PLACEMENT domain_policy DOMAIN WIDE PREFER COLOCATION;
       CREATE SCHEMA placement_event ( id I64 );
       CREATE RELAY placement_input SCHEMA placement_event UNBRANCHED;
       CREATE RELAY placement_stage_one SCHEMA placement_event UNBRANCHED;
@@ -87,11 +88,11 @@ Feature: Placement policies
       """
     And the last command output contains
       """
-      default policy: PREFER COLOCATION
+      scope=domain-wide policy=PREFER COLOCATION
       """
     And the last command output contains
       """
-      rule count: 1
+      rule count: 2
       """
 
     Examples:
@@ -104,7 +105,8 @@ Feature: Placement policies
     And a 3 node nervix cluster is started
     When these Plexus commands are executed on the leader node
       """
-      CREATE UNPACED DOMAIN {{domain}} PLACEMENT SUGGEST SEPARATION;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE PLACEMENT domain_policy DOMAIN WIDE SUGGEST SEPARATION;
       CREATE SCHEMA placement_event ( id I64 );
       CREATE RELAY placement_input SCHEMA placement_event UNBRANCHED;
       CREATE RELAY placement_stage_one SCHEMA placement_event UNBRANCHED;
@@ -147,7 +149,8 @@ Feature: Placement policies
     And a 3 node nervix cluster is started
     When these Plexus commands are executed on the leader node
       """
-      CREATE UNPACED DOMAIN {{domain}} PLACEMENT SUGGEST SEPARATION;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE PLACEMENT domain_policy DOMAIN WIDE SUGGEST SEPARATION;
       CREATE SCHEMA placement_event ( id I64 );
       CREATE RELAY state_writer_input SCHEMA placement_event UNBRANCHED;
       CREATE RELAY state_cache SCHEMA placement_event UNBRANCHED
@@ -186,12 +189,13 @@ Feature: Placement policies
     Then the last cluster status owner for scheduled "relay" "state_cache" is saved as placeholder "state_group_owner"
     And within "5s" node "node-1" eventually reports scheduled "junction" "state_reader" owner equals placeholder "state_group_owner"
 
-  Scenario: PREFER COLOCATION overrides the spreading domain default for a new assignment
+  Scenario: PREFER COLOCATION overrides the spreading domain-wide rule for a new assignment
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     When these Plexus commands are executed on the leader node
       """
-      CREATE UNPACED DOMAIN {{domain}} PLACEMENT SUGGEST SEPARATION;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE PLACEMENT domain_policy DOMAIN WIDE SUGGEST SEPARATION;
       BEGIN;
       CREATE SCHEMA placement_event ( id I64 );
       CREATE RELAY placement_input SCHEMA placement_event UNBRANCHED;
@@ -211,7 +215,7 @@ Feature: Placement policies
       CREATE PLACEMENT prefer_local
         FROM corridor_source
         TO corridor_emitter
-        PREFER COLOCATION;
+        PREFER COLOCATION RANK 1;
       COMMIT;
       START;
       SHOW CLUSTER STATUS;
@@ -229,7 +233,8 @@ Feature: Placement policies
     And a 3 node nervix cluster is started
     When these Plexus commands are executed on the leader node
       """
-      CREATE UNPACED DOMAIN {{domain}} PLACEMENT PREFER COLOCATION;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE PLACEMENT domain_policy DOMAIN WIDE PREFER COLOCATION;
       BEGIN;
       CREATE SCHEMA placement_event ( id I64 );
       CREATE RELAY placement_input SCHEMA placement_event UNBRANCHED;
@@ -242,7 +247,7 @@ Feature: Placement policies
       CREATE PLACEMENT spread_corridor
         FROM corridor_source
         TO corridor_emitter
-        SUGGEST SEPARATION;
+        SUGGEST SEPARATION RANK 1;
       COMMIT;
       START;
       SHOW CLUSTER STATUS;
@@ -598,12 +603,13 @@ Feature: Placement policies
       | 3            |
 
   @planned-handoff
-  Scenario: Changing the domain default to REQUIRE COLOCATION uses one gated handoff
+  Scenario: Changing a domain-wide rule to REQUIRE COLOCATION uses one gated handoff
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     When these Plexus commands are executed on the leader node
       """
-      CREATE UNPACED DOMAIN {{domain}} PLACEMENT SUGGEST SEPARATION;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE PLACEMENT domain_policy DOMAIN WIDE SUGGEST SEPARATION;
       CREATE SCHEMA placement_event ( id I64 );
       CREATE RELAY placement_input SCHEMA placement_event UNBRANCHED;
       CREATE RELAY placement_stage SCHEMA placement_event UNBRANCHED;
@@ -618,7 +624,7 @@ Feature: Placement policies
     Given the entity gate for domain "{{domain}}" pauses after engagement
     When these Plexus commands begin executing in the background
       """
-      ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
+      ALTER PLACEMENT domain_policy SET POLICY REQUIRE COLOCATION;
       """
     Then the entity gate pause for domain "{{domain}}" is reached
     When the entity gate pause for domain "{{domain}}" is released
@@ -642,7 +648,8 @@ Feature: Placement policies
     And the active domain is "{{domain}}"
     When these Plexus commands are executed on the leader node
       """
-      CREATE UNPACED DOMAIN {{domain}} PLACEMENT SUGGEST SEPARATION;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE PLACEMENT domain_policy DOMAIN WIDE SUGGEST SEPARATION;
       CREATE SCHEMA detached_event ( id I64 );
       CREATE RELAY detached_input SCHEMA detached_event UNBRANCHED;
       CREATE RELAY detached_stage SCHEMA detached_event UNBRANCHED;
@@ -656,18 +663,18 @@ Feature: Placement policies
     Given the entity gate for domain "{{domain}}" pauses after engagement
     When this Plexus command request with execution reference "detached-placement" begins executing in the background on the leader node
       """
-      ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
+      ALTER PLACEMENT domain_policy SET POLICY REQUIRE COLOCATION;
       """
     Then the entity gate pause for domain "{{domain}}" is reached
     When the background command request connection is dropped
     And the entity gate pause for domain "{{domain}}" is released
     And this Plexus command request with execution reference "detached-placement" is executed on the leader node
       """
-      ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
+      ALTER PLACEMENT domain_policy SET POLICY REQUIRE COLOCATION;
       """
     Then the last command output contains
       """
-      set domain '{{domain}}' placement to REQUIRE COLOCATION
+      altered placement 'domain_policy'
       """
     When these Plexus commands are executed on node "node-2"
       """
@@ -675,7 +682,7 @@ Feature: Placement policies
       """
     Then the last command output contains
       """
-      default policy: REQUIRE COLOCATION
+      scope=domain-wide policy=REQUIRE COLOCATION
       """
 
   @command_completion
@@ -685,7 +692,8 @@ Feature: Placement policies
     And the active domain is "{{domain}}"
     When these Plexus commands are executed on the leader node
       """
-      CREATE UNPACED DOMAIN {{domain}} PLACEMENT SUGGEST SEPARATION;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE PLACEMENT domain_policy DOMAIN WIDE SUGGEST SEPARATION;
       CREATE SCHEMA deadline_event ( id I64 );
       CREATE RELAY deadline_input SCHEMA deadline_event UNBRANCHED;
       CREATE RELAY deadline_stage SCHEMA deadline_event UNBRANCHED;
@@ -699,18 +707,18 @@ Feature: Placement policies
     Given the entity gate for domain "{{domain}}" pauses after engagement
     When this Plexus command request with execution reference "deadline-placement" begins executing in the background on the leader node
       """
-      ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
+      ALTER PLACEMENT domain_policy SET POLICY REQUIRE COLOCATION;
       """
     Then the entity gate pause for domain "{{domain}}" is reached
     When the background command caller deadline expires after "100ms"
     And the entity gate pause for domain "{{domain}}" is released
     And this Plexus command request with execution reference "deadline-placement" is executed on the leader node
       """
-      ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
+      ALTER PLACEMENT domain_policy SET POLICY REQUIRE COLOCATION;
       """
     Then the last command output contains
       """
-      set domain '{{domain}}' placement to REQUIRE COLOCATION
+      altered placement 'domain_policy'
       """
     When these Plexus commands are executed on node "node-3"
       """
@@ -718,7 +726,7 @@ Feature: Placement policies
       """
     Then the last command output contains
       """
-      default policy: REQUIRE COLOCATION
+      scope=domain-wide policy=REQUIRE COLOCATION
       """
 
   @transaction-planned-handoff
@@ -727,7 +735,8 @@ Feature: Placement policies
     And a 3 node nervix cluster is started
     When these Plexus commands are executed on the leader node
       """
-      CREATE UNPACED DOMAIN {{domain}} PLACEMENT SUGGEST SEPARATION;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE PLACEMENT domain_policy DOMAIN WIDE SUGGEST SEPARATION;
       CREATE SCHEMA transaction_placement_event ( id I64 );
       CREATE RELAY transaction_placement_input SCHEMA transaction_placement_event UNBRANCHED;
       CREATE RELAY transaction_placement_stage SCHEMA transaction_placement_event UNBRANCHED;
@@ -749,7 +758,7 @@ Feature: Placement policies
       CREATE PLACEMENT transaction_corridor_local
         FROM transaction_corridor_source
         TO transaction_corridor_sink
-        REQUIRE COLOCATION;
+        REQUIRE COLOCATION RANK 1;
       """
     Given the entity gate for domain "{{domain}}" pauses after engagement
     When client "owner" begins executing these Plexus commands in the background
@@ -783,7 +792,8 @@ Feature: Placement policies
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
     When these Plexus commands are executed on the leader node
       """
-      CREATE UNPACED DOMAIN {{domain}} PLACEMENT SUGGEST SEPARATION;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE PLACEMENT domain_policy DOMAIN WIDE SUGGEST SEPARATION;
       CREATE SCHEMA placement_timeout_event ( seq I64 );
       CREATE WIRE JSON SCHEMA placement_timeout_wire MODE STRICT ( seq integer );
       CREATE WIRE JSON CODEC placement_timeout_codec
@@ -829,7 +839,7 @@ Feature: Placement policies
       CREATE PLACEMENT placement_timeout_local
         FROM placement_timeout_junction
         TO placement_timeout_emitter
-        REQUIRE COLOCATION;
+        REQUIRE COLOCATION RANK 1;
       """
     When these Plexus commands are executed on the leader node
       """
@@ -847,7 +857,7 @@ Feature: Placement policies
       CREATE PLACEMENT placement_timeout_local
         FROM placement_timeout_junction
         TO placement_timeout_emitter
-        REQUIRE COLOCATION;
+        REQUIRE COLOCATION RANK 1;
       """
     Then the last command output contains
       """

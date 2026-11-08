@@ -7,7 +7,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     BackupResources, ClusterNodeName, DomainClockPeriod, DomainClockSkew, DomainClockState,
     DomainName, DomainPace, DomainStartPoint, DomainStatus, DomainTimeRate, ModelName,
-    PlacementPolicy, ResourceName, SchemaFingerprint, Timestamp, UserName, WasmStateGeneration,
+    ResourceName, SchemaFingerprint, Timestamp, UserName, WasmStateGeneration,
 };
 
 use crate::{
@@ -19,10 +19,7 @@ use crate::{
     UsersRecord, describe_archive, read_archive, read_archive_contents, read_manifest_header,
     section::{RECORD_HEADER_BYTES, RECORD_MAGIC, decode_record, encode_record},
     state::{KafkaOffsetsRecord, WasmStateDescriptor},
-    wire::{
-        DeclaredResourceWire, DomainWire, ManifestWire, PaceWire, PlacementWire, StartPointWire,
-        StatusWire,
-    },
+    wire::{DeclaredResourceWire, DomainWire, ManifestWire, PaceWire, StartPointWire, StatusWire},
 };
 
 #[test]
@@ -90,7 +87,6 @@ fn paced_domain(name: &str) -> DomainRecord {
             period: DomainClockPeriod::from_nanos(version(100_000_000)),
             skew: DomainClockSkew::from_nanos(10_000_000),
         },
-        placement: PlacementPolicy::PreferColocation,
         status: DomainStatus::Running,
         start_version: 3,
         start_point: DomainStartPoint::At {
@@ -120,7 +116,6 @@ fn unpaced_domain(name: &str) -> DomainRecord {
     DomainRecord {
         domain: domain(name),
         pace: DomainPace::Unpaced,
-        placement: PlacementPolicy::Neutral,
         status: DomainStatus::Stopped,
         start_version: 0,
         start_point: DomainStartPoint::Resume,
@@ -268,7 +263,6 @@ fn values_that_fail_their_vocabulary_are_refused() {
     let invalid_name = DomainWire {
         domain: "Not A Domain".to_string(),
         pace: PaceWire::Unpaced,
-        placement: PlacementWire::Neutral,
         status: StatusWire::Stopped,
         start_version: 0,
         start_point: StartPointWire::Resume,

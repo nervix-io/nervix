@@ -26,7 +26,7 @@ use sorted_vec::SortedSet;
 
 use crate::registry::{
     graph::{ActiveGraph, ActiveNode, EdgeKind, is_schedulable_model, schedulable_depth},
-    placement::{PlacementPair, ResolvedPlacementPair},
+    placement::{PlacementPair, PlacementTopology, ResolvedPlacementPair},
 };
 
 /// Server intakes follow live membership even when a node cannot receive placed work.
@@ -154,7 +154,9 @@ struct AssignmentPlanner<'a> {
     graph: &'a DiGraph<ActiveNode, EdgeKind>,
     cluster_nodes: &'a [ClusterNodeName],
     assigned_by_key: &'a HashMap<NodeRef, Vec<ClusterNodeName>>,
+    assigned_by_unit: &'a HashMap<NodeUnitRef, ClusterNodeName>,
     placement_pairs: &'a HashMap<PlacementPair, ResolvedPlacementPair>,
+    placement_topology: &'a PlacementTopology,
     node_load: &'a HashMap<ClusterNodeName, usize>,
     unit_primaries: &'a HashMap<ClusterNodeName, usize>,
     next_assignment: &'a mut usize,
@@ -280,24 +282,45 @@ impl AssignmentPlanner<'_> {
             .collect()
     }
 
-    fn for_group(&mut self, members: &[NodeRef], indices: &[NodeIndex]) -> Vec<ClusterNodeName> {
+    fn for_group(
+        &mut self,
+        members: &[NodeUnitRef],
+        indices: &HashMap<NodeRef, NodeIndex>,
+    ) -> Vec<ClusterNodeName> {
         if self.cluster_nodes.is_empty() {
             return Vec::new();
         }
 
         let mut preferred_order = HashMap::<ClusterNodeName, usize>::new();
-        for index in indices {
-            for (node_id, score) in
-                locality_affinity_scores(self.graph, *index, self.assigned_by_key)
-            {
-                *preferred_order.entry(node_id).or_insert(0) += score;
+        for member in members {
+            let index = *indices
+                .get(&member.node)
+                .verified("every hard-group member was resolved against this graph");
+            if matches!(member.unit.kind(), nervix_models::UnitKind::Partition(_)) {
+                partition_locality_affinity(
+                    self.graph,
+                    index,
+                    member.unit,
+                    self.assigned_by_unit,
+                    &mut HashSet::new(),
+                    &mut preferred_order,
+                );
+            } else {
+                for (node_id, score) in
+                    locality_affinity_scores(self.graph, index, self.assigned_by_key)
+                {
+                    *preferred_order.entry(node_id).or_insert(0) += score;
+                }
             }
         }
         let mut placement_order = HashMap::<ClusterNodeName, isize>::new();
         for member in members {
-            for (node_id, score) in
-                placement_affinity_scores(member, self.placement_pairs, self.assigned_by_key)
-            {
+            for (node_id, score) in placement_unit_affinity_scores(
+                member,
+                self.placement_pairs,
+                self.placement_topology,
+                self.assigned_by_unit,
+            ) {
                 *placement_order.entry(node_id).or_insert(0) += score;
             }
         }
@@ -309,6 +332,7 @@ impl AssignmentPlanner<'_> {
         index: NodeIndex,
         key: &NodeRef,
         model: &Model,
+        unit: Unit,
     ) -> Vec<ClusterNodeName> {
         if self.cluster_nodes.is_empty() {
             return Vec::new();
@@ -333,8 +357,12 @@ impl AssignmentPlanner<'_> {
             | Model::Emitter(_) => {
                 let preferred_order =
                     locality_affinity_scores(self.graph, index, self.assigned_by_key);
-                let placement_order =
-                    placement_affinity_scores(key, self.placement_pairs, self.assigned_by_key);
+                let placement_order = placement_unit_affinity_scores(
+                    &NodeUnitRef::new(key.clone(), unit),
+                    self.placement_pairs,
+                    self.placement_topology,
+                    self.assigned_by_unit,
+                );
                 self.ranked_assignment(&preferred_order, &placement_order)
             }
             _ => Vec::new(),
@@ -347,35 +375,34 @@ fn assignment_for_model(
     index: NodeIndex,
     key: &NodeRef,
     model: &Model,
+    unit: Unit,
 ) -> Vec<ClusterNodeName> {
     if planner.cluster_nodes.is_empty() {
         return Vec::new();
     }
-    planner.for_model(index, key, model)
+    planner.for_model(index, key, model, unit)
 }
 
-fn placement_affinity_scores(
-    subject: &NodeRef,
+fn placement_unit_affinity_scores(
+    subject: &NodeUnitRef,
     pairs: &HashMap<PlacementPair, ResolvedPlacementPair>,
-    assigned_by_key: &HashMap<NodeRef, Vec<ClusterNodeName>>,
+    topology: &PlacementTopology,
+    assigned: &HashMap<NodeUnitRef, ClusterNodeName>,
 ) -> HashMap<ClusterNodeName, isize> {
-    placement_affinity_scores_with(subject, pairs, |other| {
-        assigned_by_key.get(other).and_then(|nodes| nodes.first())
-    })
-}
-
-fn placement_affinity_scores_with<'a>(
-    subject: &NodeRef,
-    pairs: &HashMap<PlacementPair, ResolvedPlacementPair>,
-    primary: impl Fn(&NodeRef) -> Option<&'a ClusterNodeName>,
-) -> HashMap<ClusterNodeName, isize> {
-    let mut scores = HashMap::<ClusterNodeName, isize>::new();
-    for (pair, resolved) in pairs {
-        let other = if pair.left == *subject {
-            &pair.right
-        } else if pair.right == *subject {
-            &pair.left
+    let mut scores = HashMap::new();
+    for (other, from_left) in topology.adjacent_hops(&subject.node) {
+        let pair = if from_left {
+            PlacementPair {
+                left: subject.node.clone(),
+                right: other.clone(),
+            }
         } else {
+            PlacementPair {
+                left: other.clone(),
+                right: subject.node.clone(),
+            }
+        };
+        let Some(resolved) = pairs.get(&pair) else {
             continue;
         };
         let adjustment = match resolved.policy {
@@ -383,10 +410,11 @@ fn placement_affinity_scores_with<'a>(
             PlacementPolicy::SuggestSeparation => -1,
             PlacementPolicy::RequireColocation | PlacementPolicy::Neutral => continue,
         };
-        let Some(primary) = primary(other) else {
-            continue;
-        };
-        *scores.entry(primary.clone()).or_insert(0) += adjustment;
+        for unit in resolved.correspondence.partners(from_left, subject.unit) {
+            if let Some(primary) = assigned.get(&NodeUnitRef::new(other.clone(), unit)) {
+                *scores.entry(primary.clone()).or_insert(0) += adjustment;
+            }
+        }
     }
     scores
 }
@@ -466,7 +494,6 @@ impl ActiveGraph {
         domain: &DomainName,
         cluster_nodes: &[ClusterNodeName],
         replica_count: usize,
-        default_policy: PlacementPolicy,
     ) -> DomainSchedule {
         #[cfg(feature = "testing")]
         {
@@ -474,13 +501,12 @@ impl ActiveGraph {
                 domain,
                 cluster_nodes,
                 replica_count,
-                default_policy,
                 SchedulerMode::Sticky,
             )
         }
         #[cfg(not(feature = "testing"))]
         {
-            self.schedule_for_domain_inner(domain, cluster_nodes, replica_count, default_policy)
+            self.schedule_for_domain_inner(domain, cluster_nodes, replica_count)
         }
     }
 
@@ -490,16 +516,9 @@ impl ActiveGraph {
         domain: &DomainName,
         cluster_nodes: &[ClusterNodeName],
         replica_count: usize,
-        default_policy: PlacementPolicy,
         scheduler_mode: SchedulerMode,
     ) -> DomainSchedule {
-        self.schedule_for_domain_inner(
-            domain,
-            cluster_nodes,
-            replica_count,
-            default_policy,
-            scheduler_mode,
-        )
+        self.schedule_for_domain_inner(domain, cluster_nodes, replica_count, scheduler_mode)
     }
 
     fn schedule_for_domain_inner(
@@ -507,13 +526,11 @@ impl ActiveGraph {
         domain: &DomainName,
         cluster_nodes: &[ClusterNodeName],
         replica_count: usize,
-        default_policy: PlacementPolicy,
         #[cfg(feature = "testing")] scheduler_mode: SchedulerMode,
     ) -> DomainSchedule {
         let cluster_nodes = SortedSet::from_unsorted(cluster_nodes.to_vec()).into_vec();
-        let placement = self.placement.effective(default_policy);
-        let unit_groups =
-            super::unit_placement::UnitPlacementGroups::decide(self, &placement.require_groups);
+        let placement = self.placement.effective();
+        let unit_groups = super::unit_placement::UnitPlacementGroups::decide(self, &placement);
         let assignment_slots = replica_count
             .min(cluster_nodes.len())
             .checked_add(1)
@@ -586,22 +603,21 @@ impl ActiveGraph {
                         graph: &self.graph,
                         cluster_nodes: &cluster_nodes,
                         assigned_by_key: &assigned_by_key,
+                        assigned_by_unit: &assigned_by_unit,
                         placement_pairs: &placement.pairs,
+                        placement_topology: &self.placement.topology,
                         node_load: &working_load,
                         unit_primaries: &unit_primaries,
                         next_assignment: &mut next_assignment,
                         assignment_slots,
                     };
                     let nodes = if let Some(group) = group_index {
+                        #[cfg(feature = "testing")]
                         let members = unit_groups.groups[group]
                             .iter()
                             .map(|member| member.node.clone())
                             .collect::<std::collections::BTreeSet<_>>()
                             .into_iter()
-                            .collect::<Vec<_>>();
-                        let indices = members
-                            .iter()
-                            .map(|member| index_by_key[member])
                             .collect::<Vec<_>>();
                         #[cfg(feature = "testing")]
                         if let Some(random) = &random_assignment_planner {
@@ -615,10 +631,10 @@ impl ActiveGraph {
                             order.truncate(assignment_slots);
                             order
                         } else {
-                            planner.for_group(&members, &indices)
+                            planner.for_group(&unit_groups.groups[group], &index_by_key)
                         }
                         #[cfg(not(feature = "testing"))]
-                        planner.for_group(&members, &indices)
+                        planner.for_group(&unit_groups.groups[group], &index_by_key)
                     } else if units.len() > 1 {
                         let (unit_affinity, placement_order) =
                             if matches!(unit.kind(), nervix_models::UnitKind::Partition(_)) {
@@ -631,22 +647,23 @@ impl ActiveGraph {
                                     &mut HashSet::new(),
                                     &mut affinity,
                                 );
-                                let order = placement_affinity_scores_with(
-                                    &key,
+                                let order = placement_unit_affinity_scores(
+                                    &member,
                                     &placement.pairs,
-                                    |other| {
-                                        assigned_by_unit
-                                            .get(&NodeUnitRef::new(other.clone(), unit))
-                                            .or_else(|| {
-                                                assigned_by_key
-                                                    .get(other)
-                                                    .and_then(|nodes| nodes.first())
-                                            })
-                                    },
+                                    &self.placement.topology,
+                                    &assigned_by_unit,
                                 );
                                 (affinity, order)
                             } else {
-                                (HashMap::new(), HashMap::new())
+                                (
+                                    HashMap::new(),
+                                    placement_unit_affinity_scores(
+                                        &member,
+                                        &placement.pairs,
+                                        &self.placement.topology,
+                                        &assigned_by_unit,
+                                    ),
+                                )
                             };
                         #[cfg(feature = "testing")]
                         if let Some(random) = &random_assignment_planner {
@@ -661,10 +678,16 @@ impl ActiveGraph {
                         if let Some(random) = &random_assignment_planner {
                             random.for_model(&key, node.config.as_ref())
                         } else {
-                            assignment_for_model(&mut planner, index, &key, node.config.as_ref())
+                            assignment_for_model(
+                                &mut planner,
+                                index,
+                                &key,
+                                node.config.as_ref(),
+                                unit,
+                            )
                         }
                         #[cfg(not(feature = "testing"))]
-                        assignment_for_model(&mut planner, index, &key, node.config.as_ref())
+                        assignment_for_model(&mut planner, index, &key, node.config.as_ref(), unit)
                     };
                     if let Some(group) = group_index {
                         group_assignments.insert(group, nodes.clone());
@@ -687,9 +710,7 @@ impl ActiveGraph {
                 &mut assigned_by_key,
             );
             for (unit, assignment) in &scheduled_node.units {
-                if matches!(unit.kind(), nervix_models::UnitKind::Partition(_))
-                    && let Some(primary) = assignment.execution_node()
-                {
+                if let Some(primary) = assignment.execution_node() {
                     assigned_by_unit.insert(
                         NodeUnitRef::new(scheduled_node.identity(), *unit),
                         primary.clone(),
@@ -779,7 +800,6 @@ mod tests {
                 ClusterNodeName::parse("node-3").expect("valid name"),
             ],
             0,
-            PlacementPolicy::Neutral,
             SchedulerMode::Random,
         );
 
@@ -838,7 +858,6 @@ mod tests {
                 ClusterNodeName::parse("node-2").expect("valid name"),
             ],
             0,
-            PlacementPolicy::Neutral,
         );
 
         assert_ne!(
@@ -903,7 +922,6 @@ mod tests {
                 ClusterNodeName::parse("node-2").expect("valid name"),
             ],
             0,
-            PlacementPolicy::Neutral,
         );
 
         assert_eq!(
@@ -1011,8 +1029,7 @@ mod tests {
         let graph = registry
             .active_graph(&domain)
             .assured("the batch installed the graph");
-        let schedule =
-            graph.schedule_for_domain(&domain, &three_nodes(), 1, PlacementPolicy::Neutral);
+        let schedule = graph.schedule_for_domain(&domain, &three_nodes(), 1);
         let upstream = scheduled_node(&schedule, ModelKind::Relay, "events");
         let processor = scheduled_node(&schedule, ModelKind::Junction, "route");
         assert_eq!(processor.units.len(), 4);
@@ -1042,7 +1059,7 @@ mod tests {
             .expect("graph should be installed");
         let nodes = three_nodes();
 
-        let schedule = graph.schedule_for_domain(&domain, &nodes, 0, PlacementPolicy::Neutral);
+        let schedule = graph.schedule_for_domain(&domain, &nodes, 0);
 
         let relay = scheduled_node(&schedule, ModelKind::Relay, "tenant_events");
         let units = relay.units.keys().copied().collect::<Vec<_>>();
@@ -1081,7 +1098,7 @@ mod tests {
         assert_eq!(relay.execution_node(), None);
         assert_eq!(relay.execution_nodes().len(), 3);
 
-        let again = graph.schedule_for_domain(&domain, &nodes, 0, PlacementPolicy::Neutral);
+        let again = graph.schedule_for_domain(&domain, &nodes, 0);
         assert_eq!(again, schedule, "the same inputs place the same partitions");
 
         let _ = fs::remove_dir_all(path);
@@ -1099,8 +1116,7 @@ mod tests {
             .active_graph(&domain)
             .expect("graph should be installed");
 
-        let schedule =
-            graph.schedule_for_domain(&domain, &three_nodes(), 1, PlacementPolicy::Neutral);
+        let schedule = graph.schedule_for_domain(&domain, &three_nodes(), 1);
 
         let relay = scheduled_node(&schedule, ModelKind::Relay, "tenant_state");
         assert_eq!(relay.units.len(), 2);
@@ -1149,7 +1165,6 @@ mod tests {
                 ClusterNodeName::parse("node-2").expect("valid name"),
             ],
             0,
-            PlacementPolicy::Neutral,
         );
 
         assert_eq!(
@@ -1189,7 +1204,6 @@ mod tests {
                 ClusterNodeName::parse("node-3").expect("valid name"),
             ],
             0,
-            PlacementPolicy::Neutral,
         );
 
         let ingestor_node = scheduled_node(&schedule, ModelKind::Ingestor, "ing")
@@ -1274,20 +1288,14 @@ mod tests {
             named::<ClusterNodeName>("node-2"),
             named::<ClusterNodeName>("node-3"),
         ];
-        let expected = graph.schedule_for_domain_with_mode(
-            &domain,
-            &cluster_nodes,
-            0,
-            PlacementPolicy::Neutral,
-            SchedulerMode::Random,
-        );
+        let expected =
+            graph.schedule_for_domain_with_mode(&domain, &cluster_nodes, 0, SchedulerMode::Random);
         for _ in 0..32 {
             assert_eq!(
                 graph.schedule_for_domain_with_mode(
                     &domain,
                     &cluster_nodes,
                     0,
-                    PlacementPolicy::Neutral,
                     SchedulerMode::Random,
                 ),
                 expected,
@@ -1333,8 +1341,7 @@ mod tests {
             named::<ClusterNodeName>("node-2"),
             named::<ClusterNodeName>("node-3"),
         ];
-        let schedule =
-            graph.schedule_for_domain(&domain, &cluster_nodes, 0, PlacementPolicy::Neutral);
+        let schedule = graph.schedule_for_domain(&domain, &cluster_nodes, 0);
         let ingestor = scheduled_node(&schedule, ModelKind::Ingestor, "ing");
         assert_eq!(ingestor.single_unit().assigned_nodes, cluster_nodes);
         assert_eq!(ingestor.execution_node(), None);
@@ -1369,7 +1376,6 @@ mod tests {
                 &scheduled_domain,
                 &cluster_nodes,
                 0,
-                PlacementPolicy::Neutral,
                 SchedulerMode::Random,
             );
             let ingestor =
@@ -1442,7 +1448,6 @@ mod tests {
                 ClusterNodeName::parse("node-2").expect("valid name"),
             ],
             0,
-            PlacementPolicy::Neutral,
         );
 
         assert_eq!(
@@ -1533,7 +1538,6 @@ mod tests {
                 ClusterNodeName::parse("node-3").expect("valid name"),
             ],
             0,
-            PlacementPolicy::Neutral,
         );
 
         assert_eq!(
@@ -1549,8 +1553,7 @@ mod tests {
 
         let live_nodes = [named("node-1"), named("node-2"), named("node-3")];
         for eligible in [Vec::new(), vec![named("node-2")]] {
-            let mut schedule =
-                graph.schedule_for_domain(&domain, &eligible, 0, PlacementPolicy::Neutral);
+            let mut schedule = graph.schedule_for_domain(&domain, &eligible, 0);
             super::assign_server_listener_nodes(&mut schedule, &live_nodes);
             let listener = scheduled_node(&schedule, ModelKind::Ingestor, "http_ing");
             assert_eq!(listener.single_unit().assigned_nodes, live_nodes);
@@ -1632,7 +1635,6 @@ mod tests {
                 ClusterNodeName::parse("node-3").expect("valid name"),
             ],
             0,
-            PlacementPolicy::Neutral,
         );
         let reduced_schedule = graph.schedule_for_domain(
             &domain,
@@ -1641,7 +1643,6 @@ mod tests {
                 ClusterNodeName::parse("node-3").expect("valid name"),
             ],
             0,
-            PlacementPolicy::Neutral,
         );
 
         assert_eq!(
