@@ -19,15 +19,14 @@
 //! with the top left corner, and types the keys a scenario sends. Only that task touches the
 //! master, so a typed line and a position report never interleave.
 //!
-//! The REPL prints the events it queued, such as server notices and subscription rows, when it
-//! draws its next prompt. A wait for displayed text therefore presses Enter between looks, which on
-//! an empty line draws a new prompt and submits nothing.
+//! Waiting for displayed text sends no input, so a scenario observes asynchronous output while
+//! the operator leaves the prompt idle or continues editing an unfinished command.
 //!
 //! # Bounds
 //!
 //! The record keeps the newest [`DISPLAY_RETAINED_BYTES`] bytes the CLI wrote. A failed wait quotes
 //! the newest [`TRANSCRIPT_LINES`] lines of it as text: control sequences removed, and a run of
-//! identical lines, such as the prompts its own Enter presses draw, shown once with its count. The
+//! identical lines shown once with its count. The
 //! terminal task ends when the CLI's side of the terminal closes. Dropping the fixture aborts the
 //! task and kills the CLI, so neither outlives the scenario that started them.
 
@@ -62,8 +61,8 @@ const TRANSCRIPT_LINES: usize = 40;
 /// Typed key sequences the terminal task has not written yet.
 const PENDING_KEY_SEQUENCES: usize = 64;
 
-/// How long a wait for displayed text lets the REPL draw its prompt before it looks again.
-const PROMPT_INTERVAL: Duration = Duration::from_millis(250);
+/// The interval between observations during a bounded wait for displayed text.
+const DISPLAY_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// The terminal's size, which the REPL lays its prompt out in.
 const WINDOW: Winsize = Winsize {
@@ -167,8 +166,15 @@ impl CliTerminal {
         self.keys.send(keys).await.map_err(|_| TerminalClosed)
     }
 
-    /// Waits until the terminal has displayed `expected`, pressing Enter between looks so the REPL
-    /// draws a prompt and prints the events it queued.
+    /// Types `text` without submitting the line being edited.
+    pub(crate) async fn type_text(&self, text: &str) -> Result<(), TerminalClosed> {
+        self.keys
+            .send(text.as_bytes().to_vec())
+            .await
+            .map_err(|_| TerminalClosed)
+    }
+
+    /// Waits until the terminal has displayed `expected`, without sending any keys.
     pub(crate) async fn wait_for_display(
         &self,
         expected: &str,
@@ -180,11 +186,13 @@ impl CliTerminal {
             if self.display.lock().contains(expected) {
                 return Ok(());
             }
+            if self.keys.is_closed() {
+                return Err(TerminalClosed.into());
+            }
             if Instant::now() >= deadline {
                 return Err(DisplayWaitError::Timeout { within });
             }
-            self.type_line("").await?;
-            nervix_primitives::time::sleep(PROMPT_INTERVAL).await;
+            nervix_primitives::time::sleep(DISPLAY_POLL_INTERVAL).await;
         }
     }
 

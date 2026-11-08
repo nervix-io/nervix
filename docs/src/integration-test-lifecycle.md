@@ -18,6 +18,16 @@ client's ordinary retry deadline, then verifies that the same process resumes it
 termination cases check process exit after a subscription ends and after Ctrl-C during an outage.
 The ordinary scenario runner, deadlines and parallel execution remain in force.
 
+`just test-cli-repl` selects the interactive output, reconnect, membership, cancellation and upload
+examples tagged `@cli_repl_output` in `cli_session.feature`. Its optional first argument replaces
+that tag expression. It prepares the console assets, ONNX runtime and CLI, without unrelated
+guest or client-probe builds. The pseudo-terminal waits for output without sending Enter: rows,
+notices and new clock generations must appear while input remains unfinished, including during
+completion selection and history search. A held statement
+keeps the event consumer away from the prompt during a burst; its completion is followed by the
+bounded queue's omission notice and a fresh row. The same terminal fixture preserves its bounded
+transcript, closes with its process and leaves all scenario deadlines and parallel execution intact.
+
 `just test-domain-clock-delivery` runs the one- and three-node receiver attachment scenarios:
 clock installation while gossip exchanges are blocked, session tick delivery and receiver restart.
 It prepares the console assets, WASM guests and ONNX runtime required by the in-process nodes;
@@ -42,6 +52,17 @@ root during initial provisioning. Restart reuses those files. The rotation scena
 node's files, observes the initially loaded leaf on a fresh connection before restart, then the
 replacement leaf after restart. CLI and Rust-client operations verify the supplied CA and endpoint
 name, and the console recorder checks an opened WSS connection to the advertised leader.
+
+## Focused Emitter Batch Boundaries
+
+`just test-emitter-batch-boundaries --concurrency 2 --retry 0` selects the one- and three-node
+batch-transformation and external-sensitivity outlines. The container oracle includes omitted
+optional values, nested and empty lists, binary bytes and escaped text. The sensitivity outline
+requires explicit leakage both with batching omitted and with a singleton batch container.
+Preparation builds the console assets, WASM guests and ONNX runtime used by the in-process nodes;
+the existing Kafka and ZeroMQ observers retain their normal startup, delivery and teardown bounds.
+For a cold or changed scenario executable, run `just build-emitter-batch-boundaries` first and
+budget that compilation separately from the focused scenario run.
 
 ## Focused Application Progress Qualification
 
@@ -3606,12 +3627,31 @@ and keeps the same 5-minute reserve.
 a scenario's cluster: the cluster tier of the suite under `tests/client_conformance/<host>/suite`.
 The cluster serves its session listener over TLS. The step that starts a suite waits for every node
 to agree on its leader and starts it on a follower when the cluster has one, so its sessions follow
-a leader redirect. It starts the host's runner as one child process with its standard input closed,
+a leader redirect. It starts the host's runner as one child process with piped standard input,
 its target in the probe's `NERVIX_PROBE_*` variables and what a suite needs beside them in
 `NERVIX_SUITE_*` ones: the leader's listener, which the suite relays a session through to cut it,
 every node's listener as seeds, the fixture certificate authority, and a backup directory the step
 creates and removes once it reads the run. The runner prints one `NERVIX-SUITE <outcome> <identity>`
 line per test, and the fixture keeps every line it read.
+
+A running suite can request a declared testing-build action by flushing
+`NERVIX-SUITE-ACTION <sequence> <action>` on standard output. Sequences start at one and increase
+by one across the runner's entire cluster tier. The scenario performs the action, then flushes
+`NERVIX-SUITE-CONFIRMED <sequence> <action>` to the runner's standard input. Requests and
+confirmations are single ASCII lines, at most 256 bytes including the newline. The declared action
+`refuse-next-subscription-opening` arms every node to refuse its next subscription
+opening as unavailable, since a restored session can reach any seed. The second declared action,
+`clear-subscription-opening-refusals`, clears any unused refusals on every node; the fault fixture
+requests it in teardown even when the test failed, so a refusal cannot reach a later test.
+An unknown action, malformed or repeated sequence, failed action or undelivered confirmation fails
+the scenario. The host
+adapter waits at most 120 seconds for its exact confirmation; the scenario's whole-run deadline
+also bounds writing it. EOF, a mismatched confirmation or an oversized one fails the host test.
+The Python runner duplicates stdin and stdout before starting pytest. Its action fixture borrows
+those copies, so requests and confirmations bypass capture while pytest keeps its ordinary fd
+capture of Python and native stdout and stderr. The runner closes both copies after pytest's
+teardowns, including on failure. Hosts reuse this exchange without
+another dependency; it is a test harness contract, with no product endpoint.
 
 The step that reads the run waits for the runner to end, for the duration the step names and never
 longer than 600 seconds, so a suite that stops making progress fails with its own report inside the

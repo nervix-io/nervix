@@ -1,3 +1,10 @@
+//! Current benchmark reports across interleaved comparison arms.
+//!
+//! Outside the layer order: a test harness.
+//! - **Owns.** Arm identity, artifact validation and summary assertions.
+//! - **Depends on.** The public benchmark comparison API and current report shapes.
+//! - **Must not know.** Product execution, placement or connector implementation.
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -90,6 +97,7 @@ end_to_end_payload_mib_per_second=0.160
     write(
         &directory.join("nervix-metrics.toml"),
         r#"[[batch_targets]]
+unit = "Single"
 domain = "benchmark_run"
 target_kind = "INGESTOR"
 target = "kafka_in_0"
@@ -103,6 +111,7 @@ p90 = 1000.0
 p99 = 2048.0
 
 [[relay_buffers]]
+unit = "Single"
 domain = "benchmark_run"
 relay = "benchmark_ingested_0"
 physical_node_id = "node-1"
