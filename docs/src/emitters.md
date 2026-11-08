@@ -711,7 +711,8 @@ CREATE KAFKA TOPIC EMITTER kafka_notifications
 | Emitters | Clause |
 | --- | --- |
 | Kafka, Pulsar, RabbitMQ, Redis, MQTT, NATS, ZeroMQ, SQS, Sentry, Syslog, OTEL, Iceberg | Optional |
-| ClickHouse, Postgres, MySQL, MongoDB | Required: a database write always carries several rows |
+| ClickHouse, Postgres, MySQL, MongoDB | Required: bounds each native insert or bulk write, including a singleton |
+| Client consumers | Required: bounds each native Arrow IPC delivery |
 | HTTP | Unavailable: each request contains one source record |
 
 A statement is rejected, naming the offending value, when:
@@ -719,7 +720,7 @@ A statement is rejected, naming the offending value, when:
 - `MAX MESSAGES` is zero, exceeds its representation, or exceeds the committed batch-count cap;
 - `MAX SIZE` is zero, fractional, written without a unit, or past the 64-bit byte range;
 - `MAX SIZE` is above 1 MiB on an SQS emitter, the largest SQS message Nervix sends;
-- the clause is absent on a ClickHouse, Postgres, MySQL or MongoDB emitter;
+- the clause is absent on a ClickHouse, Postgres, MySQL, MongoDB or client consumer emitter;
 - the clause is present on a Sentry emitter whose codec declares no `ON EMITTING BATCH`
   transformation, because one Sentry envelope carries at most one event and only that
   transformation can say where the members go;
@@ -746,9 +747,10 @@ see [Emitter payload preparation](metrics-and-observability.md#emitter-payload-p
 the exact units and retry counting. `FLUSH` memory bytes and sent Arrow bytes remain separate from
 encoded payload bytes.
 
-The complete contract for batch payloads — packing, containers per wire format, exact size
-measurement and failure attribution for every emitter — is defined in
-[Optional emitter batching](https://github.com/nervix-io/nervix/blob/main/docs/specifications/emitter-batching.md).
+The [Emitter Batching](./emitter-batching.md) architecture chapter connects packing, containers,
+exact size measurement, retained membership, failure attribution and lifecycle for every entity.
+Its [measured observations](./emitter-batching.md#measured-observations) explain tuning evidence
+and its throughput, latency, CPU and memory scopes.
 The database emitters bound every insert or bulk write by both limits, as
 [Database writes](#database-writes) describes. An OTEL emitter with the clause bounds each export
 request; without it, OTEL keeps one request per pending Arrow batch, and with or without it a
@@ -912,9 +914,10 @@ maximum message size drops a larger message after the sending socket has accepte
 
 ### Database writes
 
-ClickHouse, Postgres, MySQL and MongoDB always write several rows at once, so their emitters
-require the clause. A flush hands the emitter every run of rows from successive Arrow carriers of one
-source relay and concrete branch, in the order the emitter would have published them, and the emitter
+ClickHouse, Postgres, MySQL and MongoDB write native rows rather than codec containers, so their
+emitters require the clause, including for a singleton write. A flush hands the emitter every run
+of rows from successive Arrow carriers of one source relay and concrete branch, in the order the
+emitter would have published them, and the emitter
 writes the run as inserts or bulk writes of at most `MAX MESSAGES` rows. Every source record stays
 one row or one document: an array or `VEC` value is one column value, never a set of rows, and no
 destination schema changes.

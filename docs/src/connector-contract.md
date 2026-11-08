@@ -12,6 +12,8 @@ the resulting Arrow batches inside the graph.
 ingestor and emitter plans to the host.
 [HTTP Emitter Architecture](./http-emitter-architecture.md) follows this boundary for one
 outbound request, from Arrow preparation to response and recovery.
+[Emitter Batching](./emitter-batching.md) follows compatible rows through bounded encoding,
+retained membership, native publication outcomes and the separate flush, request and commit units.
 
 ## Connector and entity kinds
 

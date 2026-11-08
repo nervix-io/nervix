@@ -68,6 +68,7 @@
   - [Typed States And Validation Boundaries](./typed-states.md)
   - [Node Settings](./node-settings.md)
   - [Connector Crates And The Connector Contract](./connector-contract.md)
+  - [Emitter Batching](./emitter-batching.md)
   - [HTTP Emitter Architecture](./http-emitter-architecture.md)
   - [Client Ingestors And Emitters](./client-io-architecture.md)
   - [Domain Clock](./domain-clock.md)
