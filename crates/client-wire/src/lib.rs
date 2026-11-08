@@ -38,6 +38,7 @@ mod domain;
 mod domain_clock;
 mod event;
 mod frame;
+mod execution_unit;
 #[cfg(feature = "grpc")]
 pub mod grpc;
 mod impact;
@@ -48,6 +49,7 @@ mod request;
 mod resource;
 mod restore;
 mod row;
+mod row_batch;
 mod row_text;
 mod server;
 mod subscription;
@@ -137,4 +139,3 @@ pub use upload::{
 #[cfg(test)]
 mod tests;
 
-mod row_batch;
