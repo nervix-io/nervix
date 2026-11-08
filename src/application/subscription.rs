@@ -49,6 +49,7 @@ use std::{
 };
 
 use ahash::{HashMap, HashMapExt};
+/// Non-security BLAKE3: distributes subscription sampling draws, not secure randomness.
 use blake3::Hasher;
 use error_stack::{Report, ResultExt as _};
 use futures_util::{StreamExt, stream::FuturesUnordered};
@@ -896,6 +897,7 @@ pub(in crate::application) struct SubscriptionSampler {
 impl SubscriptionSampler {
     /// Whether a selected row of branch `key` passes sampling at `batch_sample_rate`. A missing
     /// rate and the rates 1 and 0 decide without taking a draw.
+    /// Non-security BLAKE3: samples rows from a sequence/branch, with no access-control decision.
     fn passes(&self, batch_sample_rate: Option<f64>, key: Option<&BranchKey>) -> bool {
         let Some(rate) = batch_sample_rate else {
             return true;

@@ -38,6 +38,7 @@ impl WindowModelDigest {
 impl CreateWindowProcessor {
     /// The digest of this model's canonical Plexus, which changes with any change to the window's
     /// inputs, bounds, state limit, branch, routes or aggregates.
+    /// Non-security BLAKE3: identifies admitted window configuration for state matching.
     pub fn model_digest(&self) -> error_stack::Result<WindowModelDigest, CanonicalPlexusError> {
         let text = self.to_canonical_plexus()?;
         let mut hasher = blake3::Hasher::new();

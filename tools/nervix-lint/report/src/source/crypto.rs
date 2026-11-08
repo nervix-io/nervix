@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use proc_macro2::{Spacing, Span, TokenStream, TokenTree};
 use syn::{
-    Attribute, Item, UseTree,
+    Attribute, Expr, Item, Lit, Meta, UseTree,
     ext::IdentExt as _,
     visit::{self, Visit},
 };
@@ -24,9 +24,36 @@ const RULE: &str = "non_aws_lc_crypto";
 const BOUNDARY: &str = "crates/crypto/";
 
 /// Crates that implement cryptography other than AWS-LC. Every authored use counts, inside the
-/// boundary too. A BLAKE3 site counts while it records no non-security classification, and the
-/// rule recognises none yet.
+/// boundary too. BLAKE3 counts unless its operation documents a non-security purpose.
 const CRATES: [&str; 6] = ["argon2", "blake3", "hmac", "pbkdf2", "sha1", "sha2"];
+
+/// A source-owned purpose comment, rather than a file or module exemption. Rustdoc comments
+/// are parsed attributes, so text in literals, ordinary comments and opaque macro strings cannot
+/// accidentally classify an operation.
+fn non_security_blake3(attributes: &[Attribute]) -> bool {
+    for attribute in attributes {
+        let Meta::NameValue(value) = &attribute.meta else {
+            continue;
+        };
+        if !value.path.is_ident("doc") {
+            continue;
+        }
+        let Expr::Lit(value) = &value.value else {
+            continue;
+        };
+        let Lit::Str(text) = &value.lit else {
+            continue;
+        };
+        for line in text.value().lines() {
+            if let Some(reason) = line.trim().strip_prefix("Non-security BLAKE3:")
+                && !reason.trim().is_empty()
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
 
 /// The operating-system entropy crate, which only the boundary may call.
 const ENTROPY_CRATE: &str = "getrandom";
@@ -51,6 +78,7 @@ pub(super) fn scan(path: &str, file: &syn::File) -> Vec<SourceSite> {
         path,
         placement: Placement::of(path),
         imports,
+        non_security_blake3: false,
         sites: BTreeSet::new(),
     };
     scanner.visit_file(file);
@@ -269,10 +297,25 @@ struct Cryptography<'a> {
     path: &'a str,
     placement: Placement,
     imports: Imports,
+    non_security_blake3: bool,
     sites: BTreeSet<SourceSite>,
 }
 
 impl Cryptography<'_> {
+    fn counts(&self, path: &[String]) -> bool {
+        if self.non_security_blake3 && path.first().is_some_and(|root| root == "blake3") {
+            return false;
+        }
+        self.placement.counts(path)
+    }
+
+    fn counts_prefix(&self, path: &[String]) -> bool {
+        if self.non_security_blake3 && path.first().is_some_and(|root| root == "blake3") {
+            return false;
+        }
+        self.placement.counts_prefix(path)
+    }
+
     fn site(&mut self, span: Span) {
         let start = span.start();
         self.sites.insert(SourceSite {
@@ -295,7 +338,7 @@ impl Cryptography<'_> {
             UseTree::Rename(value) => self.imported(prefix, &value.ident),
             UseTree::Glob(value) => {
                 let prefix = self.imports.resolve(prefix);
-                if self.placement.counts_prefix(&prefix) {
+                if self.counts_prefix(&prefix) {
                     self.site(value.star_token.span);
                 }
             }
@@ -310,7 +353,7 @@ impl Cryptography<'_> {
     fn imported(&mut self, prefix: Vec<String>, name: &syn::Ident) {
         let written = joined(prefix, &name.unraw().to_string());
         let path = self.imports.resolve(written);
-        if self.placement.counts(&path) {
+        if self.counts(&path) {
             self.site(name.span());
         }
     }
@@ -355,9 +398,9 @@ impl Cryptography<'_> {
             self.imports.resolve(chain.segments.clone())
         };
         let counted = if chain.continues {
-            self.placement.counts_prefix(&path)
+            self.counts_prefix(&path)
         } else {
-            self.placement.counts(&path)
+            self.counts(&path)
         };
         if counted {
             self.site(chain.start);
@@ -371,21 +414,54 @@ impl<'ast> Visit<'ast> for Cryptography<'_> {
     }
 
     fn visit_item(&mut self, item: &'ast Item) {
-        if !test_only(item_attributes(item)) {
-            visit::visit_item(self, item);
+        if test_only(item_attributes(item)) {
+            return;
         }
+        let saved = self.non_security_blake3;
+        // Containers cannot classify their children. Each operation, import or field owns its
+        // own reason, including a nested function inside an otherwise classified operation.
+        self.non_security_blake3 = matches!(
+            item,
+            Item::Fn(_)
+                | Item::Use(_)
+                | Item::ExternCrate(_)
+                | Item::Type(_)
+                | Item::Const(_)
+                | Item::Static(_)
+                | Item::Macro(_)
+        ) && non_security_blake3(item_attributes(item));
+        visit::visit_item(self, item);
+        self.non_security_blake3 = saved;
     }
 
     fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
-        if !test_only(impl_item_attributes(item)) {
-            visit::visit_impl_item(self, item);
+        if test_only(impl_item_attributes(item)) {
+            return;
         }
+        let saved = self.non_security_blake3;
+        self.non_security_blake3 = non_security_blake3(impl_item_attributes(item));
+        visit::visit_impl_item(self, item);
+        self.non_security_blake3 = saved;
     }
 
     fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
-        if !test_only(trait_item_attributes(item)) {
-            visit::visit_trait_item(self, item);
+        if test_only(trait_item_attributes(item)) {
+            return;
         }
+        let saved = self.non_security_blake3;
+        self.non_security_blake3 = non_security_blake3(trait_item_attributes(item));
+        visit::visit_trait_item(self, item);
+        self.non_security_blake3 = saved;
+    }
+
+    fn visit_field(&mut self, field: &'ast syn::Field) {
+        if test_only(&field.attrs) {
+            return;
+        }
+        let saved = self.non_security_blake3;
+        self.non_security_blake3 = non_security_blake3(&field.attrs);
+        visit::visit_field(self, field);
+        self.non_security_blake3 = saved;
     }
 
     fn visit_item_mod(&mut self, value: &'ast syn::ItemMod) {
@@ -414,7 +490,7 @@ impl<'ast> Visit<'ast> for Cryptography<'_> {
 
     fn visit_item_extern_crate(&mut self, value: &'ast syn::ItemExternCrate) {
         let path = vec![value.ident.unraw().to_string()];
-        if self.placement.counts(&path) {
+        if self.counts(&path) {
             self.site(value.ident.span());
         }
     }
@@ -435,7 +511,7 @@ impl<'ast> Visit<'ast> for Cryptography<'_> {
             } else {
                 self.imports.resolve(written)
             };
-            if self.placement.counts(&path) {
+            if self.counts(&path) {
                 self.site(first.ident.span());
             }
         }

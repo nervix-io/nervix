@@ -176,6 +176,144 @@ fn install() { assert!(crypto::aws_lc_rs::default_provider().install_default().i
 }
 
 #[test]
+fn documented_non_security_blake3_is_scoped_to_its_operation() {
+    let source = r#"
+/// Non-security BLAKE3: identifies trusted configuration; never authenticates it.
+use blake3::Hasher as Fingerprint;
+/// Non-security BLAKE3: compares bytes inside an authenticated transfer.
+fn checksum(data: &[u8]) -> blake3::Hash { blake3::hash(data) }
+fn unclassified(data: &[u8]) -> blake3::Hash { blake3::hash(data) }
+/// Non-security BLAKE3: identifies trusted configuration.
+fn with_nested_item() {
+    let _ = blake3::hash(b"config");
+    fn nested() { blake3::hash(b"separate operation"); }
+    sha2::Sha256::new();
+}
+struct Transfer {
+    /// Non-security BLAKE3: incremental corruption detection, not a signature.
+    checksum: blake3::Hasher,
+    unclassified: blake3::Hash,
+}
+"#;
+    assert_eq!(
+        crypto_sites("src/fixture.rs", source),
+        [
+            at(source, 6, "blake3", 0),
+            at(source, 6, "blake3", 1),
+            at(source, 10, "blake3", 0),
+            at(source, 11, "sha2", 0),
+            at(source, 16, "blake3", 0),
+        ]
+    );
+}
+
+#[test]
+fn broad_empty_or_unrelated_hash_comments_leave_blake3_counted() {
+    let source = r#"
+//! Non-security BLAKE3: this crate-level comment grants no exemption.
+/// Non-security BLAKE3: this module-level comment grants no exemption.
+mod nested { fn checksum() { blake3::hash(b"data"); } }
+/// Non-security BLAKE3:
+fn empty_reason() { blake3::hash(b"data"); }
+/// Non-security SHA-1: another algorithm cannot classify BLAKE3.
+fn other_algorithm() { blake3::hash(b"data"); }
+fn ordinary_comment() {
+    // Non-security BLAKE3: ordinary body comments do not classify an owner.
+    blake3::hash(b"data");
+}
+/// Non-security BLAKE3: imports no cryptography other than BLAKE3.
+use sha1::Sha1;
+"#;
+    assert_eq!(
+        crypto_sites("src/fixture.rs", source),
+        [
+            at(source, 4, "blake3", 0),
+            at(source, 6, "blake3", 0),
+            at(source, 8, "blake3", 0),
+            at(source, 11, "blake3", 0),
+            at(source, 14, "Sha1", 0),
+        ]
+    );
+}
+
+#[test]
+fn purpose_comments_keep_renames_macros_and_method_owners_separate() {
+    let source = r#"
+/// Non-security BLAKE3: fingerprints admitted configuration.
+use blake3 as fingerprint;
+struct Owner;
+/// Non-security BLAKE3: an impl comment cannot classify methods.
+impl Owner {
+    /// Non-security BLAKE3: compares controlled content inside this operation.
+    fn classified() { tracing::debug!(key = %fingerprint::hash(b"x")); }
+    fn unclassified() { fingerprint::hash(b"x"); }
+}
+/// Non-security BLAKE3: a type comment cannot classify fields.
+struct Unclassified { hash: fingerprint::Hash }
+/// Non-security BLAKE3: fingerprints controlled macro inputs.
+macro_rules! checksum { ($bytes:expr) => { blake3::hash($bytes) }; }
+macro_rules! unclassified { () => { blake3::hash(b"x") }; }
+trait Contract {
+    /// Non-security BLAKE3: carries a checksum, not an authentication result.
+    fn checksum(&self) -> fingerprint::Hash;
+    fn unclassified(&self) -> fingerprint::Hash;
+}
+"#;
+    assert_eq!(
+        crypto_sites("src/fixture.rs", source),
+        [
+            at(source, 9, "fingerprint", 0),
+            at(source, 12, "fingerprint", 0),
+            at(source, 15, "blake3", 0),
+            at(source, 19, "fingerprint", 0),
+        ]
+    );
+}
+
+#[test]
+fn only_literal_purpose_docs_classify_an_operation() {
+    let source = r#"
+#[doc(hidden)] fn hidden() { blake3::hash(b"x"); }
+#[doc = include_str!("purpose.txt")] fn included() { blake3::hash(b"x"); }
+#[doc = 42] fn numeric() { blake3::hash(b"x"); }
+#[doc = "A checksum owner."] fn ordinary() { blake3::hash(b"x"); }
+#[doc = "Description.\n Non-security BLAKE3: detects corrupt controlled bytes."]
+fn documented() { blake3::hash(b"x"); }
+"#;
+    assert_eq!(
+        crypto_sites("src/fixture.rs", source),
+        [
+            at(source, 2, "blake3", 0),
+            at(source, 3, "blake3", 0),
+            at(source, 4, "blake3", 0),
+            at(source, 5, "blake3", 0),
+        ]
+    );
+}
+
+#[test]
+fn classified_imports_leave_later_qualified_operations_counted() {
+    let source = r#"
+/// Non-security BLAKE3: imports controlled checksum operations.
+use blake3::*;
+fn unclassified() { blake3::hash(b"x"); }
+/// Non-security BLAKE3: cannot classify SHA-2 imports.
+use sha2::*;
+/// Non-security BLAKE3: names controlled checksum operations.
+extern crate blake3 as digest;
+fn another_operation() { digest::hash(b"x"); }
+"#;
+    assert_eq!(
+        crypto_sites("src/fixture.rs", source),
+        [
+            at(source, 4, "blake3", 0),
+            at(source, 6, "*", 0),
+            at(source, 9, "digest", 0),
+        ]
+    );
+}
+
+#[test]
 fn bolero_non_aws_lc_crypto_preserves_every_authored_site() {
     bolero::check!().with_type::<[u8; 32]>().for_each(|seed| {
         let boundary = seed[0] % 2 == 1;
@@ -195,7 +333,7 @@ fn bolero_non_aws_lc_crypto_preserves_every_authored_site() {
         let count = usize::from(seed[2] % 8);
         for index in 0..count {
             let variant = seed[index + 3] % 8;
-            let (line, token, entropy) = match variant {
+            let (mut line, token, entropy) = match variant {
                 0 => (
                     format!("#[cfg(any())] use blake3::Hasher as H{index};\n"),
                     "Hasher",
@@ -244,7 +382,19 @@ fn bolero_non_aws_lc_crypto_preserves_every_authored_site() {
                     true,
                 ),
             };
-            let counted = variant != 7 && !(boundary && entropy);
+            // The same inactive BLAKE3 import is unclassified, classified, or carries an empty
+            // purpose. A purpose never suppresses another algorithm or entropy site.
+            let purpose = seed[31] % 3;
+            if purpose == 1 {
+                line = format!(
+                    "#[doc = \"Non-security BLAKE3: identifies controlled fixture content.\"] \
+                     {line}"
+                );
+            } else if purpose == 2 {
+                line = format!("#[doc = \"Non-security BLAKE3:   \"] {line}");
+            }
+            let classified = variant == 0 && purpose == 1;
+            let counted = variant != 7 && !classified && !(boundary && entropy);
             if counted {
                 let column = line
                     .find(token)
