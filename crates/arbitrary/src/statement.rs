@@ -721,8 +721,26 @@ impl Arbitrary<'_> {
             StatementVariant::ShowEmitters => Statement::ShowEmitters(ShowEmitters),
             StatementVariant::ShowPlacements => Statement::ShowPlacements(ShowPlacements),
             StatementVariant::ShowRelayMaterializedState => {
+                let relay = self.name();
+                let selection = self.entropy.flag().then(|| self.state_branch_selection());
+                let page = if self.entropy.flag() {
+                    Some(nervix_models::StateInspectionPageRequest {
+                        limit: self.positive_u64(),
+                        after: self.entropy.flag().then(|| self.non_empty_string()),
+                    })
+                } else {
+                    None
+                };
+                let format = if self.entropy.flag() {
+                    InspectionFormat::Text
+                } else {
+                    InspectionFormat::Json
+                };
                 Statement::ShowRelayMaterializedState(ShowRelayMaterializedState {
-                    relay: self.name(),
+                    relay,
+                    selection,
+                    page,
+                    format,
                 })
             }
             StatementVariant::ShowClusterStatus => Statement::ShowClusterStatus(ShowClusterStatus),

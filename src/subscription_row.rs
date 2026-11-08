@@ -18,7 +18,7 @@ use std::{collections::BTreeMap, num::NonZeroUsize};
 
 use arrow_array::RecordBatch;
 use error_stack::{Report, ResultExt as _};
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_client_wire::{
     CellWriter, EncodedFrame, RowBranch, RowSchema, ServerFrame, SessionLimits, SubscriptionHandle,
     SubscriptionOpened, SubscriptionRowsEncoder, SubscriptionType, WireEncodeError,
@@ -460,6 +460,7 @@ struct BranchCell<'a> {
 pub mod benchmark {
     use arrow_array::{ArrayRef, BinaryArray, Int64Array, RecordBatch, StringArray};
     use arrow_schema::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
+    use meticulous::ResultExt as _;
     use nervix_client_wire::{EncodedFrame, RowBranch, ServerFrame};
     use nervix_models::{ParseAsType, SubscriptionName};
     use nervix_primitives::sync::StdArc;

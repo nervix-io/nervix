@@ -60,6 +60,7 @@ pub mod runtime_ack;
 pub mod runtime_schema;
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_selection_tests;
+mod state_inspection_cursor;
 #[doc(hidden)]
 pub mod subscription_row;
 pub(crate) mod task_shutdown;

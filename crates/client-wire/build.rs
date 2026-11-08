@@ -5,7 +5,7 @@ use meticulous::OptionExt as _;
 /// Every shape of the protocol lives in this file. The root files beside it only name frame roots
 /// for other languages' code generators, so Rust generation reads this file alone.
 const SCHEMA: &str = "schema/session.fbs";
-const ROOT_SCHEMAS: [&str; 8] = [
+const ROOT_SCHEMAS: [&str; 9] = [
     "schema/client_message.fbs",
     "schema/server_message.fbs",
     "schema/upload_message.fbs",
@@ -14,6 +14,7 @@ const ROOT_SCHEMAS: [&str; 8] = [
     "schema/backup_download_message.fbs",
     "schema/restore_message.fbs",
     "schema/restore_reply.fbs",
+    "schema/state_row.fbs",
 ];
 
 /// The lints flatc's Rust output trips, each admitted with the reason it cannot be avoided in code

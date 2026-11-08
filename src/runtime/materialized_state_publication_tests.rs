@@ -104,15 +104,6 @@ fn assert_row(actual: &RuntimeRow, expected: &RuntimeRow) {
             expected.value_at(index).assured("valid original column")
         );
     }
-    let sensitivity = nervix_vm::SchemaSensitivity::from_sensitive_fields(["note".to_string()]);
-    assert_eq!(
-        actual
-            .to_json_string_masking(&sensitivity)
-            .assured("valid sensitive projection"),
-        expected
-            .to_json_string_masking(&sensitivity)
-            .assured("valid original projection")
-    );
 }
 
 fn assert_records(
@@ -145,6 +136,7 @@ fn restored_materialized_branches_receive_retention_from_activation_time() {
     ]);
     let first = expected.values().next().assured("two fixture rows exist");
     let state = Arc::new(ReplicatedMaterializedRelayState::new(
+        1,
         placement(),
         first.arrow_schema(),
     ));
@@ -181,6 +173,7 @@ fn restored_materialized_branches_receive_retention_from_activation_time() {
 fn established_updates_retain_membership_and_arrow_payloads_and_keep_timestamp_ties() {
     let first = row(1, -2, 4);
     let state = Arc::new(ReplicatedMaterializedRelayState::new(
+        1,
         placement(),
         first.arrow_schema(),
     ));
@@ -258,6 +251,7 @@ async fn materialized_branch_eviction_withdraws_its_record_before_recreation() {
         .assured("the branch installs")
         .into_inner();
     let state = Arc::new(ReplicatedMaterializedRelayState::new(
+        1,
         placed.clone(),
         row(1, 1, 1).arrow_schema(),
     ));
@@ -283,6 +277,7 @@ async fn materialized_branch_eviction_withdraws_its_record_before_recreation() {
 fn eviction_ends_retained_publications_and_recreation_gets_a_fresh_lifetime() {
     let first = row(1, 1, 1);
     let state = Arc::new(ReplicatedMaterializedRelayState::new(
+        1,
         placement(),
         first.arrow_schema(),
     ));
@@ -408,6 +403,7 @@ async fn rebinding_reseals_the_current_revision_under_its_current_fence() {
     let runtime = super::super::Runtime::new();
     let first = row(1, 1, 1);
     let state = Arc::new(ReplicatedMaterializedRelayState::new(
+        1,
         placement(),
         first.arrow_schema(),
     ));
@@ -460,6 +456,7 @@ fn bolero_materialized_sequences_preserve_selection_lifetimes_and_complete_snaps
             let snapshot_runtime = super::super::Runtime::new();
             let first = row(0, 0, 0);
             let state = Arc::new(ReplicatedMaterializedRelayState::new(
+                1,
                 placement(),
                 first.arrow_schema(),
             ));
@@ -578,6 +575,7 @@ fn bolero_materialized_sequences_preserve_selection_lifetimes_and_complete_snaps
                     );
                 }
                 let recovered = Arc::new(ReplicatedMaterializedRelayState::restored(
+                    1,
                     placement(),
                     first.arrow_schema(),
                     Some(restored),
@@ -615,6 +613,7 @@ mod shuttle_checks {
 
     fn capture_update_eviction() {
         let state = Arc::new(ReplicatedMaterializedRelayState::new(
+            1,
             placement(),
             row(1, 1, 1).arrow_schema(),
         ));
@@ -701,6 +700,7 @@ mod shuttle_checks {
 
     fn assignment_swap() {
         let state = Arc::new(ReplicatedMaterializedRelayState::new(
+            1,
             placement(),
             row(1, 1, 1).arrow_schema(),
         ));

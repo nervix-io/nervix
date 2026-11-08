@@ -49,7 +49,7 @@ Feature: Materialized relay state
       """
     Then within "5s" node "<report_node>" eventually reports materialized state for relay "root_state" containing
       """
-      key=(root) payload={"value":"root-value"}
+      {"branch":null,"fields":{"value":"root-value"}}
       """
 
     Examples:
@@ -100,15 +100,15 @@ Feature: Materialized relay state
       """
     Then within "10s" node "<report_node>" eventually reports materialized state for relay "readings" containing
       """
-      key={"tenant":"acme"} payload={"tenant":"acme","value":"Infinity"}
+      {"branch":{"tenant":"acme"},"fields":{"tenant":"acme","value":"Infinity"}}
       """
     And within "10s" node "<report_node>" eventually reports materialized state for relay "readings" containing
       """
-      key={"tenant":"beta"} payload={"tenant":"beta","value":"-Infinity"}
+      {"branch":{"tenant":"beta"},"fields":{"tenant":"beta","value":"-Infinity"}}
       """
     And within "10s" node "<report_node>" eventually reports materialized state for relay "readings" containing
       """
-      key={"tenant":"gamma"} payload={"tenant":"gamma","value":0.5}
+      {"branch":{"tenant":"gamma"},"fields":{"tenant":"gamma","value":0.5}}
       """
 
     Examples:
@@ -198,11 +198,11 @@ Feature: Materialized relay state
       """
     Then within "5s" node "node-1" eventually reports materialized state for relay "tenant_state" containing
       """
-      key={"tenant":"acme"} payload={"source":"acme-state","tenant":"acme","user_id":1}
+      {"branch":{"tenant":"acme"},"fields":{"source":"acme-state","tenant":"acme","user_id":1}}
       """
     And within "5s" node "node-1" eventually reports materialized state for relay "tenant_state" containing
       """
-      key={"tenant":"beta"} payload={"source":"beta-state","tenant":"beta","user_id":2}
+      {"branch":{"tenant":"beta"},"fields":{"source":"beta-state","tenant":"beta","user_id":2}}
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
       """
@@ -444,7 +444,7 @@ Feature: Materialized relay state
       """
     Then within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
-      key={"user_id":42} payload={"amount":1,"user_id":42}
+      {"branch":{"user_id":42},"fields":{"amount":1,"user_id":42}}
       """
     And within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
@@ -465,7 +465,7 @@ Feature: Materialized relay state
       """
     Then within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
-      key={"user_id":42} payload={"amount":2,"user_id":42}
+      {"branch":{"user_id":42},"fields":{"amount":2,"user_id":42}}
       """
 
     Examples:
@@ -521,7 +521,7 @@ Feature: Materialized relay state
       """
     Then within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
-      key={"user_id":42} payload={"user_id":42}
+      {"branch":{"user_id":42},"fields":{"user_id":42}}
       """
     When these Plexus commands are executed on the leader node
       """
@@ -530,7 +530,7 @@ Feature: Materialized relay state
       """
     Then within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
-      relay 'notifications' materialized state is empty
+      rows: 0
       """
 
     Examples:
@@ -588,11 +588,11 @@ Feature: Materialized relay state
       """
     Then within "30s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
-      key={"user_id":42} payload={"note":"first","user_id":42}
+      {"branch":{"user_id":42},"fields":{"note":"first","user_id":42}}
       """
     And within "60s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
-      relay 'notifications' materialized state is empty
+      rows: 0
       """
 
     When http payloads are posted concurrently to host "http-{{test_id}}.example.com" path "/ingest"
@@ -602,11 +602,11 @@ Feature: Materialized relay state
       """
     Then within "30s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
-      key={"user_id":42} payload={"note":"recreated-acme","user_id":42}
+      {"branch":{"user_id":42},"fields":{"note":"recreated-acme","user_id":42}}
       """
     And within "30s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
-      key={"user_id":43} payload={"note":"recreated-beta","user_id":43}
+      {"branch":{"user_id":43},"fields":{"note":"recreated-beta","user_id":43}}
       """
 
     Examples:
@@ -681,20 +681,20 @@ Feature: Materialized relay state
       """
     Then within "10s" node "node-1" eventually reports materialized state for relay "tenant_state" containing
       """
-      key={"tenant":"acme"} payload={"source":"acme-second","tenant":"acme","user_id":3,"zblob":"aaaaaaaaaa
+      {"branch":{"tenant":"acme"},"fields":{"source":"acme-second","tenant":"acme","user_id":3},"field_prefixes":{"zblob":"aaaaaaaaaa"}}
       """
     And within "10s" node "node-1" eventually reports materialized state for relay "tenant_state" containing
       """
-      key={"tenant":"globex"} payload={"source":"globex-second","tenant":"globex","user_id":4,"zblob":"y"}
+      {"branch":{"tenant":"globex"},"fields":{"source":"globex-second","tenant":"globex","user_id":4,"zblob":"y"}}
       """
     When the cluster is restarted
     Then within "30s" node "node-1" eventually reports materialized state for relay "tenant_state" containing
       """
-      key={"tenant":"acme"} payload={"source":"acme-second","tenant":"acme","user_id":3,"zblob":"aaaaaaaaaa
+      {"branch":{"tenant":"acme"},"fields":{"source":"acme-second","tenant":"acme","user_id":3},"field_prefixes":{"zblob":"aaaaaaaaaa"}}
       """
     And within "30s" node "node-1" eventually reports materialized state for relay "tenant_state" containing
       """
-      key={"tenant":"globex"} payload={"source":"globex-second","tenant":"globex","user_id":4,"zblob":"y"}
+      {"branch":{"tenant":"globex"},"fields":{"source":"globex-second","tenant":"globex","user_id":4,"zblob":"y"}}
       """
 
     Examples:

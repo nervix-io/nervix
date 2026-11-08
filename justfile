@@ -364,6 +364,20 @@ test-inferencer-state *args: build-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/inferencer_state.feature {{ quote(args) }}
 
+# Inspect materialized relay pages through the native client and in-process cluster.
+test-state-inspection *args: build-deps build-test-cli
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/materialized_state_inspection*.feature") }} {{ quote(args) }}
+
+# Existing Row owner tests qualify the shared column writer without unrelated tool builds.
+test-client-row-encoding filter="subscription_row::tests" *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-server --features testing,benchmarks --lib {{ quote(filter) }} -- {{ quote(args) }}
+
 # Exercise processor and generator partition ownership through the public interface.
 test-processor-partitions *args: build-deps
     #!/usr/bin/env bash

@@ -143,9 +143,14 @@ impl Reply {
         reply: wire::Reply<'_>,
     ) -> Result<Self, Report<WireDecodeError>> {
         let body = match reply.body_type() {
-            wire::ReplyBody::CommandOutcome => ReplyBody::Command(Box::new(
-                CommandOutcome::decode(decoder, reply_member(reply.body_as_command_outcome()))?,
-            )),
+            wire::ReplyBody::CommandOutcome => {
+                ReplyBody::Command(Box::new(CommandOutcome::decode(
+                    decoder,
+                    reply_member(reply.body_as_command_outcome()),
+                    frame.bytes(),
+                    frame.limits(),
+                )?))
+            }
             wire::ReplyBody::AttachOutcome => ReplyBody::Attach(AttachOutcome::decode(
                 decoder,
                 reply_member(reply.body_as_attach_outcome()),

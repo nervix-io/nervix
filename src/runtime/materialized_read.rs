@@ -1,8 +1,7 @@
 //! Reading an installed materialized dependency from its selected state owner.
 //!
 //! Layer: data plane.
-//! - **Owns.** Resolving local or remote materialized rows, redacting public record reports, and
-//!   reporting dependency-read failures.
+//! - **Owns.** Resolving local or remote materialized dependency rows and reporting their failures.
 //! - **Depends on.** Prepared materialized plans, runtime row carriers, state placement and exchange.
 //! - **Must not know.** Models, Plexus parsing or archive restore policy.
 
@@ -232,8 +231,6 @@ pub(crate) enum MaterializedReadError {
         domain: DomainName,
         branch: Option<BranchKey>,
     },
-    #[error("failed to render a materialized record")]
-    RecordReport { branch: Option<BranchKey> },
 }
 
 impl MaterializedReadError {
@@ -287,6 +284,17 @@ impl MaterializedRelayReads {
         match self.of_key(branch) {
             Some(published) => published.has_state_for(branch),
             None => false,
+        }
+    }
+
+    pub(in crate::runtime) fn visit_unit_states<E>(
+        &self,
+        unit: Unit,
+        visit: impl FnMut(Option<&BranchKey>, MaterializedRelayStateRead) -> Result<(), E>,
+    ) -> Result<(), E> {
+        match self.by_unit.get(&unit) {
+            Some(published) => published.visit_states(visit),
+            None => Ok(()),
         }
     }
 
@@ -356,108 +364,6 @@ impl Runtime {
             );
         }
         publications
-    }
-
-    /// Every materialized record one unit of a relay holds on this node, each reported with the
-    /// concrete branch it belongs to.
-    ///
-    /// This is the unit-scoped report, and it says so. Reading one branch is a different
-    /// operation that names that branch.
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            observer,
-            reason = "the public report enumerates installed states on observer request"
-        )
-    )]
-    pub(crate) async fn local_materialized_stream_state(
-        &self,
-        domain: &DomainName,
-        relay: &RelayName,
-        unit: Unit,
-        sensitivity: &VmSchemaSensitivity,
-    ) -> error_stack::Result<Vec<MaterializedRecordReport>, MaterializedReadError> {
-        let routing = self
-            .domain_routing(domain)
-            .map(|routing| routing.load_full());
-        let states = self
-            .inner
-            .replicated_materialized_stream_states
-            .iter()
-            .filter(|state| {
-                let placement = state.key();
-                placement.domain == *domain
-                    && placement.kind == ModelKind::Relay
-                    && placement.identifier == ModelName::from(relay)
-                    && placement.unit == unit
-            })
-            .map(|state| {
-                (
-                    state.key().clone(),
-                    ReplicatedMaterializedRelayState::read(state.value()),
-                )
-            })
-            .collect::<Vec<_>>();
-        let mut reports = Vec::new();
-        let mut found = false;
-        for (placement, state) in states {
-            found = true;
-            for record in state.records() {
-                if !self.materialized_stream_key_is_visible(
-                    routing.as_deref(),
-                    &placement,
-                    &record.branch,
-                ) {
-                    continue;
-                }
-                reports.push(record.report(sensitivity)?);
-            }
-        }
-        if !found {
-            let placement = match self.state_placement_for_unit(
-                domain,
-                RuntimeStateKind::MaterializedRelay,
-                ModelKind::Relay,
-                relay,
-                unit,
-                None,
-            ) {
-                Ok(placement) => placement,
-                // This node has applied no schedule that carries the relay, so it holds no state
-                // for it: the local report is empty.
-                Err(error)
-                    if matches!(
-                        error.current_context(),
-                        StateIdentityError::SchemaFingerprintUnpublished { .. }
-                    ) =>
-                {
-                    return Ok(reports);
-                }
-                Err(error) => {
-                    return Err(error.change_context(MaterializedReadError::StateIdentity {
-                        domain: domain.clone(),
-                        relay: relay.clone(),
-                        branch: None,
-                    }));
-                }
-            };
-            if let Some(restored) = self
-                .open_stored_materialized_snapshot(None, &placement)
-                .await?
-            {
-                for record in restored.records {
-                    reports.push(
-                        MaterializedGenerationRecord {
-                            branch: record.branch,
-                            row: record.row,
-                        }
-                        .report(sensitivity)?,
-                    );
-                }
-            }
-        }
-        reports.sort_by(|left, right| BranchKey::canonical_order(&left.branch, &right.branch));
-        Ok(reports)
     }
 
     /// Find the branch's record wherever this node keeps it.
@@ -548,7 +454,7 @@ impl Runtime {
     }
 
     /// Open the sealed snapshot this node persisted for a placement, if it has one.
-    async fn open_stored_materialized_snapshot(
+    pub(in crate::runtime) async fn open_stored_materialized_snapshot(
         &self,
         routing: Option<&DomainRoutingSnapshot>,
         placement: &RuntimeStatePlacement,
@@ -777,58 +683,6 @@ impl Runtime {
             Some(services) => services.holds_branch(key),
             None => true,
         }
-    }
-
-    /// Every materialized record one unit of a relay holds on another node, reported the same way
-    /// as the local unit-scoped view.
-    pub(crate) async fn remote_materialized_stream_state(
-        &self,
-        target_node_id: &ClusterNodeName,
-        domain: &DomainName,
-        relay: &RelayName,
-        unit: Unit,
-        sensitivity: &VmSchemaSensitivity,
-    ) -> error_stack::Result<Vec<MaterializedRecordReport>, MaterializedReadError> {
-        let placement = self
-            .state_placement_for_unit(
-                domain,
-                RuntimeStateKind::MaterializedRelay,
-                ModelKind::Relay,
-                relay,
-                unit,
-                None,
-            )
-            .change_context_lazy(|| MaterializedReadError::StateIdentity {
-                domain: domain.clone(),
-                relay: relay.clone(),
-                branch: None,
-            })?;
-        let Some(schema) = self.materialized_relay_schema(None, &placement) else {
-            return Ok(Vec::new());
-        };
-        let Some(restored) = self
-            .fetch_sealed_materialized_snapshot(target_node_id, &placement, &schema, None)
-            .await
-            .change_context(MaterializedReadError::RemoteSnapshot {
-                target: target_node_id.clone(),
-                placement: placement.clone(),
-            })?
-        else {
-            return Ok(Vec::new());
-        };
-        let mut reports = restored
-            .records
-            .into_iter()
-            .map(|record| {
-                MaterializedGenerationRecord {
-                    branch: record.branch,
-                    row: record.row,
-                }
-                .report(sensitivity)
-            })
-            .collect::<error_stack::Result<Vec<_>, MaterializedReadError>>()?;
-        reports.sort_by(|left, right| BranchKey::canonical_order(&left.branch, &right.branch));
-        Ok(reports)
     }
 
     /// Every materialized record one unit of a relay holds, taken from the node that owns it.
@@ -1266,26 +1120,6 @@ impl Runtime {
     }
 }
 
-impl MaterializedGenerationRecord {
-    /// Render this record under the relay schema's sensitivity for public inspection.
-    fn report(
-        &self,
-        sensitivity: &VmSchemaSensitivity,
-    ) -> error_stack::Result<MaterializedRecordReport, MaterializedReadError> {
-        Ok(MaterializedRecordReport {
-            branch: self.branch.clone(),
-            payload: self
-                .row
-                .to_json_string_masking(sensitivity)
-                .change_context(MaterializedReadError::RecordReport {
-                    branch: self.branch.clone(),
-                })?,
-            ingested_at_low_watermark: self.row.metadata().ingested_at_low_watermark(),
-            ingested_at_high_watermark: self.row.metadata().ingested_at_high_watermark(),
-        })
-    }
-}
-
 /// The wait of one branch task for the materialized state its parked messages need.
 ///
 /// A message parks when the state it needs is missing, and the owner of that state notifies every
@@ -1386,43 +1220,6 @@ mod tests {
         runtime_ack::{AckOutcome, AckSet},
         runtime_schema::{RuntimeRecordMetadata, RuntimeValue},
     };
-
-    #[test]
-    fn materialized_inspection_masks_payload_fields_and_preserves_watermarks() {
-        use meticulous::ResultExt as _;
-
-        use crate::runtime_schema::test_runtime_row;
-
-        let low = Timestamp::from_unix_nanos(11);
-        let high = Timestamp::from_unix_nanos(29);
-        let record = MaterializedGenerationRecord {
-            branch: string_branch_key("tenant", "private-tenant"),
-            row: test_runtime_row([
-                ("secret".to_owned(), RuntimeValue::I64(42)),
-                ("seq".to_owned(), RuntimeValue::I64(3)),
-                (
-                    "measurement".to_owned(),
-                    RuntimeValue::F64(ordered_float::OrderedFloat(f64::INFINITY)),
-                ),
-            ])
-            .with_metadata(RuntimeRecordMetadata::from_ingested_at_watermarks(
-                low, high,
-            )),
-        };
-        let sensitivity = VmSchemaSensitivity::from_sensitive_fields(["secret"]);
-
-        let report = record
-            .report(&sensitivity)
-            .assured("the fixture's Arrow columns match its values");
-
-        assert_eq!(report.branch, record.branch);
-        assert_eq!(
-            report.payload,
-            r#"{"measurement":"Infinity","secret":"<masked>","seq":3}"#
-        );
-        assert_eq!(report.ingested_at_low_watermark, low);
-        assert_eq!(report.ingested_at_high_watermark, high);
-    }
 
     #[nervix_primitives::test]
     async fn stored_materialized_reads_open_containers_larger_than_the_bulk_budget() {

@@ -836,3 +836,19 @@ reset's outcome rather than starting another. See
 the API. It follows leader redirects and reconnects with the session client's normal request-ID
 dispatch. A successful read of the attached transaction refreshes the same commit preview; a
 rejected read changes no binding or preview.
+
+## Typed Materialized State Reads
+
+Execute `SHOW RELAY events MATERIALIZED STATE FOR ALL BRANCHES LIMIT 10 FORMAT JSON;`.
+Read `outcome.state`, match `StateInspectionResult::Page` or `Rejected`, then visit units, sections
+and `frame.batch()` using each section's schema. `counts` describe the complete selected cut;
+`continuation` resumes bounded pages. Typed cells preserve sensitivity, integer widths, float bits,
+datetime nanoseconds and bytes. `state.to_json()` and `state.display_text()` render the same value.
+
+The shared binding exposes `Outcome::state_inspection()` as an independently owned `Inspection`.
+It retains the envelope, lossless JSON, counts, section schemas and verified frame backing. The C
+ABI exposes `nx_outcome_inspection`, `nx_inspection_json`, `nx_inspection_counts`,
+`nx_inspection_schema`, `nx_inspection_row_frame` and `nx_inspection_free`. JSON and frame bytes
+borrow the inspection handle; schema handles are independently owned. Indices outside the result
+return an invalid-argument failure. Counts return false for a typed rejection. Release the inspection
+only after borrowed bytes are no longer used.

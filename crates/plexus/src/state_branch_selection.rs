@@ -13,12 +13,23 @@
 use std::collections::BTreeSet;
 
 use chumsky::prelude::*;
-use nervix_models::{Float64Literal, Literal, StateBranchField};
+use nervix_models::{Float64Literal, Literal, StateBranchField, StateBranchSelection};
 
 use crate::{
     lexer::{Identifier, Token},
-    parser_support::{ParseError, field_ref, kw, string_lit, tok},
+    parser_support::{ParseError, field_ref, kw, kw_phrase2, string_lit, tok},
 };
+
+pub(crate) fn branch_selection<'src>()
+-> impl Parser<'src, &'src [Token], StateBranchSelection, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::For).ignore_then(choice((
+        kw(Identifier::Unbranched).to(StateBranchSelection::Unbranched),
+        kw_phrase2(Identifier::All, Identifier::Branches).to(StateBranchSelection::AllBranches),
+        kw_phrase2(Identifier::Branch, Identifier::Values)
+            .ignore_then(branch_fields())
+            .map(StateBranchSelection::Branch),
+    )))
+}
 
 fn branch_literal<'src>()
 -> impl Parser<'src, &'src [Token], Literal, extra::Err<ParseError<'src>>> + Clone {

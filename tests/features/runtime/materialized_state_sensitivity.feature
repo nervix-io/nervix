@@ -56,10 +56,10 @@ Feature: Materialized state inspection respects schema sensitivity
       "seq":3
       "seq":4
       """
-    And within "30s" every node reports the same materialized records for relay "events" with these prefixes
+    And within "30s" every node reports the same materialized records for relay "events" with these rows
       """
-      key={"tenant":"<redacted>","zone":"east"} payload={"secret":"<redacted>","seq":3,"tenant":"<redacted>","zone":"east"}
-      key={"tenant":"<redacted>","zone":"west"} payload={"secret":"<redacted>","seq":4,"tenant":"<redacted>","zone":"west"}
+      {"branch":{"tenant":"<redacted>","zone":"east"},"fields":{"secret":"<redacted>","seq":3,"tenant":"<redacted>","zone":"east"}}
+      {"branch":{"tenant":"<redacted>","zone":"west"},"fields":{"secret":"<redacted>","seq":4,"tenant":"<redacted>","zone":"west"}}
       """
 
     Examples:

@@ -5,7 +5,7 @@
 //! when their bytes are taken, read through borrowed views and typed values, and encoded within
 //! the same limits a receiver enforces.
 //!
-//! Layer: edges.
+//! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The session schema, frame verification and ownership, the typed requests, replies,
 //!   transfers, backup downloads, restore streams, events and rows the schema describes, the
@@ -21,7 +21,10 @@
 
 #![cfg_attr(
     nervix_lint,
-    nervix::layer(edge, reason = "owns the edges boundary declared above")
+    nervix::layer(
+        engine,
+        reason = "owns caller-driven wire codecs and verified representations"
+    )
 )]
 
 include!(concat!(env!("OUT_DIR"), "/flatbuffers/session_module.rs"));
@@ -37,8 +40,8 @@ mod consumer;
 mod domain;
 mod domain_clock;
 mod event;
-mod frame;
 mod execution_unit;
+mod frame;
 #[cfg(feature = "grpc")]
 pub mod grpc;
 mod impact;
@@ -52,6 +55,8 @@ mod row;
 mod row_batch;
 mod row_text;
 mod server;
+mod state_inspection;
+mod state_rows;
 mod subscription;
 mod transaction;
 mod transfer;
@@ -139,3 +144,5 @@ pub use upload::{
 #[cfg(test)]
 mod tests;
 
+pub use state_inspection::*;
+pub use state_rows::{StateRowFrame, StateRowsEncoder};

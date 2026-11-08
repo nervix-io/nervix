@@ -967,10 +967,23 @@ impl Statement {
             Self::ShowIngestors(_) => Ok("SHOW INGESTORS;".to_string()),
             Self::ShowEmitters(_) => Ok("SHOW EMITTERS;".to_string()),
             Self::ShowPlacements(_) => Ok("SHOW PLACEMENTS;".to_string()),
-            Self::ShowRelayMaterializedState(show) => Ok(format!(
-                "SHOW RELAY {} MATERIALIZED STATE;",
-                show.relay.as_str()
-            )),
+            Self::ShowRelayMaterializedState(show) => {
+                let mut text = format!("SHOW RELAY {} MATERIALIZED STATE", show.relay.as_str());
+                if let Some(selection) = &show.selection {
+                    text.push_str(&format!(" FOR {}", selection.to_canonical_plexus()?));
+                }
+                if let Some(page) = &show.page {
+                    text.push_str(&format!(" LIMIT {}", page.limit));
+                    if let Some(after) = &page.after {
+                        text.push_str(&format!(" AFTER {}", string_literal(after)));
+                    }
+                }
+                text.push_str(match show.format {
+                    crate::InspectionFormat::Text => " FORMAT TEXT;",
+                    crate::InspectionFormat::Json => " FORMAT JSON;",
+                });
+                Ok(text)
+            }
             Self::ShowClusterStatus(_) => Ok("SHOW CLUSTER STATUS;".to_string()),
             Self::DescribeCluster(_) => Ok("DESCRIBE CLUSTER;".to_string()),
             Self::ShowTransactions(_) => Ok("SHOW TRANSACTIONS;".to_string()),

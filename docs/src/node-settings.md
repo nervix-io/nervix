@@ -587,3 +587,19 @@ Resource-volume checks use the chosen seed before the first commit, and the live
 a joining or returning node. Local default resource limits do not refuse a node before it can
 learn that policy. The local preflight still measures and validates the restore-staging capability
 before opening the database or binding listeners.
+
+## State Inspection Capabilities
+
+The runtime declares three local `NodeCapabilities` through `SettingDefinition`:
+
+| Setting / CLI flag | Environment | Default | Validation |
+| --- | --- | --- | --- |
+| `inspection-max-rows` | `NERVIX_INSPECTION_MAX_ROWS` | 1024 | Nonzero, at most the 32-bit collection bound |
+| `inspection-max-sections` | `NERVIX_INSPECTION_MAX_SECTIONS` | 128 | Nonzero, at most the 32-bit collection bound |
+| `inspection-read-timeout` | `NERVIX_INSPECTION_READ_TIMEOUT` | 10s | Positive duration, at most an unsigned 32-bit seconds value |
+
+Defaults and validation belong only to their definitions. CLI values resolve before runtime
+construction and round-trip through the runtime argument projection. Each serving node enforces
+its bounds; the coordinator also checks session collection and complete reply limits. The deadline
+bounds the complete operator read and governs remote admission/setup as well as owner work.
+These capabilities do not change materialized row delivery, replication or stored snapshot bounds.

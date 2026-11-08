@@ -180,11 +180,11 @@ Feature: Materialized backup and archived lifecycle resumption
       """
     Then within "30s" node "node-1" eventually reports materialized state for relay "state" containing
       """
-      key={"tenant":"alpha"} payload={"source":"alpha-state","tenant":"alpha","value":3}
+      {"branch":{"tenant":"alpha"},"fields":{"source":"alpha-state","tenant":"alpha","value":3}}
       """
     And within "30s" node "node-1" eventually reports materialized state for relay "state" containing
       """
-      key={"tenant":"beta"} payload={"source":"beta-state","tenant":"beta","value":2}
+      {"branch":{"tenant":"beta"},"fields":{"source":"beta-state","tenant":"beta","value":2}}
       """
     Then the current leader node is saved as placeholder "leader"
     When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "materialized.nvxb" reporting JSON
@@ -244,7 +244,7 @@ Feature: Materialized backup and archived lifecycle resumption
       """
     Then within "30s" node "restored-1" eventually reports materialized state for relay "state" containing
       """
-      relay 'state' materialized state is empty
+      rows: 0
       """
     Given the cluster is replaced by a fresh <cluster_size> node cluster whose nodes are named "restored"
     Then the current leader node is saved as placeholder "leader"
@@ -255,11 +255,11 @@ Feature: Materialized backup and archived lifecycle resumption
     And every node reports the resumed lifecycle archived in "materialized.nvxb"
     And within "30s" node "restored-1" eventually reports materialized state for relay "state" containing
       """
-      key={"tenant":"alpha"} payload={"source":"alpha-state","tenant":"alpha","value":3}
+      {"branch":{"tenant":"alpha"},"fields":{"source":"alpha-state","tenant":"alpha","value":3}}
       """
     And within "30s" node "restored-1" eventually reports materialized state for relay "state" containing
       """
-      key={"tenant":"beta"} payload={"source":"beta-state","tenant":"beta","value":2}
+      {"branch":{"tenant":"beta"},"fields":{"source":"beta-state","tenant":"beta","value":2}}
       """
     When these Plexus commands are executed on the leader node
       """
@@ -273,11 +273,11 @@ Feature: Materialized backup and archived lifecycle resumption
     When the cluster is restarted
     Then within "30s" node "restored-1" eventually reports materialized state for relay "state" containing
       """
-      key={"tenant":"alpha"} payload={"source":"alpha-state","tenant":"alpha","value":3}
+      {"branch":{"tenant":"alpha"},"fields":{"source":"alpha-state","tenant":"alpha","value":3}}
       """
     And within "30s" node "restored-1" eventually reports materialized state for relay "state" containing
       """
-      key={"tenant":"beta"} payload={"source":"beta-state","tenant":"beta","value":2}
+      {"branch":{"tenant":"beta"},"fields":{"source":"beta-state","tenant":"beta","value":2}}
       """
     When these Plexus commands are executed on the leader node
       """
@@ -286,7 +286,7 @@ Feature: Materialized backup and archived lifecycle resumption
       """
     Then within "30s" node "restored-1" eventually reports materialized state for relay "state" containing
       """
-      relay 'state' materialized state is empty
+      rows: 0
       """
 
     Examples:
@@ -332,11 +332,11 @@ Feature: Materialized backup and archived lifecycle resumption
       """
     Then within "30s" node "node-1" eventually reports materialized state for relay "state" containing
       """
-      key={"tenant":"alpha"} payload={"source":"alpha-state","tenant":"alpha","value":3}
+      {"branch":{"tenant":"alpha"},"fields":{"source":"alpha-state","tenant":"alpha","value":3}}
       """
     And within "30s" node "node-1" eventually reports materialized state for relay "state" containing
       """
-      key={"tenant":"beta"} payload={"source":"beta-state","tenant":"beta","value":2}
+      {"branch":{"tenant":"beta"},"fields":{"source":"beta-state","tenant":"beta","value":2}}
       """
     Then the current leader node is saved as placeholder "leader"
     When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "running.nvxb" reporting JSON

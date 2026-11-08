@@ -50,11 +50,11 @@ Feature: Altering relay materialized state
       """
     And within "5s" node "node-1" eventually reports materialized state for relay "events" containing
       """
-      key={"tenant":"acme"} payload={"seq":1,"tenant":"acme"}
+      {"branch":{"tenant":"acme"},"fields":{"seq":1,"tenant":"acme"}}
       """
     And within "5s" node "node-1" eventually reports materialized state for relay "events" containing
       """
-      key={"tenant":"globex"} payload={"seq":2,"tenant":"globex"}
+      {"branch":{"tenant":"globex"},"fields":{"seq":2,"tenant":"globex"}}
       """
 
     Examples:
@@ -101,11 +101,11 @@ Feature: Altering relay materialized state
       """
     Then within "5s" node "node-1" eventually reports materialized state for relay "events" containing
       """
-      key={"tenant":"acme"} payload={"seq":1,"tenant":"acme"}
+      {"branch":{"tenant":"acme"},"fields":{"seq":1,"tenant":"acme"}}
       """
     And within "5s" node "node-1" eventually reports materialized state for relay "events" containing
       """
-      key={"tenant":"initech"} payload={"seq":2,"tenant":"initech"}
+      {"branch":{"tenant":"initech"},"fields":{"seq":2,"tenant":"initech"}}
       """
     When this Plexus command request is executed on the leader node
       """
@@ -120,7 +120,7 @@ Feature: Altering relay materialized state
       """
     And within "5s" node "node-1" eventually reports materialized state for relay "events" containing
       """
-      relay 'events' materialized state is empty
+      rows: 0
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}-materialized-schema.example.com" path "/events"
       """
@@ -132,20 +132,20 @@ Feature: Altering relay materialized state
       """
     Then within "5s" node "node-1" eventually reports materialized state for relay "events" containing
       """
-      key={"tenant":"acme"} payload={"note":"recreated","seq":3,"tenant":"acme"}
+      {"branch":{"tenant":"acme"},"fields":{"note":"recreated","seq":3,"tenant":"acme"}}
       """
     And within "5s" node "node-1" eventually reports materialized state for relay "events" containing
       """
-      key={"tenant":"globex"} payload={"note":"recreated","seq":4,"tenant":"globex"}
+      {"branch":{"tenant":"globex"},"fields":{"note":"recreated","seq":4,"tenant":"globex"}}
       """
     When the cluster is restarted
     Then within "30s" node "node-1" eventually reports materialized state for relay "events" containing
       """
-      key={"tenant":"acme"} payload={"note":"recreated","seq":3,"tenant":"acme"}
+      {"branch":{"tenant":"acme"},"fields":{"note":"recreated","seq":3,"tenant":"acme"}}
       """
     And within "30s" node "node-1" eventually reports materialized state for relay "events" containing
       """
-      key={"tenant":"globex"} payload={"note":"recreated","seq":4,"tenant":"globex"}
+      {"branch":{"tenant":"globex"},"fields":{"note":"recreated","seq":4,"tenant":"globex"}}
       """
     And the last command output does not contain
       """

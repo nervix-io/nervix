@@ -11,24 +11,16 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{ResetWasmState, StateBranchSelection};
+use nervix_models::ResetWasmState;
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{ParseError, domain_ref, kw, kw_phrase2, tok, wasm_processor_ref},
-    state_branch_selection::branch_fields,
 };
 
 pub fn reset_wasm_state_parser<'src>()
 -> impl Parser<'src, &'src [Token], ResetWasmState, extra::Err<ParseError<'src>>> + Clone {
-    let scope = kw(Identifier::For).ignore_then(choice((
-        kw(Identifier::Unbranched).to(StateBranchSelection::Unbranched),
-        kw_phrase2(Identifier::All, Identifier::Branches).to(StateBranchSelection::AllBranches),
-        kw(Identifier::Branch)
-            .ignore_then(kw(Identifier::Values))
-            .ignore_then(branch_fields())
-            .map(StateBranchSelection::Branch),
-    )));
+    let scope = crate::state_branch_selection::branch_selection();
     kw_phrase2(Identifier::Reset, Identifier::Wasm)
         .ignore_then(kw(Identifier::Processor))
         .ignore_then(wasm_processor_ref())
@@ -136,6 +128,10 @@ mod tests {
             (
                 "RESET WASM PROCESSOR counter STATE IN DOMAIN sales FOR ",
                 "ALL BRANCHES",
+            ),
+            (
+                "RESET WASM PROCESSOR counter STATE IN DOMAIN sales FOR ",
+                "BRANCH VALUES",
             ),
             (
                 "RESET WASM PROCESSOR counter STATE IN DOMAIN sales FOR BRANCH ",

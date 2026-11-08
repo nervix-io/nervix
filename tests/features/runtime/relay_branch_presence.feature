@@ -147,7 +147,7 @@ Feature: Relay branch presence
       """
     And within "30s" node "node-1" eventually reports materialized state for relay "tenant_state" containing
       """
-      key={"tenant":"gamma"} payload={"source":"gamma-first","tenant":"gamma","user_id":3}
+      {"branch":{"tenant":"gamma"},"fields":{"source":"gamma-first","tenant":"gamma","user_id":3}}
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/state"
       """
@@ -167,7 +167,7 @@ Feature: Relay branch presence
       """
     And within "30s" node "node-1" eventually reports materialized state for relay "tenant_state" containing
       """
-      key={"tenant":"acme"} payload={"source":"acme-second","tenant":"acme","user_id":4}
+      {"branch":{"tenant":"acme"},"fields":{"source":"acme-second","tenant":"acme","user_id":4}}
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
       """

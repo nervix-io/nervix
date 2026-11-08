@@ -188,6 +188,23 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
         let statement = out
             .into_output()
             .verified("has_errors returned false above, so this parse produced output");
+        if matches!(statement, Statement::ShowRelayMaterializedState(_))
+            && source.ends_with(char::is_whitespace)
+            && !matches!(tokens.last(), Some(Token::Semicolon))
+        {
+            // An impossible continuation makes the composed grammar expose the optional clauses
+            // it can still read. The probe is a token, never a second feature parser or keyword
+            // list, and is used only to obtain expectations for this already complete statement.
+            let mut probe = tokens.clone();
+            probe.push(Token::Eq);
+            return suggestions_from_errors(
+                statement_parser()
+                    .then_ignore(end())
+                    .parse(probe.as_slice())
+                    .into_errors(),
+                &prefix,
+            );
+        }
         // A statement that already parses has no expectations left to derive suggestions from,
         // because end of input is not representable as one. These few continuations are optional
         // tails of an otherwise complete statement, so they are named here.

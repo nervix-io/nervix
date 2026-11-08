@@ -1,25 +1,43 @@
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
-use nervix_models::ShowRelayMaterializedState;
+use nervix_models::{InspectionFormat, ShowRelayMaterializedState, StateInspectionPageRequest};
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, into_parse_error, kw, lex_input, relay_ref,
-        suggest_from, tok,
+        LexedInput, ParseError, ParseFromSourceError, inspection_format, into_parse_error, kw,
+        lex_input, nonzero_u64_value, relay_ref, string_lit, suggest_from, tok,
     },
 };
 
 pub fn show_stream_materialized_state_parser<'src>()
 -> impl Parser<'src, &'src [Token], ShowRelayMaterializedState, extra::Err<ParseError<'src>>> + Clone
 {
+    let page = kw(Identifier::Limit)
+        .ignore_then(nonzero_u64_value("row_limit", "LIMIT must be positive"))
+        .then(kw(Identifier::After).ignore_then(string_lit()).or_not())
+        .map(|(limit, after)| StateInspectionPageRequest { limit, after });
     kw(Identifier::Show)
         .ignore_then(kw(Identifier::Relay))
         .ignore_then(relay_ref())
         .then_ignore(kw(Identifier::Materialized))
         .then_ignore(kw(Identifier::State))
+        .then(crate::state_branch_selection::branch_selection().or_not())
+        .then(page.or_not())
+        .then(
+            kw(Identifier::Format)
+                .ignore_then(inspection_format())
+                .or_not(),
+        )
         .then_ignore(tok(Token::Semicolon).or_not())
-        .map(|relay| ShowRelayMaterializedState { relay })
+        .map(
+            |(((relay, selection), page), format)| ShowRelayMaterializedState {
+                relay,
+                selection,
+                page,
+                format: format.unwrap_or(InspectionFormat::Text),
+            },
+        )
 }
 
 pub fn parse_show_stream_materialized_state_tokens(
@@ -86,5 +104,98 @@ mod tests {
         let input = "SHOW RELAY notifications ";
         let suggestions = suggest_show_stream_materialized_state(input, input.len());
         assert!(suggestions.contains(&"MATERIALIZED".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod inspection_clauses_tests {
+    use meticulous::{OptionExt as _, ResultExt as _};
+    use nervix_models::{InspectionFormat, StateBranchSelection, Statement};
+
+    use crate::statement::{parse_statement, suggest_statement};
+
+    #[test]
+    fn selectors_limits_continuations_and_formats_are_semantic_models() {
+        for selector in [
+            "FOR ALL BRANCHES",
+            "FOR UNBRANCHED",
+            "FOR BRANCH VALUES { tenant = 'alpha', shard = -7 }",
+        ] {
+            let text = format!(
+                "SHOW RELAY events MATERIALIZED STATE {selector} LIMIT 2 AFTER \
+                 $cursor$opaque'position$cursor$ FORMAT JSON;"
+            );
+            let statement =
+                parse_statement(&text).assured("the clauses are in their declared order");
+            let Statement::ShowRelayMaterializedState(show) = &statement else {
+                panic!("inspection");
+            };
+            assert_eq!(show.format, InspectionFormat::Json);
+            assert!(show.selection.is_some());
+            let page = show.page.as_ref().assured("a page was requested");
+            assert_eq!(page.limit.get(), 2);
+            assert_eq!(page.after.as_deref(), Some("opaque'position"));
+            let canonical = statement
+                .to_canonical_plexus()
+                .assured("literal clauses render");
+            assert_eq!(
+                parse_statement(&canonical).assured("canonical grammar"),
+                statement
+            );
+        }
+        let Statement::ShowRelayMaterializedState(show) = parse_statement(
+            "show relay events materialized state for unbranched limit 1 format text;",
+        )
+        .assured("keywords are case insensitive") else {
+            panic!("inspection");
+        };
+        assert_eq!(show.selection, Some(StateBranchSelection::Unbranched));
+        assert_eq!(show.format, InspectionFormat::Text);
+    }
+
+    #[test]
+    fn invalid_page_and_selector_forms_are_refused() {
+        for suffix in [
+            "LIMIT 0",
+            "LIMIT -1",
+            "LIMIT 1.5",
+            "LIMIT 18446744073709551616",
+            "AFTER 'position'",
+            "LIMIT 1 AFTER 3",
+            "FOR BRANCH VALUES {}",
+            "FOR BRANCH VALUES { tenant = 'a', tenant = 'b' }",
+            "FOR BRANCH VALUES { tenant = null }",
+            "FORMAT JSON LIMIT 1",
+            "FOR UNBRANCHED FOR ALL BRANCHES",
+            "FORMAT XML",
+        ] {
+            assert!(
+                parse_statement(&format!("SHOW RELAY events MATERIALIZED STATE {suffix};"))
+                    .is_err(),
+                "{suffix}"
+            );
+        }
+    }
+
+    #[test]
+    fn completion_composes_the_current_state_clauses_without_statement_leakage() {
+        for (prefix, expected) in [
+            ("SHOW RELAY events MATERIALIZED STATE FOR ", "ALL BRANCHES"),
+            ("SHOW RELAY events MATERIALIZED STATE FOR ", "BRANCH VALUES"),
+            ("SHOW RELAY events MATERIALIZED STATE FORMAT ", "JSON"),
+            ("SHOW RELAY events MATERIALIZED STATE LIMIT 1 ", "AFTER"),
+        ] {
+            let suggestions = suggest_statement(prefix, prefix.len());
+            assert!(
+                suggestions.iter().any(|item| item == expected),
+                "{prefix}: {suggestions:?}"
+            );
+            assert!(
+                !suggestions
+                    .iter()
+                    .any(|item| item == "CREATE" || item == "RESET"),
+                "{prefix}: {suggestions:?}"
+            );
+        }
     }
 }

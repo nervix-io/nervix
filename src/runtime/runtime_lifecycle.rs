@@ -131,6 +131,8 @@ impl Runtime {
             );
         Ok(Self {
             inner: Arc::new(RuntimeInner {
+                inspection_instances: AtomicU64::new(0),
+                inspection_settings: settings.inspection,
                 dns,
                 ingestors: Arc::new(DashMap::default()),
                 ingestor_quiescence: Arc::new(DashMap::default()),

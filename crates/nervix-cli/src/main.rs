@@ -801,11 +801,15 @@ fn is_json_inspection_command(query: &str) -> bool {
     let Ok(statements) = parse_client_statements(query) else {
         return false;
     };
-    let [ClientStatement::Server(Statement::DescribeTransaction(describe))] = statements.as_slice()
-    else {
+    let [ClientStatement::Server(statement)] = statements.as_slice() else {
         return false;
     };
-    describe.format == InspectionFormat::Json
+    match statement {
+        Statement::DescribeTransaction(describe) => describe.format == InspectionFormat::Json,
+        Statement::DescribeWasmProcessor(describe) => describe.format == InspectionFormat::Json,
+        Statement::ShowRelayMaterializedState(show) => show.format == InspectionFormat::Json,
+        _ => false,
+    }
 }
 
 async fn run_json_inspection_mode(
@@ -844,13 +848,23 @@ async fn run_json_inspection_mode(
             return Err(error.change_context(ClientError::Request));
         }
     };
+    if outcome.state.is_some() {
+        println!("{}", outcome.message);
+        return if outcome.succeeded() {
+            Ok(())
+        } else {
+            Err(StackReport::new(ClientError::InspectionFailed {
+                message: outcome.message,
+            }))
+        };
+    }
     if !outcome.succeeded() {
         print_json_inspection_error("INSPECTION_REFUSED", &outcome.message);
         return Err(StackReport::new(ClientError::InspectionFailed {
             message: outcome.message,
         }));
     }
-    if outcome.inspection.is_none() {
+    if outcome.inspection.is_none() && outcome.state.is_none() && outcome.wasm_state.is_none() {
         let message = "the inspection response contained no typed report";
         print_json_inspection_error("REPORT_MISSING", message);
         return Err(StackReport::new(ClientError::InspectionFailed {
@@ -1856,6 +1870,15 @@ mod tests {
     fn one_shot_json_mode_requires_one_complete_inspection_statement() {
         assert!(is_json_inspection_command(
             "DESCRIBE TRANSACTION 'tx-1' OPERATION 1 FORMAT JSON;"
+        ));
+        assert!(is_json_inspection_command(
+            "SHOW RELAY events MATERIALIZED STATE FOR UNBRANCHED LIMIT 1 FORMAT JSON;"
+        ));
+        assert!(is_json_inspection_command(
+            "DESCRIBE WASM PROCESSOR worker FORMAT JSON;"
+        ));
+        assert!(!is_json_inspection_command(
+            "SHOW RELAY events MATERIALIZED STATE FORMAT TEXT;"
         ));
         assert!(!is_json_inspection_command("DESCRIBE TRANSACTION;"));
         assert!(!is_json_inspection_command(

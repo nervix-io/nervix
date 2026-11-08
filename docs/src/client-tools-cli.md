@@ -373,12 +373,15 @@ nervix-cli --domain production --command \
 
 For a standalone `--command` inspection with `FORMAT JSON`, stdout contains exactly one JSON
 document serialized from the typed report, without terminal decoration or unrelated events.
-Failures print one JSON object with `error.code` and `error.message` on stdout and exit nonzero;
-a configuration, connection or request failure's message is the whole chain of causes, such as
-`invalid server URL: relative URL without a base`. Diagnostic details and unrelated events go to
-stderr. `FORMAT TEXT` uses the normal readable
-terminal output. Inspection output is complete rather than paginated or truncated, so redirect a
-large text or JSON report to a file or downstream process when terminal output is impractical.
+A materialized-state refusal prints its typed envelope with `rejection` and exits nonzero.
+Other failures print one JSON object with `error.code` and `error.message` on stdout and exit
+nonzero; a configuration, connection or request failure's message is the whole chain of causes.
+Diagnostic details and unrelated events go to stderr. `FORMAT TEXT` uses normal readable terminal
+output. Transaction inspection is complete; materialized relay inspection is bounded and carries
+an opaque continuation. See [Inspect Materialized State](./relay.md#inspect-materialized-state)
+for selector clauses, typed counts, row limits and stale-token handling. Standalone JSON mode accepts
+`DESCRIBE TRANSACTION`, `DESCRIBE WASM PROCESSOR` and `SHOW RELAY ... MATERIALIZED STATE` with
+`FORMAT JSON`.
 After a stale-preview `COMMIT` refusal, run `DESCRIBE TRANSACTION` for the
 attached transaction before retrying the commit so the client fences it to the newly reviewed
 planning basis.

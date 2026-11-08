@@ -53,16 +53,16 @@ pub enum ResolvedStateBranchSelection {
 
 #[derive(Debug, Error)]
 pub enum StateBranchSelectionError {
-    #[error("reset scope does not match the WASM processor's branch declaration")]
+    #[error("state selection does not match the entity's branch declaration")]
     InvalidScope,
-    #[error("reset branch fields do not match the declared branch schema")]
+    #[error("state branch fields do not match the declared branch schema")]
     InvalidFields,
-    #[error("reset branch field '{field}' requires an exact {expected} literal")]
+    #[error("state branch field '{field}' requires an exact {expected} literal")]
     InvalidFieldType {
         field: FieldName,
         expected: ParseAsType,
     },
-    #[error("reset branch field '{field}' has a non-finite floating-point value")]
+    #[error("state branch field '{field}' has a non-finite floating-point value")]
     NonFiniteFloat { field: FieldName },
 }
 

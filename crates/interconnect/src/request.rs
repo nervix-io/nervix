@@ -1729,6 +1729,20 @@ impl Transport {
     where
         M: InterconnectStreamRequest,
     {
+        self.request_stream_with_timeout(node, message, M::TIMEOUT)
+            .await
+    }
+
+    /// Open the same admitted stream with the caller's remaining operation deadline.
+    pub async fn request_stream_with_timeout<M>(
+        &self,
+        node: &ClusterNodeName,
+        message: M,
+        timeout: Duration,
+    ) -> Result<super::IncomingByteStream, Report<RequestError>>
+    where
+        M: InterconnectStreamRequest,
+    {
         if self.inner.is_shutting_down() {
             return Err(Report::new(RequestError::ShuttingDown {
                 node: node.clone(),
@@ -1775,7 +1789,7 @@ impl Transport {
                     subquota: M::SUBQUOTA,
                     name: M::NAME,
                     body,
-                    timeout: M::TIMEOUT,
+                    timeout,
                     admission,
                 },
             )

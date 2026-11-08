@@ -403,7 +403,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_plexus/corpus"
-domain_version = 54
+domain_version = 55
 features = []
 id = "plexus-model"
 invariant = "Canonical Plexus of a generated Model of every family reparses through the client and server grammars to the complete CREATE statement."
@@ -418,7 +418,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/backup/__fuzz__/backup__tests__bolero_models_exported_through_an_archive_reparse_to_themselves/corpus"
-domain_version = 56
+domain_version = 57
 features = []
 id = "plexus-archive-model"
 invariant = "Complete cluster/domain archives preserve every ordered canonical Model document through export, production restore reads, semantic reparse and byte-exact re-export."
@@ -658,7 +658,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_plexus/corpus"
-domain_version = 55
+domain_version = 56
 features = []
 id = "plexus-statement"
 invariant = "Canonical Plexus of every generated current statement form, session-only forms included, reparses through the client and server grammars to the complete statement."
@@ -688,7 +688,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
-domain_version = 54
+domain_version = 55
 features = []
 id = "plexus-statement-text"
 invariant = "Edited canonical text is either rejected with located diagnostics or read as statements whose canonical Plexus reparses to them."
@@ -703,7 +703,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatted_documents_keep_their_statements/corpus"
-domain_version = 54
+domain_version = 55
 features = []
 id = "plexus-format-document"
 invariant = "Formatting a generated document with gaps, comments and either line ending keeps its statements and comments and is idempotent."
@@ -718,7 +718,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatter_text_is_formatted_or_rejected/corpus"
-domain_version = 53
+domain_version = 54
 features = []
 id = "plexus-format-text"
 invariant = "Edited documents are either refused as unparseable or formatted without changing their statements, idempotently."
@@ -4421,3 +4421,48 @@ random_iterations = 128
 source = "crates/web-console/src/create_dialog/codec_draft.rs"
 test = "create_dialog::codec_draft::tests::bolero_codec_drafts_preserve_complete_models_and_family_heads"
 test_target = "bin:nervix-web-console"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/client-wire/src/state_inspection/__fuzz__/state_inspection__tests__bolero_state_inspection_envelope_round_trips/corpus"
+domain_version = 1
+features = []
+id = "client-state-inspection"
+invariant = "Every field of the current bounded inspection envelope, including exact typed Row cells, owner origins, source fingerprints, counts, omitted rows, continuation and typed refusal, survives the production session codec unchanged."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-client-wire"
+random_iterations = 128
+source = "crates/client-wire/src/state_inspection/tests.rs"
+test = "state_inspection::tests::bolero_state_inspection_envelope_round_trips"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/__fuzz__/state_inspection_cursor__tests__bolero_state_inspection_cursor_round_trips/corpus"
+domain_version = 1
+features = ["testing"]
+id = "state-inspection-cursor"
+invariant = "Canonical opaque continuations preserve every domain, relay, schema, captured-generation fingerprint, selector and unit/branch/offset position through the production bounded encoding and decoding pair."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-server"
+random_iterations = 128
+source = "src/state_inspection_cursor.rs"
+test = "state_inspection_cursor::tests::bolero_state_inspection_cursor_round_trips"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/interconnect/src/__fuzz__/state_inspection__tests__bolero_materialized_inspection_page_messages_round_trip/corpus"
+domain_version = 1
+features = []
+id = "interconnect-state-inspection"
+invariant = "Every field of the bounded native owner-page request and typed descriptor or refusal survives the production admitted rkyv codec unchanged, including selectors, positions, source identity, complete counts, body digest and bounds."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-interconnect"
+random_iterations = 128
+source = "crates/interconnect/src/state_inspection.rs"
+test = "state_inspection::tests::bolero_materialized_inspection_page_messages_round_trip"
+test_target = "lib"
