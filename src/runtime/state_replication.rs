@@ -95,6 +95,26 @@ pub(crate) use routing::StateReplicationRequest;
 pub(in crate::runtime) use tasks::{CheckpointWriter, StateSnapshotTasks};
 
 impl Runtime {
+    /// One process-local lifetime per constructed state, without changing record publication.
+    fn next_materialized_inspection_instance(&self) -> u64 {
+        let instances = &self.inner.inspection_instances;
+        let mut current = instances.load(Ordering::Relaxed);
+        loop {
+            let next = current
+                .checked_add(1)
+                .assured("one node process cannot construct 2^64 materialized state lifetimes");
+            match instances.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(previous) => return previous,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
     /// Persist the branch lifecycle an owner formed, hold it as the lifecycle replicas
     /// synchronize, and offer it to them.
     pub(super) fn persist_branch_lru_snapshot(
@@ -2315,7 +2335,7 @@ impl Runtime {
             self.announce_checkpoint(offsets.placement(), offsets.replication(), lsm);
         }
         offsets
-            .wait_for_replica_quorum(lsm, SyncKafkaOffsets::TIMEOUT)
+            .wait_for_replica_quorum(lsm, SyncKafkaOffsets::default_timeout())
             .await
     }
 
@@ -2345,7 +2365,7 @@ impl Runtime {
         }
         self.announce_checkpoint(offsets.placement(), offsets.replication(), lsm);
         offsets
-            .wait_for_replica_quorum(lsm, SyncKafkaOffsets::TIMEOUT)
+            .wait_for_replica_quorum(lsm, SyncKafkaOffsets::default_timeout())
             .await
     }
 
@@ -2620,6 +2640,7 @@ impl Runtime {
             existing.clone()
         } else {
             let state = Arc::new(ReplicatedMaterializedRelayState::restored(
+                self.next_materialized_inspection_instance(),
                 placement.clone(),
                 schema,
                 restored,

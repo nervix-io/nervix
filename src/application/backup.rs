@@ -1052,10 +1052,11 @@ impl SessionServiceImpl {
                 }
             }
         };
-        let mut body = nervix_primitives::time::timeout(FetchCapturedSection::TIMEOUT, opening)
-            .await
-            .map_err(|_| error("captured section opening exceeded its deadline".to_string()))?
-            .change_context_lazy(failure_context)?;
+        let mut body =
+            nervix_primitives::time::timeout(FetchCapturedSection::default_timeout(), opening)
+                .await
+                .map_err(|_| error("captured section opening exceeded its deadline".to_string()))?
+                .change_context_lazy(failure_context)?;
         if body.content_length() != section.length {
             return Err(error(
                 "captured section length differs from its inventory".to_string(),

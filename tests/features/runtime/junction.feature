@@ -283,7 +283,7 @@ Feature: Relay junction
       """
     Then within "5s" node "node-1" eventually reports materialized state for relay "state_notifications" containing
       """
-      key={"user_id":11} payload={"source":"state","user_id":11}
+      {"branch":{"user_id":11},"fields":{"source":"state","user_id":11}}
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest-b"
       """

@@ -77,5 +77,8 @@ impl InterconnectStreamRequest for FetchStateSnapshot {
     const NAME: &'static str = "fetch_state_snapshot";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const TIMEOUT: Duration = Duration::from_secs(30);
+    #[inline]
+    fn default_timeout() -> Duration {
+        Duration::from_secs(30)
+    }
 }

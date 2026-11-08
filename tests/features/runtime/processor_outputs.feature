@@ -763,11 +763,11 @@ Feature: Processor output routing
       """
     Then within "10s" node "node-1" eventually reports materialized state for relay "tenant_preferences" containing
       """
-      key={"tenant":"acme"} payload={"hint":"acme-hint","tenant":"acme","theme":"acme-theme"}
+      {"branch":{"tenant":"acme"},"fields":{"hint":"acme-hint","tenant":"acme","theme":"acme-theme"}}
       """
     And within "10s" node "node-1" eventually reports materialized state for relay "tenant_preferences" containing
       """
-      key={"tenant":"globex"} payload={"hint":"globex-hint","tenant":"globex","theme":"globex-theme"}
+      {"branch":{"tenant":"globex"},"fields":{"hint":"globex-hint","tenant":"globex","theme":"globex-theme"}}
       """
     When http payload is posted to node "node-1" with host "http-branch-state-{{test_id}}.example.com" path "/branch-input"
       """
