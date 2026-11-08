@@ -79,6 +79,13 @@ pub(crate) use maintenance::DEFAULT_RESTORE_STAGING_MAX_BYTES;
 const STATE_GENERATION_KEY_MARKER: u8 = b'g';
 
 /// The byte that opens the pinned model fingerprint segment of an inferencer state key.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the stored inferencer key format prefixes its model with m"
+    )
+)]
 const STATE_MODEL_KEY_MARKER: u8 = b'm';
 
 /// The byte that opens the schema fingerprint segment of every schema-bound state key.

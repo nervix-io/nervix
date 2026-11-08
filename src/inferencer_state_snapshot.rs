@@ -73,8 +73,23 @@ pub(crate) enum SnapshotError {
 pub(crate) fn footprint(
     tensors: impl IntoIterator<Item = (u64, u64)>,
 ) -> Result<u64, Report<SnapshotError>> {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the snapshot frame stores its signature, archive root and root alignment"
+        )
+    )]
     const HEADER: usize =
         SIGNATURE.len() + size_of::<ArchivedSnapshot>() + align_of::<ArchivedSnapshot>() - 1;
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "each tensor's section charge covers its archive descriptor, simultaneous \
+                      native descriptors, serializer resolver and sequence alignment"
+        )
+    )]
     const TENSOR: usize = size_of::<ArchivedTensorSnapshot>()
         + 2 * size_of::<TensorSnapshot<'static>>()
         + size_of::<TensorSnapshotResolver>()
