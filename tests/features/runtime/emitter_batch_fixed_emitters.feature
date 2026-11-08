@@ -349,7 +349,7 @@ Feature: Fixed-format emitter batch envelopes
           'protocol' = 'tls', 'addr' = '{{syslog_ingest_addr}}',
           'tls_cert_file' = '{{ syslog_tls }}/tls.crt',
           'tls_key_file' = '{{ syslog_tls }}/tls.key',
-          'tls_ca_file' = '{{ syslog_tls }}/ca.crt'
+          'tls_client_ca_file' = '{{ syslog_tls }}/ca.crt'
         };
       CREATE SYSLOG LISTENER INGESTOR syslog_intake
         FROM syslog_listener MODE NO ACK

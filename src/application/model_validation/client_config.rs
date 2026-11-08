@@ -19,7 +19,7 @@ use nervix_models::{
     ClientConfigEntry, ClientConfigOwner, ClientConfigSchemaError, ClientConfigValue,
     ConfiguredClientRef, ConnectorKind, DomainName, MqttClientConfig, MqttClientConfigError,
     PrometheusApiRoot, PrometheusClientConfigError, WebsocketsClientConfig,
-    WebsocketsClientConfigError, validate_clickhouse_client_config,
+    WebsocketsClientConfigError, validate_clickhouse_client_config, validate_syslog_client_config,
 };
 
 use super::{ModelBindingValidationError, SessionServiceImpl};
@@ -177,6 +177,9 @@ impl SessionServiceImpl {
             ConnectorKind::Mqtt => MqttClientConfig::parse(config)
                 .map(|_| ())
                 .change_context(ClientValidationError::Schema),
+            ConnectorKind::Syslog => {
+                validate_syslog_client_config(config).change_context(ClientValidationError::Schema)
+            }
             _ => Ok(()),
         }
     }

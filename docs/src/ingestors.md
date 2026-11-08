@@ -718,7 +718,7 @@ Transport-specific schemes and keys:
   certificate it could trust. An SQS connection presents no client certificate, so
   `CREATE SQS CLIENT` refuses `tls_cert_file` and `tls_key_file`; see [SQS](#sqs).
 - `SYSLOG`: select `'protocol' = 'tls'`. An ingestor requires `tls_cert_file` and
-  `tls_key_file`; optional `tls_ca_file` enables required client-certificate verification.
+  `tls_key_file`; optional `tls_client_ca_file` enables required client-certificate verification.
 
 `HTTP REQUEST` and `PROMETHEUS QUERY` ingestors resolve endpoint names through the node's
 configured DNS resolver.
@@ -2689,8 +2689,10 @@ schema fields; quiesce buffering retains the complete row. The ingestor takes no
 and has no application acknowledgment. Every live cluster node runs the listener; it is independent
 of the leader and restarts or joins with its owning node. See [Syslog](syslog.md) for the client keys,
 cluster lifecycle, framing, TLS, limits, and failure semantics.
-An invalid client setting or unreadable TLS file fails listener startup with the Syslog key or
-file and its underlying cause. A frame or connection failure keeps its cause in the ingestor
+A client key the listener does not read, a host name in its `addr` or a TLS client without a server
+identity refuses the statement that binds the client. A TLS file that holds no usable certificate or
+key fails listener startup with the file and its underlying cause. A frame or connection failure
+keeps its cause in the ingestor
 diagnostic. These failures do not acknowledge a message; Syslog has no application ACK.
 
 ### SQS

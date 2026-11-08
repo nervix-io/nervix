@@ -212,7 +212,7 @@ Feature: Syslog name resolution
         'protocol' = 'tls', 'addr' = '{{syslog_emit_addr}}',
         'tls_cert_file' = '{{syslog_tls}}/tls.crt',
         'tls_key_file' = '{{syslog_tls}}/tls.key',
-        'tls_ca_file' = '{{syslog_tls}}/ca.crt'
+        'tls_client_ca_file' = '{{syslog_tls}}/ca.crt'
       };
       CREATE SYSLOG CLIENT syslog_forwarder MOUNT syslog_tls VERSION 1 CONFIG {
         'protocol' = 'tls', 'addr' = '{{syslog_dns_addr}}',

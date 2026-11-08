@@ -177,8 +177,8 @@ Feature: Syslog listener transport metadata
       """
 
     Examples:
-      | cluster_size | replica_count | client_authority                            | peer           |
-      | 1            | 0             | , 'tls_ca_file' = '{{ syslog_tls }}/ca.crt' | "CN=127.0.0.1" |
-      | 3            | 1             | , 'tls_ca_file' = '{{ syslog_tls }}/ca.crt' | "CN=127.0.0.1" |
-      | 1            | 0             |                                             | "unverified"   |
-      | 3            | 1             |                                             | "unverified"   |
+      | cluster_size | replica_count | client_authority                                   | peer           |
+      | 1            | 0             | , 'tls_client_ca_file' = '{{ syslog_tls }}/ca.crt' | "CN=127.0.0.1" |
+      | 3            | 1             | , 'tls_client_ca_file' = '{{ syslog_tls }}/ca.crt' | "CN=127.0.0.1" |
+      | 1            | 0             |                                                    | "unverified"   |
+      | 3            | 1             |                                                    | "unverified"   |
