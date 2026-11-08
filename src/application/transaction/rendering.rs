@@ -243,8 +243,7 @@ fn transaction_operation_text(operation: &TransactionOperation) -> String {
         | TransactionOperation::DropConfiguration { node, .. } => {
             format!("{action} {}", node_text(node))
         }
-        TransactionOperation::AlterDomain { domain }
-        | TransactionOperation::StartDomain { domain }
+        TransactionOperation::StartDomain { domain }
         | TransactionOperation::StopDomain { domain } => {
             format!("{action} domain={}", domain.as_str())
         }
@@ -276,9 +275,7 @@ fn reason_text(reason: &OperationImpactReason) -> String {
         OperationImpactReason::Configuration { node, aspect } => {
             format!("{kind} {} aspect={}", node_text(node), aspect.as_ref())
         }
-        OperationImpactReason::DomainPlacement
-        | OperationImpactReason::DomainStart
-        | OperationImpactReason::DomainStop => kind.to_string(),
+        OperationImpactReason::DomainStart | OperationImpactReason::DomainStop => kind.to_string(),
         OperationImpactReason::ResourceCatalog { resource } => {
             format!("{kind} resource={}", resource.as_str())
         }

@@ -11,7 +11,6 @@ use std::{collections::BTreeMap, time::Duration};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     DomainConfig, DomainName, DomainPace, DomainStartPoint, DomainState, DomainStatus,
-    PlacementPolicy,
 };
 use nervix_primitives::{task::JoinHandle, time::Instant};
 use strum::IntoEnumIterator as _;
@@ -28,7 +27,6 @@ fn revision_domains(name: DomainName, status: DomainStatus) -> BTreeMap<DomainNa
         id: name.clone(),
         config: DomainConfig {
             pace: DomainPace::Unpaced,
-            placement: PlacementPolicy::Neutral,
         },
         status,
         start_version: 0,

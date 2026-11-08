@@ -144,7 +144,7 @@ Feature: WebSocket client ingestor scheduling
     When these Plexus commands are executed on the leader node
       """
       CORDON NODE {{original_ws_owner}};
-      ALTER DOMAIN SET PLACEMENT SUGGEST SEPARATION;
+      CREATE PLACEMENT spread_execution DOMAIN WIDE SUGGEST SEPARATION;
       """
     Then the last command output contains
       """

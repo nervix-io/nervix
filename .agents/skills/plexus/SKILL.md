@@ -135,7 +135,7 @@ Read the CLI chapter for one-shot JSON output; programs consume `CommandOutcome.
 Establish these inputs before finalizing Plexus. Ask only for missing details that materially change
 the graph; otherwise use conspicuous placeholders and state the assumptions.
 
-- Domain: paced or unpaced, clock period/skew, start behavior, and default placement policy.
+- Domain: paced or unpaced, clock period/skew and start behavior.
 - Payload: sample input, wire format, exact internal field types, optional fields, and sensitive
   fields.
 - Ingestor and emitter: connector kinds, externally provisioned entity names, whether an operator
@@ -355,8 +355,9 @@ fails. Unresolved submissions keep their unknown-outcome boundary and must never
 automatically.
 Every reingestor and generator ALTER uses entity pause; reingestor route bodies retain their
 per-route branch selection, while generator route bodies remain set-only.
-`ALTER DOMAIN SET PLACEMENT` is nameless, targets the active domain, and performs a normal schedule
-activation; a newly effective hard colocation requirement can relocate runtime nodes.
+Read `Placement Policies` before choosing domain-wide or corridor placement, ranks or exact-unit
+relocation. Validate each hop's unit correspondence after rank resolution; a new effective hard
+requirement can relocate the corresponding unit groups.
 
 During node startup, `SHOW CLUSTER STATUS;` and `DESCRIBE CLUSTER;` remain available while live cluster policy is discovered. Status reports `node.initialization=initializing` until initialization finishes; wait for `ready` before policy-dependent commands or transfers.
 
@@ -877,7 +878,7 @@ reports no replicas. Use `DESCRIBE JUNCTION <junction>;` when the verification s
 routing contract, scheduled placement, and local edge metrics.
 
 Use `SHOW PLACEMENTS;`, `DESCRIBE PLACEMENT <placement>;`, and `DESCRIBE DOMAIN;` to verify rule
-coverage, effective claims, colocation groups, and the domain default. Use
+coverage, hop classes, effective policies, exact unit groups, and domain-wide scope. Use
 `DESCRIBE RELOCATION ...;` with the clauses of a planned `RELOCATE` to inspect the unit it would
 move, its quiesce level, the relays its hold would gate, and the preferences it would leave
 unsatisfied.

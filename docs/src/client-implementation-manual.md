@@ -306,6 +306,11 @@ An instance placement identity carries an unsigned 64-bit index in the `Placemen
 partition indices remain unsigned 32-bit values. Client encoders and decoders preserve the full
 instance index when reporting transaction impact and execution placement.
 
+Named placement creation, alteration and removal are model mutations, including a rule with
+domain-wide coverage. Exact `PARTITION` and `INSTANCE` relocation selectors retain their unit
+identity in previews and execution reports. A failed policy or selector validation is an ordinary
+failed command; the client preserves its diagnostic and does not retry invalid input.
+
 Structured WASM inspection carries a `units` collection. Clients preserve each unit identity and
 its own generation, reset, recovery and checkpoint details; a processor's partitions can have
 different generations. Checkpoint and recovery detail limits apply to the complete response.

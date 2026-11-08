@@ -19,9 +19,7 @@ use std::collections::BTreeSet;
 use error_stack::Report;
 use meticulous::ResultExt as _;
 use nervix_consensus::{DomainPlanningInputs, TransactionScheduleEligibility};
-use nervix_models::{
-    ClusterNodeIdentity, ClusterNodeName, DomainName, DomainSchedule, PlacementPolicy,
-};
+use nervix_models::{ClusterNodeIdentity, ClusterNodeName, DomainName, DomainSchedule};
 use sorted_vec::SortedSet;
 use thiserror::Error;
 
@@ -138,7 +136,6 @@ impl DomainSchedulePlanningSnapshot {
         inputs: &DomainPlanningInputs,
         domain: &DomainName,
         graph: Option<ActiveGraph>,
-        placement: PlacementPolicy,
         current: Option<&DomainSchedule>,
     ) -> PreparedDomainSchedule {
         let schedule = match graph {
@@ -148,16 +145,11 @@ impl DomainSchedulePlanningSnapshot {
                     domain,
                     &self.cluster_nodes,
                     self.replica_count,
-                    placement,
                     self.mode.scheduler_mode(),
                 );
                 #[cfg(not(feature = "testing"))]
-                let mut schedule = graph.schedule_for_domain(
-                    domain,
-                    &self.cluster_nodes,
-                    self.replica_count,
-                    placement,
-                );
+                let mut schedule =
+                    graph.schedule_for_domain(domain, &self.cluster_nodes, self.replica_count);
                 SessionServiceImpl::merge_existing_schedule_data(
                     &mut schedule,
                     current,

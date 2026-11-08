@@ -1246,16 +1246,6 @@ fn encode_transaction_operation(
                 operation,
             )
         }
-        TransactionOperation::AlterDomain { domain } => {
-            let domain = encoder.text("AlterDomainOperation.domain", domain.as_str())?;
-            let operation = wire::AlterDomainOperation::create(
-                encoder.fbb(),
-                &wire::AlterDomainOperationArgs {
-                    domain: Some(domain),
-                },
-            );
-            EncodedUnion::new(wire::TransactionOperation::AlterDomainOperation, operation)
-        }
         TransactionOperation::StartDomain { domain } => {
             let domain = encoder.text("StartDomainOperation.domain", domain.as_str())?;
             let operation = wire::StartDomainOperation::create(
@@ -1372,11 +1362,6 @@ fn decode_transaction_operation(
             node: decode_node_ref(decoder, operation.node())?,
         });
     }
-    if let Some(operation) = report.operation_as_alter_domain_operation() {
-        return Ok(TransactionOperation::AlterDomain {
-            domain: decoder.name("AlterDomainOperation.domain", operation.domain())?,
-        });
-    }
     if let Some(operation) = report.operation_as_start_domain_operation() {
         return Ok(TransactionOperation::StartDomain {
             domain: decoder.name("StartDomainOperation.domain", operation.domain())?,
@@ -1443,10 +1428,6 @@ fn encode_reason<'fbb>(
                 configuration,
             )
         }
-        OperationImpactReason::DomainPlacement => EncodedUnion::new(
-            wire::OperationImpactReason::DomainPlacementReason,
-            wire::DomainPlacementReason::create(encoder.fbb(), &wire::DomainPlacementReasonArgs {}),
-        ),
         OperationImpactReason::DomainStart => EncodedUnion::new(
             wire::OperationImpactReason::DomainStartReason,
             wire::DomainStartReason::create(encoder.fbb(), &wire::DomainStartReasonArgs {}),
@@ -1535,9 +1516,6 @@ fn decode_reason(
         });
     }
     match reason.reason_type() {
-        wire::OperationImpactReason::DomainPlacementReason => {
-            Ok(OperationImpactReason::DomainPlacement)
-        }
         wire::OperationImpactReason::DomainStartReason => Ok(OperationImpactReason::DomainStart),
         wire::OperationImpactReason::DomainStopReason => Ok(OperationImpactReason::DomainStop),
         undeclared => Err(decoder.unknown_union("OperationReason.reason", undeclared.0)),

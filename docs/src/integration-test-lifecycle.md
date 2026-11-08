@@ -11,6 +11,13 @@ parameter is refused where it is written.
 `just test-unit-binary <executable> <filters>` replays a compiled unit-test executable without
 rebuilding it; its evidence applies only to the source inputs that produced that executable.
 
+`just test-partition-placement [feature]` runs the placement scenarios with the native node assets,
+Plexus formatter, CLI and deadlock report tool prepared. Its default input is
+`tests/features/cluster/partition_placement.feature`; select
+`tests/features/web-console/visual_create_placement.feature` for the browser form. These features
+start no paced simulation or Python driver. Arguments pass to the ordinary scenario runner with
+its startup, execution, parallelism and teardown budgets unchanged.
+
 `just test-cli-streams` selects the one- and three-node CLI stream recovery and termination
 examples in `cli_session.feature`. It prepares the in-process server assets and CLI, without
 building unrelated language probes. The outage case observes a failed restoration after the
