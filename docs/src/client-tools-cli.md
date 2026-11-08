@@ -48,6 +48,8 @@ server options and their environment variables.
 | `--username <NAME>` | `NERVIX_USERNAME` | `default` | registry user |
 | `--password <PASSWORD>` | `NERVIX_PASSWORD` | | prompted interactively when unset |
 | `--command <Plexus>` | | | run statements once and exit |
+| `--suggest <Plexus>` | | | print completion candidates as JSON and exit; cannot be combined with `--command` |
+| `--cursor <OFFSET>` | | end of input | UTF-8 byte offset in `--suggest` input |
 | `--execution-reference <REFERENCE>` | | | with `--command` or a node administration subcommand, send the command under the execution reference the CLI printed for an earlier uncertain run of it, which recovers that run's outcome |
 | `--upload-identity <IDENTITY>` | | | with a `--command` that is one `UPLOAD RESOURCE`, send it under the upload identity the CLI printed for an earlier uncertain run of it, which recovers that run's outcome |
 | `--backup-wait-timeout <DURATION>` | | `10m` | overall wait of one `BACKUP` command across its cuts, redirects and reconnects, from one millisecond through 24 hours; applies to `backup`, `--command` and the REPL |
@@ -64,11 +66,14 @@ subcommand for this release.
 
 ## Modes
 
-The client runs in exactly one of three modes, in this order of precedence:
+The client runs in one of these modes. A subcommand takes precedence over the other modes:
 
 1. **A subcommand**, such as `subscribe`, `domain-clock`, `backup`, `restore`, or `drain-node`.
-2. **`--command`**, which submits Plexus, prints the result, and exits.
-3. **The interactive REPL**, when neither of the above is given.
+2. **`--suggest`**, which prints completion candidates as JSON and exits; see [Completion](#completion).
+3. **`--command`**, which submits Plexus, prints the result, and exits. A single
+   `DESCRIBE TRANSACTION ... FORMAT JSON` reserves stdout for its JSON report; see
+   [Session And Transaction Statements](#session-and-transaction-statements).
+4. **The interactive REPL**, when none of the above is given.
 
 There is no file-execution mode. To run a saved script, pass it through `--command`; to format
 one, use [`nervix-plexus-format`](client-tools-plexus-format.md):
@@ -205,6 +210,11 @@ after that word. The CLI reads successive bounded pages when the server has more
 missing or stale domain or transaction context does not produce candidates from a different
 configuration.
 
+Multi-word creation heads are offered as one item, such as `PACED DOMAIN`, `WIRE JSON SCHEMA`,
+`SIGNALING PROTOCOL`, `WINDOW PROCESSOR`, and `WASM PROCESSOR`. This also applies after
+`CREATE IF NOT EXISTS`. Once part of a head is written, completion continues from that position;
+after its name, suggestions follow that kind's body.
+
 Connector completion follows the selected entity's declaration: delivery modes, options,
 envelope clauses, property keys and client configuration keys stay specific to that entity.
 Expression positions offer ordinary functions, ingestor expressions also offer the header reads
@@ -263,15 +273,23 @@ through that command's outcome, independently of the notice stream; see
 
 A domain clock line follows each newer state or accepted tick after the attach reply. A state or
 tick that changes again before it is delivered or read is replaced by the newest one, so a slow
-client can skip states and tick ids. Between prompts the REPL holds at most 128 event lines, each
+client can skip states and tick ids. The REPL queues at most 128 event lines, each
 cut at 8 KiB with `… [line truncated]`; lines that arrive while it is full are dropped, and
 `[events] notice: <n> event lines were omitted because terminal output could not keep up` reports
 how many. When the server ends an attachment, or the session holding it is interrupted and the clock
 is attached again on the next session, the line reads `[events] domain clock [<domain>] notice: ...`
 with the reason.
 
-The REPL prints these lines when it draws its next prompt: after the statement that is running
-finishes, or when you press Enter on an empty line.
+While the prompt waits for input, events appear above it without a keypress. The text being
+edited, the continuation of a multiline statement, completion and history search remain available.
+While a statement runs, events stay in the bounded queue and print when the prompt resumes;
+event readers never wait for the terminal. An overflow is reported when output next drains,
+including when no later event arrives.
+
+Ordinary `--command` runs do not print asynchronous subscription, clock or server-notice lines.
+The single transaction-inspection JSON mode sends unrelated events to stderr, keeping stdout for
+the report. Use `subscribe` or `domain-clock` for a stream that remains open after its initial
+request.
 
 Output keeps printing across reconnects. When the session is lost, the next statement you run opens
 a new one; the client also opens one at once while a subscription or a followed clock waits to be
@@ -368,9 +386,10 @@ nervix-cli --domain production --command \
   "DESCRIBE TRANSACTION '01a0ca64-7062-7302-ac1e-43138ccc2067' OPERATION 2 FORMAT JSON;"
 ```
 
-For a standalone `--command` inspection with `FORMAT JSON`, stdout contains exactly one JSON
-document serialized from the typed report, without terminal decoration or unrelated events.
-Failures print one JSON object with `error.code` and `error.message` on stdout and exit nonzero;
+When `--command` contains exactly one `DESCRIBE TRANSACTION ... FORMAT JSON` statement, stdout
+contains exactly one JSON document serialized from the typed report, without terminal decoration
+or unrelated events. Failures in this mode print one JSON object with `error.code` and
+`error.message` on stdout and exit nonzero;
 a configuration, connection or request failure's message is the whole chain of causes, such as
 `invalid server URL: relative URL without a base`. Diagnostic details and unrelated events go to
 stderr. `FORMAT TEXT` uses the normal readable
@@ -654,6 +673,9 @@ If one unit cannot drain or activate, the command returns an error containing th
 a `failed:` line for that unit. Independent units continue moving, so `moved` can be smaller than
 `of`. The node stays cordoned, successful moves remain committed, and running `drain-node` again
 retries the units it still owns.
+The subcommand exits with status `1` for that failed outcome, even when some units moved; a
+completed drain exits `0`, and an outcome that is not known yet exits `3` with its execution
+reference.
 
 ## Shell Completions
 

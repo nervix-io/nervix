@@ -340,6 +340,7 @@ pub(super) fn check_placement_bound(
                   cancellation check"
     )
 )]
+/// Non-security BLAKE3: checks node-owned checkpoint chunks against their selected metadata.
 pub(super) fn visit_chunks(
     view: &impl Readable,
     chunks: &Keyspace,

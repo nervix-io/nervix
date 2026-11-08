@@ -111,7 +111,14 @@ can acquire a fresh owner for an applying upload after an interrupted or deferre
 
 ### Installing One Copy
 
-The leader's first copy and every replica go through the same verification in the resource store:
+The leader's first copy and every replica go through the same verification in the resource store.
+BLAKE3 establishes content identity and consistency between archive bytes, extracted files and
+committed metadata. It does not sign a resource or authenticate its author. Upload authentication
+and the committed catalog establish ownership; the interconnect authenticates replication peers.
+These checks do not protect a store whose bytes and metadata an adversary can both rewrite. The
+[cryptography register](cryptography.md#classification-register) records each checksum owner.
+
+Verification proceeds as follows:
 
 1. The archive is staged under the archive quota and hashed with BLAKE3 as it is written, and its
    digest must match the version's root checksum, the BLAKE3 digest of the archive. An archive that

@@ -15,6 +15,8 @@ Use it for:
 - [typed absence, semantic states, validation boundaries, state identity, and boundary encodings](./typed-states.md)
 - [connector and entity kinds through statement heads, Models, typed plans and composition](./connector-contract.md#connector-and-entity-kinds)
 - [connector crate ownership, the shared ingestor and emitter contract, and host execution](./connector-contract.md#ownership-and-dependency-direction)
+- [emitter batching: compatible membership, exact byte bounds, native containers, retry, lifecycle
+  and measured tuning evidence](./emitter-batching.md)
 - [HTTP emitter request preparation, delivery, lifecycle, and qualification](./http-emitter-architecture.md)
 - [client ingestors and emitters: native batches, application ACKs, credits, forwarding,
   restoration, buffered ALTER and paced workflows](./client-io-architecture.md)

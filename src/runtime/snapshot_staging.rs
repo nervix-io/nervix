@@ -33,6 +33,7 @@ use std::{
 };
 
 use arch_into::ArchInto as _;
+/// Non-security BLAKE3: staged artifact digests check content; the selected owner scopes it.
 use blake3::Hasher;
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -206,6 +207,7 @@ impl SnapshotStaging {
 
     /// Opens the staging file `length` bytes land in, holding `reservation` for as long as they
     /// exist.
+    /// Non-security BLAKE3: starts a checksum for the quota-owned selected snapshot artifact.
     async fn open(
         &self,
         length: u64,

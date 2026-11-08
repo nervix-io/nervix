@@ -70,7 +70,7 @@ pub(crate) enum ProbeRuntime {
     Python,
     /// Java 21 over the shared Rust binding, through JNI.
     Java,
-    /// Ruby over the shared Rust binding, through Fiddle.
+    /// Ruby through its native magnus gem and the shared host runtime.
     Ruby,
     /// An independent Go implementation over native gRPC.
     Go,
@@ -130,6 +130,7 @@ impl ProbeRuntime {
             }
             Self::Ruby => {
                 let mut command = Command::new("ruby");
+                command.arg("-I").arg(Self::artifacts()?.join("ruby/lib"));
                 command.arg(sources.join("ruby/probe.rb"));
                 command
             }
@@ -181,15 +182,19 @@ impl ProbeRuntime {
     /// Whether the probe loads the C ABI of the shared Rust binding, which it is told the path of.
     fn loads_binding(self) -> bool {
         match self {
-            Self::C | Self::Cpp | Self::Ruby => true,
-            Self::CAbiInProcess | Self::Python | Self::Java | Self::Go | Self::Node | Self::Bun => {
-                false
-            }
+            Self::C | Self::Cpp => true,
+            Self::CAbiInProcess
+            | Self::Python
+            | Self::Java
+            | Self::Ruby
+            | Self::Go
+            | Self::Node
+            | Self::Bun => false,
         }
     }
 
     /// Whether the probe drives the Rust client through the shared binding, in process, through
-    /// its C ABI or through the Python or JNI package, and so reaches the domain clock events and the
+    /// its C ABI or through the Python, Ruby or JNI package, and so reaches the domain clock events and the
     /// producer and consumer handles the binding exposes.
     fn drives_binding(self) -> bool {
         match self {

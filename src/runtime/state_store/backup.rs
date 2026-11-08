@@ -103,6 +103,7 @@ impl RuntimeStateStore {
         nervix::dispatch(reason = "the admitted storage owner supplies a synchronous file or \
                                    slice reader and checks cancellation between bounded chunks")
     )]
+    /// Non-security BLAKE3: checks restored checkpoint bytes; restore authority is separate.
     pub(in crate::runtime) fn stage_restored_checkpoint(
         &self,
         authority: &RestoreStateAuthority,

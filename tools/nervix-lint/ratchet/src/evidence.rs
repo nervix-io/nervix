@@ -86,13 +86,15 @@ pub struct Completion {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct MatrixReport {
+pub struct MatrixReport<E = Completion> {
     pub identity: String,
     pub source_identity: String,
     pub compiler: String,
     pub root: PathBuf,
     pub configurations: Vec<Configuration>,
-    pub evidence: Vec<Completion>,
+    // A reader that uses only aggregate findings can skip completion payloads without defining
+    // another matrix schema or allocating the compiler reports it never inspects.
+    pub evidence: Vec<E>,
     pub findings: Vec<AuthoredSite>,
     pub complete: bool,
     pub matrix_complete: bool,

@@ -59,6 +59,7 @@ pub struct CreateUdf {
 }
 
 impl CreateUdf {
+    /// Non-security BLAKE3: identifies UDF source; declaration/compilation policy owns execution admission.
     pub fn new(
         name: UdfName,
         language: UdfLanguage,
@@ -79,6 +80,7 @@ impl CreateUdf {
         }
     }
 
+    /// Non-security BLAKE3: checks stored source/hash consistency, not a code signature.
     pub fn has_valid_code_hash(&self) -> bool {
         self.code_hash == blake3::hash(self.code.as_bytes()).to_hex().as_str()
     }

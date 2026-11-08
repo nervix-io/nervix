@@ -36,12 +36,14 @@ pub(in crate::runtime) enum CheckpointReader {
         metadata: CheckpointMetadata,
         offset: u64,
         buffer: Cursor<Vec<u8>>,
+        /// Non-security BLAKE3: checks segmented checkpoint consistency, not store authenticity.
         hasher: Box<blake3::Hasher>,
     },
 }
 
 impl CheckpointReader {
     /// The reader of `checkpoint`, stored under `key`, whose chunks `view` holds.
+    /// Non-security BLAKE3: starts a checksum for the checkpoint the node-owned view selected.
     fn select(
         view: fjall::Snapshot,
         chunks: Keyspace,

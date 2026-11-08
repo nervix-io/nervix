@@ -2577,6 +2577,14 @@ These async observations introduce no tracked blocking-lock owner. Deloxide cont
 the registered product locks, while the public scenarios and model checks exercise pause ordering
 at their applicable boundaries.
 
+The host suites' declared action channel arms subscription-opening refusals on every node and
+confirms their application before a suite restores its session relay. Its teardown action removes
+unused entries from the testing-only refusal map before another test can open a subscription.
+The map operations and the host's pipe waits are untracked; they add no blocking-lock owner or
+product synchronization protocol. The action owner's ordered-confirmation and deadline checks,
+the Python pipe-adapter checks and the one- and three-node `client_suites.feature` rows hold this
+harness exchange to its contract. Deloxide does not observe the host processes.
+
 The `@restore_client_inspection` one- and three-node examples fill the real filesystem execution
 class before an accepted restore applies its client configuration, then release capacity and require
 every restore step and the configured client to survive. Their active, order and restore-stress
@@ -2746,7 +2754,9 @@ compiler finds a tracked blocking acquisition in a diagnostic configuration. Eac
 registered workloads whose processes reach its tracked locks, the path the lane does not reach and
 why, or both. `just validate-deloxide-applicability`, part of `just validate` and CI's `checks`
 job, reads the acquisition catalog `just ratchet` writes and fails on an owner without a record and
-on a record whose file no longer acquires a tracked lock. It reports how many owners registered
+on a record whose file no longer acquires a tracked lock. The lane validates its inventory, then
+delegates the comparison to `nervix-ratchet applicability`, which consumes the shared Rust
+`MatrixReport` and finding types; Python never decodes the compiler catalog. It reports how many owners registered
 workloads reach and how many record a path the lane does not reach. The catalog is the compiler's
 resolution of the Deloxide adapters' operations, not a search for lock names. Every diagnostic
 library and binary configuration enables `testing`, as the lane's server builds do, so acquisitions

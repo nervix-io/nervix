@@ -182,6 +182,7 @@ Feature: Sensitive data
       | 1            |
       | 3            |
 
+  @emitter_batch_sensitivity
   Scenario Outline: Sensitive external emission requires explicit leakage
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -241,12 +242,27 @@ Feature: Sensitive data
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
-
+      """
+    When these Plexus commands fail with "leak_sensitive"
+      """
+      CREATE ZEROMQ PUSH EMITTER sensitive_notifications_out
+        FROM notifications
+        TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING emitted_notification_codec
+        INHERIT user_id, action
+        SET secret = input.secret
+        <batch_clause>
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      """
+    And these Plexus commands are executed
+      """
       CREATE ZEROMQ PUSH EMITTER sensitive_notifications_out
         FROM notifications
         TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING emitted_notification_codec
         INHERIT user_id, action
         SET secret = leak_sensitive(input.secret)
+        <batch_clause>
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -258,10 +274,12 @@ Feature: Sensitive data
       """
     Then the observed broker receives a payload
       """
-      {"action":"OPEN","secret":"top-secret","user_id":42}
+      <expected_payload>
       """
 
     Examples:
-      | cluster_size | replica_count |
-      | 1            | 0             |
-      | 3            | 0             |
+      | cluster_size | replica_count | batch_clause                       | expected_payload                                       |
+      | 1            | 0             |                                    | {"action":"OPEN","secret":"top-secret","user_id":42}   |
+      | 3            | 0             |                                    | {"action":"OPEN","secret":"top-secret","user_id":42}   |
+      | 1            | 0             | BATCH MAX MESSAGES 2 MAX SIZE 1KiB | [{"action":"OPEN","secret":"top-secret","user_id":42}] |
+      | 3            | 0             | BATCH MAX MESSAGES 2 MAX SIZE 1KiB | [{"action":"OPEN","secret":"top-secret","user_id":42}] |

@@ -104,6 +104,11 @@ jobs:
         with:
           fetch-depth: 2
 
+      - name: Setup Ruby for the native gem
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -218,6 +223,12 @@ jobs:
       # project in either part, and the second part's script tests run through it too.
       - name: Setup uv
         uses: astral-sh/setup-uv@v6
+
+      - name: Setup Java for the JVM suite surface check
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
 
       - name: Runner diagnostics before Validate
         uses: ./.github/actions/runner-diagnostics
@@ -681,6 +692,11 @@ jobs:
             sudo apt-get install --yes --no-install-recommends libpython3.12t64
           fi
 
+      - name: Setup Ruby for embedded native-gem tests
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+
       - name: Setup Java for embedded JVM tests
         uses: actions/setup-java@v4
         with:
@@ -928,6 +944,11 @@ jobs:
       # the scenario suite there.
       - name: Pack the scenario suite
         run: just test-scenarios-coverage-pack "${RUNNER_TEMP}/scenario-suite/scenario-suite.tar.zst"
+
+      - name: Setup Ruby for embedded native-gem tests
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
 
       - name: Setup Java for embedded JVM tests
         uses: actions/setup-java@v4
@@ -1526,7 +1547,7 @@ jobs:
             target/coverage-full/summary.md
           if-no-files-found: warn
 
-  # The cross-language client probes: C, C++ and Ruby through the C ABI, Java through JNI,
+  # The cross-language client probes: C and C++ through the C ABI, Ruby through its native gem, Java through JNI,
   # CPython over its Python package, and independent Go and TypeScript implementations on Node.js and
   # Bun. They need toolchains the suite job does not install and run a feature of their own, so they
   # are a job of their own beside the suite rather than minutes added to its critical path. They run
@@ -1609,7 +1630,7 @@ jobs:
         with:
           node-version: "24"
 
-      # Fiddle's boolean type, which the Ruby probe's signatures use, ships with Ruby 3.3.
+      # Compile and load the native gem at its Ruby 3.3 floor, with this interpreter's headers.
       - name: Setup Ruby
         uses: ruby/setup-ruby@v1
         with:
@@ -1684,6 +1705,9 @@ jobs:
 
       - name: JVM binding boundary and embedded properties
         run: just test-client-jvm
+
+      - name: Test the native Ruby boundary and bounded representations
+        run: just test-client-ruby
 
       # The Python package's suite on its boundary tier, from the environment the build prepared.
       - name: Python package boundary tier
@@ -1776,6 +1800,12 @@ jobs:
     steps:
       # Each collection reads its profiles with the toolchain's own LLVM tools. The toolchain file's
       # components and target are installed here, so no collection finds them missing.
+      # Compiler-cache qualification analyzes the whole ordinary workspace, including the gem.
+      - name: Setup Ruby for workspace compiler qualification
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:

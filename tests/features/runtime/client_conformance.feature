@@ -1,8 +1,9 @@
 Feature: Cross-language client conformance
   Every client runtime reads the same rows, answers and failures through the finalized session
   protocol and prints the same report, so one expected report is the oracle for every language.
-  The shared Rust binding is driven through its C ABI from C, C++ and Ruby and in process,
-  from Java 21 through JNI, and from CPython through the Python package on the same host session runtime; Go over native
+  The shared Rust binding is driven through its C ABI from C and C++ and in process,
+  from Java 21 through JNI, Ruby through the native gem, and CPython through the Python package
+  on the same host session runtime; Go over native
   gRPC and TypeScript on Node.js and Bun over the binary WebSocket are independent implementations
   generated from the schema. Every binding host also attaches to a
   paced domain clock that is already running, reads the clock the attach reported before it uses a
@@ -70,7 +71,7 @@ Feature: Cross-language client conformance
       | java    | 3            |
 
     @client_conformance_toolchain @client_probe_ruby
-    Examples: Ruby
+    Examples: Ruby through the native gem
       | runtime | cluster_size |
       | ruby    | 1            |
       | ruby    | 3            |
@@ -245,7 +246,7 @@ Feature: Cross-language client conformance
       | java    | 3            | PARTITIONS 4     |
 
     @client_conformance_toolchain @client_probe_ruby
-    Examples: Ruby over the shared Rust binding
+    Examples: Ruby through the native gem
       | runtime | cluster_size | partition_clause |
       | ruby    | 1            |                  |
       | ruby    | 3            |                  |
@@ -495,7 +496,7 @@ Feature: Cross-language client conformance
       | java    | 3            | node-2      | node-1     |
 
     @client_conformance_toolchain @client_probe_ruby
-    Examples: Ruby over the shared Rust binding
+    Examples: Ruby through the native gem
       | runtime | cluster_size | clock_owner | entry_node |
       | ruby    | 1            | node-1      | node-1     |
       | ruby    | 3            | node-2      | node-1     |
@@ -725,7 +726,7 @@ Feature: Cross-language client conformance
       | java    | 3            | VEC<STRING> | ARRAY<I16, 2, 2> | VEC<ARRAY<DATETIME, 2>> |
 
     @client_conformance_toolchain @client_probe_ruby
-    Examples: Ruby over the shared Rust binding
+    Examples: Ruby through the native gem
       | runtime | cluster_size | tags_type   | grid_type        | spans_type              |
       | ruby    | 1            | VEC<STRING> | ARRAY<I16, 2, 2> | VEC<ARRAY<DATETIME, 2>> |
       | ruby    | 3            | VEC<STRING> | ARRAY<I16, 2, 2> | VEC<ARRAY<DATETIME, 2>> |

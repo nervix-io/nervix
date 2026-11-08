@@ -80,6 +80,7 @@ impl TransactionStatementRequest {
     /// The BLAKE3 digest of the statement's source. The source determines the statement, so a
     /// finished transaction tells an exact repetition of an append it accepted from a changed one
     /// by this digest and the append's position.
+    /// Non-security BLAKE3: detects changed retries; authenticated transaction ownership is separate.
     fn source_digest(&self) -> [u8; 32] {
         *blake3::hash(self.source.as_bytes()).as_bytes()
     }

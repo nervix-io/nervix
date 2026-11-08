@@ -314,13 +314,31 @@ test: tests-deps build-client-jvm-tests
     cargo test --all-targets --features native --package nervix-primitives
     just test-capability-docs
     just test-turmoil
+    just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-jvm-api-run
     just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-python-api
+    just test-client-suite-actions
 
 # Check capability examples with rustdoc, including runtime exports enabled only for tests.
 test-capability-docs: build-web-console
     cargo test --package nervix-server --package nervix-roto --package nervix-vm --package nervix-models \
         --package nervix-consensus --package nervix-dns --package nervix-recovery \
-        --package nervix-simd-kernels --features nervix-server/testing --doc
+        --package nervix-simd-kernels --package nervix-client-core \
+        --features nervix-server/testing,nervix-client-core/arrow --doc
+
+# Check the caller-independent IPC decoder and its host argument/delivery classification.
+test-client-ipc:
+    cargo test --package nervix-client-core --features arrow --lib emitter_batch
+    cargo test --package nervix-client-host --lib batch
+
+# Check the decoder's typed public contract without building unrelated capability examples.
+test-client-ipc-docs:
+    cargo test --package nervix-client-core --features arrow --doc
+
+# Collect focused ordinary coverage for the shared IPC decoder and host batch boundary.
+coverage-client-ipc output:
+    cargo llvm-cov --no-report --package nervix-client-core --package nervix-client-host --features nervix-client-core/arrow --lib -- emitter_batch
+    cargo llvm-cov --no-report --package nervix-client-core --package nervix-client-host --features nervix-client-core/arrow --lib -- batch::tests
+    cargo llvm-cov report --package nervix-client-core --package nervix-client-host --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
 
 # Exercise scenario argument forwarding without compiling or starting dependencies.
 test-scenario-arguments:
@@ -384,6 +402,19 @@ test-emitter-native-metrics *args: build-deps
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/{client_emitters,emitter_batch_databases,http_emitter,iceberg_emission,otel_export_retries}.feature") }} --tags '@emitter_payload_observations' {{ quote(args) }}
+
+# Complete batch values and explicit sensitivity leakage through one- and three-node public graphs.
+build-emitter-batch-boundaries: build-deps
+    cargo test --package nervix-scenarios --test scenarios --no-run
+
+test-emitter-batch-boundaries *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input 'tests/features/runtime/{emitter_batch_containers,sensitive_data}.feature' \
+        --name 'ON EMITTING BATCH maps, wraps and expands the array of member values|Sensitive external emission requires explicit leakage' \
+        {{ quote(args) }}
 
 # Exercise NATS authentication through real brokers and one-/three-node public graphs.
 test-nats-authentication *args: build-deps
@@ -521,6 +552,13 @@ test-cli-streams *args: build-deps build-test-cli
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/tools/cli_session*.feature") }} --tags '@cli_stream_termination or @cli_stream_recovery' {{ quote(args) }}
+
+# Observe interactive output without sending keys to wake the prompt or preparing unrelated guests.
+test-cli-repl tags="@cli_repl_output" *args: build-web-console download-onnxruntime build-test-cli
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/tools/cli_session*.feature") }} --tags {{ quote(tags) }} {{ quote(args) }}
 
 # Select codec round trips or browser cases with the same ordinary runner and prepared tools.
 test-codec-scenarios input *args: build-codec-heads
@@ -1129,7 +1167,7 @@ test-deloxide-replay record launch:
 # Hold every source file that acquires a tracked blocking lock in a diagnostic build to its owner
 # record in tests/deloxide-inventory.toml, using the compiler catalog `just ratchet` writes.
 validate-deloxide-applicability: ratchet
-    python3 -m scripts.deloxide_lane applicability --catalog {{ quote(cargo_target_dir + "/typed-ratchet/gate.json") }}
+    python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} applicability --catalog {{ quote(cargo_target_dir + "/typed-ratchet/gate.json") }}
 
 # Check workload registration without building or running a diagnostic lane.
 validate-deloxide-inventory:
@@ -1525,6 +1563,23 @@ test-client-wire *args:
 test-client-core *args:
     cargo test --package nervix-client-core --features arrow,autocomplete --lib -- {{ args }}
 
+# Build the native Ruby extension through the configured compiler cache.
+build-client-ruby:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir) }} cargo build --package nervix-client-ruby
+    just cargo_target_dir={{ quote(cargo_target_dir) }} package-client-ruby
+
+# Package the current Ruby interpreter's native gem and extract that exact archive for probes.
+package-client-ruby:
+    ruby crates/client-ruby/package.rb {{ quote(cargo_target_dir) }}
+
+# Each property executable owns one embedded Ruby interpreter; the unit executable owns one too.
+test-client-ruby *args:
+    BOLERO_RANDOM_SEED="${BOLERO_RANDOM_SEED:-2026110803}" cargo test --package nervix-client-ruby --features ruby-tests --all-targets -- {{ args }}
+
+# Collect the binding itself, executed by embedded Ruby, in the ordinary coverage toolchain.
+coverage-client-ruby output=(cargo_target_dir / "client-ruby.lcov"):
+    BOLERO_RANDOM_SEED="${BOLERO_RANDOM_SEED:-2026110803}" cargo llvm-cov --package nervix-client-ruby --features ruby-tests --all-targets --lcov --output-path {{ quote(output) }}
+
 # Run the C ABI's unit tests, which read every accessor as a host does through the header's types.
 test-client-ffi *args:
     cargo test --package nervix-client-ffi --lib -- {{ args }}
@@ -1588,6 +1643,11 @@ test-client-python-cluster *args: tests-deps build-client-python
     cargo test --no-run --package nervix-scenarios --test scenarios
     just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-conformance-run '@client_suite_python' {{ args }}
 
+# Run the JVM suite's cluster tier on one and three nodes with the ordinary scenario runner.
+test-client-jvm-cluster *args: tests-deps build-client-jvm-tests
+    cargo test --no-run --package nervix-scenarios --test scenarios
+    just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-conformance-run '@client_suite_java' {{ args }}
+
 # Package the Java 21 API and this target's JNI library into one self-loading jar.
 build-client-jvm:
     CARGO_TARGET_DIR={{ quote(cargo_target_dir) }} cargo build --package nervix-client-jvm
@@ -1611,18 +1671,24 @@ package-client-jvm:
     javac --release 21 -Xlint:all -Werror -cp "${artifacts}/nervix-client.jar" \
         -d "${artifacts}/probe" tests/client_conformance/java/Probe.java
 
-# Compile only the JVM boundary fixtures beside the already built jar.
+# Compile the JVM suite beside the already built jar.
 build-client-jvm-tests: build-client-jvm
     just cargo_target_dir={{ quote(cargo_target_dir) }} package-client-jvm-tests
 
-# Compile the current Java boundary fixtures against the packaged jar.
+# Compile the Java suite and embedded-JVM property fixture against the packaged jar.
 package-client-jvm-tests:
     #!/usr/bin/env bash
     set -euo pipefail
     artifacts={{ quote(cargo_target_dir + "/client-conformance/java") }}
+    junit="$(bash scripts/download_junit.sh "${artifacts}")"
+    rm -rf "${artifacts}/tests"
     mkdir -p "${artifacts}/tests"
-    javac --release 21 -Xlint:all -Werror -cp "${artifacts}/nervix-client.jar" \
-        -d "${artifacts}/tests" crates/client-jvm/tests/java/io/nervix/client/*.java
+    mapfile -t sources < <(rg --files tests/client_conformance/java/suite -g '*.java' | sort)
+    javac --release 21 -Xlint:all -Werror -cp "${artifacts}/nervix-client.jar:${junit}" \
+        -d "${artifacts}/tests" crates/client-jvm/tests/java/io/nervix/client/Properties.java \
+        "${sources[@]}"
+    mkdir -p "${artifacts}/tests/META-INF/services"
+    printf '%s\n' io.nervix.client.suite.support.Results > "${artifacts}/tests/META-INF/services/org.junit.platform.launcher.TestExecutionListener"
 
 # Hold the Java 21 API to its host ownership and bulk-column contracts.
 test-client-jvm-api: build-client-jvm-tests
@@ -1633,10 +1699,16 @@ test-client-jvm-api-run:
     #!/usr/bin/env bash
     set -euo pipefail
     artifacts={{ quote(cargo_target_dir + "/client-conformance/java") }}
-    java -Xcheck:jni -cp "${artifacts}/nervix-client.jar:${artifacts}/tests" \
-        io.nervix.client.BoundaryTests
-    java -Xcheck:jni -cp "${artifacts}/tests" io.nervix.client.ReentrantClose \
-        "${artifacts}/nervix-client.jar"
+    results="${artifacts}/java-boundary-results.txt"
+    status=0
+    NERVIX_CLIENT_JVM_JAR="${artifacts}/nervix-client.jar" java -Xcheck:jni \
+        -cp "${artifacts}/nervix-client.jar:${artifacts}/tests:${artifacts}/junit-platform-console-standalone.jar" \
+        org.junit.platform.console.ConsoleLauncher execute --scan-class-path "${artifacts}/tests" \
+        --include-tag boundary --include-classname '.*' --fail-if-no-tests --disable-banner --details summary \
+        --config 'junit.jupiter.testclass.order.default=org.junit.jupiter.api.ClassOrderer$OrderAnnotation' \
+        | tee "${results}" || status=$?
+    uv run --locked python -m scripts.client_suites check-run --host java --tier boundary "${results}"
+    exit "${status}"
 
 # Exercise the actual JNI implementations and Java classes in one embedded JVM.
 test-client-jvm: test-client-jvm-api
@@ -1655,10 +1727,10 @@ coverage-client-jvm output="lcov-client-jvm.info": build-client-jvm-tests
     CARGO_TARGET_DIR={{ quote(cargo_target_dir) }} cargo llvm-cov --package nervix-client-jvm --features jvm-tests --lib --lcov --output-path {{ quote(output) }}
 
 # Build what the cross-language client probes run: the shared Rust binding, the C and C++ probes
-# linked against it, the JNI jar and Java probe, the Python package in its virtual environment,
+# linked against it, the JNI jar and Java probe, the native Ruby gem, the Python package in its virtual environment,
 # the Go probe with its generated FlatBuffers code, and the TypeScript probe bundled with its generated code for Node.js
 # and Bun. Every generated file lands under the artifacts directory, never in the source tree.
-build-client-conformance: build-client-python build-client-jvm
+build-client-conformance: build-client-python build-client-jvm-tests build-client-ruby
     #!/usr/bin/env bash
     set -euo pipefail
     artifacts={{ quote(cargo_target_dir + "/client-conformance") }}
@@ -2739,6 +2811,18 @@ bench-smoke-bodies:
 bench-admitted-work *args: build-web-console
     cargo bench --package nervix-server --bench admitted_work --features benchmarks -- {{ args }}
 
+# Real RabbitMQ write costs. Serialize measurements across checkouts of this repository.
+bench-rabbitmq-publish *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    benchmark_lock="$(git rev-parse --path-format=absolute --git-common-dir)/nervix-benchmark.lock"
+    flock --exclusive --timeout 60 "$benchmark_lock" \
+        cargo bench --package nervix-connector-rabbitmq --features benchmarks --bench publish -- {{ quote(args) }}
+
+# Exercise the same real-broker fixture and publication/count oracles once per benchmark body.
+test-rabbitmq-publish-benchmark:
+    cargo bench --profile dev --package nervix-connector-rabbitmq --features benchmarks --bench publish -- --test
+
 # Measure ordinary native atomic, publication, lock and reference-count costs on this host.
 # Model and diagnostic builds have different instrumentation and are not performance baselines.
 bench-primitives *args:
@@ -3050,7 +3134,7 @@ clippy_build_directory(lane) := cargo_target_dir / "clippy" / lane
 # libraries and engines below them, and the cluster's network stack.
 clippy_language_packages_1 := ["nervix-plexus", "nervix-plexus-format", "nervix-roto", "nervix-vm", "nervix-web-console"]
 
-clippy_language_packages_2 := ["nervix-benchmark", "nervix-cli", "nervix-client-ffi", "nervix-client-host", "nervix-client-jvm", "nervix-client-python"]
+clippy_language_packages_2 := ["nervix-benchmark", "nervix-cli", "nervix-client-ffi", "nervix-client-host", "nervix-client-jvm", "nervix-client-python", "nervix-client-ruby"]
 
 clippy_foundation_packages_1 := ["nervix-approx-into", "nervix-bounded-write", "nervix-crypto", "nervix-dataflow-graph", "nervix-expiry-map", "nervix-primitives-macros", "nervix-recovery"]
 
@@ -3065,7 +3149,7 @@ clippy_foundation_packages_2 := [
     "nervix-models",
 ]
 
-clippy_foundation_packages_3 := ["nervix-simd-kernels", "nervix-wasm-protocol", "nervix-wasm-sdk"]
+clippy_foundation_packages_3 := ["nervix-licensing-protocol", "nervix-simd-kernels", "nervix-wasm-protocol", "nervix-wasm-sdk"]
 
 clippy_cluster_packages := ["nervix-dns", "nervix-test-environment"]
 
@@ -3310,6 +3394,7 @@ ratchet *args: typed-ratchet-build typed-ratchet-source-build install-cargo-crap
 test-ratchet-units: typed-ratchet-source-build install-cargo-crap
     just ratchet-tests lib
     just ratchet-tests audit
+    just ratchet-tests applicability
     just test-typed-ratchet-reports
     python3 -m unittest scripts.tests.test_validation_entrypoint scripts.tests.test_clock_boundaries
 
@@ -3450,7 +3535,7 @@ test-ratchet-runner *args:
 
 # Focused local tooling counters for patch review; the existing native producer collects CI.
 coverage-ratchet-runner *args:
-    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/coverage cargo +1.99 llvm-cov test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-ratchet --lib --test wrapper --test audit --no-report -- {{ args }}
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/coverage cargo +1.99 llvm-cov test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-ratchet --lib --test wrapper --test audit --test applicability --no-report -- {{ args }}
     just coverage-ratchet-report-owner
 
 [private]
@@ -3904,8 +3989,8 @@ coverage-go-ci-tool:
 
 # Every script test runs here, including the advisory CRAP report and CI-entrypoint checks, so
 # this builds the Rust gate and installs its pinned complexity analyzer.
-test-docs: typed-ratchet-source-build install-cargo-crap
-    uv run --locked python -m unittest discover -s scripts/tests -p "test_*.py"
+test-docs: typed-ratchet-source-build install-cargo-crap build-client-suite-java-checker
+    NERVIX_CLIENT_SUITE_JAVA_CHECKER={{ quote(cargo_target_dir + "/client-suites/java") }} NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }} uv run --locked python -m unittest discover -s scripts/tests -p "test_*.py"
     node --test cloudflare/docs-worker/src/index.test.js
 
 # Screenshots are recaptured from the current console and the nervix-cli and nervix-server
@@ -3921,13 +4006,28 @@ validate-skill:
 # mypy types the suite, the inventory to the suite's tests, the typed stub to the binding's source,
 # and the guide to the shared section list with every code block an anchored suite test. The same
 # mypy run checks the suite and the paced simulation driver with `--strict`.
-validate-client-suites:
-    uv run --locked python -m scripts.client_suites validate
+build-client-suite-java-checker:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bash scripts/download_junit.sh {{ quote(cargo_target_dir + "/client-conformance/java") }}
+    mkdir -p {{ quote(cargo_target_dir + "/client-suites/java") }}
+    javac --release 21 -Xlint:all -Werror -d {{ quote(cargo_target_dir + "/client-suites/java") }} scripts/client_suites_java/SurfaceCheck.java
+
+validate-client-suites: build-client-suite-java-checker
+    NERVIX_CLIENT_SUITE_JAVA_CHECKER={{ quote(cargo_target_dir + "/client-suites/java") }} NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }} uv run --locked python -m scripts.client_suites validate
+
+# Resolve the JVM reader's positive/negative controls beside the shared suite and report checks.
+test-client-suites: build-client-suite-java-checker
+    NERVIX_CLIENT_SUITE_JAVA_CHECKER={{ quote(cargo_target_dir + "/client-suites/java") }} NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }} uv run --locked python -m unittest scripts.tests.test_client_suites scripts.tests.test_client_suites_java
+
+# Exercise the host suite's bounded action adapter over real pipes, without a cluster.
+test-client-suite-actions:
+    uv run --locked python -m unittest scripts.tests.test_client_suite_actions
 
 # Collect the line coverage of the client suite check and its tests.
-coverage-client-suites-runner:
+coverage-client-suites-runner: build-client-suite-java-checker
     mkdir -p target/client-suites
-    COVERAGE_FILE=target/client-suites/.coverage uv run --locked --with coverage==7.11.0 coverage run --branch --source=scripts.client_suites,scripts.client_suites_mypy_plugin -m unittest scripts.tests.test_client_suites
+    NERVIX_CLIENT_SUITE_JAVA_CHECKER={{ quote(cargo_target_dir + "/client-suites/java") }} NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }} COVERAGE_FILE=target/client-suites/.coverage uv run --locked --with coverage==7.11.0 coverage run --branch --source=scripts.client_suites,scripts.client_suites_mypy_plugin -m unittest scripts.tests.test_client_suites scripts.tests.test_client_suites_java
     COVERAGE_FILE=target/client-suites/.coverage uv run --locked --with coverage==7.11.0 coverage report -m
 
 book-pdf version="0.1.0-dev" output="":
