@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    CommandExecutionReference, DomainConfig, DomainPace, DomainStartPoint, DomainState,
-    PlacementPolicy, Timestamp, UserName,
+    CommandExecutionReference, DomainConfig, DomainPace, DomainStartPoint, DomainState, Timestamp,
+    UserName,
 };
 
 use super::*;
@@ -49,7 +49,6 @@ impl Fixture {
                 id: domain.clone(),
                 config: DomainConfig {
                     pace: DomainPace::Unpaced,
-                    placement: PlacementPolicy::Neutral,
                 },
                 status: DomainStatus::Paused,
                 start_version: 7,

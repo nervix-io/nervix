@@ -7,10 +7,10 @@ use meticulous::OptionExt as _;
 use meticulous::ResultExt as _;
 use nervix_models::{
     ActualExecutionStepImpact, ClusterNodeIdentity, CommandExecutionReference, DomainClockState,
-    DomainName, DomainSchedule, DomainStartPoint, DomainState, ExecutionStepImpactReport,
-    ExecutionStepOutcome, ImpactDiagnostic, ImpactDiagnosticKind, ResourceName, Statement,
-    Timestamp, TransactionOperationAdmission, TransactionOperationNumber,
-    TransactionOperationRange, TransactionPreviewIdentity, UserName,
+    DomainName, DomainSchedule, DomainStartPoint, ExecutionStepImpactReport, ExecutionStepOutcome,
+    ImpactDiagnostic, ImpactDiagnosticKind, ResourceName, Statement, Timestamp,
+    TransactionOperationAdmission, TransactionOperationNumber, TransactionOperationRange,
+    TransactionPreviewIdentity, UserName,
 };
 pub use nervix_models::{
     TransactionCommitPlan, TransactionCommitPlanHeader, TransactionCommitPlanStep,
@@ -1293,11 +1293,6 @@ pub enum TransactionStepEffect {
         inputs: Box<DomainPlanningInputs>,
         schedule: Option<Box<DomainSchedule>>,
     },
-    PutDomainAndSchedule {
-        inputs: Box<DomainPlanningInputs>,
-        domain: Box<DomainState>,
-        schedule: Option<Box<DomainSchedule>>,
-    },
     StartDomain {
         inputs: Box<DomainPlanningInputs>,
         start: DomainStartPoint,
@@ -1323,7 +1318,6 @@ impl TransactionStepEffect {
     pub fn inputs(&self) -> &DomainPlanningInputs {
         match self {
             Self::ReplaceDomainSchedule { inputs, .. }
-            | Self::PutDomainAndSchedule { inputs, .. }
             | Self::StartDomain { inputs, .. }
             | Self::StopDomain { inputs }
             | Self::CreateResourceCatalog { inputs, .. } => inputs,

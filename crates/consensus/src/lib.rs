@@ -461,12 +461,6 @@ pub enum ConsensusCommand {
     ReconcileOwnershipHandoffPreparations {
         authority: CoordinationIdentity,
     },
-    PutDomainAndSchedule {
-        inputs: Box<DomainPlanningInputs>,
-        domain: Box<DomainState>,
-        schedule: Option<Box<DomainSchedule>>,
-        mutation: Option<Box<DomainMutationLease>>,
-    },
     PutDomain {
         domain: Box<DomainState>,
         mutation: Option<Box<DomainMutationLease>>,
@@ -774,9 +768,6 @@ impl std::fmt::Display for ConsensusCommand {
             }
             Self::ReconcileOwnershipHandoffPreparations { authority } => {
                 write!(f, "reconcile-ownership-handoff-preparations:{authority}")
-            }
-            Self::PutDomainAndSchedule { domain, .. } => {
-                write!(f, "put-domain-and-schedule:{}", domain.id.as_str())
             }
             Self::PutDomain { domain, .. } => write!(f, "put-domain:{}", domain.id.as_str()),
             Self::StartDomain { domain_id, .. } => write!(f, "start-domain:{}", domain_id.as_str()),
@@ -3790,25 +3781,6 @@ impl Proposer {
         Self::applied_response(response.data)
     }
 
-    pub async fn put_domain_and_schedule(
-        &self,
-        inputs: DomainPlanningInputs,
-        domain: DomainState,
-        schedule: Option<DomainSchedule>,
-        mutation: Option<&DomainMutationLease>,
-    ) -> error_stack::Result<(), ConsensusError> {
-        let response = self
-            .inner
-            .client_write(ConsensusCommand::PutDomainAndSchedule {
-                inputs: Box::new(inputs),
-                domain: Box::new(domain),
-                schedule: schedule.map(Box::new),
-                mutation: mutation.cloned().map(Box::new),
-            })
-            .await?;
-        Self::applied_response(response.data)
-    }
-
     pub async fn start_domain(
         &self,
         domain_id: DomainName,
@@ -5956,35 +5928,6 @@ fn apply_consensus_command_at(
             changes.schedule_changed = true;
         }
         ConsensusCommand::ReconcileOwnershipHandoffPreparations { .. } => {}
-        ConsensusCommand::PutDomainAndSchedule {
-            inputs,
-            domain,
-            schedule,
-            mutation,
-        } => {
-            if domain.status != DomainStatus::Stopped
-                && let Err(reason) = restore::validate_restored_domain_start(state, &domain.id)
-            {
-                return AppliedConsensusCommand::conflict(reason.to_string());
-            }
-            if let Err(reason) = validate_domain_mutation(state, &domain.id, mutation.as_deref()) {
-                return AppliedConsensusCommand::conflict(reason.to_string());
-            }
-            if inputs.domain() != &domain.id {
-                return AppliedConsensusCommand::conflict(
-                    "domain update does not match its captured planning inputs".to_string(),
-                );
-            }
-            if let Err(reason) = validate_domain_planning_inputs(state, inputs) {
-                return AppliedConsensusCommand::conflict(reason.to_string());
-            }
-            state
-                .domains
-                .insert(domain.id.clone(), domain.as_ref().clone());
-            state.replace_domain_schedule(&domain.id, schedule.as_deref());
-            changes.domains_changed = true;
-            changes.schedule_changed = true;
-        }
         ConsensusCommand::PutDomain { domain, mutation } => {
             if domain.status != DomainStatus::Stopped
                 && let Err(reason) = restore::validate_restored_domain_start(state, &domain.id)
@@ -7093,7 +7036,6 @@ fn validate_transaction_step_without_effect(
     let statement = &statements[0];
     let valid_no_effect = match &statement.statement {
         Statement::CreateResource(create) => create.if_not_exists && result.result.already_existed,
-        Statement::AlterDomain(_) => true,
         _ => false,
     };
     if valid_no_effect {
@@ -7131,14 +7073,6 @@ fn validate_transaction_step_effect(
             TransactionStepEffect::ReplaceDomainSchedule { .. } => statements
                 .iter()
                 .all(|statement| statement.statement.is_model_mutation()),
-            TransactionStepEffect::PutDomainAndSchedule { inputs, domain, .. } => {
-                statements.len() == 1
-                    && transaction.domain == domain.id
-                    && inputs
-                        .state()
-                        .is_some_and(|previous| previous.id == domain.id)
-                    && matches!(statements[0].statement, Statement::AlterDomain(_))
-            }
             TransactionStepEffect::StartDomain { inputs, .. } => {
                 statements.len() == 1
                     && inputs
@@ -7251,16 +7185,6 @@ fn apply_transaction_step_effect(
             inputs, schedule, ..
         } => {
             state.replace_domain_schedule(inputs.domain(), schedule.as_deref());
-            changes.schedule_changed = true;
-        }
-        TransactionStepEffect::PutDomainAndSchedule {
-            domain, schedule, ..
-        } => {
-            state
-                .domains
-                .insert(domain.id.clone(), domain.as_ref().clone());
-            state.replace_domain_schedule(&domain.id, schedule.as_deref());
-            changes.domains_changed = true;
             changes.schedule_changed = true;
         }
         TransactionStepEffect::StartDomain {
@@ -8075,7 +7999,6 @@ mod tests {
             id: domain(raw),
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
-                placement: nervix_models::PlacementPolicy::Neutral,
             },
             status: DomainStatus::Running,
             start_version: 7,
@@ -9099,28 +9022,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["alpha"]
         );
-    }
-
-    #[test]
-    fn apply_consensus_command_updates_domain_and_schedule_atomically() {
-        let mut state = StateMachineData::default();
-        let mut domain_state = running_domain_state("tenant");
-        domain_state.config.placement = nervix_models::PlacementPolicy::RequireColocation;
-        let schedule = domain_schedule("tenant");
-        let inputs = captured_inputs(&state, "tenant");
-
-        apply_consensus_command(
-            &mut state,
-            &ConsensusCommand::PutDomainAndSchedule {
-                inputs,
-                domain: Box::new(domain_state.clone()),
-                schedule: Some(Box::new(schedule.clone())),
-                mutation: None,
-            },
-        );
-
-        assert_eq!(state.domains.get(&domain("tenant")), Some(&domain_state));
-        assert_eq!(state.schedule.domain(&domain("tenant")), Some(&schedule));
     }
 
     #[test]
