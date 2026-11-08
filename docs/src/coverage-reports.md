@@ -90,6 +90,12 @@ and the report owner's unit tests, including authored macro provenance,
 in a local tooling report for patch review; it is not a new CI producer or evidence that every
 ordinary workspace member was measured. The existing typed-ratchet native producer collects these
 tests with the compiler qualification in CI.
+`just coverage-client-ruby` collects the native Rust binding through one embedded-Ruby boundary
+test and two bounded representation-property executables. It exports `target/client-ruby.lcov` for
+local patch review; it is not a separate ordinary CI producer or evidence for every workspace
+member. Ordinary workspace unit collection already includes this crate with `ruby-tests` and the
+same interpreter provisioned on the build and restored runners. LLVM counters measure the Rust
+binding the Ruby calls execute; they do not measure the Ruby scripts themselves.
 The assertion tests build in `typed-ratchet/tests`, separately from the executable in
 `typed-ratchet/source`, so building a test cannot replace an executable the producer already ran.
 The collected runner gives Cargo children the build-time `/dev/null` profile path, keeping build

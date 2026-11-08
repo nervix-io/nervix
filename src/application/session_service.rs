@@ -609,6 +609,7 @@ struct ChoicePageBasis {
 }
 
 impl ChoicePageBasis {
+    /// Non-security BLAKE3: binds page freshness to a typed query, not a credential.
     fn new(request: &ChoiceLookupRequest, revision: u64) -> Self {
         let mut hasher = blake3::Hasher::new();
         hasher.update(&[request.target().cursor_tag()]);
@@ -628,6 +629,7 @@ impl ChoicePageBasis {
         self
     }
 
+    /// Non-security BLAKE3: checks selected candidates/revision; authentication is separate.
     fn page(&self, request: &ChoiceLookupRequest, candidates: Vec<Choice>) -> ChoiceOutcome {
         let mut candidate_hasher = blake3::Hasher::new();
         hash_optional_choice_text(&mut candidate_hasher, self.content_digest.as_deref());
@@ -689,6 +691,7 @@ impl ChoicePageBasis {
     }
 }
 
+/// Non-security BLAKE3: frames controlled freshness inputs, not an authentication message.
 pub(in crate::application) fn hash_choice_text(hasher: &mut blake3::Hasher, value: &str) {
     let length =
         u64::try_from(value.len()).assured("choice text fits the bounded session transfer limit");
@@ -696,6 +699,7 @@ pub(in crate::application) fn hash_choice_text(hasher: &mut blake3::Hasher, valu
     hasher.update(value.as_bytes());
 }
 
+/// Non-security BLAKE3: frames controlled freshness inputs, not an authentication message.
 fn hash_optional_choice_text(hasher: &mut blake3::Hasher, value: Option<&str>) {
     match value {
         Some(value) => {
@@ -708,6 +712,7 @@ fn hash_optional_choice_text(hasher: &mut blake3::Hasher, value: Option<&str>) {
     }
 }
 
+/// Non-security BLAKE3: frames controlled freshness inputs, not an authentication message.
 fn hash_choice_value(hasher: &mut blake3::Hasher, value: &ChoiceValue) {
     match value {
         ChoiceValue::DomainPace(value) => {
@@ -912,6 +917,7 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
 }
 
 impl CompletionPageBasis {
+    /// Non-security BLAKE3: binds completion-page freshness to a query, not a credential.
     fn new(request: &SuggestRequest, revision: u64) -> Self {
         let mut hasher = blake3::Hasher::new();
         hasher.update(request.input().as_bytes());
@@ -928,6 +934,7 @@ impl CompletionPageBasis {
         }
     }
 
+    /// Non-security BLAKE3: checks completion candidate/revision consistency, not access permission.
     fn page(&self, request: &SuggestRequest, candidates: Vec<Suggestion>) -> SuggestOutcome {
         let mut candidate_hasher = blake3::Hasher::new();
         for candidate in &candidates {

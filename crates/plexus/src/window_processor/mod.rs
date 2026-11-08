@@ -23,8 +23,8 @@ use crate::{
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, boxed_choice, branch_selection,
         byte_size_lit, duration_lit, explicit_processor_outputs, filter_where_clause,
-        from_relay_clauses, if_not_exists_clause, into_parse_error, kw, kw_phrase3, lex_input,
-        materialized_state_dependencies, suggest_from, tok, window_processor_name,
+        from_relay_clauses, if_not_exists_clause, into_parse_error, kw, kw_phrase2, kw_phrase3,
+        lex_input, materialized_state_dependencies, suggest_from, tok, window_processor_name,
     },
 };
 
@@ -210,8 +210,7 @@ pub fn create_window_processor_parser<'src>()
 + Clone {
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
-        .then_ignore(kw(Identifier::Window))
-        .then_ignore(kw(Identifier::Processor))
+        .then_ignore(kw_phrase2(Identifier::Window, Identifier::Processor))
         .then(window_processor_name())
         .then_ignore(kw(Identifier::From))
         .then(from_relay_clauses())
