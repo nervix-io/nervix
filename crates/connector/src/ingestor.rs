@@ -479,6 +479,10 @@ impl IngestorBatchAcknowledgement {
     )
 )]
 pub trait IngestorHostServices: Send + 'static {
+    /// Observes one completed broker read or host-interrupted read, without changing its outcome.
+    fn record_read(&self, outcome: IngestorReadOutcome);
+    /// Counts raw transport payloads before decoding or graph admission, never internal replay.
+    fn record_read_payloads(&self, payloads: usize, bytes: u64);
     /// Takes in a batch whose positions nothing downstream acknowledges.
     async fn intake_unacknowledged(
         &mut self,
@@ -519,7 +523,24 @@ pub struct IngestorHost {
     services: Box<dyn IngestorHostServices>,
 }
 
+/// The bounded observation of one transport read or scheduled poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr, strum::EnumIter)]
+#[strum(serialize_all = "snake_case")]
+pub enum IngestorReadOutcome {
+    Delivered,
+    Empty,
+    Failed,
+    Interrupted,
+}
+
 impl IngestorHost {
+    pub fn record_read(&self, outcome: IngestorReadOutcome) {
+        self.services.record_read(outcome);
+    }
+
+    pub fn record_read_payloads(&self, payloads: usize, bytes: u64) {
+        self.services.record_read_payloads(payloads, bytes);
+    }
     pub fn new(services: impl IngestorHostServices) -> Self {
         Self {
             services: Box::new(services),
