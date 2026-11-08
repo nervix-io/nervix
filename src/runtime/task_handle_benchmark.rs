@@ -96,7 +96,6 @@ impl TaskHandleBenchmark {
                 id: domain.clone(),
                 config: nervix_models::DomainConfig {
                     pace: DomainPace::Unpaced,
-                    placement: nervix_models::PlacementPolicy::Neutral,
                 },
                 status: DomainStatus::Running,
                 start_version: 0,
@@ -181,6 +180,7 @@ impl TaskHandleBenchmark {
             &ingestor,
             nervix_models::Unit::SINGLE,
             None,
+            nervix_models::IngestorEntityKind::Http(nervix_models::HttpIngestorEntity::Endpoint),
         );
         let dropped = runtime.metrics().session_subscription_dropped_rows(
             &domain,

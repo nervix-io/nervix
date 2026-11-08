@@ -1067,6 +1067,99 @@ fn failover_starts_a_new_guest_state_lifetime_for_every_branch() {
 }
 
 #[test]
+fn forced_recovery_preserves_the_complete_healthy_partition_inside_and_outside_a_hard_group() {
+    use nervix_models::{
+        BranchPartitions, BranchSelection, CreateSchema, NodeUnitRef, ParseAsType,
+        PlacementGroupSchedule, ResolvedBranching, SchemaField, Unit,
+    };
+
+    let branching = ResolvedBranching::branched(
+        named("tenants"),
+        CreateSchema {
+            name: named("tenant_key"),
+            fields: vec![SchemaField {
+                name: named("tenant"),
+                ty: ParseAsType::String,
+                optional: false,
+                sensitive: false,
+            }],
+        },
+        BranchPartitions::Direct(nonzero!(2u16)),
+    );
+    let partitioned = |name, kind| {
+        let mut node = scheduled_node(name, kind);
+        let selection = BranchSelection::BranchedBy {
+            branch: named("tenants"),
+        };
+        match node.config.as_mut() {
+            Model::WasmProcessor(processor) => processor.branched_by = selection,
+            Model::Junction(processor) => processor.branched_by = selection,
+            _ => panic!("this fixture declares a partitioned processor"),
+        }
+        let mut node = node.with_resolved_branching(Some(branching.clone()));
+        assert!(node.place_unit(
+            Unit::partition(0),
+            Some(node_named("node-2")),
+            vec![node_named("node-2"), node_named("node-3")],
+        ));
+        assert!(node.place_unit(
+            Unit::partition(1),
+            Some(node_named("node-1")),
+            vec![node_named("node-1"), node_named("node-3")],
+        ));
+        node
+    };
+    for grouped in [false, true] {
+        let guest = partitioned("counting_guest", ModelKind::WasmProcessor);
+        let mate = partitioned("forward", ModelKind::Junction);
+        let healthy_guest = guest.units[&Unit::partition(1)].clone();
+        let healthy_mate = mate.units[&Unit::partition(1)].clone();
+        let groups = if grouped {
+            (0..2)
+                .map(|index| PlacementGroupSchedule {
+                    members: vec![
+                        NodeUnitRef::new(guest.identity(), Unit::partition(index)),
+                        NodeUnitRef::new(mate.identity(), Unit::partition(index)),
+                    ],
+                    primary_node: guest.units[&Unit::partition(index)].primary_node.clone(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut schedule = DomainSchedule::new(named("payments"), vec![guest, mate], groups);
+        let live = BTreeSet::from([node_named("node-1"), node_named("node-3")]);
+        let moves = SessionServiceImpl::failover_unavailable_scheduled_nodes(
+            &mut schedule,
+            None,
+            &live,
+            &live,
+        );
+        assert!(!moves.is_empty());
+        let guest = &schedule.nodes[0];
+        let mate = &schedule.nodes[1];
+        assert_eq!(
+            guest.units[&Unit::partition(1)],
+            healthy_guest,
+            "grouped={grouped}"
+        );
+        assert_eq!(
+            mate.units[&Unit::partition(1)],
+            healthy_mate,
+            "grouped={grouped}"
+        );
+        let mut recovered = WasmStateGenerations::first();
+        recovered.begin_every_branch();
+        assert_eq!(
+            guest.units[&Unit::partition(0)]
+                .wasm_state_generations
+                .as_ref(),
+            Some(&recovered),
+        );
+    }
+}
+
+#[test]
 fn a_planned_drain_keeps_the_guest_state_lifetime() {
     let domain = DomainName::parse("payments").expect("valid domain");
     let mut schedule = DomainSchedule::new(

@@ -324,6 +324,16 @@ CI_PRODUCERS: tuple[Producer, ...] = (
 )
 
 LOCAL_PRODUCERS: tuple[Producer, ...] = (
+    # The ordinary workspace producer already runs these integration targets in CI. These
+    # selections collect a focused local view without duplicating their CI execution.
+    Producer(
+        name="test-client-c-api", mode="ordinary", prepare=(),
+        instrumented="test-client-c-api", finish=(), explicit_only=True,
+    ),
+    Producer(
+        name="test-client-cpp-api", mode="ordinary", prepare=(),
+        instrumented="test-client-cpp-api", finish=(), explicit_only=True,
+    ),
     # This real-broker benchmark is explicitly selected for local qualification. Adding it does
     # not start a broker in the existing in-memory benchmark smoke lane.
     Producer(

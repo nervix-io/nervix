@@ -1669,17 +1669,19 @@ metadata.partition and metadata.offset`. A `TIMESTAMP AT metadata.<field>` that 
 field is refused with `RegistryError::UndeclaredIngestorTimestampMetadata`, and one that names a
 field declared as another type than `DATETIME` with `RegistryError::IngestorTimestampMetadataType`,
 which names the declared type.
-Planning failures
-likewise retain the selected entity or placement so an operator can correct the request. A
-relocation the graph cannot plan is a `RelocationPlanError` report beneath `RelocationError::Graph`:
-a member that does not exist names the domain and the member, a server-listener ingestor names the
-ingestor, a corridor whose `FROM`/`TO` pairs are all disconnected, a hard group whose overrides
-request different strategies lists every member of that group, and an override outside the unit
-names its member. The failed command renders the chain, such as `relocation plan failed: junction
-'chain_distant' is not part of the relocation`. A relay divided into partitions has no one owner to
-move, so a relocation that selects it is refused with `RelocationError::MemberPartitioned`, naming
-the domain and the relay. See [Control Plane](./control-plane.md) for activation and
-[Typed States And Validation Boundaries](./typed-states.md) for required state.
+Placement validation resolves ranked claims before checking the winner on each directed hop.
+`RegistryError::PlacementHopPolicy` retains the domain, both typed node references, the hop's
+class, the effective policy and the winning rule names. A model mutation that changes a unit
+structure is refused against its candidate graph, leaving the stored graph and schedule unchanged.
+
+A relocation the graph cannot plan is a `RelocationPlanError` report beneath
+`RelocationError::Graph`. A missing member names its domain and kind; `UnknownUnit` also names the
+requested partition or instance. Server listeners remain unrelocatable. Disconnected corridors,
+conflicting overrides within an exact unit group and overrides outside the selected/captured unit
+retain their typed causes. The reporting boundary renders that chain once. A qualified selector
+moves its exact hard group; an unqualified member selects all its declared units. See
+[Control Plane](./control-plane.md) for activation and [Typed States And Validation
+Boundaries](./typed-states.md) for required state.
 
 `ALTER BRANCH <branch> SET PARTITIONS <n>` on a domain that is running or paused is refused before
 anything is committed with `TransactionPlanningError::BranchPartitionsRequireStoppedDomain`, which
@@ -1687,6 +1689,10 @@ names the operation, the domain and the branch and states the stopped-domain pat
 'by_tenant' changes its partition count only while its domain is stopped: STOP domain 'payments',
 run ALTER BRANCH, then START it`. A domain build whose committed schedule lacks a unit its relay
 needs reports `ExecutionBuildError::RelayUnitNotScheduled`, naming the relay and the unit.
+
+The domain-wide placement editor retains typed name and positive-integer rank parse failures
+under `PlacementDraftError` and preserves the editable draft. The server decides hop applicability
+against the graph and reports a refused rule inline.
 
 Visual schema, branch, relay, and subscription editors report incomplete names, fields, types,
 modes, references, branching, capacities, instance limits, filters and sample rates before
@@ -2427,9 +2433,14 @@ target state; a failed preparation cannot publish a partial layout.
 A stopping node's `stopping_node_drain` request answers with outcomes of its own instead, because
 its only subject is the authenticated sender: completed or failed, each with the leader's report for
 the sender's log, or not the leader, which sends the sender to the leader it observes next. A node
-that receives the request without leading changes nothing. If leadership is lost during a drain,
-the interrupted report remains in the former leader's log and the new leader continues from the
-committed schedule within the original remaining budget. This classification uses the typed
+that receives the request without leading changes nothing. An unconfirmed leader lease also
+answers not the leader, but its interrupted-drain log names the term and says the same leader may
+still lead. The stopping node waits 25 ms and observes the leader again, so it can retry that same
+leader. When leadership actually moves, the log names the observed replacement when known, and
+the next leader continues from the committed schedule within the original remaining budget. The
+interrupted event retains the stopping node's identity and the original drain report, and says
+remaining work can be retried rather than promising a retry after the caller's deadline.
+This classification uses the typed
 command disposition and the retained consensus leadership observation; it never interprets report
 text. A failed drain while the answering node still leads remains failed. When that request fails
 in transport, the drain counts as requested but unanswered:

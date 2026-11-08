@@ -90,6 +90,15 @@ impl<M> BrokerRead<M> {
     /// interruption the host did not ask for, is reported, and what it carries is still taken in.
     /// Payloads the ingestor dropped for their size are counted, and the loop reads again.
     pub(super) fn into_outcome(self, host: &IngestorHost) -> ReadOutcome<M> {
+        let outcome = match &self.batch {
+            Ok(IngestorBatch::Messages(messages)) if !messages.is_empty() => {
+                IngestorReadOutcome::Delivered
+            }
+            Ok(IngestorBatch::Interrupted { .. }) => IngestorReadOutcome::Interrupted,
+            Err(_) => IngestorReadOutcome::Failed,
+            Ok(_) => IngestorReadOutcome::Empty,
+        };
+        host.record_read(outcome);
         match self.batch {
             Ok(IngestorBatch::Messages(messages)) => {
                 if messages.is_empty() {

@@ -17,7 +17,7 @@
     )
 )]
 
-use std::{collections::BTreeSet, num::NonZeroU64, time::Duration};
+use std::{collections::BTreeSet, fmt, num::NonZeroU64, time::Duration};
 
 use ahash::{HashMap, HashSet};
 use error_stack::{Report, ResultExt as _};
@@ -33,8 +33,7 @@ use nervix_interconnect::{
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, DomainName, IngestorEntity, IngestorName, KafkaIngestor,
     KafkaOffsetMode, KafkaPartitionSchedule, KafkaTopicIngestor, Model, ModelKind, ModelName,
-    NodeRef, NodeUnitRef, PlacementGroupSchedule, PlacementPolicy, QuiesceLevel, ScheduledNode,
-    Unit,
+    NodeRef, NodeUnitRef, PlacementGroupSchedule, QuiesceLevel, ScheduledNode, Unit,
 };
 use nervix_primitives::{
     sync::CancellationToken,
@@ -45,13 +44,14 @@ use tracing::{info, warn};
 use super::{
     AppError,
     background_task::BackgroundTask,
-    command_result::CommandResult,
-    describe_output::{format_placement_unit_nodes, placement_unit_members_equal},
+    command_result::{CommandDisposition, CommandResult, LeaderRedirect},
+    describe_output::format_placement_unit_nodes,
     model_mutation::{command_error, command_ok, quiesce_level_message},
     ownership_handoff::{
         AssignmentRelocation, DrainMove, PlannedOwnershipHandoff, format_planned_ownership_move,
         mark_complete_ownership_transitions, planned_ownership_moves,
     },
+    placement_groups::{PlacementGroupAssignments, PlacementGroupIndex},
     schedule_planning::{DomainSchedulePlanningSnapshot, PreparedDomainSchedule},
     session_service::SessionServiceImpl,
     shutdown::{ShutdownDeadline, ShutdownPhaseOutcome},
@@ -169,6 +169,28 @@ enum KafkaPartitionPublicationError {
         domain: DomainName,
         ingestor: IngestorName,
     },
+}
+
+/// A drain's retained leadership observation, borrowed at its reporting boundary.
+struct ShutdownDrainObservation<'a>(&'a CommandDisposition);
+
+impl fmt::Display for ShutdownDrainObservation<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            CommandDisposition::NotLeader(LeaderRedirect::UnconfirmedLease { term }) => write!(
+                formatter,
+                "the leader could not confirm its lease in term {term} and may still lead"
+            ),
+            CommandDisposition::NotLeader(LeaderRedirect::Leader(location)) => {
+                write!(formatter, "leadership moved to node '{}'", location.node)
+            }
+            CommandDisposition::NotLeader(LeaderRedirect::NoLeader) => {
+                formatter.write_str("leadership moved, and no leader is known yet")
+            }
+            // The caller separately observed that this node stopped leading after the failure.
+            _ => formatter.write_str("leadership moved"),
+        }
+    }
 }
 
 /// The one drain timeout that a graceful shutdown's ownership move and local graph drain share,
@@ -470,15 +492,11 @@ impl SessionServiceImpl {
             }));
         }
         let inputs = self.inner.consensus.domain_planning_inputs(domain).await;
-        let default_policy = inputs
-            .state()
-            .ok_or_else(|| {
-                Report::new(SchedulePublicationError::DomainNotFound {
-                    domain: domain.clone(),
-                })
-            })?
-            .config
-            .placement;
+        inputs.state().ok_or_else(|| {
+            Report::new(SchedulePublicationError::DomainNotFound {
+                domain: domain.clone(),
+            })
+        })?;
         let planning = self
             .capture_domain_schedule_planning_snapshot(&inputs)
             .await;
@@ -486,7 +504,7 @@ impl SessionServiceImpl {
             schedule,
             relocations,
             ..
-        } = planning.prepare(&inputs, domain, graph, default_policy, inputs.schedule());
+        } = planning.prepare(&inputs, domain, graph, inputs.schedule());
         self.validate_domain_planning_inputs(&inputs)
             .await
             .change_context(SchedulePublicationError::InvalidInputs {
@@ -516,18 +534,11 @@ impl SessionServiceImpl {
         &self,
         inputs: DomainPlanningInputs,
         graph: Option<ActiveGraph>,
-        placement: PlacementPolicy,
     ) -> PreparedDomainSchedule {
         let snapshot = self
             .capture_domain_schedule_planning_snapshot(&inputs)
             .await;
-        snapshot.prepare(
-            &inputs,
-            inputs.domain(),
-            graph,
-            placement,
-            inputs.schedule(),
-        )
+        snapshot.prepare(&inputs, inputs.domain(), graph, inputs.schedule())
     }
 
     pub(in crate::application) async fn drop_node(
@@ -595,7 +606,7 @@ impl SessionServiceImpl {
 
         for (domain, graph) in self.inner.registry.active_graphs() {
             let inputs = self.inner.consensus.domain_planning_inputs(&domain).await;
-            let Some(domain_state) = inputs.state() else {
+            let Some(_) = inputs.state() else {
                 continue;
             };
             let planning = self
@@ -611,7 +622,6 @@ impl SessionServiceImpl {
                 cluster_nodes,
                 usize::try_from(self.cluster_parameters().replica_count())
                     .assured("the committed count fits a supported target"),
-                domain_state.config.placement,
                 self.inner.runtime.scheduler_mode(),
             );
             #[cfg(not(feature = "testing"))]
@@ -620,7 +630,6 @@ impl SessionServiceImpl {
                 cluster_nodes,
                 usize::try_from(self.cluster_parameters().replica_count())
                     .assured("the committed count fits a supported target"),
-                domain_state.config.placement,
             );
             Self::merge_existing_schedule_data(&mut schedule, inputs.schedule(), preservable_nodes);
             if let Err(error) = self.validate_domain_planning_inputs(&inputs).await {
@@ -835,7 +844,7 @@ impl SessionServiceImpl {
                     None
                 };
                 let inputs = self.inner.consensus.domain_planning_inputs(&domain).await;
-                let Some(domain_state) = inputs.state() else {
+                let Some(_) = inputs.state() else {
                     continue;
                 };
                 let planning = self
@@ -865,7 +874,6 @@ impl SessionServiceImpl {
                     &replacement_nodes,
                     usize::try_from(self.cluster_parameters().replica_count())
                         .assured("the committed count fits a supported target"),
-                    domain_state.config.placement,
                     self.inner.runtime.scheduler_mode(),
                 );
                 #[cfg(not(feature = "testing"))]
@@ -874,7 +882,6 @@ impl SessionServiceImpl {
                     &replacement_nodes,
                     usize::try_from(self.cluster_parameters().replica_count())
                         .assured("the committed count fits a supported target"),
-                    domain_state.config.placement,
                 );
                 let Some(current_domain) = inputs.schedule() else {
                     if let Err(error) = self.validate_domain_planning_inputs(&inputs).await {
@@ -1471,12 +1478,7 @@ impl SessionServiceImpl {
                     || self.inner.consensus.current_leader().await.as_ref()
                         != Some(self.inner.consensus.local_node_id())
                 {
-                    info!(
-                        node_id = %node_id,
-                        report = %drained.message,
-                        "stopping-node drain lost leadership; remaining work needs the next leader"
-                    );
-                    StoppingNodeDrainResponse::NotLeader
+                    Self::stopping_node_drain_retry_response(&node_id, &drained)
                 } else {
                     StoppingNodeDrainResponse::Failed {
                         report: drained.message,
@@ -1500,6 +1502,20 @@ impl SessionServiceImpl {
                 Self::cordon_release_response(&node_id, released)
             }
         }
+    }
+
+    /// Reports an interrupted drain before asking the stopping node to observe its leader again.
+    fn stopping_node_drain_retry_response(
+        node_id: &ClusterNodeName,
+        drained: &CommandResult,
+    ) -> StoppingNodeDrainResponse {
+        let observation = ShutdownDrainObservation(&drained.disposition);
+        info!(
+            node_id = %node_id,
+            report = %drained.message,
+            "stopping-node drain interrupted: {observation}; remaining work can be retried at the observed leader"
+        );
+        StoppingNodeDrainResponse::NotLeader
     }
 
     /// The answer to stopping node `node_id`'s request to release its drain cordon, from what this
@@ -1553,6 +1569,7 @@ impl SessionServiceImpl {
         // node and a bracketed member list for a placement group, so this stays a string set.
         excluded: &BTreeSet<String>,
     ) -> Option<DrainMove> {
+        let current_groups = PlacementGroupIndex::new(&schedule.placement_groups);
         let mut groups = desired.placement_groups.iter().collect::<Vec<_>>();
         groups.sort_by(|left, right| {
             left.members
@@ -1588,8 +1605,9 @@ impl SessionServiceImpl {
                 })
             });
             if needs_relocation {
+                let current_group_index = current_groups.index_of(&group.members);
                 return Self::relocate_placement_group_assignment(
-                    schedule,
+                    PlacementGroupAssignments::new(schedule, current_group_index),
                     desired,
                     group,
                     node_id,
@@ -1667,7 +1685,7 @@ impl SessionServiceImpl {
     }
 
     fn relocate_placement_group_assignment(
-        schedule: &mut nervix_models::DomainSchedule,
+        mut current: PlacementGroupAssignments<'_>,
         desired: &nervix_models::DomainSchedule,
         group: &PlacementGroupSchedule,
         unavailable_node_id: &ClusterNodeName,
@@ -1678,12 +1696,12 @@ impl SessionServiceImpl {
         let current_nodes = group
             .members
             .iter()
-            .map(|member| schedule.nodes.get(&member.node).cloned())
+            .map(|member| current.nodes().get(&member.node))
             .collect::<Option<Vec<_>>>()?;
         let desired_nodes = group
             .members
             .iter()
-            .map(|member| desired.nodes.get(&member.node).cloned())
+            .map(|member| desired.nodes.get(&member.node))
             .collect::<Option<Vec<_>>>()?;
         let current_units = group
             .members
@@ -1756,6 +1774,12 @@ impl SessionServiceImpl {
                 .iter()
                 .all(|unit| unit.assigned_nodes.contains(&target)))
         .then(|| target.clone());
+        struct UnitAssignmentUpdate {
+            member: NodeUnitRef,
+            assigned_nodes: Vec<ClusterNodeName>,
+            transition: Option<nervix_models::OwnershipTransition>,
+        }
+        let mut updates = Vec::with_capacity(group.members.len());
         for (((member, current_node), current_unit), desired_unit) in group
             .members
             .iter()
@@ -1789,8 +1813,20 @@ impl SessionServiceImpl {
                 )),
                 _ => None,
             };
-            let node = schedule
-                .nodes
+            updates.push(UnitAssignmentUpdate {
+                member: member.clone(),
+                assigned_nodes,
+                transition,
+            });
+        }
+        for UnitAssignmentUpdate {
+            member,
+            assigned_nodes,
+            transition,
+        } in updates
+        {
+            let node = current
+                .nodes_mut()
                 .get_mut(&member.node)
                 .verified("every group member was resolved above");
             if let Some(transition) = transition {
@@ -1799,18 +1835,12 @@ impl SessionServiceImpl {
                     .verified("the group unit was resolved above")
                     .ownership_transition = Some(transition);
                 if relocation.replaces_owner_state() {
-                    node.begin_wasm_state_generation();
+                    node.begin_wasm_unit_state_generation(member.unit);
                 }
             }
             node.place_unit(member.unit, Some(target.clone()), assigned_nodes);
         }
-        if let Some(current_group) = schedule
-            .placement_groups
-            .iter_mut()
-            .find(|candidate| placement_unit_members_equal(&candidate.members, &group.members))
-        {
-            current_group.primary_node = Some(target.clone());
-        }
+        current.place_primary(target.clone());
 
         let fallback_node = if primary_changed && promoted_replica.is_none() {
             Some(target)
@@ -1939,7 +1969,7 @@ impl SessionServiceImpl {
         }
 
         if relocation.replaces_owner_state() && ownership_transition.is_some() {
-            node.begin_wasm_state_generation();
+            node.begin_wasm_unit_state_generation(unit);
         }
         let scheduled = node
             .units
@@ -1994,13 +2024,14 @@ impl SessionServiceImpl {
             .verified("the generated schedule is built exactly when no desired schedule was given");
 
         let groups = schedule.placement_groups.clone();
+        let desired_groups = PlacementGroupIndex::new(&desired.placement_groups);
         let mut grouped_members = HashSet::default();
-        for group in groups {
+        for (group_index, group) in groups.into_iter().enumerate() {
             grouped_members.extend(group.members.iter().cloned());
             let current_nodes = group
                 .members
                 .iter()
-                .map(|member| schedule.nodes.get(&member.node).cloned())
+                .map(|member| schedule.nodes.get(&member.node))
                 .collect::<Option<Vec<_>>>();
             let Some(current_nodes) = current_nodes else {
                 continue;
@@ -2040,13 +2071,9 @@ impl SessionServiceImpl {
             let Some(unavailable_node_id) = unavailable_node_id else {
                 continue;
             };
-            let desired_group = desired
-                .placement_groups
-                .iter()
-                .find(|candidate| placement_unit_members_equal(&candidate.members, &group.members))
-                .unwrap_or(&group);
+            let desired_group = desired_groups.find(&group.members).unwrap_or(&group);
             if let Some(failover_move) = Self::relocate_placement_group_assignment(
-                schedule,
+                PlacementGroupAssignments::new(schedule, Some(group_index)),
                 desired,
                 desired_group,
                 &unavailable_node_id,

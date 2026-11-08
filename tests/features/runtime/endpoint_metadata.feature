@@ -146,6 +146,8 @@ Feature: Endpoint request metadata
       """
       domain="{{domain}}"
       ingestor="tenants_in"
+      connector="HTTP"
+      entity="ENDPOINT"
       """
 
     Examples:

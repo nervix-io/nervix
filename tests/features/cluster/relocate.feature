@@ -712,7 +712,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     Then the last command output contains
       """
-      relocated 1 of 1 runtime node(s) onto node 'node-2'
+      relocated 1 of 1 execution unit(s) onto node 'node-2'
       relocation onto node 'node-2'
       quiesce level: ENTITY_PAUSE
       """
@@ -802,7 +802,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     Then the last command output contains
       """
-      relocated 6 of 6 runtime node(s) onto node 'node-2'
+      relocated 6 of 6 execution unit(s) onto node 'node-2'
       """
     And the last command output contains
       """
@@ -884,7 +884,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     Then the last command output contains
       """
-      relocated 3 of 3 runtime node(s) onto node 'node-2'
+      relocated 3 of 3 execution unit(s) onto node 'node-2'
       """
     And the last command output contains
       """
@@ -960,19 +960,19 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     And the last command output contains
       """
-      - kind=junction name=chain_partner group=2 strategy=follow reason=preferred owner=node-1 moves=yes
+      - kind=junction name=chain_partner group=3 strategy=follow reason=preferred owner=node-1 moves=yes
       """
     And the last command output contains
       """
-      - kind=relay name=chain_first group=3 strategy=follow reason=preferred owner=node-1 moves=yes
+      - kind=relay name=chain_first group=2 strategy=follow reason=preferred owner=node-1 moves=yes
       """
     And the last command output contains
       """
-      - kind=junction name=chain_distant group=4 strategy=follow reason=preferred owner=node-1 moves=yes
+      - kind=junction name=chain_distant group=5 strategy=follow reason=preferred owner=node-1 moves=yes
       """
     And the last command output contains
       """
-      - kind=relay name=chain_second group=5 strategy=follow reason=preferred owner=node-1 moves=yes
+      - kind=relay name=chain_second group=4 strategy=follow reason=preferred owner=node-1 moves=yes
       """
     And the last command output contains
       """
@@ -985,7 +985,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     Then the last command output contains
       """
-      - kind=junction name=chain_partner group=2 strategy=ignore reason=preferred owner=node-1 moves=yes
+      - kind=junction name=chain_partner group=3 strategy=ignore reason=preferred owner=node-1 moves=yes
       """
     And the last command output does not contain
       """
@@ -993,8 +993,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     And the last command output contains
       """
-      unsatisfied preferences: 2
-      - prefer colocation chain_distant <-> chain_partner (prefer_second)
+      unsatisfied preferences: 1
       - prefer colocation chain_partner <-> chain_second (prefer_second)
       """
     When these Plexus commands are executed through the client on node "node-1"
@@ -1008,7 +1007,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     And the last command output contains
       """
-      - kind=junction name=chain_partner group=2 strategy=ignore reason=preferred owner=node-1 moves=yes
+      - kind=relay name=chain_first group=2 strategy=ignore reason=preferred owner=node-1 moves=yes
       """
     And the last command output does not contain
       """
@@ -1068,7 +1067,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     Then the last command output contains
       """
-      relocated 1 of 1 runtime node(s) onto node 'node-2'
+      relocated 1 of 1 execution unit(s) onto node 'node-2'
       """
     And the last command output does not contain
       """
@@ -1080,12 +1079,12 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     When these Plexus commands are executed through the client on node "node-1"
       """
-      DESCRIBE RELOCATION JUNCTION split_partner ONTO NODE node-2 FOLLOW PREFERENCES;
+      DESCRIBE RELOCATION JUNCTION split_partner ONTO NODE node-1 FOLLOW PREFERENCES;
       """
     Then the last command output contains
       """
       unsatisfied preferences: 1
-      - suggest separation split_head <-> split_partner (spread_split)
+      - suggest separation split_first <-> split_partner (spread_split)
       """
 
   Scenario: A described plan matches the plan the relocation executes
@@ -1165,7 +1164,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     Then the last command output contains
       """
-      relocated 0 of 1 runtime node(s) onto node 'node-1'
+      relocated 0 of 1 execution unit(s) onto node 'node-1'
       relocation onto node 'node-1'
       quiesce level: DYNAMIC
       gated relays: -
@@ -1404,7 +1403,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     Then the last command output contains
       """
-      - kind=ingestor name=promote_ingestor group=1 strategy=ignore reason=selected owner={{promote_owner}} moves=yes replicas={{promote_owner}} promoted_replica=yes
+      - kind=ingestor name=promote_ingestor unit=instance:0 group=1 strategy=ignore reason=selected owner={{promote_owner}} moves=yes replicas={{promote_owner}} promoted_replica=yes
       """
     Then within "20s" node "node-1" eventually reports scheduled "ingestor" "promote_ingestor" owner equals placeholder "promote_replica"
     When Kafka message is published to topic "promote_events_{{test_id}}"
@@ -1468,7 +1467,7 @@ Feature: Relocating runtime nodes onto a named cluster node
     Then the background Plexus execution succeeds
     And the last command output contains
       """
-      relocated 1 of 1 runtime node(s) onto node 'node-2'
+      relocated 1 of 1 execution unit(s) onto node 'node-2'
       """
 
   Scenario: A relocation whose commit a leader with a lapsed lease refuses completes under its execution reference
@@ -1506,7 +1505,7 @@ Feature: Relocating runtime nodes onto a named cluster node
     Then the refusal of the relocation commit in domain "{{domain}}" was delivered
     And the last command output contains
       """
-      relocated 1 of 1 runtime node(s) onto node 'node-2'
+      relocated 1 of 1 execution unit(s) onto node 'node-2'
       """
     When these Plexus statements are executed on the leader node
       """
@@ -1695,7 +1694,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     Then the last command output contains
       """
-      relocated 1 of 1 runtime node(s) onto node 'node-2'
+      relocated 1 of 1 execution unit(s) onto node 'node-2'
       """
     And the relay subscription does not receive a payload within "2s"
     When Kafka message is published to topic "untouched_state_{{test_id}}"
@@ -1737,7 +1736,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     Then the last command output contains
       """
-      relocated 1 of 1 runtime node(s) onto node 'node-2'
+      relocated 1 of 1 execution unit(s) onto node 'node-2'
       """
     When these Plexus commands are executed through the client on node "node-1"
       """

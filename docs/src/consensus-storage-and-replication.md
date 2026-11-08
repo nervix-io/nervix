@@ -529,12 +529,14 @@ resolved branch declaration of the committed schedule carries. It identifies
 the current statement shape as well, which the statements a transaction keeps are stored in:
 `ALTER BRANCH` among those statements, and an `ALTER INGESTOR` or `ALTER EMITTER` operation that
 changes one part of its entity's body, an envelope clause or the properties, or one part of a
-construction where it stands. Its state metadata requires the current `ClusterState` encoding, 15,
+construction where it stands. Its state metadata requires the current `ClusterState` encoding, 16,
 including the cluster identity reference, committed cluster parameters, the durable restore installation gate and the unit-keyed
 committed schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,
 typed ingestor instancing, exact-unit placement-group members
-and entity-versus-unit transaction gate targets. Native counts in commands, queued transactions,
+and entity-versus-unit transaction gate targets. Placement Models carry corridor or domain-wide
+coverage; domain records carry pace, and relocation statements retain exact partition or instance
+selectors. Native counts in commands, queued transactions,
 progress, outcomes, and plan, report and topology
 headers are archived as fixed-width 64-bit values with checked native decoding. Log replay, state
 recovery and snapshot installation therefore retain their complete magnitudes. See

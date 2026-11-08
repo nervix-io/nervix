@@ -289,7 +289,6 @@ impl Harness {
             id: DomainName::try_from(name).assured("the fixture generates identifier-shaped names"),
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
-                placement: Default::default(),
             },
             status: DomainStatus::Stopped,
             start_version: 0,
@@ -447,6 +446,15 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
         SchemaFingerprint::from_digest([1; 32]),
     );
     let created = DomainSchedule::new(domain.id.clone(), [processor.clone()], vec![]);
+    harness
+        .apply(
+            1,
+            ConsensusCommand::PutDomain {
+                domain: Box::new(domain.clone()),
+                mutation: None,
+            },
+        )
+        .await?;
     let create_inputs = harness
         .store
         .inner
@@ -454,10 +462,9 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
         .domain_planning_inputs(&domain.id);
     harness
         .apply(
-            1,
-            ConsensusCommand::PutDomainAndSchedule {
+            2,
+            ConsensusCommand::ReplaceDomainSchedule {
                 inputs: Box::new(create_inputs),
-                domain: Box::new(domain.clone()),
                 schedule: Some(Box::new(created)),
                 mutation: None,
             },
@@ -467,7 +474,7 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
     let reference = Harness::command_reference(1);
     harness
         .apply(
-            2,
+            3,
             ConsensusCommand::AdmitCommandExecution {
                 execution: Box::new(crate::CommandExecution::applying(
                     reference.clone(),
@@ -511,7 +518,7 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
         .domain_planning_inputs(&domain.id);
     harness
         .apply(
-            3,
+            4,
             ConsensusCommand::ReplaceDomainSchedule {
                 inputs: Box::new(branch_transition_inputs),
                 schedule: Some(Box::new(branch_schedule.clone())),
@@ -526,7 +533,7 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
         .domain_planning_inputs(&domain.id);
     harness
         .apply(
-            4,
+            5,
             ConsensusCommand::ReplaceDomainSchedule {
                 inputs: Box::new(rejected_transition_inputs),
                 schedule: Some(Box::new(every_branch_schedule.clone())),
@@ -546,7 +553,7 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
         .domain_planning_inputs(&domain.id);
     harness
         .apply(
-            5,
+            6,
             ConsensusCommand::ReplaceDomainSchedule {
                 inputs: Box::new(every_branch_transition_inputs),
                 schedule: Some(Box::new(every_branch_schedule.clone())),
@@ -581,19 +588,25 @@ async fn record_state_and_applied_position_recover_together_at_each_boundary() -
         let mut harness = Harness::new().await?;
         let domain = Harness::domain("tenant");
         let schedule = DomainSchedule::new(domain.id.clone(), [], vec![]);
-        let inputs = Box::new(
-            harness
-                .store
-                .inner
-                .state()
-                .domain_planning_inputs(&domain.id),
-        );
         harness
             .apply(
                 1,
-                ConsensusCommand::PutDomainAndSchedule {
-                    inputs,
+                ConsensusCommand::PutDomain {
                     domain: Box::new(domain.clone()),
+                    mutation: None,
+                },
+            )
+            .await?;
+        let inputs = harness
+            .store
+            .inner
+            .state()
+            .domain_planning_inputs(&domain.id);
+        harness
+            .apply(
+                2,
+                ConsensusCommand::ReplaceDomainSchedule {
+                    inputs: Box::new(inputs),
                     schedule: Some(Box::new(schedule.clone())),
                     mutation: None,
                 },
@@ -604,17 +617,8 @@ async fn record_state_and_applied_position_recover_together_at_each_boundary() -
         let schedule_watch = harness.store.inner.schedule_tx.subscribe();
         let mut changed_domain = domain.clone();
         changed_domain.status = DomainStatus::Running;
-        let inputs = Box::new(
-            harness
-                .store
-                .inner
-                .state()
-                .domain_planning_inputs(&domain.id),
-        );
-        let command = ConsensusCommand::PutDomainAndSchedule {
-            inputs,
+        let command = ConsensusCommand::PutDomain {
             domain: Box::new(changed_domain.clone()),
-            schedule: None,
             mutation: None,
         };
         harness
@@ -622,7 +626,7 @@ async fn record_state_and_applied_position_recover_together_at_each_boundary() -
             .inner
             .faults
             .fail_next(command.to_string(), boundary);
-        assert!(harness.apply(2, command).await.is_err());
+        assert!(harness.apply(3, command).await.is_err());
         assert_eq!(harness.store.inner.state(), preceding);
         assert!(!domain_watch.has_changed()?);
         assert!(!schedule_watch.has_changed()?);
@@ -644,11 +648,14 @@ async fn record_state_and_applied_position_recover_together_at_each_boundary() -
                     recovered.domains.get(&changed_domain.id),
                     Some(&changed_domain)
                 );
-                assert!(recovered.schedule.domain(&changed_domain.id).is_none());
-                assert_eq!(recovered.runtime_revision, 2);
+                assert_eq!(
+                    recovered.schedule.domain(&changed_domain.id),
+                    Some(&schedule)
+                );
+                assert_eq!(recovered.runtime_revision, 3);
                 assert_eq!(
                     harness.store.applied_state().await?.0,
-                    Some(Harness::log_id(2))
+                    Some(Harness::log_id(3))
                 );
             }
         }

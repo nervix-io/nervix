@@ -142,6 +142,9 @@ traversal budgets scale with the frame being verified rather than with the limit
 bytes may hold at most `n / 4` tables and may expand to at most eight times its own size, so a small
 frame whose offsets alias one another cannot make a receiver walk far more than it sent.
 
+The transaction-operation and impact-reason unions declare their current numeric tags explicitly
+in the shared schema. Only declared alternatives are accepted.
+
 Reading then applies the rules the verifier does not know. Every union is required, so the `NONE`
 discriminant is never valid. A union discriminant or enum value the schema does not declare is
 rejected, and so is an absent optional scalar that a comment requires, a zero where a comment
@@ -534,6 +537,17 @@ The cursor binds the selected candidate set and its definitions; a changed conte
 `StaleContext` instead of continuing an earlier page. [Sessions](./sessions.md#structured-choices)
 owns the complete lookup contract and the server's transaction-aware resolution.
 
+Emitter controls ask entity-specific reference questions using the clients their vocabulary
+declarations admit; a client consumer selects its schema, and the Iceberg catalog question reads
+the declared catalog-client option. Encoding-codec questions require a domain and offer codecs
+that encode; their schema may differ from the input schema because construction builds the
+output. Additional-input questions carry the first input relay and require its exact payload
+schema. Unlike ordinary processor inputs, emitter
+inputs may have different branches. Materialized-state and error-relay questions therefore carry
+every selected input and require a candidate's branch to match all of them. Output schema fields
+are selected with a domain and schema reference. These lookups retain the same transaction-prefix,
+paging, definition-digest and stale-context guarantees as the existing structured controls.
+
 ```mermaid
 flowchart LR
     Client -- ClientMessage --> Decode[Verify and decode]
@@ -763,7 +777,8 @@ retention, and the retry fence; this section describes what a client can rely on
 ### What Is Recorded
 
 Every persistent command is recorded under its reference before its first effect: model creation,
-alteration, and removal, `REBIND RESOURCE`, `CREATE DOMAIN`, `ALTER DOMAIN`, `CREATE USER`,
+alteration, and removal (including corridor and domain-wide placement rules), `REBIND RESOURCE`,
+`CREATE DOMAIN`, `CREATE USER`,
 `CREATE RESOURCE`, `START`, `STOP`, `DROP NODE`, `CORDON NODE`, `UNCORDON NODE`, `DRAIN NODE`,
 `RELOCATE`, `RESET WASM PROCESSOR ... STATE`, and `BACKUP`. So is every transaction request: a request that
 begins, commits, or reverts a transaction, one sent while the session is bound to a transaction, and
@@ -2675,6 +2690,10 @@ failure outcomes. No transfer starts before this admission check and no wire sha
 Producer and consumer session-byte admission uses the committed cluster limits. A producer's
 existing grant carries its exact row bound, which the admission worker enforces for that
 attachment. The compiled defaults are request preferences, not server admission ceilings.
+
+Placement-policy choices use `ChoiceTarget::PlacementPolicy` with no dependencies. They offer
+policies for named placement rules; the rule's scope and the candidate graph determine which
+policies are applicable. Domain pace is a separate domain-creation choice.
 
 ## Materialized State Inspection Envelope
 

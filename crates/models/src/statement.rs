@@ -24,22 +24,22 @@ use strum::{AsRefStr, EnumIter, EnumProperty, EnumString, IntoEnumIterator, Into
 use thiserror::Error;
 
 use crate::{
-    AlterDeduplicator, AlterEmitter, AlterJunction, AlterReingestor, AlterReorderer, AlterSchema,
-    AlterWireSchema, AvroType, Backup, BranchName, CborType, ClientConfigEntry, ClientName,
-    ClusterNodeName, CodecName, ConnectorKind, CorrelatorName, CreateAvroWireSchema,
-    CreateCborWireSchema, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs,
-    CreateClientHttp, CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb,
-    CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
-    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+    AlterDeduplicator, AlterEmitter, AlterJunction, AlterPlacement, AlterReingestor,
+    AlterReorderer, AlterSchema, AlterWireSchema, AvroType, Backup, BranchName, CborType,
+    ClientConfigEntry, ClientName, ClusterNodeName, CodecName, ConnectorKind, CorrelatorName,
+    CreateAvroWireSchema, CreateCborWireSchema, CreateClientAzureBlob, CreateClientClickHouse,
+    CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
+    CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel,
+    CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
+    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
     CreateClientWebsockets, CreateClientZeroMq, CreateCorrelator, CreateDeduplicator,
-    CreateEmitter, CreateInferencer, CreateJsonWireSchema, CreateJunction, CreateReingestor,
-    CreateReorderer, CreateSchema, CreateUdf, CreateWasmProcessor, CreateWindowProcessor,
-    DeduplicatorName, DomainClockPeriod, DomainClockSkew, DomainClockState, DomainName,
-    DomainTimeRate, EmitterName, EndpointName, FieldName, GeneratorName, IngestQuiesceMode,
-    IngestorName, JsonType, JunctionName, LookupName, ModelName, NodeRef, PlacementName,
-    ProcessorOutput, ProcessorOutputs, RebindResource, ReingestorName, RelayName, ReordererName,
-    RequestedResourceVersion, ResetWasmState, ResourceName, Restore, SchemaName,
+    CreateEmitter, CreateInferencer, CreateJsonWireSchema, CreateJunction, CreatePlacement,
+    CreateReingestor, CreateReorderer, CreateSchema, CreateUdf, CreateWasmProcessor,
+    CreateWindowProcessor, DeduplicatorName, DomainClockPeriod, DomainClockSkew, DomainClockState,
+    DomainName, DomainTimeRate, EmitterName, EndpointName, FieldName, GeneratorName,
+    IngestQuiesceMode, IngestorName, JsonType, JunctionName, LookupName, ModelName, NodeRef,
+    PlacementName, ProcessorOutput, ProcessorOutputs, RebindResource, ReingestorName, RelayName,
+    ReordererName, RequestedResourceVersion, ResetWasmState, ResourceName, Restore, SchemaName,
     SignalingProtocolName, SubscriptionName, Timestamp, TransactionInspectionRequest, UdfName,
     Unit, UserName, VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
 };
@@ -50,7 +50,6 @@ use crate::{
 pub enum Statement {
     AlterCluster(crate::AlterCluster),
     CreateDomain(CreateStatement<CreateDomain>),
-    AlterDomain(AlterDomain),
     CreateUser(CreateStatement<CreateUser>),
     CreateResource(CreateStatement<CreateResource>),
     RebindResource(RebindResource),
@@ -118,7 +117,6 @@ impl Statement {
             || matches!(
                 self,
                 Self::CreateDomain(_)
-                    | Self::AlterDomain(_)
                     | Self::StartDomain(_)
                     | Self::StopDomain(_)
                     | Self::DrainNode(_)
@@ -148,7 +146,6 @@ impl Statement {
             | Self::Drop(_) => true,
             Self::AlterCluster(_)
             | Self::CreateDomain(_)
-            | Self::AlterDomain(_)
             | Self::CreateUser(_)
             | Self::CreateResource(_)
             | Self::UploadResource(_)
@@ -453,13 +450,6 @@ pub struct CreateDomain {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct AlterDomain {
-    pub policy: PlacementPolicy,
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
 pub struct CreateUser {
     pub name: UserName,
     pub password: String,
@@ -504,37 +494,9 @@ pub struct StopDomain;
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
+#[serde(deny_unknown_fields)]
 pub struct DomainConfig {
     pub pace: DomainPace,
-    pub placement: PlacementPolicy,
-}
-
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-    Default,
-    AsRefStr,
-    strum::Display,
-)]
-pub enum PlacementPolicy {
-    #[strum(serialize = "REQUIRE COLOCATION")]
-    RequireColocation,
-    #[strum(serialize = "PREFER COLOCATION")]
-    PreferColocation,
-    #[default]
-    #[strum(serialize = "NEUTRAL")]
-    Neutral,
-    #[strum(serialize = "SUGGEST SEPARATION")]
-    SuggestSeparation,
 }
 
 #[derive(
@@ -709,18 +671,65 @@ pub struct DrainNode {
     RkyvDeserialize,
 )]
 pub struct RelocationMember {
-    pub kind: ModelKind,
-    pub name: ModelName,
+    pub node: NodeRef,
+    pub selection: RelocationUnitSelection,
+}
+
+/// The exact unit selector, or all of the named node's declared units.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum RelocationUnitSelection {
+    All,
+    Partition(u32),
+    Instance(u64),
+}
+
+impl std::fmt::Display for RelocationUnitSelection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::All => formatter.write_str("all declared"),
+            Self::Partition(index) => write!(formatter, "partition {index}"),
+            Self::Instance(index) => write!(formatter, "instance {index}"),
+        }
+    }
 }
 
 impl RelocationMember {
     pub fn new(kind: ModelKind, name: ModelName) -> Self {
-        Self { kind, name }
+        Self {
+            node: NodeRef::new(kind, name),
+            selection: RelocationUnitSelection::All,
+        }
     }
 
     /// The `<kind> <name>` spelling used in canonical Plexus and in diagnostics.
     pub fn to_plexus(&self) -> String {
-        format!("{} {}", self.kind.keyword_phrase(), self.name.as_str())
+        let mut rendered = format!(
+            "{} {}",
+            self.node.kind.keyword_phrase(),
+            self.node.identifier.as_str()
+        );
+        match self.selection {
+            RelocationUnitSelection::All => {}
+            RelocationUnitSelection::Partition(index) => {
+                rendered.push_str(&format!(" PARTITION {index}"))
+            }
+            RelocationUnitSelection::Instance(index) => {
+                rendered.push_str(&format!(" INSTANCE {index}"))
+            }
+        }
+        rendered
     }
 }
 
@@ -733,16 +742,16 @@ pub enum RelocationSelection {
     List(Vec<RelocationMember>),
     /// Every runtime node covered by a directed corridor between the endpoints.
     Corridor {
-        from: Vec<RelocationMember>,
-        to: Vec<RelocationMember>,
+        from: Vec<NodeRef>,
+        to: Vec<NodeRef>,
     },
 }
 
 impl RelocationSelection {
     /// Every member written in the statement, in written order.
-    pub fn members(&self) -> Vec<&RelocationMember> {
+    pub fn members(&self) -> Vec<&NodeRef> {
         match self {
-            Self::List(members) => members.iter().collect(),
+            Self::List(members) => members.iter().map(|member| &member.node).collect(),
             Self::Corridor { from, to } => from.iter().chain(to).collect(),
         }
     }
@@ -752,8 +761,8 @@ impl RelocationSelection {
             Self::List(members) => format_relocation_members(members),
             Self::Corridor { from, to } => format!(
                 "FROM {} TO {}",
-                format_relocation_members(from),
-                format_relocation_members(to)
+                format_relocation_endpoints(from),
+                format_relocation_endpoints(to)
             ),
         }
     }
@@ -835,6 +844,20 @@ impl Relocation {
         }
         rendered
     }
+}
+
+fn format_relocation_endpoints(members: &[NodeRef]) -> String {
+    members
+        .iter()
+        .map(|member| {
+            format!(
+                "{} {}",
+                member.kind.keyword_phrase(),
+                member.identifier.as_str()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn format_relocation_members(members: &[RelocationMember]) -> String {
@@ -1073,136 +1096,6 @@ pub enum SubscriptionLiteral {
     String(String),
     Number(String),
     Bool(bool),
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub struct CreatePlacement {
-    pub name: PlacementName,
-    pub from: Vec<ModelName>,
-    pub to: Vec<ModelName>,
-    pub policy: PlacementPolicy,
-    pub rank: Option<NonZeroU64>,
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub struct AlterPlacement {
-    pub placement: PlacementName,
-    pub operations: Vec<AlterPlacementOperation>,
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub enum AlterPlacementOperation {
-    SetPolicy {
-        policy: PlacementPolicy,
-    },
-    SetRank {
-        rank: NonZeroU64,
-    },
-    DropRank,
-    SetMembers {
-        from: Vec<ModelName>,
-        to: Vec<ModelName>,
-    },
-    RenameTo {
-        name: PlacementName,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum AlterPlacementError {
-    #[error("ALTER targets placement `{requested}`, but the stored placement is `{stored}`")]
-    PlacementNameMismatch {
-        stored: PlacementName,
-        requested: PlacementName,
-    },
-    #[error("a placement must declare at least one FROM member")]
-    EmptyFrom,
-    #[error("a placement must declare at least one TO member")]
-    EmptyTo,
-}
-
-impl CreatePlacement {
-    pub fn new(
-        name: PlacementName,
-        from: Vec<ModelName>,
-        to: Vec<ModelName>,
-        policy: PlacementPolicy,
-        rank: Option<NonZeroU64>,
-    ) -> error_stack::Result<Self, AlterPlacementError> {
-        let mut placement = Self {
-            name,
-            from,
-            to,
-            policy,
-            rank,
-        };
-        placement.normalize_members();
-        placement.validate()?;
-        Ok(placement)
-    }
-
-    pub fn apply_alter(
-        &mut self,
-        alter: &AlterPlacement,
-    ) -> error_stack::Result<(), AlterPlacementError> {
-        if self.name != alter.placement {
-            return Err(Report::new(AlterPlacementError::PlacementNameMismatch {
-                stored: self.name.clone(),
-                requested: alter.placement.clone(),
-            }));
-        }
-
-        let mut candidate = self.clone();
-        for operation in &alter.operations {
-            match operation {
-                AlterPlacementOperation::SetPolicy { policy } => candidate.policy = *policy,
-                AlterPlacementOperation::SetRank { rank } => candidate.rank = Some(*rank),
-                AlterPlacementOperation::DropRank => candidate.rank = None,
-                AlterPlacementOperation::SetMembers { from, to } => {
-                    candidate.from = from.clone();
-                    candidate.to = to.clone();
-                    candidate.normalize_members();
-                }
-                AlterPlacementOperation::RenameTo { name } => candidate.name = name.clone(),
-            }
-            candidate.validate()?;
-        }
-        *self = candidate;
-        Ok(())
-    }
-
-    pub fn validate(&self) -> error_stack::Result<(), AlterPlacementError> {
-        if self.from.is_empty() {
-            return Err(Report::new(AlterPlacementError::EmptyFrom));
-        }
-        if self.to.is_empty() {
-            return Err(Report::new(AlterPlacementError::EmptyTo));
-        }
-        Ok(())
-    }
-
-    fn normalize_members(&mut self) {
-        deduplicate_identifiers(&mut self.from);
-        deduplicate_identifiers(&mut self.to);
-    }
-}
-
-fn deduplicate_identifiers(identifiers: &mut Vec<ModelName>) {
-    let mut seen = Vec::new();
-    identifiers.retain(|identifier| {
-        if seen.contains(identifier) {
-            false
-        } else {
-            seen.push(identifier.clone());
-            true
-        }
-    });
 }
 
 /// A model shape that its [`ModelKind`] names, and that names its kind back.
@@ -1620,7 +1513,10 @@ impl CodecWireFormat {
             }
         }
     }
+}
 
+impl<Version> CodecWireFormat<Version> {
+    /// Whether this codec can encode outgoing payloads, independent of resource version state.
     pub fn supports_encoding(&self) -> bool {
         match self {
             Self::Json { .. } | Self::Cbor { .. } | Self::Avro { .. } | Self::Syslog => true,
@@ -1632,9 +1528,7 @@ impl CodecWireFormat {
             }) => transformations.on_emitting.is_some(),
         }
     }
-}
 
-impl<Version> CodecWireFormat<Version> {
     /// Whether this codec can decode incoming payloads, independent of resource version state.
     pub fn supports_decoding(&self) -> bool {
         match self {
