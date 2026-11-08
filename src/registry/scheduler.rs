@@ -172,6 +172,7 @@ struct RandomAssignmentPlanner<'a> {
 
 #[cfg(feature = "testing")]
 impl<'a> RandomAssignmentPlanner<'a> {
+    /// Non-security BLAKE3: seeds deterministic test placement, not secure randomness.
     fn new(
         domain: &DomainName,
         cluster_nodes: &'a [ClusterNodeName],
@@ -188,6 +189,7 @@ impl<'a> RandomAssignmentPlanner<'a> {
         }
     }
 
+    /// Non-security BLAKE3: distributes controlled test assignments, not security decisions.
     fn assignment_seed_for(&self, members: &[NodeRef]) -> u64 {
         let mut hasher = blake3::Hasher::new();
         if let [member] = members {

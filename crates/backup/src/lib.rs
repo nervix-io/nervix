@@ -5,7 +5,8 @@
 //! or a record this crate owns, encoded with rkyv behind a header of its own: a magic, a record kind
 //! and a format version, checked before bytecheck validates a single field of the payload. The
 //! manifest names every section with its length and BLAKE3 digest, so a reader verifies each section
-//! as it passes and refuses an archive that is truncated, reordered or altered.
+//! as it passes and refuses truncated, reordered or inconsistent sections. These checks establish
+//! consistency with the unsigned manifest, not an archive's authenticity or provenance.
 //!
 //! Layer: engines and infrastructure.
 //!

@@ -93,10 +93,12 @@ pub(crate) struct ArchiveReceipt {
     total_bytes: NonZeroU64,
     digest: ArchiveDigest,
     received: u64,
+    /// Non-security BLAKE3: checks downloaded bytes against the selected server summary.
     hasher: blake3::Hasher,
 }
 
 impl ArchiveReceipt {
+    /// Non-security BLAKE3: starts a download consistency check; session policy owns trust.
     pub(crate) fn new(summary: &BackupArchiveSummary) -> Self {
         Self {
             total_bytes: summary.total_bytes,

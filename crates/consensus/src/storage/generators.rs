@@ -2181,6 +2181,7 @@ const REVISION_BYTES: usize = 64 * 1024;
 
 /// `length` bytes that differ from seed to seed: the BLAKE3 output stream of the seed, which
 /// spreads the late choices of a value between seeds as evenly as the first.
+/// Non-security BLAKE3: spreads controlled fixture choices deterministically, not secure randomness.
 fn seeded_bytes(seed: u64, length: usize) -> Vec<u8> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(&seed.to_le_bytes());

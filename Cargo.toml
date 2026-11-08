@@ -314,6 +314,7 @@ members = [
   "crates/client-host",
   "crates/client-jvm",
   "crates/client-python",
+  "crates/client-ruby",
   "crates/client-wire",
   "crates/columnar-json",
   "crates/connector",
@@ -345,6 +346,7 @@ members = [
   "crates/execution",
   "crates/expiry-map",
   "crates/interconnect",
+  "crates/licensing-protocol",
   "crates/jaq",
   "crates/nervix-wasm",
   "crates/nervix-wasm-protocol",
@@ -414,6 +416,11 @@ arrow-select = "58"
 arrow-string = "58"
 ascii-dag = "0.9"
 astral-tokio-tar = { version = "0.6.4", default-features = false }
+jose-b64 = { version = "0.1.2", default-features = false, features = ["json"] }
+jose-jws = { version = "0.1.2", default-features = false }
+jsonwebtoken = { version = "11.1.0", default-features = false, features = [
+  "aws_lc_rs",
+] }
 num-rational = { version = "0.4.2", default-features = false, features = [
   "std",
 ] }
@@ -537,6 +544,10 @@ leptos = { version = "0.8.19", features = ["csr"] }
 # threads, and only `nervix-model-harness` runs its models; both take it as an optional dependency,
 # so no ordinary dependency graph contains it.
 loom = "0.7.2"
+magnus = { version = "0.9.1", default-features = false, features = [
+  "rb-sys",
+  "io",
+] }
 md5 = "0.8"
 memchr = "2.8"
 # `disallow-todo-on-release` is not enabled: the published crate gates the `todo` method on the
@@ -768,7 +779,10 @@ any_spawner = "0.3.0"
 nkeys = "0.4.5"
 # Maintained NKey format APIs without a signing or random backend; nkeys remains the independent
 # test-only SDK. Production signing stays with Nervix's cryptography owner.
+cc = "1"
 nkeys-codec = { package = "nkeys", git = "https://github.com/nervix-io/nkeys.git", rev = "248dc49a1a8d4ebc47504358cc011f5c26583dfe", default-features = false }
+rb-sys = { version = "0.9.124", default-features = false }
+rb-sys-env = "0.2.3"
 tonic = { version = "0.13", features = ["tls-aws-lc", "tls-webpki-roots"] }
 tracing = "0.1"
 tracing-opentelemetry = "0.32"
