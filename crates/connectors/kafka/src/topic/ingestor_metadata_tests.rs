@@ -302,8 +302,12 @@ impl GeneratedRecord {
         };
         let time_value = self.timestamp.expected_time();
         let kind_value = self.timestamp.expected_kind();
+        let payload_bytes = match &payload {
+            Some(payload) => payload.len(),
+            None => 0,
+        };
         let expected = RetainedIngestMetadata::from_values(
-            payload.as_ref().map_or(0, Vec::len),
+            payload_bytes,
             vec![
                 Value::String(topic.clone()),
                 Value::I32(partition),
