@@ -198,7 +198,10 @@ Feature: Emitter batch containers
     And Kafka topic "transformed_{{test_id}}" is observed
     When these Plexus commands are executed on the leader node
       """
-      CREATE SCHEMA rich_event ( seq I64, tags <tags_type>, blob BYTES );
+      CREATE SCHEMA rich_event (
+        seq I64, tags <tags_type>, blob BYTES,
+        note STRING OPTIONAL, matrix <matrix_type>
+      );
       CREATE JAQ JSON CODEC ingest_codec TO SCHEMA rich_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE JAQ JSON CODEC identity_codec TO SCHEMA rich_event
@@ -260,20 +263,20 @@ Feature: Emitter batch containers
       """
     And http payload is posted to host "http-{{test_id}}.example.com" path "/events"
       """
-      [{"seq":1,"tags":["x","y"],"blob":"AP8="},{"seq":2,"tags":[],"blob":""}]
+      [{"seq":1,"tags":["x","y"],"blob":"AP8=","note":"quote\" line\n nul\u0000 π","matrix":[[1,-2],[]]},{"seq":2,"tags":[],"blob":"","matrix":[]}]
       """
     Then within "30s" the observed broker receives exactly these payloads
       """
-      [{"seq": 1, "tags": ["x", "y"], "blob": "AP8="}, {"seq": 2, "tags": [], "blob": ""}]
+      [{"seq": 1, "tags": ["x", "y"], "blob": "AP8=", "note": "quote\" line\n nul\u0000 π", "matrix": [[1, -2], []]}, {"seq": 2, "tags": [], "blob": "", "matrix": []}]
       [{"id": 1, "first_tag": "x"}, {"id": 2, "first_tag": null}]
       {"schema_version": 2, "count": 2, "records": [{"id": 1, "blob": "AP8="}, {"id": 2, "blob": ""}]}
       [{"id": 1}, {"id": 2}, {"id": 1}, {"id": 2}]
       """
 
     Examples:
-      | cluster_size | tags_type   |
-      | 1            | VEC<STRING> |
-      | 3            | VEC<STRING> |
+      | cluster_size | tags_type   | matrix_type   |
+      | 1            | VEC<STRING> | VEC<VEC<I64>> |
+      | 3            | VEC<STRING> | VEC<VEC<I64>> |
 
   @emitter_batch_round_trip
   Scenario Outline: Batch payloads read back as their members through a Nervix ingestor

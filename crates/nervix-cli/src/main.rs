@@ -56,9 +56,9 @@ use nervix_primitives::{
 };
 use nervix_recovery::Discarded as _;
 use reedline::{
-    Completer, DefaultHinter, DefaultPrompt, DefaultPromptSegment, Emacs, FileBackedHistory,
-    KeyCode, KeyModifiers, ListMenu, MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu, Signal,
-    Suggestion,
+    Completer, CompletionResult, DefaultHinter, DefaultPrompt, DefaultPromptSegment, Emacs,
+    ExternalOutput, FileBackedHistory, KeyCode, KeyModifiers, ListMenu, MenuBuilder, Reedline,
+    ReedlineEvent, ReedlineMenu, Signal, Suggestion,
 };
 use thiserror::Error;
 
@@ -378,11 +378,11 @@ async fn collect_suggestions(
 }
 
 impl Completer for GrpcCompleter {
-    fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
+    fn complete(&mut self, line: &str, pos: usize) -> CompletionResult {
         let prefix = self.buffer_prefix.lock().clone();
         let pos = line.floor_char_boundary(pos.min(line.len()));
         let Some(cursor) = prefix.len().checked_add(pos) else {
-            return Vec::new();
+            return CompletionResult::fresh(Vec::<Suggestion>::new());
         };
         let combined = format!("{prefix}{line}");
         let client = self.client.clone();
@@ -391,10 +391,10 @@ impl Completer for GrpcCompleter {
         let outcome =
             block_in_place(|| runtime.block_on(collect_suggestions(&client, combined, cursor)));
         let Ok(outcome) = outcome else {
-            return Vec::new();
+            return CompletionResult::fresh(Vec::<Suggestion>::new());
         };
         if outcome.status != nervix_client_core::SuggestionStatus::Ready {
-            return Vec::new();
+            return CompletionResult::fresh(Vec::<Suggestion>::new());
         }
         let suggestions = outcome.suggestions;
 
@@ -406,11 +406,11 @@ impl Completer for GrpcCompleter {
                 .iter()
                 .find(|suggestion| suggestion.kind == ClientSuggestionKind::LocalDirectoryLookup);
             if let Some(local) = complete_local_paths(line, pos, prefix.len(), lookup_hint) {
-                return local;
+                return CompletionResult::fresh(local);
             }
         }
 
-        Self::text_suggestions(line, prefix.len(), suggestions)
+        CompletionResult::fresh(Self::text_suggestions(line, prefix.len(), suggestions))
     }
 }
 
@@ -433,11 +433,13 @@ impl GrpcCompleter {
                 }
                 Some(Suggestion {
                     value: suggestion.edit.replacement,
+                    display_override: None,
                     description: Some(suggestion.value),
                     style: None,
                     extra: None,
                     span: reedline::Span::new(start, end),
                     append_whitespace: end == line.len(),
+                    match_indices: None,
                 })
             })
             .collect()
@@ -644,7 +646,7 @@ async fn main() -> Result<RunEnd, StackReport<ClientError>> {
         );
         return Ok(RunEnd::Completed);
     }
-    let (event_sender, mut event_receiver) =
+    let (event_sender, event_receiver) =
         nervix_primitives::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
     let event_sender = EventLineSender::new(event_sender);
     drop(spawn_event_collectors(
@@ -671,14 +673,23 @@ async fn main() -> Result<RunEnd, StackReport<ClientError>> {
     println!("Type 'exit' to quit. Trailing ';' is optional.");
     println!("[events] notifications are printed above the prompt");
 
+    let mut line_editor = create_line_editor(completer)?.with_external_printer(ReplEventOutput {
+        receiver: event_receiver,
+        sender: event_sender,
+    });
+
     // A statement's outcome never ends the REPL: the runner prints it, whatever it is.
     let mut statements = StatementRunner::at_prompt();
     loop {
+        // Keep changes made by another CLI's history visible at each prompt, as reopening the
+        // history for each line did, while one editor owns asynchronous output throughout the REPL.
+        line_editor
+            .sync_history()
+            .change_context(ClientError::InitHistory)?;
         let prompt_domain = prompt_domain(
             client.domain().await.as_ref(),
             client.transaction_status().await.as_ref(),
         );
-        drain_event_queue(&mut event_receiver, &event_sender);
         let prompt = if buffer.is_empty() {
             DefaultPrompt::new(
                 DefaultPromptSegment::Basic(format!("nervix[{prompt_domain}]")),
@@ -692,8 +703,6 @@ async fn main() -> Result<RunEnd, StackReport<ClientError>> {
         };
 
         *buffer_prefix.lock() = buffer.clone();
-
-        let mut line_editor = create_line_editor(completer.clone())?;
 
         match line_editor.read_line(&prompt) {
             Ok(Signal::Success(line)) => {
@@ -715,10 +724,9 @@ async fn main() -> Result<RunEnd, StackReport<ClientError>> {
                 if command_buffer_is_complete(&buffer) {
                     let payload = std::mem::take(&mut buffer);
                     statements.run(&client, payload).await?;
-                    drain_event_queue(&mut event_receiver, &event_sender);
                 }
             }
-            Ok(Signal::CtrlD) | Ok(Signal::CtrlC) => break,
+            Ok(_) => break,
             Err(err) => {
                 return Err(StackReport::new(ClientError::ReadLine)
                     .attach_printable(format!("readline failed: {err}")));
@@ -977,11 +985,13 @@ fn complete_local_paths(
             } else {
                 value
             },
+            display_override: None,
             description: None,
             style: None,
             extra: None,
             span: reedline::Span::new(replacement_range.start, replacement_range.end),
             append_whitespace: false,
+            match_indices: None,
         });
     }
     suggestions.sort_by(|left, right| left.value.cmp(&right.value));
@@ -1291,6 +1301,48 @@ impl EventLineSender {
     fn take_dropped(&self) -> u64 {
         self.dropped.swap(0, Ordering::Relaxed)
     }
+
+    fn gap_line(dropped: u64) -> Option<String> {
+        if dropped == 0 {
+            return None;
+        }
+        Some(format!(
+            "[events] notice: {dropped} event lines were omitted because terminal output could \
+             not keep up"
+        ))
+    }
+}
+
+/// The editor owns the existing queue's receiver. Each poll takes at most one queue's capacity,
+/// so a producer that keeps refilling it cannot prevent input and repainting from making progress.
+/// Between read_line calls the same queue retains statement-time events under its original bound.
+struct ReplEventOutput {
+    receiver: nervix_primitives::sync::mpsc::Receiver<String>,
+    sender: EventLineSender,
+}
+
+impl ExternalOutput for ReplEventOutput {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::error_boundary(
+            library,
+            reason = "reedline requires its ExternalOutput callback to return io::Result; this \
+                      bounded queue drain performs no I/O"
+        )
+    )]
+    fn drain(&mut self) -> std::io::Result<Vec<String>> {
+        let mut lines = Vec::new();
+        for _ in 0..EVENT_BUFFER_RECORDS {
+            let Ok(line) = self.receiver.try_recv() else {
+                break;
+            };
+            lines.push(line);
+        }
+        if let Some(gap) = EventLineSender::gap_line(self.sender.take_dropped()) {
+            lines.push(gap);
+        }
+        Ok(lines)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1309,11 +1361,8 @@ impl EventOutput {
 }
 
 fn print_event_gap(dropped: u64, output: EventOutput) {
-    if dropped > 0 {
-        output.print(&format!(
-            "[events] notice: {dropped} event lines were omitted because terminal output could \
-             not keep up"
-        ));
+    if let Some(gap) = EventLineSender::gap_line(dropped) {
+        output.print(&gap);
     }
 }
 
@@ -1491,19 +1540,6 @@ fn spawn_event_loggers(
         print_event_gap(dropped.swap(0, Ordering::Relaxed), output);
     });
     subscription
-}
-
-fn drain_event_queue(
-    receiver: &mut nervix_primitives::sync::mpsc::Receiver<String>,
-    sender: &EventLineSender,
-) {
-    for _ in 0..EVENT_BUFFER_RECORDS {
-        let Ok(line) = receiver.try_recv() else {
-            break;
-        };
-        EventOutput::Stdout.print(&line);
-    }
-    print_event_gap(sender.take_dropped(), EventOutput::Stdout);
 }
 
 /// The terminal lines of one subscription event: one line per row of a batch, or one notice.
@@ -1751,19 +1787,54 @@ mod tests {
 
     #[test]
     fn draining_events_resets_the_visible_gap_after_a_full_queue() {
-        let (sender, mut receiver) = nervix_primitives::sync::mpsc::channel(2);
+        let (sender, receiver) = nervix_primitives::sync::mpsc::channel(2);
         let connector = EventLineSender::new(sender);
         connector.push("first".to_string());
         connector.push("second".to_string());
         connector.push("dropped".to_string());
 
-        drain_event_queue(&mut receiver, &connector);
+        let mut output = ReplEventOutput {
+            receiver,
+            sender: connector,
+        };
+        let lines = output.drain().assured("the queue drain performs no I/O");
 
-        assert!(receiver.try_recv().is_err());
         assert_eq!(
-            connector.take_dropped(),
-            0,
-            "the gap was reported during the drain"
+            lines,
+            [
+                "first",
+                "second",
+                "[events] notice: 1 event lines were omitted because terminal output could not \
+                 keep up",
+            ]
+        );
+        assert!(
+            output
+                .drain()
+                .assured("the queue drain performs no I/O")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_idle_editor_reports_a_gap_without_waiting_for_another_event() {
+        let (sender, receiver) = nervix_primitives::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
+        let sender = EventLineSender::new(sender);
+        sender.dropped.store(3, Ordering::Relaxed);
+        let mut output = ReplEventOutput { receiver, sender };
+
+        assert_eq!(
+            output.drain().assured("the queue drain performs no I/O"),
+            [
+                "[events] notice: 3 event lines were omitted because terminal output could not \
+                 keep up"
+            ]
+        );
+        assert!(
+            output
+                .drain()
+                .assured("the queue drain performs no I/O")
+                .is_empty()
         );
     }
 

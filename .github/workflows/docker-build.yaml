@@ -767,6 +767,12 @@ jobs:
       # The book build compiles nervix-server and nervix-cli: the screenshot tool
       # drives a real server, and the nervix-cli reference is rendered from the
       # binary's own --help.
+      - name: Setup Java for JVM guide validation
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
       - name: Install apt deps
         run: |
           sudo apt-get install --yes --no-install-recommends \

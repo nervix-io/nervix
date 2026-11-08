@@ -129,7 +129,9 @@ use crate::common::{
         ATTACHED_LINE, ClientProbe, OPENED_LINE, ProbeExercise, ProbeRuntime, ProbeTarget,
         SUBSCRIBED_LINE, corpus_report,
     },
-    client_suites::{ClientSuite, SuiteHost, SuiteTarget, fixture_certificate_authority},
+    client_suites::{
+        ClientSuite, SuiteAction, SuiteHost, SuiteTarget, fixture_certificate_authority,
+    },
     client_wire_tls_cost::TransportCostServers,
     cluster::{
         AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, BrokerRecordTime, Cluster,
@@ -210,6 +212,7 @@ use crate::common::{
 
 mod backup;
 mod cli_outcomes;
+mod cli_repl;
 mod clickhouse_connections;
 mod client_consumers;
 mod client_foreign_execution;
@@ -5210,7 +5213,21 @@ async fn then_client_suite_passes_every_registered_cluster_test(
         .take()
         .verified("a preceding step started a client suite");
     let report = suite
-        .finish(within)
+        .finish(within, |action| {
+            match action {
+                SuiteAction::RefuseNextSubscriptionOpening => {
+                    when_every_node_refuses_next_subscription_opening(world);
+                }
+                SuiteAction::ClearSubscriptionOpeningRefusals => {
+                    for node_id in world.cluster().node_ids() {
+                        world.fault_injection.clear_subscription_opening_refusal_on(
+                            &crate::common::cluster::node_name(&node_id),
+                        );
+                    }
+                }
+            }
+            Ok(())
+        })
         .await
         .unwrap_or_else(|error| panic!("{error}"));
     report.check().unwrap_or_else(|error| panic!("{error}"));

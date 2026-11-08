@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** Starting one host's suite runner on the cluster tier, with the environment a probe
 //!   reads and what a suite needs beside it, reading the one result line per test the runner
-//!   prints, and holding those results to the tests `tests/client-suites-inventory.toml` registers
+//!   prints, confirming declared scenario actions, and holding those results to the inventory
 //!   for the host's cluster tier.
 //! - **Depends on.** The suite sources under `tests/client_conformance/<host>/suite`, the
 //!   artifacts `just build-client-conformance` builds for them, and the inventory.
@@ -30,8 +30,13 @@ use serde::Deserialize;
 use tempfile::TempDir;
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncReadExt as _, BufReader},
-    process::{Child, Command},
+    process::{Child, ChildStdin, Command},
 };
+
+mod actions;
+
+pub(crate) use actions::SuiteAction;
+use actions::SuiteActions;
 
 /// The prefix of every result line a runner prints.
 const RESULT_PREFIX: &str = "NERVIX-SUITE ";
@@ -47,6 +52,8 @@ const INVENTORY: &str = "tests/client-suites-inventory.toml";
 pub(crate) enum SuiteHost {
     /// CPython over the Python package, `nervix_client`, with pytest.
     Python,
+    /// Java 21 over the JVM library, with the pinned JUnit 5 console launcher.
+    Java,
 }
 
 impl FromStr for SuiteHost {
@@ -55,6 +62,7 @@ impl FromStr for SuiteHost {
     fn from_str(host: &str) -> io::Result<Self> {
         match host {
             "python" => Ok(Self::Python),
+            "java" => Ok(Self::Java),
             other => Err(io::Error::other(format!(
                 "unknown client suite host '{other}'"
             ))),
@@ -73,17 +81,15 @@ impl SuiteHost {
     fn name(self) -> &'static str {
         match self {
             Self::Python => "python",
+            Self::Java => "java",
         }
     }
 
     /// The suite's root, which its runner treats as the root of every test identity.
     fn suite(self) -> PathBuf {
-        let host = match self {
-            Self::Python => "python",
-        };
         workspace_root()
             .join("tests/client_conformance")
-            .join(host)
+            .join(self.name())
             .join("suite")
     }
 
@@ -95,9 +101,43 @@ impl SuiteHost {
                 // The CPython the package was installed into, with pytest, pyarrow and polars.
                 let mut command = Command::new(artifacts.join("python/bin/python"));
                 command
-                    .args(["-m", "pytest", "cluster"])
+                    .args(["-m", "cluster_runner", "cluster"])
                     .current_dir(self.suite())
                     .env("PYTHONDONTWRITEBYTECODE", "1");
+                Ok(command)
+            }
+            Self::Java => {
+                let java = artifacts.join("java");
+                let classpath = std::env::join_paths([
+                    java.join("nervix-client.jar"),
+                    java.join("tests"),
+                    java.join("junit-platform-console-standalone.jar"),
+                ])
+                .map_err(io::Error::other)?;
+                let mut command = Command::new("java");
+                command
+                    .args(["-Xcheck:jni", "-cp"])
+                    .arg(classpath)
+                    .args([
+                        "org.junit.platform.console.ConsoleLauncher",
+                        "execute",
+                        "--scan-class-path",
+                    ])
+                    .arg(java.join("tests"))
+                    .args([
+                        "--include-tag",
+                        "cluster",
+                        "--include-classname",
+                        ".*",
+                        "--fail-if-no-tests",
+                        "--disable-banner",
+                        "--details",
+                        "summary",
+                        "--config",
+                        "junit.jupiter.testclass.order.default=org.junit.jupiter.api.\
+                         ClassOrderer$OrderAnnotation",
+                    ])
+                    .env("NERVIX_CLIENT_JVM_JAR", java.join("nervix-client.jar"));
                 Ok(command)
             }
         }
@@ -188,7 +228,9 @@ fn registered(host: SuiteHost, tier: &str) -> io::Result<BTreeSet<String>> {
 pub(crate) struct ClientSuite {
     host: SuiteHost,
     lines: mpsc::UnboundedReceiver<String>,
+    input: ChildStdin,
     child: Child,
+    stdout: JoinHandle<io::Result<()>>,
     stderr: JoinHandle<io::Result<String>>,
     /// The target's backup directory, kept until the run is read.
     _backups: TempDir,
@@ -213,13 +255,17 @@ impl ClientSuite {
         let mut command = host.command()?;
         command
             .envs(target.environment())
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         let mut child = command.spawn().map_err(|error| {
             io::Error::other(format!("failed to start the {host} client suite: {error}"))
         })?;
+        let input = child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("the suite's stdin was not captured"))?;
         let stdout = child
             .stdout
             .take()
@@ -229,14 +275,18 @@ impl ClientSuite {
             .take()
             .ok_or_else(|| io::Error::other("the suite's stderr was not captured"))?;
         let (sender, lines) = mpsc::unbounded_channel();
-        nervix_primitives::task::spawn(async move {
+        let stdout = nervix_primitives::task::spawn(async move {
             let mut reader = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
+            loop {
                 nervix_primitives::task::consume_budget().await;
+                let Some(line) = reader.next_line().await? else {
+                    break;
+                };
                 if sender.send(line).is_err() {
                     break;
                 }
             }
+            Ok(())
         });
         let stderr = nervix_primitives::task::spawn(async move {
             let mut captured = String::new();
@@ -246,20 +296,32 @@ impl ClientSuite {
         Ok(Self {
             host,
             lines,
+            input,
             child,
+            stdout,
             stderr,
             _backups: backups,
         })
     }
 
     /// Waits for the runner to end and holds its results to the inventory's cluster tier.
-    pub(crate) async fn finish(mut self, within: Duration) -> io::Result<SuiteReport> {
+    pub(crate) async fn finish(
+        mut self,
+        within: Duration,
+        mut perform: impl FnMut(SuiteAction) -> io::Result<()>,
+    ) -> io::Result<SuiteReport> {
         let deadline = Instant::now() + within;
         let mut output = Vec::new();
+        let mut actions = SuiteActions::new();
         loop {
             nervix_primitives::task::consume_budget().await;
             match nervix_primitives::time::timeout_at(deadline, self.lines.recv()).await {
-                Ok(Some(line)) => output.push(line),
+                Ok(Some(line)) => {
+                    actions
+                        .handle(&line, &mut self.input, deadline, &mut perform)
+                        .await?;
+                    output.push(line);
+                }
                 Ok(None) => break,
                 Err(_) => {
                     return Err(io::Error::other(format!(
@@ -270,6 +332,10 @@ impl ClientSuite {
                 }
             }
         }
+        nervix_primitives::time::timeout_at(deadline, self.stdout)
+            .await
+            .map_err(io::Error::other)?
+            .map_err(io::Error::other)??;
         let status = nervix_primitives::time::timeout_at(deadline, self.child.wait())
             .await
             .map_err(|_| {
