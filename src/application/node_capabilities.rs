@@ -1,7 +1,7 @@
 //! Publication of this node's resolved, immutable capacity claim after membership admission.
 //!
 //! Layer: control plane.
-//! - **Owns.** Retrying this run's announcement until the committed record matches it.
+//! - **Owns.** Retrying this run's announcement until Raft confirms its immutable claim.
 //! - **Depends on.** The consensus proposer, local run identity and resolved vocabulary values.
 //! - **Must not know.** Detection, scheduling scores or relay acknowledgement ownership.
 
@@ -17,7 +17,7 @@ pub(super) async fn announce(
     consensus: &Proposer,
     cluster: &crate::cluster::ClusterHandle,
     capabilities: NodeCapabilities,
-) {
+) -> bool {
     let identity = cluster.local_node_identity().await;
     let record = NodeCapabilityRecord {
         identity,
@@ -28,16 +28,20 @@ pub(super) async fn announce(
         .as_ref()
         == Some(&record)
     {
-        return;
+        return true;
     }
     if !consensus
         .stored_membership_nodes()
         .contains_key(record.identity.node_id())
     {
-        return;
+        return false;
     }
-    if let Err(error) = consensus.announce_node_capabilities(record).await {
-        tracing::debug!(error = %format_args!("{error:#}"), "node capability announcement will retry");
+    match consensus.announce_node_capabilities(record).await {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::debug!(error = %format_args!("{error:#}"), "node capability announcement will retry");
+            false
+        }
     }
 }
 
@@ -50,6 +54,7 @@ pub(super) fn spawn(
     shutdown: nervix_primitives::sync::CancellationToken,
 ) -> nervix_primitives::task::JoinHandle<()> {
     nervix_primitives::task::spawn(async move {
+        let mut announced = false;
         let mut cadence = nervix_primitives::time::interval(
             super::runtime_admission::RUNTIME_STATE_RETRY_INTERVAL,
         );
@@ -60,12 +65,16 @@ pub(super) fn spawn(
                 _ = cadence.tick() => {},
             }
             interconnect.publish_peer_capabilities(&consensus.node_capabilities());
-            if shutdown
-                .run_until_cancelled(announce(&consensus, &cluster, capabilities))
-                .await
-                .is_none()
-            {
-                return;
+            if !announced {
+                let Some(committed) = shutdown
+                    .run_until_cancelled(announce(&consensus, &cluster, capabilities))
+                    .await
+                else {
+                    return;
+                };
+                // A successful reply already confirms Raft's durable commit even while this
+                // follower's applied view is catching up; this run's immutable claim is done.
+                announced = committed;
             }
         }
     })

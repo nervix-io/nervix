@@ -3447,6 +3447,19 @@ impl Observer {
             .collect()
     }
 
+    /// The effective membership entry, independent of ordinary commands appended after it.
+    #[cfg(feature = "testing")]
+    pub fn membership_log_index(&self) -> Option<u64> {
+        self.inner
+            .raft
+            .metrics()
+            .borrow_watched()
+            .membership_config
+            .log_id()
+            .as_ref()
+            .map(|log_id| log_id.index)
+    }
+
     /// The membership already recovered from durable state, available before Raft publishes its
     /// initial metrics. Startup uses these endpoints to find surviving peers after a restart.
     pub fn stored_membership_nodes(&self) -> BTreeMap<ClusterNodeName, String> {
