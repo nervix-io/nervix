@@ -383,8 +383,8 @@ nervix-cli --domain production --command \
 
 When `--command` contains exactly one `DESCRIBE TRANSACTION ... FORMAT JSON` statement, stdout
 contains exactly one JSON document serialized from the typed report, without terminal decoration
-or unrelated events. Other statements in the same command use ordinary terminal output.
-Failures print one JSON object with `error.code` and `error.message` on stdout and exit nonzero;
+or unrelated events. Failures in this mode print one JSON object with `error.code` and
+`error.message` on stdout and exit nonzero;
 a configuration, connection or request failure's message is the whole chain of causes, such as
 `invalid server URL: relative URL without a base`. Diagnostic details and unrelated events go to
 stderr. `FORMAT TEXT` uses the normal readable
