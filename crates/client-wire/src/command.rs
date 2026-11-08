@@ -340,6 +340,8 @@ pub struct CommandOutcome {
     pub inspection: Option<Box<TransactionInspection>>,
     /// The typed state read by a WASM processor description.
     pub wasm_state: Option<Box<nervix_models::WasmStateInspection>>,
+    /// A bounded typed read of runtime state.
+    pub state: Option<Box<crate::StateInspection>>,
     /// The versions, entries and bindings read by a description of every version of a resource,
     /// whichever text its message renders them as.
     pub resource: Option<Box<ResourceDescription>>,
@@ -408,6 +410,11 @@ impl CommandOutcome {
             }
             None => None,
         };
+        let state = self
+            .state
+            .as_ref()
+            .map(|state| state.encode(encoder))
+            .transpose()?;
         let resource = match &self.resource {
             Some(description) => Some(encode_resource_description(encoder, description)?),
             None => None,
@@ -434,6 +441,7 @@ impl CommandOutcome {
                 transaction_admission,
                 inspection,
                 wasm_state,
+                state,
                 resource,
                 backup,
                 restore,
@@ -444,6 +452,8 @@ impl CommandOutcome {
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         outcome: wire::CommandOutcome<'_>,
+        backing: &bytes::Bytes,
+        limits: &crate::SessionLimits,
     ) -> Result<Self, Report<WireDecodeError>> {
         let execution_reference = decoder.check_text(
             "CommandOutcome.execution_reference",
@@ -500,6 +510,12 @@ impl CommandOutcome {
             }
             None => None,
         };
+        let state = outcome
+            .state()
+            .map(|state| {
+                crate::StateInspection::decode(decoder, state, backing, limits).map(Box::new)
+            })
+            .transpose()?;
         let resource = match outcome.resource() {
             Some(description) => Some(Box::new(decode_resource_description(decoder, description)?)),
             None => None,
@@ -523,6 +539,7 @@ impl CommandOutcome {
             transaction_admission,
             inspection,
             wasm_state,
+            state,
             resource,
             backup,
             restore,

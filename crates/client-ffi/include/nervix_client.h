@@ -69,6 +69,7 @@ typedef struct nx_session nx_session;
 typedef struct nx_connect_options nx_connect_options;
 typedef struct nx_execution nx_execution;
 typedef struct nx_outcome nx_outcome;
+typedef struct nx_inspection nx_inspection;
 typedef struct nx_schema nx_schema;
 typedef struct nx_event nx_event;
 typedef struct nx_clock_event nx_clock_event;
@@ -546,6 +547,18 @@ nx_error *nx_suggestions_at(const nx_suggestions *suggestions, size_t index,
 bool nx_suggestions_continuation(const nx_suggestions *suggestions,
                                   const uint8_t **continuation, size_t *continuation_len);
 void nx_suggestions_free(nx_suggestions *suggestions);
+
+/* ---- State inspections -------------------------------------------------------------------- */
+/* Retain the typed state envelope independently of outcome. Free with nx_inspection_free. */
+nx_error *nx_outcome_inspection(const nx_outcome *outcome, nx_inspection **out);
+/* One lossless typed JSON document; borrowed until the inspection handle is freed. */
+void nx_inspection_json(const nx_inspection *inspection, const uint8_t **data, size_t *len);
+/* False for a typed refusal. Counts include rows omitted from this page. */
+bool nx_inspection_counts(const nx_inspection *inspection, uint64_t *branches, uint64_t *rows, uint64_t *bytes);
+nx_error *nx_inspection_schema(const nx_inspection *inspection, size_t unit, size_t section, nx_schema **out);
+/* A verified NXRB RowBatch frame; borrowed until the inspection handle is freed. */
+nx_error *nx_inspection_row_frame(const nx_inspection *inspection, size_t unit, size_t section, size_t frame, const uint8_t **data, size_t *len);
+void nx_inspection_free(nx_inspection *inspection);
 
 /* ---- Outcomes ----------------------------------------------------------------------------- */
 

@@ -266,19 +266,19 @@ Feature: Altering schemas on a running domain
       """
     Then within "5s" node "node-1" eventually reports materialized state for relay "mutable_state" containing
       """
-      key={"tenant":"acme"} payload={"seq":1,"tenant":"acme"}
+      {"branch":{"tenant":"acme"},"fields":{"seq":1,"tenant":"acme"}}
       """
     And within "5s" node "node-1" eventually reports materialized state for relay "mutable_state" containing
       """
-      key={"tenant":"beta"} payload={"seq":2,"tenant":"beta"}
+      {"branch":{"tenant":"beta"},"fields":{"seq":2,"tenant":"beta"}}
       """
     And within "5s" node "node-1" eventually reports materialized state for relay "stable_state" containing
       """
-      key={"tenant":"acme"} payload={"seq":10,"tenant":"acme"}
+      {"branch":{"tenant":"acme"},"fields":{"seq":10,"tenant":"acme"}}
       """
     And within "5s" node "node-1" eventually reports materialized state for relay "stable_state" containing
       """
-      key={"tenant":"beta"} payload={"seq":20,"tenant":"beta"}
+      {"branch":{"tenant":"beta"},"fields":{"seq":20,"tenant":"beta"}}
       """
     When this Plexus command request is executed on the leader node
       """
@@ -291,15 +291,15 @@ Feature: Altering schemas on a running domain
       """
     Then within "5s" node "node-1" eventually reports materialized state for relay "mutable_state" containing
       """
-      relay 'mutable_state' materialized state is empty
+      rows: 0
       """
     And within "5s" node "node-1" eventually reports materialized state for relay "stable_state" containing
       """
-      key={"tenant":"acme"} payload={"seq":10,"tenant":"acme"}
+      {"branch":{"tenant":"acme"},"fields":{"seq":10,"tenant":"acme"}}
       """
     And within "5s" node "node-1" eventually reports materialized state for relay "stable_state" containing
       """
-      key={"tenant":"beta"} payload={"seq":20,"tenant":"beta"}
+      {"branch":{"tenant":"beta"},"fields":{"seq":20,"tenant":"beta"}}
       """
 
     Examples:

@@ -89,6 +89,7 @@ impl MaterializedBranchRecord {
 
 #[derive(Debug)]
 pub(super) struct ReplicatedMaterializedRelayState {
+    inspection_instance: u64,
     placement: RuntimeStatePlacement,
     schema: StdArc<arrow_schema::Schema>,
     assignment: StateAssignmentAuthority,
@@ -151,27 +152,18 @@ pub(super) struct MaterializedRelayStateAssignment {
     pub(super) persistence: MaterializedRelayStatePersistence,
 }
 
-/// One materialized record as it is reported through the public interface: its branch key, the
-/// columns of that record rendered for display, and the watermarks it was materialized with.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MaterializedRecordReport {
-    pub(crate) branch: Option<BranchKey>,
-    pub(crate) payload: String,
-    pub(crate) ingested_at_low_watermark: nervix_models::Timestamp,
-    pub(crate) ingested_at_high_watermark: nervix_models::Timestamp,
-}
-
 impl ReplicatedMaterializedRelayState {
     /// Build this state from a snapshot that has already been opened, or empty when there is none.
     ///
     /// A restored state adopts the revision and branch lifecycle its snapshot was captured at, so
     /// it continues that history instead of starting a new one beside it.
     pub(super) fn restored(
+        inspection_instance: u64,
         placement: RuntimeStatePlacement,
         schema: StdArc<arrow_schema::Schema>,
         restored: Option<RestoredMaterializedSnapshot>,
     ) -> Self {
-        let state = Self::new(placement, schema);
+        let state = Self::new(inspection_instance, placement, schema);
         let Some(restored) = restored else {
             return state;
         };
@@ -195,10 +187,12 @@ impl ReplicatedMaterializedRelayState {
     }
 
     pub(super) fn new(
+        inspection_instance: u64,
         placement: RuntimeStatePlacement,
         schema: StdArc<arrow_schema::Schema>,
     ) -> Self {
         Self {
+            inspection_instance,
             placement,
             schema,
             assignment: StateAssignmentAuthority::default(),
@@ -293,6 +287,10 @@ impl ReplicatedMaterializedRelayState {
 }
 
 impl MaterializedRelayStateRead {
+    pub(super) fn inspection_instance(&self) -> u64 {
+        self.state.inspection_instance
+    }
+
     pub(super) fn placement(&self) -> &RuntimeStatePlacement {
         &self.state.placement
     }
@@ -350,6 +348,35 @@ impl MaterializedRelayStateRead {
         self.state
             .assignment
             .serialize_with(|binding| self.capture_generation(binding.fence()))
+    }
+
+    /// Capture the shared row views an operator inspects under memory admission.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            observer,
+            reason = "operator inspection captures admitted shared row views"
+        )
+    )]
+    pub(super) fn capture_for_inspection(
+        &self,
+        executor: &Executor,
+    ) -> Result<(MaterializedGeneration, Reservation), Report<MaterializedSnapshotError>> {
+        self.state.assignment.serialize_with(|binding| {
+            let records = self.state.entries.load().len();
+            let bytes = records
+                .checked_mul(std::mem::size_of::<MaterializedGenerationRecord>())
+                .ok_or_else(|| {
+                    Report::new(MaterializedSnapshotError::MetadataAddressability { records })
+                })?;
+            let bytes = u64::try_from(bytes).map_err(|_| {
+                Report::new(MaterializedSnapshotError::MetadataAddressability { records })
+            })?;
+            let charge = executor
+                .try_reserve(MemoryClass::Bulk, bytes.max(1))
+                .change_context(MaterializedSnapshotError::Admission)?;
+            Ok((self.capture_generation(binding.fence()), charge))
+        })
     }
 
     /// Admit the row-view and grouping arrays before capturing a backup cut. Carrier columns and
@@ -876,6 +903,7 @@ mod tests {
         let row = timestamped_row(1);
         let schema = row.arrow_schema();
         let owner = Arc::new(ReplicatedMaterializedRelayState::new(
+            1,
             test_placement("state"),
             schema.clone(),
         ));
@@ -900,6 +928,7 @@ mod tests {
             .assured("alpha advances");
         let restored = captured_revision(&executor, &owner);
         let replica = Arc::new(ReplicatedMaterializedRelayState::restored(
+            1,
             test_placement("state"),
             schema,
             Some(restored),
@@ -974,6 +1003,7 @@ mod tests {
         let first = test_runtime_row([("value".to_string(), RuntimeValue::I64(1))]);
         let schema = first.arrow_schema();
         let state = Arc::new(ReplicatedMaterializedRelayState::new(
+            1,
             test_placement("tenant_state"),
             schema.clone(),
         ));
@@ -1089,6 +1119,7 @@ mod tests {
         )]);
         let schema = record.arrow_schema();
         let state = Arc::new(ReplicatedMaterializedRelayState::new(
+            1,
             placement.clone(),
             schema.clone(),
         ));
@@ -1123,6 +1154,7 @@ mod tests {
         .await
         .assured("the sealed generation should open");
         let restored = Arc::new(ReplicatedMaterializedRelayState::restored(
+            1,
             placement,
             schema,
             Some(restored),
@@ -1149,6 +1181,7 @@ mod tests {
             ("score".to_string(), RuntimeValue::I64(42)),
         ]);
         let state = Arc::new(ReplicatedMaterializedRelayState::new(
+            1,
             test_placement("profiles"),
             record.arrow_schema(),
         ));
@@ -1196,6 +1229,7 @@ mod tests {
         )]);
         let schema = first.arrow_schema();
         let state = Arc::new(ReplicatedMaterializedRelayState::new(
+            1,
             placement.clone(),
             schema.clone(),
         ));
@@ -1245,6 +1279,7 @@ mod tests {
             RuntimeValue::String("ready".to_string()),
         )]);
         let state = Arc::new(ReplicatedMaterializedRelayState::new(
+            1,
             placement,
             record.arrow_schema(),
         ));
@@ -1287,6 +1322,7 @@ mod tests {
         )]);
         let schema = record.arrow_schema();
         let state = Arc::new(ReplicatedMaterializedRelayState::new(
+            1,
             placement.clone(),
             schema.clone(),
         ));
@@ -1322,6 +1358,7 @@ mod tests {
 
         // A replica that already followed the eviction refuses the generation from before it.
         let replica_state = Arc::new(ReplicatedMaterializedRelayState::new(
+            1,
             placement.clone(),
             schema.clone(),
         ));
@@ -1372,6 +1409,7 @@ mod tests {
                 RuntimeValue::String("ready".to_string()),
             )]);
             let state = Arc::new(ReplicatedMaterializedRelayState::new(
+                1,
                 test_placement("tenant_state"),
                 record.arrow_schema(),
             ));
@@ -1445,6 +1483,7 @@ mod tests {
             check_interleavings(|| {
                 let row = timestamped_row(1);
                 let state = Arc::new(ReplicatedMaterializedRelayState::new(
+                    1,
                     test_placement("state"),
                     row.arrow_schema(),
                 ));

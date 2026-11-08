@@ -55,7 +55,18 @@ impl IngestorBatchAcknowledgementServices for ImmediateAcknowledgement {
     }
 }
 
+#[derive(Default)]
+struct ReadObservations {
+    oversized: usize,
+    reads: Vec<IngestorReadOutcome>,
+    payloads: Vec<(usize, u64)>,
+    polls: Vec<(IngestorReadOutcome, Duration)>,
+}
+
 struct FakeHost {
+    expected_oversized: usize,
+    /// The test retains metric events independently of the fake driver's observations.
+    read_observations: Arc<Mutex<ReadObservations>>,
     refused_payload: Option<u8>,
     allow_unconfirmed_stop: bool,
     acknowledgements: BTreeMap<u8, TestAcknowledgementPlan>,
@@ -70,6 +81,8 @@ struct FakeHost {
 impl FakeHost {
     fn running(observations: Arc<Mutex<IngestorLoopObservations>>) -> Self {
         Self {
+            expected_oversized: 0,
+            read_observations: Arc::new(Mutex::new(ReadObservations::default())),
             refused_payload: None,
             allow_unconfirmed_stop: false,
             acknowledgements: BTreeMap::new(),
@@ -85,6 +98,16 @@ impl FakeHost {
 
 #[async_trait]
 impl IngestorHostServices for FakeHost {
+    fn record_read(&self, outcome: nervix_connector::IngestorReadOutcome) {
+        self.read_observations.lock().reads.push(outcome);
+    }
+    fn record_read_payloads(&self, payloads: usize, bytes: u64) {
+        self.read_observations
+            .lock()
+            .payloads
+            .push((payloads, bytes));
+    }
+
     async fn intake_unacknowledged(
         &mut self,
         messages: Vec<IngestorIntakeMessage<'_>>,
@@ -195,7 +218,12 @@ impl IngestorHostServices for FakeHost {
         panic!("a replayable test ingestor discarded {positions} positions after a reconnect");
     }
     fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
-        panic!("a test ingestor whose payloads all fit dropped {payloads} for their size");
+        assert_eq!(
+            payloads.get(),
+            self.expected_oversized,
+            "the driver returns only its scripted oversized answer"
+        );
+        self.read_observations.lock().oversized += payloads.get();
     }
     fn record_unconfirmed_stop(&self, positions: usize) {
         assert!(
@@ -208,6 +236,10 @@ impl IngestorHostServices for FakeHost {
 
 #[async_trait]
 impl PacedIngestorHostServices for FakeHost {
+    fn record_poll(&self, outcome: nervix_connector::IngestorReadOutcome, elapsed: Duration) {
+        self.read_observations.lock().polls.push((outcome, elapsed));
+    }
+
     async fn intake_poll(
         &mut self,
         poll: IngestorPoll,
@@ -1080,4 +1112,175 @@ async fn individual_settlement_counts_every_unconfirmed_position_when_shutdown_e
             assert_eq!(record.rejected, [vec![1]]);
         }
     }
+}
+
+#[test]
+fn broker_read_observation_follows_each_typed_answer_once() {
+    struct Case {
+        result: nervix_connector::IngestorResult<IngestorBatch<FakeMessage>>,
+        expected: IngestorReadOutcome,
+    }
+    let cases = [
+        Case {
+            result: Ok(IngestorBatch::Messages(three_messages().into())),
+            expected: IngestorReadOutcome::Delivered,
+        },
+        Case {
+            result: Ok(IngestorBatch::Messages(Vec::new())),
+            expected: IngestorReadOutcome::Empty,
+        },
+        Case {
+            result: Ok(IngestorBatch::Interrupted {
+                gathered: three_messages().into(),
+            }),
+            expected: IngestorReadOutcome::Interrupted,
+        },
+        Case {
+            result: Ok(IngestorBatch::Oversized {
+                payloads: NonZeroUsize::MIN,
+            }),
+            expected: IngestorReadOutcome::Empty,
+        },
+        Case {
+            result: Ok(IngestorBatch::ResumeRequired),
+            expected: IngestorReadOutcome::Empty,
+        },
+        Case {
+            result: Ok(IngestorBatch::Closed),
+            expected: IngestorReadOutcome::Empty,
+        },
+        Case {
+            result: Err(Report::new(IngestorError::Read { connector: "fake" })),
+            expected: IngestorReadOutcome::Failed,
+        },
+    ];
+    for case in cases {
+        let expected_oversized = match &case.result {
+            Ok(IngestorBatch::Oversized { payloads }) => payloads.get(),
+            _ => 0,
+        };
+        let mut host = FakeHost::running(Arc::new(Mutex::new(IngestorLoopObservations::default())));
+        host.expected_oversized = expected_oversized;
+        let events = host.read_observations.clone();
+        let host = IngestorHost::new(host);
+        let _outcome = read::BrokerRead {
+            batch: case.result,
+            end: read::ReadEnd::Stopping,
+        }
+        .into_outcome(&host);
+        assert_eq!(events.lock().reads, [case.expected]);
+        assert_eq!(events.lock().oversized, expected_oversized);
+    }
+}
+
+#[nervix_primitives::test]
+async fn broker_payload_observation_counts_the_transport_batch_and_skips_buffer_replay() {
+    let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
+    let mut connector = empty_ingestor(observations.clone());
+    connector.queued().extend(three_messages());
+    connector.replays_pending_after_resume = 2;
+    let services = FakeHost::running(observations);
+    let events = services.read_observations.clone();
+    let (_shutdown, receiver) = watch::channel(false);
+    run_ingestor_instance_with_retry(
+        connector,
+        IngestorHost::new(services),
+        replayable(IngestorAckPolicy::None),
+        receiver,
+    )
+    .await;
+    let events = events.lock();
+    assert_eq!(events.payloads, [(1, 1), (1, 1), (1, 1)]);
+    assert_eq!(
+        events.reads,
+        [
+            IngestorReadOutcome::Delivered,
+            IngestorReadOutcome::Delivered,
+            IngestorReadOutcome::Delivered,
+            IngestorReadOutcome::Empty
+        ]
+    );
+}
+
+#[nervix_primitives::test]
+async fn paced_reads_record_one_outcome_and_one_duration_for_each_poll_answer() {
+    for expected in [
+        IngestorReadOutcome::Delivered,
+        IngestorReadOutcome::Empty,
+        IngestorReadOutcome::Failed,
+    ] {
+        let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
+        let mut connector = empty_ingestor(observations.clone());
+        let (shutdown, receiver) = watch::channel(false);
+        connector.stop_after_poll = Some(shutdown);
+        let mut poll = IngestorPoll {
+            messages: Vec::new(),
+            failures: Vec::new(),
+            dropped_header_values: 0,
+            observed_at: Timestamp::from_unix_nanos(1),
+        };
+        if expected == IngestorReadOutcome::Delivered {
+            poll.messages.push(nervix_connector::IngestorPollMessage {
+                payload: vec![7],
+                headers: nervix_connector::RetainedIngestHeaders::none(),
+                metadata: nervix_connector::RetainedIngestMetadata::none(),
+            });
+        }
+        connector
+            .polls
+            .push_back(if expected == IngestorReadOutcome::Failed {
+                Err(Report::new(IngestorError::Read { connector: "fake" }))
+            } else {
+                Ok(poll)
+            });
+        let host = FakeHost::running(observations);
+        let events = host.read_observations.clone();
+        run_paced_ingestor(
+            connector,
+            host,
+            SingleOccurrenceCadence {
+                occurrence: Some(Timestamp::from_unix_nanos(1)),
+            },
+            NonZeroUsize::MIN,
+            receiver,
+        )
+        .await;
+        let events = events.lock();
+        assert_eq!(events.polls.len(), 1);
+        assert_eq!(events.polls[0].0, expected);
+        assert!(
+            events.reads.is_empty(),
+            "paced reads are recorded through the timed observation once"
+        );
+    }
+}
+
+#[nervix_primitives::test]
+async fn ending_an_inflight_paced_poll_records_interruption_once() {
+    use futures_util::FutureExt as _;
+    let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
+    let host = FakeHost::running(observations);
+    let events = host.read_observations.clone();
+    let (_messages, receiver) = nervix_primitives::sync::mpsc::channel(1);
+    let connector = FakeIngestor::new(receiver);
+    let (shutdown, receiver) = watch::channel(false);
+    let mut running = Box::pin(run_paced_ingestor(
+        connector,
+        host,
+        SingleOccurrenceCadence {
+            occurrence: Some(Timestamp::from_unix_nanos(1)),
+        },
+        NonZeroUsize::MIN,
+        receiver,
+    ));
+    assert!(
+        running.as_mut().now_or_never().is_none(),
+        "the poll waits for a transport answer"
+    );
+    assert!(events.lock().polls.is_empty());
+    shutdown.send_replace(true);
+    running.await;
+    let events = events.lock();
+    assert_eq!(events.polls.len(), 1);
+    assert_eq!(events.polls[0].0, IngestorReadOutcome::Interrupted);
 }

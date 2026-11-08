@@ -633,6 +633,7 @@ pub struct KafkaDomainOffsetDescribeEnvelope {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IngestorDescribeEnvelope {
+    pub source_metrics: Vec<String>,
     pub running: bool,
     pub ready: bool,
     pub quiesce_state: Option<String>,
@@ -1485,3 +1486,9 @@ pub enum TlsConfigError {
 
 #[cfg(test)]
 mod tests;
+
+mod state_inspection;
+pub use state_inspection::{
+    MaterializedStatePageBody, MaterializedStatePageDescriptor, MaterializedStatePageReply,
+    MaterializedStatePageTransfer, ReadMaterializedStatePage,
+};

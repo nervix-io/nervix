@@ -19,7 +19,7 @@ const FRAME_HEADER_BYTES: usize = 8;
 
 /// The root table a frame carries, and the identifier that marks it.
 ///
-/// The eight roots are the only implementations.
+/// The transport roots and the embedded state Row root are the only implementations.
 pub trait FrameRoot: sealed::Sealed + 'static {
     /// The four-byte file identifier the schema declares for this root.
     const IDENTIFIER: &'static str;
@@ -86,6 +86,11 @@ frame_root!(
 frame_root!(
     /// The frame that answers a restore stream.
     RestoreReplyFrame => RestoreReply, "NXRR"
+);
+
+frame_root!(
+    /// A typed Row batch embedded in one state inspection section.
+    StateRowRoot => RowBatch, "NXRB"
 );
 
 /// Why bytes were refused as a frame.

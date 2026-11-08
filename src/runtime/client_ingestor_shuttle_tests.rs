@@ -163,6 +163,9 @@ fn a_batch_racing_a_quiesce_is_counted_or_refused() {
             &ingestor,
             nervix_models::Unit::SINGLE,
             None,
+            nervix_models::IngestorEntityKind::Client(
+                nervix_models::ClientIngestorEntity::Producer,
+            ),
         );
         let control = Arc::new(IngestorQuiesceControl::new(
             IngestQuiesceMode::Suspend,

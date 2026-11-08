@@ -9,9 +9,9 @@ use nervix_models::{
     AlterSchemaOperation, BranchSelection, ClusterNodeName, CommandExecutionReference,
     ConcreteBranchCoverage, CreateResource, CreateStatement, CreateVhost, DomainConfig, DomainPace,
     DomainStartPoint, DropModel, FieldName, ImpactEdgeKind, ImpactPlanningBasis, Model, ModelKind,
-    OutputBranch, ParseAsType, ResetWasmBranchField, ResetWasmState, ResetWasmStateScope,
-    ResourceId, ResourceName, ResourceUpload, ResourceUploadIdentity, ResourceUploadKey,
-    ResourceUploadState, SchemaField, Statement, UserName, VhostTlsResource,
+    OutputBranch, ParseAsType, ResetWasmState, ResourceId, ResourceName, ResourceUpload,
+    ResourceUploadIdentity, ResourceUploadKey, ResourceUploadState, SchemaField, StateBranchField,
+    StateBranchSelection, Statement, UserName, VhostTlsResource,
 };
 use nonzero_ext::nonzero;
 
@@ -167,7 +167,7 @@ fn wasm_reset_fixture() -> (
     let statement = Statement::ResetWasmState(ResetWasmState {
         domain: named("default"),
         processor: named("filter_events"),
-        scope: ResetWasmStateScope::Branch(vec![ResetWasmBranchField {
+        scope: StateBranchSelection::Branch(vec![StateBranchField {
             name: named("tenant"),
             value: nervix_models::Literal::String("alpha".to_string()),
         }]),
@@ -314,7 +314,7 @@ fn reset_planning_rejects_a_second_identity_while_the_first_is_publishing() {
         .assured("the fixture selects the declared branch field");
     assert!(node.begin_wasm_state_reset(
         first_request,
-        selected.scope(),
+        selected.reset_scope(),
         nervix_models::WasmStateResetReason::Transaction,
     ));
     captured.operation_references[0] = CommandExecutionReference::parse("reset-filter-again")

@@ -71,6 +71,12 @@ impl RuntimeIngestorHost {
         poll: IngestorPoll,
         intake_batch: NonZeroUsize,
     ) -> IngestorIntakeResult<bool> {
+        let bytes = raw_payload_bytes(
+            poll.messages
+                .iter()
+                .map(|message| message.payload.as_slice()),
+        );
+        self.interactions.reads.payloads(poll.messages.len(), bytes);
         if poll.dropped_header_values > 0 {
             self.interactions
                 .header_values_dropped

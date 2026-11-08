@@ -108,6 +108,7 @@ For authentication refusals and retry behavior, follow
 does not establish that a user exists.
 Read the Ingestors and Emitters chapters for `SHOW INGESTORS`, `SHOW EMITTERS`, and `DESCRIBE`;
 their inspection contracts distinguish effective options from canonical `SHOW CREATE` configuration.
+For ingestor inspection, follow [Ingestor Source Interactions](../../../docs/src/metrics-and-observability.md#ingestor-source-interactions) before interpreting raw counts, filtered graph traffic or poll duration.
 For batching inspection, read [Emitter payload preparation](../../../docs/src/metrics-and-observability.md#emitter-payload-preparation)
 alongside Emitters: check the effective container and distinguish encoded payload measurements,
 retained work, retries and confirmed source records before interpreting a throughput figure.
@@ -123,6 +124,10 @@ schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoin
 Roto UDFs, ingestors for every connector and entity pair, junctions, reingestors, and session
 subscriptions; use the same web-console chapter for their typed fields, resource versions, program
 editors, reference lookup, and transaction behavior.
+
+For materialized relay inspection, read [Relay → Inspect Materialized State](../../../docs/src/relay.md#inspect-materialized-state)
+for selector, LIMIT/AFTER and FORMAT clause order, typed rows, sensitivity and stale continuations.
+Read the CLI chapter for one-shot JSON output; programs consume `CommandOutcome.state` directly.
 
 ## Gather the configuration contract
 

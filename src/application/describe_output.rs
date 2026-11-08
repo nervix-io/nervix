@@ -30,7 +30,7 @@ use nervix_models::{
     CreateReorderer, CreateWindowProcessor, EmitterBody, EmitterPayloadPresentation, FieldPath,
     HeaderModel, IcebergTableEmitter, IngestTimestampSource, IngestorEntity, IngestorInput,
     KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, Model, ModelKind, ModelName, NodeRef,
-    NodeUnitRef, PlacementName, PlacementPolicy, ProcessorInputs, ProcessorOutputs, RelayName,
+    NodeUnitRef, PlacementName, PlacementPolicy, ProcessorInputs, ProcessorOutputs,
     RequestedResourceVersion, ResourceDescription, ResourceEntryContent, ResourceManifestEntry,
     ResourceUsage, ResourceVersionEntries, ScheduledNode, Unit, WasmStateInspection,
     WasmUnitStateInspection, expression_to_plexus,
@@ -50,6 +50,7 @@ pub(in crate::application) fn runtime_ingestor_describe_to_envelope(
     metrics: Vec<String>,
 ) -> IngestorDescribeEnvelope {
     IngestorDescribeEnvelope {
+        source_metrics: summary.source_metrics,
         running: summary.running,
         ready: summary.ready,
         quiesce_state: summary.quiesce_state,
@@ -94,6 +95,7 @@ pub(in crate::application) fn runtime_ingestor_describe_from_envelope(
 ) -> (RuntimeIngestorDescribe, Vec<String>) {
     (
         RuntimeIngestorDescribe {
+            source_metrics: summary.source_metrics,
             running: summary.running,
             ready: summary.ready,
             quiesce_state: summary.quiesce_state,
@@ -370,6 +372,7 @@ pub(in crate::application) fn format_ingestor_describe_output(
             "quiesce state: {}",
             summary.quiesce_state.as_deref().unwrap_or("none")
         ),
+        "source:".to_string(),
         format!(
             "nervix_ingestor_quiesce_buffered_records: {}",
             summary.quiesce_counters.buffered_records
@@ -399,6 +402,12 @@ pub(in crate::application) fn format_ingestor_describe_output(
             summary.oversized_payloads_total
         ),
     ]);
+    lines.extend(
+        summary
+            .source_metrics
+            .iter()
+            .map(|line| format!("  {line}")),
+    );
     let last_decode_rejection = match summary.last_decode_rejection.as_ref() {
         Some(rejection) => rejection.to_string(),
         None => "-".to_string(),
@@ -1358,27 +1367,6 @@ pub(in crate::application) fn format_resource_usage_lines(usages: &[ResourceUsag
     lines
 }
 
-pub(in crate::application) fn format_materialized_stream_state_output(
-    relay: &RelayName,
-    scheduled_node: &ScheduledNode,
-    entries: Vec<String>,
-) -> String {
-    let mut lines = vec![
-        format!("materialized relay: {}", relay.as_str()),
-        "kind: RELAY".to_string(),
-    ];
-    lines.extend(format_schedule_placement_lines(Some(scheduled_node)));
-    if entries.is_empty() {
-        lines.push(format!(
-            "relay '{}' materialized state is empty",
-            relay.as_str()
-        ));
-    } else {
-        lines.extend(entries);
-    }
-    lines.join("\n")
-}
-
 fn format_window_aggregate_demand(
     demand: &WindowAggregateDemand,
     references: &[usize],
@@ -1804,6 +1792,7 @@ mod tests {
         use super::super::test_fixtures::{named, scheduled_node};
 
         let summary = RuntimeIngestorDescribe {
+            source_metrics: Vec::new(),
             running: true,
             ready: true,
             quiesce_state: None,
