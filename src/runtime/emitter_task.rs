@@ -33,7 +33,9 @@ use nervix_connector::{
 };
 
 use super::{
-    emitter_publishing::EmitterStopDrainOutcome, emitter_retry::EmitterBufferedKeepalive, *,
+    emitter_publishing::{EmitterPublishAttemptKind, EmitterStopDrainOutcome},
+    emitter_retry::EmitterBufferedKeepalive,
+    *,
 };
 
 #[path = "emitter_branch_retention.rs"]
@@ -82,6 +84,7 @@ struct EmitterBatchContext<'a> {
     emitter: &'a EmitterName,
     node: &'a ModelName,
     output_metrics: &'a EmitterOutputMetrics,
+    interactions: &'a EmitterInteractionMetrics,
     error_policies: &'a ErrorPolicies,
     source_filters: &'a HashMap<RelayName, CompiledProgramWithMaterializedInterest>,
     filter_map: Option<&'a CompiledEmitterFilterMapProgram>,
@@ -216,6 +219,15 @@ pub(in crate::runtime) enum EmitterRuntimeError {
 }
 
 impl EmitterRuntimeError {
+    pub(super) fn retry_cause(&self) -> EmitterRetryCause {
+        match self {
+            Self::ConnectorNotInitialized
+            | Self::InitializeConnector
+            | Self::ResumeConnector
+            | Self::ConnectorWaiting => EmitterRetryCause::Connect,
+            _ => EmitterRetryCause::Publish,
+        }
+    }
     pub(super) fn is_retryable_publish_failure(&self) -> bool {
         match self {
             Self::ConnectorNotInitialized
@@ -276,6 +288,17 @@ pub(super) fn emitter_init_error(error: impl std::fmt::Display) -> Report<Emitte
 }
 
 impl EmitterConnectorContext {
+    pub(super) fn record_confirmation_timeout(&self, error: &Report<EmitterRuntimeError>) {
+        let timed_out = error.frames().any(|frame| {
+            matches!(
+                frame.downcast_ref::<nervix_connector::ConfirmationWindowError>(),
+                Some(nervix_connector::ConfirmationWindowError::AnswerTimedOut { .. })
+            )
+        });
+        if timed_out {
+            self.interactions.record_confirmation_timeout();
+        }
+    }
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "the connector failure becomes a retained status string \
@@ -679,6 +702,7 @@ impl EmitterTaskState {
             retry.defer(
                 context,
                 EmitterRetryDeferral {
+                    cause: EmitterRetryCause::Connect,
                     wait: connector.installation_retry_delay(&mut backoff),
                     acks: EmitterAcknowledgements::default(),
                     waiting_for_stall_clear: false,
@@ -737,7 +761,7 @@ impl EmitterTaskState {
             );
             return;
         };
-        match self.connector.finish_transport(deadline).await {
+        match self.connector.finish_transport(context, deadline).await {
             Ok(finished) => context.record_finished(connector, ending, finished),
             Err(error) => context.record_unfinished(connector, ending, &error),
         }
@@ -762,6 +786,7 @@ impl EmitterTaskState {
                 pending_batch.take();
             }
             Err(failure) if emitter_publish_error_is_retryable(failure.error()) => {
+                let cause = failure.retry_cause();
                 let (error, batch_owner) = failure.into_parts();
                 let wait = emitter_retry_delay(&mut self.backoff, &error);
                 if let EmitterPublishBatchOwner::Caller = batch_owner {
@@ -787,6 +812,7 @@ impl EmitterTaskState {
                 self.retry.defer(
                     context,
                     EmitterRetryDeferral {
+                        cause,
                         wait,
                         acks: self.connector.pending_acks(&self.buffer),
                         waiting_for_stall_clear: error.current_context()
@@ -1077,6 +1103,10 @@ impl EmitterTask {
                 clock: domain_clock.clone(),
             };
             let _registration = super::emitter_supervision::EmitterTaskRegistration::new(&context);
+            let failure_status = context.status.clone();
+            let _failure_observation = context
+                .interactions
+                .bind_failure_source(move || failure_status.failures().is_some());
             let backoff = RuntimeReconnectBackoff::from_policy(plan.retry_policy);
             let buffer =
                 EmitterBatchBuffer::new(&context, &task_flush_policy, buffered_messages.clone());
@@ -1102,6 +1132,7 @@ impl EmitterTask {
                 emitter: &task_emitter,
                 node: &task_emitter_node,
                 output_metrics: &task_output_metrics,
+                interactions: &context.interactions,
                 error_policies: &task_error_policies,
                 source_filters: &programs.source_filters,
                 filter_map: programs.filter_map.as_ref(),
@@ -1277,6 +1308,7 @@ impl EmitterTaskLoop<'_> {
                             .means_peer_left("emitter stop requester");
                         continue;
                     }
+                    let kind = EmitterPublishAttemptKind::from_retry(self.state.retry.is_active());
                     let EmitterTaskState {
                         connector,
                         buffer,
@@ -1296,6 +1328,7 @@ impl EmitterTaskLoop<'_> {
                             &mut control,
                             buffer,
                             deadline,
+                            kind,
                         )
                         .await;
                     let result = match drained {
@@ -1364,6 +1397,7 @@ impl EmitterTaskLoop<'_> {
                             self.state.retry.defer(
                                 self.context,
                                 EmitterRetryDeferral {
+                                    cause: self.state.connector.retry_cause(),
                                     wait: self.state.backoff.take_next_delay(),
                                     acks: self.state.connector.pending_acks(&self.state.buffer),
                                     waiting_for_stall_clear: self
@@ -1379,6 +1413,8 @@ impl EmitterTaskLoop<'_> {
                         continue;
                     }
                     let publish_result = {
+                        let kind =
+                            EmitterPublishAttemptKind::from_retry(self.state.retry.is_active());
                         let EmitterTaskState {
                             connector,
                             buffer,
@@ -1392,7 +1428,13 @@ impl EmitterTaskLoop<'_> {
                             backoff,
                         };
                         connector
-                            .flush_all(&self.connector_label, self.context, &mut control, buffer)
+                            .flush_all(
+                                &self.connector_label,
+                                self.context,
+                                &mut control,
+                                buffer,
+                                kind,
+                            )
                             .await
                             .map_err(EmitterPublishFailure::buffer)
                     };
@@ -1440,6 +1482,8 @@ impl EmitterTaskLoop<'_> {
                         break EmitterEnding::InteractionStopped;
                     }
                     let flush_result = {
+                        let kind =
+                            EmitterPublishAttemptKind::from_retry(self.state.retry.is_active());
                         let EmitterTaskState {
                             connector,
                             buffer,
@@ -1453,7 +1497,13 @@ impl EmitterTaskLoop<'_> {
                             backoff,
                         };
                         connector
-                            .flush_all(&self.connector_label, self.context, &mut control, buffer)
+                            .flush_all(
+                                &self.connector_label,
+                                self.context,
+                                &mut control,
+                                buffer,
+                                kind,
+                            )
                             .await
                     };
                     match flush_result {
@@ -1528,6 +1578,7 @@ impl EmitterTaskLoop<'_> {
                             self.state.retry.defer(
                                 self.context,
                                 EmitterRetryDeferral {
+                                    cause: EmitterRetryCause::Connect,
                                     wait: self
                                         .state
                                         .connector
@@ -1648,6 +1699,7 @@ impl EmitterTaskLoop<'_> {
                             self.state.retry.defer(
                                 self.context,
                                 EmitterRetryDeferral {
+                                    cause: self.state.connector.retry_cause(),
                                     wait: self.state.backoff.take_next_delay(),
                                     acks: self.state.connector.pending_acks(&self.state.buffer),
                                     waiting_for_stall_clear: self
@@ -1763,6 +1815,7 @@ impl EmitterBatchContext<'_> {
                 return;
             }
         };
+        let mut outcomes = self.interactions.record_outcomes();
         for (row, message) in messages.into_iter().enumerate() {
             if resolved.get(row).copied().unwrap_or(false) {
                 continue;
@@ -1790,6 +1843,7 @@ impl EmitterBatchContext<'_> {
                     execution_now,
                 })
                 .await;
+            outcomes.fail();
         }
     }
 

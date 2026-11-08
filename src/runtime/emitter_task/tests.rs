@@ -58,6 +58,7 @@ fn batch_context<'a>(
         emitter: &context.emitter,
         node,
         output_metrics,
+        interactions: &context.interactions,
         error_policies: &context.error_policies,
         source_filters,
         filter_map: None,
@@ -646,7 +647,14 @@ async fn stop_drain_with_emitter(
     let context = emitter_context();
     let mut buffer = EmitterBatchBuffer::default();
     connector
-        .drain_for_stop("test", &context, &mut control, &mut buffer, deadline)
+        .drain_for_stop(
+            "test",
+            &context,
+            &mut control,
+            &mut buffer,
+            deadline,
+            EmitterPublishAttemptKind::Initial,
+        )
         .await
 }
 
@@ -818,15 +826,90 @@ async fn a_task_ended_without_a_stop_deadline_leaves_its_emitter_unfinished() {
 
 #[nervix_primitives::test]
 async fn an_emitter_without_an_open_emitter_holds_nothing_to_finish() {
+    let context = emitter_context();
     let mut connector = EmitterConnectorState::Unavailable {
         retry_open: false,
         reason: "test emitter is unavailable".to_string(),
     };
 
     let finished = connector
-        .finish_transport(Instant::now())
+        .finish_transport(&context, Instant::now())
         .await
         .expect("an emitter without a client has nothing to send");
 
     assert_eq!(finished, EmitterFinish::NothingHeld);
+}
+
+#[test]
+fn emitter_outcomes_follow_both_failure_owners_and_end_with_the_task_binding() {
+    let context = emitter_context();
+    let status = context.status.clone();
+    let binding = context
+        .interactions
+        .bind_failure_source(move || status.failures().is_some());
+    let observed = |expected: &str| {
+        assert!(context.interactions.describe_lines().iter().any(|line| {
+            line.starts_with("nervix_emitter_transient_failure{") && line.ends_with(expected)
+        }));
+    };
+    observed("value=0");
+    context.record_failure("publish failed");
+    context
+        .status
+        .fail_connector("connection failed".to_owned(), None);
+    observed("value=1");
+    context.status.clear();
+    observed("value=1");
+    context.status.clear_connector();
+    observed("value=0");
+    context
+        .status
+        .fail_connector("connection failed".to_owned(), None);
+    context.record_failure("publish failed");
+    context.status.clear_connector();
+    observed("value=1");
+    context.status.clear();
+    observed("value=0");
+    context.record_failure("ending with unresolved work");
+    drop(binding);
+    observed("value=0");
+}
+
+#[nervix_primitives::test]
+async fn emitter_outcomes_terminal_failure_counts_only_rows_routed_to_message_policy() {
+    let context = emitter_context();
+    let routing = DomainRouting::new(DomainRoutingSnapshot::default());
+    let mut routing = DomainRoutingCache::new(routing.shared());
+    let output_metrics = output_metrics(&context);
+    let node = ModelName::from(&context.emitter);
+    let source_filters = HashMap::default();
+    let batch_context = batch_context(
+        &context,
+        &mut routing,
+        &output_metrics,
+        &node,
+        &source_filters,
+        &[],
+    );
+    let at = Timestamp::from_unix_nanos(100);
+    let mut delivered = EmitterPublishBatch::from_batch(input_batch(), at);
+    delivered
+        .mark_delivered(0, DeliveredAcknowledgements::Host)
+        .assured("fixture delivery");
+    let mut rejected = EmitterPublishBatch::from_batch(input_batch(), at);
+    rejected
+        .mark_rejected_after_delivery(0, std::future::ready(()))
+        .await
+        .assured("fixture rejection settled");
+    let unresolved = EmitterPublishBatch::from_batch(input_batch(), at);
+    batch_context
+        .handle_publish_error_batches(
+            vec![delivered, rejected, unresolved],
+            "terminal publish refusal".to_owned(),
+            MessageErrorOperation::Publish,
+        )
+        .await;
+    assert!(context.interactions.describe_lines().iter().any(|line| {
+        line.starts_with("nervix_emitter_records_failed_total{") && line.ends_with("total=1")
+    }));
 }

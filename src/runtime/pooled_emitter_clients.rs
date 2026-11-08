@@ -63,6 +63,7 @@ impl PooledEmitterClient {
                     context.emitter.clone(),
                 ),
                 client.name.clone(),
+                context.interactions.clone(),
             ),
         })
     }
@@ -154,6 +155,7 @@ impl EmitterConnectorContext {
                     self.emitter.clone(),
                 ),
                 plan.client.name.clone(),
+                self.interactions.clone(),
             ),
         }))
     }

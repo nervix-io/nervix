@@ -81,6 +81,7 @@ impl EmitterBufferedKeepalive {
 /// One deferral of an emitter's publish attempt: how long the emitter waits, which
 /// acknowledgements it keeps alive meanwhile, and what the operator is told about the wait.
 pub(super) struct EmitterRetryDeferral<'a> {
+    pub(super) cause: EmitterRetryCause,
     pub(super) wait: Duration,
     pub(super) acks: EmitterAcknowledgements,
     pub(super) waiting_for_stall_clear: bool,
@@ -267,6 +268,7 @@ impl EmitterRetrySchedule {
         deferral: EmitterRetryDeferral<'_>,
     ) {
         let EmitterRetryDeferral {
+            cause,
             wait,
             acks,
             waiting_for_stall_clear,
@@ -274,6 +276,7 @@ impl EmitterRetrySchedule {
         } = deferral;
         match self.schedule(wait, acks, waiting_for_stall_clear) {
             Ok(()) => {
+                context.interactions.record_retry(cause, wait);
                 if let Some(reason) = reason {
                     context.record_retry(reason, wait, EmitterRetryKind::Infrastructure);
                 }

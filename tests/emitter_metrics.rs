@@ -112,3 +112,94 @@ async fn describe_emitter_from_every_node(
         world.last_command_output = Some(output);
     }
 }
+
+#[then(expr = "the last command output emitter is saved as placeholder {string}")]
+fn save_described_emitter(world: &mut ScenarioWorld, placeholder: String) {
+    let output = world
+        .last_command_output
+        .as_deref()
+        .expect("DESCRIBE output exists");
+    let emitter = output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("emitter: "))
+        .unwrap_or_else(|| panic!("DESCRIBE output has no emitter name: {output}"));
+    world
+        .placeholders
+        .insert(placeholder, emitter.trim().to_owned());
+}
+
+#[then(
+    expr = "node {string} observability metric {string} with labels eventually becomes positive"
+)]
+async fn interaction_metric_becomes_positive(
+    world: &mut ScenarioWorld,
+    node: String,
+    metric: String,
+    #[step] step: &Step,
+) {
+    let observation = InteractionObservation::from_step(world, &node, &metric, step);
+    let mut last = String::new();
+    let completed =
+        nervix_primitives::time::timeout(common::status_request::STATUS_WAIT_BUDGET, async {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let sample = world
+                    .cluster()
+                    .read_observability_metric(
+                        &observation.node,
+                        &observation.metric,
+                        &observation.labels,
+                    )
+                    .await;
+                match sample {
+                    Ok(value) if value.is_finite() && value > 0.0 => break,
+                    Ok(value) => last = value.to_string(),
+                    Err(error) => last = error.to_string(),
+                }
+                nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+    assert!(
+        completed.is_ok(),
+        "{} with {:?} did not become positive: {last}",
+        observation.metric,
+        observation.labels
+    );
+}
+
+#[then(expr = "node {string} records one completed transport finish for emitter {string}")]
+async fn completed_emitter_finish(world: &mut ScenarioWorld, node: String, emitter: String) {
+    let node = expand_placeholders(world, &node);
+    let emitter = expand_placeholders(world, &emitter);
+    let mut last = Vec::new();
+    let completed =
+        nervix_primitives::time::timeout(common::status_request::STATUS_WAIT_BUDGET, async {
+            loop {
+                last.clear();
+                for outcome in ["nothing_held", "flushed"] {
+                    let labels = vec![
+                        format!("emitter=\"{emitter}\""),
+                        format!("outcome=\"{outcome}\""),
+                    ];
+                    let value = world
+                        .cluster()
+                        .read_observability_metric(&node, "nervix_emitter_finishes_total", &labels)
+                        .await;
+                    last.push(value.map_err(|error| error.to_string()));
+                }
+                if let [Ok(nothing_held), Ok(flushed)] = last.as_slice() {
+                    let finishes = nothing_held + flushed;
+                    if finishes == 1.0 {
+                        break;
+                    }
+                }
+                nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+    assert!(
+        completed.is_ok(),
+        "emitter {emitter} on {node} did not record one completed finish: {last:?}"
+    );
+}

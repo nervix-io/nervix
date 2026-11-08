@@ -13,6 +13,12 @@ use super::*;
 fn encoded_connector(
     script: impl Into<nervix_connector_fake::PublishScript>,
 ) -> EmitterConnectorState {
+    encoded_driver(nervix_connector_fake::FakeEmitter::new(script))
+}
+
+fn encoded_driver(
+    driver: nervix_connector_fake::FakeEmitter<nervix_connector_fake::Records>,
+) -> EmitterConnectorState {
     let schema = crate::runtime::test_fixtures::EntrypointTestDomain {
         relays: &[],
         fields: &[("value", ParseAsType::I64)],
@@ -20,9 +26,7 @@ fn encoded_connector(
     };
     EmitterConnectorState::opened(Box::new(
         crate::runtime::emitter_encoding::EncodedRecordEmitter {
-            connector: Box::new(nervix_connector_fake::FakeEmitter::<
-                nervix_connector_fake::Records,
-            >::new(script)),
+            connector: Box::new(driver),
             codec: schema.codec(),
             batch: None,
         },
@@ -76,7 +80,14 @@ async fn a_stop_drain_recovers_the_same_instance_and_finishes_before_close() {
     };
     let deadline = Instant::now() + Duration::from_secs(5);
     let drained = connector
-        .drain_for_stop("scripted", &context, &mut control, &mut buffer, deadline)
+        .drain_for_stop(
+            "scripted",
+            &context,
+            &mut control,
+            &mut buffer,
+            deadline,
+            EmitterPublishAttemptKind::Initial,
+        )
         .await;
     let EmitterStopDrainOutcome::Finished { report, .. } = drained else {
         panic!("the retained emitter must recover and drain by its original stop deadline");
@@ -92,6 +103,20 @@ async fn a_stop_drain_recovers_the_same_instance_and_finishes_before_close() {
     assert_eq!(observed.finishes, [deadline]);
     assert_eq!(observed.payloads().len(), 2);
     assert_eq!(observed.payloads()[0], observed.payloads()[1]);
+    let metrics = DestinationProbe { context: &context };
+    metrics.event("nervix_emitter_retries_total", &[("cause", "publish")], 1.0);
+    metrics.event("nervix_emitter_retry_wait_seconds_total", &[], 0.001);
+    metrics.event("nervix_emitter_records_retried_total", &[], 1.0);
+    metrics.event(
+        "nervix_emitter_opens_total",
+        &[("outcome", "succeeded")],
+        1.0,
+    );
+    metrics.event(
+        "nervix_emitter_finishes_total",
+        &[("outcome", "nothing_held")],
+        1.0,
+    );
 }
 
 struct DestinationProbe<'a> {
@@ -112,62 +137,56 @@ fn measured_buffer(context: &EmitterConnectorContext) -> EmitterBatchBuffer {
 }
 
 impl DestinationProbe<'_> {
-    fn payload_sample(&self, family: &str, state: Option<&str>, expected: f64) {
+    fn event(&self, family: &str, labels: &[(&str, &str)], expected: f64) {
         let text = self.context.runtime.inner.metrics.prometheus_text();
-        let family = format!("{family}{{");
+        let prefix = if family.ends_with('{') {
+            family.to_owned()
+        } else {
+            format!("{family}{{")
+        };
         let emitter = format!("emitter=\"{}\"", self.context.emitter);
-        let mut observed = None;
+        let mut sample = None;
         for line in text.lines() {
-            if !line.starts_with(&family) || !line.contains(&emitter) {
+            if !line.starts_with(&prefix) || !line.contains(&emitter) {
                 continue;
             }
-            if let Some(state) = state
-                && !line.contains(&format!("state=\"{state}\""))
-            {
+            let matches = labels
+                .iter()
+                .all(|(key, value)| line.contains(&format!("{key}=\"{value}\"")));
+            if !matches {
                 continue;
             }
             let (_, value) = line
                 .rsplit_once(' ')
-                .assured("Prometheus samples end in a numeric value");
-            observed = Some(
+                .assured("samples end in numeric values");
+            sample = Some(
                 value
                     .parse::<f64>()
-                    .assured("the metric encoder emits numbers"),
+                    .assured("the maintained encoder emits numbers"),
             );
             break;
         }
         assert_eq!(
-            observed,
+            sample,
             Some(expected),
-            "wrong or absent payload sample in {text}"
+            "missing or wrong {family} with {labels:?} in {text}"
         );
     }
 
-    fn assert_sample(&self, family: &str, operation: &str, outcome: Option<&str>, expected: f64) {
-        let text = self.context.runtime.inner.metrics.prometheus_text();
-        let emitter = format!("emitter=\"{}\"", self.context.emitter);
-        let operation = format!("operation=\"{operation}\"");
-        let mut sample = None;
-        for line in text.lines() {
-            if !line.starts_with(family) || !line.contains(&emitter) || !line.contains(&operation) {
-                continue;
-            }
-            if let Some(outcome) = outcome
-                && !line.contains(&format!("outcome=\"{outcome}\""))
-            {
-                continue;
-            }
-            let (_, value) = line
-                .rsplit_once(' ')
-                .assured("Prometheus samples end in a value");
-            sample = Some(
-                value
-                    .parse::<f64>()
-                    .assured("the encoder emits numeric samples"),
-            );
-            break;
+    fn payload_sample(&self, family: &str, state: Option<&str>, expected: f64) {
+        if let Some(state) = state {
+            self.event(family, &[("state", state)], expected);
+        } else {
+            self.event(family, &[], expected);
         }
-        assert_eq!(sample, Some(expected), "missing or wrong sample in {text}");
+    }
+
+    fn assert_sample(&self, family: &str, operation: &str, outcome: Option<&str>, expected: f64) {
+        let mut labels = vec![("operation", operation)];
+        if let Some(outcome) = outcome {
+            labels.push(("outcome", outcome));
+        }
+        self.event(family, &labels, expected);
     }
 
     fn attempts(&self, operation: &str, outcome: &str, expected: f64) {
@@ -218,7 +237,12 @@ async fn an_empty_flush_is_not_a_destination_attempt() {
     let mut buffer = releasing_buffer();
     assert!(
         connector
-            .flush_buffer(&context, &mut control, &mut buffer)
+            .flush_buffer(
+                &context,
+                &mut control,
+                &mut buffer,
+                EmitterPublishAttemptKind::Initial
+            )
             .await
             .assured("an empty flush performs no encoding")
             .is_none()
@@ -369,6 +393,26 @@ async fn a_failed_commit_retains_staged_rows_and_counts_its_successful_retry_sep
     metrics.payload_sample("nervix_emitter_work_messages", Some("in_flight"), 0.0);
     metrics.attempts("commit", "succeeded", 0.0);
     metrics.durations("commit", 1.0);
+    let wait = control.backoff.next_delay();
+    let acknowledgements = connector.pending_acks(&buffer);
+    assert!(
+        EmitterConnectorState::wait_for_commit_retry(
+            "scripted",
+            &context,
+            &mut control,
+            &acknowledgements,
+            &failure,
+        )
+        .await
+        .assured("the declared commit delay completes")
+    );
+    metrics.event("nervix_emitter_retries_total", &[("cause", "commit")], 1.0);
+    metrics.event(
+        "nervix_emitter_retry_wait_seconds_total",
+        &[],
+        wait.as_secs_f64(),
+    );
+    metrics.event("nervix_emitter_records_retried_total", &[], 0.0);
     let committed = connector
         .commit_staged_once(
             &context,
@@ -438,7 +482,12 @@ async fn unanswered_records_are_transient_and_their_retry_counts_one_success() {
     metrics.payload_sample("nervix_emitter_work_messages", Some("prepared"), 1.0);
     metrics.payload_sample("nervix_emitter_work_messages", Some("in_flight"), 0.0);
     let published = connector
-        .flush_buffer(&context, &mut control, &mut buffer)
+        .flush_buffer(
+            &context,
+            &mut control,
+            &mut buffer,
+            EmitterPublishAttemptKind::Retry,
+        )
         .await
         .assured("the scripted retry confirms its retained record");
     assert_eq!(published.map(|report| report.messages), Some(1));
@@ -502,3 +551,5 @@ async fn an_unknown_record_is_a_violation_without_accepting_a_foreign_answer() {
     metrics.attempts("publish", "succeeded", 0.0);
     metrics.durations("publish", 1.0);
 }
+
+mod outcomes;

@@ -393,6 +393,23 @@ test-processor-partitions *args: build-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/processor_partitions.feature {{ quote(args) }}
 
+# Observe emitter outcomes through public sessions and the owning node's metric endpoint.
+test-emitter-outcomes *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input 'tests/features/runtime/*.feature' --tags '@emitter_outcomes' {{ quote(args) }}
+
+# Verify emitter outcome owners and the established interaction instrumentation in isolation.
+test-emitter-outcome-owners *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-server --features testing --lib metrics::connector {{ quote(args) }}
+    cargo test --package nervix-server --features testing --lib runtime::emitter_publishing::tests::interaction_metrics {{ quote(args) }}
+    cargo test --package nervix-server --features testing --lib runtime::emitter_task::tests::emitter_outcomes {{ quote(args) }}
+    cargo test --package nervix-server --features testing --lib runtime::shared_clients::tests {{ quote(args) }}
+
 # Observe batching through the public session and the owning node's metric endpoint.
 test-emitter-batch-metrics *args: build-deps
     #!/usr/bin/env bash

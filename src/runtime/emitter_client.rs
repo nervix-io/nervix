@@ -209,18 +209,16 @@ impl ClientConsumerConnector {
                             batch_index,
                             row_index: first_row,
                         };
-                        rejected.push(RejectedEmitterRecord {
+                        rejected.push(RejectedEmitterRecord::structured(
                             position,
-                            reason: String::new(),
-                            structured_error: Some(
-                                RejectedEmitterMember::oversize(
-                                    position,
-                                    batch.execution_now(),
-                                    format!("client output row exceeds {} IPC bytes", max_bytes),
-                                )
-                                .error,
-                            ),
-                        });
+                            EmitterRejectionCode::Oversize,
+                            RejectedEmitterMember::oversize(
+                                position,
+                                batch.execution_now(),
+                                format!("client output row exceeds {} IPC bytes", max_bytes),
+                            )
+                            .error,
+                        ));
                         next += 1;
                         break (&pending[0..0], Bytes::new());
                     }

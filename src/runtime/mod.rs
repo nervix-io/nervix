@@ -165,9 +165,10 @@ use crate::{
     emitter_start_plan::*,
     metrics::{
         BatchMetricsHandle, BranchEvictionReason, ClientIngestorSeries, EmitterAttemptOperation,
-        EmitterAttemptOutcome, EmitterInteractionMetrics, IngestorQuiesceMetrics,
-        MessageMetricsHandle, NodeBatchMetricsSpec, NodeInputMetricsHandle, RelayMetricRecorders,
-        RelayMetricsHandle, RuntimeMetrics, RuntimeMetricsSnapshot,
+        EmitterAttemptOutcome, EmitterFinishOutcome, EmitterInteractionMetrics, EmitterOpenOutcome,
+        EmitterRejectionCode, EmitterRetryCause, IngestorQuiesceMetrics, MessageMetricsHandle,
+        NodeBatchMetricsSpec, NodeInputMetricsHandle, RelayMetricRecorders, RelayMetricsHandle,
+        RuntimeMetrics, RuntimeMetricsSnapshot,
     },
     registry::{
         BranchInstanceAckBoundary, BranchedNodeSpecs, BranchedProcessorNodeSpec,
