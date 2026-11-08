@@ -109,7 +109,7 @@ fn every_bounded_child_is_registered_at_zero_with_the_vocabulary_labels() {
     }
     assert_eq!(attempts, 8);
     assert_eq!(durations, 2);
-    assert_eq!(handle.describe_lines().len(), 14);
+    assert_eq!(handle.describe_lines().len(), 35);
 }
 
 #[test]
@@ -187,7 +187,7 @@ fn registration_keeps_process_totals_and_separates_nodes_entities_and_processes(
     );
     let lines = metrics.describe_emitter_interactions(&entity);
     assert_eq!(lines[0], "destination:");
-    assert_eq!(lines.len(), 43);
+    assert_eq!(lines.len(), 106);
     let missing = DomainNodeRef::node_in(
         entity.domain,
         ModelKind::Emitter,

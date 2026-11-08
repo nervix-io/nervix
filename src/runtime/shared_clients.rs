@@ -287,22 +287,28 @@ impl PoolWait {
 pub(in crate::runtime) struct PoolWaitSlot {
     client: ClientName,
     active: ArcSwapOption<PoolWait>,
+    interactions: EmitterInteractionMetrics,
 }
 
 impl PoolWaitSlot {
-    fn new(client: ClientName) -> Self {
+    fn new(client: ClientName, interactions: EmitterInteractionMetrics) -> Self {
         Self {
             client,
             active: ArcSwapOption::empty(),
+            interactions,
         }
     }
 
     pub(in crate::runtime) fn begin(slot: &Arc<Self>) -> PoolWaitGuard {
+        let since = Instant::now();
         slot.active.store(Some(StdArc::new(PoolWait {
             client: slot.client.clone(),
-            since: Instant::now(),
+            since,
         })));
-        PoolWaitGuard { slot: slot.clone() }
+        PoolWaitGuard {
+            slot: slot.clone(),
+            since,
+        }
     }
 
     /// A ready borrow performs no publication or registry operation. Cancellation drops its guard.
@@ -326,10 +332,14 @@ impl PoolWaitSlot {
 /// Clears a pending connection borrow on success, failure or cancellation.
 pub(in crate::runtime) struct PoolWaitGuard {
     slot: Arc<PoolWaitSlot>,
+    since: Instant,
 }
 
 impl Drop for PoolWaitGuard {
     fn drop(&mut self) {
+        self.slot
+            .interactions
+            .record_pool_wait(self.since.elapsed());
         self.slot.active.store(None);
     }
 }
@@ -516,8 +526,9 @@ impl Runtime {
         &self,
         waiter: DomainNodeRef,
         client: ClientName,
+        interactions: EmitterInteractionMetrics,
     ) -> PoolWaitRegistration {
-        let slot = Arc::new(PoolWaitSlot::new(client));
+        let slot = Arc::new(PoolWaitSlot::new(client, interactions));
         self.inner.pool_waits.insert(waiter.clone(), slot.clone());
         PoolWaitRegistration {
             slot,
@@ -544,6 +555,22 @@ mod tests {
 
     use super::*;
 
+    fn assert_pool_outcomes(slot: &PoolWaitSlot, expected: u64) {
+        let suffix = format!("total={expected}");
+        assert!(slot.interactions.describe_lines().iter().any(|line| {
+            line.starts_with("nervix_emitter_pool_waits_total{") && line.ends_with(&suffix)
+        }));
+    }
+
+    fn pool_metrics(runtime: &Runtime) -> EmitterInteractionMetrics {
+        runtime.inner.metrics.register_emitter_interactions(
+            &domain("pool_wait"),
+            &named::<EmitterName>("emitter"),
+            None,
+            nervix_models::EmitterEntityKind::Postgres(nervix_models::PostgresEmitterEntity::Table),
+        )
+    }
+
     #[nervix_primitives::test]
     async fn retained_pool_wait_reports_only_pending_borrows_and_clears_on_cancel() {
         let runtime = Runtime::new();
@@ -552,12 +579,14 @@ mod tests {
             ModelKind::Emitter,
             named::<EmitterName>("emitter"),
         );
-        let registration = runtime.register_pool_wait(key.clone(), named("database"));
+        let registration =
+            runtime.register_pool_wait(key.clone(), named("database"), pool_metrics(&runtime));
         let slot = registration.slot.clone();
         for _ in 0..100 {
             assert_eq!(PoolWaitSlot::borrow(&slot, std::future::ready(7)).await, 7);
         }
         assert!(slot.active.load().is_none());
+        assert_pool_outcomes(&slot, 0);
         let (sender, receiver) = oneshot::channel::<u8>();
         let mut borrow = Box::pin(PoolWaitSlot::borrow(&slot, receiver));
         std::future::poll_fn(|context| {
@@ -572,6 +601,7 @@ mod tests {
         sender.send(9).assured("the borrow retains its receiver");
         assert_eq!(borrow.await.assured("the connection borrow succeeds"), 9);
         assert!(slot.active.load().is_none());
+        assert_pool_outcomes(&slot, 1);
         let mut borrow = Box::pin(PoolWaitSlot::borrow(&slot, std::future::pending::<()>()));
         std::future::poll_fn(|context| {
             assert!(borrow.as_mut().poll(context).is_pending());
@@ -581,6 +611,23 @@ mod tests {
         assert!(slot.active.load().is_some());
         drop(borrow);
         assert!(slot.active.load().is_none());
+        assert_pool_outcomes(&slot, 2);
+        let (sender, receiver) = oneshot::channel::<()>();
+        let mut failed = Box::pin(PoolWaitSlot::borrow(&slot, receiver));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(failed.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(sender);
+        assert!(failed.await.is_err());
+        assert_pool_outcomes(&slot, 3);
+        assert!(
+            PoolWaitSlot::borrow(&slot, std::future::ready(Err::<(), ()>(())))
+                .await
+                .is_err()
+        );
+        assert_pool_outcomes(&slot, 3);
         drop(registration);
         assert!(runtime.pool_wait(&key).is_none());
     }
@@ -593,8 +640,10 @@ mod tests {
             ModelKind::Emitter,
             named::<EmitterName>("emitter"),
         );
-        let first = runtime.register_pool_wait(key.clone(), named("database"));
-        let replacement = runtime.register_pool_wait(key.clone(), named("database"));
+        let first =
+            runtime.register_pool_wait(key.clone(), named("database"), pool_metrics(&runtime));
+        let replacement =
+            runtime.register_pool_wait(key.clone(), named("database"), pool_metrics(&runtime));
         drop(first);
         let waiting = PoolWaitSlot::begin(&replacement.slot);
         assert!(runtime.pool_wait(&key).is_some());

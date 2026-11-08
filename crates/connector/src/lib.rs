@@ -69,15 +69,16 @@ pub use confirmation_window::{
 };
 pub use emitter::{
     AckConfirmation, BrokerPublishingMode, EmitterBoundedExecution, EmitterCommitReport,
-    EmitterEventReporter, EmitterFinish, EmitterFinishError, EmitterFinishResult,
+    EmitterConnector, EmitterEventReporter, EmitterFinish, EmitterFinishError, EmitterFinishResult,
     EmitterGeneralErrorHandler, EmitterHost, EmitterHostServices, EmitterHttpRequest,
-    EmitterLifecycle, EmitterOpenError, EmitterRecord, EmitterRecordAcknowledgementServices,
-    EmitterRecordAcknowledgements, EmitterRecordId, EmitterRecordPosition, EmitterRetryDelay,
-    EmitterRowRequest, EmitterStagedCommit, EmitterStagingDirectory, EmitterStartResult,
-    EmitterTransientErrorStatus, EmitterWriteError, EmitterWriteResult, HttpRequestEmitter,
-    MappedEmitterCarrier, MappedEmitterMember, MappedEmitterRows, PerRecordOutcome,
-    PerRecordOutcomeParts, PreparedRowRequest, PropertyValue, RecordDestination, RecordEmitter,
-    RecordEnvelope, RecordKey, RecordProperty, RejectedEmitterMember, RowEmitter,
+    EmitterLifecycle, EmitterLifecycleError, EmitterLifecycleResult, EmitterLifecycleStep,
+    EmitterOpenError, EmitterReadiness, EmitterRecord, EmitterRecordAcknowledgementServices,
+    EmitterRecordAcknowledgements, EmitterRecordId, EmitterRecordPosition, EmitterResume,
+    EmitterRetryDelay, EmitterRowRequest, EmitterStagedCommit, EmitterStagingDirectory,
+    EmitterStartResult, EmitterTransientErrorStatus, EmitterWriteError, EmitterWriteResult,
+    HttpRequestEmitter, MappedEmitterCarrier, MappedEmitterMember, MappedEmitterRows,
+    PerRecordOutcome, PerRecordOutcomeParts, PreparedRowRequest, PropertyValue, RecordDestination,
+    RecordEmitter, RecordEnvelope, RecordKey, RecordProperty, RejectedEmitterMember, RowEmitter,
     RowRequestEmitter, RowRequestPreparation, TypedRecordHeader,
 };
 pub use emitter_observation::{EmitterPayloadMeasurement, EmitterPayloadObserver};

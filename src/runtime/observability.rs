@@ -581,6 +581,23 @@ impl Runtime {
         let Ok(model_kind) = kind.to_ascii_lowercase().parse::<ModelKind>() else {
             return nervix_dataflow_graph::DataflowNodeHealth::default();
         };
+        if model_kind == ModelKind::Emitter
+            && self
+                .inner
+                .emitter_readiness
+                .get(&DomainNodeRef::node_in(
+                    domain.clone(),
+                    model_kind,
+                    identifier.clone(),
+                ))
+                .is_some_and(|ready| !ready.load(Ordering::Relaxed))
+        {
+            return nervix_dataflow_graph::DataflowNodeHealth {
+                status: nervix_dataflow_graph::DataflowNodeStatus::Waiting,
+                detail: Some("waiting for emitter transport readiness".to_string()),
+                reconnect_wait_millis,
+            };
+        }
         match self.pool_wait(&DomainNodeRef::node_in(
             domain.clone(),
             model_kind,

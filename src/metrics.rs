@@ -69,8 +69,9 @@ mod session;
 use command_execution::CommandExecutionMetrics;
 use connector::ConnectorInteractionMetrics;
 pub(crate) use connector::{
-    EmitterAttemptOperation, EmitterAttemptOutcome, EmitterInteractionMetrics, EmitterWork,
-    EmitterWorkKind, IngestorInteractionMetrics,
+    EmitterAttemptOperation, EmitterAttemptOutcome, EmitterFinishOutcome,
+    EmitterInteractionMetrics, EmitterOpenOutcome, EmitterRejectionCode, EmitterRetryCause,
+    EmitterWork, EmitterWorkKind, IngestorInteractionMetrics,
 };
 pub use interconnection::NodeObservations;
 use interconnection::{InterconnectionCollector, InterconnectionCollectorHandle};

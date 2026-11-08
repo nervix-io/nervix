@@ -1366,6 +1366,7 @@ pub(super) fn emitter_context() -> EmitterConnectorContext {
     let emitter = EmitterName::parse("output").assured("fixture emitter name is valid");
     let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
     EmitterConnectorContext {
+        readiness: runtime.register_emitter_readiness(&key),
         routing: StdArc::new(ArcSwap::from_pointee(DomainRoutingSnapshot::default())),
         metrics_dirty: BranchMetricsMark::default(),
         status: runtime.emitter_status(&key),

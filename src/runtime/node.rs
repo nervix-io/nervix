@@ -43,6 +43,7 @@ pub(in crate::runtime) struct RuntimeInner {
         DashMap<DomainNodeUnitRef, IngestorInstanceReadiness, RandomState>,
     pub(in crate::runtime) emitter_statuses:
         DashMap<DomainNodeRef, Arc<task_status::TaskStatus<EmitterRetryStatus>>, RandomState>,
+    pub(in crate::runtime) emitter_readiness: DashMap<DomainNodeRef, Arc<AtomicBool>, RandomState>,
     pub(in crate::runtime) emitter_confirmation_waits:
         DashMap<DomainNodeRef, Arc<AtomicUsize>, RandomState>,
     /// One connector instance per named client on this node, keyed by the client it belongs to and

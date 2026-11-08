@@ -19,7 +19,7 @@ use std::{
 use error_stack::{AttachmentKind, FrameKind};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
-    BrokerPublishingMode, EmitterFinish, EmitterHost, EmitterLifecycle as _, EmitterOpenError,
+    BrokerPublishingMode, EmitterConnector as _, EmitterFinish, EmitterHost, EmitterLifecycle as _,
     EmitterRecordId, RecordEmitter as _,
 };
 use nervix_execution::{AdmissionError, Executor, MemoryClass};
@@ -57,7 +57,8 @@ async fn connected_emitter(
         &FAST_RECONNECT,
         BrokerPublishingMode::NoAck,
         executor.clone(),
-    );
+    )
+    .await;
     let outcome = emitter
         .publish(vec![record(0, PARTITION_ZERO_KEYS[0], small_payload(0))])
         .await;
@@ -109,7 +110,7 @@ async fn send_held_records(
 async fn an_emitter_dropped_before_it_publishes_destroys_its_producer_on_a_connector_worker() {
     let cluster = cluster(1, 1);
     let executor = Executor::default();
-    let emitter = emitter_on(&cluster, &[], BrokerPublishingMode::NoAck, executor.clone());
+    let emitter = emitter_on(&cluster, &[], BrokerPublishingMode::NoAck, executor.clone()).await;
     let before = executor.snapshot().connector_storage;
 
     drop(emitter);
@@ -135,7 +136,8 @@ async fn a_finished_emitter_its_host_drops_destroys_its_producer_on_a_connector_
         &[],
         confirmed(1, Duration::from_secs(60)),
         executor.clone(),
-    );
+    )
+    .await;
     let outcome = emitter
         .publish(vec![record(0, PARTITION_ZERO_KEYS[0], small_payload(0))])
         .await;
@@ -252,7 +254,8 @@ async fn a_destruction_that_waits_for_the_polling_thread_waits_on_a_connector_wo
         &FAST_RECONNECT,
         BrokerPublishingMode::NoAck,
         executor.clone(),
-    );
+    )
+    .await;
     let hold = PollingThreadHold::waker();
     let mut probe = awaited_hand_over(
         &emitter,
@@ -311,7 +314,7 @@ async fn a_destruction_that_waits_for_the_polling_thread_waits_on_a_connector_wo
 async fn a_producer_destruction_waits_for_a_place_in_a_full_connector_queue() {
     let cluster = cluster(1, 1);
     let executor = single_connector_worker();
-    let emitter = emitter_on(&cluster, &[], BrokerPublishingMode::NoAck, executor.clone());
+    let emitter = emitter_on(&cluster, &[], BrokerPublishingMode::NoAck, executor.clone()).await;
     let full = FullConnectorQueue::fill(&executor).await;
     let before = executor.snapshot().connector_storage;
 
@@ -342,17 +345,20 @@ async fn a_producer_holds_the_charge_of_its_retirement_from_its_creation() {
         .try_reserve(MemoryClass::Commands, capacity)
         .assured("the test occupies the command budget before starting the emitter");
 
-    let refused = KafkaTopicEmitter::new(
+    let mut prepared = KafkaTopicEmitter::open(
         emitter_config(&cluster, &[], BrokerPublishingMode::NoAck),
         EmitterHost::new(SilentHost::on(executor.clone())),
-    );
+    )
+    .await
+    .assured("network-free configuration does not reserve a native producer");
+    let refused = prepared.resume().await;
 
     let Err(report) = refused else {
         panic!("a full commands budget refuses the producer's retirement charge");
     };
     assert_eq!(
         report.current_context(),
-        &EmitterOpenError::Initialize { connector: "kafka" }
+        &nervix_connector::EmitterLifecycleError::Resume { connector: "kafka" }
     );
     assert_eq!(
         report.downcast_ref::<KafkaProducerStartError>(),
@@ -378,7 +384,7 @@ async fn a_producer_holds_the_charge_of_its_retirement_from_its_creation() {
         })
     ));
     drop(occupied);
-    let emitter = emitter_on(&cluster, &[], BrokerPublishingMode::NoAck, executor.clone());
+    let emitter = emitter_on(&cluster, &[], BrokerPublishingMode::NoAck, executor.clone()).await;
     let charge = u64::try_from(std::mem::size_of::<KafkaProducer>())
         .assured("a producer handle's size fits in u64");
     assert_eq!(executor.snapshot().commands_memory.reserved_bytes, charge);

@@ -115,6 +115,10 @@ retained work, retries and confirmed source records before interpreting a throug
 For packing, exact byte boundaries, native containers, retry membership and the scope of measured
 tuning evidence, read [Emitter Batching](../../../docs/src/emitter-batching.md). Choose the policy
 from the entity's current declaration before applying its tuning guidance.
+For emitter recovery and shutdown inspection, read
+[Emitter outcomes and lifecycle](../../../docs/src/metrics-and-observability.md#emitter-outcomes-and-lifecycle)
+for record outcomes, retry causes and waits, acquisition, pool waits, finish outcomes and the
+current failure gauge in `/metrics` and `DESCRIBE EMITTER`.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
 Roto UDFs, ingestors for every connector and entity pair, junctions, reingestors, and session

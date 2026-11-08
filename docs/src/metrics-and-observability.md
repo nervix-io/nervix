@@ -528,7 +528,7 @@ replicated nor restored from snapshots, and removing a task does not withdraw it
 
 `DESCRIBE EMITTER` renders a `destination:` section after status and before the graph-edge
 `metrics:` section. The existing owner route also supplies this section when another node receives
-the command. Each counter line includes its full family and label selector, `total`, the wall
+the command. Each attempt counter line includes its full family and label selector, `total`, the wall
 average rate and the one-minute and fifteen-minute wall EMA rates. Domain rates are `-`, because
 an attempt has no domain timestamp. Each duration line includes its full selector, `count` and
 `sum_seconds`. For example:
@@ -538,6 +538,42 @@ destination:
   nervix_emitter_publish_attempts_total{domain="prod",emitter="notifications_out",physical_node_id="node-1",connector="REDIS",entity="PUBSUB",operation="publish",outcome="succeeded"} total=2 wall_rate_per_sec=0.5 domain_rate_per_sec=- wall_rate_ema_1m_per_sec=0.4 wall_rate_ema_15m_per_sec=0.1 domain_rate_ema_1m_per_sec=- domain_rate_ema_15m_per_sec=-
   nervix_emitter_publish_duration_seconds{domain="prod",emitter="notifications_out",physical_node_id="node-1",connector="REDIS",entity="PUBSUB",operation="publish"} count=2 sum_seconds=0.003
 ```
+
+### Emitter outcomes and lifecycle
+
+These host observations carry the same five identity labels as destination attempts. Every
+bounded child exists at zero when its emitter starts. Counters retain their process-local history
+across task restarts; the failure gauge describes the current task. `DESCRIBE EMITTER` includes
+every family in `destination:`, with its full selector and `total`, or `value` for the gauge.
+The two wait counters preserve fractional seconds.
+
+| Family | Additional label | Meaning |
+| --- | --- | --- |
+| `nervix_emitter_records_rejected_total` | `code="external\|oversize\|invalid\|encode"` | Source rows definitively refused by the destination, size limit, value validation or encoding. The host carries the class from the typed refusal site and counts a row when its message-error handling settles its rejection. A container encoding failure remains `encode` even when its public message error is `validation/encode`. |
+| `nervix_emitter_records_failed_total` | None | Previously unresolved source rows whose message-error handling completed after a terminal publish failure. Delivered, rejected and connector-staged rows are excluded. |
+| `nervix_emitter_records_retried_total` | None | Unresolved source rows selected by each retried host publish attempt, after transport acquisition. Drain retries count too. A staged commit alone presents no source rows again. |
+| `nervix_emitter_retries_total` | `cause="publish\|connect\|commit"` | Successfully scheduled retry deferrals and inline retry waits, classified by the typed operation being retried. |
+| `nervix_emitter_retry_wait_seconds_total` | None | Sum of the delays actually scheduled for those retries, rather than elapsed time or a suggested backoff. |
+| `nervix_emitter_opens_total` | `outcome="succeeded\|failed"` | Initial transport acquisition and every retained transport reacquisition. Failed local preparation counts once; successful local preparation delegates the outcome to acquisition. A ready instance requires no new acquisition. A cancelled acquisition counts as failed. |
+| `nervix_emitter_pool_waits_total` | None | Pending pooled-connection borrows that ended by success, failure or cancellation, attributed to the borrowing emitter. A borrow ready on its first poll contributes zero. |
+| `nervix_emitter_pool_wait_seconds_total` | None | Elapsed monotonic wall seconds of those pending borrows, including failed and cancelled waits. |
+| `nervix_emitter_confirmation_timeouts_total` | None | Host publish or commit attempts whose typed report contains `ConfirmationWindowError::AnswerTimedOut`, counted once per attempt. |
+| `nervix_emitter_finishes_total` | `outcome="nothing_held\|flushed\|unsent\|failed"` | Each transport finish's typed outcome. Cancellation before an answer counts as failed. |
+| `nervix_emitter_unsent_records_total` | None | Exact record counts reported by `EmitterFinishError::Unsent`, summed across finishes. |
+| `nervix_emitter_transient_failure` | None | `1` while the current task has a published host or connector failure, otherwise `0`. Ending the task resets the observation to `0`; an ending predecessor cannot clear its replacement. |
+
+These counters describe host attempts and source membership. A connector can perform several
+external calls during one attempt. Retrying a record with an uncertain result can duplicate its
+external delivery; an already resolved source row contributes no further retry count. The
+existing sent-traffic counter continues to count each delivered source row once.
+A forced flush or live drain inherits an already pending retry's classification on its first
+attempt, without scheduling another delay.
+
+The gauge samples the existing coherent failure publication. Clearing the host failure leaves a
+connector-owned failure visible, and clearing the connector failure leaves a host-owned failure
+visible. A successful reacquisition can therefore coexist with a failure while publication or
+commit still has unresolved work. Use the gauge with the retry families to distinguish current
+unavailability from historical failures and recovery attempts.
 
 ### Emitter payload preparation
 

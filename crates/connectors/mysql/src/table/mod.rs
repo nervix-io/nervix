@@ -59,6 +59,14 @@ use tracing::{debug, trace};
 mod pool_minimum;
 mod pool_policy;
 
+impl nervix_connector::EmitterConnector for MySqlTableEmitter {
+    const KIND: nervix_models::EmitterEntityKind = Self::KIND;
+    type Plan = MySqlTableEmitterConfig;
+    async fn open(plan: Self::Plan, host: EmitterHost) -> EmitterStartResult<Self> {
+        Self::prepare(plan, host)
+    }
+}
+
 #[cfg(test)]
 #[path = "client_tests.rs"]
 mod client_tests;
@@ -154,6 +162,7 @@ pub trait MySqlConnections: Send + Sync + 'static {
 
 /// What one MySQL emitter inserts with, from its typed emitter plan.
 pub struct MySqlTableEmitterConfig {
+    pub connections: Box<dyn MySqlConnections>,
     pub table: MySqlTableName,
     pub conflict_action: MySqlConflictAction,
     /// The emitter's `BATCH` limits, which bound the rows and the measured bytes of every insert.
@@ -404,12 +413,9 @@ impl MySqlTableEmitter {
             reason = "external Arrow access and MySQL driver insertion own their effects"
         )
     )]
-    pub fn new(
-        config: MySqlTableEmitterConfig,
-        connections: Box<dyn MySqlConnections>,
-        host: EmitterHost,
-    ) -> EmitterStartResult<Self> {
+    fn prepare(config: MySqlTableEmitterConfig, host: EmitterHost) -> EmitterStartResult<Self> {
         let MySqlTableEmitterConfig {
+            connections,
             table,
             conflict_action,
             batch,

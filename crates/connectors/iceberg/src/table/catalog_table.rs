@@ -8,8 +8,8 @@
 //!   the emitter uninitialized, with the catalog's error beneath.
 //! - **Depends on.** The `iceberg` crate's catalog interface and errors, the connector contract's
 //!   open failures, the vocabulary's catalog names, and `error-stack`.
-//! - **Must not know.** Staging, commits, acknowledgements, the host, or when the host opens the
-//!   emitter again.
+//! - **Must not know.** Staging, commits, acknowledgements, host scheduling or the policy that
+//!   retries transport acquisition.
 //!
 //! Nervix creates nothing in a catalog. A REST catalog answers the load of a table whose namespace
 //! does not exist exactly as it answers the load of a table that does not exist, with
@@ -53,8 +53,14 @@ impl IcebergCatalogTable<'_> {
     /// Loads the table from `catalog`.
     ///
     /// A namespace or table the catalog does not hold is the missing external entity an operator
-    /// provisions, and the host opens the emitter again until it exists. Any other catalog failure
-    /// leaves the emitter uninitialized, with the catalog's error beneath.
+    /// provisions, and the host retries the retained emitter's resume until it exists. Any other
+    /// catalog failure leaves the emitter uninitialized, with the catalog's error beneath.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "loads table metadata through the external Iceberg catalog \
+                                   driver's object-safe SDK contract; it calls no Nervix \
+                                   runtime owner")
+    )]
     pub(super) async fn load(&self, catalog: &dyn Catalog) -> EmitterStartResult<Table> {
         let ident = self.ident();
         let error = match catalog.load_table(&ident).await {
@@ -75,6 +81,12 @@ impl IcebergCatalogTable<'_> {
 
     /// What a catalog that answered it does not hold the table lacks: the table's namespace, or the
     /// table in a namespace it holds.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "asks the external Iceberg catalog driver for namespace \
+                                   metadata through its SDK contract; it calls no Nervix \
+                                   runtime owner")
+    )]
     async fn missing_entity(
         &self,
         catalog: &dyn Catalog,
