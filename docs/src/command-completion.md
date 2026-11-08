@@ -459,6 +459,20 @@ The public behavior is specified in
 The corresponding public scenario inventory is maintained in the repository's command-completion
 acceptance ledger.
 
+## Language completion
+
+Interactive language completion derives its expectations from the composed top-level Plexus
+grammar. Kinded endpoint, codec and connector heads are offered as one item, such as
+`HTTP ENDPOINT`, `WIRE JSON CODEC` or `KAFKA TOPIC INGESTOR`. Once selected, only that kind's body clauses and
+reference kinds are offered. Clients do not merge independent statement parsers' suggestions.
+The [statement-head contract](architecture.md#statement-heads-and-body-properties) defines those
+boundaries; the [CLI completion guide](client-tools-cli.md#completion) describes cursor edits
+and transaction-aware choices.
+
+These authoring requests remain available while an earlier administrative command is pending;
+they do not acknowledge or complete its effect. Command completion above retains its durable
+execution-reference and readiness contract.
+
 ## Parameter Changes
 
 `ALTER CLUSTER SET` uses ordinary durable command admission and exact recovery. Its effect records

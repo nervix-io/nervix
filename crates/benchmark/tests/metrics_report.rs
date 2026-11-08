@@ -1,28 +1,35 @@
+//! Current runtime metric shapes and execution-unit report invariants.
+//!
+//! Outside the layer order: a test harness.
+//! - **Owns.** Public parser, identity, persistence and diagnostic assertions.
+//! - **Depends on.** The benchmark API and vocabulary execution units.
+//! - **Must not know.** Runtime scheduling or connector implementation.
+
 use meticulous::ResultExt as _;
 use nervix_benchmark::{
     HistogramError, MetricSeries, MetricsReportError, NervixMetricsReport, PercentileError,
     PrometheusSampleError, Quantile, ReportEntry,
 };
-use nervix_models::ClusterNodeName;
+use nervix_models::{ClusterNodeName, Unit};
 
 const PROMETHEUS_FIXTURE: &str = r#"
 # HELP nervix_messages_total Total graph messages observed by Nervix runtime targets.
 # TYPE nervix_messages_total counter
-nervix_messages_total{direction="sent",domain="benchmark_run",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 6144
-nervix_batches_total{direction="sent",domain="benchmark_run",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 6
-nervix_messages_per_batch_bucket{direction="sent",domain="benchmark_run",le="500",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 0
-nervix_messages_per_batch_bucket{direction="sent",domain="benchmark_run",le="1024",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 4
-nervix_messages_per_batch_bucket{direction="sent",domain="benchmark_run",le="2048",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 6
-nervix_messages_per_batch_bucket{direction="sent",domain="benchmark_run",le="+Inf",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 6
-nervix_messages_per_batch_sum{direction="sent",domain="benchmark_run",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 6144
-nervix_messages_per_batch_count{direction="sent",domain="benchmark_run",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 6
-nervix_relay_buffer_len_bucket{direction="concrete",domain="benchmark_run",le="0",peer="",peer_kind="",physical_node_id="node-1",relay="ingested",target="ingested",target_kind="RELAY"} 4
-nervix_relay_buffer_len_bucket{direction="concrete",domain="benchmark_run",le="1",peer="",peer_kind="",physical_node_id="node-1",relay="ingested",target="ingested",target_kind="RELAY"} 6
-nervix_relay_buffer_len_bucket{direction="concrete",domain="benchmark_run",le="4",peer="",peer_kind="",physical_node_id="node-1",relay="ingested",target="ingested",target_kind="RELAY"} 9
-nervix_relay_buffer_len_bucket{direction="concrete",domain="benchmark_run",le="8",peer="",peer_kind="",physical_node_id="node-1",relay="ingested",target="ingested",target_kind="RELAY"} 10
-nervix_relay_buffer_len_bucket{direction="concrete",domain="benchmark_run",le="+Inf",peer="",peer_kind="",physical_node_id="node-1",relay="ingested",target="ingested",target_kind="RELAY"} 10
-nervix_relay_buffer_len_count{direction="concrete",domain="benchmark_run",peer="",peer_kind="",physical_node_id="node-1",relay="ingested",target="ingested",target_kind="RELAY"} 10
-nervix_messages_total{direction="sent",domain="another_domain",peer="ignored",peer_kind="RELAY",physical_node_id="node-1",relay="ignored",target="ignored",target_kind="INGESTOR"} 99
+nervix_messages_total{direction="sent",domain="benchmark_run",partition="-",instance="-",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 6144
+nervix_batches_total{direction="sent",domain="benchmark_run",partition="-",instance="-",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 6
+nervix_messages_per_batch_bucket{direction="sent",domain="benchmark_run",partition="-",instance="-",le="500",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 0
+nervix_messages_per_batch_bucket{direction="sent",domain="benchmark_run",partition="-",instance="-",le="1024",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 4
+nervix_messages_per_batch_bucket{direction="sent",domain="benchmark_run",partition="-",instance="-",le="2048",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 6
+nervix_messages_per_batch_bucket{direction="sent",domain="benchmark_run",partition="-",instance="-",le="+Inf",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 6
+nervix_messages_per_batch_sum{direction="sent",domain="benchmark_run",partition="-",instance="-",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 6144
+nervix_messages_per_batch_count{direction="sent",domain="benchmark_run",partition="-",instance="-",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 6
+nervix_relay_buffer_len_bucket{direction="concrete",domain="benchmark_run",partition="-",instance="-",le="0",peer="",peer_kind="",physical_node_id="node-1",relay="ingested",target="ingested",target_kind="RELAY"} 4
+nervix_relay_buffer_len_bucket{direction="concrete",domain="benchmark_run",partition="-",instance="-",le="1",peer="",peer_kind="",physical_node_id="node-1",relay="ingested",target="ingested",target_kind="RELAY"} 6
+nervix_relay_buffer_len_bucket{direction="concrete",domain="benchmark_run",partition="-",instance="-",le="4",peer="",peer_kind="",physical_node_id="node-1",relay="ingested",target="ingested",target_kind="RELAY"} 9
+nervix_relay_buffer_len_bucket{direction="concrete",domain="benchmark_run",partition="-",instance="-",le="8",peer="",peer_kind="",physical_node_id="node-1",relay="ingested",target="ingested",target_kind="RELAY"} 10
+nervix_relay_buffer_len_bucket{direction="concrete",domain="benchmark_run",partition="-",instance="-",le="+Inf",peer="",peer_kind="",physical_node_id="node-1",relay="ingested",target="ingested",target_kind="RELAY"} 10
+nervix_relay_buffer_len_count{direction="concrete",domain="benchmark_run",partition="-",instance="-",peer="",peer_kind="",physical_node_id="node-1",relay="ingested",target="ingested",target_kind="RELAY"} 10
+nervix_messages_total{direction="sent",domain="another_domain",partition="-",instance="-",peer="ignored",peer_kind="RELAY",physical_node_id="node-1",relay="ignored",target="ignored",target_kind="INGESTOR"} 99
 "#;
 
 #[test]
@@ -38,6 +45,7 @@ fn derives_target_batch_sizes_and_relay_percentiles_from_prometheus_histograms()
         Some(ClusterNodeName::parse("node-1").expect("valid name"))
     );
     assert_eq!(target.target, "kafka_in");
+    assert_eq!(target.unit, Unit::SINGLE);
     assert_eq!(target.direction, "sent");
     assert_eq!(target.relay, "ingested");
     assert_eq!(target.messages_total, 6_144);
@@ -50,11 +58,113 @@ fn derives_target_batch_sizes_and_relay_percentiles_from_prometheus_histograms()
     assert_eq!(report.relay_buffers.len(), 1);
     let relay = &report.relay_buffers[0];
     assert_eq!(relay.relay, "ingested");
+    assert_eq!(relay.unit, Unit::SINGLE);
     assert_eq!(relay.direction, "concrete");
     assert_eq!(relay.observations, 10);
     assert_eq!(relay.p50, 1.0);
     assert_eq!(relay.p90, 4.0);
     assert_eq!(relay.p99, 8.0);
+}
+
+#[test]
+fn keeps_partition_and_instance_series_distinct() {
+    let mut metrics = PROMETHEUS_FIXTURE.to_string();
+    for index in [0, 1] {
+        for (kind, label) in [("INGESTOR", "instance"), ("RELAY", "partition")] {
+            for line in PROMETHEUS_FIXTURE.lines().filter(|line| {
+                line.starts_with("nervix_") && line.contains(&format!("target_kind=\"{kind}\""))
+            }) {
+                metrics.push_str(
+                    &line.replace(&format!("{label}=\"-\""), &format!("{label}=\"{index}\"")),
+                );
+                metrics.push('\n');
+            }
+        }
+    }
+    let report = NervixMetricsReport::from_prometheus(&metrics, "benchmark_run")
+        .expect("current execution-unit labels retain each complete series");
+    assert_eq!(report.batch_targets.len(), 3);
+    assert_eq!(report.relay_buffers.len(), 3);
+    assert_eq!(
+        report
+            .batch_targets
+            .iter()
+            .map(|target| target.unit)
+            .collect::<Vec<_>>(),
+        [
+            Unit::SINGLE,
+            Unit::FIRST_INSTANCE,
+            Unit::try_instance(1).expect("valid instance")
+        ],
+    );
+    assert_eq!(
+        report
+            .relay_buffers
+            .iter()
+            .map(|relay| relay.unit)
+            .collect::<Vec<_>>(),
+        [Unit::SINGLE, Unit::partition(0), Unit::partition(1)],
+    );
+    assert!(
+        report
+            .batch_targets
+            .iter()
+            .all(|target| target.messages_total == 6_144)
+    );
+    assert!(
+        report
+            .relay_buffers
+            .iter()
+            .all(|relay| relay.observations == 10)
+    );
+    let directory = tempfile::tempdir().expect("temporary report directory");
+    let path = directory.path().join("nervix-metrics.toml");
+    report.write(&path).expect("write current unit identities");
+    assert_eq!(
+        NervixMetricsReport::read(&path).expect("read current unit identities"),
+        report
+    );
+    assert_eq!(
+        NervixMetricsReport::from_prometheus_scrapes(
+            [metrics.as_str(), metrics.as_str()],
+            "benchmark_run",
+        )
+        .expect("repeated complete scrapes retain each unit once"),
+        report,
+    );
+}
+
+#[test]
+fn execution_unit_label_errors_keep_their_typed_causes() {
+    let invalid_partition =
+        PROMETHEUS_FIXTURE.replace("partition=\"-\"", "partition=\"4294967296\"");
+    let error = NervixMetricsReport::from_prometheus(&invalid_partition, "benchmark_run")
+        .expect_err("the partition index must fit its vocabulary type");
+    assert!(matches!(
+        error.downcast_ref::<PrometheusSampleError>(),
+        Some(PrometheusSampleError::InvalidPartition { .. })
+    ));
+    assert!(error.contains::<std::num::ParseIntError>());
+
+    let invalid_instance =
+        PROMETHEUS_FIXTURE.replace("instance=\"-\"", "instance=\"18446744073709551615\"");
+    let error = NervixMetricsReport::from_prometheus(&invalid_instance, "benchmark_run")
+        .expect_err("the instance index must fit its vocabulary identity");
+    assert!(matches!(
+        error.downcast_ref::<PrometheusSampleError>(),
+        Some(PrometheusSampleError::InvalidInstance { .. })
+    ));
+    assert!(error.contains::<nervix_models::UnitIndexError>());
+
+    let conflicting = PROMETHEUS_FIXTURE
+        .replace("partition=\"-\"", "partition=\"0\"")
+        .replace("instance=\"-\"", "instance=\"0\"");
+    let error = NervixMetricsReport::from_prometheus(&conflicting, "benchmark_run")
+        .expect_err("one execution unit cannot name both dimensions");
+    assert!(matches!(
+        error.downcast_ref::<PrometheusSampleError>(),
+        Some(PrometheusSampleError::ConflictingUnitLabels { .. })
+    ));
 }
 
 #[test]
@@ -73,9 +183,9 @@ fn cluster_scrapes_do_not_count_the_same_node_label_twice() {
 #[test]
 fn rejects_a_batch_histogram_without_its_batch_counter() {
     let metrics = PROMETHEUS_FIXTURE.replace(
-        "nervix_batches_total{direction=\"sent\",domain=\"benchmark_run\",peer=\"ingested\",\
-         peer_kind=\"RELAY\",physical_node_id=\"node-1\",relay=\"ingested\",target=\"kafka_in\",\
-         target_kind=\"INGESTOR\"} 6\n",
+        "nervix_batches_total{direction=\"sent\",domain=\"benchmark_run\",partition=\"-\",\
+         instance=\"-\",peer=\"ingested\",peer_kind=\"RELAY\",physical_node_id=\"node-1\",relay=\"\
+         ingested\",target=\"kafka_in\",target_kind=\"INGESTOR\"} 6\n",
         "",
     );
 
@@ -183,6 +293,7 @@ fn names_the_histogram_and_the_property_that_does_not_hold() {
             direction: "sent".to_string(),
             relay: "ingested".to_string(),
             physical_node_id: Some(ClusterNodeName::parse("node-1").expect("valid name")),
+            unit: Unit::SINGLE,
         }
     );
     assert!(matches!(
@@ -227,9 +338,9 @@ fn names_the_stored_report_whose_entries_are_invalid() {
 }
 
 /// The labels of the fixture's ingestor target, which every batch metric of these tests describes.
-const TARGET_LABELS: &str = r#"direction="sent",domain="benchmark_run",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR""#;
+const TARGET_LABELS: &str = r#"direction="sent",domain="benchmark_run",partition="-",instance="-",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR""#;
 /// The labels of the fixture's relay buffer.
-const RELAY_LABELS: &str = r#"direction="concrete",domain="benchmark_run",peer="",peer_kind="",physical_node_id="node-1",relay="ingested",target="ingested",target_kind="RELAY""#;
+const RELAY_LABELS: &str = r#"direction="concrete",domain="benchmark_run",partition="-",instance="-",peer="",peer_kind="",physical_node_id="node-1",relay="ingested",target="ingested",target_kind="RELAY""#;
 
 fn sample(metric: &str, labels: &str, value: &str) -> String {
     format!("{metric}{{{labels}}} {value}")

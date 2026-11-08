@@ -10,7 +10,7 @@
 //! - **Depends on.** The session wire contract, the language layer — an edge may name the parser,
 //!   and this one does so for client-side parsing and completion — and the vocabulary.
 //! - **Must not know.** The registry, the runtime, or anything else inside the server. Everything
-//!   it learns arrives over the session protocol.
+//!   it learns about server state arrives over the session protocol.
 
 #![cfg_attr(
     nervix_lint,
@@ -43,6 +43,8 @@ mod upload;
 pub use backup::BackupDownloadError;
 pub use client::{Client, ExecutionHandle};
 pub use connection::{ConnectDns, ConnectOptions, TlsRequirement};
+#[cfg(feature = "arrow")]
+pub use consumer::EmitterBatchDecodeError;
 pub use consumer::{ConsumerConnection, ConsumerReopenReason, EmitterConsumer, EmitterDelivery};
 pub use domain_clock::{
     AttachedDomainClock, DomainClockEvent, DomainClockInterruption, DomainClockReadError,

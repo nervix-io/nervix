@@ -33,6 +33,8 @@ mod session;
 // models do not keep outside a Shuttle test.
 #[cfg(not(feature = "shuttle"))]
 mod consumers;
+#[cfg(feature = "arrow")]
+mod emitter_batches;
 #[cfg(not(feature = "shuttle"))]
 mod producers;
 

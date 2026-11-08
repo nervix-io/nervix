@@ -37,6 +37,12 @@ rustls failures. Ed25519 key preparation and signing retain AWS-LC's typed cause
 cryptography context; the NATS owner adds its configuration context or hands the complete report
 to the driver's authentication callback error, without rendering credentials.
 
+P-256 key generation, PKCS#8 import/export, signing and verification retain AWS-LC's typed
+`KeyRejected` or `Unspecified` cause beneath the corresponding `EcdsaP256Error` operation.
+Neither these contexts nor the private-key owners' `Debug` output contain key bytes. Digest
+inequality is a boolean outcome, and backend FIPS status is a typed observation rather than a
+key, signature or authentication refusal.
+
 Client CONFIG validation keeps vocabulary `ClientConfigSchemaError` beneath the registry's
 client/domain context. The server's changed-model binding validation runs connector-owned offline
 checks before standalone mutation or transaction commit. `OfflineClientConfigError` retains typed
@@ -2829,6 +2835,14 @@ execution reference and typed open refusal. It never reclassifies by message tex
 command disposition as a thrown operation error. A JNI library error stays at JNI's foreign
 boundary; an already pending Java exception is preserved. Checked native exports contain Rust
 unwinds at that boundary. Restoration events expose the shared client's message and retry wait.
+
+The shared Arrow delivery decoder reports `EmitterBatchDecodeError`: an unreadable stream, a
+schema mismatch, a missing or extra batch, an unreadable batch, or a row-count mismatch. An Arrow
+library error stays typed beneath its decoder context. Both the delivery method and the
+retained-bytes decoder return that report directly. The host failure owner projects a received
+delivery's report into `Protocol`. A host's local
+`Batch::decode` instead projects the same complete report into `InvalidArgument` at its reporting
+boundary. Neither path changes the exact schema, single-batch or member-count checks.
 
 Resource archive construction returns its first I/O failure beneath `BuildUploadArchive`.
 Reusing an upload identity for another archive returns the typed `UploadFailure::IdentityConflict`

@@ -14,7 +14,8 @@
 //!   subscription payload observations, declared scenario weights, admission fairness and the
 //!   per-node execution readings of timed probes.
 //!   It also registers causal reply/pause ordering checks for command recovery probes and
-//!   the in-process status reader's committed-uniform readiness cases.
+//!   the in-process status reader's committed-uniform readiness cases, and the client suite's
+//!   declared action/confirmation exchange.
 //! - **Depends on.** The node-liveness, node-startup, node-stop, phase-deadline, status-request,
 //!   port-pool, node-bound address, process-cluster convergence, cluster-teardown, scenario-phase,
 //!   suite-watchdog, Redis-client, HTTP-receiver, Iceberg-catalog-gate, backup phase, snapshot receive memory, gRPC-receiver,
@@ -47,6 +48,11 @@ mod command_probe_tests;
 mod snapshot_receive_memory;
 #[path = "common/snapshot_receive_memory_tests.rs"]
 mod snapshot_receive_memory_tests;
+
+#[path = "common/client_suites/actions.rs"]
+mod client_suite_actions;
+#[path = "common/client_suites/actions_tests.rs"]
+mod client_suite_actions_tests;
 
 #[path = "common/cluster/status.rs"]
 mod cluster_status;

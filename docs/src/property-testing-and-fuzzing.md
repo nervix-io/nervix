@@ -66,6 +66,8 @@ records their scope without treating a passing qualification as a completed camp
 
 | ID | Package and invariant | Domain | Ordinary cases | Input limit |
 | --- | --- | --- | ---: | ---: |
+| `crypto-p256-keys` | `nervix-crypto` complete PKCS#8 DER equality, public-point/coordinate equality and signing capability through import/export | valid nonzero P-256 scalars from up to 32 bytes, v1 | 128 | 32 bytes |
+| `crypto-p256-signatures` | `nervix-crypto` fixed P-256/SHA-256 signatures bind the complete message and public key, refuse flipped message/signature bits and preserve all 64 signature bytes | binary messages, including empty and 4096-byte boundaries, v1 | 128 | 4096 bytes |
 | `crypto-sha2-digests` | `nervix-crypto` complete SHA-256/SHA-512 equality against independent RustCrypto digests and incremental SHA-256 segmentation equality | arbitrary binary inputs and updates split at 1, 7, 64 and 128 bytes, v1 | 256 | 4096 bytes |
 | `nats-subject-grammar` | `nervix-models` accepted subscription names obey Nervix's byte, character and token bounds; accepted publication names are literal subscription names | bounded malformed subject text with separators, wildcards, whitespace, controls and UTF-8, v1 | 256 | 1152 bytes |
 | `nats-user-authentication` | `nervix-connector-nats` compares every seed byte and exact seed/public-key encoding with the independent SDK, preserves its credentials JWT and signs nonces that the SDK verifies | 32-byte user seeds and nonces up to 64 bytes, directly and in decorated credentials, v2 | 256 | 128 bytes |
@@ -229,6 +231,10 @@ records their scope without treating a passing qualification as a completed camp
 | `typed-gate-baseline` | `nervix-ratchet` structural baseline file round trip | every declared count with independently generated bounded values, v1 | 256 | 32 bytes |
 | `typed-gate-product-graph` | `nervix-ratchet` exact depth-prefixed release-tree edges and malformed-depth refusal | up to two trees of twelve generated package edges each with bounded nesting, v1 | 256 | 32 bytes |
 | `typed-audit-report` | `nervix-ratchet audit` complete report equality, deterministic JSON and Markdown | all eight patterns, five suggestions, nullable contexts, spans/origins, rules, rewrites and summaries with Unicode, v1 | 256 | 32 bytes |
+
+The Rust runner, gate, audit and diagnostic-owner applicability check consume the same typed
+compiler evidence. The runner properties above own its persisted representations; readers add
+deterministic checks of their projections without introducing a second report shape or decoder.
 | `typed-site-union` | `nervix-lint-report` authored-site deduplication preserves every configuration | repeated ordinary/modeled findings over bounded current sites, with complete current reports, v3 | 256 | 32 bytes |
 | `typed-source-syntax` | `nervix-lint-report` exact cast/field counts and complete source/site representation equality | bounded inactive Rust casts, testing-gated tuple fields, raw identifiers and Unicode comments with exact locations, v1 | 256 | 32 bytes |
 | `typed-hidden-tunables` | `nervix-lint-report` complete numeric policy site equality and source/site JSON round trips | bounded numeric constants, literal capacities, inactive and macro source, fixed contracts and test exclusions with exact locations, v1 | 256 | 32 bytes |
