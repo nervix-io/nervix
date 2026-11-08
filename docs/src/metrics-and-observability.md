@@ -532,6 +532,9 @@ destination:
 
 ### Emitter payload preparation
 
+The [Emitter Batching](./emitter-batching.md#inspection-and-tuning) architecture chapter connects
+these observations to packing boundaries, retry ownership and scoped performance measurements.
+
 Payload observations use the same five identity labels as destination attempts. They have no
 branch-key, record, request or error-text label. Every child exists at zero when its emitter starts.
 `DESCRIBE EMITTER` includes the same totals in its owner-routed `destination:` section.

@@ -360,3 +360,178 @@ tier = "cluster"
 host = "python"
 identity = "cluster/test_subscriptions.py::test_a_deleted_subscription_frees_its_name_for_a_new_generation"
 tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.ArgumentTests#aSilentListenerEndsAtTheConnectDeadline"
+tier = "boundary"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.ArgumentTests#fieldLevelsAndMalformedIpcAreRefusedAsTypedArguments"
+tier = "boundary"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.ArgumentTests#invalidDurationsHaveTypedFailuresAndClosedHandlesRefuseCalls"
+tier = "boundary"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.BoundaryTests#cancellation"
+tier = "boundary"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.BoundaryTests#cleanup"
+tier = "boundary"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.BoundaryTests#columns"
+tier = "boundary"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.BoundaryTests#concurrentLeaseCleanup"
+tier = "boundary"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.ReentrantClose#admittedGetterSurvivesReentrantClose"
+tier = "boundary"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.VocabularyTests#everyEnumerationKeepsItsMembersAndCodes"
+tier = "boundary"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.VocabularyTests#everyTypedFailureIsAClientExceptionWithItsClassification"
+tier = "boundary"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.VocabularyTests#recordsExposeTheirComponentsAndUseJavaValueEquality"
+tier = "boundary"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.ClockTests#aLostSessionRestoresItsClockAttachmentBeforeDeliveringTicks"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.ClockTests#detachingEndsTheAttachmentAndClockWaitsCanBeCancelled"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.ClockTests#readsProjectsAndFollowsClockGenerationsThroughStopAndStart"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.ClusterTests#aBackupAndAnUncertainBackupRecoverUnderTheirPreparedReferences"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.ClusterTests#aSharedSessionMakesProgressWhileAnotherThreadWaitsAndCancels"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.ClusterTests#cancellationAndDeadlineKeepThePreparedIdentityForRecovery"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.ClusterTests#completesStatementsAndContinuesEveryPage"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.ClusterTests#connectsWithEveryTlsRequirementAndTimeoutOption"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.ClusterTests#credentialsTrustAndUnavailableSeedsProduceTypedConnectFailures"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.ClusterTests#executesPreparedCommandsAndReadsDiagnostics"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.ClusterTests#malformedLocalIpcIsAnArgumentFailureWithNoServerOperation"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.ClusterTests#opensRefusedByTheClusterKeepTheTypedRefusal"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.ClusterTests#packagedJarLoadsOnAFreshJvm"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.ClusterTests#producerAndConsumerCarryTheirDescriptionsAndExactColumnarValues"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.ClusterTests#releasesInterestWithoutCancellingEffectsAndRefusesForeignIpc"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.ClusterTests#retriesKeepDeliveryIdentityAndRejectsReportProcessingFailure"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.ClusterTests#subscriptionsReadTypedColumnsNullsRedactionAndRetainedFrames"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.RecoveryTests#aLostConsumerRestoresTheDeliveryIdentityAndFencesItsEarlierAttempt"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.RecoveryTests#aLostPublishingSessionLeavesTheHeldSubmissionUnknownThenRestores"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.RecoveryTests#aLostSessionRestoresSubscriptionsAndReportsARemovedRelay"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.RecoveryTests#aProducerKeepsItsSessionAndDeliveryViewsKeepTheirNativeData"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.RecoveryTests#cancellationAfterAnObservedEffectRecoversTheSamePreparedExecution"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.RecoveryTests#changingAContractSuspendsAdmissionAndRequiresAnExplicitReopen"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.RecoveryTests#creditWaitsWithoutSubmittingAndResolvedReleaseHandsOverTheOutcome"
+tier = "cluster"

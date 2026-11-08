@@ -12,6 +12,8 @@ the resulting Arrow batches inside the graph.
 ingestor and emitter plans to the host.
 [HTTP Emitter Architecture](./http-emitter-architecture.md) follows this boundary for one
 outbound request, from Arrow preparation to response and recovery.
+[Emitter Batching](./emitter-batching.md) follows compatible rows through bounded encoding,
+retained membership, native publication outcomes and the separate flush, request and commit units.
 
 ## Connector and entity kinds
 
@@ -22,6 +24,9 @@ ingestors therefore have distinct kinds, as do OTEL logs, traces and metrics emi
 that serves one entity still names that entity explicitly.
 
 ### Statement heads and references
+
+The general [statement-head contract](architecture.md#statement-heads-and-body-properties) owns
+kind selection, body properties and addressing. Connector declarations specialize that contract.
 
 Plexus selects these identities in the statement head:
 

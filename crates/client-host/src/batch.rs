@@ -146,7 +146,7 @@ impl<'a> LevelData<'a> {
 impl Batch {
     /// Decodes the batch a delivery carried, held to its consumer's schema and its row count.
     pub(crate) fn delivered(delivery: &EmitterDelivery, schema: Schema) -> Result<Self, Failure> {
-        let batch = delivery.record_batch().map_err(Failure::from)?;
+        let batch = delivery.record_batch().map_err(Failure::received_batch)?;
         Ok(Self {
             batch,
             schema,
@@ -158,7 +158,12 @@ impl Batch {
     /// exactly as the Rust client decodes a delivery, and keeps the stream as the batch's own.
     pub fn decode(ipc: Bytes, schema: Schema, rows: u32) -> Result<Self, Failure> {
         let batch = EmitterDelivery::decode_record_batch(schema.fields(Part::Rows), &ipc, rows)
-            .map_err(Failure::from)?;
+            .map_err(|error| {
+                Failure::new(
+                    FailureKind::InvalidArgument,
+                    format!("invalid `ipc` argument: {error:#}"),
+                )
+            })?;
         Ok(Self {
             batch,
             schema,
@@ -421,3 +426,7 @@ impl Batch {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "batch_tests.rs"]
+mod tests;
