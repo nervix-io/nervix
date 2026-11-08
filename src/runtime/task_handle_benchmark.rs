@@ -96,7 +96,6 @@ impl TaskHandleBenchmark {
                 id: domain.clone(),
                 config: nervix_models::DomainConfig {
                     pace: DomainPace::Unpaced,
-                    placement: nervix_models::PlacementPolicy::Neutral,
                 },
                 status: DomainStatus::Running,
                 start_version: 0,

@@ -106,22 +106,6 @@ fn schedule_commands(inputs: &DomainPlanningInputs) -> Vec<ConsensusCommand> {
             inputs: Box::new(inputs.clone()),
             schedule: Some(Box::new(schedule.clone())),
         },
-        ConsensusCommand::PutDomainAndSchedule {
-            inputs: Box::new(inputs.clone()),
-            domain: Box::new(DomainState {
-                id: inputs.domain().clone(),
-                config: nervix_models::DomainConfig {
-                    pace: nervix_models::DomainPace::Unpaced,
-                    placement: nervix_models::PlacementPolicy::Neutral,
-                },
-                status: DomainStatus::Stopped,
-                start_version: 0,
-                last_start: nervix_models::DomainStartPoint::Resume,
-                clock: None,
-            }),
-            schedule: Some(Box::new(schedule)),
-            mutation: None,
-        },
     ]
 }
 
@@ -179,14 +163,16 @@ fn planning_parameter_fence_preserves_existing_conflict_precedence() {
     let domain = DomainName::parse("orders").assured("orders is an identifier-shaped literal");
     let captured = state.domain_planning_inputs(&domain);
     publish_timeout(&mut state, 20);
-    let ConsensusCommand::PutDomainAndSchedule {
-        domain: changed, ..
-    } = schedule_commands(&captured)
-        .pop()
-        .assured("the four-entry fixture sequence ends with the domain writer")
-    else {
-        panic!("the last fixture writer changes domain state");
-    };
+    let changed = Box::new(DomainState {
+        id: domain.clone(),
+        config: nervix_models::DomainConfig {
+            pace: nervix_models::DomainPace::Unpaced,
+        },
+        status: nervix_models::DomainStatus::Stopped,
+        start_version: 0,
+        last_start: nervix_models::DomainStartPoint::Resume,
+        clock: None,
+    });
     let applied = apply_consensus_command(
         &mut state,
         &ConsensusCommand::PutDomain {

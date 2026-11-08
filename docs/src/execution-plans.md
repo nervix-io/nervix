@@ -58,6 +58,12 @@ A changed unit lifetime replaces its publication while retaining reusable compil
 Processor, generator and placement-task ownership is unit-qualified, so an assignment delta ends
 only lost units and preserves unchanged sibling supervisors, checkpoint writers and replica polls.
 
+Placement decisions classify direct hops by the correspondence of their execution units.
+Effective hard policies form groups of exact `NodeUnitRef` bonds: identity maps matching indices,
+and fiber maps each producer to its declared recipient. Domain-wide and corridor rules use the
+same precedence and validation before a schedule exists. The execution revision consumes the
+resulting unit groups; it does not reinterpret placement Models.
+
 Ingestor entrypoints are keyed by `NodeUnitRef`. Planning lowers the common input declaration and
 routes once, then binds each unit's identity and Kafka primary into its start plan. Validation
 requires the complete declared unit set before a plan can run. The runtime registers ingestors,

@@ -632,8 +632,7 @@ impl ScheduledNode {
             .assured("this operation selects a node with exactly one execution unit")
     }
 
-    /// The first unit of this node in unit order. A placement group places every unit of each
-    /// member together, so for a grouped node it stands for the placement of each of its units.
+    /// The first unit of this node in unit order.
     pub fn first_unit(&self) -> &ScheduledUnit {
         self.units
             .values()
@@ -641,8 +640,7 @@ impl ScheduledNode {
             .assured("every scheduled node is scheduled as at least one unit")
     }
 
-    /// Places every unit of this node on `assigned`, with `primary` owning its state, as a
-    /// placement group places each of its members.
+    /// Places every unit of this node on `assigned`, with `primary` owning its state.
     pub fn place_every_unit(
         &mut self,
         primary: Option<ClusterNodeName>,
@@ -654,8 +652,7 @@ impl ScheduledNode {
         }
     }
 
-    /// Records `transition` as the ownership move of every unit of this node, as a placement group
-    /// moves each of its members whole.
+    /// Records `transition` as the ownership move of every unit of this node.
     pub fn record_ownership_transition_of_every_unit(&mut self, transition: &OwnershipTransition) {
         for unit in self.units.values_mut() {
             unit.ownership_transition = Some(transition.clone());
@@ -847,6 +844,15 @@ impl ScheduledNode {
             if let Some(generations) = unit.wasm_state_generations.as_mut() {
                 generations.begin_every_branch();
             }
+        }
+    }
+
+    /// Start a new guest-state lifetime only for the unit whose owner state is replaced.
+    pub fn begin_wasm_unit_state_generation(&mut self, identity: Unit) {
+        if let Some(unit) = self.units.get_mut(&identity)
+            && let Some(generations) = unit.wasm_state_generations.as_mut()
+        {
+            generations.begin_every_branch();
         }
     }
 

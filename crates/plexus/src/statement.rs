@@ -26,7 +26,6 @@ pub fn statement_parser<'src>()
 -> impl Parser<'src, &'src [Token], Statement, extra::Err<ParseError<'src>>> + Clone {
     let domain_and_core = boxed_choice!(
         crate::domain::create_domain_parser().map(Statement::CreateDomain),
-        crate::domain::alter_domain_parser().map(Statement::AlterDomain),
         crate::create_resource::create_resource_parser().map(Statement::CreateResource),
         crate::domain::start_domain_parser().map(Statement::StartDomain),
         crate::domain::stop_domain_parser().map(Statement::StopDomain),
@@ -253,15 +252,11 @@ fn open_statement_tail(statement: &Statement, tokens: &[Token], normalized: &str
         } else {
             vec![";".to_string(), "FOR".to_string()]
         }
-    } else if normalized.starts_with("CREATE ")
-        && normalized.contains(" DOMAIN ")
-        && !normalized.contains(" PLACEMENT ")
-    {
-        vec![";".to_string(), "PLACEMENT".to_string()]
-    } else if normalized.starts_with("CREATE ")
-        && normalized.contains(" PLACEMENT ")
-        && !normalized.contains(" DOMAIN ")
-        && !normalized.contains(" RANK ")
+    } else if matches!(statement, Statement::CreateDomain(_)) {
+        vec![";".to_string()]
+    } else if let Statement::Create(create) = statement
+        && let Model::Placement(placement) = create.body.as_ref()
+        && placement.rank.is_none()
     {
         vec![";".to_string(), "RANK".to_string()]
     } else if (normalized.starts_with("RELOCATE ")

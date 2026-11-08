@@ -703,7 +703,7 @@ Feature: Plexus transactions
       """
     When client "contender" fails to execute these Plexus commands
       """
-      ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
+      CREATE PLACEMENT local_execution DOMAIN WIDE REQUIRE COLOCATION;
       """
     Then the last command error contains
       """
