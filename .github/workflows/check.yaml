@@ -1569,7 +1569,7 @@ jobs:
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
       NERVIX_TEST_CONCURRENCY_FACTOR: "2"
-      # The forty-seven probe scenarios took 17 seconds in Check run 42325403607, and the two host
+      # The forty-seven probe scenarios took 17 seconds in Check run 42325403607, and the host
       # suite scenarios, which start first, bound their runners at ten minutes. A short budget leaves
       # the builds before them up to 40 minutes of the job limit instead of the suite job's 25.
       NERVIX_TEST_SUITE_BUDGET: "15m"
@@ -1712,6 +1712,11 @@ jobs:
       # The Python package's suite on its boundary tier, from the environment the build prepared.
       - name: Python package boundary tier
         run: just test-client-python-api-run
+
+      - name: C and C++ boundary tiers with and without sanitizers
+        run: |
+          just test-client-native-api-run c
+          just test-client-native-api-run cpp
 
       - name: Client conformance and host suites
         run: just test-client-conformance-run
@@ -2036,6 +2041,18 @@ jobs:
         if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-primitive-boundary
 
+      # The readers' tests resolve the JVM suite through Java 21 compiler trees, as validation does.
+      - name: Setup Java for the client suite readers
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Client suite surface and inventory reader coverage
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
+        run: just coverage-client-suites-runner
+
       # The completed doctests no longer need their compiled outputs. Keep their evidence while
       # making room for the separately instrumented benchmark build.
       - name: Reclaim completed documentation builds
@@ -2145,6 +2162,7 @@ jobs:
             target/connector-matrix/python.lcov
             target/ci-selection/python.lcov
             target/wasm-bindgen-coverage/python.lcov
+            target/client-suites/python.lcov
             target/coverage-source-root.txt
             target/typed-ratchet/cache-qualification/**/qualification.json
           if-no-files-found: ignore
