@@ -64,7 +64,7 @@ pub enum AlgorithmSelectionError {
 
 macro_rules! algorithms {
     ($algorithm:ident, $selection:ident, $kind:ident, $archived:ident;
-     $($variant:ident = ($id:expr, $name:literal, $approved:literal $(, $alias:literal)*)),+ $(,)?) => {
+     $($variant:ident = ($id:expr, $name:literal, $approved:literal, $preference:literal $(, $alias:literal)*)),+ $(,)?) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
                  Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
                  strum::EnumString, strum::IntoStaticStr)]
@@ -75,7 +75,23 @@ macro_rules! algorithms {
         }
 
         impl $algorithm {
-            pub const ALL: &'static [Self] = &[$(Self::$variant,)+];
+            /// Complete membership in alias preference order. The explicit ranks keep preference
+            /// independent of enum discriminants and serialization identities.
+            pub const ALL: &'static [Self] = &{
+                let declared = [$(Self::$variant,)+];
+                let mut ordered = declared;
+                let mut occupied = [$( { let _ = Self::$variant; false },)+];
+                let mut index = 0;
+                while index < declared.len() {
+                    let rank = match declared[index] { $(Self::$variant => $preference,)+ };
+                    assert!(rank < declared.len(), "algorithm preference is within the catalog");
+                    assert!(!occupied[rank], "algorithm preference ranks are unique");
+                    occupied[rank] = true;
+                    ordered[rank] = declared[index];
+                    index += 1;
+                }
+                ordered
+            };
             pub const ACCEPTED_NAMES: &'static [&'static str] = &[$($name, $($alias,)* )+];
 
             pub const fn iana(self) -> u16 {
@@ -233,25 +249,25 @@ macro_rules! algorithms {
 }
 
 algorithms! { TlsCipherSuite, TlsCipherSuites, CipherSuite, ArchivedTlsCipherSuites;
-    Aes256GcmSha384 = (0x1302, "TLS13_AES_256_GCM_SHA384", true, "TLS_AES_256_GCM_SHA384"),
-    Aes128GcmSha256 = (0x1301, "TLS13_AES_128_GCM_SHA256", true, "TLS_AES_128_GCM_SHA256"),
-    ChaCha20Poly1305Sha256 = (0x1303, "TLS13_CHACHA20_POLY1305_SHA256", false, "TLS_CHACHA20_POLY1305_SHA256"),
-    EcdheEcdsaAes256GcmSha384 = (0xc02c, "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384", true),
-    EcdheEcdsaAes128GcmSha256 = (0xc02b, "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256", true),
-    EcdheEcdsaChaCha20Poly1305Sha256 = (0xcca9, "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256", false),
-    EcdheRsaAes256GcmSha384 = (0xc030, "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384", true),
-    EcdheRsaAes128GcmSha256 = (0xc02f, "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", true),
-    EcdheRsaChaCha20Poly1305Sha256 = (0xcca8, "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256", false),
+    Aes256GcmSha384 = (0x1302, "TLS13_AES_256_GCM_SHA384", true, 0, "TLS_AES_256_GCM_SHA384"),
+    Aes128GcmSha256 = (0x1301, "TLS13_AES_128_GCM_SHA256", true, 1, "TLS_AES_128_GCM_SHA256"),
+    ChaCha20Poly1305Sha256 = (0x1303, "TLS13_CHACHA20_POLY1305_SHA256", false, 2, "TLS_CHACHA20_POLY1305_SHA256"),
+    EcdheEcdsaAes256GcmSha384 = (0xc02c, "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384", true, 3),
+    EcdheEcdsaAes128GcmSha256 = (0xc02b, "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256", true, 4),
+    EcdheEcdsaChaCha20Poly1305Sha256 = (0xcca9, "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256", false, 5),
+    EcdheRsaAes256GcmSha384 = (0xc030, "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384", true, 6),
+    EcdheRsaAes128GcmSha256 = (0xc02f, "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", true, 7),
+    EcdheRsaChaCha20Poly1305Sha256 = (0xcca8, "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256", false, 8),
 }
 
 algorithms! { TlsKeyExchangeGroup, TlsKeyExchangeGroups, KeyExchangeGroup, ArchivedTlsKeyExchangeGroups;
-    X25519 = (0x001d, "X25519", false),
-    Secp256r1 = (0x0017, "secp256r1", true),
-    Secp384r1 = (0x0018, "secp384r1", true),
-    X25519MlKem768 = (0x11ec, "X25519MLKEM768", true),
-    Secp256r1MlKem768 = (0x11eb, "secp256r1MLKEM768", true),
-    MlKem768 = (0x0201, "MLKEM768", true),
-    MlKem1024 = (0x0202, "MLKEM1024", true),
+    X25519 = (0x001d, "X25519", false, 1),
+    Secp256r1 = (0x0017, "secp256r1", true, 2),
+    Secp384r1 = (0x0018, "secp384r1", true, 3),
+    X25519MlKem768 = (0x11ec, "X25519MLKEM768", true, 0),
+    Secp256r1MlKem768 = (0x11eb, "secp256r1MLKEM768", true, 4),
+    MlKem768 = (0x0201, "MLKEM768", true, 5),
+    MlKem1024 = (0x0202, "MLKEM1024", true, 6),
 }
 
 impl TlsCipherSuite {

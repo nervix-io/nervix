@@ -88,7 +88,11 @@ order. The full catalog is:
 | Selection | Exact rustls names, in catalog order |
 | --- | --- |
 | Cipher suites | `TLS13_AES_256_GCM_SHA384`, `TLS13_AES_128_GCM_SHA256`, `TLS13_CHACHA20_POLY1305_SHA256`, `TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384`, `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256`, `TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256`, `TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384`, `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`, `TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256` |
-| Key exchange groups | `X25519`, `secp256r1`, `secp384r1`, `X25519MLKEM768`, `secp256r1MLKEM768`, `MLKEM768`, `MLKEM1024` |
+| Key exchange groups | `X25519MLKEM768`, `X25519`, `secp256r1`, `secp384r1`, `secp256r1MLKEM768`, `MLKEM768`, `MLKEM1024` |
+
+Alias expansion starts with `X25519MLKEM768` to preserve the product's post-quantum preference.
+Explicit names before an alias can select another preference. Preference ranks are declared with
+the catalog and remain independent of serialized enum identities.
 
 The TLS 1.3 suites also accept their IANA spellings `TLS_AES_256_GCM_SHA384`,
 `TLS_AES_128_GCM_SHA256` and `TLS_CHACHA20_POLY1305_SHA256`. `default` expands to the complete

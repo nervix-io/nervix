@@ -47,6 +47,11 @@ mod tests {
         let groups = TlsKeyExchangeGroups::resolve(["default"]).assured("the catalog alias exists");
         let provider = algorithm_provider(suites, groups);
         assert_eq!(
+            provider.cipher_suites.len(),
+            aws_lc_rs::ALL_CIPHER_SUITES.len()
+        );
+        assert_eq!(provider.kx_groups.len(), aws_lc_rs::ALL_KX_GROUPS.len());
+        assert_eq!(
             provider
                 .cipher_suites
                 .iter()
@@ -62,5 +67,19 @@ mod tests {
                 .collect::<Vec<_>>(),
             groups.iter().map(|g| g.iana()).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn both_aliases_preserve_the_products_post_quantum_first_offer() {
+        for alias in ["fips", "default"] {
+            let provider = algorithm_provider(
+                TlsCipherSuites::resolve([alias]).assured("declared alias"),
+                TlsKeyExchangeGroups::resolve([alias]).assured("declared alias"),
+            );
+            assert_eq!(
+                provider.kx_groups[0].name(),
+                rustls::NamedGroup::X25519MLKEM768
+            );
+        }
     }
 }

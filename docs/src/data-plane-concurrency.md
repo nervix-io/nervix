@@ -3618,11 +3618,15 @@ failure status has a separate owner. A retiring handle cannot update or remove i
 
 `nervix-tls` publishes cipher suites and key-exchange groups together through one node-owned
 `ArcSwap`. Each client/server template holds one bounded cache behind a blocking mutex: at most one
-applied algorithm snapshot and one resolved configuration. A capture loads the pair once and reuses its original template without locking or cloning the
-configuration when its provider is still current. Otherwise it reuses a matching cache entry, or
+applied algorithm snapshot and one resolved configuration. A capture loads the pair once and reuses
+its original template without locking or cloning the configuration when its provider is still
+current. Otherwise it reuses a matching cache entry, or
 replaces it with a complete configuration retaining that template's trust,
 identity, ALPN, versions and resumption. The resolved configuration has no resolver, preventing a
 cache/template ownership cycle. Cloning a template creates an independent empty cache.
+New connections can open during ordinary connector execution. The capture's bounded execution
+contract is keyed by one configuration template: one cache entry and one synchronous configuration
+clone, with no guard held across an await.
 
 The production-owner Shuttle check
 `shuttle_tests::shuttle_capture_racing_publication_keeps_one_complete_pair_and_the_retained_snapshot`

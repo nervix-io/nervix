@@ -99,6 +99,17 @@ macro_rules! selection {
             cache: Mutex<Option<(StdArc<Algorithms>, StdArc<$config>)>>,
         }
         impl $trait for $name {
+            #[cfg_attr(
+                nervix_lint,
+                nervix::context(
+                    bounded,
+                    reason = "captures one configuration for a new TLS connection, including \
+                              connections opened during ordinary connector execution",
+                    key = "one TLS configuration template",
+                    bound = "one cache entry and one synchronous configuration clone; no guard \
+                             across await"
+                )
+            )]
             fn resolve(
                 &self,
                 template: &StdArc<$config>,
