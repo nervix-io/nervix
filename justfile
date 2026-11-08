@@ -1617,6 +1617,10 @@ test-websockets *args:
 test-websockets-shuttle check:
     SHUTTLE_TRACE_DIR={{ quote(cargo_target_dir + "/shuttle-failures/nervix-connector-websockets/" + check) }} cargo test --package nervix-connector-websockets --features shuttle --lib {{ quote(check) }} -- --exact --nocapture --test-threads=1
 
+# Diagnose one Syslog handoff check through its production owner and replayable schedules.
+test-syslog-shuttle check:
+    SHUTTLE_TRACE_DIR={{ quote(cargo_target_dir + "/shuttle-failures/nervix-connector-syslog/" + check) }} cargo test --package nervix-connector-syslog --features shuttle --lib {{ quote(check) }} -- --exact --nocapture --test-threads=1
+
 # Explore one client owner and its nondeterminism check without unrelated server test roots.
 # The inventory and complete package selection remain qualified by test-shuttle in CI.
 test-client-shuttle check:

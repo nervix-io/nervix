@@ -831,14 +831,21 @@ fn shuttle_a_decoded_frame_racing_suspension_is_handed_off_once() {
             assert_eq!(second.payload, b"second");
             for frame in [first, second] {
                 use nervix_connector::{
-                    RetainedIngestMetadata, RetainedIngestMetadataValue as Value,
+                    IngestMessageMetadata as _, RetainedIngestMetadata,
+                    RetainedIngestMetadataValue as Value,
                 };
+                let payload_bytes = frame.payload.len();
+                let message = SyslogListenerIngestorMessage::new(frame.payload, frame.peer);
+                let retained = RetainedIngestMetadata::capture(&message);
+                drop(message);
+                assert_eq!(retained.payload_bytes(), payload_bytes);
                 assert_eq!(
-                    RetainedIngestMetadata::capture(&frame.peer).values(),
+                    retained.values(),
                     [
                         Value::String(peer_addr.to_string()),
                         Value::String("tcp".to_string()),
                         Value::Absent,
+                        Value::String(peer_addr.ip().to_string()),
                     ]
                 );
             }
