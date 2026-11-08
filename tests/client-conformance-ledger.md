@@ -210,30 +210,41 @@ Beyond the shared report, each kind of probe checks what only it can reach:
 ## Host suites
 
 A probe holds every runtime to one report. A host suite holds one binding to the behaviour its
-guide documents, in that host's own test framework, asserting values and exceptions rather than
-report lines. A suite has two tiers: its boundary tier needs no cluster, and its cluster tier runs
+guide documents, in that host's own test framework or registered native function table, asserting values and
+errors. A suite has two tiers: its boundary tier needs no cluster, and its cluster tier runs
 in `tests/features/runtime/client_suites.feature` against a cluster whose session listener serves
-TLS. `tests/client-suites-inventory.toml` registers every test by host, tier and stable identity,
+the HTTP or HTTPS transport its example names. `tests/client-suites-inventory.toml` registers every test by host, tier and stable identity,
 and a run of either tier fails on a registered test that did not run or did not pass, on a skipped
 test and on a test the inventory does not register. Each runner prints one
 `NERVIX-SUITE <outcome> <identity>` line per test, which the scenario harness and
 `scripts/client_suites.py check-run` read. `just validate-client-suites` holds each suite to its
-binding's whole public surface, measured by mypy over the typed suite, and its guide to the shared
+binding's whole public surface, measured by mypy for Python or Clang-resolved declarations and references for C/C++, and its guide to the shared
 section list with every code block an include of an anchored test.
 
 The cluster runner can request a testing-build action on stdout and await its numbered confirmation
 on stdin, through the exchange [Client Suites](../docs/src/integration-test-lifecycle.md#client-suites)
 specifies. Python's registered
-`test_a_refused_subscription_restoration_reports_its_cause_and_recovers` cuts its session relay,
-asks the scenario to arm every node's next subscription-opening refusal, restores the relay, reads
+`test_a_refused_subscription_restoration_reports_its_cause_and_recovers`, and the C/C++ case
+`test_b7_refused_subscription_restoration_reports_its_cause_and_recovers`, cut their session relay,
+ask the scenario to arm every node's next subscription-opening refusal, restore the relay, read
 `INTERRUPTED` and `RESTORATION_FAILED` with `UNAVAILABLE`, a message and a positive retry wait,
-then reads rows after restoration succeeds. There is no corresponding declared clock-attachment
+then read rows from the same subscription after restoration succeeds. All clear unused refusal
+tokens during teardown, including when an assertion fails. There is no corresponding declared clock-attachment
 refusal action; clock restoration-failure values remain covered by the binding owner tests rather
 than a claimed live host-suite observation.
 
 | Host | Build | Boundary tier | Cluster tier | Covers | Runs in | Guide |
 | --- | --- | --- | --- | --- | --- | --- |
 | CPython 3.12+ | `just build-client-python`: the wheel with pytest, pyarrow, polars and mypy in `target/client-conformance/python`, and alone in `target/client-conformance/python-bare` | `just test-client-python-api`, which `just test` runs | `just test-client-python-cluster`, or the `@client_suite_python` rows of `just test-client-conformance` | Connection over TLS with seeds and timeouts, execution and recovery by the same execution, completion, subscriptions and their events, domain clocks across generations and a lost session, producers and every outcome class, consumers and every settlement, backup and restore, `with` blocks and collection-driven lifetimes, threads, typed exceptions, Arrow exchange with pyarrow and polars, and the wheel's packaging | The `client-conformance` job, for a pull request labeled `client-conformance` | [Python Client Library](../docs/src/client-library-python.md) |
+| C11 | `just build-client-c-suites`: the shared binding, C11/C++17 programs and ASan/UBSan variants | `just test-client-c-api`, also the ordinary Cargo native integration target | `just test-client-c-cluster`, or `@client_suite_c` | Every B-1 to B-16 by named case: explicit releases, retained bytes and cross-thread lifetimes, embedded NULs, bulk columns, cancellation and deadlines, completion, clocks, backup/restore, all producer outcomes and consumer settlements, gaps and reopen | Ordinary workspace tests and `client-conformance` | [C and C++ Client Library](../docs/src/client-library-c.md) |
+| C++17 | The same build with the C++17 compiler and its own native executable | `just test-client-cpp-api`, also the ordinary Cargo native integration target | `just test-client-c-cluster`, or `@client_suite_cpp` | The C ABI cases compiled and run independently as C++17, plus typed custom-deleter `std::unique_ptr` owners, exception unwinding and a retained batch moved across a thread | Ordinary workspace tests and `client-conformance` | [C and C++ Client Library](../docs/src/client-library-c.md) |
+
+The native boundary tiers run both ordinary and ASan/UBSan programs; cluster tiers run their
+sanitized programs over HTTP and HTTPS on one and three nodes. Their fixed ownership registry is
+bounded to 512 entries per test and teardown joins every owned host thread before reporting.
+The C ABI probes and in-process Rust probe remain independent evidence. Rust coverage observes
+the binding and harness, while sanitizers judge host memory and undefined behavior; Deloxide does
+not observe these separate host processes.
 
 ## Batch buffers
 

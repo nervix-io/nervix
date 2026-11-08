@@ -132,10 +132,10 @@ class InventoryTests(unittest.TestCase):
         lanes = [producer.lane for producer in native_coverage.PRODUCERS if producer.lane is not None]
         self.assertEqual(lanes, list(inventory.selections))
 
-    def test_local_broker_benchmarks_are_registered_without_adding_ci_work(self) -> None:
+    def test_local_producers_are_registered_without_adding_ci_work(self) -> None:
         self.assertEqual(
             [producer.name for producer in native_coverage.LOCAL_PRODUCERS],
-            ["test-rabbitmq-publish-benchmark"],
+            ["test-client-c-api", "test-client-cpp-api", "test-rabbitmq-publish-benchmark"],
         )
         self.assertEqual(
             native_coverage.PRODUCERS,
@@ -146,6 +146,18 @@ class InventoryTests(unittest.TestCase):
         workflow = (REPOSITORY / ".github/workflows/check.yaml").read_text(encoding="utf-8")
         for producer in native_coverage.LOCAL_PRODUCERS:
             self.assertNotIn(f"just coverage-native-extras {producer.name}", workflow)
+
+    def test_native_application_harnesses_join_the_ordinary_ci_producer(self) -> None:
+        workflow = (REPOSITORY / ".github/workflows/check.yaml").read_text(encoding="utf-8")
+        justfile = (REPOSITORY / "justfile").read_text(encoding="utf-8")
+        self.assertIn("run: just test-coverage-run\n", job_section(workflow, "tests"))
+        self.assertIn("cargo test --package nervix-client-ffi --test native_suites", justfile)
+        conformance = job_section(workflow, "client-conformance")
+        for host in ("c", "cpp"):
+            producer = next(p for p in native_coverage.LOCAL_PRODUCERS
+                            if p.name == f"test-client-{host}-api")
+            self.assertIn(f"{producer.name}: {producer.instrumented}\n", justfile)
+            self.assertIn(f"just test-client-native-api-run {host}\n", conformance)
 
     def test_a_check_composed_otherwise_than_its_producer_is_refused(self) -> None:
         producer = Producer("check", "ordinary", ("prepare",), "body", ("finish",))
@@ -229,7 +241,7 @@ class InventoryTests(unittest.TestCase):
         )
         self.assertEqual(
             native_coverage.select_producers(["test-rabbitmq-publish-benchmark"], producers),
-            list(native_coverage.LOCAL_PRODUCERS),
+            [next(producer for producer in producers if producer.name == "test-rabbitmq-publish-benchmark")],
         )
         self.assertEqual(
             native_coverage.select_producers(["plexus-completion-walk", "bench-smoke"], producers),

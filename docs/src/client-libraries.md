@@ -13,10 +13,11 @@ written in.
 | --- | --- | --- | --- |
 | [Rust Client Library](client-library.md) | Rust | the `nervix-client-core` crate of the Nervix repository | a Rust program, and the reference every other library runs on |
 | [Python Client Library](client-library-python.md) | CPython 3.12 and newer | the `nervix_client` wheel `just build-client-python` builds | a Python program, with Arrow data exchanged with pyarrow and polars |
+| [C Client Library](client-library-c.md) | C11 | the `nervix-client-ffi` shared library and `nervix_client.h` | a C program with explicit ownership and typed Arrow columns |
+| [C++ Client Library](client-library-c.md) | C++17 | the same C ABI, with application-owned custom deleters | a C++ program using RAII and canonical Arrow IPC |
 
-The JVM library, `crates/client-jvm`, and the C ABI, `crates/client-ffi` with the header
-`crates/client-ffi/include/nervix_client.h`, are described in the
-[Rust Client Library](client-library.md#through-the-shared-c-binding) chapter's binding sections.
+The JVM library, `crates/client-jvm`, is described in the
+[Rust Client Library](client-library.md#through-the-jvm-library) chapter's binding sections.
 
 ## What Every Library Shares
 
