@@ -1663,7 +1663,11 @@ test-client-ruby-api-run:
 
 # Each property executable owns one embedded Ruby interpreter; the unit executable owns one too.
 test-client-ruby *args: build-client-ruby
-    BOLERO_RANDOM_SEED="${BOLERO_RANDOM_SEED:-2026110803}" cargo test --package nervix-client-ruby --features ruby-tests --all-targets -- {{ args }}
+    just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-ruby-run {{ args }}
+
+# CI already prepared the exact gem alongside its probes; run it without repackaging.
+test-client-ruby-run *args:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir) }} NERVIX_CLIENT_RUBY_TEST_ARTIFACTS={{ quote(cargo_target_dir + "/client-conformance") }} BOLERO_RANDOM_SEED="${BOLERO_RANDOM_SEED:-2026110803}" cargo test --package nervix-client-ruby --features ruby-tests --all-targets -- {{ args }}
 
 # Collect the binding itself, executed by embedded Ruby, in the ordinary coverage toolchain.
 coverage-client-ruby output=(cargo_target_dir / "client-ruby.lcov"):

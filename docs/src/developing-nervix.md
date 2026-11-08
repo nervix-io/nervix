@@ -87,6 +87,8 @@ boundary tier directly. `just validate-client-suites` compares native magnus reg
 Prism-parsed constant and typed-receiver references, inventories every minitest identity and
 checks the [Ruby guide](client-library-ruby.md)'s anchored includes. `just test-client-ruby-suite-reader`
 checks registration, receiver, inventory, guide and actual minitest reporter controls.
+The conformance job calls `just test-client-ruby-run` after its artifact build, preserving the
+embedded tests and boundary tier without packaging that same gem twice.
 
 The Python package builds with maturin, which `just build-client-python` runs as
 `uvx --from maturin==1.16.0 maturin`, into an abi3 wheel for CPython 3.12 and later under
