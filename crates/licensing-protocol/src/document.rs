@@ -173,6 +173,22 @@ pub struct SignatureSet {
 }
 
 impl SignatureSet {
+    pub(crate) fn check_bounds(&self, limits: DocumentLimits) -> Result<(), Report<DocumentError>> {
+        if self.signatures.is_empty() || self.signatures.len() > limits.signatures.get() {
+            return Err(Report::new(DocumentError::SignatureCount {
+                limit: limits.signatures,
+            }));
+        }
+        for compact in &self.signatures {
+            if compact.len() > limits.bytes.get() {
+                return Err(Report::new(DocumentError::Size {
+                    limit: limits.bytes,
+                }));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn document_type(
         &self,
         limits: DocumentLimits,
@@ -191,11 +207,7 @@ impl SignatureSet {
         expected: DocumentType,
         limits: DocumentLimits,
     ) -> Result<Vec<UnverifiedDocument>, Report<DocumentError>> {
-        if self.signatures.is_empty() || self.signatures.len() > limits.signatures.get() {
-            return Err(Report::new(DocumentError::SignatureCount {
-                limit: limits.signatures,
-            }));
-        }
+        self.check_bounds(limits)?;
         let mut documents: Vec<UnverifiedDocument> = Vec::with_capacity(self.signatures.len());
         let mut signers = std::collections::BTreeSet::new();
         for compact in &self.signatures {

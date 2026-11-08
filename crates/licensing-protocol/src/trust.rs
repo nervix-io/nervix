@@ -65,7 +65,7 @@ struct PreparedRootSet {
 }
 
 impl RootSet {
-    fn prepare(self, limits: DocumentLimits) -> Result<PreparedRootSet, Report<TrustError>> {
+    fn prepare(&self, limits: DocumentLimits) -> Result<PreparedRootSet, Report<TrustError>> {
         if self.roots.len() > limits.signatures.get() || self.threshold.get() > self.roots.len() {
             return Err(Report::new(TrustError::RootSet));
         }
@@ -77,7 +77,7 @@ impl RootSet {
             }
         }
         Ok(PreparedRootSet {
-            original: self,
+            original: self.clone(),
             keys,
         })
     }
@@ -193,6 +193,17 @@ impl TrustState {
         if embedded.epochs.is_empty() {
             return Err(Report::new(TrustError::NoAnchors));
         }
+        // Validate borrowed lengths before retaining any signed input or deriving root identities.
+        // The total document count above also bounds these preflight walks.
+        for set in &embedded.successions {
+            set.check_bounds(limits)
+                .change_context(TrustError::Document)?;
+        }
+        for document in &documents.documents {
+            document
+                .check_bounds(limits)
+                .change_context(TrustError::Document)?;
+        }
         let mut state = Self {
             roots: BTreeMap::new(),
             authorizations: BTreeMap::new(),
@@ -200,13 +211,15 @@ impl TrustState {
             original: documents.clone(),
         };
         for root in &embedded.epochs {
-            state.install_roots(root.clone(), limits)?;
+            state.install_roots(root, limits)?;
         }
         let mut successions = embedded.successions.clone();
         let mut authorizations = Vec::new();
         let mut revocations = Vec::new();
         for document in &documents.documents {
-            let set = document.signature_set();
+            let set = document
+                .signature_set(limits)
+                .change_context(TrustError::Document)?;
             match set
                 .document_type(limits)
                 .change_context(TrustError::Document)?
@@ -247,11 +260,11 @@ impl TrustState {
 
     fn install_roots(
         &mut self,
-        root: RootSet,
+        root: &RootSet,
         limits: DocumentLimits,
     ) -> Result<(), Report<TrustError>> {
         if let Some(existing) = self.roots.get(&root.epoch) {
-            if existing.original != root {
+            if &existing.original != root {
                 return Err(Report::new(TrustError::EpochConflict { epoch: root.epoch }));
             }
             return Ok(());
@@ -292,7 +305,7 @@ impl TrustState {
                             return Err(Report::new(TrustError::EpochGap));
                         }
                         self.install_roots(
-                            RootSet {
+                            &RootSet {
                                 epoch: succession.to_epoch,
                                 roots: succession.roots,
                                 threshold: succession.threshold,
@@ -322,7 +335,9 @@ impl TrustState {
         }
         let mut seen = BTreeMap::new();
         for signed in &self.original.documents {
-            let set = signed.signature_set();
+            let set = signed
+                .signature_set(limits)
+                .change_context(TrustError::Document)?;
             let kind = set
                 .document_type(limits)
                 .change_context(TrustError::Document)?;

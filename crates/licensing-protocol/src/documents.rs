@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
+use error_stack::Report;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
@@ -15,7 +16,7 @@ use uuid::Uuid;
 
 use crate::{
     conditions::{ActivationKind, OperatingConditions, Quota, UsageConditions},
-    document::{Document, DocumentType, SignatureSet},
+    document::{Document, DocumentError, DocumentLimits, DocumentType, SignatureSet},
     keys::{KeyId, PublicKey},
 };
 
@@ -267,13 +268,30 @@ pub enum SignedTrustDocument {
 }
 
 impl SignedTrustDocument {
-    pub fn signature_set(&self) -> SignatureSet {
+    pub(crate) fn check_bounds(&self, limits: DocumentLimits) -> Result<(), Report<DocumentError>> {
         match self {
+            Self::Compact(compact) if compact.len() > limits.bytes.get() => {
+                Err(Report::new(DocumentError::Size {
+                    limit: limits.bytes,
+                }))
+            }
+            Self::Compact(_) => Ok(()),
+            Self::Signatures(set) => set.check_bounds(limits),
+        }
+    }
+
+    pub fn signature_set(
+        &self,
+        limits: DocumentLimits,
+    ) -> Result<SignatureSet, Report<DocumentError>> {
+        self.check_bounds(limits)?;
+        let set = match self {
             Self::Compact(compact) => SignatureSet {
                 signatures: vec![compact.clone()],
             },
             Self::Signatures(set) => set.clone(),
-        }
+        };
+        Ok(set)
     }
 }
 

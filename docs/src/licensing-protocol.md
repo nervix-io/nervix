@@ -22,7 +22,8 @@ together for an established refresh, release, rotation or stream ticket. Secret 
 on drop and redact `Debug`; transport and persistence owners also protect serialized copies.
 
 `DocumentLimits` carries nonzero byte, signature-count and trust-document bounds from the caller.
-Compact input is bounded before framing allocations, and trusted payload serialization uses the
+Borrowed trust inputs are checked for document count, signature count and byte size before retained
+copies or root preparation. Compact input is bounded before framing allocations, and trusted payload serialization uses the
 bounded writer before the maintained signer runs. Root sets and signature sets are bounded by the
 signature count; trust derivation is bounded by the trust-document count. HTTP owners must bound
 their response body before deserializing an envelope. These are caller bounds, not commercial

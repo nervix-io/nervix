@@ -170,3 +170,39 @@ fn compact_single_root_trust_and_public_key_profiles_are_exact() {
         assert!(serde_json::from_value::<crate::keys::PublicKey>(value).is_err());
     }
 }
+
+#[test]
+fn trust_input_bounds_precede_root_preparation_and_owned_copies() {
+    use meticulous::OptionExt as _;
+    let fixture = Fixture::new();
+    let mut embedded = fixture.embedded();
+    embedded.epochs[0].threshold =
+        std::num::NonZeroUsize::new(4).assured("nonzero invalid threshold");
+    let documents = fixture.documents();
+    let mut tiny = limits();
+    tiny.bytes = std::num::NonZeroUsize::MIN;
+    let error = TrustState::build(&embedded, &documents, tiny)
+        .err()
+        .assured("oversized input must be refused before deriving root identities");
+    assert!(matches!(error.current_context(), TrustError::Document));
+    assert!(matches!(
+        error.downcast_ref::<DocumentError>(),
+        Some(DocumentError::Size { .. })
+    ));
+    let mut tiny = limits();
+    tiny.signatures = std::num::NonZeroUsize::MIN;
+    let error = TrustState::build(&embedded, &documents, tiny)
+        .err()
+        .assured("signature count must be bounded before copies");
+    assert!(matches!(
+        error.downcast_ref::<DocumentError>(),
+        Some(DocumentError::SignatureCount { .. })
+    ));
+    assert!(matches!(
+        TrustState::build(&embedded, &documents, limits())
+            .err()
+            .assured("valid input still checks the root threshold")
+            .current_context(),
+        TrustError::RootSet
+    ));
+}
