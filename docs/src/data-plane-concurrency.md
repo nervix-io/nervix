@@ -3583,6 +3583,16 @@ pause, network waits and standard-library once publication remain outside the bl
 The diagnostic parameter workloads reach the surrounding tracked owners; the public scenario and
 external partition recovery verify admission and observation during an isolated process restart.
 
+### Ingestor Read Observations
+
+Read and poll loops retain their outcome counters, raw payload/byte counters and poll histogram.
+Registration and inspection alone reach the exact-unit read history registry; no recurring read,
+payload, acknowledgement or poll resolves labels or reaches that map. A broker interruption still
+passes every gathered message into its existing intake path. Observation introduces no wait,
+notification, ordering fence or tracked lock. Registry withdrawal follows the existing exact-unit
+retirement boundary and preserves sibling handles. Poll timing excludes cadence waiting and graph
+intake. The counters do not establish a memory-ordering or delivery guarantee.
+
 ## Materialized Inspection Capture
 
 Operator inspection uses the published unit routing index and the existing materialized assignment
