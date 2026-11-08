@@ -77,6 +77,12 @@ For the CLI's `subscribe` and `domain-clock` shell streams and their line format
 [Command Line Client](https://docs.nervix.io/client-tools-cli.html) directly. Follow the same
 documentation version as the selected index; this client chapter is outside the curated Plexus index.
 
+For Ruby applications driving a configured graph, read
+[Client Library → Through The Native Ruby Gem](https://docs.nervix.io/client-library.html#through-the-native-ruby-gem)
+and [Client Implementation Manual → Using The Ruby Gem](https://docs.nervix.io/client-implementation-manual.html#using-the-ruby-gem)
+for the native gem's lifetime, GVL, typed-column and exact-recovery rules. Follow the documentation
+version selected by the index; these client chapters are outside its curated Plexus topics.
+
 For native subscription and clock recovery, read [Rust Client Library](https://docs.nervix.io/client-library.html)
 and [Client Implementation Manual](https://docs.nervix.io/client-implementation-manual.html), especially
 S-7 and K-5. Keep an unanswered reopening distinct from a refusal, and account for the live-edge gap.

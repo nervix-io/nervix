@@ -27,13 +27,13 @@ const MAX_LIST_LEVELS: usize = 32;
 const MAX_FIXED_LIST_LENGTH: u32 = i32::MAX.cast_unsigned();
 
 /// A field list a host is building.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Fields {
     fields: Vec<FieldDraft>,
 }
 
 /// One field as far as the host has described it.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct FieldDraft {
     name: FieldName,
     nullable: bool,

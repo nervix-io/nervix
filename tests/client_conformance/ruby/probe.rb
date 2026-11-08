@@ -1,46 +1,42 @@
 # frozen_string_literal: true
 
-# The Ruby probe of the shared Rust binding, through Fiddle.
-#
-# It prints the same conformance report as every other probe. Every event reference is a
-# Fiddle::Pointer whose free function is the binding's release, so the garbage collector releases a
-# reference nothing reaches; the probe also releases references explicitly. Frames are read in
-# place through the pointer the binding lends, and columns are copied into Fiddle buffers one call
-# per column. Run with the `clock` argument, it attaches to the domain's running clock instead,
-# reads the clock the attach reported before its first tick, follows the generation a STOP and
-# START begin and the attachment restored after its session ends, and detaches. Run with the `io`
-# argument, it publishes typed batches through a client ingestor and reads, retries, rejects and
-# acknowledges their output through a client emitter, across the session the scenario cuts.
-
-require 'fiddle'
+# The Ruby conformance client of Nervix::Client's native gem. Report formatting belongs here;
+# sessions, recovery, typed columns, GVL release and object ownership belong to the gem.
+require 'nervix_client'
 
 module Probe
-  LIBRARY = Fiddle.dlopen(ENV.fetch('NERVIX_CLIENT_LIBRARY'))
-  VOIDP = Fiddle::TYPE_VOIDP
-  SIZE = Fiddle::TYPE_SIZE_T
-  INT = Fiddle::TYPE_INT32_T
-  BOOL = Fiddle::TYPE_BOOL
-  U64 = Fiddle::TYPE_UINT64_T
-  I64 = Fiddle::TYPE_INT64_T
-  POINTER_BYTES = Fiddle::SIZEOF_VOIDP
-  SIZE_BYTES = Fiddle::SIZEOF_SIZE_T
+  NX = Nervix::Client
+  Failure = NX::ClientError
+  ERROR_DEADLINE = NX::FailureKind::DEADLINE
+  ERROR_CANCELLED = NX::FailureKind::CANCELLED
+  ERROR_INVALID_ARGUMENT = NX::FailureKind::INVALID_ARGUMENT
+  ERROR_REJECTED = NX::FailureKind::REJECTED
+  ERROR_INTERRUPTED = NX::FailureKind::INTERRUPTED
+  PART_ROWS = NX::Part::ROWS
+  PART_BRANCH_KEY = NX::Part::BRANCH_KEY
+  CELL_VALUE = NX::CellState::VALUE
+  CELL_NULL = NX::CellState::NULL
+  CELL_REDACTED = NX::CellState::REDACTED
+  EVENT_ROWS = NX::EventKind::ROWS
+  CLOCK_PACED = NX::ClockState::PACED
+  ENDPOINT_ACTIVE = NX::EndpointState::ACTIVE
+  ENDPOINT_CLOSED = NX::EndpointState::CLOSED
+  UPLOAD_IDENTITY_CONFLICT = NX::UploadFailure::IDENTITY_CONFLICT
+  WAIT_MILLIS = 120_000
+  EXPIRING_MILLIS = 200
+  PRODUCER_BATCHES = 2
+  CONSUMER_BATCHES = 4
+  ENDPOINT_BYTES = 1_048_576
+  SCRIBBLE = 0xaa
 
-  ERROR_DEADLINE = 6
-  ERROR_CANCELLED = 7
-  PART_ROWS = 1
-  PART_BRANCH_KEY = 2
-  CELL_VALUE = 1
-  CELL_NULL = 2
-  CELL_REDACTED = 3
-  EVENT_ROWS = 1
-  CLOCK_KINDS = [nil, 'STATE', 'TICK', 'ENDED', 'INTERRUPTED', 'RESTORATION_FAILED'].freeze
-  CLOCK_PACED = 4
-  UPLOAD_IDENTITY_CONFLICT = 6
-  DISPOSITIONS = [nil, 'completed', 'failed', 'not_leader', 'transaction_detached',
-                  'transaction_taken_over', 'outcome_unknown', 'execution_reference_conflict',
-                  'execution_reference_expired', 'preview_stale'].freeze
-  TYPES = [nil, 'U8', 'I8', 'U16', 'I16', 'U32', 'I32', 'U64', 'I64', 'F32', 'F64', 'BOOL',
-           'STRING', 'BYTES', 'DATETIME', 'FIXED_LIST', 'LIST'].freeze
+  def self.name(namespace, value)
+    namespace.constants.find { |key| namespace.const_get(key) == value }.to_s
+  end
+
+  def self.lower(namespace, value) = name(namespace, value).downcase
+  def self.disposition(outcome) = lower(NX::Disposition, outcome.disposition)
+  def self.cancel(millis = nil) = millis.nil? ? NX::Cancel.new : NX::Cancel.new(deadline: millis / 1000.0)
+
   # The width of each fixed-width type, and the `unpack` directive that reads it in native byte
   # order. Floats are read as unsigned integers of their width, because the report prints bits.
   FIXED = {
@@ -50,136 +46,6 @@ module Probe
     'F64' => [8, 'Q', 'f64'], 'BOOL' => [1, 'C', 'bool'], 'DATETIME' => [8, 'q', 'datetime']
   }.freeze
 
-  def self.function(name, arguments, result)
-    Fiddle::Function.new(LIBRARY[name], arguments, result)
-  end
-
-  F = {
-    error_kind: function('nx_error_kind_of', [VOIDP], INT),
-    error_message: function('nx_error_message', [VOIDP, VOIDP, VOIDP], Fiddle::TYPE_VOID),
-    error_reference: function('nx_error_execution_reference', [VOIDP, VOIDP, VOIDP], BOOL),
-    error_free: function('nx_error_free', [VOIDP], Fiddle::TYPE_VOID),
-    cancel_new: function('nx_cancel_new', [], VOIDP),
-    cancel_with_deadline: function('nx_cancel_with_deadline', [U64, VOIDP], VOIDP),
-    cancel_trigger: function('nx_cancel_trigger', [VOIDP], Fiddle::TYPE_VOID),
-    connect_options_new: function('nx_connect_options_new', [], VOIDP),
-    connect_options_free: function('nx_connect_options_free', [VOIDP], Fiddle::TYPE_VOID),
-    connect_options_basic_auth: function('nx_connect_options_basic_auth',
-                                         [VOIDP, VOIDP, SIZE, VOIDP, SIZE], VOIDP),
-    session_connect: function('nx_session_connect',
-                              [VOIDP, SIZE, VOIDP, SIZE, VOIDP, VOIDP, VOIDP], VOIDP),
-    session_free: function('nx_session_free', [VOIDP], Fiddle::TYPE_VOID),
-    session_prepare: function('nx_session_prepare', [VOIDP, VOIDP, SIZE, VOIDP, VOIDP], VOIDP),
-    execution_free: function('nx_execution_free', [VOIDP], Fiddle::TYPE_VOID),
-    session_execute: function('nx_session_execute', [VOIDP, VOIDP, VOIDP, VOIDP], VOIDP),
-    session_next_event: function('nx_session_next_event', [VOIDP, VOIDP, VOIDP], VOIDP),
-    outcome_disposition: function('nx_outcome_disposition', [VOIDP], INT),
-    outcome_upload_failure: function('nx_outcome_upload_failure', [VOIDP, VOIDP], BOOL),
-    outcome_diagnostic_count: function('nx_outcome_diagnostic_count', [VOIDP], SIZE),
-    outcome_diagnostic: function('nx_outcome_diagnostic',
-                                 [VOIDP, SIZE, VOIDP, VOIDP, VOIDP, VOIDP, VOIDP], VOIDP),
-    outcome_subscription: function('nx_outcome_subscription', [VOIDP, VOIDP, VOIDP, VOIDP], BOOL),
-    outcome_schema: function('nx_outcome_schema', [VOIDP, VOIDP], VOIDP),
-    schema_field_count: function('nx_schema_field_count', [VOIDP, INT, VOIDP], VOIDP),
-    schema_field: function('nx_schema_field',
-                           [VOIDP, INT, SIZE, VOIDP, VOIDP, VOIDP, VOIDP, VOIDP], VOIDP),
-    schema_branch: function('nx_schema_branch', [VOIDP, VOIDP, VOIDP], BOOL),
-    schema_free: function('nx_schema_free', [VOIDP], Fiddle::TYPE_VOID),
-    event_kind: function('nx_event_kind_of', [VOIDP], INT),
-    event_subscription: function('nx_event_subscription', [VOIDP, VOIDP, VOIDP, VOIDP], Fiddle::TYPE_VOID),
-    event_row_count: function('nx_event_row_count', [VOIDP], U64),
-    event_retain: function('nx_event_retain', [VOIDP], VOIDP),
-    event_frame: function('nx_event_frame', [VOIDP, VOIDP, VOIDP], VOIDP),
-    event_column_states: function('nx_event_column_states', [VOIDP, INT, SIZE, VOIDP, SIZE], VOIDP),
-    event_column_fixed: function('nx_event_column_fixed', [VOIDP, INT, SIZE, VOIDP, SIZE], VOIDP),
-    event_column_varlen: function('nx_event_column_varlen',
-                                  [VOIDP, INT, SIZE, VOIDP, SIZE, VOIDP, SIZE, VOIDP], VOIDP),
-    event_cell_varlen: function('nx_event_cell_varlen', [VOIDP, INT, SIZE, SIZE, VOIDP, VOIDP], VOIDP),
-    session_next_clock_event: function('nx_session_next_clock_event', [VOIDP, VOIDP, VOIDP], VOIDP),
-    clock_event_kind: function('nx_clock_event_kind_of', [VOIDP], INT),
-    clock_event_domain: function('nx_clock_event_domain', [VOIDP, VOIDP, VOIDP], Fiddle::TYPE_VOID),
-    clock_event_generation: function('nx_clock_event_generation', [VOIDP, VOIDP], VOIDP),
-    clock_event_state: function('nx_clock_event_state', [VOIDP, VOIDP], VOIDP),
-    clock_event_paced: function('nx_clock_event_paced', [VOIDP, VOIDP, VOIDP, VOIDP, VOIDP, VOIDP], VOIDP),
-    clock_event_tick: function('nx_clock_event_tick', [VOIDP, VOIDP, VOIDP, VOIDP, VOIDP], VOIDP),
-    clock_event_retain: function('nx_clock_event_retain', [VOIDP], VOIDP),
-    session_domain_clock: function('nx_session_domain_clock', [VOIDP, VOIDP, SIZE, VOIDP], VOIDP),
-    domain_clock_generation: function('nx_domain_clock_generation', [VOIDP], U64),
-    domain_clock_state: function('nx_domain_clock_state', [VOIDP], INT),
-    domain_clock_paced: function('nx_domain_clock_paced', [VOIDP, VOIDP, VOIDP, VOIDP, VOIDP, VOIDP], VOIDP),
-    domain_clock_tick: function('nx_domain_clock_tick', [VOIDP, VOIDP, VOIDP, VOIDP, VOIDP], BOOL),
-    domain_clock_logical_time_at: function('nx_domain_clock_logical_time_at', [VOIDP, I64, VOIDP], VOIDP),
-    domain_clock_wall_duration_until: function('nx_domain_clock_wall_duration_until',
-                                               [VOIDP, I64, I64, VOIDP], VOIDP),
-    domain_clock_admission_window: function('nx_domain_clock_admission_window',
-                                            [VOIDP, I64, VOIDP, VOIDP, VOIDP], VOIDP),
-    domain_clock_admits: function('nx_domain_clock_admits', [VOIDP, I64, I64, VOIDP], VOIDP),
-    domain_clock_retain: function('nx_domain_clock_retain', [VOIDP], VOIDP)
-  }.freeze
-
-  # The binding's release functions, run by the collector on pointers it frees.
-  EVENT_RELEASE = LIBRARY['nx_event_release']
-  CLOCK_EVENT_RELEASE = LIBRARY['nx_clock_event_release']
-  DOMAIN_CLOCK_RELEASE = LIBRARY['nx_domain_clock_release']
-  OUTCOME_FREE = LIBRARY['nx_outcome_free']
-  CANCEL_FREE = LIBRARY['nx_cancel_free']
-
-  # A failure the binding returned.
-  class Failure < StandardError
-    attr_reader :kind, :reference
-
-    def initialize(kind, message, reference)
-      super("kind #{kind}: #{message}")
-      @kind = kind
-      @reference = reference
-    end
-  end
-
-  # An out-parameter slot of `bytes` bytes, freed by the collector.
-  def self.slot(bytes = POINTER_BYTES)
-    Fiddle::Pointer.malloc(bytes, Fiddle::RUBY_FREE)
-  end
-
-  def self.read_size(slot) = slot[0, SIZE_BYTES].unpack1('J')
-
-  def self.read_pointer(slot) = Fiddle::Pointer.new(slot[0, POINTER_BYTES].unpack1('J'))
-
-  # Copies bytes the binding lent for the duration of this call.
-  def self.borrowed(pointer_slot, length_slot)
-    length = read_size(length_slot)
-    return ''.b if length.zero?
-
-    read_pointer(pointer_slot)[0, length]
-  end
-
-  # Raises the error a call returned, releasing it.
-  def self.check(error)
-    return if error.null?
-
-    message = slot
-    message_len = slot(SIZE_BYTES)
-    F[:error_message].call(error, message, message_len)
-    reference = slot
-    reference_len = slot(SIZE_BYTES)
-    named = F[:error_reference].call(error, reference, reference_len) ? borrowed(reference, reference_len) : nil
-    failure = Failure.new(F[:error_kind].call(error), borrowed(message, message_len).force_encoding('UTF-8'), named)
-    F[:error_free].call(error)
-    raise failure
-  end
-
-  def self.cancel(deadline_millis = nil)
-    handle = if deadline_millis.nil?
-               F[:cancel_new].call
-             else
-               out = slot
-               check(F[:cancel_with_deadline].call(deadline_millis, out))
-               read_pointer(out)
-             end
-    handle.free = CANCEL_FREE
-    handle
-  end
-
-  # One field of a schema.
   Field = Struct.new(:name, :type, :nullable, :sensitive) do
     def line(prefix)
       "#{prefix} #{name} #{type} #{nullable ? 'nullable' : 'required'} #{sensitive ? 'sensitive' : 'public'}"
@@ -187,124 +53,60 @@ module Probe
   end
 
   def self.fields(schema, part)
-    count = slot(SIZE_BYTES)
-    check(F[:schema_field_count].call(schema, part, count))
-    Array.new(read_size(count)) do |index|
-      name = slot
-      name_len = slot(SIZE_BYTES)
-      type = slot(4)
-      nullable = slot(1)
-      sensitive = slot(1)
-      check(F[:schema_field].call(schema, part, index, name, name_len, type, nullable, sensitive))
-      Field.new(borrowed(name, name_len), TYPES.fetch(type[0, 4].unpack1('l')),
-                nullable[0, 1].unpack1('C') != 0, sensitive[0, 1].unpack1('C') != 0)
-    end
+    selected = part == PART_ROWS ? schema.fields : schema.key_fields
+    selected.map { |field| Field.new(field.name, name(NX::FieldType, field.type), field.nullable, field.sensitive) }
   end
 
-  # One reference to an event. The collector releases it when nothing reaches it any more.
   class Event
-    attr_reader :handle
-
-    def initialize(handle)
-      handle.free = EVENT_RELEASE
-      @handle = handle
-    end
-
-    def retain = Event.new(F[:event_retain].call(@handle))
-
-    # Releases the reference now instead of waiting for the collector.
-    def release = @handle.call_free
-
-    def kind = F[:event_kind].call(@handle)
-
-    def row_count = F[:event_row_count].call(@handle)
-
-    def subscription
-      name = Probe.slot
-      name_len = Probe.slot(SIZE_BYTES)
-      generation = Probe.slot(8)
-      F[:event_subscription].call(@handle, name, name_len, generation)
-      [Probe.borrowed(name, name_len), generation[0, 8].unpack1('Q')]
-    end
-
-    # The frame, read in place through the pointer the binding lends. Valid while this reference
-    # is held.
-    def frame
-      frame = Probe.slot
-      frame_len = Probe.slot(SIZE_BYTES)
-      Probe.check(F[:event_frame].call(@handle, frame, frame_len))
-      pointer = Probe.read_pointer(frame)
-      pointer.size = Probe.read_size(frame_len)
-      pointer
-    end
+    def initialize(event) = @event = event
+    def retain = Event.new(@event)
+    def release = @event = nil
+    def kind = @event.kind
+    def row_count = @event.row_count
+    def subscription = [@event.subscription.name, @event.subscription.generation]
+    def frame = @event.frame
 
     def column(part, index, field, cells)
-      states = Probe.slot([cells, 1].max)
-      Probe.check(F[:event_column_states].call(@handle, part, index, states, cells))
-      states = states[0, cells].unpack('C*')
+      states = @event.states(index, part)
+      typed = @event.column(index, part)
       values = if FIXED.key?(field.type)
-                 fixed(part, index, field, cells)
-               elsif %w[STRING BYTES].include?(field.type)
-                 varlen(part, index, field, cells)
+                 _, directive, prefix = FIXED.fetch(field.type)
+                 @event.fixed(index, part).unpack("#{directive}*").map do |value|
+                   case field.type
+                   when 'F32' then format('f32:%08x', value)
+                   when 'F64' then format('f64:%016x', value)
+                   when 'BOOL' then "bool:#{value != 0}"
+                   else "#{prefix}:#{value}"
+                   end
+                 end
                else
-                 raise 'list columns are read from the frame'
+                 offsets, data = @event.varlen(index, part)
+                 Array.new(cells) do |row|
+                   raw = data.byteslice(offsets[row]...offsets[row + 1])
+                   if states[row] == CELL_VALUE && typed[row].b != raw
+                     raise 'a typed value differs from the column copied in bulk'
+                   end
+                   "#{field.type == 'STRING' ? 'str' : 'bytes'}:#{raw.unpack1('H*')}"
+                 end
                end
       states.each_with_index.map do |state, row|
         case state
-        when CELL_NULL then 'null'
-        when CELL_REDACTED then 'redacted'
+        when CELL_NULL
+          raise 'a null cell exposes a value' unless typed[row].nil?
+          'null'
+        when CELL_REDACTED
+          raise 'a redacted cell exposes a value' unless typed[row] == NX::REDACTED
+          'redacted'
         when CELL_VALUE then values.fetch(row)
         else raise "unknown cell state #{state}"
         end
       end
     end
 
-    def fixed(part, index, field, cells)
-      width, directive, prefix = FIXED.fetch(field.type)
-      buffer = Probe.slot(cells * width)
-      Probe.check(F[:event_column_fixed].call(@handle, part, index, buffer, cells * width))
-      buffer[0, cells * width].unpack("#{directive}*").map do |value|
-        case field.type
-        when 'F32' then format('f32:%08x', value)
-        when 'F64' then format('f64:%016x', value)
-        when 'BOOL' then "bool:#{value != 0}"
-        else "#{prefix}:#{value}"
-        end
-      end
-    end
-
-    def varlen(part, index, field, cells)
-      data_len = Probe.slot(SIZE_BYTES)
-      Probe.check(F[:event_column_varlen].call(@handle, part, index, nil, 0, nil, 0, data_len))
-      needed = [Probe.read_size(data_len), 1].max
-      offsets = Probe.slot((cells + 1) * 8)
-      data = Probe.slot(needed)
-      Probe.check(F[:event_column_varlen].call(@handle, part, index, offsets, cells + 1, data, needed, data_len))
-      bounds = offsets[0, (cells + 1) * 8].unpack('Q*')
-      prefix = field.type == 'STRING' ? 'str' : 'bytes'
-      Array.new(cells) do |row|
-        copied = bounds[row] == bounds[row + 1] ? ''.b : data[bounds[row], bounds[row + 1] - bounds[row]]
-        "#{prefix}:#{copied.unpack1('H*')}"
-      end
-    end
-
-    def borrowed_cell(part, row, index)
-      value = Probe.slot
-      value_len = Probe.slot(SIZE_BYTES)
-      Probe.check(F[:event_cell_varlen].call(@handle, part, row, index, value, value_len))
-      Probe.borrowed(value, value_len)
-    end
-
     def render(part, fields, cells)
       rows = Array.new(cells) { [] }
       fields.each_with_index do |field, index|
-        column(part, index, field, cells).each_with_index do |rendered, row|
-          if %w[STRING BYTES].include?(field.type) && rendered.include?(':')
-            copied = [rendered.split(':', 2)[1]].pack('H*')
-            raise 'a copied value differs from the same value borrowed from the frame' if copied != borrowed_cell(part, row, index)
-          end
-          rows[row] << "#{field.name}=#{rendered}"
-        end
+        column(part, index, field, cells).each_with_index { |value, row| rows[row] << "#{field.name}=#{value}" }
       end
       rows.map { |row| row.join(' ') }
     end
@@ -364,195 +166,63 @@ module Probe
   Tick = Struct.new(:generation, :id, :boundary, :serving_logical)
 
   # The committed clock `read` writes for `handle`, a clock event or a domain clock.
-  def self.paced_clock(read, handle, generation)
-    period = slot(8)
-    skew = slot(8)
-    origin = slot(8)
-    anchor = slot(8)
-    rate = slot(8)
-    check(read.call(handle, period, skew, origin, anchor, rate))
-    PacedClock.new(generation, period[0, 8].unpack1('Q'), skew[0, 8].unpack1('Q'), origin[0, 8].unpack1('q'),
-                   anchor[0, 8].unpack1('q'), rate[0, 8].unpack1('D'))
+  def self.paced(read)
+    clock = read.paced
+    PacedClock.new(clock.generation, clock.period_nanos, clock.skew_nanos, clock.origin, clock.anchor, clock.rate)
   end
 
-  # One reference to a domain clock event. The collector releases it when nothing reaches it.
   class ClockEvent
-    def initialize(handle)
-      handle.free = CLOCK_EVENT_RELEASE
-      @handle = handle
-    end
-
-    def retain = ClockEvent.new(F[:clock_event_retain].call(@handle))
-
-    # Releases the reference now instead of waiting for the collector.
-    def release = @handle.call_free
-
-    def kind = CLOCK_KINDS.fetch(F[:clock_event_kind].call(@handle))
-
-    def domain
-      name = Probe.slot
-      name_len = Probe.slot(SIZE_BYTES)
-      F[:clock_event_domain].call(@handle, name, name_len)
-      Probe.borrowed(name, name_len).force_encoding('UTF-8')
-    end
-
-    def generation
-      generation = Probe.slot(8)
-      Probe.check(F[:clock_event_generation].call(@handle, generation))
-      generation[0, 8].unpack1('Q')
-    end
-
-    def state
-      state = Probe.slot(4)
-      Probe.check(F[:clock_event_state].call(@handle, state))
-      state[0, 4].unpack1('l')
-    end
-
-    def paced = Probe.paced_clock(F[:clock_event_paced], @handle, generation)
-
-    # The tick. The authority's UTC observation depends on when it was accepted, so it is not read.
+    def initialize(event) = @event = event
+    def retain = ClockEvent.new(@event)
+    def release = @event = nil
+    def kind = Probe.name(NX::ClockEventKind, @event.kind)
+    def domain = @event.domain
+    def generation = @event.generation
+    def state = @event.state
+    def paced = Probe.paced(@event)
     def tick
-      id = Probe.slot(8)
-      boundary = Probe.slot(8)
-      serving_logical = Probe.slot(8)
-      Probe.check(F[:clock_event_tick].call(@handle, id, boundary, nil, serving_logical))
-      Tick.new(generation, id[0, 8].unpack1('Q'), boundary[0, 8].unpack1('q'), serving_logical[0, 8].unpack1('q'))
+      value = @event.tick
+      Tick.new(value.generation, value.id, value.boundary, value.serving_logical)
     end
   end
 
-  # One reference to the clock the session held for a followed domain when the probe read it. The
-  # collector releases it when nothing reaches it.
   class DomainClock
-    def initialize(handle)
-      handle.free = DOMAIN_CLOCK_RELEASE
-      @handle = handle
-    end
-
-    def retain = DomainClock.new(F[:domain_clock_retain].call(@handle))
-
-    # Releases the reference now instead of waiting for the collector.
-    def release = @handle.call_free
-
-    def generation = F[:domain_clock_generation].call(@handle)
-
-    def state = F[:domain_clock_state].call(@handle)
-
-    def paced = Probe.paced_clock(F[:domain_clock_paced], @handle, generation)
-
-    # The id of the newest tick the read holds, or nil when it holds none.
-    def tick_id
-      id = Probe.slot(8)
-      return nil unless F[:domain_clock_tick].call(@handle, id, nil, nil, nil)
-
-      id[0, 8].unpack1('Q')
-    end
-
-    def logical_time_at(utc)
-      logical = Probe.slot(8)
-      Probe.check(F[:domain_clock_logical_time_at].call(@handle, utc, logical))
-      logical[0, 8].unpack1('q')
-    end
-
-    def wall_duration_until(utc, target)
-      wait = Probe.slot(8)
-      Probe.check(F[:domain_clock_wall_duration_until].call(@handle, utc, target, wait))
-      wait[0, 8].unpack1('Q')
-    end
-
-    # The earliest and latest admitted tick centers, or nil for a clock without a window.
-    def admission_window(utc)
-      has_window = Probe.slot(1)
-      earliest = Probe.slot(8)
-      latest = Probe.slot(8)
-      Probe.check(F[:domain_clock_admission_window].call(@handle, utc, has_window, earliest, latest))
-      return nil if has_window[0, 1].unpack1('C').zero?
-
-      [earliest[0, 8].unpack1('q'), latest[0, 8].unpack1('q')]
-    end
-
-    def admits(utc, event)
-      admitted = Probe.slot(1)
-      Probe.check(F[:domain_clock_admits].call(@handle, utc, event, admitted))
-      admitted[0, 1].unpack1('C') != 0
-    end
+    def initialize(clock) = @clock = clock
+    def retain = DomainClock.new(@clock)
+    def release = @clock = nil
+    def generation = @clock.generation
+    def state = @clock.state
+    def paced = Probe.paced(@clock)
+    def tick_id = @clock.tick&.id
+    def logical_time_at(utc) = @clock.logical_time_at(utc)
+    def wall_duration_until(utc, target) = @clock.wall_duration_until(utc, target)
+    def admission_window(utc) = @clock.admission_window(utc)
+    def admits(utc, event) = @clock.admits(utc, event)
   end
 
-  # An open session.
   class Session
-    attr_reader :handle
-
+    attr_reader :native
     def initialize(server, domain, username, password)
-      out = Probe.slot
-      options = F[:connect_options_new].call
-      begin
-        Probe.check(F[:connect_options_basic_auth].call(options, username, username.bytesize,
-                                                        password, password.bytesize))
-        Probe.check(F[:session_connect].call(server, server.bytesize, domain, domain.bytesize,
-                                             options, nil, out))
-      ensure
-        F[:connect_options_free].call(options)
-      end
-      @handle = Probe.read_pointer(out)
+      @native = NX::Session.connect(server, domain: domain, username: username, password: password)
     end
-
-    def close = F[:session_free].call(@handle)
-
-    def execute(query, cancel = nil)
-      execution = Probe.slot
-      Probe.check(F[:session_prepare].call(@handle, query, query.bytesize, nil, execution))
-      prepared = Probe.read_pointer(execution)
-      begin
-        outcome = Probe.slot
-        Probe.check(F[:session_execute].call(@handle, prepared, cancel, outcome))
-        handle = Probe.read_pointer(outcome)
-        handle.free = OUTCOME_FREE
-        handle
-      ensure
-        F[:execution_free].call(prepared)
-      end
-    end
-
-    def next_event(cancel)
-      out = Probe.slot
-      Probe.check(F[:session_next_event].call(@handle, cancel, out))
-      Event.new(Probe.read_pointer(out))
-    end
-
-    # The clock the session holds for `domain`, or nil when it follows none.
+    def close = @native.close
+    def execute(query, cancel = nil) = @native.execute(@native.prepare(query), cancel: cancel)
+    def next_event(cancel) = Event.new(@native.next_event(cancel: cancel))
     def domain_clock(domain)
-      out = Probe.slot
-      Probe.check(F[:session_domain_clock].call(@handle, domain, domain.bytesize, out))
-      clock = Probe.read_pointer(out)
-      return nil if clock.null?
-
-      DomainClock.new(clock)
+      value = @native.domain_clock(domain)
+      DomainClock.new(value) unless value.nil?
     end
-
     def next_clock_event(cancel, domain)
-      out = Probe.slot
-      Probe.check(F[:session_next_clock_event].call(@handle, cancel, out))
-      event = ClockEvent.new(Probe.read_pointer(out))
-      raise 'a clock event arrived for another domain' unless event.domain == domain
-
-      event
+      value = @native.next_clock_event(cancel: cancel)
+      raise 'a clock event arrived for another domain' unless value.domain == domain
+      ClockEvent.new(value)
     end
   end
-
-  def self.disposition(outcome) = DISPOSITIONS.fetch(F[:outcome_disposition].call(outcome))
 
   def self.error_line(outcome)
-    count = F[:outcome_diagnostic_count].call(outcome)
-    span = 'none'
-    if count.positive?
-      message = slot
-      message_len = slot(SIZE_BYTES)
-      has_span = slot(1)
-      start = slot(4)
-      finish = slot(4)
-      check(F[:outcome_diagnostic].call(outcome, 0, message, message_len, has_span, start, finish))
-      span = "#{start[0, 4].unpack1('L')}..#{finish[0, 4].unpack1('L')}" if has_span[0, 1].unpack1('C') != 0
-    end
-    "ERROR #{disposition(outcome)} diagnostics=#{count} span=#{span}"
+    first = outcome.diagnostics.first
+    span = first&.span.nil? ? 'none' : first.span.join('..')
+    "ERROR #{disposition(outcome)} diagnostics=#{outcome.diagnostics.size} span=#{span}"
   end
 
   def self.failure_of
@@ -563,7 +233,7 @@ module Probe
   end
 
   def self.check_retention(retained, reported, fields, key_fields)
-    frames = retained.map { |event| event.frame[0, event.frame.size] }
+    frames = retained.map { |event| event.frame.get_string }
     # References nothing reaches are released by the collector, concurrently with reads of the
     # references that remain.
     retained.each { |event| event.retain.row_lines(fields, key_fields) }
@@ -572,27 +242,30 @@ module Probe
       Array.new(2048) { |size| 'x' * (size * 64) }
     end
     retained.each_with_index do |event, index|
-      raise 'a retained frame changed while it was retained' if event.frame[0, event.frame.size] != frames[index]
-      raise 'a retained frame is not a ServerMessage frame' if event.frame[4, 4] != 'NXSM'
+      raise 'a retained frame changed while it was retained' if event.frame.get_string != frames[index]
+      raise 'a retained frame is not a ServerMessage frame' if event.frame.get_string(4, 4) != 'NXSM'
       raise 'a retained event reads differently than it did' if event.row_lines(fields, key_fields) != reported[index]
     end
+    views = retained.map { |event| event.frame.slice(4, 4) }
     Thread.new { retained.each(&:release) }.join
+    GC.start(full_mark: true, immediate_sweep: true)
+    raise 'a frame slice lost its owner' unless views.all? { |view| view.get_string == 'NXSM' }
   end
 
   def self.check_cancellation(session)
     cancel = cancel()
     waiter = Thread.new { failure_of { session.next_event(cancel) } }
     sleep 0.1
-    F[:cancel_trigger].call(cancel)
+    cancel.trigger
     raise 'a cancelled wait did not report CANCELLED' unless waiter.join(30)&.value&.kind == ERROR_CANCELLED
 
     expired = failure_of { session.next_event(cancel(50)) }
     raise 'an expired wait did not report DEADLINE' unless expired.kind == ERROR_DEADLINE
 
     cancelled = cancel()
-    F[:cancel_trigger].call(cancelled)
+    cancelled.trigger
     command = failure_of { session.execute('SHOW DOMAINS;', cancelled) }
-    return if command.kind == ERROR_CANCELLED && !command.reference.to_s.empty?
+    return if command.kind == ERROR_CANCELLED && !command.execution_reference.to_s.empty?
 
     raise 'a cancelled command did not report CANCELLED with its execution reference'
   end
@@ -608,7 +281,7 @@ module Probe
     cancel = cancel()
     waiter = Thread.new { failure_of { session.next_clock_event(cancel, domain) } }
     sleep 0.1
-    F[:cancel_trigger].call(cancel)
+    cancel.trigger
     raise 'a cancelled clock wait did not report CANCELLED' unless waiter.join(30)&.value&.kind == ERROR_CANCELLED
 
     expired = failure_of { session.next_clock_event(cancel(50), domain) }
@@ -791,102 +464,6 @@ module Probe
     report('PASS')
   end
 
-  # ---- Producers and consumers ------------------------------------------------------------------
-
-  WAIT_MILLIS = 120_000
-  EXPIRING_MILLIS = 200
-  PRODUCER_BATCHES = 2
-  CONSUMER_BATCHES = 4
-  ENDPOINT_BYTES = 1_048_576
-  SCRIBBLE = 0xaa
-  ERROR_INVALID_ARGUMENT = 1
-  ERROR_REJECTED = 5
-  ERROR_INTERRUPTED = 12
-  OPEN_SCHEMA_MISMATCH = 6
-  ENDPOINT_ACTIVE = 1
-  ENDPOINT_CLOSED = 5
-  STATES = [nil, 'active', 'interrupted', 'restoring', 'reopen_required', 'closed'].freeze
-  SETTLEMENTS = [nil, 'confirmed', 'stale_reference', 'wrong_consumer', 'invalid_reason',
-                 'consumer_ended'].freeze
-  REFUSALS = [nil, 'invalid_batch', 'suspended', 'busy', 'draining', 'producer_ended',
-              'credit_exceeded'].freeze
-  DEFECTS = [nil, 'malformed', 'unexpected_message', 'compressed', 'schema_mismatch',
-             'not_one_batch', 'too_many_rows', 'too_large', 'invalid_data'].freeze
-  FAILURES = [nil, 'ack_timed_out', 'rejected'].freeze
-  UNCERTAINTIES = [nil, 'interrupted', 'owner_lost', 'session_lost'].freeze
-  U32 = Fiddle::TYPE_UINT32_T
-
-  E = {
-    error_open_refusal: function('nx_error_open_refusal', [VOIDP, VOIDP], BOOL),
-    fields_new: function('nx_fields_new', [], VOIDP),
-    fields_add: function('nx_fields_add', [VOIDP, VOIDP, SIZE, INT, U32, BOOL, BOOL], VOIDP),
-    fields_element: function('nx_fields_element', [VOIDP, INT, U32], VOIDP),
-    fields_free: function('nx_fields_free', [VOIDP], Fiddle::TYPE_VOID),
-    schema_field_levels: function('nx_schema_field_levels', [VOIDP, INT, SIZE, VOIDP], VOIDP),
-    schema_field_level: function('nx_schema_field_level', [VOIDP, INT, SIZE, SIZE, VOIDP, VOIDP], VOIDP),
-    open_ingestor: function('nx_session_open_ingestor',
-                            [VOIDP, VOIDP, SIZE, VOIDP, SIZE, VOIDP, U32, U64, VOIDP, VOIDP], VOIDP),
-    subscribe_emitter: function('nx_session_subscribe_emitter',
-                                [VOIDP, VOIDP, SIZE, VOIDP, SIZE, VOIDP, U32, U64, VOIDP, VOIDP], VOIDP),
-    producer_schema: function('nx_producer_schema', [VOIDP, VOIDP], VOIDP),
-    producer_generation: function('nx_producer_generation', [VOIDP], U64),
-    producer_grant: function('nx_producer_grant', [VOIDP, VOIDP, VOIDP, VOIDP, VOIDP], Fiddle::TYPE_VOID),
-    producer_policy: function('nx_producer_policy', [VOIDP, VOIDP, VOIDP, VOIDP, VOIDP, VOIDP],
-                              Fiddle::TYPE_VOID),
-    producer_admission: function('nx_producer_admission', [VOIDP], INT),
-    producer_state: function('nx_producer_state', [VOIDP], INT),
-    producer_submit: function('nx_producer_submit', [VOIDP, VOIDP, VOIDP, VOIDP], VOIDP),
-    producer_submit_ipc: function('nx_producer_submit_ipc', [VOIDP, VOIDP, SIZE, VOIDP, VOIDP], VOIDP),
-    producer_rejoin: function('nx_producer_rejoin', [VOIDP, U64, VOIDP, VOIDP], VOIDP),
-    producer_pending: function('nx_producer_pending', [VOIDP, VOIDP, VOIDP, SIZE, VOIDP], VOIDP),
-    producer_close: function('nx_producer_close', [VOIDP, VOIDP], VOIDP),
-    producer_free: function('nx_producer_free', [VOIDP], Fiddle::TYPE_VOID),
-    outcome_result: function('nx_submission_outcome_result', [VOIDP], INT),
-    outcome_refusal: function('nx_submission_outcome_refusal', [VOIDP, VOIDP], VOIDP),
-    outcome_defect: function('nx_submission_outcome_defect', [VOIDP, VOIDP], VOIDP),
-    outcome_failure: function('nx_submission_outcome_failure', [VOIDP, VOIDP], VOIDP),
-    outcome_uncertainty: function('nx_submission_outcome_uncertainty', [VOIDP, VOIDP], VOIDP),
-    submission_free: function('nx_submission_outcome_free', [VOIDP], Fiddle::TYPE_VOID),
-    consumer_schema: function('nx_consumer_schema', [VOIDP, VOIDP], VOIDP),
-    consumer_generation: function('nx_consumer_generation', [VOIDP], U64),
-    consumer_grant: function('nx_consumer_grant', [VOIDP, VOIDP, VOIDP, VOIDP, VOIDP], Fiddle::TYPE_VOID),
-    consumer_policy: function('nx_consumer_policy', [VOIDP, VOIDP, VOIDP, VOIDP, VOIDP, VOIDP],
-                              Fiddle::TYPE_VOID),
-    consumer_state: function('nx_consumer_state', [VOIDP], INT),
-    consumer_next: function('nx_consumer_next', [VOIDP, VOIDP, VOIDP], VOIDP),
-    consumer_close: function('nx_consumer_close', [VOIDP, VOIDP], VOIDP),
-    consumer_free: function('nx_consumer_free', [VOIDP], Fiddle::TYPE_VOID),
-    delivery_identity: function('nx_delivery_identity', [VOIDP, VOIDP, VOIDP], Fiddle::TYPE_VOID),
-    delivery_reference: function('nx_delivery_reference', [VOIDP, VOIDP, VOIDP], Fiddle::TYPE_VOID),
-    delivery_relay: function('nx_delivery_source_relay', [VOIDP, VOIDP, VOIDP], Fiddle::TYPE_VOID),
-    delivery_fingerprint: function('nx_delivery_branch_fingerprint', [VOIDP, VOIDP, VOIDP], BOOL),
-    delivery_members: function('nx_delivery_members', [VOIDP], U32),
-    delivery_ipc: function('nx_delivery_ipc', [VOIDP, VOIDP, VOIDP], Fiddle::TYPE_VOID),
-    delivery_batch: function('nx_delivery_batch', [VOIDP, VOIDP], VOIDP),
-    delivery_ack: function('nx_delivery_ack', [VOIDP, VOIDP, VOIDP], VOIDP),
-    delivery_retry: function('nx_delivery_retry', [VOIDP, VOIDP, VOIDP], VOIDP),
-    delivery_reject: function('nx_delivery_reject', [VOIDP, VOIDP, SIZE, VOIDP, VOIDP], VOIDP),
-    delivery_retain: function('nx_delivery_retain', [VOIDP], VOIDP),
-    batch_row_count: function('nx_batch_row_count', [VOIDP], SIZE),
-    batch_ipc: function('nx_batch_ipc', [VOIDP, VOIDP, VOIDP], VOIDP),
-    batch_cells: function('nx_batch_cells', [VOIDP, SIZE, SIZE, VOIDP], VOIDP),
-    batch_states: function('nx_batch_states', [VOIDP, SIZE, VOIDP, SIZE], VOIDP),
-    batch_offsets: function('nx_batch_offsets', [VOIDP, SIZE, SIZE, VOIDP, SIZE], VOIDP),
-    batch_fixed: function('nx_batch_fixed', [VOIDP, SIZE, SIZE, VOIDP, SIZE], VOIDP),
-    batch_varlen: function('nx_batch_varlen', [VOIDP, SIZE, SIZE, VOIDP, SIZE, VOIDP, SIZE, VOIDP], VOIDP),
-    batch_retain: function('nx_batch_retain', [VOIDP], VOIDP),
-    builder_new: function('nx_batch_builder_new', [VOIDP, SIZE, VOIDP], VOIDP),
-    builder_states: function('nx_batch_builder_states', [VOIDP, SIZE, VOIDP, SIZE], VOIDP),
-    builder_offsets: function('nx_batch_builder_offsets', [VOIDP, SIZE, SIZE, VOIDP, SIZE], VOIDP),
-    builder_fixed: function('nx_batch_builder_fixed', [VOIDP, SIZE, SIZE, VOIDP, SIZE], VOIDP),
-    builder_varlen: function('nx_batch_builder_varlen', [VOIDP, SIZE, SIZE, VOIDP, SIZE, VOIDP, SIZE], VOIDP),
-    builder_finish: function('nx_batch_builder_finish', [VOIDP, VOIDP], VOIDP),
-    builder_free: function('nx_batch_builder_free', [VOIDP], Fiddle::TYPE_VOID)
-  }.freeze
-
-  DELIVERY_RELEASE = LIBRARY['nx_delivery_release']
-  BATCH_RELEASE = LIBRARY['nx_batch_release']
-
   # The input schema of the probe's ingestor, in declared order: each field's name, the [type,
   # length] of every level of its type, and whether it is nullable and sensitive.
   INPUT_FIELDS = [
@@ -997,15 +574,21 @@ module Probe
   end
 
   def self.fields_handle(specs)
-    handle = E[:fields_new].call
+    fields = NX::Fields.new
     specs.each do |name, levels, nullable, sensitive|
       kind, length = levels.first
-      check(E[:fields_add].call(handle, name, name.bytesize, TYPES.index(kind), length, nullable, sensitive))
-      levels.drop(1).each do |level_kind, level_length|
-        check(E[:fields_element].call(handle, TYPES.index(level_kind), level_length))
-      end
+      fields.add(name, NX::FieldType.const_get(kind), length, nullable: nullable, sensitive: sensitive)
+      levels.drop(1).each { |element, size| fields.element(NX::FieldType.const_get(element), size) }
     end
-    handle
+    fields
+  end
+
+  def self.reported_fields(schema)
+    schema.fields.map do |field|
+      levels = field.levels.map { |level| [name(NX::FieldType, level.type), level.length] }
+      raise "a field's first level differs from its type" unless levels.first.first == name(NX::FieldType, field.type)
+      { name: field.name, levels: levels, nullable: field.nullable, sensitive: field.sensitive }
+    end
   end
 
   # A field's type in Plexus's spelling, with nested fixed-size lists as dimensions.
@@ -1020,143 +603,65 @@ module Probe
     kind
   end
 
-  def self.reported_fields(schema)
-    count = slot(SIZE_BYTES)
-    check(F[:schema_field_count].call(schema, PART_ROWS, count))
-    Array.new(read_size(count)) do |index|
-      name = slot
-      name_len = slot(SIZE_BYTES)
-      type = slot(4)
-      nullable = slot(1)
-      sensitive = slot(1)
-      check(F[:schema_field].call(schema, PART_ROWS, index, name, name_len, type, nullable, sensitive))
-      level_count = slot(SIZE_BYTES)
-      check(E[:schema_field_levels].call(schema, PART_ROWS, index, level_count))
-      levels = Array.new(read_size(level_count)) do |level|
-        level_type = slot(4)
-        level_length = slot(4)
-        check(E[:schema_field_level].call(schema, PART_ROWS, index, level, level_type, level_length))
-        [TYPES.fetch(level_type[0, 4].unpack1('l')), level_length[0, 4].unpack1('L')]
-      end
-      raise "a field's first level differs from its type" unless levels.first.first == TYPES.fetch(type[0, 4].unpack1('l'))
-
-      { name: borrowed(name, name_len), levels: levels, nullable: nullable[0, 1].unpack1('C') != 0,
-        sensitive: sensitive[0, 1].unpack1('C') != 0 }
-    end
-  end
-
   def self.reported_line(prefix, field)
     "#{prefix} #{field[:name]} #{type_text(field[:levels])} #{field[:nullable] ? 'nullable' : 'required'} " \
       "#{field[:sensitive] ? 'sensitive' : 'public'}"
   end
 
-  # A Fiddle buffer holding `bytes`, which the binding copies.
-  def self.buffer(bytes)
-    pointer = slot([bytes.bytesize, 1].max)
-    pointer[0, bytes.bytesize] = bytes unless bytes.empty?
-    pointer
-  end
-
-  # One reference to a batch. The collector releases it when nothing reaches it any more.
   class Batch
-    attr_reader :handle
+    attr_reader :native
+    def initialize(batch) = @native = batch
+    def retain = Batch.new(@native)
+    def release = @native = nil
+    def stream = @native.ipc.get_string
+    def cells(column, level) = @native.cells(column, level)
 
-    def initialize(handle)
-      handle.free = BATCH_RELEASE
-      @handle = handle
-    end
-
-    def retain = Batch.new(E[:batch_retain].call(@handle))
-
-    def release = @handle.call_free
-
-    # Builds a batch of `rows` for `schema`, writing over every buffer once the binding copied it.
     def self.build(schema, rows)
-      out = Probe.slot
-      Probe.check(E[:builder_new].call(schema, rows.size, out))
-      builder = Probe.read_pointer(out)
-      begin
-        Probe.reported_fields(schema).each_with_index do |field, index|
-          column = Probe.host_column(field[:name], rows)
-          unless column[:states].nil?
-            states = Probe.buffer(column[:states])
-            Probe.check(E[:builder_states].call(builder, index, states, column[:states].bytesize))
-            states[0, column[:states].bytesize] = [SCRIBBLE].pack('C') * column[:states].bytesize
-          end
-          unless column[:offsets].nil?
-            offsets = Probe.buffer(column[:offsets].pack('Q*'))
-            Probe.check(E[:builder_offsets].call(builder, index, 0, offsets, column[:offsets].size))
-            offsets[0, column[:offsets].size * 8] = "\xff".b * (column[:offsets].size * 8)
-          end
-          if column[:varlen].nil?
-            values = Probe.buffer(column[:fixed])
-            Probe.check(E[:builder_fixed].call(builder, index, column[:leaf], values, column[:fixed].bytesize))
-            values[0, column[:fixed].bytesize] = [SCRIBBLE].pack('C') * column[:fixed].bytesize unless column[:fixed].empty?
-          else
-            value_offsets, data = column[:varlen]
-            offsets = Probe.buffer(value_offsets.pack('Q*'))
-            values = Probe.buffer(data)
-            Probe.check(E[:builder_varlen].call(builder, index, column[:leaf], offsets, value_offsets.size, values,
-                                                data.bytesize))
-            offsets[0, value_offsets.size * 8] = "\xff".b * (value_offsets.size * 8)
-            values[0, data.bytesize] = [SCRIBBLE].pack('C') * data.bytesize unless data.empty?
-          end
+      builder = NX::BatchBuilder.new(schema, rows.size)
+      Probe.reported_fields(schema).each_with_index do |field, index|
+        column = Probe.host_column(field[:name], rows)
+        unless column[:states].nil?
+          states = column[:states].bytes.map { |state| state == CELL_VALUE }
+          builder.states(index, states)
+          states.fill(false)
         end
-        batch = Probe.slot
-        Probe.check(E[:builder_finish].call(builder, batch))
-        Batch.new(Probe.read_pointer(batch))
-      ensure
-        E[:builder_free].call(builder)
+        unless column[:offsets].nil?
+          offsets = column[:offsets].dup
+          builder.offsets(index, 0, offsets)
+          offsets.fill((1 << 64) - 1)
+        end
+        if column[:varlen].nil?
+          values = column[:fixed].dup
+          builder.fixed(index, column[:leaf], values)
+          values.replace([SCRIBBLE].pack('C') * values.bytesize)
+        else
+          value_offsets, data = column[:varlen]
+          offsets = value_offsets.dup
+          values = data.dup
+          builder.varlen(index, column[:leaf], offsets, values)
+          offsets.fill((1 << 64) - 1)
+          values.replace([SCRIBBLE].pack('C') * values.bytesize)
+        end
       end
+      new(builder.finish)
     end
 
-    def stream
-      ipc = Probe.slot
-      ipc_len = Probe.slot(SIZE_BYTES)
-      Probe.check(E[:batch_ipc].call(@handle, ipc, ipc_len))
-      Probe.borrowed(ipc, ipc_len)
-    end
-
-    def cells(column, level)
-      cells = Probe.slot(SIZE_BYTES)
-      Probe.check(E[:batch_cells].call(@handle, column, level, cells))
-      Probe.read_size(cells)
-    end
-
-    # Reads one column in one call per level of its type and renders each row.
     def column(index, field)
-      rows = cells(index, 0)
-      states = Probe.slot([rows, 1].max)
-      Probe.check(E[:batch_states].call(@handle, index, states, rows))
-      states = states[0, rows].unpack('C*')
+      states = @native.states(index)
       levels = field[:levels]
       innermost = levels.size - 1
       lists = levels.take(innermost).each_with_index.map do |(kind, length), level|
-        next length unless kind == 'LIST'
-
-        count = cells(index, level) + 1
-        offsets = Probe.slot(count * 8)
-        Probe.check(E[:batch_offsets].call(@handle, index, level, offsets, count))
-        offsets[0, count * 8].unpack('Q*')
+        kind == 'LIST' ? @native.offsets(index, level) : length
       end
       kind = levels.last.first
       count = cells(index, innermost)
       leaves = if %w[STRING BYTES].include?(kind)
-                 offsets = Probe.slot((count + 1) * 8)
-                 data_len = Probe.slot(SIZE_BYTES)
-                 Probe.check(E[:batch_varlen].call(@handle, index, innermost, offsets, count + 1, nil, 0, data_len))
-                 needed = Probe.read_size(data_len)
-                 data = Probe.slot([needed, 1].max)
-                 Probe.check(E[:batch_varlen].call(@handle, index, innermost, offsets, count + 1, data, needed, data_len))
-                 bounds = offsets[0, (count + 1) * 8].unpack('Q*')
-                 bytes = needed.zero? ? ''.b : data[0, needed]
+                 bounds, bytes = @native.varlen(index, innermost)
                  prefix = kind == 'STRING' ? 'str' : 'bytes'
-                 Array.new(count) { |cell| "#{prefix}:#{bytes.byteslice(bounds[cell], bounds[cell + 1] - bounds[cell]).unpack1('H*')}" }
+                 Array.new(count) { |cell| "#{prefix}:#{bytes.byteslice(bounds[cell]...bounds[cell + 1]).unpack1('H*')}" }
                else
-                 width, directive, prefix = FIXED.fetch(kind)
-                 values = Probe.slot([count * width, 1].max)
-                 Probe.check(E[:batch_fixed].call(@handle, index, innermost, values, count * width)) if count.positive?
-                 (count.zero? ? [] : values[0, count * width].unpack("#{directive}*")).map do |value|
+                 _, directive, prefix = FIXED.fetch(kind)
+                 @native.fixed(index, innermost).unpack("#{directive}*").map do |value|
                    case kind
                    when 'F32' then format('f32:%08x', value)
                    when 'F64' then format('f64:%016x', value)
@@ -1167,7 +672,6 @@ module Probe
                end
       render = lambda do |level, cell|
         next leaves.fetch(cell) if level == lists.size
-
         shape = lists[level]
         range = shape.is_a?(Array) ? (shape[cell]...shape[cell + 1]) : ((cell * shape)...((cell + 1) * shape))
         "[#{range.map { |element| render.call(level + 1, element) }.join(',')}]"
@@ -1177,7 +681,7 @@ module Probe
 
     def rows(fields)
       columns = fields.each_with_index.map { |field, index| column(index, field) }
-      Array.new(E[:batch_row_count].call(@handle)) do |row|
+      Array.new(@native.row_count) do |row|
         "ROW #{fields.each_with_index.map { |field, index| "#{field[:name]}=#{columns[index][row]}" }.join(' ')}"
       end
     end
@@ -1188,54 +692,34 @@ module Probe
     end
   end
 
-  # One reference to a delivery. The collector releases it when nothing reaches it any more.
   class Delivery
-    attr_reader :handle
-
-    def initialize(handle)
-      handle.free = DELIVERY_RELEASE
-      @handle = handle
-    end
-
-    def retain = Delivery.new(E[:delivery_retain].call(@handle))
-
-    def release = @handle.call_free
-
+    def initialize(delivery) = @native = delivery
+    def retain = Delivery.new(@native)
+    def release = @native = nil
     def read(accessor)
-      data = Probe.slot
-      data_len = Probe.slot(SIZE_BYTES)
-      E[accessor].call(@handle, data, data_len)
-      Probe.borrowed(data, data_len)
+      case accessor
+      when :delivery_identity then @native.identity
+      when :delivery_reference then @native.reference
+      when :delivery_relay then @native.source_relay
+      when :delivery_ipc then @native.ipc.get_string
+      else raise "unknown report field #{accessor}"
+      end
     end
-
     def summary
-      fingerprint = Probe.slot
-      fingerprint_len = Probe.slot(SIZE_BYTES)
-      branched = E[:delivery_fingerprint].call(@handle, fingerprint, fingerprint_len)
-      branch = branched ? Probe.read_size(fingerprint_len).to_s : 'none'
-      "DELIVERY relay=#{read(:delivery_relay)} members=#{E[:delivery_members].call(@handle)} branch=#{branch} " \
-        "identity=#{read(:delivery_identity).bytesize} reference=#{read(:delivery_reference).bytesize}"
+      branch = @native.branch_fingerprint&.bytesize || 'none'
+      "DELIVERY relay=#{@native.source_relay} members=#{@native.members} branch=#{branch} " \
+        "identity=#{@native.identity.bytesize} reference=#{@native.reference.bytesize}"
     end
-
-    def batch
-      out = Probe.slot
-      Probe.check(E[:delivery_batch].call(@handle, out))
-      Batch.new(Probe.read_pointer(out))
-    end
-
+    def batch = Batch.new(@native.batch)
     def settle(accessor)
-      deadline = Probe.cancel(WAIT_MILLIS)
-      settlement = Probe.slot(4)
-      Probe.check(E[accessor].call(@handle, deadline, settlement))
-      SETTLEMENTS.fetch(settlement[0, 4].unpack1('l'))
+      value = case accessor
+              when :delivery_ack then @native.ack(cancel: Probe.cancel(WAIT_MILLIS))
+              when :delivery_retry then @native.retry(cancel: Probe.cancel(WAIT_MILLIS))
+              else raise "unknown settlement #{accessor}"
+              end
+      Probe.lower(NX::Settlement, value)
     end
-
-    def reject(reason)
-      deadline = Probe.cancel(WAIT_MILLIS)
-      settlement = Probe.slot(4)
-      Probe.check(E[:delivery_reject].call(@handle, reason, reason.bytesize, deadline, settlement))
-      SETTLEMENTS.fetch(settlement[0, 4].unpack1('l'))
-    end
+    def reject(reason) = Probe.lower(NX::Settlement, @native.reject(reason, cancel: Probe.cancel(WAIT_MILLIS)))
   end
 
   def self.failure_kind
@@ -1245,7 +729,6 @@ module Probe
     e.kind
   end
 
-  # The producer and consumer exercise.
   class Endpoints
     def initialize(session, domain)
       @session = session
@@ -1254,98 +737,43 @@ module Probe
       @emitter = ENV.fetch('NERVIX_PROBE_EMITTER')
       @failures = []
     end
-
     def expect(holds, what)
       @failures << what unless holds
     end
-
-    def open_producer(fields, batches, asked, out)
-      E[:open_ingestor].call(@session.handle, @domain, @domain.bytesize, @ingestor, @ingestor.bytesize, fields,
-                             batches, asked, nil, out)
+    def open_producer(fields, batches = PRODUCER_BATCHES, asked = ENDPOINT_BYTES)
+      @session.native.open_ingestor(@domain, @ingestor, fields, batches: batches, bytes: asked)
     end
-
-    def open_consumer(fields, out)
-      E[:subscribe_emitter].call(@session.handle, @domain, @domain.bytesize, @emitter, @emitter.bytesize, fields,
-                                 CONSUMER_BATCHES, ENDPOINT_BYTES, nil, out)
+    def open_consumer(fields)
+      @session.native.subscribe_emitter(@domain, @emitter, fields, batches: CONSUMER_BATCHES, bytes: ENDPOINT_BYTES)
     end
-
-    def expect_refused(error, what)
-      refusal = Probe.slot(4)
-      if error.null? || F[:error_kind].call(error) != ERROR_REJECTED ||
-         !E[:error_open_refusal].call(error, refusal) || refusal[0, 4].unpack1('l') != OPEN_SCHEMA_MISMATCH
+    def expect_refused(what)
+      error = Probe.failure_of { yield }
+      unless error.kind == NX::FailureKind::REJECTED && error.open_refusal == NX::OpenRefusal::SCHEMA_MISMATCH
         raise 'an open with another schema was not refused exactly'
       end
-
-      F[:error_free].call(error)
       Probe.report("REFUSED #{what} schema mismatch")
     end
-
-    def opened(error, out)
-      Probe.check(error)
-      Probe.read_pointer(out)
-    end
-
-    def submit(producer, batch, cancel = nil)
-      submission = Probe.slot(8)
-      Probe.check(E[:producer_submit].call(producer, batch.handle, cancel, submission))
-      submission[0, 8].unpack1('Q')
-    end
-
+    def submit(producer, batch, cancel = nil) = producer.submit(batch.native, cancel: cancel)
     def outcome(producer, submission)
-      deadline = Probe.cancel(WAIT_MILLIS)
-      out = Probe.slot
-      Probe.check(E[:producer_rejoin].call(producer, submission, deadline, out))
-      outcome = Probe.read_pointer(out)
-      cause = Probe.slot(4)
-      begin
-        case E[:outcome_result].call(outcome)
-        when 2 then 'completed'
-        when 1
-          Probe.check(E[:outcome_refusal].call(outcome, cause))
-          refusal = cause[0, 4].unpack1('l')
-          text = "not_admitted #{REFUSALS.fetch(refusal)}"
-          if refusal == 1
-            Probe.check(E[:outcome_defect].call(outcome, cause))
-            text += " #{DEFECTS.fetch(cause[0, 4].unpack1('l'))}"
-          end
-          text
-        when 3
-          Probe.check(E[:outcome_failure].call(outcome, cause))
-          "processing_failed #{FAILURES.fetch(cause[0, 4].unpack1('l'))}"
-        else
-          Probe.check(E[:outcome_uncertainty].call(outcome, cause))
-          "outcome_unknown #{UNCERTAINTIES.fetch(cause[0, 4].unpack1('l'))}"
-        end
-      ensure
-        E[:submission_free].call(outcome)
+      result = producer.rejoin(submission, cancel: Probe.cancel(WAIT_MILLIS))
+      case result.result
+      when NX::SubmissionResult::COMPLETED then 'completed'
+      when NX::SubmissionResult::NOT_ADMITTED
+        text = "not_admitted #{Probe.lower(NX::SubmissionRefusal, result.refusal)}"
+        text += " #{Probe.lower(NX::BatchDefect, result.defect)}" if result.refusal == NX::SubmissionRefusal::INVALID_BATCH
+        text
+      when NX::SubmissionResult::PROCESSING_FAILED then "processing_failed #{Probe.lower(NX::ProcessingFailure, result.failure)}"
+      else "outcome_unknown #{Probe.lower(NX::Uncertainty, result.uncertainty)}"
       end
     end
-
-    def next_delivery(consumer, cancel = Probe.cancel(WAIT_MILLIS))
-      out = Probe.slot
-      Probe.check(E[:consumer_next].call(consumer, cancel, out))
-      Delivery.new(Probe.read_pointer(out))
+    def next_delivery(consumer, cancel = Probe.cancel(WAIT_MILLIS)) = Delivery.new(consumer.next(cancel: cancel))
+    def policy(handle)
+      policy = handle.policy
+      "window=#{Probe.lower(NX::WindowKind, policy.window)}/#{policy.outstanding} ack_timeout=#{policy.ack_timeout_nanos}"
     end
-
-    def policy(accessor, handle)
-      window = Probe.slot(4)
-      outstanding = Probe.slot(8)
-      timeout = Probe.slot(8)
-      backoff = Probe.slot(8)
-      maximum = Probe.slot(8)
-      E[accessor].call(handle, window, outstanding, timeout, backoff, maximum)
-      "window=#{window[0, 4].unpack1('l') == 1 ? 'sequential' : 'parallel'}/#{outstanding[0, 8].unpack1('Q')} " \
-        "ack_timeout=#{timeout[0, 8].unpack1('Q')}"
-    end
-
-    def grant(accessor, handle)
-      batches = Probe.slot(4)
-      granted = Probe.slot(8)
-      max_rows = Probe.slot(4)
-      max_bytes = Probe.slot(8)
-      E[accessor].call(handle, batches, granted, max_rows, max_bytes)
-      [batches[0, 4].unpack1('L'), granted[0, 8].unpack1('Q'), max_rows[0, 4].unpack1('L'),
-       max_bytes[0, 8].unpack1('Q')]
+    def grant(handle)
+      grant = handle.grant
+      [grant.batches, grant.bytes, grant.max_batch_rows, grant.max_batch_bytes]
     end
 
     def run
@@ -1355,31 +783,29 @@ module Probe
       input_fields = Probe.fields_handle(INPUT_FIELDS)
       output_fields = Probe.fields_handle(INPUT_FIELDS + [ECHO_FIELD])
       mismatched = Probe.fields_handle(mismatched_specs)
-      out = Probe.slot
 
       # An open whose expected fields differ from the endpoint's is refused exactly.
-      expect_refused(open_producer(mismatched, PRODUCER_BATCHES, ENDPOINT_BYTES, out), 'producer')
-      expect_refused(open_consumer(input_fields, out), 'consumer')
-      E[:fields_free].call(mismatched)
+      expect_refused('producer') { open_producer(mismatched) }
+      expect_refused('consumer') { open_consumer(input_fields) }
 
-      consumer = opened(open_consumer(output_fields, out), out)
-      producer = opened(open_producer(input_fields, PRODUCER_BATCHES, ENDPOINT_BYTES, out), out)
-      output_schema = opened(E[:consumer_schema].call(consumer, out), out)
-      input_schema = opened(E[:producer_schema].call(producer, out), out)
+      consumer = open_consumer(output_fields)
+      producer = open_producer(input_fields)
+      output_schema = consumer.schema
+      input_schema = producer.schema
       output = Probe.reported_fields(output_schema)
       inputs = Probe.reported_fields(input_schema)
 
-      batches, granted, max_rows, max_bytes = grant(:consumer_grant, consumer)
-      Probe.report("CONSUMER generation=#{E[:consumer_generation].call(consumer)} " \
-                   "state=#{STATES.fetch(E[:consumer_state].call(consumer))} #{policy(:consumer_policy, consumer)} " \
+      batches, granted, max_rows, max_bytes = grant(consumer)
+      Probe.report("CONSUMER generation=#{consumer.generation} " \
+                   "state=#{Probe.lower(NX::EndpointState, consumer.state)} #{policy(consumer)} " \
                    "credit=#{batches}/#{granted} max=#{max_rows}/#{max_bytes}")
       output.each { |field| Probe.report(Probe.reported_line('OUTPUT FIELD', field)) }
-      batches, granted, max_rows, max_bytes = grant(:producer_grant, producer)
+      batches, granted, max_rows, max_bytes = grant(producer)
       expect(max_rows.positive? && max_bytes.positive? && max_bytes <= granted, "the producer's limits fit its grant")
-      admission = E[:producer_admission].call(producer) == 1 ? 'open' : 'suspended'
-      Probe.report("PRODUCER generation=#{E[:producer_generation].call(producer)} " \
-                   "state=#{STATES.fetch(E[:producer_state].call(producer))} admission=#{admission} " \
-                   "#{policy(:producer_policy, producer)} credit=#{batches}/#{granted}")
+      admission = producer.admission == 1 ? 'open' : 'suspended'
+      Probe.report("PRODUCER generation=#{producer.generation} " \
+                   "state=#{Probe.lower(NX::EndpointState, producer.state)} admission=#{admission} " \
+                   "#{policy(producer)} credit=#{batches}/#{granted}")
       inputs.each { |field| Probe.report(Probe.reported_line('INPUT FIELD', field)) }
       Probe.report('OPENED')
 
@@ -1391,7 +817,7 @@ module Probe
       token = Probe.cancel
       waiter = Thread.new { Probe.failure_kind { next_delivery(consumer, token) } }
       sleep 0.1
-      F[:cancel_trigger].call(token)
+      token.trigger
       expect(waiter.value == ERROR_CANCELLED, 'a cancelled read reports its cancellation')
       Probe.report('NEXT cancelled')
 
@@ -1402,28 +828,21 @@ module Probe
       expect(Probe.failure_kind { submit(producer, other) } == ERROR_INVALID_ARGUMENT, 'another schema')
       Probe.report('SUBMIT invalid argument')
       foreign = other.stream
-      copy = Probe.buffer(foreign)
-      submission = Probe.slot(8)
-      Probe.check(E[:producer_submit_ipc].call(producer, copy, foreign.bytesize, nil, submission))
-      copy[0, foreign.bytesize] = [SCRIBBLE].pack('C') * foreign.bytesize
+      copy = foreign.dup
+      submission = producer.submit_ipc(copy)
+      copy.replace([SCRIBBLE].pack('C') * copy.bytesize)
       other.release
-      Probe.report("OUTCOME #{outcome(producer, submission[0, 8].unpack1('Q'))}")
+      Probe.report("OUTCOME #{outcome(producer, submission)}")
 
       # The typed batch: its outcome waits for the application's acknowledgement.
       first = submit(producer, Batch.build(input_schema, rows))
       Probe.report('SUBMITTED first')
       delivery = next_delivery(consumer)
       Probe.report(delivery.summary)
-      pending_ids = Probe.slot(8 * 4)
-      pending_resolved = Probe.slot(4)
-      pending_count = Probe.slot(SIZE_BYTES)
-      Probe.check(E[:producer_pending].call(producer, pending_ids, pending_resolved, 4, pending_count))
-      expect(Probe.read_size(pending_count) == 1 && pending_ids[0, 8].unpack1('Q') == first &&
-             pending_resolved[0, 1].unpack1('C').zero?, 'the only submission waits for its outcome')
-      early = Probe.slot
+      pending = producer.pending
+      expect(pending.size == 1 && pending.first.id == first && !pending.first.resolved, 'the only submission waits for its outcome')
       expiring = Probe.cancel(EXPIRING_MILLIS)
-      expect(Probe.failure_kind { Probe.check(E[:producer_rejoin].call(producer, first, expiring, early)) } ==
-             ERROR_DEADLINE, 'an unacknowledged submission has no outcome')
+      expect(Probe.failure_kind { producer.rejoin(first, cancel: expiring) } == ERROR_DEADLINE, 'an unacknowledged submission has no outcome')
       Probe.report('PENDING first unresolved')
       delivered = delivery.batch
       printed = delivered.rows(output)
@@ -1491,7 +910,7 @@ module Probe
       Probe.report("OUTCOME #{outcome(producer, fifth)}")
 
       # The scenario cuts the session while one delivery is held unacknowledged.
-      extra = opened(open_producer(input_fields, 1, 65_536, out), out)
+      extra = open_producer(input_fields, 1, 65_536)
       Probe.report('PRODUCER extra opened')
       held = submit(producer, Batch.build(input_schema, [Probe.plain_row(30, 'gamma')]))
       Probe.report('SUBMITTED held')
@@ -1505,14 +924,14 @@ module Probe
       held_delivery.release
       Probe.report("OUTCOME #{outcome(producer, held)}")
       waited_until = Process.clock_gettime(Process::CLOCK_MONOTONIC) + (WAIT_MILLIS / 1000.0)
-      while E[:producer_state].call(extra) == ENDPOINT_ACTIVE
+      while extra.state == ENDPOINT_ACTIVE
         raise 'the extra producer stayed active after its session ended' if Process.clock_gettime(Process::CLOCK_MONOTONIC) > waited_until
 
         sleep 0.01
       end
       closing = Probe.cancel(WAIT_MILLIS)
-      Probe.check(E[:producer_close].call(extra, closing))
-      expect(E[:producer_state].call(extra) == ENDPOINT_CLOSED, 'a producer closed during reconnect is closed')
+      extra.close(cancel: closing)
+      expect(extra.state == ENDPOINT_CLOSED, 'a producer closed during reconnect is closed')
       Probe.report('CLOSED extra producer')
       Probe.report('WAITING restore')
 
@@ -1528,66 +947,34 @@ module Probe
       Probe.report("ACK #{sixth_output.settle(:delivery_ack)}")
       sixth_output.release
       Probe.report("OUTCOME #{outcome(producer, sixth)}")
-      Probe.report("STATE producer=#{STATES.fetch(E[:producer_state].call(producer))} " \
-                   "extra=#{STATES.fetch(E[:producer_state].call(extra))} " \
-                   "consumer=#{STATES.fetch(E[:consumer_state].call(consumer))}")
-      Probe.check(E[:consumer_close].call(consumer, closing))
-      Probe.check(E[:producer_close].call(producer, closing))
-      expect(E[:consumer_state].call(consumer) == ENDPOINT_CLOSED && E[:producer_state].call(producer) == ENDPOINT_CLOSED,
+      Probe.report("STATE producer=#{Probe.lower(NX::EndpointState, producer.state)} " \
+                   "extra=#{Probe.lower(NX::EndpointState, extra.state)} " \
+                   "consumer=#{Probe.lower(NX::EndpointState, consumer.state)}")
+      consumer.close(cancel: closing)
+      producer.close(cancel: closing)
+      expect(consumer.state == ENDPOINT_CLOSED && producer.state == ENDPOINT_CLOSED,
              'closed handles read closed')
       Probe.report('CLOSED completed')
       raise "the probe's checks failed: #{@failures.join('; ')}" unless @failures.empty?
 
       Probe.report('CHECKS ok')
-      E[:producer_free].call(extra)
-      E[:producer_free].call(producer)
-      E[:consumer_free].call(consumer)
-      F[:schema_free].call(input_schema)
-      F[:schema_free].call(output_schema)
-      E[:fields_free].call(input_fields)
-      E[:fields_free].call(output_fields)
     end
   end
 
   def self.run_upload(session)
-    query = ENV.fetch('NERVIX_PROBE_UPLOAD_QUERY')
-    slot = Probe.slot
-    check(F[:session_prepare].call(session.handle, query, query.bytesize, nil, slot))
-    execution = read_pointer(slot)
-    begin
-      ['UPLOAD completed', 'RETRY completed'].each do |line|
-        out = Probe.slot
-        check(F[:session_execute].call(session.handle, execution, nil, out))
-        outcome = read_pointer(out)
-        outcome.free = OUTCOME_FREE
-        begin
-          raise 'the upload must complete' unless F[:outcome_disposition].call(outcome) == 1
-          failure = Probe.slot(4)
-          raise 'a completed upload has no refusal' if F[:outcome_upload_failure].call(outcome, failure)
-          report(line)
-        ensure
-          outcome.call_free
-        end
-      end
-      File.binwrite(ENV.fetch('NERVIX_PROBE_UPLOAD_FILE'), "different archive\n")
-      out = Probe.slot
-      check(F[:session_execute].call(session.handle, execution, nil, out))
-      outcome = read_pointer(out)
-      outcome.free = OUTCOME_FREE
-      begin
-        failure = Probe.slot(4)
-        unless F[:outcome_disposition].call(outcome) == 2 &&
-               F[:outcome_upload_failure].call(outcome, failure) &&
-               failure[0, 4].unpack1('l') == UPLOAD_IDENTITY_CONFLICT
-          raise 'the upload must report its typed identity conflict'
-        end
-        report('CONFLICT IdentityConflict')
-      ensure
-        outcome.call_free
-      end
-    ensure
-      F[:execution_free].call(execution)
+    execution = session.native.prepare(ENV.fetch('NERVIX_PROBE_UPLOAD_QUERY'))
+    ['UPLOAD completed', 'RETRY completed'].each do |line|
+      outcome = session.native.execute(execution)
+      raise 'the upload must complete' unless outcome.disposition == NX::Disposition::COMPLETED
+      raise 'a completed upload has no refusal' unless outcome.upload_failure.nil?
+      report(line)
     end
+    File.binwrite(ENV.fetch('NERVIX_PROBE_UPLOAD_FILE'), "different archive\n")
+    outcome = session.native.execute(execution)
+    unless outcome.disposition == NX::Disposition::FAILED && outcome.upload_failure == UPLOAD_IDENTITY_CONFLICT
+      raise 'the upload must report its typed identity conflict'
+    end
+    report('CONFLICT IdentityConflict')
   end
 
   def self.main
@@ -1617,21 +1004,12 @@ module Probe
     report(error_line(session.execute('CREATE RELAY;')))
 
     opened = session.execute("CREATE SUBSCRIPTION #{subscription} TO #{relay};")
-    name = slot
-    name_len = slot(SIZE_BYTES)
-    generation = slot(8)
-    raise 'the subscribe command opened no subscription' unless F[:outcome_subscription].call(opened, name, name_len, generation)
-
-    generation = generation[0, 8].unpack1('Q')
-    schema_out = slot
-    check(F[:outcome_schema].call(opened, schema_out))
-    schema = read_pointer(schema_out)
+    raise 'the subscribe command opened no subscription' if opened.subscription.nil?
+    generation = opened.subscription.generation
+    schema = opened.schema
     fields = fields(schema, PART_ROWS)
     key_fields = fields(schema, PART_BRANCH_KEY)
-    branch = slot
-    branch_len = slot(SIZE_BYTES)
-    branch_name = F[:schema_branch].call(schema, branch, branch_len) ? borrowed(branch, branch_len) : nil
-    F[:schema_free].call(schema)
+    branch_name = schema.branch
     fields.each { |field| report(field.line('FIELD')) }
     report("BRANCH #{branch_name}") unless branch_name.nil?
     key_fields.each { |field| report(field.line('KEY')) }

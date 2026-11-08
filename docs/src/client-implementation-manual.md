@@ -10,7 +10,7 @@ the system behaves this way. This manual does not repeat those reasons, and the 
 repeat these rules.
 
 The Rust client, `nervix-client-core`, is the reference implementation. The shared binding exposes
-it through the C ABI of `nervix-client-ffi` to C, C++, and Ruby hosts, the Python package
+it through the C ABI of `nervix-client-ffi` to C and C++ hosts, the native Ruby gem `nervix-client` to Ruby hosts, the Python package
 `nervix_client` to CPython hosts, and the JNI library `nervix-client-jvm` to JVM hosts. A host
 that uses a binding inherits every rule below from it except its host-specific rules in
 [Using The Shared Binding](#using-the-shared-binding), [Using The Python Package](#using-the-python-package),
@@ -948,6 +948,33 @@ A host of the C ABI, `nervix-client-ffi`, follows the contract in
   `NX_ERROR_REOPEN_REQUIRED` as the end of the handle, read why with the handle's reopen reason,
   and open a new one only after checking the endpoint it now expects.
 
+## Using The Ruby Gem
+
+A Ruby 3.3+ host loads `nervix-client` with `require 'nervix_client'` and uses `Nervix::Client`.
+The gem is built against the loading interpreter's ABI. B-1, B-7, B-8, B-10, B-12 and B-14 to
+B-16 apply through its classes and enum constants. Ruby owns object lifetimes:
+
+- **R-1.** Keep ordinary Ruby references to objects in use. The collector releases their native
+  ownership once, without waiting. `Session#close` releases that session reference; already
+  admitted calls, producers, consumers and deliveries retain the runtime they require. Dropping
+  a delivery MUST NOT be interpreted as acknowledgement.
+- **R-2.** Blocking calls MUST release the GVL and retain native input snapshots before waiting.
+  Another Ruby thread MAY trigger their `Cancel`. A Ruby thread interrupt ends only that call;
+  it MUST NOT cancel sibling calls through the same token. A caller MAY edit a `Fields` draft
+  after an open took its snapshot without changing the open's complete field descriptions.
+- **R-3.** Frame and IPC `IO::Buffer` views MUST remain read-only and retain their native owner,
+  including through derived slices after session closure and collection. A caller MAY use
+  `get_string` for a binary copy. Builders copy their inputs. Read columns as typed arrays or
+  bulk values; preserve unsigned widths, signed nanosecond timestamps and float bits.
+- **R-4.** Branch on the typed `ClientError` subclass or `kind`, never message text. Recover a
+  durable command with the same `Execution`; inspect `execution_reference` after an uncertain,
+  cancelled or expired call and `open_refusal` after an endpoint refusal. A command disposition
+  remains an `Outcome`. Completion spans count UTF-8 bytes. Read event and clock attributes only
+  for the variant that carries them, including restoration cause, message and retry wait.
+- **R-5.** `Producer#close` and `Consumer#close` wait for the server-side close under their token
+  and deadline. The gem MUST NOT implement another retry, routing or acknowledgement policy,
+  and library workers MUST NOT call Ruby.
+
 ## Using The JVM Library
 
 A Java 21 host uses `io.nervix.client.Nervix`, built on JNI in `crates/client-jvm` and the same
@@ -1193,7 +1220,7 @@ the replacement session. The one-node examples are direct-connection controls.
 | `tests/client_conformance/c/probe.c`, `cpp/probe.cpp` | The binding from C and from C++ with `std::unique_ptr` ownership |
 | `tests/client_conformance/python/probe.py` | The Python package `nervix_client`: a `memoryview` of a frame that keeps its event alive, waits cancelled from another thread, typed exceptions, and Arrow data pyarrow builds and reads through the PyCapsule interface |
 | `tests/client_conformance/java/Probe.java` | Java 21 JNI classes with Cleaner-owned handles and owner-retaining direct frame buffers |
-| `tests/client_conformance/ruby/probe.rb` | The binding through Fiddle, with collector-driven release |
+| `tests/client_conformance/ruby/probe.rb` | The magnus gem with collector-owned objects, immutable owner-retaining frame/IPC buffers and released-GVL waits |
 
 Run with the `clock` argument, each binding probe follows a paced domain clock instead: it attaches
 to a running clock, reads the clock the attach reported and its projections before it uses a tick,
