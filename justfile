@@ -3929,7 +3929,7 @@ coverage-go-ci-tool:
 # Every script test runs here, including the advisory CRAP report and CI-entrypoint checks, so
 # this builds the Rust gate and installs its pinned complexity analyzer.
 test-docs: typed-ratchet-source-build install-cargo-crap build-client-suite-java-checker
-    uv run --locked python -m unittest discover -s scripts/tests -p "test_*.py"
+    NERVIX_CLIENT_SUITE_JAVA_CHECKER={{ quote(cargo_target_dir + "/client-suites/java") }} NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }} uv run --locked python -m unittest discover -s scripts/tests -p "test_*.py"
     node --test cloudflare/docs-worker/src/index.test.js
 
 # Screenshots are recaptured from the current console and the nervix-cli and nervix-server
@@ -3962,7 +3962,7 @@ test-client-suites: build-client-suite-java-checker
 # Collect the line coverage of the client suite check and its tests.
 coverage-client-suites-runner: build-client-suite-java-checker
     mkdir -p target/client-suites
-    COVERAGE_FILE=target/client-suites/.coverage uv run --locked --with coverage==7.11.0 coverage run --branch --source=scripts.client_suites,scripts.client_suites_mypy_plugin -m unittest scripts.tests.test_client_suites scripts.tests.test_client_suites_java
+    NERVIX_CLIENT_SUITE_JAVA_CHECKER={{ quote(cargo_target_dir + "/client-suites/java") }} NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }} COVERAGE_FILE=target/client-suites/.coverage uv run --locked --with coverage==7.11.0 coverage run --branch --source=scripts.client_suites,scripts.client_suites_mypy_plugin -m unittest scripts.tests.test_client_suites scripts.tests.test_client_suites_java
     COVERAGE_FILE=target/client-suites/.coverage uv run --locked --with coverage==7.11.0 coverage report -m
 
 book-pdf version="0.1.0-dev" output="":
