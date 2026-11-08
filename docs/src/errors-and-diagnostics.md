@@ -1446,6 +1446,19 @@ broker ingestor's acknowledgement that its transport fails to confirm, and a rej
 take back, become the ingestor's transient status with the innermost context of the ingestor's
 report as the reason, and only a later confirmed acknowledgement clears it.
 
+An ingestor's acknowledgement wait ends with a typed `IngestorAcknowledgementOutcome`:
+`Acknowledged`, `Failed` with the reason the failing share of its tree gave, `TimedOut` with the
+`ACK TIMEOUT` the tree stayed silent for, or `Shutdown`. The timeout is a property of the bounded
+wait, which `AckWaitOutcome::TimedOut` carries as a `Duration`; a root itself resolves only as
+acknowledged or failed, and no text encodes a timeout. The host reports a failed tree as `ingestor
+ACK chain failed for ingestor '<name>' in domain '<domain>': <reason>`, and an expired wait as a
+timeout naming its bound, `ingestor ACK chain for ingestor '<name>' in domain '<domain>' timed out:
+no acknowledgement progress within ACK TIMEOUT <duration>`. Both reject the batch, and both are
+counted by outcome; see [Ingestor Acknowledgement And
+Lifecycle](metrics-and-observability.md#ingestor-acknowledgement-and-lifecycle). The
+`nervix_ingestor_transient_failure` gauge projects the same transient status `DESCRIBE INGESTOR`
+shows, for the task that currently runs the unit.
+
 A WebSockets connection's idle expiry keeps `DeadlineElapsed` with the explicit
 `idle_timeout_ms` key, or `WebsocketsConnectionIngestorFailure::IdleTimeout` with its derived effective budget,
 beneath `IngestorError::Read`. The fieldless timer expiry is retained as a typed attachment, so the

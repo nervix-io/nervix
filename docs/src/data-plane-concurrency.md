@@ -3575,6 +3575,21 @@ notification, ordering fence or tracked lock. Registry withdrawal follows the ex
 retirement boundary and preserves sibling handles. Poll timing excludes cadence waiting and graph
 intake. The counters do not establish a memory-ordering or delivery guarantee.
 
+### Ingestor Acknowledgement Observations
+
+The broker and paced loops record acknowledgement outcomes, transport acknowledgement and
+rejection outcomes with their durations, resumes, suspensions and unconfirmed stops through the
+same exact-unit children the read observations retain, registered with them and withdrawn with
+them; no recurring path resolves labels or reaches the registry. Typing the acknowledgement wait's
+outcome changes no ACK-tree transition: an expired `ACK TIMEOUT` still ends only the wait, and the
+silent root, its completion and the batch's confirmation hold are kept exactly as before, so drains
+and ownership handoffs wait as they did. The transient-failure gauge reuses the emitter's
+task-bound failure projection: each ingestor host binds a closure over its unit's existing status
+publication when it starts, a scrape loads the current binding, and dropping the host withdraws
+only its own binding by pointer identity, so an ending predecessor never clears its replacement.
+These observations add no wait, notification, ordering fence or tracked lock, and establish no
+memory-ordering or delivery guarantee.
+
 ## Materialized Inspection Capture
 
 Operator inspection uses the published unit routing index and the existing materialized assignment
