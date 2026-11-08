@@ -413,6 +413,10 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
 - [Connector Crates And The Connector Contract](docs/src/connector-contract.md): a connector crate,
   the shared connector contract, connector planning or composition, host ingestor and emitter
   execution.
+- [Emitter Batching](docs/src/emitter-batching.md): compatible-row packing, exact encoded-size
+  boundaries and subdivision, retained payload membership and outcomes, batching observation units
+  and the scope of measured tuning evidence. The connector contract retains the general host and
+  engine boundary; the Emitters and Schemas And Codecs manuals own public clauses and containers.
 - [Cluster Interconnect](docs/src/interconnect.md): interconnect code and every node-to-node
   operation, including application progress reports, queries and completion-participant views.
 - [Name Resolution](docs/src/name-resolution.md): `nervix-dns`; how a node or a native client loads

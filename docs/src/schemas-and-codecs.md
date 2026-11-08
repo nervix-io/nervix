@@ -528,6 +528,10 @@ state or headers, so it cannot reach a sensitive value that construction did not
 
 ### Batch Containers
 
+The [Emitter Batching](./emitter-batching.md#exact-bytes-and-bounded-subdivision) architecture
+chapter owns how selected members are packed, measured and subdivided under the encoded limit,
+and how their membership survives an uncertain publication.
+
 An emitter that declares a [batching clause](emitters.md#batch-payloads) publishes several records
 as one payload. Each record contributes one member value, exactly the value it would have been
 published as alone: the wire object for `WIRE JSON`, `WIRE CBOR` and `WIRE AVRO` codecs, the

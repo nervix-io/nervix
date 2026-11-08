@@ -96,6 +96,9 @@ their inspection contracts distinguish effective options from canonical `SHOW CR
 For batching inspection, read [Emitter payload preparation](../../../docs/src/metrics-and-observability.md#emitter-payload-preparation)
 alongside Emitters: check the effective container and distinguish encoded payload measurements,
 retained work, retries and confirmed source records before interpreting a throughput figure.
+For packing, exact byte boundaries, native containers, retry membership and the scope of measured
+tuning evidence, read [Emitter Batching](../../../docs/src/emitter-batching.md). Choose the policy
+from the entity's current declaration before applying its tuning guidance.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
 Roto UDFs, ingestors for every connector and entity pair, junctions, reingestors, and session
@@ -156,7 +159,7 @@ defines each status.
 For `RESTORE`, retain the same archive bytes as well as the statement and execution reference after
 status `3`, including an invalid reply after upload. Follow the Rust client guide's
 [Restoring](https://docs.nervix.io/client-library.html#restoring) contract when recovering it.
-For browser restore recovery, read [the web console's Backup And Restore section](../../../docs/src/client-tools-web-console.md#backup-and-restore)
+For browser restore recovery, read [the web console's Backing Up And Restoring section](../../../docs/src/client-tools-web-console.md#backing-up-and-restoring)
 before interpreting a later request failure as the result of an earlier possibly admitted restore.
 For a native CLI or Rust-client session addressed by hostname, Hickory resolves the selected
 server, seeds, and redirects on connection. Keep the hostname in the `http://` or `https://` server
