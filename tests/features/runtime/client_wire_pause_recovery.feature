@@ -26,6 +26,7 @@ Feature: Transaction-owned domain pause recovery
     When these Plexus statements are executed on the leader node
       """
       CREATE RELAY after_orphan SCHEMA pause_event UNBRANCHED;
+      SHOW CREATE RELAY after_orphan;
       """
     Then the last command output contains
       """
