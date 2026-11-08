@@ -24,7 +24,7 @@ complete gate passes. No numeric allowance controls a semantic rule.
 | Gate | `nervix-ratchet gate` (`just ratchet`) | Requires the complete diagnostic gate, reads the product's dependency graph with `cargo tree` and compares the six structural counts with `debt-baseline.json`. |
 | Complexity analyzer | `nervix-ratchet crap` | Pins and runs the analyzer behind `functions_over_complexity_30`. |
 | Audit | `tools/nervix-lint/ratchet/src/audit` (`nervix-ratchet audit`, `just lint-audit`) | Consumes one in-process matrix report and attributes review candidates to the history that produced them. |
-| Diagnostic owner applicability | `nervix-ratchet applicability` (`just validate-deloxide-applicability`) | Reads the typed matrix report and compares diagnostic tracked-lock owners with the workload inventory's owner declarations. The Python lane validates its inventory and delegates this comparison without opening compiler evidence. |
+| Diagnostic owner applicability | `nervix-ratchet applicability` (`just validate-deloxide-applicability`) | Reads the typed matrix report and compares diagnostic tracked-lock owners with the workload inventory's owner declarations. Its projection uses the shared matrix schema and findings without materializing unused completion payloads. The Python lane validates its inventory and delegates this comparison without opening compiler evidence. |
 
 Compiler evidence has one Rust owner in this workspace. The driver writes compiler side reports;
 the report crate defines and aggregates them; the ratchet owns the matrix, compilation and

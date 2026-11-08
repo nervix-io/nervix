@@ -40,7 +40,7 @@ struct Owner {
     gap: Option<String>,
 }
 
-impl MatrixReport {
+impl MatrixReport<serde::de::IgnoredAny> {
     fn diagnostic_owners(&self, catalog: &std::path::Path) -> Result<BTreeSet<String>> {
         let mut diagnostic = BTreeSet::new();
         for configuration in &self.configurations {
@@ -99,7 +99,7 @@ impl Options {
             fs::read_to_string(&path).change_context(Error::Declaration { path: path.clone() })?;
         let inventory: Inventory =
             toml::from_str(&text).change_context(Error::Declaration { path: path.clone() })?;
-        let report: MatrixReport = io::read(&self.catalog)?;
+        let report: MatrixReport<serde::de::IgnoredAny> = io::read(&self.catalog)?;
         let owners = report.diagnostic_owners(&self.catalog)?;
         let declared: BTreeSet<_> = inventory
             .owner
