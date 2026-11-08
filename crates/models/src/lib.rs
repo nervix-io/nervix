@@ -62,6 +62,7 @@ mod schedule;
 mod schema;
 mod schema_fingerprint;
 mod settings;
+mod state_branch_selection;
 mod statement;
 mod timestamp;
 mod udf;
@@ -329,10 +330,7 @@ pub use remote::{
     RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeElementValue,
     RemoteRuntimeField, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
 };
-pub use reset_wasm_state::{
-    ResetWasmBranchField, ResetWasmState, ResetWasmStateScope, ResetWasmStateSelectionError,
-    ResolvedResetWasmStateScope,
-};
+pub use reset_wasm_state::ResetWasmState;
 pub use resource::{
     RequestedResourceVersion, ResourceDescription, ResourceEntryContent, ResourceId,
     ResourceManifestEntry, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey,
@@ -363,6 +361,9 @@ pub use schema::{
 pub use schema_fingerprint::SchemaFingerprint;
 pub use settings::{
     ClusterParameters, NodeCapabilities, Prerequisites, Setting, SettingClass, SettingDefinition,
+};
+pub use state_branch_selection::{
+    ResolvedStateBranchSelection, StateBranchField, StateBranchSelection, StateBranchSelectionError,
 };
 pub use statement::{
     AckWindow, AlterBranch, AlterBranchError, AlterBranchOperation, AlterDomain, AlterGenerator,

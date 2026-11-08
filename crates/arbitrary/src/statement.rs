@@ -24,10 +24,10 @@ use nervix_models::{
     PrometheusIngestorEntity, PulsarIngestorEntity, RabbitMqIngestorEntity, RebindResource,
     RebindResourceMembers, RebindResourceSelection, RedisIngestorEntity, RelayBranching, RelayName,
     Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
-    RelocationSelection, ResetWasmBranchField, ResetWasmState, ResetWasmStateScope, Restore,
-    RestoreLifecycle, RestoreMode, RestoreScope, RestoreState, ShowClusterStatus, ShowCreate,
-    ShowEmitters, ShowIngestors, ShowPlacements, ShowRelayMaterializedState, ShowTransactions,
-    ShowUdfs, SqsIngestorEntity, StartDomain, Statement, StopDomain, SubscriptionBinding,
+    RelocationSelection, ResetWasmState, Restore, RestoreLifecycle, RestoreMode, RestoreScope,
+    RestoreState, ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowPlacements,
+    ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SqsIngestorEntity, StartDomain,
+    StateBranchField, StateBranchSelection, Statement, StopDomain, SubscriptionBinding,
     SubscriptionLiteral, SyslogIngestorEntity, TransactionInspectionRequest,
     TransactionInspectionTarget, TransactionOperationNumber, UncordonNode, UploadResource,
     WebsocketsIngestorEntity, ZeroMqIngestorEntity,
@@ -408,21 +408,7 @@ impl Arbitrary<'_> {
                 })
             }
             StatementVariant::ResetWasmState => {
-                let scope = match self.entropy.byte() % 3 {
-                    0 => ResetWasmStateScope::Unbranched,
-                    1 => ResetWasmStateScope::AllBranches,
-                    _ => {
-                        let names = self.distinct_names::<FieldName>(1, ITEMS);
-                        let mut fields = Vec::with_capacity(names.len());
-                        for name in names {
-                            fields.push(ResetWasmBranchField {
-                                name,
-                                value: self.branch_value(),
-                            });
-                        }
-                        ResetWasmStateScope::Branch(fields)
-                    }
-                };
+                let scope = self.state_branch_selection();
                 Statement::ResetWasmState(ResetWasmState {
                     domain: self.name(),
                     processor: self.name(),
@@ -778,6 +764,24 @@ impl Arbitrary<'_> {
             operations.push(operation(self));
         }
         operations
+    }
+
+    fn state_branch_selection(&mut self) -> StateBranchSelection {
+        match self.entropy.byte() % 3 {
+            0 => StateBranchSelection::Unbranched,
+            1 => StateBranchSelection::AllBranches,
+            _ => {
+                let names = self.distinct_names::<FieldName>(1, ITEMS);
+                let mut fields = Vec::with_capacity(names.len());
+                for name in names {
+                    fields.push(StateBranchField {
+                        name,
+                        value: self.branch_value(),
+                    });
+                }
+                StateBranchSelection::Branch(fields)
+            }
+        }
     }
 
     pub(crate) fn placement_policy(&mut self) -> PlacementPolicy {
