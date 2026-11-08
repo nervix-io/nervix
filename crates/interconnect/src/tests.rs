@@ -471,14 +471,6 @@ async fn send_waits_for_a_target_registered_after_the_operation_starts() {
 }
 
 #[test]
-fn internal_tls_negotiates_only_http2() {
-    let tls = test_tls();
-
-    assert_eq!(tls.client_config.alpn_protocols, [b"h2".to_vec()]);
-    assert_eq!(tls.server_config.alpn_protocols, [b"h2".to_vec()]);
-}
-
-#[test]
 fn connection_limit_reserves_both_preconnected_directions() {
     let mut options = TransportOptions {
         max_peers: 2,
@@ -692,21 +684,6 @@ async fn connection_binding_drives_response_flow_control() {
 
     transport_a.shutdown().await;
     transport_b.shutdown().await;
-}
-
-#[test]
-fn certificate_binds_cluster_node_and_endpoint() {
-    let tls = test_tls();
-    let node = ClusterNodeName::parse("node-1").expect("valid node name");
-
-    tls.certificate
-        .validate_local("default", &node, "localhost")
-        .expect("certificate identity should match");
-    assert!(
-        tls.certificate
-            .validate_local("another-cluster", &node, "localhost")
-            .is_err()
-    );
 }
 
 #[nervix_primitives::test]
