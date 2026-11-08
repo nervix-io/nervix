@@ -64,10 +64,10 @@ pub(super) fn scheduled_snapshot(
         .assured("the scheduler fixture node is an identifier-shaped literal");
     let schedule = graph.schedule_for_domain(
         &domain,
-        &[node.clone()],
+        std::slice::from_ref(&node),
         0,
         PlacementPolicy::Neutral,
-        &crate::registry::uniform_capabilities(&[node]),
+        &crate::registry::uniform_capabilities(std::slice::from_ref(&node)),
     );
     TransactionPlanningSnapshot {
         parameters: nervix_models::ClusterParameterValues::default(),

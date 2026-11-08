@@ -109,9 +109,7 @@ impl FaultInjection {
             observer: observer.clone(),
             missing: missing.clone(),
         };
-        let Some(state) = self.inner.live_view_gaps.get(&gap) else {
-            return None;
-        };
+        let state = self.inner.live_view_gaps.get(&gap)?;
         let mut observed = Some(None);
         state.send_if_modified(|state| match state {
             LiveViewGapState::Opening => {

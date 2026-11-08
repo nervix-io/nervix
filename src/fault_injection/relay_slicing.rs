@@ -110,7 +110,6 @@ impl FaultInjection {
             .verified("the scenario armed this domain")
             .value()
             .clone();
-        let observations = probe.accepted.lock().clone();
-        observations
+        probe.accepted.lock().clone()
     }
 }

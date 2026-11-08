@@ -26,6 +26,11 @@ use crate::runtime_schema::{RuntimeRecordBatch, batch_payload_bytes};
 impl RemoteDispatcher {
     /// The ordinary path sends the original shared body once. A refusal creates no receiver
     /// attempt, so its sequence can carry a smaller prefix; accepted prefixes keep their ACKs.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the encoded payload, borrowed rows, channel gate and ACK registrations retain \
+                  independent owners; the caller supplies its deadline and capacity-refusal policy"
+    )]
     pub(super) async fn dispatch_sliced_relay_payload(
         &self,
         node: &ClusterNodeName,
@@ -57,7 +62,7 @@ impl RemoteDispatcher {
                 if let Some(owner) = acknowledgements {
                     owner.admit();
                 }
-                return Ok(());
+                Ok(())
             }
             Err(error) => {
                 let RemoteDispatchError::ReceiveBounds { bounds, .. } = error.current_context()

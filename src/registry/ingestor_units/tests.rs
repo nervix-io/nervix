@@ -115,10 +115,10 @@ fn one_instance_exposes_its_single_execution_and_several_instances_keep_distinct
     let multiple_graph = graph(IngestorInstances::Count(nonzero!(3u64)), false);
     let schedule = multiple_graph.schedule_for_domain(
         &named("instances"),
-        &[owner.clone()],
+        std::slice::from_ref(&owner),
         0,
         PlacementPolicy::Neutral,
-        &crate::registry::uniform_capabilities(&[owner]),
+        &crate::registry::uniform_capabilities(std::slice::from_ref(&owner)),
     );
     let source = &schedule.nodes[&identity];
     assert!(source.sole_unit().is_none());
