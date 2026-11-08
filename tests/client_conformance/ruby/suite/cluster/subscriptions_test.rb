@@ -120,7 +120,7 @@ module RubySuite
       end
     end
 
-    def test_a_removed_relay_ends_its_subscription
+    def test_dropping_a_relay_ends_its_subscription
       relay = unique('doomed')
       subscription = unique('ended')
       completed("CREATE RELAY #{relay} SCHEMA suite_row BRANCHED BY by_tenant;")

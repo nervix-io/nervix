@@ -703,7 +703,7 @@ tier = "cluster"
 
 [[test]]
 host = "ruby"
-identity = "RubySuite::SubscriptionsTest#test_a_removed_relay_ends_its_subscription"
+identity = "RubySuite::SubscriptionsTest#test_dropping_a_relay_ends_its_subscription"
 tier = "cluster"
 
 [[test]]
