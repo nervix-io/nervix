@@ -2,6 +2,12 @@
 
 *Plexus, the Nervix graph definition language.*
 
+Secure random values come from `nervix-crypto`. Its pinned AWS-LC generator returns complete
+random bytes or aborts if sufficient entropy cannot be obtained; it has no recoverable entropy
+failure to classify as a record, authentication or transport rejection. No default value replaces
+an unavailable random draw. Digest computation and the deterministic transport-entropy callback
+retain their infallible contracts.
+
 The allowance engine returns `Admission` decisions separately from input and conversion errors.
 `WaitUntil`, `NeverAdmissible` and `KeyBudgetExhausted` are ordinary outcomes, not decode failures
 or dropped payloads. `QuotaError` identifies invalid rates, bursts, costs, TTLs and horizon ranges;
@@ -163,6 +169,10 @@ as waiting for materialized state or following a new leader, remain distinct fro
 The web console applies the same distinction to structured choice lookups: an absent form
 prerequisite shows a neutral hint, and stale context offers a fresh request. A failed lookup,
 closed session channel, or unreadable reply appears as an alert.
+For relay-tab restoration, the console decides from the typed `SubscriptionRefusal`: a missing
+domain or relay, or a changed relay schema, ends the tab; other failures retain it for a bounded
+backoff. Restoration causes, server diagnostics and retry waits appear only in that tab, preserving
+the operator's REPL history. The [Web Console](client-tools-web-console.md) owns the presentation.
 Client creation names its choice as a connector and presents the composed Plexus
 `<CONNECTOR> CLIENT` head; a missing choice asks the operator to choose a client connector.
 

@@ -605,7 +605,7 @@ dependencies = [
  "libc",
  "portable-atomic",
  "rustc-hash",
- "rustix 1.1.6",
+ "rustix",
  "tokio",
  "tokio-stream",
  "xattr",
@@ -2940,19 +2940,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 
 [[package]]
-name = "crossbeam"
-version = "0.8.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e71406cd8807725f7ac2f999a4cdd32e98f829fdf65f528343cebf945e41df1e"
-dependencies = [
- "crossbeam-channel",
- "crossbeam-deque",
- "crossbeam-epoch",
- "crossbeam-queue",
- "crossbeam-utils",
-]
-
-[[package]]
 name = "crossbeam-channel"
 version = "0.5.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3007,15 +2994,17 @@ checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
 name = "crossterm"
-version = "0.28.1"
+version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "829d955a0bb380ef178a640b91779e3987da38c9aea133b20614cfed8cdea9c6"
+checksum = "d8b9f2e4c67f833b660cdb0a3523065869fb35570177239812ed4c905aeff87b"
 dependencies = [
  "bitflags 2.13.2",
  "crossterm_winapi",
+ "derive_more",
+ "document-features",
  "mio",
  "parking_lot",
- "rustix 0.38.44",
+ "rustix",
  "serde",
  "signal-hook 0.3.18",
  "signal-hook-mio",
@@ -3648,6 +3637,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "document-features"
+version = "0.2.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
+dependencies = [
+ "litrs",
+]
+
+[[package]]
 name = "dotenvy"
 version = "0.15.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3900,7 +3898,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ce92ff622d6dadf7349484f42c93271a0d49b7cc4d466a936405bacbe10aa78"
 dependencies = [
  "cfg-if",
- "rustix 1.1.6",
+ "rustix",
  "windows-sys 0.59.0",
 ]
 
@@ -5405,15 +5403,6 @@ dependencies = [
 
 [[package]]
 name = "itertools"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
@@ -5968,12 +5957,6 @@ checksum = "7e57c38c1e860fd37c604281cdfb1dd2216977fd76a50f85ba2f388ef3219616"
 
 [[package]]
 name = "linux-raw-sys"
-version = "0.4.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
-
-[[package]]
-name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
@@ -5983,6 +5966,12 @@ name = "litemap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
+
+[[package]]
+name = "litrs"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
 
 [[package]]
 name = "lock_api"
@@ -6303,7 +6292,7 @@ version = "0.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57804b2c9b69967f1536a56f86297e367a33b19e98852ed624b84551cdbc0d90"
 dependencies = [
- "rustix 1.1.6",
+ "rustix",
 ]
 
 [[package]]
@@ -7568,11 +7557,15 @@ name = "nervix-crypto"
 version = "0.1.0-dev"
 dependencies = [
  "aws-lc-rs",
+ "aws-lc-sys",
+ "bolero",
  "error-stack",
+ "faster-hex",
  "meticulous",
  "nervix-primitives",
  "nervix-recovery",
  "rustls",
+ "sha2 0.10.9",
  "thiserror 2.0.21",
 ]
 
@@ -7681,6 +7674,7 @@ dependencies = [
  "bolero",
  "bytes",
  "error-stack",
+ "faster-hex",
  "futures-util",
  "h2",
  "http",
@@ -7695,14 +7689,12 @@ dependencies = [
  "nervix-primitives",
  "nervix-recovery",
  "percent-encoding",
- "rand_core 0.6.4",
  "rcgen",
  "rkyv",
  "rustls",
  "rustls-pki-types",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "shuttle",
  "sorted-vec",
  "strum 0.26.3",
@@ -8258,6 +8250,7 @@ dependencies = [
  "md5",
  "meticulous",
  "nervix-approx-into",
+ "nervix-crypto",
  "nervix-execution",
  "nervix-models",
  "nervix-plexus",
@@ -8268,7 +8261,6 @@ dependencies = [
  "regex",
  "regex-automata 0.4.18",
  "rstest",
- "sha2 0.10.9",
  "simd-json",
  "sorted-vec",
  "strum 0.26.3",
@@ -10503,23 +10495,17 @@ dependencies = [
 
 [[package]]
 name = "reedline"
-version = "0.36.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57016fc0ec4c651a05cb80fb1200b7c3518afcc2f769edffe15aca2363395c15"
+version = "0.52.1"
+source = "git+https://github.com/nushell/reedline.git?rev=c8d81b222745f7057a30a0fbf0ec454c5ac42e2e#c8d81b222745f7057a30a0fbf0ec454c5ac42e2e"
 dependencies = [
- "chrono",
- "crossbeam",
  "crossterm",
  "fd-lock",
- "itertools 0.12.1",
  "nu-ansi-term",
  "serde",
  "strip-ansi-escapes",
- "strum 0.26.3",
- "strum_macros 0.26.4",
- "thiserror 1.0.69",
+ "strum 0.28.0",
  "unicode-segmentation",
- "unicode-width 0.1.14",
+ "unicode-width 0.2.3",
 ]
 
 [[package]]
@@ -11157,19 +11143,6 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "0.38.44"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdb5bc1ae2baa591800df16c9ca78619bf65c0488b41b96ccec5d11220d8c154"
-dependencies = [
- "bitflags 2.13.2",
- "errno",
- "libc",
- "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "rustix"
 version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
@@ -11177,7 +11150,7 @@ dependencies = [
  "bitflags 2.13.2",
  "errno",
  "libc",
- "linux-raw-sys 0.12.1",
+ "linux-raw-sys",
  "windows-sys 0.61.2",
 ]
 
@@ -12472,6 +12445,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "strum"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9628de9b8791db39ceda2b119bbe13134770b56c138ec1d3af810d045c04f9bd"
+dependencies = [
+ "strum_macros 0.28.0",
+]
+
+[[package]]
 name = "strum_macros"
 version = "0.26.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12489,6 +12471,18 @@ name = "strum_macros"
 version = "0.27.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7695ce3845ea4b33927c055a39dc438a45b059f7c1b3d91d38d10355fb8cbca7"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "strum_macros"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab85eea0270ee17587ed4156089e10b9e6880ee688791d45a905f5b1ca36f664"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -12719,7 +12713,7 @@ dependencies = [
  "fastrand",
  "getrandom 0.4.3",
  "once_cell",
- "rustix 1.1.6",
+ "rustix",
  "windows-sys 0.61.2",
 ]
 
@@ -12738,7 +12732,7 @@ version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
- "rustix 1.1.6",
+ "rustix",
  "windows-sys 0.61.2",
 ]
 
@@ -14087,7 +14081,7 @@ dependencies = [
  "postcard",
  "pulley-interpreter",
  "rayon",
- "rustix 1.1.6",
+ "rustix",
  "serde",
  "serde_derive",
  "smallvec",
@@ -14204,7 +14198,7 @@ checksum = "bd8aa8711f68b2cdd94c2b85ba5c8317edaa1ac4ee0a0534b957123680239307"
 dependencies = [
  "cc",
  "libc",
- "rustix 1.1.6",
+ "rustix",
  "wasmtime-environ",
  "wasmtime-internal-versioned-export-macros",
  "windows-sys 0.61.2",
@@ -14753,7 +14747,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
 dependencies = [
  "libc",
- "rustix 1.1.6",
+ "rustix",
 ]
 
 [[package]]

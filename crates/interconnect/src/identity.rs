@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** Loading cluster trust and its fingerprint, TLS 1.3 configuration, certificate SAN
 //!   identity, and the identity and join terms a transport binds as.
-//! - **Depends on.** The shared cluster node name vocabulary and X.509/TLS primitives.
+//! - **Depends on.** Shared node names, the cryptography boundary and X.509/TLS primitives.
 //! - **Must not know.** HTTP/2 pools, request routing, or runtime operations.
 
 #![cfg_attr(
@@ -19,6 +19,7 @@ use std::{collections::BTreeSet, io, net::IpAddr, path::Path};
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
+use nervix_crypto::digest::{Sha256, sha256};
 use nervix_models::{
     ClusterNodeName, PrerequisiteTimings, RaftLogDurability, TrustRootFingerprint,
 };
@@ -30,7 +31,6 @@ use rustls::{
     server::WebPkiClientVerifier,
 };
 use rustls_pki_types::pem::{Error as PemError, PemObject};
-use sha2::{Digest as _, Sha256};
 use url::Url;
 use x509_parser::{
     extensions::GeneralName,
@@ -332,7 +332,7 @@ impl TlsConfigBundle {
 fn trust_root_fingerprint(anchors: &[CertificateDer<'static>]) -> TrustRootFingerprint {
     let mut digests = BTreeSet::new();
     for anchor in anchors {
-        let digest: [u8; 32] = Sha256::digest(anchor.as_ref()).into();
+        let digest = sha256(anchor.as_ref());
         digests.insert(digest);
     }
     let mut hasher = Sha256::new();
@@ -340,7 +340,7 @@ fn trust_root_fingerprint(anchors: &[CertificateDer<'static>]) -> TrustRootFinge
     for digest in &digests {
         hasher.update(digest);
     }
-    TrustRootFingerprint::from_digest(hasher.finalize().into())
+    TrustRootFingerprint::from_digest(hasher.finish())
 }
 
 fn load_certificates(
@@ -412,8 +412,33 @@ mod tests {
     use error_stack::Report;
     use rustls_pki_types::pem::Error as PemError;
 
-    use super::{TlsConfigBundle, map_pem_error, parse_identity_uri};
+    use super::{TlsConfigBundle, map_pem_error, parse_identity_uri, trust_root_fingerprint};
     use crate::{TlsConfigError, TlsPemFailureKind, TlsPemFileKind, TransportClock};
+
+    #[test]
+    fn trust_fingerprints_match_fixed_vectors_and_treat_anchors_as_a_set() {
+        use rustls_pki_types::CertificateDer;
+
+        let a = CertificateDer::from(b"anchor a".to_vec());
+        let b = CertificateDer::from(b"anchor b".to_vec());
+        assert_eq!(
+            trust_root_fingerprint(&[]).to_string(),
+            "5b992be32569c77a8560f4389f2d6bec1e5129f291b59bf24aed8f7989f0139c"
+        );
+        assert_eq!(
+            trust_root_fingerprint(std::slice::from_ref(&a)).to_string(),
+            "5d157cc280f8141dc64f5a6972c0bbbf5019f6ea4a45f60928e41a35d8ba98a5"
+        );
+        let expected = "4fb926f856349e239b4d2d18f77a0cbdcefe0c30354d5cf045ae496ac0085610";
+        assert_eq!(
+            trust_root_fingerprint(&[a.clone(), b.clone()]).to_string(),
+            expected
+        );
+        assert_eq!(
+            trust_root_fingerprint(&[b, a.clone(), a]).to_string(),
+            expected
+        );
+    }
 
     #[test]
     fn identity_uri_rejects_components_outside_the_canonical_shape() {

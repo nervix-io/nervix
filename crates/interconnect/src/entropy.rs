@@ -3,7 +3,7 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The source of the process epoch and of relay grant identifiers.
-//! - **Depends on.** Operating-system randomness.
+//! - **Depends on.** The cryptography boundary's secure random values.
 //! - **Must not know.** What an identifier fences, or how a peer uses it.
 
 #![cfg_attr(
@@ -17,13 +17,12 @@
 use std::fmt;
 
 use nervix_primitives::sync::StdArc;
-use rand_core::{OsRng, RngCore as _};
 
 /// The source of the unpredictable values a transport allocates: its process epoch, which fences
 /// work addressed to an earlier incarnation of the same node, and its relay grant identifiers.
 ///
-/// Production draws both from the operating system. A controlled environment, such as a
-/// simulation, supplies its own source so that the same scenario allocates the same identities.
+/// Production draws both from AWS-LC through the cryptography boundary. A controlled environment,
+/// such as a simulation, supplies its own source so the same scenario allocates the same identities.
 /// Cryptographic randomness inside TLS is not drawn from here.
 #[derive(Clone)]
 pub struct TransportEntropy {
@@ -31,10 +30,10 @@ pub struct TransportEntropy {
 }
 
 impl TransportEntropy {
-    /// Draw every value from the operating system's secure random source.
+    /// Draw every value from AWS-LC's operating-system-seeded secure random source.
     pub fn operating_system() -> Self {
         Self {
-            source: StdArc::new(|| OsRng.next_u64()),
+            source: StdArc::new(nervix_crypto::random::u64),
         }
     }
 

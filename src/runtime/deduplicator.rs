@@ -1,9 +1,14 @@
+//! Layer: data plane.
+//! Owns: branch-local deduplicator keys, their immutable snapshot codec, and keyspace restoration.
+//! May depend on: the shared replicated branch-state owner, expiry maps, typed keys, and the
+//! bounded executor.
+//! Must not know: snapshot cadence, replica scheduling, control-plane transactions, or Plexus parsing.
+
 use std::{io::Write, mem::MaybeUninit, time::Duration};
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_checkpoint_replication::CheckpointReplication;
-use nervix_execution::Cancellation;
+use nervix_execution::{Cancellation, Executor};
 use nervix_expiry_map::ExpiryMap;
 use nervix_models::{Expression, ModelName, RelayName, Timestamp};
 use nervix_primitives::sync::{Arc, StdArc};
@@ -15,14 +20,15 @@ pub(in crate::runtime) mod stored_view;
 
 use super::{
     KeyProjectionKind, PersistedRuntimeStateEntry, ProcessorCompileError, ReorderKeyPart,
-    RuntimePersistenceError, RuntimeStateKind, RuntimeStatePlacement, StoredStateIssue,
-    UdfExecutor,
-    branch_checkpoint_catalog::{BranchCheckpointCatalog, CatalogRegistration},
+    RuntimePersistenceError, RuntimeStateKind, RuntimeStateOperationError, RuntimeStatePlacement,
+    RuntimeStateResult, RuntimeStateStore, StoredStateIssue, UdfExecutor,
     checked_add_duration_to_timestamp, compile_key_projection_program,
     native_checkpoint_encoding::{
         CancellableEntry, CancellableIterator, IteratorAsVec, scratch_bytes,
     },
     published_generation::{Generation, PublishedGenerations},
+    replicated_branch_state::{BranchSnapshotCodec, ReplicatedBranchState},
+    snapshot_staging::SnapshotStaging,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -75,17 +81,11 @@ pub(super) struct CompiledDeduplicatorKeyProgram {
 /// a lock. Everything outside the task reads the keys it last published here: the snapshot task
 /// persists them, replicas and ownership handoff receive them, and the next task for the same
 /// branch restores its keyspace from them.
+pub(super) type ReplicatedDeduplicatorState = ReplicatedBranchState<DeduplicatorSnapshotCodec>;
+
+/// The deduplicator's published keys and resident checkpoint encoding.
 #[derive(Debug)]
-pub(super) struct ReplicatedDeduplicatorState {
-    pub(super) placement: RuntimeStatePlacement,
-    pub(super) generations: PublishedGenerations<Vec<PublishedDeduplicatorKey>>,
-    /// What each replica reported holding of the published keys, and the offer of the newest
-    /// published keys to the replicas that lack them.
-    replication: CheckpointReplication,
-    /// The entry of the entity's branch checkpoint catalog that every published generation is
-    /// recorded in, absent for a state that only encodes or checks a checkpoint.
-    catalog: Option<CatalogRegistration>,
-}
+pub(super) struct DeduplicatorSnapshotCodec;
 
 /// One key a deduplicator branch held when its task published the keyspace, shared with that
 /// keyspace rather than copied from it.
@@ -339,35 +339,7 @@ impl ReplicatedDeduplicatorState {
             }
             None => PublishedGenerations::restored(0, Vec::new()),
         };
-        Ok(Self {
-            placement,
-            generations,
-            replication: CheckpointReplication::new(),
-            catalog: None,
-        })
-    }
-
-    /// This state as the state of a branch this node owns, with every generation it publishes
-    /// recorded in `catalog`, so the entity's replicas learn of it.
-    pub(super) fn cataloged(mut self, catalog: &BranchCheckpointCatalog) -> Self {
-        let revision = self.generations.load().revision;
-        self.catalog = Some(catalog.register(
-            self.placement.branch_key.clone(),
-            self.placement.state,
-            revision,
-        ));
-        self
-    }
-
-    pub(super) fn replication(&self) -> &CheckpointReplication {
-        &self.replication
-    }
-
-    /// Record in the entity's catalog that this state published `revision`.
-    fn record_published(&self, revision: u64) {
-        if let Some(catalog) = &self.catalog {
-            catalog.record(revision);
-        }
+        Ok(Self::from_generations(placement, generations))
     }
 
     /// Build the keyspace a branch task owns from the keys published last.
@@ -435,6 +407,29 @@ impl ReplicatedDeduplicatorState {
     }
 }
 
+impl BranchSnapshotCodec for DeduplicatorSnapshotCodec {
+    type Published = Vec<PublishedDeduplicatorKey>;
+
+    async fn persist_after(
+        state: &ReplicatedDeduplicatorState,
+        after_lsm: u64,
+        store: &RuntimeStateStore,
+        _executor: &Executor,
+        _staging: &SnapshotStaging,
+    ) -> RuntimeStateResult<Option<u64>> {
+        let snapshot = state
+            .snapshot_after(Some(after_lsm))
+            .change_context(RuntimeStateOperationError::Persistence)?;
+        let Some(snapshot) = snapshot else {
+            return Ok(None);
+        };
+        store
+            .persist_latest_snapshot(&state.placement, snapshot.lsm, &snapshot.payload)
+            .change_context(RuntimeStateOperationError::Persistence)?;
+        Ok(Some(snapshot.lsm))
+    }
+}
+
 impl DeduplicatorKeyspace {
     pub(super) fn state(&self) -> &Arc<ReplicatedDeduplicatorState> {
         &self.state
@@ -482,8 +477,7 @@ impl DeduplicatorKeyspace {
             return;
         }
         let published = ReplicatedDeduplicatorState::published_keys(&self.recent_keys);
-        let revision = self.state.generations.publish(published);
-        self.state.record_published(revision);
+        self.state.publish(published);
     }
 }
 

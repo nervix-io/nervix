@@ -57,7 +57,7 @@ impl Sample {
     fn tab(self) -> SubscriptionTabState {
         match self {
             Self::Subscribe => SubscriptionTabState::Ended,
-            Self::Restore => SubscriptionTabState::Interrupted,
+            Self::Restore => SubscriptionTabState::Interrupted(test_restoration()),
             Self::Unsubscribe => SubscriptionTabState::Open(test_stream()),
             Self::Command
             | Self::ListDomains

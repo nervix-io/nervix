@@ -26,20 +26,29 @@ It owns the scope of:
 - secure random values;
 - password and key derivation.
 
-The crate owns TLS provider selection and Ed25519 signing. Security digests, randomness and
-password derivation still have the counted call sites below; the remaining FIPS preparation work
-moves those operations to this boundary.
+The crate owns TLS provider selection, SHA-256 and SHA-512 digests, secure randomness and Ed25519
+signing. Password derivation and the unclassified hashes still have the counted call sites below.
+The one-shot digests use `aws_lc_rs::digest`. Incremental SHA-256 wraps the maintained native
+`SHA256_CTX` from the same AWS-LC module, keeping its state on the stack; the EVP context used by
+`aws_lc_rs::digest::Context` allocates algorithm state. The direct `aws-lc-sys` pin moves together
+with `aws-lc-rs` and librdkafka, preserving the single-module rule.
 
 | Purpose | Where Nervix obtains it today |
 | --- | --- |
 | TLS provider | `nervix-crypto` installs the outward provider through rustls's process-default installation and supplies an independent checked interconnect provider. Connector TLS, native sessions and TLS VHOSTs retain the outward provider; SQS projects the boundary's typed outward choice into Smithy's mode, preserving the SDK's cipher filtering. |
-| Security digests | RustCrypto SHA-256, for the interconnect's trust-root fingerprint and the expression function `sha256()`. |
-| Secure randomness | The operating-system generator of `rand_core`, for interconnect entropy and for password salts. |
+| Security digests | `nervix_crypto::digest` obtains SHA-256 and SHA-512 from AWS-LC. The interconnect trust-root fingerprint and the expression function `sha256()` use this boundary. |
+| Secure randomness | `nervix_crypto::random` obtains bytes and unsigned 64-bit values from AWS-LC's operating-system-seeded generator, for interconnect entropy and password salts. |
 | Password derivation | Argon2, for user passwords. |
 | NATS user authentication | `nervix-crypto` prepares the Ed25519 signing key and signs the nonce with AWS-LC. The NATS connector owns seed and credentials decoding, public-key encoding and the driver callback. |
 | Other digests | BLAKE3, for backups, resources, checkpoints, archives, identities and fingerprints. No product site is classified yet. |
 
 ## Algorithm Policy
+
+The boundary's random fill returns only a complete value. AWS-LC's `RAND_bytes` contract aborts
+if sufficient entropy cannot be obtained, and otherwise returns success; it provides no partial,
+default or deterministic substitute. The transport still accepts an environment-owned entropy
+callback for deterministic simulation, without changing the production cryptographic generator.
+Password salts retain the password-hash library's recommended length and base64 representation.
 
 The interconnect uses TLS 1.3 with `TLS_AES_256_GCM_SHA384` and
 `TLS_AES_128_GCM_SHA256`, and the `secp256r1`, `secp384r1` and `X25519MLKEM768` key
@@ -84,6 +93,10 @@ A site that uses a non-approved hash records its non-security purpose where it i
 register lists it with the site and the hash. The count recognises no recorded BLAKE3 purpose yet,
 so it holds every BLAKE3 site as unclassified.
 
+The expression function `md5()` in `crates/nervix-vm/src/runtime.rs` is a non-security checksum
+over UTF-8 text. It establishes no authenticity, authorization or collision-resistance guarantee;
+expressions needing collision resistance use the boundary-backed `sha256()` function.
+
 The maintained format-only [NKey fork](https://github.com/nervix-io/nkeys), called by
 `crates/connectors/nats/src/client/authentication.rs`, uses CRC-16/XMODEM only to detect transcription
 errors in a seed or public-key encoding, as the [NATS nkeys format](https://github.com/nats-io/nkeys/blob/main/strkey.go)
@@ -107,8 +120,6 @@ Nervix's own crates bring:
 | Crates | Path | Use | Purpose |
 | --- | --- | --- | --- |
 | `argon2`, with `blake2` | `nervix-server` | User password hashing | Security |
-| `sha2` | `nervix-interconnect` | The trust-root fingerprint | Security |
-| `sha2` | `nervix-vm` | The expression function `sha256()` | A digest users compute; moves to the boundary |
 | `md5` | `nervix-vm` | The expression function `md5()` | Non-security checksum |
 | `blake3` | `nervix-server`, `nervix-backup`, `nervix-consensus`, `nervix-models`, `nervix-roto` | Backup, resource, checkpoint and archive digests, identities and fingerprints | Unclassified |
 
