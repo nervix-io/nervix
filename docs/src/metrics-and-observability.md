@@ -772,7 +772,8 @@ planned handoff or failover.
 `DESCRIBE INGESTOR` queries each unit's current owner and reports its global index, owner, running
 state and readiness. Its edge metric lines render `instance=<i>`. Ingestor-specific quiesce,
 redelivery, decode-rejection, oversize, header-drop, read-ahead-drop and unfolding-refusal metrics
-use `domain`, `ingestor`, `physical_node_id` and `instance`; a `Single` ingestor uses `instance="-"`.
+use `domain`, `ingestor`, `physical_node_id`, `instance`, `connector` and `entity`; a `Single`
+ingestor uses `instance="-"`.
 
 A `BranchAggregated` checkpoint belongs to an exact execution unit. Capture includes that unit's
 series with each series' physical-node attribution intact. Installation replaces only that unit's
