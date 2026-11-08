@@ -12574,6 +12574,24 @@ mod tests {
             | ChoiceControl::ProcessorOutputField
             | ChoiceControl::ProcessorErrorField => nervix_client_wire::ChoiceTarget::RelayField,
             ChoiceControl::ProcessorBranchField => nervix_client_wire::ChoiceTarget::BranchField,
+            ChoiceControl::EmitterReference => {
+                nervix_client_wire::ChoiceTarget::EmitterHttpRequestReference
+            }
+            ChoiceControl::EmitterCatalog => {
+                nervix_client_wire::ChoiceTarget::EmitterIcebergCatalog
+            }
+            ChoiceControl::EmitterInputRelay => {
+                nervix_client_wire::ChoiceTarget::EmitterCompatibleInputRelay
+            }
+            ChoiceControl::EmitterCodec => nervix_client_wire::ChoiceTarget::EmitterCodec,
+            ChoiceControl::EmitterInputField
+            | ChoiceControl::EmitterStateField
+            | ChoiceControl::EmitterErrorField => nervix_client_wire::ChoiceTarget::RelayField,
+            ChoiceControl::EmitterOutputField => nervix_client_wire::ChoiceTarget::CodecField,
+            ChoiceControl::EmitterStateRelay => {
+                nervix_client_wire::ChoiceTarget::EmitterMaterializedRelay
+            }
+            ChoiceControl::EmitterErrorRelay => nervix_client_wire::ChoiceTarget::EmitterErrorRelay,
         };
         ConsoleRequest::Choice {
             request: ChoiceLookupRequest::new(target, Vec::new(), String::new()),

@@ -1738,7 +1738,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__requests__bolero_client_requests_keep_complete_values/corpus"
-domain_version = 6
+domain_version = 7
 features = []
 id = "client-requests"
 invariant = "Every current typed client request decodes to its complete original value, including identities, positions, schemas, a restoration's expected schema and opaque payloads."
@@ -4450,4 +4450,19 @@ package = "nervix-web-console"
 random_iterations = 128
 source = "crates/web-console/src/create_dialog/codec_draft.rs"
 test = "create_dialog::codec_draft::tests::bolero_codec_drafts_preserve_complete_models_and_family_heads"
+test_target = "bin:nervix-web-console"
+
+[[target]]
+case_timeout_seconds = 30
+corpus = "crates/web-console/src/create_dialog/__fuzz__/create_dialog__emitter_model_tests__bolero_emitter_drafts_preserve_every_complete_entity/corpus"
+domain_version = 1
+features = []
+id = "console-emitter-drafts"
+invariant = "Every declared emitter entity's in-contract browser draft preserves the complete current Model and canonical Plexus, including publication windows, ordered inputs, state, construction, values, envelope, batching, retries and explicit policies; out-of-contract batch bounds retain their exact text and typed refusal."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-web-console"
+random_iterations = 128
+source = "crates/web-console/src/create_dialog/emitter_model_tests.rs"
+test = "create_dialog::emitter_model_tests::bolero_emitter_drafts_preserve_every_complete_entity"
 test_target = "bin:nervix-web-console"

@@ -115,7 +115,7 @@ tuning evidence, read [Emitter Batching](../../../docs/src/emitter-batching.md).
 from the entity's current declaration before applying its tuning guidance.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
-Roto UDFs, ingestors for every connector and entity pair, junctions, reingestors, and session
+Roto UDFs, ingestors and emitters for every connector and entity pair, junctions, reingestors, and session
 subscriptions; use the same web-console chapter for their typed fields, resource versions, program
 editors, reference lookup, and transaction behavior.
 

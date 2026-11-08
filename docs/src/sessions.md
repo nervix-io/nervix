@@ -423,6 +423,16 @@ ingestor codec target requires a domain and filters out codecs without decoding.
 An unbranched relay target requires a domain and also supplies ingestor error relay choices, while
 a branched relay target requires a domain then a branch model reference. Branch fields require the
 same pair. Decoded fields and output fields use the existing codec-field and relay-field targets.
+Emitter reference targets use each entity's declared client connector choices; client consumers
+select a schema instead. The Iceberg catalog target uses the entity's catalog-client declaration.
+An emitter's encoding-codec target requires a domain and selects encoding-capable codecs; output
+construction may target a schema different from the inputs. Its additional-input target requires
+the domain and first input relay, selecting its exact named payload schema without requiring its
+branch. Materialized-state
+and error-relay targets require the domain followed by every selected input relay; they offer
+only candidates whose branch matches every input, with materialized state required for the state
+target. Schema-field choices require the domain and schema reference and keep schema field order.
+Their page digests include all selected input definitions and the referenced field schema.
 Placement requires exactly one domain-pace dependency. Schema, wire-schema, branch, relay, VHOST,
 signaling-protocol, resource, and codec lookups require exactly one domain reference. A
 relay-field lookup requires that domain reference followed by a relay model reference, and returns

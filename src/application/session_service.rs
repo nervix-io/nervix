@@ -611,45 +611,7 @@ struct ChoicePageBasis {
 impl ChoicePageBasis {
     fn new(request: &ChoiceLookupRequest, revision: u64) -> Self {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(&[match request.target() {
-            ChoiceTarget::DomainPace => 0,
-            ChoiceTarget::PlacementPolicy => 1,
-            ChoiceTarget::Schema => 2,
-            ChoiceTarget::Branch => 3,
-            ChoiceTarget::Relay => 4,
-            ChoiceTarget::RelayField => 5,
-            ChoiceTarget::WireJsonSchema => 6,
-            ChoiceTarget::WireCborSchema => 7,
-            ChoiceTarget::WireAvroSchema => 8,
-            ChoiceTarget::Resource => 9,
-            ChoiceTarget::CompletedResourceVersion => 10,
-            ChoiceTarget::Vhost => 11,
-            ChoiceTarget::SignalingProtocol => 12,
-            ChoiceTarget::Codec => 13,
-            ChoiceTarget::CodecField => 14,
-            ChoiceTarget::IngestHttpRequestSource => 15,
-            ChoiceTarget::IngestHttpEndpointSource => 16,
-            ChoiceTarget::IngestKafkaSource => 17,
-            ChoiceTarget::IngestPulsarSource => 18,
-            ChoiceTarget::IngestMqttSource => 19,
-            ChoiceTarget::IngestNatsSource => 20,
-            ChoiceTarget::IngestRabbitMqSource => 21,
-            ChoiceTarget::IngestRedisPubSubSource => 22,
-            ChoiceTarget::IngestPrometheusSource => 23,
-            ChoiceTarget::IngestZeroMqSource => 24,
-            ChoiceTarget::IngestSqsSource => 25,
-            ChoiceTarget::IngestWebsocketsConnectionSource => 26,
-            ChoiceTarget::IngestWebsocketsEndpointSource => 27,
-            ChoiceTarget::IngestSyslogSource => 28,
-            ChoiceTarget::IngestCodec => 29,
-            ChoiceTarget::IngestUnbranchedRelay => 30,
-            ChoiceTarget::IngestBranchedRelay => 31,
-            ChoiceTarget::BranchField => 32,
-            ChoiceTarget::ProcessorCompatibleInputRelay => 33,
-            ChoiceTarget::ProcessorInputBranchRelay => 34,
-            ChoiceTarget::ProcessorMaterializedRelay => 35,
-            ChoiceTarget::IngestNatsStreamSource => 36,
-        }]);
+        hasher.update(&[request.target().cursor_tag()]);
         hash_choice_text(&mut hasher, request.search());
         for dependency in request.dependencies() {
             hash_choice_value(&mut hasher, &dependency.value);
@@ -901,7 +863,34 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
         | ChoiceTarget::BranchField
         | ChoiceTarget::ProcessorCompatibleInputRelay
         | ChoiceTarget::ProcessorInputBranchRelay
-        | ChoiceTarget::ProcessorMaterializedRelay => {
+        | ChoiceTarget::ProcessorMaterializedRelay
+        | ChoiceTarget::EmitterHttpRequestReference
+        | ChoiceTarget::EmitterKafkaTopicReference
+        | ChoiceTarget::EmitterPulsarTopicReference
+        | ChoiceTarget::EmitterRabbitMqQueueReference
+        | ChoiceTarget::EmitterRabbitMqExchangeReference
+        | ChoiceTarget::EmitterRedisPubSubReference
+        | ChoiceTarget::EmitterMqttTopicReference
+        | ChoiceTarget::EmitterNatsSubjectReference
+        | ChoiceTarget::EmitterNatsStreamReference
+        | ChoiceTarget::EmitterZeroMqPushReference
+        | ChoiceTarget::EmitterSqsQueueReference
+        | ChoiceTarget::EmitterSentryEventReference
+        | ChoiceTarget::EmitterSyslogCollectorReference
+        | ChoiceTarget::EmitterOtelLogsReference
+        | ChoiceTarget::EmitterOtelTracesReference
+        | ChoiceTarget::EmitterOtelMetricsReference
+        | ChoiceTarget::EmitterClickHouseTableReference
+        | ChoiceTarget::EmitterPostgresTableReference
+        | ChoiceTarget::EmitterMySqlTableReference
+        | ChoiceTarget::EmitterMongoDbCollectionReference
+        | ChoiceTarget::EmitterIcebergTableReference
+        | ChoiceTarget::EmitterIcebergCatalog
+        | ChoiceTarget::EmitterCodec
+        | ChoiceTarget::EmitterCompatibleInputRelay
+        | ChoiceTarget::EmitterMaterializedRelay
+        | ChoiceTarget::EmitterErrorRelay
+        | ChoiceTarget::SchemaField => {
             return Err(ChoiceStatus::MissingContext);
         }
     };
@@ -1161,9 +1150,34 @@ impl SessionServiceImpl {
             | ChoiceTarget::BranchField
             | ChoiceTarget::ProcessorCompatibleInputRelay
             | ChoiceTarget::ProcessorInputBranchRelay
-            | ChoiceTarget::ProcessorMaterializedRelay => {
-                self.configured_choices_for(&request, session).await
-            }
+            | ChoiceTarget::ProcessorMaterializedRelay
+            | ChoiceTarget::EmitterHttpRequestReference
+            | ChoiceTarget::EmitterKafkaTopicReference
+            | ChoiceTarget::EmitterPulsarTopicReference
+            | ChoiceTarget::EmitterRabbitMqQueueReference
+            | ChoiceTarget::EmitterRabbitMqExchangeReference
+            | ChoiceTarget::EmitterRedisPubSubReference
+            | ChoiceTarget::EmitterMqttTopicReference
+            | ChoiceTarget::EmitterNatsSubjectReference
+            | ChoiceTarget::EmitterNatsStreamReference
+            | ChoiceTarget::EmitterZeroMqPushReference
+            | ChoiceTarget::EmitterSqsQueueReference
+            | ChoiceTarget::EmitterSentryEventReference
+            | ChoiceTarget::EmitterSyslogCollectorReference
+            | ChoiceTarget::EmitterOtelLogsReference
+            | ChoiceTarget::EmitterOtelTracesReference
+            | ChoiceTarget::EmitterOtelMetricsReference
+            | ChoiceTarget::EmitterClickHouseTableReference
+            | ChoiceTarget::EmitterPostgresTableReference
+            | ChoiceTarget::EmitterMySqlTableReference
+            | ChoiceTarget::EmitterMongoDbCollectionReference
+            | ChoiceTarget::EmitterIcebergTableReference
+            | ChoiceTarget::EmitterIcebergCatalog
+            | ChoiceTarget::EmitterCodec
+            | ChoiceTarget::EmitterCompatibleInputRelay
+            | ChoiceTarget::EmitterMaterializedRelay
+            | ChoiceTarget::EmitterErrorRelay
+            | ChoiceTarget::SchemaField => self.configured_choices_for(&request, session).await,
         };
         let (choices, content_digest) = match resolved {
             Ok(resolved) => resolved,

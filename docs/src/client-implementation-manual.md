@@ -254,7 +254,16 @@ archive; see [Restore Streams](#restore-streams).
   branch, and the third a relay with materialized state in that branch. A junction's first input
   uses the ingestor relay target for its selected branch; a reingestor's first input uses the
   ordinary relay target. Reingestor routes that construct a different branch use the ingestor
-  relay and branch-field targets.
+  relay and branch-field targets. An emitter-reference target carries a domain and offers only
+  the client connectors its entity declares; a client consumer instead uses the schema target.
+  The Iceberg catalog target uses its declared catalog-client option. An emitter encoding-codec
+  target carries a domain and selects encoding-capable codecs; its schema may differ from the
+  inputs because construction builds the output. A compatible-input target carries a domain
+  followed by the first input relay and requires its exact named schema while allowing different
+  input branches. Emitter materialized-state
+  and error-relay targets carry a domain followed by every selected input relay, in input order;
+  candidates must match every input's exact branch declaration, and materialized candidates must
+  declare materialized state. Schema-field targets carry a domain followed by the output schema.
 - **Q-2.** A client MUST use the returned `ChoiceValue`, rather than its presentation label, for
   selection. For completed resource versions it MUST handle `ResourceVersionNumber` and
   `LatestResourceVersion` as distinct values. It MUST NOT offer a version absent from the result as

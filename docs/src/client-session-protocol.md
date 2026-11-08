@@ -533,6 +533,17 @@ The cursor binds the selected candidate set and its definitions; a changed conte
 `StaleContext` instead of continuing an earlier page. [Sessions](./sessions.md#structured-choices)
 owns the complete lookup contract and the server's transaction-aware resolution.
 
+Emitter controls ask entity-specific reference questions using the clients their vocabulary
+declarations admit; a client consumer selects its schema, and the Iceberg catalog question reads
+the declared catalog-client option. Encoding-codec questions require a domain and offer codecs
+that encode; their schema may differ from the input schema because construction builds the
+output. Additional-input questions carry the first input relay and require its exact payload
+schema. Unlike ordinary processor inputs, emitter
+inputs may have different branches. Materialized-state and error-relay questions therefore carry
+every selected input and require a candidate's branch to match all of them. Output schema fields
+are selected with a domain and schema reference. These lookups retain the same transaction-prefix,
+paging, definition-digest and stale-context guarantees as the existing structured controls.
+
 ```mermaid
 flowchart LR
     Client -- ClientMessage --> Decode[Verify and decode]
