@@ -2714,7 +2714,14 @@ refusal reached against a transaction that another coordinator has since opened 
 as `TransactionPlanningError::DomainPaused` caused by the same command's own pause, is not that
 command's failure:
 the coordinator recovers the recorded progress under the same execution reference instead. A
-refusal against an unchanged transaction keeps its report, message, and disposition.
+refusal against an unchanged transaction keeps its report, message, and disposition, except for a
+typed paused-domain refusal eligible for orphaned-pause recovery. That recovery presents the
+command's current mutation lease to a conditional consensus operation; typed mutation-fence or
+restore-installation causes survive to the reporting boundary. A refused restore gate preserves
+the original refusal. An unconfirmed recovery, a lost fence or a transaction that now owns the
+pause keeps the admitted command retryable under the same reference. A confirmed resume emits
+the lifecycle log `resumed orphaned ALTER pause`; an unchanged status emits no such log. Neither
+outcome adds a client notice or a second success result.
 
 ### Domain Clock Attachment
 

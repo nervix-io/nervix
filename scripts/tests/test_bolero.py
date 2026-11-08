@@ -525,7 +525,7 @@ class InventoryTests(unittest.TestCase):
             "registry-archived-models": 49,
             "consensus-state-records": 46,
             "consensus-state-corruption": 46,
-            "consensus-raft-records": 45,
+            "consensus-raft-records": 46,
             "registry-stored-models": 42,
             "registry-stored-models-corruption": 42,
             "inferencer-tensor-columns": 1,

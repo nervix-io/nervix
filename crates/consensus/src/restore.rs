@@ -58,7 +58,18 @@ impl DomainRestoreInstallation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Error,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub enum RestoreStateInstallationError {
     #[error("domain '{domain}' restore state installation is incomplete")]
     Incomplete { domain: DomainName },

@@ -29,7 +29,7 @@ fn preparation_boundary(boundary: &str) -> StandaloneTransactionBoundary {
 
 #[given(expr = "the next model command in domain {string} finds an orphaned pause after admission")]
 async fn orphan_model_command_pause(world: &mut ScenarioWorld, domain: String) {
-    let domain = DomainName::parse(expand_placeholders(world, &domain))
+    let domain = DomainName::parse(&expand_placeholders(world, &domain))
         .assured("the scenario domain is valid");
     world
         .fault_injection
@@ -38,7 +38,7 @@ async fn orphan_model_command_pause(world: &mut ScenarioWorld, domain: String) {
 
 #[then(expr = "the orphaned pause in domain {string} was delivered to the model command")]
 async fn orphaned_model_command_pause_delivered(world: &mut ScenarioWorld, domain: String) {
-    let domain = DomainName::parse(expand_placeholders(world, &domain))
+    let domain = DomainName::parse(&expand_placeholders(world, &domain))
         .assured("the scenario domain is valid");
     assert!(
         world

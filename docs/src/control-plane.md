@@ -315,6 +315,14 @@ the first attempt and a resuming leader apply this rule. Repeating the outstandi
 this execution and waits for the retained terminal result. Atomicity still does not span the whole
 transaction.
 
+Before its internal transaction commits, a model command may encounter an orphaned alteration
+pause. After its whole-transaction progress recheck, a typed paused-domain refusal triggers a
+conditional recovery under its admitted mutation lease. The applied consensus operation checks
+that exact fence, the restore activation gate and the absence of a same-domain `COMMITTING`
+transaction atomically. An active local alteration prevents the attempt; no new alteration guard
+is acquired. A confirmed recovery replans the command; an unconfirmed one keeps its identity and
+lease available for retry. This leaves ordinary transaction cleanup and backup cuts unchanged.
+
 Finished transactions remain as small tombstones containing the outcome, step progress, errors,
 and executed quiesce levels. A tombstone also keeps the request identity, position, source digest
 and admitted result of every statement the transaction accepted, without the statement itself. An

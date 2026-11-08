@@ -348,8 +348,8 @@ service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of s
 emitter writes beside its publishing mode, its retained-publication flag and MQTT 5 property
 mappings, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a `PATTERN`,
 that header state, and inferencer state bindings with their initial expressions.
-Consensus's `raft_kind_key_` keyspaces and current `ClusterState`
-metadata encoding, 14, identify its stored shapes, including the partition count of every resolved branch
+Consensus's `raft_gate_key_` keyspaces and current `ClusterState`
+metadata encoding, 15, identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations. The runtime state store's
 `ranked-intake-unit-checkpoint-segments` format identifies the checkpoints it keeps, including the

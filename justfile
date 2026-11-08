@@ -1487,6 +1487,10 @@ test-wasm-protocol *args:
 test-consensus *args:
     cargo test --package nervix-consensus --lib -- {{ args }}
 
+# Explore one registered consensus owner without unrelated inventory packages.
+test-consensus-shuttle check:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/shuttle") }} SHUTTLE_TRACE_DIR={{ quote(cargo_target_dir + "/shuttle-failures/nervix-consensus/" + check) }} cargo test --package nervix-consensus --features shuttle --lib {{ quote(check) }} -- --exact --nocapture --test-threads=1
+
 # Run vocabulary unit tests and representation properties.
 test-models *args:
     cargo test --package nervix-models --all-targets -- {{ args }}

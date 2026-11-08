@@ -30,7 +30,7 @@ use nervix_consensus::{
     CommandExecutionState, CommandExecutionStatementDisposition, CommandExecutionStatementResult,
     CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
     CommandExecutionTransactionStatus, CommandExecutionTransactionTarget, ConsensusConflict,
-    ConsensusError, RecordedBackupArchive, RestoreExecution,
+    ConsensusError, RecordedBackupArchive, RestoreExecution, TransactionStatementRequest,
 };
 use nervix_models::{
     Backup, BackupCapture, BackupResources, BackupScope, ClusterNodeIdentity,
@@ -872,17 +872,22 @@ impl SessionServiceImpl {
                 } else {
                     domain
                 };
+                let mutation = execution.domain_mutation(&domain);
                 Box::pin(
                     self.execute_standalone_transaction(
                         transaction_id,
-                        execution.reference.clone(),
                         execution
                             .owner()
                             .verified("an applying execution retains its owner")
                             .clone(),
                         domain,
-                        source,
-                        *statement,
+                        TransactionStatementRequest {
+                            request_reference: execution.reference.clone(),
+                            expected_position: 0,
+                            source,
+                            statement: *statement,
+                        },
+                        mutation,
                     ),
                 )
                 .await
