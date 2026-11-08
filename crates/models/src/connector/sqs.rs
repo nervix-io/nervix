@@ -192,6 +192,7 @@ impl IngestorDeclaration for SqsQueueIngestor {
         instancing: crate::IngestorInstancingCapability::PerPartition,
         // An SQS message's attributes: one value per name, in no order.
         headers: Some(HeaderModel::exact(HeaderLayout::LastWins)),
+        payload: crate::IngestorPayloadDeclaration::BYTES,
         metadata: IngestorMetadataDeclaration::new(&[
             IngestorMetadataField::new("message_id", IngestorMetadataType::String),
             IngestorMetadataField::new("sent_at", IngestorMetadataType::Datetime),

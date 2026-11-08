@@ -336,6 +336,27 @@ test-scenarios *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
 
+# Exercise transport payload facts without unrelated paced client-driver preparation.
+test-ingestor-payload *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input 'tests/features/runtime/ingestor_payload*.feature' {{ quote(args) }}
+
+# Verify payload syntax and declaration-driven completion through the composed Plexus grammar.
+test-ingestor-payload-language:
+    cargo test --package nervix-plexus --lib semantic_program::tests::payload_
+    cargo test --package nervix-plexus --lib client_statement::connector_completion_tests::
+
+# Exercise lazy payload projection, registry admission and scalar retention through their owners.
+test-ingestor-payload-owners: download-onnxruntime build-web-console
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-server --features testing --lib -- ingest_payload --skip bolero
+    cargo test --package nervix-server --features testing --lib -- runtime::ingest_metadata::tests:: --skip bolero
+    cargo test --package nervix-connector --lib -- ingest_metadata::tests:: --skip bolero
+
 # Endpoint inspection/refusal cases use in-process nodes and the native session client.
 test-endpoint-heads *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash

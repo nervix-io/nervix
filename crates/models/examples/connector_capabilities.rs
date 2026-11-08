@@ -144,6 +144,7 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
         instancing,
         headers,
         metadata,
+        payload,
         executes_on_every_cluster_node,
         reference: source_reference,
         position_class,
@@ -175,6 +176,11 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
         .map(|field| format!("metadata.{}: {} OPTIONAL", field.name(), field.ty()))
         .collect();
     let options: Vec<_> = declared_options.iter().map(option).collect();
+    let payload: Vec<_> = payload
+        .fields()
+        .iter()
+        .map(|field| format!("payload.{}: {}", field.name(), field.ty()))
+        .collect();
     let from = match source_reference {
         IngestorReferenceKind::Schema => "SCHEMA <schema>",
         IngestorReferenceKind::Client(_) => "<client>",
@@ -197,6 +203,7 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
     json!({
         "entity": kind.phrase(), "connector": kind.connector().keyword(),
         "instancing": instancing.as_ref(),
+        "payload": payload,
         "reference": reference, "locator": locators(&declared_locators), "options": options,
         "modes": modes, "quiesce": quiesce, "metadata": metadata,
         "headers": header_model(headers), "every_node": executes_on_every_cluster_node,

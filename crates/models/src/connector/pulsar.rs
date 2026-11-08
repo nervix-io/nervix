@@ -494,6 +494,7 @@ impl IngestorDeclaration for PulsarTopicIngestor {
         // A Pulsar message carries its properties as a list, in the order the producer wrote them.
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         metadata: PULSAR_TOPIC_METADATA,
+        payload: crate::IngestorPayloadDeclaration::BYTES,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Pulsar),
         position_class: PositionClass::Replayable,

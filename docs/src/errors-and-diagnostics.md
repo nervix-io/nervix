@@ -1526,6 +1526,13 @@ sequenceDiagram
 
 ### Registry Validation And Planning
 
+An ingestor reading an undeclared `payload` field is
+`RegistryError::UndeclaredIngestorPayload`. It names the domain, ingestor, entity, field, the
+`FILTER WHERE` or destination route that read it, and the payload fields that entity declares.
+`payload.rows` is therefore refused for a transport entity with `payload.bytes` in its diagnostic.
+The runtime keeps an Arrow column-construction failure beneath `IngestMetadataError` as a typed
+cause for both metadata and payload projection.
+
 Connector declaration failures carry `RegistryError::InvalidConnectorDeclaration` with the domain,
 typed node identity, and a `ConnectorDeclarationIssue` naming the refused clause or mapping key.
 Duration failures retain the duration reader's typed cause; an unschedulable duration and an

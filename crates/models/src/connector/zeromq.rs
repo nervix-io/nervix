@@ -114,6 +114,7 @@ impl IngestorDeclaration for ZeroMqPullIngestor {
         instancing: crate::IngestorInstancingCapability::Single,
         headers: None,
         metadata: IngestorMetadataDeclaration::NONE,
+        payload: crate::IngestorPayloadDeclaration::BYTES,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::ZeroMq),
         position_class: PositionClass::None,

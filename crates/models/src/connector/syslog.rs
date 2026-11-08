@@ -287,6 +287,7 @@ const SYSLOG_LISTENER_METADATA: IngestorMetadataDeclaration = IngestorMetadataDe
     IngestorMetadataField::new("peer_addr", IngestorMetadataType::String),
     IngestorMetadataField::new("transport", IngestorMetadataType::String),
     IngestorMetadataField::new("tls_peer", IngestorMetadataType::String),
+    IngestorMetadataField::new("remote_ip", IngestorMetadataType::String),
 ]);
 
 impl IngestorDeclaration for SyslogListenerIngestor {
@@ -294,6 +295,7 @@ impl IngestorDeclaration for SyslogListenerIngestor {
         instancing: crate::IngestorInstancingCapability::Single,
         headers: None,
         metadata: SYSLOG_LISTENER_METADATA,
+        payload: crate::IngestorPayloadDeclaration::BYTES,
         executes_on_every_cluster_node: true,
         reference: IngestorReferenceKind::Client(ConnectorKind::Syslog),
         position_class: PositionClass::None,

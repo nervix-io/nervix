@@ -1092,6 +1092,8 @@ pub(crate) struct TestClusterConfig {
     pub transaction_max_source_bytes: u64,
     pub transaction_max_open: usize,
     pub grpc_mode: InternalTransportMode,
+    /// The loopback family used by HTTP and WebSocket intake in this scenario.
+    pub http_intake_ip: IpAddr,
     /// Whether the console's reserved port serves HTTP or HTTPS in this scenario.
     pub web_console_mode: InternalTransportMode,
     pub graceful_shutdown_drain: bool,
@@ -1127,6 +1129,7 @@ impl Default for TestClusterConfig {
             transaction_max_source_bytes: 1024 * 1024,
             transaction_max_open: 1024,
             grpc_mode: InternalTransportMode::Http,
+            http_intake_ip: HOST,
             web_console_mode: InternalTransportMode::Http,
             graceful_shutdown_drain: false,
             drain_timeout: DEFAULT_TEST_DRAIN_TIMEOUT,
@@ -1276,6 +1279,7 @@ impl Cluster {
                 config.grpc_mode,
             )?;
             spec.set_interconnect_address(address);
+            spec.http_intake_ip = config.http_intake_ip;
             spec.dns = dns.as_ref().map(ClusterDns::configuration);
             fault_injection
                 .set_syslog_ingestor_bind_ip(node_name(&node_id), spec.syslog_ingestor_host);
@@ -1753,6 +1757,7 @@ impl Cluster {
             dns.publish(node_id, index, address.listen_ip);
         }
         spec.set_interconnect_address(address);
+        spec.http_intake_ip = config.http_intake_ip;
         spec.dns = self.dns.as_ref().map(ClusterDns::configuration);
         spec.bootstrap_host = Some(bootstrap_host);
         self.fault_injection
@@ -1766,6 +1771,21 @@ impl Cluster {
                 self.roots.clone(),
             ),
         );
+        Ok(())
+    }
+
+    /// Changes one node's scenario-owned Syslog bind address before its ingestor opens.
+    pub(crate) fn set_syslog_ingestor_host(
+        &mut self,
+        node_id: &str,
+        host: IpAddr,
+    ) -> io::Result<()> {
+        let handle = self.nodes.get_mut(node_id).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("unknown node '{node_id}'"))
+        })?;
+        handle.spec.syslog_ingestor_host = host;
+        self.fault_injection
+            .set_syslog_ingestor_bind_ip(node_name(node_id), host);
         Ok(())
     }
 
@@ -5098,6 +5118,7 @@ struct NodeSpec {
     grpc_port: u16,
     grpc_https_port: u16,
     http_port: u16,
+    http_intake_ip: IpAddr,
     https_port: u16,
     observability_port: u16,
     web_console_port: u16,
@@ -5177,6 +5198,7 @@ impl NodeSpec {
             grpc_port: ports.grpc,
             grpc_https_port: ports.grpc_https,
             http_port: ports.http,
+            http_intake_ip: HOST,
             https_port: ports.https,
             observability_port: ports.observability,
             web_console_port: ports.web_console,
@@ -5342,11 +5364,11 @@ impl NodeSpec {
     }
 
     fn websocket_uri(&self, path: &str) -> String {
-        format!("ws://{}:{}{path}", HOST, self.http_port)
+        format!("ws://{}{path}", self.http_addr())
     }
 
     fn http_uri(&self, path: &str) -> String {
-        format!("http://{}:{}{path}", HOST, self.http_port)
+        format!("http://{}{path}", self.http_addr())
     }
 
     fn web_console_url(&self, mode: InternalTransportMode) -> String {
@@ -5376,7 +5398,7 @@ impl NodeSpec {
     }
 
     fn http_addr(&self) -> String {
-        format!("{HOST}:{}", self.http_port)
+        SocketAddr::new(self.http_intake_ip, self.http_port).to_string()
     }
 
     fn https_addr(&self) -> String {

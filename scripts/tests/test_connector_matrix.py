@@ -19,6 +19,7 @@ def declarations():
             "locator": "TOPIC 'orders' (kafka_topic)", "options": [],
             "modes": ["NO ACK", "ACK SEQUENTIAL ACK TIMEOUT 5s"],
             "quiesce": ["SUSPEND"], "metadata": ["metadata.offset: I64 OPTIONAL"],
+            "payload": ["payload.bytes: U64"],
             "headers": {"layout": "ordered_repeats", "names": "exact",
                         "layout_meaning": "every header in the order it was written",
                         "names_meaning": "a name matches only itself", "values": None},
@@ -69,6 +70,12 @@ def reasons():
 
 
 class ConnectorMatrixTests(unittest.TestCase):
+    def test_payload_facts_render_the_declared_required_counts(self):
+        surface = declarations()
+        surface["ingest"][0]["payload"] = ["payload.bytes: U64", "payload.rows: U64"]
+        text = matrix.render_matrix(surface, reasons())
+        self.assertIn("| Payload facts | payload.bytes: U64<br>payload.rows: U64 |", text)
+
     def test_value_and_client_constraints_follow_the_compiled_declaration(self):
         surface = declarations()
         surface["emit"][0]["value_contract"] = {

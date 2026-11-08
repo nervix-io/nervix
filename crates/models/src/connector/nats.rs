@@ -261,6 +261,7 @@ impl IngestorDeclaration for NatsSubjectIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         instancing: crate::IngestorInstancingCapability::PerPartition,
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+        payload: crate::IngestorPayloadDeclaration::BYTES,
         metadata: IngestorMetadataDeclaration::new(&[
             IngestorMetadataField::new("subject", IngestorMetadataType::String),
             IngestorMetadataField::new("reply", IngestorMetadataType::String),
@@ -434,6 +435,7 @@ impl IngestorDeclaration for NatsStreamIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         instancing: crate::IngestorInstancingCapability::Single,
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+        payload: crate::IngestorPayloadDeclaration::BYTES,
         metadata: IngestorMetadataDeclaration::new(&[
             IngestorMetadataField::new("subject", IngestorMetadataType::String),
             IngestorMetadataField::new("reply", IngestorMetadataType::String),

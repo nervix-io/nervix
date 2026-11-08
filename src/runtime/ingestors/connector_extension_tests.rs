@@ -246,7 +246,7 @@ fn poll_of(user_id: i64) -> IngestorPoll {
         messages: vec![IngestorPollMessage {
             payload: format!(r#"{{"user_id":{user_id}}}"#).into_bytes(),
             headers: RetainedIngestHeaders::none(),
-            metadata: nervix_connector::RetainedIngestMetadata::none(),
+            metadata: nervix_connector::RetainedIngestMetadata::none(0),
         }],
         failures: Vec::new(),
         dropped_header_values: 0,
@@ -317,7 +317,10 @@ async fn an_unacknowledged_batch_waits_for_the_extension_workers_when_its_ingest
         let intake = host
             .intake_unacknowledged(vec![IngestorIntakeMessage {
                 payload: &payload,
-                metadata: IngestMetadataRow::headers(&NoIngestHeaders),
+                metadata: IngestMetadataRow::headers(
+                    &NoIngestHeaders,
+                    &nervix_connector::NoIngestMetadata(0),
+                ),
             }])
             .await;
         (host, intake)
@@ -357,7 +360,10 @@ async fn take_in_unacknowledged(
     let payload = format!(r#"{{"user_id":{user_id}}}"#).into_bytes();
     host.intake_unacknowledged(vec![IngestorIntakeMessage {
         payload: &payload,
-        metadata: IngestMetadataRow::headers(&NoIngestHeaders),
+        metadata: IngestMetadataRow::headers(
+            &NoIngestHeaders,
+            &nervix_connector::NoIngestMetadata(0),
+        ),
     }])
     .await
 }
@@ -710,7 +716,10 @@ async fn take_in_acknowledged(
     let payload = format!(r#"{{"user_id":{user_id}}}"#).into_bytes();
     host.intake_acknowledged(vec![IngestorIntakeMessage {
         payload: &payload,
-        metadata: IngestMetadataRow::headers(&NoIngestHeaders),
+        metadata: IngestMetadataRow::headers(
+            &NoIngestHeaders,
+            &nervix_connector::NoIngestMetadata(0),
+        ),
     }])
     .await
 }

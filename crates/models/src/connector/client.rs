@@ -135,6 +135,7 @@ impl IngestorDeclaration for ClientProducerIngestor {
         instancing: crate::IngestorInstancingCapability::Single,
         headers: None,
         metadata: IngestorMetadataDeclaration::NONE,
+        payload: crate::IngestorPayloadDeclaration::BATCH,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Schema,
         position_class: PositionClass::None,

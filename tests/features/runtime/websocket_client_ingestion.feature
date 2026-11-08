@@ -50,6 +50,7 @@ Feature: Websocket client ingestion
       CREATE WEBSOCKETS CONNECTION INGESTOR ws_notifications
         FROM ws_main MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
+        FILTER WHERE payload.bytes > (0 AS U64)
         TO notifications
         INHERIT ALL
         BRANCHED BY by_ws_notifications

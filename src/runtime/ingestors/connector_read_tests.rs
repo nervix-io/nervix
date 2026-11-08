@@ -194,7 +194,7 @@ impl IngestorMessage for GatheredMessage {
     }
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
-        IngestMetadataRow::headers(self)
+        IngestMetadataRow::headers(self, self)
     }
 }
 
@@ -853,4 +853,11 @@ async fn payloads_an_ingestor_dropped_for_their_size_are_counted_and_nothing_is_
         Vec::<String>::new(),
         "a dropped oversized payload is no ingestor error"
     );
+}
+
+impl nervix_connector::IngestMessageMetadata for GatheredMessage {
+    fn payload_bytes(&self) -> usize {
+        nervix_connector::IngestorMessage::payload(self).len()
+    }
+    fn visit_metadata(&self, _values: &mut dyn nervix_connector::IngestMetadataValues) {}
 }

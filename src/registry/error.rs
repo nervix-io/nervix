@@ -26,6 +26,36 @@ use thiserror::Error;
 /// phrase: "declare only metadata.status and metadata.polled_at", or "declare no metadata field".
 struct DeclaredIngestorMetadata(IngestorEntityKind);
 
+struct DeclaredIngestorPayload(IngestorEntityKind);
+
+impl fmt::Display for DeclaredIngestorPayload {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("declare only ")?;
+        for (index, field) in self.0.capabilities().payload.fields().iter().enumerate() {
+            if index != 0 {
+                formatter.write_str(" and ")?;
+            }
+            write!(formatter, "payload.{}", field.name())?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IngestorPayloadReadSite {
+    FilterWhere,
+    Route(RelayName),
+}
+
+impl fmt::Display for IngestorPayloadReadSite {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FilterWhere => formatter.write_str("FILTER WHERE"),
+            Self::Route(relay) => write!(formatter, "its route to '{relay}'"),
+        }
+    }
+}
+
 impl fmt::Display for DeclaredIngestorMetadata {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let declared = self.0.capabilities().metadata;
@@ -318,6 +348,14 @@ pub(crate) enum RegistryError {
     DeserializeValue,
     #[error("stored model has an invalid archive header; recreate the stored data")]
     InvalidModelArchive,
+    #[error("ingestor '{ingestor}' in domain '{domain}' reads payload.{field} in {site}, but {kind} ingestors {}", DeclaredIngestorPayload(*.kind))]
+    UndeclaredIngestorPayload {
+        domain: DomainName,
+        ingestor: ModelName,
+        field: FieldName,
+        kind: IngestorEntityKind,
+        site: IngestorPayloadReadSite,
+    },
     /// An ingestor's route reads a metadata field the entity of its input does not declare.
     #[error(
         "ingestor '{ingestor}' in domain '{domain}' reads metadata.{field} in its route to \

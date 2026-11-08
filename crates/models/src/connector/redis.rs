@@ -222,6 +222,7 @@ impl IngestorDeclaration for RedisPubSubIngestor {
         // transport headers.
         headers: None,
         metadata: REDIS_PUBSUB_METADATA,
+        payload: crate::IngestorPayloadDeclaration::BYTES,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Redis),
         position_class: PositionClass::None,

@@ -105,6 +105,10 @@ impl IngestMessageHeaders for FakeMessage {
 /// The values of the metadata the transport's entity declares, in its order, as the real
 /// connector of that entity hands them over.
 impl IngestMessageMetadata for FakeMessage {
+    fn payload_bytes(&self) -> usize {
+        nervix_connector::IngestorMessage::payload(self).len()
+    }
+
     fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
         match &self.transport {
             MessageTransport::Headers(_) => {}

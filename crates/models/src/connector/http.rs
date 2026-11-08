@@ -354,6 +354,7 @@ impl IngestorDeclaration for HttpRequestIngestor {
         // value of a repeated field together under its name.
         headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
         metadata: HTTP_REQUEST_METADATA,
+        payload: crate::IngestorPayloadDeclaration::BYTES,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Http),
         position_class: PositionClass::None,
@@ -452,6 +453,7 @@ const HTTP_ENDPOINT_METADATA: IngestorMetadataDeclaration = IngestorMetadataDecl
     IngestorMetadataField::new("query", IngestorMetadataType::String),
     IngestorMetadataField::new("remote_addr", IngestorMetadataType::String),
     IngestorMetadataField::new("host", IngestorMetadataType::String),
+    IngestorMetadataField::new("remote_ip", IngestorMetadataType::String),
 ]);
 
 impl IngestorDeclaration for HttpEndpointIngestor {
@@ -461,6 +463,7 @@ impl IngestorDeclaration for HttpEndpointIngestor {
         // value of a repeated field together under its name.
         headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
         metadata: HTTP_ENDPOINT_METADATA,
+        payload: crate::IngestorPayloadDeclaration::BYTES,
         executes_on_every_cluster_node: true,
         reference: IngestorReferenceKind::Endpoint(EndpointType::Http),
         position_class: PositionClass::None,

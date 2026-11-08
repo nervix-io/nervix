@@ -225,6 +225,10 @@ impl IngestorMessage for WebsocketsConnectionIngestorMessage {
 /// The value of the metadata `WEBSOCKETS CONNECTION` declares: the text or binary kind of the data
 /// frame.
 impl IngestMessageMetadata for WebsocketsConnectionIngestorMessage {
+    fn payload_bytes(&self) -> usize {
+        nervix_connector::IngestorMessage::payload(self).len()
+    }
+
     fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
         values.string(self.frame.frame_type().as_ref());
     }

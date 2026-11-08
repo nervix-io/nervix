@@ -500,6 +500,8 @@ pub enum RuntimeCapability {
     },
     /// An ingestor's programs reading one typed metadata field.
     Metadata { field: &'static str },
+    /// An ingestor's programs reading one required payload fact.
+    Payload { field: &'static str },
     /// An emitter publishing in batches.
     Batch,
     /// An emitter setting one envelope clause.
@@ -556,6 +558,7 @@ impl Display for RuntimeCapability {
             Self::Option { keywords } => f.write_str(keywords),
             Self::OptionChoice { keywords, choice } => write!(f, "{keywords} {choice}"),
             Self::Metadata { field } => write!(f, "metadata.{field}"),
+            Self::Payload { field } => write!(f, "payload.{field}"),
             Self::Batch => f.write_str("BATCH"),
             Self::Envelope(kind) => f.write_str(kind.keywords()),
             Self::StalledPeer(key) => write!(f, "STALLED PEER {}", key.key()),

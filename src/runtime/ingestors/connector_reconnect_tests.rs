@@ -126,7 +126,7 @@ impl IngestorMessage for BrokerDelivery {
     }
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
-        IngestMetadataRow::headers(self)
+        IngestMetadataRow::headers(self, self)
     }
 }
 
@@ -538,4 +538,11 @@ fn a_broker_ingestor_without_a_retry_policy_reopens_on_the_reconnect_cadence() {
         PositionClass::Replayable,
     );
     assert_eq!(acknowledged.retry, declared);
+}
+
+impl nervix_connector::IngestMessageMetadata for BrokerDelivery {
+    fn payload_bytes(&self) -> usize {
+        nervix_connector::IngestorMessage::payload(self).len()
+    }
+    fn visit_metadata(&self, _values: &mut dyn nervix_connector::IngestMetadataValues) {}
 }

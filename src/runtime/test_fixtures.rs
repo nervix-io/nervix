@@ -125,7 +125,7 @@ pub(super) fn ingest_metadata_for_test(
     let mut builders = super::IngestMetadataBuilders::new(projection, rows.len());
     for row in rows {
         builders
-            .append(row)
+            .append(row, None)
             .expect("test metadata row must hand over the values its declaration names");
     }
     builders.finish().expect("test metadata must build")
@@ -916,6 +916,7 @@ pub(super) fn bind_ingestor_route_for_test(
     bind_ingestor_filter_map_program(
         identifier,
         metadata,
+        nervix_models::IngestorPayloadDeclaration::BYTES,
         allow_header_reads,
         &lowered,
         schemas,

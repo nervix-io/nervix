@@ -430,7 +430,7 @@ impl BufferedIngestMetadata {
     #[cfg(test)]
     pub(in crate::runtime) fn without_headers() -> Self {
         Self {
-            fields: RetainedIngestMetadata::none(),
+            fields: RetainedIngestMetadata::none(0),
             headers: BufferedIngestHeaders::Copied(RetainedIngestHeaders::none()),
             position: None,
         }

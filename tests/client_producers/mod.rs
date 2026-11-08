@@ -87,7 +87,18 @@ impl ScenarioProducer {
 /// A batch a producer submitted.
 struct ScenarioSubmission {
     producer: String,
+    /// The exact IPC body handed to the transport, before any server-side decoding.
+    bytes: usize,
     state: SubmissionState,
+}
+
+pub(super) fn submitted_bytes(world: &ScenarioWorld, batch: &str) -> usize {
+    world
+        .producers
+        .submissions
+        .get(batch)
+        .assured("the scenario submits its named batch before inspecting its byte count")
+        .bytes
 }
 
 enum SubmissionState {
@@ -844,7 +855,7 @@ enum SubmittedBody {
 
 /// Submits `body` through `producer` under the name `batch`.
 async fn submit(world: &mut ScenarioWorld, producer: String, batch: String, body: SubmittedBody) {
-    let submission = match world.scenario_producer(&producer) {
+    let (submission, bytes) = match world.scenario_producer(&producer) {
         ScenarioProducer::Native(native) => {
             let native = native.clone();
             let body = match body {
@@ -853,6 +864,7 @@ async fn submit(world: &mut ScenarioWorld, producer: String, batch: String, body
                 }),
                 SubmittedBody::Written(body) => ProducerBatch::from_arrow_ipc(body),
             };
+            let bytes = body.len();
             let (identified, id) = watch::channel(None);
             let wait = nervix_primitives::task::spawn(async move {
                 let submitted = native.submit(body).await;
@@ -864,11 +876,14 @@ async fn submit(world: &mut ScenarioWorld, producer: String, batch: String, body
                     at: Instant::now(),
                 })
             });
-            SubmissionState::Native(NativeSubmission {
-                id,
-                wait: Some(AbortOnDropHandle::new(wait)),
-                answered: None,
-            })
+            (
+                SubmissionState::Native(NativeSubmission {
+                    id,
+                    wait: Some(AbortOnDropHandle::new(wait)),
+                    answered: None,
+                }),
+                bytes,
+            )
         }
         ScenarioProducer::Raw { session, id, .. } => {
             let session = session.clone();
@@ -882,6 +897,7 @@ async fn submit(world: &mut ScenarioWorld, producer: String, batch: String, body
                 SubmittedBody::Rows(rows) => arrow_stream(&[rows]),
                 SubmittedBody::Written(body) => body,
             };
+            let bytes = body.len();
             let request = ClientRequest::SubmitBatch(SubmitBatchRequest {
                 producer: producer_id,
                 batch: body,
@@ -890,11 +906,12 @@ async fn submit(world: &mut ScenarioWorld, producer: String, batch: String, body
                 .send(request)
                 .await
                 .unwrap_or_else(|error| panic!("batch '{batch}' could not be sent: {error}"));
-            SubmissionState::Raw { session, request }
+            (SubmissionState::Raw { session, request }, bytes)
         }
     };
     let submission = ScenarioSubmission {
         producer,
+        bytes,
         state: submission,
     };
     assert!(

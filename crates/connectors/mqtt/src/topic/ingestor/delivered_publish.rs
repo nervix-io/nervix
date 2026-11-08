@@ -54,6 +54,10 @@ impl MqttTopicIngestorMessage {
 /// of service and duplicate flags, then the MQTT 5 properties, each absent where the packet carries
 /// none.
 impl IngestMessageMetadata for MqttTopicIngestorMessage {
+    fn payload_bytes(&self) -> usize {
+        nervix_connector::IngestorMessage::payload(self).len()
+    }
+
     fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
         let packet = self.packet();
         values.string(self.topic());

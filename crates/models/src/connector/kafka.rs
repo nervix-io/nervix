@@ -397,6 +397,7 @@ impl IngestorDeclaration for KafkaTopicIngestor {
         // A Kafka record carries its headers as a list, in the order written, repeats included.
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         metadata: KAFKA_TOPIC_METADATA,
+        payload: crate::IngestorPayloadDeclaration::BYTES,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Kafka),
         position_class: PositionClass::Replayable,
