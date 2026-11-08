@@ -13,6 +13,7 @@
 pub mod digest;
 pub mod ecdsa;
 pub mod ed25519;
+pub mod jws;
 pub mod provider;
 pub mod random;
 pub mod tls;
