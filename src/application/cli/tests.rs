@@ -33,7 +33,7 @@ const SETTINGS_HEADINGS: [&str; 9] = [
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 29] = [
+const SETTING_NAMES: [&str; 34] = [
     "raft-heartbeat-interval",
     "raft-snapshot-entry-threshold",
     "raft-snapshot-byte-threshold",
@@ -62,6 +62,11 @@ const SETTING_NAMES: [&str; 29] = [
     "resource-max-archive-bytes",
     "resource-max-extracted-bytes",
     "resource-max-file-count",
+    "interconnect-relay-batch-bytes",
+    "interconnect-relay-decoded-bytes",
+    "interconnect-bulk-chunk-bytes",
+    "interconnect-bulk-receive-window",
+    "cpu-count",
     "memory-limit",
 ];
 

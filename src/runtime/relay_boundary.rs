@@ -2395,8 +2395,8 @@ impl RelayBoundaryBuilder {
 }
 
 impl Runtime {
-    /// Whether this node owns `unit` of the relay `services` serve. A unit whose schedule names no
-    /// owner is owned wherever it runs.
+    /// Whether this node owns `unit` of the relay `services` serve. A runtime attached to a cluster
+    /// needs a scheduled owner; only a standalone runtime owns an unplaced unit.
     #[cfg_attr(
         nervix_lint,
         nervix::context(

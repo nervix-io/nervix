@@ -1065,6 +1065,7 @@ impl JoinedRelayOwner {
         let relay = RelayName::parse("notifications").expect("valid identifier");
         let schema = test_schema(&[("user_id", ParseAsType::U32)]);
         let services = test_relay_boundary_services();
+        services.replace_owner_routes(RelayOwnerRoutes::single(node.clone()));
         install_test_domain_execution(
             &runtime,
             &domain,
