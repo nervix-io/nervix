@@ -195,8 +195,16 @@ opening it.
 `RESTORATION_FAILED` says the new session refused for now to open the subscription again, for
 example because the node it reached has not caught up with the cluster yet. Its
 `restoration_failure` carries the `RestorationCause`, the server's message and how long the session
-waits before it tries again; the subscription stays and the session keeps trying. `DELIVERY_LOST`,
-`ROWS_SKIPPED` and `CONSUMER_OVERFLOW` report gaps with their row counts in `row_count`. A reader
+waits before it tries again; the subscription stays and the session keeps trying. The suite asks
+its scenario to refuse one restoration, checks those details, then reads rows after a later attempt
+succeeds:
+
+```python
+{{#include ../../tests/client_conformance/python/suite/cluster/test_subscriptions.py:restoration_failed}}
+```
+
+`DELIVERY_LOST`, `ROWS_SKIPPED` and `CONSUMER_OVERFLOW` report gaps with their row counts in
+`row_count`. A reader
 handles each kind of event:
 
 ```python

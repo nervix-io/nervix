@@ -50,8 +50,8 @@ CREATE [IF NOT EXISTS] <CONNECTOR> <ENTITY> INGESTOR <name>
 
 `DECODE USING` is required under every head except `CLIENT PRODUCER`, which decodes nothing and
 does not accept it. A client the body names must be a client of the head's connector, and an
-endpoint must have the head's `TYPE`; completion after `FROM` offers only those, and any other
-reference is refused when the statement is applied, with a message that names both kinds, such as
+endpoint must have the kind selected by the head; completion after `FROM` offers only those.
+Any other reference is refused when the statement is applied, naming both kinds, such as
 `requires a KAFKA client, but client 'cache' is a REDIS client`. `SHOW CREATE INGESTOR` renders the
 complete statement under its head. `DESCRIBE INGESTOR` prints the pair, reference and locator on
 its `from:` line, such as `from: KAFKA TOPIC kafka_main TOPIC 'Orders'`. The following rows show

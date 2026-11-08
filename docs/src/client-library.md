@@ -489,18 +489,6 @@ session: executing the same prepared execution again sends another session-local
 may be refused as already attached even when the first succeeded. `nx_session_domain_clock` tells
 whether the session follows the clock.
 
-### Through The JVM Library
-
-Java 21 and later use `io.nervix.client.Nervix` from `crates/client-jvm`. Its `Session`, prepared
-`Execution`, `Outcome`, `ClockEvent` and immutable `DomainClock` expose the shared Rust client's
-state and projection arithmetic. `Event.endReason()` reads why an ended subscription ended,
-`RELAY_REMOVED` or `RELAY_CHANGED`, and a subscription's or clock's `RestorationFailure` carries
-its typed `RestorationCause`, the message and the physical wait.
-`Cancel` supports deadlines and cancellation from another Java thread while a native call waits.
-Close handles with try-with-resources; Cleaner supplies fallback cleanup. Build the jar and its
-native library with `just build-client-jvm`. The [implementation manual](./client-implementation-manual.md#using-the-jvm-library)
-owns the Java lifetime, unsigned-width, error and threading rules.
-
 ## Events Across Reconnects
 
 `next_subscription()`, `next_domain_clock_event()`, and `next_server_event()` read streams that
@@ -628,9 +616,12 @@ consumer.close().await?;
 
 `record_batch` accepts a delivery only when its Arrow IPC stream declares exactly the Arrow schema
 of the fields the emitter declares and holds one record batch of the delivery's member count; any
-other stream is a `ClientError::UnexpectedReply`. `EmitterDelivery::decode_record_batch(fields,
+other stream returns a typed `EmitterBatchDecodeError`, above the Arrow cause when one occurred.
+`EmitterDelivery::decode_record_batch(fields,
 batch, members)` applies the same check to bytes an application kept: it takes the fields of
 `consumer.description()`, a delivery's `batch` bytes and its `members`, and needs no live delivery.
+Both methods return the same decoder report directly; the caller decides whether the bytes are
+received data or local application input.
 
 `delivery.retry().await` keeps the same bytes and asks the server to reassign after physical
 backoff. `delivery.reject(reason).await` sends one bounded, non-sensitive reason through the
@@ -706,16 +697,6 @@ exactly as described; the binding keeps no acknowledgement or reconnect state of
   from one thread at a time. A producer, a consumer and a delivery keep their session running until
   they are released, and a borrowed stream or value stays valid until the reference it was read from
   is released.
-
-### Endpoints Through The JVM Library
-
-The JNI library exposes `Session.openProducer` and `openConsumer`, `Fields`, `Schema`,
-`BatchBuilder`, `Batch`, `Delivery` and `Submission`. Builders copy one column level per call;
-readers copy states, offsets and scalar bytes in bulk. `Batch.fromIpc` and `ipc` exchange canonical
-Arrow IPC with Arrow Java. Direct `ipcBuffer` views retain their data through every derived buffer.
-Endpoint `description`, `pending`, `state`, `admission` and `reopen` read the shared client's typed
-results. `submit`, `rejoin`, `next`, `ack`, `retry`, `reject` and `end` take optional cancellation
-and deadline tokens; none owns a Java retry policy. `close` releases ownership and settles nothing.
 
 ## Transaction Handles And Attach
 

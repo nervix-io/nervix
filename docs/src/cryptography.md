@@ -26,8 +26,9 @@ It owns the scope of:
 - secure random values;
 - password and key derivation.
 
-The crate owns TLS provider selection, SHA-256 and SHA-512 digests, secure randomness and Ed25519
-signing. Password derivation and the unclassified hashes still have the counted call sites below.
+The crate owns TLS provider selection, SHA-256 and SHA-512 digests, secure randomness, ECDSA
+P-256/SHA-256 and Ed25519 signing. Password derivation and the unclassified hashes still have the
+counted call sites below.
 The one-shot digests use `aws_lc_rs::digest`. Incremental SHA-256 wraps the maintained native
 `SHA256_CTX` from the same AWS-LC module, keeping its state on the stack; the EVP context used by
 `aws_lc_rs::digest::Context` allocates algorithm state. The direct `aws-lc-sys` pin moves together
@@ -37,6 +38,9 @@ with `aws-lc-rs` and librdkafka, preserving the single-module rule.
 | --- | --- |
 | TLS provider | `nervix-crypto` installs the outward provider through rustls's process-default installation and supplies an independent checked interconnect provider. Connector TLS, native sessions and TLS VHOSTs retain the outward provider; SQS projects the boundary's typed outward choice into Smithy's mode, preserving the SDK's cipher filtering. |
 | Security digests | `nervix_crypto::digest` obtains SHA-256 and SHA-512 from AWS-LC. The interconnect trust-root fingerprint and the expression function `sha256()` use this boundary. |
+| Digest comparison | `nervix_crypto::digest::equal` compares equal-width digest arrays through AWS-LC's constant-time comparison. |
+| ECDSA signatures and keys | `nervix_crypto::ecdsa` owns P-256/SHA-256 fixed `r‖s` signing and verification, PKCS#8 v1 key generation/import/export, and uncompressed public-point coordinates. |
+| Backend status | `nervix_crypto::provider::module_mode` reports the linked AWS-LC module's runtime FIPS status as `ModuleMode`, independently of TLS algorithm selection. |
 | Secure randomness | `nervix_crypto::random` obtains bytes and unsigned 64-bit values from AWS-LC's operating-system-seeded generator, for interconnect entropy and password salts. |
 | Password derivation | Argon2, for user passwords. |
 | NATS user authentication | `nervix-crypto` prepares the Ed25519 signing key and signs the nonce with AWS-LC. The NATS connector owns seed and credentials decoding, public-key encoding and the driver callback. |
@@ -277,6 +281,37 @@ pinned [aws-lc-rs Ed25519 implementation](https://github.com/aws/aws-lc-rs/blob/
 marks signing as unsuitable for FIPS use, so the future FIPS mode must refuse these NATS methods
 until its boundary has a validated signing service for the protocol. Token authentication has no
 Nervix-owned nonce-signing operation.
+
+## P-256 Signing And Private-Key Ownership
+
+`nervix_crypto::ecdsa` uses AWS-LC's `ECDSA_P256_SHA256_FIXED_SIGNING` and
+`ECDSA_P256_SHA256_FIXED`. Each signature is exactly 64 bytes: the 32-byte unsigned big-endian
+`r` followed by the 32-byte `s`. AWS-LC hashes the complete message with SHA-256 and obtains
+its signing nonce from its system-seeded generator; the caller supplies neither a digest nor a
+nonce. Verification retains the typed backend refusal for malformed keys/signatures and altered
+messages. The cryptographic boundary owns no JWK or JWS syntax.
+
+Key generation and export return an unencrypted PKCS#8 v1 DER `Pkcs8PrivateKey`, whose maintained
+AWS-LC document zeroizes its byte allocation on drop. `EcdsaP256KeyPair` owns the native key;
+AWS-LC releases its private scalar through its cleansing allocator when the final native key
+reference ends. Neither owner is cloneable or prints any key bytes in `Debug`. Callers borrowing
+or copying private DER must protect and clear their own storage. Public extraction borrows the
+backend's SEC 1 uncompressed point or returns its fixed-width `x` and `y` coordinates without
+implementing another point encoder.
+
+`digest::equal` uses AWS-LC's maintained constant-time primitive on equal-width arrays. Its work
+does not depend on which digest byte differs; the width is public. `provider::module_mode` queries
+the linked module with AWS-LC's runtime FIPS check. An approved algorithm or selected TLS suite
+does not establish a validated backend or deployment. The ordinary Nervix build reports
+`ModuleMode::Ordinary`. A service's FIPS qualification must select one consistent FIPS module
+throughout its dependency graph and run these same vectors there.
+
+The boundary tests retain the complete P-256/SHA-256 section of the
+[NIST CAVP FIPS 186-4 verification vectors](https://csrc.nist.gov/projects/cryptographic-algorithm-validation-program/digital-signatures),
+including invalid signatures, changed messages and changed public keys. Registered bounded
+properties cover message/signature bit changes and complete PKCS#8 round trips. These are algorithm
+and representation checks; they do not claim a FIPS-qualified build. Cross-build signature
+qualification belongs to the licensing service's FIPS lane.
 
 ## What The FIPS Migration Will Refuse
 

@@ -23,6 +23,10 @@ The optional `ATTACHED | DETACHED` clause follows the complete input list and it
 correlator it follows the complete `RIGHT FROM` list and its collection policy. Omitting the clause
 selects `ATTACHED`; canonical Plexus and `SHOW CREATE` always write it explicitly in that body
 position. The supported `ALTER ... SET ATTACHED | SET DETACHED` operations change the same mode.
+These operations are available on junctions, deduplicators, reorderers and reingestors. Window
+processors, correlators, inferencers and WASM processors have no `ALTER` statement. Their heads
+still select the node kind, and acknowledgement remains a body property; see the
+[statement-head contract](architecture.md#statement-heads-and-body-properties).
 
 Without `COLLECT FOR`, each relay batch is executed immediately and Nervix creates no additional
 input buffer. With it, the duration starts when data enters an empty input collector. The node

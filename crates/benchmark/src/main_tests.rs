@@ -1,3 +1,10 @@
+//! Command orchestration and current scrape fixtures for the benchmark executable.
+//!
+//! Outside the layer order: a test harness.
+//! - **Owns.** CLI orchestration, fixture lifecycle and complete report assertions.
+//! - **Depends on.** The benchmark command, public reports and bounded test infrastructure.
+//! - **Must not know.** Product placement, scheduling or connector implementation.
+
 use std::{ffi::OsStr, os::unix::ffi::OsStrExt as _};
 
 use nervix_benchmark::{BenchmarkError, SettingsError};
@@ -39,14 +46,14 @@ config_path = "/etc/vector/vector.yaml"
 "#;
 
 /// One Prometheus scrape holding a complete metrics report for domain `benchmark_run`.
-const SCRAPE: &str = r#"nervix_messages_total{direction="sent",domain="benchmark_run",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 6144
-nervix_batches_total{direction="sent",domain="benchmark_run",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 6
-nervix_messages_per_batch_bucket{direction="sent",domain="benchmark_run",le="1024",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 6
-nervix_messages_per_batch_bucket{direction="sent",domain="benchmark_run",le="+Inf",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 6
-nervix_messages_per_batch_count{direction="sent",domain="benchmark_run",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 6
-nervix_relay_buffer_len_bucket{direction="concrete",domain="benchmark_run",le="1",peer="",peer_kind="",physical_node_id="node-1",relay="ingested",target="ingested",target_kind="RELAY"} 4
-nervix_relay_buffer_len_bucket{direction="concrete",domain="benchmark_run",le="+Inf",peer="",peer_kind="",physical_node_id="node-1",relay="ingested",target="ingested",target_kind="RELAY"} 4
-nervix_relay_buffer_len_count{direction="concrete",domain="benchmark_run",peer="",peer_kind="",physical_node_id="node-1",relay="ingested",target="ingested",target_kind="RELAY"} 4
+const SCRAPE: &str = r#"nervix_messages_total{direction="sent",domain="benchmark_run",partition="-",instance="-",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 6144
+nervix_batches_total{direction="sent",domain="benchmark_run",partition="-",instance="-",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 6
+nervix_messages_per_batch_bucket{direction="sent",domain="benchmark_run",partition="-",instance="-",le="1024",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 6
+nervix_messages_per_batch_bucket{direction="sent",domain="benchmark_run",partition="-",instance="-",le="+Inf",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 6
+nervix_messages_per_batch_count{direction="sent",domain="benchmark_run",partition="-",instance="-",peer="ingested",peer_kind="RELAY",physical_node_id="node-1",relay="ingested",target="kafka_in",target_kind="INGESTOR"} 6
+nervix_relay_buffer_len_bucket{direction="concrete",domain="benchmark_run",partition="-",instance="-",le="1",peer="",peer_kind="",physical_node_id="node-1",relay="ingested",target="ingested",target_kind="RELAY"} 4
+nervix_relay_buffer_len_bucket{direction="concrete",domain="benchmark_run",partition="-",instance="-",le="+Inf",peer="",peer_kind="",physical_node_id="node-1",relay="ingested",target="ingested",target_kind="RELAY"} 4
+nervix_relay_buffer_len_count{direction="concrete",domain="benchmark_run",partition="-",instance="-",peer="",peer_kind="",physical_node_id="node-1",relay="ingested",target="ingested",target_kind="RELAY"} 4
 "#;
 
 /// A repository whose catalog holds the benchmarks `slugs`.

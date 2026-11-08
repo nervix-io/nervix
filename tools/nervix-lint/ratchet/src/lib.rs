@@ -6,6 +6,7 @@
 pub mod admission;
 pub mod admission_queue;
 pub mod analysis;
+pub mod applicability;
 pub mod audit;
 pub mod cache;
 pub mod configuration;
