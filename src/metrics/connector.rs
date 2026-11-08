@@ -27,6 +27,9 @@ use super::{CounterSeries, RuntimeMetrics, format_number, format_optional, physi
 
 mod ingestor;
 pub(crate) use ingestor::IngestorInteractionMetrics;
+mod ingestor_reads;
+use ingestor_reads::IngestorReadFamilies;
+pub(crate) use ingestor_reads::IngestorReadMetrics;
 mod payloads;
 pub(crate) use payloads::{EmitterWork, EmitterWorkKind};
 
@@ -99,6 +102,7 @@ pub(super) struct ConnectorInteractionMetrics {
     attempts: IntCounterVec,
     durations: HistogramVec,
     payloads: payloads::PayloadFamilies,
+    reads: IngestorReadFamilies,
 }
 
 impl ConnectorInteractionMetrics {
@@ -138,6 +142,7 @@ impl ConnectorInteractionMetrics {
             attempts,
             durations,
             payloads: payloads::PayloadFamilies::register(registry),
+            reads: IngestorReadFamilies::register(registry),
         }
     }
 

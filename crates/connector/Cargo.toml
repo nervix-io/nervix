@@ -38,6 +38,7 @@ rustls-native-certs = { workspace = true }
 rustls-pki-types = { workspace = true }
 serde = { workspace = true }
 shuttle = { workspace = true, optional = true }
+strum = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

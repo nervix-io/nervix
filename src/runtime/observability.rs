@@ -77,6 +77,7 @@ pub(crate) struct KafkaDomainOffsetDescribe {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IngestorDescribe {
+    pub(crate) source_metrics: Vec<String>,
     pub(crate) running: bool,
     pub(crate) ready: bool,
     pub(crate) quiesce_state: Option<String>,
@@ -716,11 +717,13 @@ impl Runtime {
         domain: &DomainName,
         ingestor: &IngestorName,
         unit: Unit,
+        kind: nervix_models::IngestorEntityKind,
     ) -> error_stack::Result<IngestorDescribe, RuntimeObservationError> {
         let key = DomainNodeUnitRef::new(
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor),
             unit,
         );
+        let source_metrics = self.inner.metrics.describe_ingestor_interactions(&key);
         let transient = DataflowNodeTransientState::from_failures(
             self.inner
                 .ingestor_statuses
@@ -747,6 +750,7 @@ impl Runtime {
                 ingestor,
                 unit,
                 dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+                kind,
             )
             .get();
         let decode_rejections_total = self
@@ -757,6 +761,7 @@ impl Runtime {
                 ingestor,
                 unit,
                 dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+                kind,
             )
             .get();
         let oversized_payloads_total = self
@@ -767,6 +772,7 @@ impl Runtime {
                 ingestor,
                 unit,
                 dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+                kind,
             )
             .get();
         let last_decode_rejection = self.last_decode_rejection(&key);
@@ -783,6 +789,7 @@ impl Runtime {
                     .map(|error| error.value().clone())
             };
             return Ok(IngestorDescribe {
+                source_metrics,
                 running: false,
                 ready: false,
                 quiesce_state: quiesce_state.clone(),
@@ -801,6 +808,7 @@ impl Runtime {
         }
         let Some(execution) = self.inner.executions.get(domain) else {
             return Ok(IngestorDescribe {
+                source_metrics,
                 running: true,
                 ready: self.ingestor_ready(domain, ingestor, unit),
                 quiesce_state: quiesce_state.clone(),
@@ -846,6 +854,7 @@ impl Runtime {
             None
         };
         Ok(IngestorDescribe {
+            source_metrics,
             running: true,
             ready: self.ingestor_ready(domain, ingestor, unit),
             quiesce_state,
@@ -1411,7 +1420,14 @@ mod tests {
         );
 
         let describe = runtime
-            .describe_local_ingestor(&domain, &ingestor, nervix_models::Unit::SINGLE)
+            .describe_local_ingestor(
+                &domain,
+                &ingestor,
+                nervix_models::Unit::SINGLE,
+                nervix_models::IngestorEntityKind::Http(
+                    nervix_models::HttpIngestorEntity::Endpoint,
+                ),
+            )
             .expect("describe should succeed");
 
         assert!(!describe.running);

@@ -24,8 +24,13 @@ fn ingestor_interaction_registration_preserves_every_execution_unit() {
             .assured("the fixture instance fits the execution-unit range"),
     ]
     .map(|unit| {
-        let (interactions, decode_rejections) =
-            metrics.register_ingestor_interactions(&domain, &source, unit, Some(&node));
+        let (interactions, decode_rejections) = metrics.register_ingestor_interactions(
+            &domain,
+            &source,
+            unit,
+            Some(&node),
+            nervix_models::IngestorEntityKind::Http(nervix_models::HttpIngestorEntity::Endpoint),
+        );
         [
             interactions.unfolding_refused,
             interactions.transport_redeliveries,
