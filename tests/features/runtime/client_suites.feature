@@ -2,7 +2,7 @@ Feature: Language-level client suites
   Every host binding has a test suite written in its own language, in that language's standard test
   framework, that uses the binding as an application does. A suite's boundary tier needs no cluster
   and runs through `just test-client-<host>-api`; its cluster tier runs here, against a cluster whose
-  session listener serves TLS, starting on a follower when the cluster has one. The harness holds
+  session listener serves the example's transport, starting on a follower when the cluster has one. The harness holds
   the run to the tests `tests/client-suites-inventory.toml` registers for the host's cluster tier:
   every one ran once and passed, nothing was skipped, and nothing else ran.
 
@@ -16,8 +16,8 @@ Feature: Language-level client suites
   node to refuse its next subscription opening as unavailable, restores the relay, checks the
   interruption and the refusal's cause, message and retry wait, then reads rows after recovery.
 
-  Scenario Outline: A <runtime> client's suite passes its cluster tests on <cluster_size> nodes
-    Given client grpc transport is configured with mode "https"
+  Scenario Outline: A <runtime> client's suite passes its cluster tests over <transport> on <cluster_size> nodes
+    Given client grpc transport is configured with mode "<transport>"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """
@@ -90,6 +90,14 @@ Feature: Language-level client suites
 
     @client_conformance_toolchain @client_suite_python @long_running @slots_1
     Examples: CPython over the Python package
-      | runtime | cluster_size | tags_type   | grid_type     |
-      | python  | 1            | VEC<STRING> | ARRAY<I16, 2> |
-      | python  | 3            | VEC<STRING> | ARRAY<I16, 2> |
+      | runtime | cluster_size | transport | tags_type   | grid_type     |
+      | python  | 1            | https     | VEC<STRING> | ARRAY<I16, 2> |
+      | python  | 3            | https     | VEC<STRING> | ARRAY<I16, 2> |
+
+    @client_conformance_toolchain @client_suite_java @long_running @slots_1
+    Examples: Java over the JVM library on TLS and plaintext listeners
+      | runtime | cluster_size | transport | tags_type   | grid_type     |
+      | java    | 1            | https     | VEC<STRING> | ARRAY<I16, 2> |
+      | java    | 3            | https     | VEC<STRING> | ARRAY<I16, 2> |
+      | java    | 1            | http      | VEC<STRING> | ARRAY<I16, 2> |
+      | java    | 3            | http      | VEC<STRING> | ARRAY<I16, 2> |
