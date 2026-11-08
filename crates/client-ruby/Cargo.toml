@@ -1,0 +1,44 @@
+[package]
+description = "The Ruby 3.3+ Nervix client gem on magnus and the shared host runtime"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-client-ruby"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+ruby-tests = ["magnus/embed"]
+
+[dependencies]
+arrow-array = { workspace = true }
+bytes = { workspace = true }
+magnus = { workspace = true }
+meticulous = { workspace = true }
+nervix-client-core = { workspace = true, features = ["arrow", "autocomplete"] }
+nervix-client-host = { workspace = true }
+nervix-models = { workspace = true, features = ["arrow"] }
+nervix-primitives = { workspace = true, features = ["native"] }
+rb-sys = { workspace = true }
+url = { workspace = true }
+
+[build-dependencies]
+cc = { workspace = true }
+meticulous = { workspace = true }
+rb-sys-env = { workspace = true }
+
+[dev-dependencies]
+bolero = { workspace = true }
+tonic = { workspace = true }
+
+[[test]]
+name = "columns"
+required-features = ["ruby-tests"]
+
+[[test]]
+name = "fields"
+required-features = ["ruby-tests"]

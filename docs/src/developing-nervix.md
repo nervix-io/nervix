@@ -53,6 +53,18 @@ CI and the workspace build/test jobs provision Java 21.
 `NERVIX_CLIENT_JVM_TEST_ARTIFACTS` points embedded tests at the prepared Java artifacts; just exports
 the configured build root's path so instrumented Rust builds use the same jar and fixtures.
 
+The Ruby gem requires CRuby 3.3 or later, its development headers and shared library
+(`ruby-dev` for the selected interpreter on Debian and Ubuntu), plus libclang for rb-sys.
+`just build-client-ruby` compiles `crates/client-ruby` through the configured Rust wrapper and
+packages a native `nervix-client-*.gem` under `target/client-conformance`. It extracts that exact
+gem to `target/client-conformance/ruby`; the probe uses its `lib` directory. Each prebuilt gem
+requires the Ruby minor ABI it was compiled against; rebuild with the interpreter that will load
+it. The loader rejects another ABI with a clear error. No registry publication is involved.
+`just test-client-ruby` embeds that interpreter for the boundary test and two bounded
+representation properties. All-features workspace tests enable `ruby-tests` too, so build and
+restored unit jobs provision the same Ruby version. `ruby/setup-ruby` provides CI's interpreter,
+headers and shared library. No buffer or generated gem is written into the source tree.
+
 The Python package builds with maturin, which `just build-client-python` runs as
 `uvx --from maturin==1.16.0 maturin`, into an abi3 wheel for CPython 3.12 and later under
 `target/client-conformance/wheels`, with its typed stub `crates/client-python/nervix_client.pyi`
@@ -72,7 +84,7 @@ scenario suite. `just validate-client-suites`, part of `just validate`, types th
 paced simulation driver with `mypy --strict` against the stub through the repository's uv project,
 and holds the suite, its inventory, the stub and the
 [Python Client Library](client-library-python.md) chapter to the package's source. The
-`client-conformance` CI job builds every host's artifacts, runs the JVM and Python boundary tiers,
+`client-conformance` CI job builds every host's artifacts, runs the JVM, Ruby and Python boundary tiers,
 then runs the probes and the suites' cluster rows together.
 
 `just build-web-console` builds the console the server embeds. trunk uses a `wasm-bindgen` CLI
@@ -566,7 +578,7 @@ compares it with the workflows.
 | `shuttle` | Check | The Shuttle checks and their replay check |
 | `loom` | Check | The Loom models and their weakening qualification |
 | `turmoil` | Check | The Turmoil simulation suite and its replay check |
-| `client-conformance` | Check | The cross-language client probes and the host suites' cluster tiers against one- and three-node clusters, and the JVM and Python boundary tiers |
+| `client-conformance` | Check | The cross-language client probes and the host suites' cluster tiers against one- and three-node clusters, and the JVM, Ruby and Python boundary tiers |
 | `bolero-random` | Check, through Bolero | Bolero's randomized properties and corpus replay, which a manual run of the Bolero workflow always runs |
 | `extra-doctests` | Check | Capability doctests |
 | `extra-miri` | Check | Miri over the expiry map |
