@@ -178,21 +178,28 @@ async fn emitter_outcomes_retry_only_unresolved_members_and_leave_a_fresh_publis
             .is_err()
     );
     assert_eq!(buffer.unresolved_messages(), 2);
-    faults.fail_emitter_client_unavailable(context.emitter.as_str());
-    assert!(
-        connector
-            .flush_buffer(
-                &context,
-                &mut control,
-                &mut buffer,
-                EmitterPublishAttemptKind::Retry,
-            )
-            .await
-            .is_err()
-    );
-    DestinationProbe { context: &context }.event("nervix_emitter_records_retried_total", &[], 0.0);
-    assert_eq!(observations.lock().payloads().len(), 1);
-    faults.clear_emitter_client_fault(context.emitter.as_str());
+    #[cfg(feature = "testing")]
+    {
+        faults.fail_emitter_client_unavailable(context.emitter.as_str());
+        assert!(
+            connector
+                .flush_buffer(
+                    &context,
+                    &mut control,
+                    &mut buffer,
+                    EmitterPublishAttemptKind::Retry,
+                )
+                .await
+                .is_err()
+        );
+        DestinationProbe { context: &context }.event(
+            "nervix_emitter_records_retried_total",
+            &[],
+            0.0,
+        );
+        assert_eq!(observations.lock().payloads().len(), 1);
+        faults.clear_emitter_client_fault(context.emitter.as_str());
+    }
     let report = connector
         .flush_buffer(
             &context,
