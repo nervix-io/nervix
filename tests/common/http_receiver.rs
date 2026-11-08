@@ -166,11 +166,19 @@ pub(crate) enum ReceiverTransport {
 /// offers.
 #[derive(Clone, Debug)]
 pub(crate) struct ReceiverTlsOptions {
+    pub(crate) algorithms: ReceiverTlsAlgorithms,
     /// The DNS names and IP addresses the receiver's certificate is valid for. A client that dials
     /// any other name fails hostname verification.
     pub(crate) certificate_hosts: Vec<String>,
     pub(crate) client_certificate: ClientCertificatePolicy,
     pub(crate) protocols: ReceiverProtocols,
+}
+
+/// The algorithm offer of the independent TLS peer, without using the product policy resolver.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ReceiverTlsAlgorithms {
+    Complete,
+    ChaCha20AndX25519,
 }
 
 /// The HTTP versions a TLS receiver offers in its handshake.
@@ -928,7 +936,16 @@ impl ReceiverTlsIdentity {
         )?;
         write(ReceiverTlsFiles::CLIENT_KEY, client_key.serialize_pem())?;
 
-        let provider = StdArc::new(nervix_crypto::tls::outward_tls_provider().rustls());
+        let mut provider = nervix_crypto::tls::outward_tls_provider().rustls();
+        if matches!(options.algorithms, ReceiverTlsAlgorithms::ChaCha20AndX25519) {
+            provider.cipher_suites.retain(|suite| {
+                suite.suite() == rustls::CipherSuite::TLS13_CHACHA20_POLY1305_SHA256
+            });
+            provider
+                .kx_groups
+                .retain(|group| group.name() == rustls::NamedGroup::X25519);
+        }
+        let provider = StdArc::new(provider);
         let builder = ServerConfig::builder_with_provider(StdArc::clone(&provider))
             .with_safe_default_protocol_versions()
             .map_err(ReceiverStartError::TlsConfiguration)?;

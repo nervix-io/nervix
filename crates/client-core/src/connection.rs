@@ -159,7 +159,8 @@ impl GrpcConnector {
         endpoint = endpoint.connect_timeout(self.options.connect_timeout);
         if is_https {
             nervix_crypto::tls::install_default_provider();
-            let mut tls = ClientTlsConfig::new();
+            let mut tls =
+                ClientTlsConfig::new().crypto_provider(nervix_crypto::tls::fips_provider());
             if let Some(pem) = self.options.ca_certificate_pem.clone() {
                 tls = tls.ca_certificate(Certificate::from_pem(pem));
             }

@@ -14,6 +14,7 @@ aws-lc-sys = { workspace = true }
 error-stack = { workspace = true }
 jsonwebtoken = { workspace = true }
 meticulous = { workspace = true }
+nervix-crypto-policy = { workspace = true }
 nervix-primitives = { workspace = true }
 nervix-recovery = { workspace = true }
 rustls = { workspace = true }

@@ -3613,3 +3613,23 @@ Installation inserts a fresh `Arc<AtomicBool>`, host callbacks store only that i
 readiness, and task registration removes it only by pointer identity. Inspection loads the scalar
 with relaxed ordering; it publishes no other data, admits no work and supplies no wakeup. Pending
 failure status has a separate owner. A retiring handle cannot update or remove its replacement.
+
+## Outward TLS Snapshot Capture
+
+`nervix-tls` publishes cipher suites and key-exchange groups together through one node-owned
+`ArcSwap`. Each client/server template holds one bounded cache behind a blocking mutex: at most one
+applied algorithm snapshot and one resolved configuration. A capture loads the pair once and reuses its original template without locking or cloning the
+configuration when its provider is still current. Otherwise it reuses a matching cache entry, or
+replaces it with a complete configuration retaining that template's trust,
+identity, ALPN, versions and resumption. The resolved configuration has no resolver, preventing a
+cache/template ownership cycle. Cloning a template creates an independent empty cache.
+
+The production-owner Shuttle check
+`shuttle_tests::shuttle_capture_racing_publication_keeps_one_complete_pair_and_the_retained_snapshot`
+orders capture against publication and cache replacement. It asserts coherent pairs, new-policy
+capture after installation, and immutable retained snapshots. It does not claim ArcSwap's internal
+memory ordering, reference-count ordering, cryptographic correctness or network scheduling. The
+focused canonical runner is `just test-outward-tls-publication`; full CI retains the complete Shuttle
+inventory. The cache mutex's diagnostic applicability and unrun scope are recorded in the Deloxide
+inventory. Public one-/three-node scenarios use real native/console/HTTPS and shared HTTP connector
+handshakes, including retained traffic and dynamic certificate rebinding.

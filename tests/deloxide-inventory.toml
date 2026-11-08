@@ -6337,3 +6337,8 @@ workloads = [
   "owner.emitter-retained-recovery",
   "owner.emitter-retained-cancellation",
 ]
+
+[[owner]]
+gap = "The new per-template client/server cache mutex serializes one bounded config clone and provider replacement. Public outward TLS policy scenarios and the production-owner Shuttle check cover policy/capture behavior in ordinary and modeled modes. Diagnostic campaigns are deliberately unrun under the live Task Execution Template's temporary Deloxide CI/local cost policy; no tracked-lock execution evidence is claimed."
+path = "crates/tls/src/lib.rs"
+workloads = []

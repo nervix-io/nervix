@@ -280,11 +280,15 @@ cause; TLS files supplied in HTTP mode are refused. Certificates are loaded once
 requires restarting the node. A running listener retains the loaded identity. Client trust remains
 explicit: the native client uses the supplied CA, while the browser uses its own trust store.
 
-Native session clients and the server's certificate/key constructors obtain their outward rustls
-provider from `nervix-crypto`. It keeps the full AWS-LC default algorithm set and a process default
-already installed by an embedding host. The interconnect's fixed algorithm set is an independent
-provider and does not restrict public session TLS. [Cryptography](cryptography.md#algorithm-policy)
-owns these provider choices; certificate trust and the listener's configuration remain as above.
+Native listeners, console TLS and HTTPS VHOSTs capture the committed outward cipher/group policy
+for each new handshake. Changes apply without restarting them; established sessions retain their
+negotiation and loaded identity. `DESCRIBE CLUSTER` exposes resolved committed and running lists.
+Native client-core, the CLI and native bindings use `nervix-crypto`'s explicit `fips` provider by
+default, independently of an embedding host's process provider. They are clients rather than members
+of the cluster's policy authority. Browser TLS remains the browser's choice. The interconnect has
+its independent fixed provider, unaffected by outward algorithm changes.
+[Cryptography](cryptography.md#algorithm-policy) owns exact names, aliases, defaults and governed
+connector paths; certificate trust and provisioning remain as above.
 
 ### Console WebSocket
 

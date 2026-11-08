@@ -106,6 +106,7 @@ impl Default for RuntimeSettings {
 pub(crate) struct RuntimeEnvironment {
     /// The node's bounded execution and transient-memory admission.
     pub(crate) executor: Executor,
+    pub(crate) outward_tls: nervix_tls::OutwardTlsPolicy,
     /// The node's resolver, which connectors resolve host names through.
     pub(crate) dns: Option<DnsResolver>,
     /// The node database the runtime persists its state in, absent for a runtime that keeps none.
@@ -125,6 +126,7 @@ impl RuntimeEnvironment {
     pub(crate) fn transient(executor: Executor) -> Self {
         Self {
             executor,
+            outward_tls: nervix_tls::OutwardTlsPolicy::default(),
             dns: None,
             db: None,
             restore_staging_max_bytes: ByteUnit::Byte(DEFAULT_RESTORE_STAGING_MAX_BYTES),

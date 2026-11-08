@@ -667,6 +667,7 @@ async fn a_failed_accept_keeps_an_established_connection_and_rebinds() {
             },
         ],
         |_| bind_addr,
+        Default::default(),
     )
     .expect("the TCP plan is valid");
     let mut ingestor = SyslogListenerIngestor::open(&plan, 0)

@@ -114,6 +114,7 @@ pub(super) struct OtlpEncoder {
 
 /// What one OTEL emitter exports with, from its typed emitter plan.
 pub(super) struct OtlpEncoderConfig {
+    pub tls_policy: nervix_connector::OutwardTlsPolicy,
     pub config: Vec<ClientConfigEntry>,
     pub dns: nervix_dns::DnsResolver,
     pub signal: OtlpSignal,
@@ -597,6 +598,7 @@ impl OtlpEncoder {
     )]
     pub(super) fn new(config: OtlpEncoderConfig, host: EmitterHost) -> EmitterStartResult<Self> {
         let OtlpEncoderConfig {
+            tls_policy,
             config,
             dns,
             signal,
@@ -608,7 +610,7 @@ impl OtlpEncoder {
             mapped_schema,
         } = config;
         let client = OtelClient {
-            transport: Self::transport_from_config(&config, &dns)?,
+            transport: Self::transport_from_config(&config, &dns, &tls_policy)?,
         };
         Self::validate_mapped_types(&signal, &values, &attributes, &mapped_schema)
             .verified("registry validation and mapped projection establish exact OTEL plan types");
@@ -658,6 +660,7 @@ impl OtlpEncoder {
     fn transport_from_config(
         config: &[ClientConfigEntry],
         dns: &nervix_dns::DnsResolver,
+        tls_policy: &nervix_connector::OutwardTlsPolicy,
     ) -> EmitterStartResult<OtelTransport> {
         let settings = OtelClientSettings::parse(config)?;
         match settings.protocol {
@@ -725,7 +728,7 @@ impl OtlpEncoder {
                 })
             }
             OtelProtocol::HttpProtobuf => {
-                let client = HttpClientConfig::new(config, "OTEL", dns)
+                let client = HttpClientConfig::new(config, "OTEL", dns, tls_policy)
                     .build()
                     .map_err(invalid_configuration)?;
                 let headers = Self::http_headers(&settings.headers)?;
@@ -2597,6 +2600,7 @@ mod tests {
                 ("timeout_ms", "1"),
             ]),
             &dns,
+            &Default::default(),
         )
         .unwrap_or_else(|error| {
             panic!("an unavailable endpoint must initialize for publish-time retry: {error:?}")
@@ -2648,6 +2652,7 @@ mod tests {
                 ("timeout_ms", "2000"),
             ]),
             &dns,
+            &Default::default(),
         )
         .assured("a named endpoint constructs a lazy gRPC channel");
         nervix_primitives::task::yield_now().await;

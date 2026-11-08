@@ -152,6 +152,8 @@ class InventoryTests(unittest.TestCase):
             "benchmark-metrics-report",
             "crypto-p256-keys",
             "crypto-p256-signatures",
+            "tls-algorithm-selections",
+            "tls-algorithm-unknown-names",
             "runtime-kafka-unit-layouts",
             "runtime-ingestor-metric-layouts",
             "models-ingestor-instancing",
@@ -504,6 +506,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-dns",
             "nervix-licensing-protocol",
             "nervix-crypto",
+            "nervix-crypto-policy",
         })
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())
@@ -532,9 +535,9 @@ class InventoryTests(unittest.TestCase):
             "plexus-format-text": 54,
             "models-archived-models": 55,
             "registry-archived-models": 50,
-            "consensus-state-records": 47,
-            "consensus-state-corruption": 47,
-            "consensus-raft-records": 46,
+            "consensus-state-records": 48,
+            "consensus-state-corruption": 48,
+            "consensus-raft-records": 47,
             "registry-stored-models": 43,
             "registry-stored-models-corruption": 43,
             "inferencer-tensor-columns": 1,

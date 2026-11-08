@@ -94,6 +94,8 @@ pub enum Identifier {
     HttpHeaderBytes,
     HttpHeaderFields,
     ClientBatchRows,
+    TlsCipherSuites,
+    TlsKeyExchangeGroups,
     Headers,
     Secret,
     Platform,

@@ -430,3 +430,10 @@ items = ["thread::spawn"]
 owner = "The interconnect relay-owner checks and native contention probe"
 path = "crates/interconnect/src/connection/relay_owner_tests.rs"
 reason = "At most two modeled participants race the production admission owner and peer retirement, or one native participant measures an independent peer while another peer's guard is held. The shared harness bounds exploration; the native probe takes 5,000 frames and every participant joins."
+
+[[permission]]
+bound = "Two modeled threads per execution, one publication and one capture, both joined before final assertions and execution completion."
+items = ["thread::spawn"]
+owner = "The outward TLS policy production-owner Shuttle check."
+path = "crates/tls/src/shuttle_tests.rs"
+reason = "These finite synchronous model contenders exercise the owner directly, outside node execution jobs."

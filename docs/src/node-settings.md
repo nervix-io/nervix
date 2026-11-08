@@ -299,6 +299,7 @@ describes, defaults included.
 | `--raft-snapshot-entry-threshold`, `--raft-snapshot-byte-threshold`, `--raft-covered-log-entries-retained`, `--raft-covered-log-bytes-retained`, `--raft-retained-log-cap` | node capability | Raft retention |
 | `--node-unavailability-timeout` | cluster parameter | membership |
 | `--replica-count` | cluster parameter | scheduling |
+| `--tls-cipher-suites`, `--tls-key-exchange-groups` | cluster parameter | outward TLS algorithm policy |
 | `--state-snapshot-interval` | cluster parameter | runtime |
 | `--domain-drain-timeout`, `--entity-gate-deadline` | cluster parameter | cluster policy |
 | `--max-batch-messages`, `--client-producer-session-bytes`, `--client-consumer-session-bytes`, `--udf-code-bytes`, `--http-header-bytes`, `--http-header-fields`, `--client-batch-rows` | cluster parameter | model and session policy |
@@ -461,6 +462,18 @@ cap, and prerequisite relationships must still hold. Apply committed changes liv
 owner that captures settings at construction over its existing storage. The current record changes
 no OpenRaft construction setting: heartbeat and election timing remain prerequisites. Committed
 and running revisions are published together, and delayed observations cannot move them backward.
+
+
+Outward TLS algorithms are ordered-list cluster parameters. Both bootstrap defaults are `fips`:
+`--tls-cipher-suites` (`NERVIX_TLS_CIPHER_SUITES`) and `--tls-key-exchange-groups`
+(`NERVIX_TLS_KEY_EXCHANGE_GROUPS`) take comma-separated exact names or aliases. After bootstrap use
+`ALTER CLUSTER SET TLS_CIPHER_SUITES = ('fips'), TLS_KEY_EXCHANGE_GROUPS = ('fips');`.
+Aliases resolve in place and duplicate algorithms keep their first position. The complete resolved
+pair validates at commit and is installed live for new handshakes; established connections keep
+their negotiation. `DESCRIBE CLUSTER` and the settings log show resolved committed/running lists.
+The [cryptography chapter](cryptography.md#algorithm-policy) owns membership, exact spellings,
+validation and the inventory of TLS stacks the policy governs. Protocol versions and signature
+schemes have no additional cluster parameter.
 
 ## Fixed Values And The Source Ratchet
 

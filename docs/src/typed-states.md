@@ -1383,3 +1383,13 @@ Normalization sorts and deduplicates within the selected form. Persisted transac
 interconnect requests and runtime holds retain that choice. A held lease must contain the exact
 unit and its exact freeze before it authorizes a handoff checkpoint. Placement groups also carry
 exact unit members, allowing an ingestor instance and a relay partition in the same component.
+
+## Resolved TLS Parameter Pairs
+
+The mandatory `ClusterParameterValues` TLS fields contain bounded, nonempty, unique ordered
+algorithm identifiers. Aliases exist only at input conversion. Individual selection decoding rejects
+gaps and duplicates; complete JSON and archive record decoding applies the same joint validation
+as bootstrap and administrative transitions. The complete candidate includes TLS 1.3 and, when it
+retains a TLS 1.2 suite, a usable TLS 1.2 group. Neither decoding nor installation supplies an omitted
+policy field. Current storage headers and the interconnect contract fingerprint identify this
+complete shape. See [Algorithm Policy](cryptography.md#algorithm-policy).

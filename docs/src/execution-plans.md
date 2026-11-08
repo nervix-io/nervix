@@ -566,3 +566,12 @@ Emitter task installation consumes its decided configuration and pooled leases o
 connector's open boundary. Transient recovery suspends and resumes that retained instance; it does
 not lower another plan, rebind programs or acquire a second lease. Connection acquisition is a
 resume operation and never changes the plan or the ownership of retained records and commits.
+
+## Outward TLS Construction
+
+A committed TLS policy is a validated pair of resolved algorithm selections. Runtime installation
+projects the pair once into the node-owned TLS engine; connector composition passes that engine's
+handle as a construction input, alongside its existing DNS and execution handles. A connector reads
+no Model and reparses no algorithm text. Its retained rustls template resolves an immutable crypto
+snapshot when a new connection is constructed. Certificate/trust/ALPN owners and driver lifetimes
+stay independent of that publication. See [Algorithm Policy](cryptography.md#algorithm-policy).

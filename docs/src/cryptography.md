@@ -36,7 +36,7 @@ with `aws-lc-rs` and librdkafka, preserving the single-module rule.
 
 | Purpose | Where Nervix obtains it today |
 | --- | --- |
-| TLS provider | `nervix-crypto` installs the outward provider through rustls's process-default installation and supplies an independent checked interconnect provider. Connector TLS, native sessions and TLS VHOSTs retain the outward provider; SQS projects the boundary's typed outward choice into Smithy's mode, preserving the SDK's cipher filtering. |
+| TLS provider | `nervix-crypto` installs the outward provider through rustls's process-default installation and supplies an independent checked interconnect provider. Shared connector TLS, native sessions and TLS VHOSTs use the committed outward policy; SQS projects the boundary's typed outward choice into Smithy's mode, preserving the SDK's cipher filtering. |
 | Security digests | `nervix_crypto::digest` obtains SHA-256 and SHA-512 from AWS-LC. The interconnect trust-root fingerprint and the expression function `sha256()` use this boundary. |
 | Digest comparison | `nervix_crypto::digest::equal` compares equal-width digest arrays through AWS-LC's constant-time comparison. |
 | ECDSA signatures and keys | `nervix_crypto::ecdsa` owns P-256/SHA-256 fixed `r‖s` signing and verification, PKCS#8 v1 key generation/import/export, and uncompressed public-point coordinates. |
@@ -62,12 +62,71 @@ standalone X25519 and ChaCha20 are outside this set. Every client/server bundle 
 against the fixed set and keeps TLS 1.3, mutual certificate authentication and its certificate clock.
 This selects algorithms; the ordinary AWS-LC build is not a validated FIPS module.
 
-Outward TLS keeps the full AWS-LC default algorithm set. Rustls installs that process default
-once and retains a provider installed by the embedding host. The interconnect's independent
-immutable provider is cached once per process, so neither install order nor outward host policy
-changes its algorithm set. SQS retains Smithy's existing AWS-LC mode and its additional cipher
-filter, rather than using a custom-provider hook that bypasses that filter. Protocol negotiation,
-trust roots and client identities remain with their existing TLS owners.
+Outward TLS is a committed cluster policy. `TLS_CIPHER_SUITES` and
+`TLS_KEY_EXCHANGE_GROUPS` each default to `fips`. Bootstrap flags are
+`--tls-cipher-suites` / `NERVIX_TLS_CIPHER_SUITES` and
+`--tls-key-exchange-groups` / `NERVIX_TLS_KEY_EXCHANGE_GROUPS`; their values are comma-separated
+names. After bootstrap, change them through Plexus:
+
+```plexus
+ALTER CLUSTER SET
+  TLS_CIPHER_SUITES = ('fips', 'TLS13_CHACHA20_POLY1305_SHA256'),
+  TLS_KEY_EXCHANGE_GROUPS = ('fips', 'X25519');
+```
+
+Each list contains exact IANA/rustls names or aliases, matched case-insensitively. An alias expands
+at its position; repeated algorithms keep their first position. This order is preference order.
+The record, `DESCRIBE CLUSTER` and resolved-settings logs contain typed resolved lists, never an
+alias. An unknown or empty selection is refused with the setting and offending input. The complete
+candidate must contain a TLS 1.3 suite; retaining any TLS 1.2 suite requires a TLS 1.2-capable group.
+Changing both lists validates their final pair atomically, without judging an intermediate pair.
+
+`nervix-crypto-policy`, beneath the native crypto implementation, owns the catalog and alias
+membership once. `nervix-crypto` projects those identifiers to AWS-LC implementations in the same
+order. The full catalog is:
+
+| Selection | Exact rustls names, in catalog order |
+| --- | --- |
+| Cipher suites | `TLS13_AES_256_GCM_SHA384`, `TLS13_AES_128_GCM_SHA256`, `TLS13_CHACHA20_POLY1305_SHA256`, `TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384`, `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256`, `TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256`, `TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384`, `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`, `TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256` |
+| Key exchange groups | `X25519`, `secp256r1`, `secp384r1`, `X25519MLKEM768`, `secp256r1MLKEM768`, `MLKEM768`, `MLKEM1024` |
+
+The TLS 1.3 suites also accept their IANA spellings `TLS_AES_256_GCM_SHA384`,
+`TLS_AES_128_GCM_SHA256` and `TLS_CHACHA20_POLY1305_SHA256`. `default` expands to the complete
+catalog, including AWS-LC's non-default post-quantum groups. `fips` expands to the same catalog with
+ChaCha20 suites and standalone X25519 excluded. Its hybrid classification follows rustls
+0.23.46's post-quantum-first construction, just as the fixed interconnect does. `secp256r1`,
+`secp384r1` and `X25519` support TLS 1.2; the other groups support TLS 1.3.
+
+Protocol versions remain TLS 1.2 and TLS 1.3 as the TLS stack supports them, without a third
+parameter. Operators can exclude TLS 1.2 by selecting only TLS 1.3 suites. Signature schemes remain
+with the signature/FIPS migration. Approved membership selects algorithms; it does not certify an
+ordinary AWS-LC build or a deployment.
+
+The native `nervix-tls` engine publishes one node-owned immutable cipher/group pair. Listeners and
+shared-provider connectors resolve it once at new connection construction, including SDK-created
+reconnections. Each configuration template caches at most one resolved snapshot; unchanged policy
+reuses it. A cloned template gets an independent cache so changed ALPN, trust or identity cannot
+borrow another template's configuration. Existing connections retain their negotiated parameters,
+trust and driver lifecycle. A policy installation changes no certificate, pool, task, buffer,
+retry, acknowledgement or connection lifetime. HTTPS `DYNAMIC` certificate publication retains its
+own revision barrier and receives the same algorithm resolver. Running settings are published only
+after the node installs the complete policy. Before live parameter initialization, observation
+listeners use the explicit `fips` bootstrap policy; graph admission retains its normal initialization
+gate.
+
+The maintained rustls connection-resolution seam and Tonic prebuilt-configuration entrypoint
+preserve the dependencies' handshake, protocol and connection machinery. The interconnect retains
+its independent fixed provider and TLS 1.3 mutual authentication under every outward policy.
+Client tools, client-core and native bindings use the boundary's explicit `fips` provider, independent
+of a provider an embedding host installed. Rustls's process default remains AWS-LC's default
+provider for SDKs that construct their own configurations; its first-installation ownership stays
+unchanged.
+
+The governed shared-provider paths are HTTP requests, ClickHouse, Iceberg catalog/object storage,
+Pulsar, Redis Pub/Sub, WebSocket connections, Syslog, Prometheus, Sentry and OTEL HTTP. Driver-owned
+TLS configurations are known gaps: Kafka/librdkafka, MQTT, NATS, RabbitMQ, Postgres/MySQL pools,
+MongoDB, SQS/Smithy, Redis command pools and OTEL gRPC. Their existing AWS-LC/provider and driver
+filtering contracts remain in place; the cluster policy does not claim to govern them.
 
 Anything that protects confidentiality, integrity or authenticity uses an algorithm AWS-LC provides
 and FIPS 140-3 approves, such as the SHA-2 family, HMAC, AES-GCM, PBKDF2, RSA and ECDSA signatures,

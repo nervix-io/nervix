@@ -99,8 +99,11 @@ commits, read [Signing In](../../../docs/src/client-tools-web-console.md#signing
 Read [Layout](../../../docs/src/client-tools-web-console.md#layout) before interpreting footer totals.
 Listener certificates are node provisioning, configured outside Plexus statements.
 For TLS algorithm choices, read [Cryptography](../../../docs/src/cryptography.md#algorithm-policy):
-the interconnect uses its fixed provider, while native sessions and connectors use the outward
-provider and each connector's declared trust and identity keys.
+use ordered string lists with `ALTER CLUSTER SET TLS_CIPHER_SUITES = ('fips'),
+TLS_KEY_EXCHANGE_GROUPS = ('fips');`. Read that chapter before choosing exact names or aliases,
+changing both lists, or promising which connector handshakes are governed. The interconnect keeps
+its fixed provider; existing connections retain their negotiation and connector trust/identity
+remain with their declared client keys.
 For backend validation claims, follow that chapter's P-256 signing and backend-status guidance;
 selecting an approved algorithm does not establish a validated deployment.
 For authentication refusals and retry behavior, follow

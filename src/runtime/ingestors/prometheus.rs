@@ -56,6 +56,7 @@ impl PrometheusQueryIngestorStartPlan {
             .assured("an ingest group holds at least one message");
         PacedIngestorStart {
             connector: PrometheusQueryIngestorPlan {
+                tls_policy: runtime.outward_tls().clone(),
                 config: resolved.entries,
                 query,
                 max_body_size,
