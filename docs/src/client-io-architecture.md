@@ -337,10 +337,13 @@ the supported signatures, errors and examples.
 
 ### Shared C Binding And Buffer Lifetimes
 
-C, C++ and Ruby hosts use the existing Rust binding through
+C and C++ hosts use the existing Rust binding through
 [`nervix_client.h`](https://github.com/nervix-io/nervix/blob/main/crates/client-ffi/include/nervix_client.h),
 CPython hosts through its Python package, `nervix_client`, and JVM hosts through the Java 21 JNI
-classes in `crates/client-jvm`. All forward through the host session
+classes in `crates/client-jvm`. Ruby 3.3+ hosts load the magnus gem `nervix-client` from
+`crates/client-ruby`; its collector owns native objects, blocking calls release the GVL, and
+immutable IPC buffers mark their owner through every derived slice. Ruby builders copy inputs
+and endpoint opens retain a complete field snapshot. All forward through the host session
 runtime to the same Rust handles and recovery owner. Its blocking calls belong on application
 threads, never a thread driving a Tokio runtime. Native data access is bulk column access or
 canonical IPC, without per-value language callbacks or row-map payloads.
