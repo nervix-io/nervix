@@ -1,5 +1,6 @@
 //! Layer: engines and infrastructure.
-//! - **Owns.** Retained read counters, paced poll durations and exact-unit inspection history.
+//! - **Owns.** Retained read counters, paced poll durations and exact-unit inspection history,
+//!   which also retains the endpoint request children of an endpoint ingestor's unit.
 //! - **Depends on.** Vocabulary identities, the existing rate owner and Prometheus.
 //! - **Must not know.** Drivers, graph admission, decoding or acknowledgement policy.
 
@@ -15,7 +16,10 @@ use nervix_connector::IngestorReadOutcome;
 use nervix_models::{DomainNodeUnitRef, IngestorEntityKind, IngestorName, Unit};
 use strum::IntoEnumIterator as _;
 
-use super::*;
+use super::{
+    endpoint_requests::{EndpointRequestFamily, IngestorEndpointMetrics},
+    *,
+};
 
 const READS: &str = "nervix_ingestor_reads_total";
 const PAYLOADS: &str = "nervix_ingestor_read_payloads_total";
@@ -44,6 +48,7 @@ pub(super) struct IngestorReadFamilies {
     payloads: IntCounterVec,
     bytes: IntCounterVec,
     duration: HistogramVec,
+    endpoint_requests: EndpointRequestFamily,
 }
 
 impl IngestorReadFamilies {
@@ -90,6 +95,7 @@ impl IngestorReadFamilies {
             payloads,
             bytes,
             duration,
+            endpoint_requests: EndpointRequestFamily::register(registry, LABELS),
         }
     }
 
@@ -174,6 +180,7 @@ impl IngestorReadFamilies {
                         payloads: ReadCounter::new(&self.payloads, &values, None),
                         bytes: ReadCounter::new(&self.bytes, &values, None),
                         duration: self.duration.with_label_values(&values),
+                        endpoint_requests: self.endpoint_requests.unit(kind, &values),
                     }),
                 };
                 entry.insert(metrics.clone());
@@ -245,6 +252,7 @@ impl IngestorReadFamilies {
             self.duration
                 .remove_label_values(&labels)
                 .assured("registration installs the duration histogram");
+            self.endpoint_requests.withdraw(key.kind, &labels);
             scopes.remove(&key);
             kinds.push(key.kind);
         }
@@ -273,10 +281,14 @@ struct ReadSeries {
     payloads: ReadCounter,
     bytes: ReadCounter,
     duration: Histogram,
+    /// The request children of an endpoint ingestor's unit, which its endpoint bindings retain.
+    endpoint_requests: Option<IngestorEndpointMetrics>,
 }
 
+/// One retained counter child beside its rate summaries, which every interaction family of an
+/// ingestor unit that reports wall rates records through.
 #[derive(Debug)]
-struct ReadCounter {
+pub(super) struct ReadCounter {
     prometheus: IntCounter,
     rate: CounterSeries,
 }
@@ -295,6 +307,15 @@ impl ReadCounter {
             }
             None => family.with_label_values(labels),
         };
+        Self::retained(prometheus)
+    }
+
+    /// Retains the resolved child `prometheus` beside rate summaries that start at zero.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(lifecycle, reason = "wraps one child resolved at unit preparation")
+    )]
+    pub(super) fn retained(prometheus: IntCounter) -> Self {
         Self {
             prometheus,
             rate: CounterSeries::default(),
@@ -305,7 +326,7 @@ impl ReadCounter {
         nervix_lint,
         nervix::context(recurring, reason = "updates retained atomic children only")
     )]
-    fn record(&self, count: u64) {
+    pub(super) fn record(&self, count: u64) {
         self.prometheus.inc_by(count);
         self.rate.increment(count, None);
     }
@@ -314,7 +335,7 @@ impl ReadCounter {
         nervix_lint,
         nervix::context(observer, reason = "projects one counter and its rate summaries")
     )]
-    fn describe(&self, name: &str, selector: &str) -> String {
+    pub(super) fn describe(&self, name: &str, selector: &str) -> String {
         let summary = self.rate.summary();
         format!(
             "{name}{{{selector}}} total={} wall_rate_per_sec={} domain_rate_per_sec=- \
@@ -325,6 +346,14 @@ impl ReadCounter {
             format_optional(summary.rolling.wall_1m_per_sec),
             format_optional(summary.rolling.wall_15m_per_sec)
         )
+    }
+}
+
+impl ReadCounter {
+    /// The child's count so far.
+    #[cfg(test)]
+    pub(super) fn total(&self) -> u64 {
+        self.prometheus.get()
     }
 }
 
@@ -393,7 +422,23 @@ impl IngestorReadMetrics {
             self.series.duration.get_sample_count(),
             format_number(self.series.duration.get_sample_sum())
         ));
+        if let Some(endpoint_requests) = &self.series.endpoint_requests {
+            endpoint_requests.describe_lines(&self.series.selector, &mut lines);
+        }
         lines
+    }
+
+    /// The request children of an endpoint ingestor's unit, for its endpoint bindings to retain,
+    /// and nothing for a unit of an entity that reads no endpoint.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "an endpoint binding retains its unit's request children when it is bound"
+        )
+    )]
+    pub(crate) fn endpoint_requests(&self) -> Option<IngestorEndpointMetrics> {
+        self.series.endpoint_requests.clone()
     }
 }
 

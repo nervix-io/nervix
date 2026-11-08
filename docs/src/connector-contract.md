@@ -3532,7 +3532,11 @@ Broker read results and scheduled polls are observed once through the host's typ
 times paced polls; internal buffer replay is not another transport read. Neither observation
 changes delivery, cancellation, acknowledgement, error reporting or retry policy. An actual
 extension-worker unfolding refusal is counted on acknowledged, unacknowledged and endpoint intake;
-waiting for admission is not a refusal. [Ingestor Source Interactions](metrics-and-observability.md#ingestor-source-interactions)
+waiting for admission is not a refusal. The request path records each endpoint request or frame
+once for every ingestor bound to its route, through retained children of that ingestor's unit,
+from the typed outcome that ingestor reached. A route that refuses a request before reading it
+records each ingestor's refusal there, and a request it admits is recorded at dispatch alone.
+[Ingestor Source Interactions](metrics-and-observability.md#ingestor-source-interactions)
 owns the outcome and inspection contracts.
 
 The emitter host observes one publish or due staged-commit attempt through retained metric

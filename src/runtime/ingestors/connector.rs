@@ -668,6 +668,10 @@ impl RuntimeIngestorHost {
             decode_rejections: self.decode_rejections.clone(),
             header_values_dropped: self.interactions.header_values_dropped.clone(),
             unfolding_refused: self.interactions.unfolding_refused.clone(),
+            requests: self.interactions.reads.endpoint_requests().assured(
+                "only an endpoint ingestor binds request intake, and its unit's entity reads an \
+                 endpoint, which registers the unit's request children",
+            ),
         }
     }
 
