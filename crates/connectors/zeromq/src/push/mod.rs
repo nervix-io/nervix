@@ -23,6 +23,14 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
+impl nervix_connector::EmitterConnector for ZeroMqPushEmitter {
+    const KIND: nervix_models::EmitterEntityKind = Self::KIND;
+    type Plan = ZeroMqPushEmitterConfig;
+    async fn open(plan: Self::Plan, host: EmitterHost) -> EmitterStartResult<Self> {
+        Self::prepare(plan, host).await
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(
     nervix_lint,
@@ -50,45 +58,30 @@ pub struct ZeroMqPushEmitterConfig {
 }
 
 pub struct ZeroMqPushEmitter {
-    socket: PushSocket,
+    socket: Option<PushSocket>,
+    addr: String,
+    bind: bool,
+    connect_timeout: ConfiguredDeadline,
     /// The client's `timeout_ms`, which bounds each send, where it sets one.
     send_timeout: Option<ConfiguredDeadline>,
 }
 
 impl ZeroMqPushEmitter {
-    pub async fn new(
+    async fn prepare(
         config: ZeroMqPushEmitterConfig,
         _host: EmitterHost,
     ) -> EmitterStartResult<Self> {
-        Self::open(&config.config).await
-    }
-
-    /// Opens the PUSH socket `config` declares. The emitter reports nothing to its host, so opening it
-    /// needs only its client's entries. Both deadline keys are read before the socket opens, so a
-    /// value that breaks the deadline rule fails the start whether the socket binds or connects.
-    async fn open(config: &[ClientConfigEntry]) -> EmitterStartResult<Self> {
-        let connect_timeout = Self::connect_timeout(config)?;
-        let send_timeout = Self::send_timeout(config)?;
-        let socket = Self::push_socket_from_config(config, connect_timeout).await?;
+        let connect_timeout = Self::connect_timeout(&config.config)?;
+        let send_timeout = Self::send_timeout(&config.config)?;
+        let addr = Self::addr_from_config(&config.config)?;
+        let bind = Self::bind_from_config(&config.config)?;
         Ok(Self {
-            socket,
+            socket: None,
+            addr,
+            bind,
+            connect_timeout,
             send_timeout,
         })
-    }
-
-    async fn push_socket_from_config(
-        config: &[ClientConfigEntry],
-        connect_timeout: ConfiguredDeadline,
-    ) -> EmitterStartResult<PushSocket> {
-        let addr = Self::addr_from_config(config)?;
-        let bind = Self::bind_from_config(config)?;
-        let mut socket = PushSocket::new();
-        if bind {
-            socket.bind(&addr).await.map_err(Self::start_error)?;
-        } else {
-            Self::connect(&mut socket, &addr, connect_timeout).await?;
-        }
-        Ok(socket)
     }
 
     /// Connects `socket` to its peer at `addr` within the client's `connect_timeout_ms`. The driver
@@ -135,17 +128,25 @@ impl ZeroMqPushEmitter {
     /// `timeout_ms`: a peer that stops reading fills the connection's buffers and holds the send.
     /// The driver returns a peer to its round robin only when a send to it completes, so this
     /// socket never writes to that connection again and a message a timed-out send left partly
-    /// written is never continued; the host opens a new socket after the failed publish.
+    /// written is never continued; the retained emitter acquires a new socket before the next publish.
     async fn send(&mut self, payload: Vec<u8>) -> EmitterWriteResult<()> {
-        let send_timeout = self.send_timeout;
-        let send = self.socket.send(ZmqMessage::from(payload));
-        let Some(deadline) = send_timeout else {
-            return send.await.map_err(Self::publish_error);
+        let Some(mut socket) = self.socket.take() else {
+            return Err(Report::new(EmitterWriteError::NotInitialized {
+                connector: ZEROMQ,
+            }));
         };
-        match timeout(deadline.bound(), send).await {
-            Ok(sent) => sent.map_err(Self::publish_error),
-            Err(_) => Err(Self::send_elapsed(deadline)),
+        let send = socket.send(ZmqMessage::from(payload));
+        let sent = match self.send_timeout {
+            None => send.await.map_err(Self::publish_error),
+            Some(deadline) => match timeout(deadline.bound(), send).await {
+                Ok(sent) => sent.map_err(Self::publish_error),
+                Err(_) => Err(Self::send_elapsed(deadline)),
+            },
+        };
+        if sent.is_ok() {
+            self.socket = Some(socket);
         }
+        sent
     }
 
     /// The failure of a send that ran out of the client's `timeout_ms`, with the elapsed deadline
@@ -181,9 +182,11 @@ impl ZeroMqPushEmitter {
         Ok(bind.unwrap_or(false))
     }
 
-    fn start_error(error: impl std::fmt::Display) -> Report<EmitterOpenError> {
-        Report::new(EmitterOpenError::Initialize { connector: ZEROMQ })
-            .attach_printable(error.to_string())
+    fn start_error(error: zeromq::ZmqError) -> Report<EmitterOpenError> {
+        let description = error.to_string();
+        Report::new(error)
+            .change_context(EmitterOpenError::Initialize { connector: ZEROMQ })
+            .attach_printable(description)
     }
 
     #[cfg_attr(
@@ -206,6 +209,43 @@ impl ZeroMqPushEmitter {
 impl EmitterLifecycle for ZeroMqPushEmitter {
     fn kind(&self) -> nervix_models::EmitterEntityKind {
         Self::KIND
+    }
+
+    fn needs_resume(&mut self) -> bool {
+        self.socket.is_none()
+    }
+
+    fn resume(
+        &mut self,
+    ) -> nervix_connector::EmitterLifecycleStep<'_, nervix_connector::EmitterResume> {
+        if !self.needs_resume() {
+            return nervix_connector::EmitterLifecycleStep::ready(Ok(
+                nervix_connector::EmitterResume::Ready,
+            ));
+        }
+        nervix_connector::EmitterLifecycleStep::run(async move {
+            if self.socket.is_none() {
+                let mut socket = PushSocket::new();
+                let opened = if self.bind {
+                    match socket.bind(&self.addr).await {
+                        Ok(_) => Ok(()),
+                        Err(error) => Err(Self::start_error(error)),
+                    }
+                } else {
+                    Self::connect(&mut socket, &self.addr, self.connect_timeout).await
+                };
+                opened.change_context(nervix_connector::EmitterLifecycleError::Resume {
+                    connector: ZEROMQ,
+                })?;
+                self.socket = Some(socket);
+            }
+            Ok(nervix_connector::EmitterResume::Ready)
+        })
+    }
+
+    fn close(&mut self) -> nervix_connector::EmitterLifecycleStep<'_, ()> {
+        self.socket = None;
+        nervix_connector::EmitterLifecycleStep::ready(Ok(()))
     }
 
     /// A send that completes has written and flushed its frame to a peer's socket, and what a

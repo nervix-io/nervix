@@ -80,26 +80,26 @@ impl UnpublishableRow {
         execution_now: Timestamp,
     ) -> RejectedEmitterRecord {
         match self {
-            Self::OrderingGroup(error) => RejectedEmitterRecord {
+            Self::OrderingGroup(error) => RejectedEmitterRecord::message(
                 position,
-                reason: error.to_string(),
-                structured_error: None,
-            },
+                EmitterRejectionCode::Invalid,
+                error.to_string(),
+            ),
             Self::Envelope(error) => {
                 let reason = error.to_string();
                 let structured_error = structured_message_error(
                     execution_now,
                     MessageErrorCode::Evaluation,
-                    reason.clone(),
+                    reason,
                     MessageErrorOperation::Publish,
                     None,
                     std::iter::empty(),
                 );
-                RejectedEmitterRecord {
+                RejectedEmitterRecord::structured(
                     position,
-                    reason,
-                    structured_error: Some(structured_error),
-                }
+                    EmitterRejectionCode::Invalid,
+                    structured_error,
+                )
             }
         }
     }
@@ -182,11 +182,7 @@ impl EmitterConnector for EncodedRecordEmitter {
                         );
                         let mut member_error = error.clone();
                         member_error.occurred_at = batch.execution_now();
-                        rejected.push(RejectedEmitterRecord {
-                            position,
-                            reason: String::new(),
-                            structured_error: Some(member_error),
-                        });
+                        rejected.push(RejectedEmitterRecord::preparation(position, member_error));
                     }
                 }
             }
@@ -362,14 +358,14 @@ async fn encode_broker_records(
             let payload = match payload {
                 Ok(payload) => payload,
                 Err(error) => {
-                    rejected.push(RejectedEmitterRecord {
+                    rejected.push(RejectedEmitterRecord::message(
                         position,
-                        reason: format!(
+                        EmitterRejectionCode::Encode,
+                        format!(
                             "emitter '{}' failed to encode record: {error:#}",
                             context.emitter.as_str()
                         ),
-                        structured_error: None,
-                    });
+                    ));
                     continue;
                 }
             };
@@ -508,32 +504,32 @@ async fn pack_batch_records(
                 });
             }
             PackedOutcome::MemberFailed { position, error } => {
-                rejected.push(RejectedEmitterRecord {
+                rejected.push(RejectedEmitterRecord::message(
                     position,
-                    reason: format!(
+                    EmitterRejectionCode::Encode,
+                    format!(
                         "emitter '{}' failed to encode record: {error:#}",
                         context.emitter.as_str()
                     ),
-                    structured_error: None,
-                });
+                ));
             }
             PackedOutcome::Oversize { position, exceeded } => {
                 let batch = batches
                     .get(position.batch_index)
                     .assured("packing positions refer to the source batches it received");
                 let message = format!("emitter '{}' {exceeded}", context.emitter.as_str());
-                rejected.push(RejectedEmitterRecord {
+                rejected.push(RejectedEmitterRecord::structured(
                     position,
-                    reason: message.clone(),
-                    structured_error: Some(structured_message_error(
+                    EmitterRejectionCode::Oversize,
+                    structured_message_error(
                         batch.execution_now(),
                         MessageErrorCode::Validation,
                         message,
                         MessageErrorOperation::Encode,
                         None,
                         std::iter::empty(),
-                    )),
-                });
+                    ),
+                ));
             }
             PackedOutcome::ContainerFailed { rows, error } => {
                 let first = rows
@@ -549,11 +545,11 @@ async fn pack_batch_records(
                         .assured("packing positions refer to the source batches it received");
                     let mut member_error = shared.clone();
                     member_error.occurred_at = batch.execution_now();
-                    rejected.push(RejectedEmitterRecord {
+                    rejected.push(RejectedEmitterRecord::structured(
                         position,
-                        reason: shared.message.clone(),
-                        structured_error: Some(member_error),
-                    });
+                        EmitterRejectionCode::Encode,
+                        member_error,
+                    ));
                 }
             }
         }

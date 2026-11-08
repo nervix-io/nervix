@@ -28,6 +28,14 @@
     )
 )]
 
+impl nervix_connector::EmitterConnector for HttpRequestEmitter {
+    const KIND: nervix_models::EmitterEntityKind = Self::KIND;
+    type Plan = HttpRequestEmitterConfig;
+    async fn open(plan: Self::Plan, host: EmitterHost) -> EmitterStartResult<Self> {
+        Self::prepare(plan, host)
+    }
+}
+
 #[cfg(test)]
 mod request_tests;
 mod response;
@@ -199,13 +207,13 @@ type HttpAttemptResult<T> = Result<T, Report<HttpAttemptError>>;
 struct AddressShareElapsed;
 
 impl HttpRequestEmitter {
-    pub fn new(config: HttpRequestEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
-        Self::open(config)
+    fn prepare(config: HttpRequestEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
+        Self::prepare_client(config)
     }
 
     /// The emitter `config` declares: its client transport, its proxy and its TLS settings, read
     /// locally without contacting the endpoint.
-    fn open(config: HttpRequestEmitterConfig) -> EmitterStartResult<Self> {
+    fn prepare_client(config: HttpRequestEmitterConfig) -> EmitterStartResult<Self> {
         let transport = ClientTransport::declared(&config.config, HTTP_EMITTER).change_context(
             EmitterOpenError::InvalidConfiguration {
                 connector: HTTP_EMITTER,
@@ -705,13 +713,6 @@ impl EmitterLifecycle for HttpRequestEmitter {
     /// nothing.
     async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
         Ok(EmitterFinish::NothingHeld)
-    }
-
-    /// The emitter holds no connection or staged work between attempts, so keeping it loses
-    /// nothing, and the emitter's retry sends the pending request without reopening an emitter whose
-    /// successful reopening would clear the failure the request is still waiting out.
-    fn keeps_client_on_publish_failure(&self) -> bool {
-        true
     }
 }
 
