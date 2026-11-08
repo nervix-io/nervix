@@ -12,6 +12,8 @@ the resulting Arrow batches inside the graph.
 ingestor and emitter plans to the host.
 [HTTP Emitter Architecture](./http-emitter-architecture.md) follows this boundary for one
 outbound request, from Arrow preparation to response and recovery.
+[Emitter Batching](./emitter-batching.md) follows compatible rows through bounded encoding,
+retained membership, native publication outcomes and the separate flush, request and commit units.
 
 ## Connector and entity kinds
 
@@ -22,6 +24,9 @@ ingestors therefore have distinct kinds, as do OTEL logs, traces and metrics emi
 that serves one entity still names that entity explicitly.
 
 ### Statement heads and references
+
+The general [statement-head contract](architecture.md#statement-heads-and-body-properties) owns
+kind selection, body properties and addressing. Connector declarations specialize that contract.
 
 Plexus selects these identities in the statement head:
 
@@ -270,6 +275,13 @@ at or below its baseline. Documentation changes also run `just book`. Execution-
 follows the changed protocol or lifecycle, as [Data-Plane
 Concurrency](./data-plane-concurrency.md) describes; changing labels or documentation alone does
 not introduce a synchronization claim.
+
+The RabbitMQ publication benchmark invokes the public queue emitter against an explicitly
+provisioned broker, with bounded write sizes and an exact external message-count check outside
+timing. Its driver controls isolate the channel round trip from enqueue completion; neither
+control replaces the production delivery contract. The benchmark guide under `benches/README.md`
+defines its measurement boundaries and commands. Qualification records distinguish these write
+costs from full-graph throughput, flush latency and memory measurements.
 
 Before closing a connector epic, review changes landed from parallel work for additional name
 sources, free-text causes, inaccurate boundary annotations, and publish, mapping, batch or

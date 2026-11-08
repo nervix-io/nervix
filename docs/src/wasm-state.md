@@ -313,6 +313,11 @@ before writing the checkpoint to its own storage. A save up to the host's 64 MiB
 therefore cross the 2 MiB replication-message limit. The bulk fetch has a sixty-second progress
 deadline inside the checkpoint's ninety-second completion budget.
 
+The BLAKE3 digest checks consistency with the selected checkpoint descriptor. The interconnect
+authenticates the peer, and placement and generation admission determine which state may be
+installed. The checksum is not a signature or an independent authority to install state; its
+non-security purpose is recorded in [Cryptography](cryptography.md#classification-register).
+
 The fetch's bulk stream grants the owner a 1 MiB receive window, so the owner keeps sixteen 64 KiB
 chunks in flight. A save then crosses in one round trip per window rather than one per chunk, which
 matters on a loaded node, where every round trip waits for several scheduled tasks on both sides.

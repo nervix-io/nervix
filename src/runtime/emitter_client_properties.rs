@@ -20,7 +20,7 @@ use arrow_ipc::writer::StreamWriter;
 use bytes::Bytes;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::{Arbitrary, Domain};
-use nervix_client_core::{ClientError, EmitterDelivery, RequestKind};
+use nervix_client_core::{EmitterBatchDecodeError, EmitterDelivery};
 use nervix_models::SchemaField;
 
 use super::ClientConsumerConnector;
@@ -54,20 +54,10 @@ fn delivery(schema: &GeneratedSchema, source: &RecordBatch, rows: &[usize]) -> B
         .assured("rows of the emitter's own output schema encode")
 }
 
-fn assert_refused(outcome: error_stack::Result<RecordBatch, ClientError>, what: &str) {
-    let refused = match outcome {
-        Ok(decoded) => panic!("{what} decoded to {} rows", decoded.num_rows()),
-        Err(refused) => refused,
-    };
-    assert!(
-        matches!(
-            refused.current_context(),
-            ClientError::UnexpectedReply {
-                request: RequestKind::ReadEmitterBatch
-            }
-        ),
-        "{what} is refused as a batch the consumer did not ask for: {refused:?}"
-    );
+fn assert_refused(outcome: error_stack::Result<RecordBatch, EmitterBatchDecodeError>, what: &str) {
+    if let Ok(decoded) = outcome {
+        panic!("{what} decoded to {} rows", decoded.num_rows());
+    }
 }
 
 /// The rows a client emitter connector writes for a delivery are the rows an application consumer
@@ -204,7 +194,7 @@ fn stream_of(schema: &GeneratedSchema, source: &RecordBatch, batches: usize) -> 
 
 /// A delivery is one record batch of its declared schema. The decoder accepts the stream that holds
 /// exactly one, and refuses a stream that holds none or two, a stream cut short and no bytes at
-/// all, each as a batch the consumer did not ask for.
+/// all, each with a typed decoder refusal.
 #[test]
 fn a_delivery_that_is_not_one_batch_is_refused() {
     let bytes = seeded_bytes(7);

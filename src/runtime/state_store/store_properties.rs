@@ -103,6 +103,7 @@ impl GeneratedCheckpoint {
         u64::try_from(self.payload.len()).assured("a payload length fits in u64")
     }
 
+    /// Non-security BLAKE3: identifies controlled generated checkpoint bytes in this fixture.
     fn metadata(&self) -> CheckpointMetadata {
         CheckpointMetadata {
             lsm: self.lsm,

@@ -200,6 +200,7 @@ impl StagedArtifact {
 /// Every writer call is split into bounded units even when the codec presents a large string.
 struct EncodingWriter<'a> {
     file: &'a mut dyn Write,
+    /// Non-security BLAKE3: measures controlled staged artifact bytes, not their authenticity.
     hasher: &'a mut blake3::Hasher,
     cancellation: &'a Cancellation,
     maximum: u64,

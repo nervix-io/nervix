@@ -28,6 +28,14 @@ impl RestartableRabbitMq {
         self.environment.endpoints().get(RABBITMQ_ADDR)
     }
 
+    /// The isolated broker whose diagnostics a failed test must retain before teardown.
+    pub fn container_id(&self) -> &str {
+        let [RunningContainer::Generic(container)] = self.environment.containers.as_slice() else {
+            unreachable!("this private environment starts exactly one RabbitMQ container");
+        };
+        container.id()
+    }
+
     pub async fn restart(&mut self) -> io::Result<()> {
         let [RunningContainer::Generic(container)] = self.environment.containers.as_slice() else {
             unreachable!("this private environment starts exactly one RabbitMQ container");

@@ -18,6 +18,11 @@ not a second grammar.
 
 Always read `Plexus Overview`. Add the indexed topics relevant to the requested graph:
 
+Its `Statement catalog` explains kinded heads and addressing. Read `Schemas And Codecs` → `Codecs`
+for the complete codec head and wire reference, `Ingestors` for endpoint declarations, and the
+`Processors` or `Emitters` input synopsis for acknowledgement placement and supported alterations.
+Keep detailed grammar in those chapters when reviewing a configuration.
+
 | User need | Documentation index entry |
 | --- | --- |
 | Domain timing and lifecycle | `Domains And Time` |
@@ -42,6 +47,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Processor and emitter input attachment, its body-clause position and default | `Runtime Nodes` → `Shared input and branch contracts`, and `Emitters` → `Statement heads and external names` |
 | Timed generation from materialized state | `Plexus Overview` and `Examples` |
 | Emitter transports, publishing modes, confirmation windows/timeouts, retry pacing, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
+| Emitter batching legality, compatible membership, encoded limits, native containers, retained retries and measured sizing | `Emitters` → `Batching`, then [Emitter Batching](../../../../docs/src/emitter-batching.md) and `Metrics And Observability` → `Emitter payload preparation` |
 | Emitter envelope clauses and `PROPERTIES`: timestamps, flags, delays, reply targets and message identities a transport carries beside each payload | `Emitters` → `Envelope clauses`, then `Connector Capabilities` |
 | MongoDB collection names and the lookup before each write, BSON field-name admission, native widths/date precision, conflict filters and upserts, write-concern outcomes, client URL configuration, the client database, paired TLS identity files, pool waits and driver deadlines | `Emitters` → `MongoDB`, `Database Client Connection Pools`, then `Connector Capabilities` |
 | MySQL table path parts, exact value bindings, duplicate-key actions, placeholder and packet limits, operation deadlines, TLS verification and identity file formats, the declared checkout budget, connection lifetimes and maintained pool minimums | `Emitters` → `MySQL`, `Database Client Connection Pools`, then `Connector Capabilities` → `MYSQL client` |
@@ -70,6 +76,12 @@ is outside the curated Plexus index.
 For the CLI's `subscribe` and `domain-clock` shell streams and their line formats, read
 [Command Line Client](https://docs.nervix.io/client-tools-cli.html) directly. Follow the same
 documentation version as the selected index; this client chapter is outside the curated Plexus index.
+
+For Ruby applications driving a configured graph, read
+[Client Library → Through The Native Ruby Gem](https://docs.nervix.io/client-library.html#through-the-native-ruby-gem)
+and [Client Implementation Manual → Using The Ruby Gem](https://docs.nervix.io/client-implementation-manual.html#using-the-ruby-gem)
+for the native gem's lifetime, GVL, typed-column and exact-recovery rules. Follow the documentation
+version selected by the index; these client chapters are outside its curated Plexus topics.
 
 For native subscription and clock recovery, read [Rust Client Library](https://docs.nervix.io/client-library.html)
 and [Client Implementation Manual](https://docs.nervix.io/client-implementation-manual.html), especially

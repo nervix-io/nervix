@@ -110,7 +110,7 @@ class InventoryTests(unittest.TestCase):
 
     def test_the_producers_are_the_native_extra_checks_in_ci_order(self) -> None:
         self.assertEqual(
-            [producer.name for producer in native_coverage.PRODUCERS],
+            [producer.name for producer in native_coverage.CI_PRODUCERS],
             ["test-typed-ratchet", "bench-smoke", "test-primitives-ordinary",
              "test-primitives-shuttle", "test-primitives-loom", "test-primitives-turmoil",
              "test-primitives-deloxide", "plexus-completion-walk", "validate-connector-matrix", "test-shuttle", "test-loom", "test-turmoil",
@@ -131,6 +131,21 @@ class InventoryTests(unittest.TestCase):
                 self.assertEqual(producer.instrumented, f"test-{producer.lane}-workloads")
         lanes = [producer.lane for producer in native_coverage.PRODUCERS if producer.lane is not None]
         self.assertEqual(lanes, list(inventory.selections))
+
+    def test_local_broker_benchmarks_are_registered_without_adding_ci_work(self) -> None:
+        self.assertEqual(
+            [producer.name for producer in native_coverage.LOCAL_PRODUCERS],
+            ["test-rabbitmq-publish-benchmark"],
+        )
+        self.assertEqual(
+            native_coverage.PRODUCERS,
+            (*native_coverage.CI_PRODUCERS, *native_coverage.LOCAL_PRODUCERS),
+        )
+        names = [producer.name for producer in native_coverage.PRODUCERS]
+        self.assertEqual(len(names), len(set(names)), "producer names never shadow each other")
+        workflow = (REPOSITORY / ".github/workflows/check.yaml").read_text(encoding="utf-8")
+        for producer in native_coverage.LOCAL_PRODUCERS:
+            self.assertNotIn(f"just coverage-native-extras {producer.name}", workflow)
 
     def test_a_check_composed_otherwise_than_its_producer_is_refused(self) -> None:
         producer = Producer("check", "ordinary", ("prepare",), "body", ("finish",))
@@ -209,7 +224,13 @@ class InventoryTests(unittest.TestCase):
 
     def test_producers_are_selected_by_name_once_each(self) -> None:
         producers = native_coverage.PRODUCERS
-        self.assertEqual(native_coverage.select_producers([], producers), list(producers))
+        self.assertEqual(
+            native_coverage.select_producers([], producers), list(native_coverage.CI_PRODUCERS)
+        )
+        self.assertEqual(
+            native_coverage.select_producers(["test-rabbitmq-publish-benchmark"], producers),
+            list(native_coverage.LOCAL_PRODUCERS),
+        )
         self.assertEqual(
             native_coverage.select_producers(["plexus-completion-walk", "bench-smoke"], producers),
             [next(producer for producer in producers if producer.name == "plexus-completion-walk"), next(producer for producer in producers if producer.name == "bench-smoke")],
@@ -229,7 +250,7 @@ class InventoryTests(unittest.TestCase):
         # installs them with its toolchain instead of relying on the runner's image.
         self.assertRegex(step_section(job, "Setup Rust"), r"components: [^\n]*\bllvm-tools\b")
         self.assertIn("run: just coverage-model-runner\n", job)
-        for producer in native_coverage.PRODUCERS:
+        for producer in native_coverage.CI_PRODUCERS:
             with self.subTest(producer=producer.name):
                 if producer.name == "test-shuttle":
                     selected_job = job_section(workflow, "shuttle")

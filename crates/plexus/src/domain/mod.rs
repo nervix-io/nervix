@@ -73,8 +73,7 @@ pub fn create_domain_parser<'src>()
                 placement,
             },
         });
-    let paced = kw(Identifier::Paced)
-        .ignore_then(kw(Identifier::Domain))
+    let paced = kw_phrase2(Identifier::Paced, Identifier::Domain)
         .ignore_then(domain_name())
         .then_ignore(kw(Identifier::With))
         .then_ignore(kw(Identifier::Period))
@@ -89,8 +88,7 @@ pub fn create_domain_parser<'src>()
                 placement,
             },
         });
-    let unpaced = kw(Identifier::Unpaced)
-        .ignore_then(kw(Identifier::Domain))
+    let unpaced = kw_phrase2(Identifier::Unpaced, Identifier::Domain)
         .ignore_then(domain_name())
         .then(placement)
         .map(|(id, placement)| CreateDomain {
@@ -475,11 +473,11 @@ mod tests {
     }
 
     #[test]
-    fn suggests_pace_keywords_after_create() {
+    fn suggests_domain_heads_after_create() {
         let suggestions = suggest_statement("CREATE ", 7);
         assert!(suggestions.contains(&"DOMAIN".to_string()));
-        assert!(suggestions.contains(&"PACED".to_string()));
-        assert!(suggestions.contains(&"UNPACED".to_string()));
+        assert!(suggestions.contains(&"PACED DOMAIN".to_string()));
+        assert!(suggestions.contains(&"UNPACED DOMAIN".to_string()));
     }
 
     #[test]
@@ -492,7 +490,7 @@ mod tests {
     #[test]
     fn suggests_unpaced_without_cross_branch_leakage() {
         let suggestions = suggest_statement("CREATE UNP", 10);
-        assert!(suggestions.contains(&"UNPACED".to_string()));
+        assert!(suggestions.contains(&"UNPACED DOMAIN".to_string()));
         assert!(!suggestions.contains(&"JUNCTION".to_string()));
     }
 

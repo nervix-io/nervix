@@ -23,15 +23,16 @@ lifetimes, restoration and runnable paced workflows. This ledger owns the qualif
 | C++ (C++17) | Shared Rust binding, owned through `std::unique_ptr` | Native gRPC | `tests/client_conformance/cpp/probe.cpp` |
 | CPython 3.12+ | Shared Rust binding through the Python package `nervix_client` on pyo3, `crates/client-python` | Native gRPC | `tests/client_conformance/python/probe.py` |
 | Java 21+ | Shared Rust host runtime through the JNI library, `crates/client-jvm` | Native gRPC | `tests/client_conformance/java/Probe.java` |
-| Ruby 3.3+ | Shared Rust binding through Fiddle | Native gRPC | `tests/client_conformance/ruby/probe.rb` |
+| Ruby 3.3+ | Shared Rust host runtime through the magnus gem, `crates/client-ruby` | Native gRPC | `tests/client_conformance/ruby/probe.rb` |
 | Go 1.25+ | Independent native client, `flatc --go` and `google.golang.org/grpc` | Native gRPC | `tests/client_conformance/go/` |
 | Node.js 24 | Independent native client, `flatc --ts` and the built-in `WebSocket` | Binary WebSocket | `tests/client_conformance/node/probe.ts` |
 | Bun 1.4 | The same TypeScript client, unchanged | Binary WebSocket | `tests/client_conformance/node/probe.ts` |
 
-The shared Rust binding is the host session runtime, `crates/client-host`, which C, C++ and
-Ruby hosts reach through the C ABI of `crates/client-ffi`, whose contract is
+The shared Rust binding is the host session runtime, `crates/client-host`, which C and C++
+hosts reach through the C ABI of `crates/client-ffi`, whose contract is
 `crates/client-ffi/include/nervix_client.h`, and CPython hosts through the Python package of
-`crates/client-python` and JVM hosts through the JNI jar of `crates/client-jvm`. Every binding host drives the Rust client's own state machine, so leader
+`crates/client-python`, JVM hosts through the JNI jar of `crates/client-jvm`, and Ruby hosts through the native magnus
+gem of `crates/client-ruby`. Every binding host drives the Rust client's own state machine, so leader
 retry, request correlation, reconnection, execution identity and subscription restoration are the
 ones `nervix-client-core` tests, and no host reinterprets an uncertain outcome.
 The Go and TypeScript clients implement the protocol themselves: they correlate replies by request
@@ -53,7 +54,7 @@ pull request labeled `client-conformance`.
 | C++ | `c++ -std=c++17 -Wall -Wextra -Werror -pthread -I crates/client-ffi/include tests/client_conformance/cpp/probe.cpp -L target/debug -lnervix_client_ffi -Wl,-rpath,target/debug -o target/client-conformance/cpp-probe` | `target/client-conformance/cpp-probe` |
 | Python | `just build-client-python`: `maturin build` of `crates/client-python` into an abi3 wheel under `target/client-conformance/wheels`, installed with `pyarrow` into the CPython 3.12 environment `target/client-conformance/python` | `target/client-conformance/python/bin/python tests/client_conformance/python/probe.py` |
 | Java | `just build-client-jvm`: Java 21 classes, JNI library bundled into `target/client-conformance/java/nervix-client.jar`, and compiled probe | `java -Xcheck:jni -cp target/client-conformance/java/nervix-client.jar:target/client-conformance/java/probe Probe` |
-| Ruby | None | `ruby tests/client_conformance/ruby/probe.rb` |
+| Ruby | `just build-client-ruby`: native extension built against the current CRuby 3.3+ interpreter, packaged into a gem and extracted under `target/client-conformance/ruby` | `ruby -I target/client-conformance/ruby/lib tests/client_conformance/ruby/probe.rb` |
 | Go | `flatc --go` into a copy of `tests/client_conformance/go`, then `go build` | `target/client-conformance/go-probe`, or `go-probe corpus <dir>` |
 | Node.js | `flatc --ts`, `npm ci`, then `esbuild probe.ts --bundle --platform=node --format=esm` | `node target/client-conformance/node/probe.mjs`, or with `corpus <dir>` |
 | Bun | The Node.js bundle; Bun is the release the probe's `package-lock.json` pins | `target/client-conformance/node-src/node_modules/.bin/bun target/client-conformance/node/probe.mjs` |
@@ -204,7 +205,7 @@ Beyond the shared report, each kind of probe checks what only it can reach:
 | Binding hosts, producers and consumers | Every buffer a host passes a batch builder is overwritten as soon as the call returns, and the rows the consumer reads are still the ones the host built. The stream a host passes `nx_producer_submit_ipc` is overwritten or released as soon as the call returns, and the server still refuses it for its schema rather than as malformed. A delivery's batch borrows the stream the delivery carried. A delivery and its batch retained before the first reference is released on another thread read the same stream and rows, and the retained delivery settles the attempt. A submission's pending list names the one waiting submission, and a wait for its outcome ends by its deadline while its output is unacknowledged. |
 | Python | The frame is a `memoryview` whose buffer keeps the event alive; it stays readable after every other reference is dropped and collected. |
 | Java | Cleaner releases unreachable handles. A read-only direct frame buffer retains its native event, including through slice/duplicate chains after explicit event close. Shared handle leases permit cross-thread cancellation and release. |
-| Ruby | References nothing reaches are released by the collector's free function while retained references are read. |
+| Ruby | Native objects the collector no longer reaches are released; frozen, locked frame and IPC buffers and their slices retain their owners across session closure and collection. |
 | Go, TypeScript | A request that omits the required subscription type is rejected rather than defaulted, and cancelling an identity that is not in flight reports `NotInFlight`. The TypeScript client reads every 64-bit value as a `BigInt`. |
 
 ## Host suites
@@ -218,12 +219,23 @@ and a run of either tier fails on a registered test that did not run or did not 
 test and on a test the inventory does not register. Each runner prints one
 `NERVIX-SUITE <outcome> <identity>` line per test, which the scenario harness and
 `scripts/client_suites.py check-run` read. `just validate-client-suites` holds each suite to its
-binding's whole public surface, measured by mypy over the typed suite, and its guide to the shared
-section list with every code block an include of an anchored test.
+binding's whole public surface, resolved by mypy for Python and Java compiler elements for the JVM,
+and its guide to the shared section list with every code block an include of an anchored test.
+
+The cluster runner can request a testing-build action on stdout and await its numbered confirmation
+on stdin, through the exchange [Client Suites](../docs/src/integration-test-lifecycle.md#client-suites)
+specifies. Python's registered
+`test_a_refused_subscription_restoration_reports_its_cause_and_recovers` cuts its session relay,
+asks the scenario to arm every node's next subscription-opening refusal, restores the relay, reads
+`INTERRUPTED` and `RESTORATION_FAILED` with `UNAVAILABLE`, a message and a positive retry wait,
+then reads rows after restoration succeeds. There is no corresponding declared clock-attachment
+refusal action; clock restoration-failure values remain covered by the binding owner tests rather
+than a claimed live host-suite observation.
 
 | Host | Build | Boundary tier | Cluster tier | Covers | Runs in | Guide |
 | --- | --- | --- | --- | --- | --- | --- |
 | CPython 3.12+ | `just build-client-python`: the wheel with pytest, pyarrow, polars and mypy in `target/client-conformance/python`, and alone in `target/client-conformance/python-bare` | `just test-client-python-api`, which `just test` runs | `just test-client-python-cluster`, or the `@client_suite_python` rows of `just test-client-conformance` | Connection over TLS with seeds and timeouts, execution and recovery by the same execution, completion, subscriptions and their events, domain clocks across generations and a lost session, producers and every outcome class, consumers and every settlement, backup and restore, `with` blocks and collection-driven lifetimes, threads, typed exceptions, Arrow exchange with pyarrow and polars, and the wheel's packaging | The `client-conformance` job, for a pull request labeled `client-conformance` | [Python Client Library](../docs/src/client-library-python.md) |
+| JVM / Java 21+ | `just build-client-jvm-tests`: the self-loading jar, pinned/digest-verified JUnit 5 console launcher and compiled suite | `just test-client-jvm-api` with `-Xcheck:jni` and exact inventory accounting | `just test-client-jvm-cluster`, or the `@client_suite_java` rows of `just test-client-conformance` | TLS/authentication/seeds/timeouts, execution identity recovery, completion, typed subscriptions, clock generations and reconnection, producers and credit/outcomes, consumer settlements and recovery, backup/restore, Cleaner/close/buffer lifetimes, concurrent calls and cancellation, records/enums and the exception hierarchy | The `client-conformance` job; boundary, embedded-JNI and existing Java probe checks retained | [JVM Client Library](../docs/src/client-library-jvm.md) |
 
 ## Batch buffers
 

@@ -354,6 +354,7 @@ impl ConfiguredChoices {
         }
     }
 
+    /// Non-security BLAKE3: checks configuration-page freshness; it does not authorize candidates.
     fn models(
         &self,
         question: &ConfiguredQuestion,
@@ -520,6 +521,7 @@ impl ConfiguredChoices {
         })
     }
 
+    /// Non-security BLAKE3: checks catalog-page freshness; authentication is separate.
     fn resources(&self, search: &str) -> Result<ResolvedChoices, ChoiceStatus> {
         let mut names = BTreeSet::new();
         for counter in &self.resources.next_version_by_resource {
@@ -558,6 +560,7 @@ impl ConfiguredChoices {
         })
     }
 
+    /// Non-security BLAKE3: checks version-page freshness inside the selected resource catalog.
     fn completed_versions(
         &self,
         resource: &ResourceName,
@@ -620,6 +623,7 @@ impl ConfiguredChoices {
         })
     }
 
+    /// Non-security BLAKE3: checks relay/schema-page freshness, not access permission.
     fn relay_fields(&self, relay: &NodeRef, search: &str) -> Result<ResolvedChoices, ChoiceStatus> {
         // A relay dropped since the form selected it no longer gives the question its context.
         let Some(Model::Relay(relay)) = self.models.get(relay) else {
@@ -666,6 +670,7 @@ impl ConfiguredChoices {
         })
     }
 
+    /// Non-security BLAKE3: checks codec/schema-page freshness, not access permission.
     fn codec_fields(&self, codec: &NodeRef, search: &str) -> Result<ResolvedChoices, ChoiceStatus> {
         let Some(Model::Codec(codec)) = self.models.get(codec) else {
             return Err(ChoiceStatus::MissingContext);
@@ -707,6 +712,7 @@ impl ConfiguredChoices {
         })
     }
 
+    /// Non-security BLAKE3: checks branch/schema-page freshness, not access permission.
     fn branch_fields(
         &self,
         branch: &NodeRef,

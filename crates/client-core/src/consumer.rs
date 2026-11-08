@@ -1190,11 +1190,34 @@ mod shuttle_tests {
     }
 }
 
+/// Why bytes do not encode the one canonical Arrow batch a caller declared.
+///
+/// The decoder does not decide whether these are application arguments or server data. Its caller
+/// supplies that context, and Arrow's typed cause stays below the failure that owns it.
+#[cfg(feature = "arrow")]
+#[derive(Debug, thiserror::Error)]
+pub enum EmitterBatchDecodeError {
+    #[error("failed to open the Arrow IPC stream")]
+    OpenStream,
+    #[error("the Arrow IPC stream schema does not match the declared fields")]
+    SchemaMismatch,
+    #[error("the Arrow IPC stream contains no record batch")]
+    MissingBatch,
+    #[error("failed to read a record batch from the Arrow IPC stream")]
+    ReadBatch,
+    #[error("the Arrow IPC stream contains more than one record batch")]
+    ExtraBatch,
+    #[error("the Arrow IPC batch has {actual} rows; the caller declared {expected}")]
+    RowCount { expected: u32, actual: usize },
+}
+
 #[cfg(feature = "arrow")]
 impl EmitterDelivery {
     /// Decodes the canonical Arrow stream and checks every field against the emitter's declared
     /// output schema before yielding it to the application.
-    pub fn record_batch(&self) -> error_stack::Result<arrow_array::RecordBatch, ClientError> {
+    pub fn record_batch(
+        &self,
+    ) -> error_stack::Result<arrow_array::RecordBatch, EmitterBatchDecodeError> {
         Self::decode_record_batch(&self.inner.description.fields, &self.batch, self.members)
     }
 
@@ -1203,43 +1226,58 @@ impl EmitterDelivery {
     /// of `members` rows. [`Self::record_batch`] decodes a delivery through this, and an
     /// application that kept a delivery's bytes and row count beside its consumer's description
     /// decodes them the same way.
+    ///
+    /// The typed refusal describes the stream independently of its origin:
+    ///
+    /// ```
+    /// use bytes::Bytes;
+    /// use nervix_client_core::{EmitterBatchDecodeError, EmitterDelivery};
+    /// let decoded: error_stack::Result<_, EmitterBatchDecodeError> =
+    ///     EmitterDelivery::decode_record_batch(&[], &Bytes::new(), 0);
+    /// assert!(decoded.is_err());
+    /// ```
+    ///
+    /// Fields are the shared typed vocabulary, rather than field-name strings:
+    ///
+    /// ```compile_fail
+    /// use bytes::Bytes;
+    /// use nervix_client_core::EmitterDelivery;
+    /// EmitterDelivery::decode_record_batch(&["id"], &Bytes::new(), 1);
+    /// ```
     pub fn decode_record_batch(
         fields: &[SchemaField],
         batch: &Bytes,
         members: u32,
-    ) -> error_stack::Result<arrow_array::RecordBatch, ClientError> {
+    ) -> error_stack::Result<arrow_array::RecordBatch, EmitterBatchDecodeError> {
         use arrow_ipc::reader::StreamReader;
         let expected = SchemaField::arrow_schema(fields);
         let mut reader =
             StreamReader::try_new(std::io::Cursor::new(batch), None).map_err(|cause| {
-                Report::new(cause).change_context(ClientError::UnexpectedReply {
-                    request: RequestKind::ReadEmitterBatch,
-                })
+                Report::new(cause).change_context(EmitterBatchDecodeError::OpenStream)
             })?;
         if reader.schema().as_ref() != &expected {
-            return Err(Report::new(ClientError::UnexpectedReply {
-                request: RequestKind::ReadEmitterBatch,
-            }));
+            return Err(Report::new(EmitterBatchDecodeError::SchemaMismatch));
         }
         let Some(rows) = reader.next() else {
-            return Err(Report::new(ClientError::UnexpectedReply {
-                request: RequestKind::ReadEmitterBatch,
-            }));
+            return Err(Report::new(EmitterBatchDecodeError::MissingBatch));
         };
         let rows = rows.map_err(|cause| {
-            Report::new(cause).change_context(ClientError::UnexpectedReply {
-                request: RequestKind::ReadEmitterBatch,
-            })
+            Report::new(cause).change_context(EmitterBatchDecodeError::ReadBatch)
         })?;
-        if reader.next().is_some()
-            || rows.num_rows()
-                != meticulous::ResultExt::assured(
-                    usize::try_from(members),
-                    "a u32 row count fits in supported client targets",
-                )
-        {
-            return Err(Report::new(ClientError::UnexpectedReply {
-                request: RequestKind::ReadEmitterBatch,
+        if let Some(next) = reader.next() {
+            if let Err(cause) = next {
+                return Err(Report::new(cause).change_context(EmitterBatchDecodeError::ReadBatch));
+            }
+            return Err(Report::new(EmitterBatchDecodeError::ExtraBatch));
+        }
+        let expected_rows = meticulous::ResultExt::assured(
+            usize::try_from(members),
+            "a u32 row count fits in supported client targets",
+        );
+        if rows.num_rows() != expected_rows {
+            return Err(Report::new(EmitterBatchDecodeError::RowCount {
+                expected: members,
+                actual: rows.num_rows(),
             }));
         }
         Ok(rows)

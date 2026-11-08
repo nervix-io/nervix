@@ -340,6 +340,7 @@ impl ExecutionRevision {
     }
 
     /// Fingerprint the committed placement and guest-state lifetime of every unit.
+    /// Non-security BLAKE3: identifies a trusted schedule predecessor, not an ownership credential.
     pub(crate) fn ownership_fingerprint(
         schedule: &DomainSchedule,
     ) -> error_stack::Result<[u8; 32], ExecutionRevisionError> {
@@ -408,6 +409,7 @@ impl ExecutionRevision {
         Ok(*hasher.finalize().as_bytes())
     }
 
+    /// Non-security BLAKE3: identifies the trusted schedule used to construct one execution revision.
     fn source_digest(
         schedule: &DomainSchedule,
     ) -> error_stack::Result<[u8; 32], ExecutionRevisionError> {
