@@ -350,6 +350,35 @@ impl MaterializedRelayStateRead {
             .serialize_with(|binding| self.capture_generation(binding.fence()))
     }
 
+    /// Capture the shared row views an operator inspects under memory admission.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            observer,
+            reason = "operator inspection captures admitted shared row views"
+        )
+    )]
+    pub(super) fn capture_for_inspection(
+        &self,
+        executor: &Executor,
+    ) -> Result<(MaterializedGeneration, Reservation), Report<MaterializedSnapshotError>> {
+        self.state.assignment.serialize_with(|binding| {
+            let records = self.state.entries.load().len();
+            let bytes = records
+                .checked_mul(std::mem::size_of::<MaterializedGenerationRecord>())
+                .ok_or_else(|| {
+                    Report::new(MaterializedSnapshotError::MetadataAddressability { records })
+                })?;
+            let bytes = u64::try_from(bytes).map_err(|_| {
+                Report::new(MaterializedSnapshotError::MetadataAddressability { records })
+            })?;
+            let charge = executor
+                .try_reserve(MemoryClass::Bulk, bytes.max(1))
+                .change_context(MaterializedSnapshotError::Admission)?;
+            Ok((self.capture_generation(binding.fence()), charge))
+        })
+    }
+
     /// Admit the row-view and grouping arrays before capturing a backup cut. Carrier columns and
     /// branch identities remain shared; the charge follows the immutable generation until its
     /// archive sections have been staged. One capture cannot monopolize the bulk worker budget.

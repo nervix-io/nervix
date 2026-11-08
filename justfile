@@ -389,6 +389,13 @@ test-state-inspection *args: build-deps build-test-cli
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/materialized_state_inspection*.feature") }} {{ quote(args) }}
 
+# Verify typed materialized-state diagnostics without preparing unrelated host-language suites.
+test-state-inspection-diagnostics: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test harness_liveness -- materialized_state_diagnostics
+
 # Existing Row owner tests qualify the shared column writer without unrelated tool builds.
 test-client-row-encoding filter="subscription_row::tests" *args: build-deps
     #!/usr/bin/env bash

@@ -1045,6 +1045,10 @@ impl Runtime {
                             .materialized_stream_owner_nodes
                             .remove(&RelayName::from(&entity.identifier));
                     }
+                    execution.materialized_stream_reads = self.materialized_relay_publications(
+                        domain,
+                        &execution.materialized_stream_specs,
+                    );
                     let previous_state_tasks = execution.take_relay_state_tasks(&relay);
                     (
                         was_materialized,

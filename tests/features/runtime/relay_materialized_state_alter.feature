@@ -215,10 +215,12 @@ Feature: Altering relay materialized state
       """
       "seq":9
       """
-    When these Plexus commands fail with "is not materialized"
+    Given client "inspection" is connected to node "node-1"
+    When client "inspection" submits this Plexus command request
       """
-      SHOW RELAY events MATERIALIZED STATE;
+      SHOW RELAY events MATERIALIZED STATE FORMAT JSON;
       """
+    Then the typed inspection refuses the read with "not_materialized"
 
     Examples:
       | cluster_size |

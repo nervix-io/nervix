@@ -168,6 +168,9 @@ increase for an accepted replacement. Each captured-cut fingerprint therefore in
 lifetime, source stamps, concrete branch identity and both captured watermarks; a row changed during
 capture cannot silently reuse an earlier cut. Source lifetime numbers belong to the Runtime and
 are assigned once when state is constructed, without adding per-record work or ambient atomics.
+Inspection charges its row-view metadata against the finite Bulk budget;
+backup archive grouping metadata and its staging ceiling do not constrain an operator capture.
+Backup capture keeps its own grouping reservation and staging bound.
 
 The owner scans and selects under the bounded Bulk executor, applies the resolved selector and
 row/byte budget before sending, and carries selected columns using the native snapshot container.

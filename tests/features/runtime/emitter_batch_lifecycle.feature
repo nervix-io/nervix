@@ -566,7 +566,7 @@ Feature: Emitter batch lifecycle
       """
     Then within "10s" node "node-1" eventually reports materialized state for relay "settings" containing
       """
-      key={"tenant":"acme"}
+      {"branch":{"tenant":"acme"},"fields":{"tenant":"acme","label":"ready"}}
       """
     When http payload is posted to host "batch-wait-expiry-{{test_id}}.example.com" path "/events"
       """

@@ -86,7 +86,11 @@ fn row_matches(row: &Value, expected: &Value) -> bool {
         return false;
     }
     let fields = row["fields"].as_object().assured("observed fields");
-    let exact = expected["fields"].as_object().assured("expected fields");
+    let Some(expected_fields) = expected.get("fields") else {
+        // A branch-only observation waits for presence without prescribing its dynamic fields.
+        return true;
+    };
+    let exact = expected_fields.as_object().assured("expected fields");
     let prefixes = expected.get("field_prefixes").and_then(Value::as_object);
     fields.len() == exact.len() + prefixes.map_or(0, |prefixes| prefixes.len())
         && exact

@@ -131,9 +131,12 @@ impl Runtime {
                         cancellation
                             .check()
                             .change_context(StatePageReadError::Admission)?;
-                        let (generation, _capture_charge) = state
-                            .capture_for_backup(&captured_executor)
+                        // Keep the generation and its admission in one owner: tuple fields drop
+                        // in order, so row-view metadata is freed before its charge is released.
+                        let captured = state
+                            .capture_for_inspection(&captured_executor)
                             .change_context(StatePageReadError::Admission)?;
+                        let generation = &captured.0;
                         reserve_views(&mut records, generation.records().len(), &mut charge)?;
                         records.extend_from_slice(generation.records());
                         reserve_views(&mut sources, 1, &mut source_charge)?;

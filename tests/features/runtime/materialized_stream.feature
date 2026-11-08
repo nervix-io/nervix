@@ -100,11 +100,11 @@ Feature: Materialized relay state
       """
     Then within "10s" node "<report_node>" eventually reports materialized state for relay "readings" containing
       """
-      {"branch":{"tenant":"acme"},"fields":{"tenant":"acme","value":"Infinity"}}
+      {"branch":{"tenant":"acme"},"fields":{"tenant":"acme","value":"inf"}}
       """
     And within "10s" node "<report_node>" eventually reports materialized state for relay "readings" containing
       """
-      {"branch":{"tenant":"beta"},"fields":{"tenant":"beta","value":"-Infinity"}}
+      {"branch":{"tenant":"beta"},"fields":{"tenant":"beta","value":"-inf"}}
       """
     And within "10s" node "<report_node>" eventually reports materialized state for relay "readings" containing
       """
@@ -448,8 +448,8 @@ Feature: Materialized relay state
       """
     And within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
-      materialized relay: notifications
       kind: RELAY
+      entity: notifications
       """
     And within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """

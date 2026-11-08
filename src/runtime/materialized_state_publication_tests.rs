@@ -818,3 +818,52 @@ mod shuttle_checks {
         check_interleavings(required_wait_registration);
     }
 }
+
+#[test]
+fn state_inspection_capture_uses_its_row_view_budget_above_the_backup_grouping_ceiling() {
+    let executor = nervix_execution::Executor::default();
+    let record = row(1, 1, 1);
+    let state = Arc::new(ReplicatedMaterializedRelayState::new(
+        1,
+        placement(),
+        record.arrow_schema(),
+    ));
+    let mut originator = owner(&state);
+    let grouping_bytes = std::mem::size_of::<MaterializedGenerationRecord>()
+        + std::mem::size_of::<std::ops::Range<usize>>();
+    let count = (8 * 1024 * 1024) / grouping_bytes + 1;
+    let field = FieldName::parse("tenant").assured("fixture field");
+    for index in 0..count {
+        let branch = Some(
+            BranchKey::from_fields([(
+                field.clone(),
+                RuntimeValue::I64(i64::try_from(index).assured("the bounded fixture fits i64")),
+            )])
+            .assured("one typed branch field"),
+        );
+        originator
+            .update_last_by_timestamp(&branch, record.clone())
+            .assured("the fixture owns the assignment")
+            .assured("each branch is new");
+    }
+    let read = ReplicatedMaterializedRelayState::read(&state);
+    let captured = read
+        .capture_for_inspection(&executor)
+        .assured("inspection admits row views independently of backup grouping metadata");
+    let generation = &captured.0;
+    assert_eq!(generation.records().len(), count);
+    assert!(
+        generation
+            .records()
+            .iter()
+            .all(|captured| { Arc::ptr_eq(captured.row.batch(), record.batch()) }),
+        "the capture shares every original Arrow carrier"
+    );
+    let Err(error) = read.capture_for_backup(&executor) else {
+        panic!("backup retains its existing staging bound");
+    };
+    assert!(matches!(
+        error.current_context(),
+        MaterializedSnapshotError::MetadataTooLarge
+    ));
+}

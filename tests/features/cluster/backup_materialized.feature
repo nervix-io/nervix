@@ -684,7 +684,7 @@ Feature: Materialized backup and archived lifecycle resumption
     When client "driver" posts event 1 to host "backup-paced-{{test_id}}.example.com" path "/events" at the newest tick center its attached clock admits
     Then within "30s" node "node-1" eventually reports materialized state for relay "state" containing
       """
-      key={"sequence":1}
+      {"branch":{"sequence":1}}
       """
     Then the current leader node is saved as placeholder "leader"
     When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "paced.nvxb" reporting JSON
@@ -706,17 +706,17 @@ Feature: Materialized backup and archived lifecycle resumption
     When client "driver" posts event 2 to host "backup-paced-{{test_id}}.example.com" path "/events" at the newest tick center its attached clock admits
     Then within "30s" node "restored-1" eventually reports materialized state for relay "state" containing
       """
-      key={"sequence":1}
+      {"branch":{"sequence":1}}
       """
     And within "30s" node "restored-1" eventually reports materialized state for relay "state" containing
       """
-      key={"sequence":2}
+      {"branch":{"sequence":2}}
       """
     When the cluster is restarted
     Then every node reports the resumed lifecycle archived in "paced.nvxb"
     And within "30s" node "restored-1" eventually reports materialized state for relay "state" containing
       """
-      key={"sequence":2}
+      {"branch":{"sequence":2}}
       """
 
     Examples:
@@ -749,7 +749,7 @@ Feature: Materialized backup and archived lifecycle resumption
       """
     Then within "30s" node "node-1" eventually reports materialized state for relay "state" containing
       """
-      payload={"value":42}
+      {"branch":null,"fields":{"value":42}}
       """
     Then the current leader node is saved as placeholder "leader"
     When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "source.nvxb" reporting JSON
