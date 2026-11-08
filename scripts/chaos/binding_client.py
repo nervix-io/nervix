@@ -62,8 +62,11 @@ class BindingClient:
 
     def before_record(self, sequence):
         hold = Path(self.args.control) / "hold-binding"
-        while hold.exists():
-            limit = int(hold.read_text())
+        while True:
+            try:
+                limit = int(hold.read_text())
+            except FileNotFoundError:
+                break
             if sequence <= limit:
                 break
             self.cancel()

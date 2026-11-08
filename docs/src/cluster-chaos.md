@@ -2867,8 +2867,8 @@ cleanup works in this order:
   and the steps after the suite: cleanup, which has its own 8-minute bound holding its five-minute
   wait, plus the summary and the uploads.
 
-The smoke shards therefore run 20, 22 and 25 minutes of entries in steps of 45, 47 and 50 minutes
-and jobs of 66, 68 and 71 minutes. The soak's fourteen shards hold 1,133 minutes of entries.
+The binding smoke shard, for example, holds 46 minutes of entries, giving it a 71-minute step
+and a 92-minute job. The generated plan supplies each smoke or soak shard's current budgets.
 
 `just chaos suite report [--expect-shards N] SUITE_JSON...` renders one summary of several shards.
 It fails unless each shard passed and `N` of them are present.

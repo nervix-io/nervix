@@ -158,6 +158,22 @@ class BindingEvidenceTests(unittest.TestCase):
 
 
 class BindingPublisherTests(unittest.TestCase):
+    def test_releasing_the_hold_during_a_read_resumes_publishing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            hold = Path(directory) / "hold-binding"
+            hold.write_text("40\n")
+            client = object.__new__(binding_client.BindingClient)
+            client.args = SimpleNamespace(control=directory)
+            read = Path.read_text
+
+            def release_then_read(path):
+                path.unlink()
+                return read(path)
+
+            with patch.object(Path, "read_text", release_then_read):
+                client.before_record(41)
+            self.assertFalse(hold.exists())
+
     def test_failed_and_unknown_results_advance_without_a_second_submission(self):
         outcomes = iter(["completed", "processing_failed", "outcome_unknown", "completed"])
         sent = []
