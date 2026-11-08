@@ -96,6 +96,13 @@ local patch review; it is not a separate ordinary CI producer or evidence for ev
 member. Ordinary workspace unit collection already includes this crate with `ruby-tests` and the
 same interpreter provisioned on the build and restored runners. LLVM counters measure the Rust
 binding the Ruby calls execute; they do not measure the Ruby scripts themselves.
+The local-only native selection `just coverage-native-extras test-client-ruby-api` additionally builds
+the instrumented extension, packages it with build-time profiling disabled and runs the prepared
+minitest boundary tier through its Rust `host_suite` test. Its child-loaded extension is retained
+as a coverage object. Ordinary workspace collection owns the CI evidence: its build prepares both
+the extracted gem and fresh installed archive under the coverage target, and `unit-tests` carries
+both to restored runners. This adds no duplicate CI producer. `coverage-client-suites-runner`
+includes the Python registration reader and its controls; it does not measure Prism's Ruby process.
 The assertion tests build in `typed-ratchet/tests`, separately from the executable in
 `typed-ratchet/source`, so building a test cannot replace an executable the producer already ran.
 The collected runner gives Cargo children the build-time `/dev/null` profile path, keeping build

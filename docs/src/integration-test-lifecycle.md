@@ -3631,7 +3631,7 @@ and keeps the same 5-minute reserve.
 
 `client_suites.feature` runs a host binding's own test suite, in its host's test framework, against
 a scenario's cluster: the cluster tier of the suite under `tests/client_conformance/<host>/suite`.
-The cluster serves its session listener over TLS. The step that starts a suite waits for every node
+Each host's rows cover TLS and plaintext listeners. The step that starts a suite waits for every node
 to agree on its leader and starts it on a follower when the cluster has one, so its sessions follow
 a leader redirect. It starts the host's runner as one child process with piped standard input,
 its target in the probe's `NERVIX_PROBE_*` variables and what a suite needs beside them in
@@ -3677,6 +3677,11 @@ scenario never leaves one running.
 Every example is tagged `@client_conformance_toolchain` and `@client_suite_<host>`, so the suite
 excludes it unless a run selects it: `just test-client-conformance` runs the suites' rows beside
 the probes, and `just test-client-python-cluster` runs the Python rows alone.
+`just test-client-ruby-cluster` similarly selects Ruby's rows. Its bundled minitest runner first
+loads the installed gem in a fresh `GEM_HOME`, then runs every remaining cluster test with a fixed
+order seed. Its reporter emits a result only after teardown, keeps completed failure diagnostics
+on the captured output, and excludes minitest's progress dots from protocol lines. The boundary
+tier uses the same inventory judge through the Rust `host_suite` test and already-prepared gem.
 
 ## The Suite Watchdog
 

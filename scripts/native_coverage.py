@@ -324,6 +324,10 @@ CI_PRODUCERS: tuple[Producer, ...] = (
 )
 
 LOCAL_PRODUCERS: tuple[Producer, ...] = (
+    Producer(
+        name="test-client-ruby-api", mode="ordinary", prepare=(),
+        instrumented="test-client-ruby-api-bodies", finish=(), explicit_only=True,
+    ),
     # This real-broker benchmark is explicitly selected for local qualification. Adding it does
     # not start a broker in the existing in-memory benchmark smoke lane.
     Producer(

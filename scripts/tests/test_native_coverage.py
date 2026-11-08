@@ -135,7 +135,7 @@ class InventoryTests(unittest.TestCase):
     def test_local_broker_benchmarks_are_registered_without_adding_ci_work(self) -> None:
         self.assertEqual(
             [producer.name for producer in native_coverage.LOCAL_PRODUCERS],
-            ["test-rabbitmq-publish-benchmark"],
+            ["test-client-ruby-api", "test-rabbitmq-publish-benchmark"],
         )
         self.assertEqual(
             native_coverage.PRODUCERS,
@@ -227,10 +227,11 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(
             native_coverage.select_producers([], producers), list(native_coverage.CI_PRODUCERS)
         )
-        self.assertEqual(
-            native_coverage.select_producers(["test-rabbitmq-publish-benchmark"], producers),
-            list(native_coverage.LOCAL_PRODUCERS),
-        )
+        for producer in native_coverage.LOCAL_PRODUCERS:
+            self.assertEqual(
+                native_coverage.select_producers([producer.name], producers),
+                [producer],
+            )
         self.assertEqual(
             native_coverage.select_producers(["plexus-completion-walk", "bench-smoke"], producers),
             [next(producer for producer in producers if producer.name == "plexus-completion-walk"), next(producer for producer in producers if producer.name == "bench-smoke")],

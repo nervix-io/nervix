@@ -95,6 +95,14 @@ HOSTS = {
         guide="docs/src/client-library-python.md",
         typed=("examples/paced-simulation/python/paced_simulation.py",),
     ),
+    "ruby": Host(
+        name="ruby",
+        module="Nervix::Client",
+        sources="crates/client-ruby/src",
+        stub="",
+        suite="tests/client_conformance/ruby/suite",
+        guide="docs/src/client-library-ruby.md",
+    ),
 }
 
 
@@ -832,6 +840,16 @@ def validate(root: Path, hosts: list[Host]) -> list[str]:
     problems = Problems()
     registered = read_inventory(root)
     for host in hosts:
+        if host.name == "ruby":
+            from scripts.client_suites_ruby import analyze
+
+            analysis = analyze(root, host.sources, host.suite, host.module)
+            problems.extend(analysis.problems)
+            for missing in sorted(analysis.surface - analysis.references):
+                problems.add(f"{host.suite} does not reference Ruby member {missing}")
+            problems.extend(compare_inventory(host, registered.get(host.name, {}), analysis.tests))
+            problems.extend(check_guide(root, host))
+            continue
         if host.name == "java":
             analysis = analyze_java(root, host)
             problems.extend(analysis.problems)

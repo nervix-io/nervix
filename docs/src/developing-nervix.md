@@ -75,6 +75,19 @@ representation properties. All-features workspace tests enable `ruby-tests` too,
 restored unit jobs provision the same Ruby version. `ruby/setup-ruby` provides CI's interpreter,
 headers and shared library. No buffer or generated gem is written into the source tree.
 
+The minitest suite in `tests/client_conformance/ruby/suite` uses Ruby's bundled minitest and Prism,
+without another gem download. `just test-client-ruby-api` prepares the gem and runs its boundary
+tier through the native `host_suite` test; that test also runs in ordinary workspace unit jobs.
+`just test-client-ruby-cluster` runs the one- and three-node TLS/plaintext cluster rows.
+Packaging prepares a fresh `GEM_HOME` beside the extracted gem, and each tier loads that installed
+archive first. The coverage build prepares both forms from its instrumented extension and carries
+them in the unit-test archive. `NERVIX_CLIENT_RUBY_TEST_ARTIFACTS` selects those prepared artifacts;
+no test invokes a compiler or package manager. `just test-client-ruby-api-run` runs the prepared
+boundary tier directly. `just validate-client-suites` compares native magnus registrations with
+Prism-parsed constant and typed-receiver references, inventories every minitest identity and
+checks the [Ruby guide](client-library-ruby.md)'s anchored includes. `just test-client-ruby-suite-reader`
+checks registration, receiver, inventory, guide and actual minitest reporter controls.
+
 The Python package builds with maturin, which `just build-client-python` runs as
 `uvx --from maturin==1.16.0 maturin`, into an abi3 wheel for CPython 3.12 and later under
 `target/client-conformance/wheels`, with its typed stub `crates/client-python/nervix_client.pyi`

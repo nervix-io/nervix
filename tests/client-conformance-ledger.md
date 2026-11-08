@@ -219,7 +219,8 @@ and a run of either tier fails on a registered test that did not run or did not 
 test and on a test the inventory does not register. Each runner prints one
 `NERVIX-SUITE <outcome> <identity>` line per test, which the scenario harness and
 `scripts/client_suites.py check-run` read. `just validate-client-suites` holds each suite to its
-binding's whole public surface, resolved by mypy for Python and Java compiler elements for the JVM,
+binding's whole public surface, resolved by mypy for Python, Java compiler elements for the JVM,
+and native magnus registrations with Prism-parsed Ruby references for Ruby,
 and its guide to the shared section list with every code block an include of an anchored test.
 
 The cluster runner can request a testing-build action on stdout and await its numbered confirmation
@@ -229,13 +230,14 @@ specifies. Python's registered
 asks the scenario to arm every node's next subscription-opening refusal, restores the relay, reads
 `INTERRUPTED` and `RESTORATION_FAILED` with `UNAVAILABLE`, a message and a positive retry wait,
 then reads rows after restoration succeeds. There is no corresponding declared clock-attachment
-refusal action; clock restoration-failure values remain covered by the binding owner tests rather
-than a claimed live host-suite observation.
+refusal action or public domain-removal statement; clock restoration-failure and domain-removed
+end values remain covered by the binding owner tests rather than a claimed live host-suite observation.
 
 | Host | Build | Boundary tier | Cluster tier | Covers | Runs in | Guide |
 | --- | --- | --- | --- | --- | --- | --- |
 | CPython 3.12+ | `just build-client-python`: the wheel with pytest, pyarrow, polars and mypy in `target/client-conformance/python`, and alone in `target/client-conformance/python-bare` | `just test-client-python-api`, which `just test` runs | `just test-client-python-cluster`, or the `@client_suite_python` rows of `just test-client-conformance` | Connection over TLS with seeds and timeouts, execution and recovery by the same execution, completion, subscriptions and their events, domain clocks across generations and a lost session, producers and every outcome class, consumers and every settlement, backup and restore, `with` blocks and collection-driven lifetimes, threads, typed exceptions, Arrow exchange with pyarrow and polars, and the wheel's packaging | The `client-conformance` job, for a pull request labeled `client-conformance` | [Python Client Library](../docs/src/client-library-python.md) |
 | JVM / Java 21+ | `just build-client-jvm-tests`: the self-loading jar, pinned/digest-verified JUnit 5 console launcher and compiled suite | `just test-client-jvm-api` with `-Xcheck:jni` and exact inventory accounting | `just test-client-jvm-cluster`, or the `@client_suite_java` rows of `just test-client-conformance` | TLS/authentication/seeds/timeouts, execution identity recovery, completion, typed subscriptions, clock generations and reconnection, producers and credit/outcomes, consumer settlements and recovery, backup/restore, Cleaner/close/buffer lifetimes, concurrent calls and cancellation, records/enums and the exception hierarchy | The `client-conformance` job; boundary, embedded-JNI and existing Java probe checks retained | [JVM Client Library](../docs/src/client-library-jvm.md) |
+| CRuby 3.3+ | `just build-client-ruby`: the native gem, extracted loader and fresh `GEM_HOME` install | `just test-client-ruby-api`; the Rust `host_suite` test runs the prepared minitest boundary tier in ordinary tests | `just test-client-ruby-cluster`, or the `@client_suite_ruby` rows of `just test-client-conformance` | TLS/authentication/seeds/timeouts, execution recovery, completion, subscriptions and restoration refusal, clocks, endpoint metadata/credit/outcomes/settlements/recovery, backup/restore, blocks and ensure, collection and retained slices, GVL release, typed errors and exact scalar/nested IPC | The `client-conformance` job and ordinary boundary tests, with exact inventory accounting | [Ruby Client Library](../docs/src/client-library-ruby.md) |
 
 ## Batch buffers
 
