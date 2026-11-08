@@ -321,7 +321,7 @@ test: tests-deps build-client-jvm-tests
 # Check capability examples with rustdoc, including runtime exports enabled only for tests.
 test-capability-docs: build-web-console
     cargo test --package nervix-server --package nervix-roto --package nervix-vm --package nervix-models \
-        --package nervix-consensus --package nervix-dns --package nervix-recovery \
+        --package nervix-consensus --package nervix-interconnect --package nervix-dns --package nervix-recovery \
         --package nervix-simd-kernels --package nervix-client-core \
         --features nervix-server/testing,nervix-client-core/arrow --doc
 
