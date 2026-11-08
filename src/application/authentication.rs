@@ -154,7 +154,7 @@ pub(in crate::application) enum GrpcAuthenticationError {
 pub(in crate::application) enum AuthenticationRefusal {
     /// The call presented no readable Basic credentials.
     Missing,
-    /// The user is unknown, the password is wrong, or the stored hash could not be verified.
+    /// The user is unknown, the name is invalid, or the password is wrong.
     Rejected,
     /// The node's bounded execution could not take the verification now, so the credentials were
     /// not judged at all.
@@ -454,13 +454,13 @@ impl SessionServiceImpl {
             Ok(matched) => matched,
             Err(error) => {
                 if let PasswordHashError::Busy = error.current_context() {
-                    // Nothing judged the credentials, so the attempt neither paces the user nor
-                    // clears a pacing it already has.
                     debug!(error = %format_args!("{error:#}"), "credential verification was not admitted");
-                    return Err(AuthenticationRefusal::Unavailable);
+                } else {
+                    warn!(error = %format_args!("{error:#}"), "credential verification failed");
                 }
-                warn!(error = %format_args!("{error:#}"), "credential verification failed");
-                false
+                // Only a completed verifier can judge a password. A worker failure neither
+                // paces the user nor clears a pacing it already has.
+                return Err(AuthenticationRefusal::Unavailable);
             }
         };
         if matched {
