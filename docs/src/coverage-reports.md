@@ -59,6 +59,7 @@ the downloaded artifact:
 | `coverage-release-evidence` | Required revision/check evidence accounting |
 | `coverage-operator-deployment` | Kubernetes deployment identity, public readiness observations, failure cleanup and image-publication gating |
 | `coverage-kache-ci` | The shared compiler cache's remote publication contract and build-runner diagnostic tooling |
+| `coverage-chaos-binding` | The external Python binding client's deterministic outcome, effect, settlement, evidence and offline wheel-installation controls; its counters join the ordinary Python report, while the external product processes remain uninstrumented |
 | `coverage-connector-matrix` | Plexus connector matrix rendering, generated manual regions and declaration drift checks |
 | `coverage-ci-selection` | Exact-source suite and Bolero call selection |
 | `coverage-wasm-bindgen` | The console build's wasm-bindgen CLI selection, installation and verification |

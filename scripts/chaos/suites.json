@@ -2,7 +2,7 @@
   "ci_reserve_minutes": 21,
   "suites": {
     "smoke": {
-      "description": "Three-node baseline, a leader crash with its restart, the recovery from an isolated follower's partition, endpoint intake on one node and through a three-node owner crash, and the lifetimes workloads through a three-node owner crash",
+      "description": "Three-node baseline, a leader crash with its restart, the recovery from an isolated follower's partition, endpoint intake on one node and through a three-node owner crash, the lifetimes workloads through a three-node owner crash, and the Python binding through graceful stop, crash and restart",
       "entries": [
         {
           "id": "stateful-partitions-3-owner-crash",
@@ -45,6 +45,30 @@
           "shard": 3,
           "budget_minutes": 25,
           "run": ["lifetimes", "--nodes", "3", "--fault", "owner-crash"]
+        },
+        {
+          "id": "binding-endpoints-1",
+          "shard": 5,
+          "budget_minutes": 10,
+          "run": ["binding-endpoints", "--nodes", "1", "--fault", "none"]
+        },
+        {
+          "id": "binding-endpoints-3-owner-stop",
+          "shard": 5,
+          "budget_minutes": 12,
+          "run": ["binding-endpoints", "--nodes", "3", "--fault", "owner-stop"]
+        },
+        {
+          "id": "binding-endpoints-3-owner-crash",
+          "shard": 5,
+          "budget_minutes": 12,
+          "run": ["binding-endpoints", "--nodes", "3", "--fault", "owner-crash"]
+        },
+        {
+          "id": "binding-endpoints-1-cluster-restart",
+          "shard": 5,
+          "budget_minutes": 12,
+          "run": ["binding-endpoints", "--nodes", "1", "--fault", "cluster-restart"]
         }
       ]
     },
@@ -509,6 +533,30 @@
           "shard": 14,
           "budget_minutes": 25,
           "run": ["lifetimes", "--nodes", "3", "--fault", "cluster-restart"]
+        },
+        {
+          "id": "binding-endpoints-1",
+          "shard": 16,
+          "budget_minutes": 10,
+          "run": ["binding-endpoints", "--nodes", "1", "--fault", "none"]
+        },
+        {
+          "id": "binding-endpoints-3-owner-stop",
+          "shard": 16,
+          "budget_minutes": 12,
+          "run": ["binding-endpoints", "--nodes", "3", "--fault", "owner-stop"]
+        },
+        {
+          "id": "binding-endpoints-3-owner-crash",
+          "shard": 16,
+          "budget_minutes": 12,
+          "run": ["binding-endpoints", "--nodes", "3", "--fault", "owner-crash"]
+        },
+        {
+          "id": "binding-endpoints-1-cluster-restart",
+          "shard": 16,
+          "budget_minutes": 12,
+          "run": ["binding-endpoints", "--nodes", "1", "--fault", "cluster-restart"]
         }
       ]
     }
