@@ -272,7 +272,7 @@ paced-simulation-python *args:
     just cargo_target_dir={{ quote(cargo_target_dir) }} build-paced-simulation-python release
     {{ quote(cargo_target_dir + "/paced-simulation/python/bin/python") }} examples/paced-simulation/python/paced_simulation.py {{ quote(args) }}
 
-test: tests-deps build-client-jvm-tests build-client-c-suites
+test: tests-deps build-client-jvm-tests build-client-ruby build-client-c-suites
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
@@ -1655,13 +1655,39 @@ build-client-ruby:
 package-client-ruby:
     ruby crates/client-ruby/package.rb {{ quote(cargo_target_dir) }}
 
+# Run minitest's cluster-free tier against the packaged gem, with exact inventory accounting.
+test-client-ruby-api: test-client-ruby-api-bodies
+
+# Build the exact extension loaded by the child, then run its Cargo-owned host check.
+# A native collection instruments this extension and records its loaded shared-object identity.
+test-client-ruby-api-bodies:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir) }} cargo build --package nervix-client-ruby --features ruby-tests
+    LLVM_PROFILE_FILE=/dev/null just cargo_target_dir={{ quote(cargo_target_dir) }} package-client-ruby
+    NERVIX_CLIENT_RUBY_TEST_ARTIFACTS={{ quote(cargo_target_dir + "/client-conformance") }} cargo test --package nervix-client-ruby --features ruby-tests --test host_suite
+
+# Test an already-prepared gem; no compiler or package manager runs inside minitest.
+test-client-ruby-api-run:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    artifacts={{ quote(cargo_target_dir + "/client-conformance") }}
+    results="$artifacts/ruby-boundary-results.txt"
+    status=0
+    NERVIX_CLIENT_CONFORMANCE_DIR="$artifacts" ruby -I "$artifacts/ruby/lib" \
+        tests/client_conformance/ruby/suite/runner.rb boundary | tee "$results" || status=$?
+    uv run --locked python -m scripts.client_suites check-run --host ruby --tier boundary "$results"
+    exit "$status"
+
 # Each property executable owns one embedded Ruby interpreter; the unit executable owns one too.
-test-client-ruby *args:
-    BOLERO_RANDOM_SEED="${BOLERO_RANDOM_SEED:-2026110803}" cargo test --package nervix-client-ruby --features ruby-tests --all-targets -- {{ args }}
+test-client-ruby *args: build-client-ruby
+    just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-ruby-run {{ args }}
+
+# CI already prepared the exact gem alongside its probes; run it without repackaging.
+test-client-ruby-run *args:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir) }} NERVIX_CLIENT_RUBY_TEST_ARTIFACTS={{ quote(cargo_target_dir + "/client-conformance") }} BOLERO_RANDOM_SEED="${BOLERO_RANDOM_SEED:-2026110803}" cargo test --package nervix-client-ruby --features ruby-tests --all-targets -- {{ args }}
 
 # Collect the binding itself, executed by embedded Ruby, in the ordinary coverage toolchain.
 coverage-client-ruby output=(cargo_target_dir / "client-ruby.lcov"):
-    BOLERO_RANDOM_SEED="${BOLERO_RANDOM_SEED:-2026110803}" cargo llvm-cov --package nervix-client-ruby --features ruby-tests --all-targets --lcov --output-path {{ quote(output) }}
+    BOLERO_RANDOM_SEED="${BOLERO_RANDOM_SEED:-2026110803}" cargo llvm-cov --package nervix-client-ruby --features ruby-tests --lib --test columns --test fields --lcov --output-path {{ quote(output) }}
 
 # Run the C ABI's unit tests, which read every accessor as a host does through the header's types.
 test-client-ffi *args:
@@ -1730,6 +1756,15 @@ test-client-python-cluster *args: tests-deps build-client-python
 test-client-jvm-cluster *args: tests-deps build-client-jvm-tests
     cargo test --no-run --package nervix-scenarios --test scenarios
     just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-conformance-run '@client_suite_java' {{ args }}
+
+# Run the native Ruby suite's cluster tier, without preparing unrelated host toolchains.
+test-client-ruby-cluster *args: tests-deps build-client-ruby
+    cargo test --no-run --package nervix-scenarios --test scenarios
+    just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-conformance-run '@client_suite_ruby' {{ args }}
+
+# Qualify the native registration reader and Prism's receiver/reference and identity controls.
+test-client-ruby-suite-reader:
+    python3 -m unittest --verbose scripts.tests.test_client_suites_ruby
 
 # Package the Java 21 API and this target's JNI library into one self-loading jar.
 build-client-jvm:
@@ -2035,6 +2070,9 @@ test-coverage-binaries: tests-deps build-client-jvm-tests
         --package nervix-rate-limit \
         --package nervix-wasm
     coverage --all-targets --features native --package nervix-primitives
+    # Carry the exact instrumented native extension the Ruby host suite loads at run time.
+    cargo build --package nervix-client-ruby --features ruby-tests
+    LLVM_PROFILE_FILE=/dev/null just cargo_target_dir="$CARGO_TARGET_DIR" package-client-ruby
     python3 -m scripts.unit_test_archive plan
 
 # Run the workspace's tests from the binaries `test-coverage-build` left or a restored archive
@@ -4172,7 +4210,7 @@ validate-client-suites: build-client-suite-java-checker
 
 # Resolve the JVM reader's positive/negative controls beside the shared suite and report checks.
 test-client-suites: build-client-suite-java-checker
-    NERVIX_CLIENT_SUITE_JAVA_CHECKER={{ quote(cargo_target_dir + "/client-suites/java") }} NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }} uv run --locked python -m unittest scripts.tests.test_client_suites scripts.tests.test_client_suites_java scripts.tests.test_client_suites_c
+    NERVIX_CLIENT_SUITE_JAVA_CHECKER={{ quote(cargo_target_dir + "/client-suites/java") }} NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }} uv run --locked python -m unittest scripts.tests.test_client_suites scripts.tests.test_client_suites_java scripts.tests.test_client_suites_ruby scripts.tests.test_client_suites_c
 
 # Exercise the host suite's bounded action adapter over real pipes, without a cluster.
 test-client-suite-actions:
@@ -4181,7 +4219,7 @@ test-client-suite-actions:
 # Collect the line coverage of the client suite check and its tests.
 coverage-client-suites-runner: build-client-suite-java-checker
     mkdir -p target/client-suites
-    NERVIX_CLIENT_SUITE_JAVA_CHECKER={{ quote(cargo_target_dir + "/client-suites/java") }} NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }} COVERAGE_FILE=target/client-suites/.coverage uv run --locked --with coverage==7.11.0 coverage run --branch --source=scripts.client_suites,scripts.client_suites_mypy_plugin,scripts.client_suites_c,scripts.unit_test_archive -m unittest scripts.tests.test_client_suites scripts.tests.test_client_suites_java scripts.tests.test_client_suites_c scripts.tests.test_unit_test_archive
+    NERVIX_CLIENT_SUITE_JAVA_CHECKER={{ quote(cargo_target_dir + "/client-suites/java") }} NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }} COVERAGE_FILE=target/client-suites/.coverage uv run --locked --with coverage==7.11.0 coverage run --branch --source=scripts.client_suites,scripts.client_suites_mypy_plugin,scripts.client_suites_c,scripts.unit_test_archive,scripts.client_suites_ruby -m unittest scripts.tests.test_client_suites scripts.tests.test_client_suites_java scripts.tests.test_client_suites_c scripts.tests.test_unit_test_archive scripts.tests.test_client_suites_ruby
     COVERAGE_FILE=target/client-suites/.coverage uv run --locked --with coverage==7.11.0 coverage report -m
     COVERAGE_FILE=target/client-suites/.coverage uv run --locked --with coverage==7.11.0 coverage lcov -o target/client-suites/python.lcov
 

@@ -70,7 +70,7 @@ class Recorded(Checkout):
             archive.plan(resolved)
 
     def pack_tests(self, path: Path) -> shards.Manifest:
-        with mock.patch.object(shards, "workspace_targets", return_value=TARGETS), redirect_stdout(io.StringIO()):
+        with mock.patch.object(shards, "workspace_targets", return_value=TARGETS | {"host_suite"}), redirect_stdout(io.StringIO()):
             return archive.pack(self.root.resolve(), path)
 
 
@@ -162,6 +162,65 @@ class ArchiveTests(unittest.TestCase):
             self.assertIn(path.as_posix(), str(failure.exception))
             write(build.root / path, b"prepared input")
 
+    def ruby_program(self, build: Recorded) -> archive.TestProgram:
+        source = build.root / UNIT_EXECUTABLE
+        executable = UNIT_EXECUTABLE.with_name("host_suite-0123456789")
+        write(build.root / executable, source.read_bytes(), executable=True)
+        program = archive.TestProgram(executable.as_posix(), "crates/client-ruby")
+        write(build.root / archive.PROGRAMS, json.dumps([program.to_json()]).encode())
+        return program
+
+    def ruby_artifacts(self, build: Recorded) -> dict[Path, bytes]:
+        ruby = archive.RUBY_ARTIFACTS
+        inputs = {}
+        for library in (ruby / "ruby/lib", ruby / "ruby-fresh/gems/nervix-client-0.1.0/lib"):
+            inputs[library / "nervix_client.rb"] = b"native gem loader"
+            inputs[library / "nervix_client/build.rb"] = b"selected Ruby ABI"
+            inputs[library / "nervix_client_ruby.so"] = b"the prepared shared object"
+        inputs[ruby / "ruby-fresh/specifications/nervix-client-0.1.0.gemspec"] = b"local gem specification"
+        for path, content in inputs.items():
+            write(build.root / path, content)
+        return inputs
+
+    def test_restored_ruby_host_tests_have_both_package_forms(self) -> None:
+        build = Recorded(self.directory / "checkout")
+        self.ruby_program(build)
+        inputs = self.ruby_artifacts(build)
+        build.pack_tests(self.directory / "unit-tests.tar.zst")
+        (build.root / "target").rename(self.directory / "saved")
+        tools = fake_ldd(self.directory / "tools", "nothing")
+        with (
+            mock.patch.dict(os.environ, {"PATH": f"{tools}:{os.environ['PATH']}"}),
+            mock.patch.object(archive, "library_path", return_value="/toolchain"),
+            redirect_stdout(io.StringIO()),
+        ):
+            archive.unpack(build.root.resolve(), self.directory / "unit-tests.tar.zst")
+        for path, content in inputs.items():
+            self.assertEqual((build.root / path).read_bytes(), content)
+
+    def test_ruby_host_test_packing_refuses_missing_package_inputs(self) -> None:
+        build = Recorded(self.directory / "checkout")
+        program = self.ruby_program(build)
+        inputs = self.ruby_artifacts(build)
+        for path, content in inputs.items():
+            (build.root / path).unlink()
+            with self.assertRaises(shards.ShardError):
+                archive.ruby_inputs(build.root, [program])
+            write(build.root / path, content)
+
+    def test_ruby_host_test_run_selects_its_instrumented_package(self) -> None:
+        build = Recorded(self.directory / "checkout")
+        self.ruby_program(build)
+        with (
+            mock.patch.object(archive, "library_path", return_value="/toolchain"),
+            mock.patch.object(archive.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run,
+            redirect_stdout(io.StringIO()),
+        ):
+            archive.run(build.root.resolve())
+        environment = run.call_args.kwargs["env"]
+        self.assertEqual(str(build.root.resolve() / archive.RUBY_ARTIFACTS),
+                         environment["NERVIX_CLIENT_RUBY_TEST_ARTIFACTS"])
+
     def test_native_boundary_inputs_are_complete_and_retained(self) -> None:
         root = self.directory / "native"
         root.mkdir()
@@ -178,14 +237,17 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(archive.native_inputs(root, [program]), expected)
         self.assertEqual(archive.native_inputs(root, [archive.TestProgram("ffi-unit", "crates/client-ffi")]), [])
 
-    def test_a_restored_native_boundary_test_keeps_both_programs_and_the_library(self) -> None:
+    def test_a_restored_archive_keeps_c_cpp_and_ruby_suite_inputs(self) -> None:
         build = Recorded(self.directory / "checkout")
+        ruby_program = self.ruby_program(build)
+        inputs = self.ruby_artifacts(build)
         native = shards.COVERAGE_DEBUG / "deps/native_suites-abcd"
         write(build.root / native, (build.root / UNIT_EXECUTABLE).read_bytes(), executable=True)
         program = archive.TestProgram(native.as_posix(), "crates/client-ffi")
-        write(build.root / archive.PROGRAMS, json.dumps([program.to_json()]).encode())
-        inputs = {archive.NATIVE_ARTIFACTS / f"{host}-suite{suffix}": f"{host}{suffix}".encode()
-                  for host in ("c", "cpp") for suffix in ("", "-sanitized")}
+        write(build.root / archive.PROGRAMS,
+              json.dumps([ruby_program.to_json(), program.to_json()]).encode())
+        inputs.update({archive.NATIVE_ARTIFACTS / f"{host}-suite{suffix}": f"{host}{suffix}".encode()
+                       for host in ("c", "cpp") for suffix in ("", "-sanitized")})
         library = shards.COVERAGE_DEBUG / "libnervix_client_ffi.so"
         inputs[library] = (build.root / shards.COVERAGE_DEBUG / "deps/libnervix_client_ffi.so").read_bytes()
         for path, content in inputs.items():

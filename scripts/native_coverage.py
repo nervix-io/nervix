@@ -324,6 +324,10 @@ CI_PRODUCERS: tuple[Producer, ...] = (
 )
 
 LOCAL_PRODUCERS: tuple[Producer, ...] = (
+    Producer(
+        name="test-client-ruby-api", mode="ordinary", prepare=(),
+        instrumented="test-client-ruby-api-bodies", finish=(), explicit_only=True,
+    ),
     # The ordinary workspace producer already runs these integration targets in CI. These
     # selections collect a focused local view without duplicating their CI execution.
     Producer(
