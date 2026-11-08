@@ -120,6 +120,8 @@ pub enum AppError {
     InvalidMembershipSettings,
     #[error("invalid capacity settings")]
     InvalidCapacitySettings,
+    #[error("invalid state inspection capabilities")]
+    InvalidStateInspectionSettings,
     #[error("invalid shutdown timeouts")]
     InvalidShutdownTimeouts,
     #[error("failed to read the node settings")]

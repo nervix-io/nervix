@@ -4,6 +4,7 @@
 use std::collections::VecDeque;
 
 use async_trait::async_trait;
+use nervix_connector::EmitterConnector as _;
 
 use super::*;
 
@@ -19,6 +20,11 @@ fn config(entries: &[(&str, &str)]) -> Vec<ClientConfigEntry> {
 
 /// Host services ignored by tests that inspect the prepared request bytes.
 struct SilentHost;
+
+impl nervix_connector::EmitterReadiness for SilentHost {
+    fn mark_ready(&self) {}
+    fn mark_unready(&self) {}
+}
 
 impl nervix_connector::EmitterTransientErrorStatus for SilentHost {
     fn record_transient_error(&self, _reason: String, _retry_after: Duration) {}
@@ -856,27 +862,29 @@ async fn entity_constructors_keep_their_kind_through_the_lifecycle_contract() {
     let mut emitters: [(Box<dyn EmitterLifecycle>, OtelEmitterEntity); 3] = [
         (
             Box::new(
-                OtelLogsEmitter::new(
+                OtelLogsEmitter::open(
                     OtelLogsEmitterConfig { export: export() },
                     EmitterHost::new(SilentHost),
                 )
+                .await
                 .expect("logs opens"),
             ),
             OtelEmitterEntity::Logs,
         ),
         (
             Box::new(
-                OtelTracesEmitter::new(
+                OtelTracesEmitter::open(
                     OtelTracesEmitterConfig { export: export() },
                     EmitterHost::new(SilentHost),
                 )
+                .await
                 .expect("traces opens"),
             ),
             OtelEmitterEntity::Traces,
         ),
         (
             Box::new(
-                OtelMetricsEmitter::new(
+                OtelMetricsEmitter::open(
                     OtelMetricsEmitterConfig {
                         export: export(),
                         metric: OtelMetric {
@@ -888,6 +896,7 @@ async fn entity_constructors_keep_their_kind_through_the_lifecycle_contract() {
                     },
                     EmitterHost::new(SilentHost),
                 )
+                .await
                 .expect("metrics opens"),
             ),
             OtelEmitterEntity::Metrics,

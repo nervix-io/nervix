@@ -16,7 +16,7 @@ use nervix_connector::{EmitterRecord, PropertyValue};
 use nervix_models::{EmitterEntityKind, PropertyType, RabbitMqEmitterEntity};
 use thiserror::Error;
 
-use super::{RabbitMqMessage, RabbitMqPublisher};
+use super::{RabbitMqChannel, RabbitMqMessage};
 
 #[cfg_attr(
     nervix_lint,
@@ -55,7 +55,7 @@ impl RabbitMqMessage {
     pub(super) fn properties(
         record: &EmitterRecord,
     ) -> error_stack::Result<BasicProperties, RabbitMqPropertyError> {
-        let mut properties = RabbitMqPublisher::properties(&record.headers);
+        let mut properties = RabbitMqChannel::properties(&record.headers);
         if record.envelope.persistent {
             properties = properties.with_delivery_mode(2);
         }

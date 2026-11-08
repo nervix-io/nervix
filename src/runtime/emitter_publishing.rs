@@ -32,6 +32,22 @@ pub(super) struct EmitterPublishControl<'a> {
     pub(super) backoff: &'a mut RuntimeReconnectBackoff,
 }
 
+/// The existing retry decision accompanies the publish it selects, including drain retries.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum EmitterPublishAttemptKind {
+    Initial,
+    Retry,
+}
+
+impl EmitterPublishAttemptKind {
+    pub(super) fn from_retry(retry: bool) -> Self {
+        match retry {
+            true => Self::Retry,
+            false => Self::Initial,
+        }
+    }
+}
+
 async fn await_until_emitter_stop_deadline<T>(
     stop_rx: &mut watch::Receiver<Option<Instant>>,
     future: impl std::future::Future<Output = T>,
@@ -96,8 +112,94 @@ impl EmitterCommitReason {
 #[derive(Debug)]
 pub(super) struct RejectedEmitterRecord {
     pub(super) position: EmitterRecordPosition,
-    pub(super) reason: String,
-    pub(super) structured_error: Option<StructuredMessageError>,
+    code: EmitterRejectionCode,
+    error: RejectedEmitterError,
+}
+
+/// A rejection owns one error body; a structured error already owns its display message.
+#[derive(Debug)]
+enum RejectedEmitterError {
+    Message(String),
+    Structured(StructuredMessageError),
+}
+
+impl RejectedEmitterRecord {
+    pub(super) fn message(
+        position: EmitterRecordPosition,
+        code: EmitterRejectionCode,
+        reason: String,
+    ) -> Self {
+        Self {
+            position,
+            code,
+            error: RejectedEmitterError::Message(reason),
+        }
+    }
+
+    pub(super) fn structured(
+        position: EmitterRecordPosition,
+        code: EmitterRejectionCode,
+        error: StructuredMessageError,
+    ) -> Self {
+        Self {
+            position,
+            code,
+            error: RejectedEmitterError::Structured(error),
+        }
+    }
+
+    /// The connector contract's constructors distinguish external, oversized and invalid members.
+    pub(super) fn member(position: EmitterRecordPosition, error: StructuredMessageError) -> Self {
+        let code = match (error.code, error.operation) {
+            (MessageErrorCode::Validation, MessageErrorOperation::Encode) => {
+                EmitterRejectionCode::Oversize
+            }
+            (_, MessageErrorOperation::Encode) => EmitterRejectionCode::Encode,
+            (MessageErrorCode::External, MessageErrorOperation::Publish) => {
+                EmitterRejectionCode::External
+            }
+            _ => EmitterRejectionCode::Invalid,
+        };
+        Self::structured(position, code, error)
+    }
+
+    pub(super) fn preparation(
+        position: EmitterRecordPosition,
+        error: StructuredMessageError,
+    ) -> Self {
+        let code = match error.operation {
+            MessageErrorOperation::Encode => EmitterRejectionCode::Encode,
+            MessageErrorOperation::Values => EmitterRejectionCode::Invalid,
+            _ => EmitterRejectionCode::External,
+        };
+        Self::structured(position, code, error)
+    }
+
+    #[cfg(test)]
+    pub(super) fn structured_error(&self) -> Option<&StructuredMessageError> {
+        match &self.error {
+            RejectedEmitterError::Message(_) => None,
+            RejectedEmitterError::Structured(error) => Some(error),
+        }
+    }
+
+    fn into_error(
+        self,
+        execution_now: Timestamp,
+        operation: MessageErrorOperation,
+    ) -> StructuredMessageError {
+        match self.error {
+            RejectedEmitterError::Structured(error) => error,
+            RejectedEmitterError::Message(reason) => structured_message_error(
+                execution_now,
+                MessageErrorCode::External,
+                reason,
+                operation,
+                None,
+                std::iter::empty(),
+            ),
+        }
+    }
 }
 
 /// What the message error of a record rejected after its batch was admitted reads besides the
@@ -126,6 +228,19 @@ pub(super) struct EmitterPublishFailure {
 }
 
 impl EmitterPublishFailure {
+    pub(super) fn retry_cause(&self) -> EmitterRetryCause {
+        let commit = self.error.frames().any(|frame| {
+            matches!(
+                frame.downcast_ref::<EmitterWriteError>(),
+                Some(EmitterWriteError::Commit { .. })
+            )
+        });
+        if commit {
+            EmitterRetryCause::Commit
+        } else {
+            self.error.current_context().retry_cause()
+        }
+    }
     pub(super) fn caller(error: Report<EmitterRuntimeError>) -> Self {
         Self {
             error,
@@ -233,7 +348,7 @@ pub(super) enum EmitterConnectorState {
     Open(OpenEmitterConnector),
     /// No connector could be opened, for this reason. The emitter retries on its declared
     /// backoff, and until then a publish attempt fails as one without a client.
-    Unavailable { reason: String },
+    Unavailable { reason: String, retry_open: bool },
 }
 
 /// A connector the emitter holds open, and the commit cadence the host measures for what it staged.
@@ -242,6 +357,9 @@ pub(super) enum EmitterConnectorState {
 /// which has staged nothing, starts without one.
 pub(super) struct OpenEmitterConnector {
     connector: Box<dyn EmitterConnector>,
+    lifecycle: super::emitter_lifecycle::EmitterLifecycleState,
+    resume_error: Option<String>,
+    resume_retry_after: Duration,
     /// The `COMMIT EACH` deadline of the staged rows, armed by the first cadence check that finds
     /// them staged and cleared once the connector holds nothing.
     commit_cadence: BranchBufferTimer,
@@ -258,6 +376,13 @@ pub(super) enum EmitterStopDrainOutcome {
 }
 
 impl EmitterConnectorState {
+    pub(super) fn retry_cause(&self) -> EmitterRetryCause {
+        if self.unavailable_reason().is_some() {
+            EmitterRetryCause::Connect
+        } else {
+            EmitterRetryCause::Publish
+        }
+    }
     /// Resolves the host's label once from the opened connector's declaration. Before a
     /// connector can open, its decided entity supplies the initialization diagnostic label.
     pub(super) fn connector_label(&self, planned: &str) -> String {
@@ -281,10 +406,12 @@ impl EmitterConnectorState {
         control: &mut EmitterPublishControl<'_>,
         buffer: &mut EmitterBatchBuffer,
         deadline: Instant,
+        kind: EmitterPublishAttemptKind,
     ) -> EmitterStopDrainOutcome {
+        self.retain_after_stop_failure();
         let drained = nervix_primitives::time::timeout_at(
             deadline,
-            self.flush_all(label, context, control, buffer),
+            self.flush_all(label, context, control, buffer, kind),
         )
         .await;
         let report = match drained {
@@ -296,13 +423,17 @@ impl EmitterConnectorState {
         // receiving the emitter's deadline report, and half for delivering it to the supervisor.
         // The emitter still receives only the original deadline.
         let finish_bound = deadline + PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE / 2;
-        match nervix_primitives::time::timeout_at(finish_bound, self.finish_transport(deadline))
-            .await
+        match nervix_primitives::time::timeout_at(
+            finish_bound,
+            self.finish_transport(context, deadline),
+        )
+        .await
         {
             Ok(Ok(finished)) if Instant::now() <= deadline => {
                 EmitterStopDrainOutcome::Finished { report, finished }
             }
             Ok(Err(error)) => {
+                self.retain_after_stop_failure();
                 let description = error.current_context().to_string();
                 EmitterStopDrainOutcome::Failed(
                     error
@@ -310,7 +441,10 @@ impl EmitterConnectorState {
                         .attach_printable(description),
                 )
             }
-            Ok(Ok(_)) | Err(_) => EmitterStopDrainOutcome::DeadlineElapsed,
+            Ok(Ok(_)) | Err(_) => {
+                self.retain_after_stop_failure();
+                EmitterStopDrainOutcome::DeadlineElapsed
+            }
         }
     }
 
@@ -318,6 +452,9 @@ impl EmitterConnectorState {
     pub(super) fn opened(connector: Box<dyn EmitterConnector>) -> Self {
         Self::Open(OpenEmitterConnector {
             connector,
+            lifecycle: super::emitter_lifecycle::EmitterLifecycleState::new(true),
+            resume_error: None,
+            resume_retry_after: Duration::ZERO,
             commit_cadence: BranchBufferTimer::default(),
         })
     }
@@ -331,13 +468,22 @@ impl EmitterConnectorState {
         codec: Option<&Arc<CompiledCodec>>,
         work_cancel_rx: &mut watch::Receiver<bool>,
     ) -> Self {
-        nervix_primitives::select! {
+        let mut connector = nervix_primitives::select! {
             biased;
             _ = wait_for_emitter_work_cancel(work_cancel_rx) => Self::Unavailable {
                 reason: "emitter connector initialization canceled while stopping".to_string(),
+                retry_open: false,
             },
             connector = Self::open(plan, context, input_schema, output_schema, codec) => connector,
+        };
+        if let Self::Open(open) = &mut connector {
+            open.lifecycle = super::emitter_lifecycle::EmitterLifecycleState::new(false);
+            connector
+                .resume_until_cancelled(context, work_cancel_rx)
+                .await
+                .discarded("the retained connector records its resume failure for the host retry");
         }
+        connector
     }
 
     /// Opens this emitter's connector through the composition root, reporting a connector that
@@ -349,14 +495,33 @@ impl EmitterConnectorState {
         output_schema: &Arc<CompiledSchema>,
         codec: Option<&Arc<CompiledCodec>>,
     ) -> Self {
-        match EmitterConnectorStarter::start(plan, context, input_schema, output_schema, codec)
-            .await
-        {
-            Ok(connector) => Self::opened(connector),
+        let attempt = context.interactions.begin_open();
+        let opened = nervix_primitives::expect_lint!(
+            nervix::lifecycle_call,
+            "only initial installation or an Unavailable state with no instance enters this \
+             constructor; an Open state always retains and resumes its installed instance",
+            EmitterConnectorStarter::start(plan, context, input_schema, output_schema, codec)
+        )
+        .await;
+        match opened {
+            Ok(connector) => {
+                attempt.prepared();
+                Self::opened(connector)
+            }
             Err(error) => {
                 let reason = emitter_error_message(&error);
                 context.report_init_error(&plan.label, &reason);
-                Self::Unavailable { reason }
+                let configuration = error.frames().any(|frame| {
+                    matches!(
+                        frame.downcast_ref::<nervix_connector::EmitterOpenError>(),
+                        Some(nervix_connector::EmitterOpenError::InvalidConfiguration { .. })
+                    )
+                }) || error.current_context()
+                    == &EmitterRuntimeError::InvalidConnectorConfig;
+                Self::Unavailable {
+                    reason,
+                    retry_open: !configuration,
+                }
             }
         }
     }
@@ -407,15 +572,130 @@ impl EmitterConnectorState {
 
     pub(super) fn unavailable_reason(&self) -> Option<&str> {
         match self {
-            Self::Open(_) => None,
-            Self::Unavailable { reason } => Some(reason.as_str()),
+            Self::Open(open) => open.resume_error.as_deref(),
+            Self::Unavailable { reason, .. } => Some(reason.as_str()),
         }
     }
 
-    fn requires_publish_failure_reinitialization(&self) -> bool {
+    pub(super) fn retries_installation(&self) -> bool {
+        matches!(
+            self,
+            Self::Unavailable {
+                retry_open: true,
+                ..
+            }
+        )
+    }
+
+    fn retain_after_stop_failure(&mut self) {
+        if let Self::Open(open) = self {
+            open.lifecycle.retain_after_stop_failure();
+        }
+    }
+
+    pub(super) fn record_unfinished_ending(&mut self) {
+        if let Self::Open(open) = self {
+            open.lifecycle.record_unfinished_ending();
+        }
+    }
+
+    pub(super) fn installation_retry_delay(
+        &self,
+        backoff: &mut RuntimeReconnectBackoff,
+    ) -> Duration {
+        let minimum = match self {
+            Self::Open(open) => open.resume_retry_after,
+            Self::Unavailable { .. } => Duration::ZERO,
+        };
+        backoff.take_next_delay().max(minimum)
+    }
+
+    fn needs_resume(&mut self) -> bool {
         match self {
-            Self::Open(open) => !open.connector.lifecycle().keeps_client_on_publish_failure(),
-            Self::Unavailable { .. } => true,
+            Self::Open(open) => open.lifecycle.needs_resume(open.connector.lifecycle_mut()),
+            Self::Unavailable { .. } => false,
+        }
+    }
+
+    /// Reacquires the retained transport; cancellation never drops its owner or staged work.
+    pub(super) async fn resume_until_cancelled(
+        &mut self,
+        context: &EmitterConnectorContext,
+        work_cancel_rx: &mut watch::Receiver<bool>,
+    ) -> EmitterRuntimeResult<()> {
+        let resumed = nervix_primitives::select! {
+            biased;
+            _ = wait_for_emitter_work_cancel(work_cancel_rx) => Err(Report::new(EmitterRuntimeError::ShutdownWhileStalled)),
+            resumed = self.resume_transport(context) => resumed,
+        };
+        // The outer gate owns cancellation; transport failures are recorded before returning.
+        if let Err(error) = &resumed
+            && error.current_context() == &EmitterRuntimeError::ShutdownWhileStalled
+            && let Self::Open(open) = self
+        {
+            open.resume_error = Some(emitter_error_message(error));
+            open.resume_retry_after = super::emitter_retry::emitter_minimum_retry_delay(error);
+        }
+        resumed
+    }
+
+    async fn resume_transport(
+        &mut self,
+        context: &EmitterConnectorContext,
+    ) -> EmitterRuntimeResult<()> {
+        let Self::Open(open) = self else {
+            return Err(Report::new(EmitterRuntimeError::ConnectorNotInitialized));
+        };
+        if !open.lifecycle.needs_resume(open.connector.lifecycle_mut()) {
+            return Ok(());
+        }
+        let attempt = context.interactions.begin_open();
+        let resumed = open
+            .lifecycle
+            .resume(open.connector.lifecycle_mut(), context)
+            .await
+            .change_context(EmitterRuntimeError::ResumeConnector);
+        let resumed = match resumed {
+            Ok(nervix_connector::EmitterResume::Ready) => Ok(()),
+            Ok(nervix_connector::EmitterResume::Waiting { retry_after }) => {
+                Err(Report::new(EmitterRuntimeError::ConnectorWaiting)
+                    .attach(nervix_connector::EmitterRetryDelay(retry_after)))
+            }
+            Err(error) => Err(error),
+        };
+        let outcome = match &resumed {
+            Ok(()) => EmitterOpenOutcome::Succeeded,
+            Err(_) => EmitterOpenOutcome::Failed,
+        };
+        attempt.finish(outcome);
+        open.resume_error = resumed.as_ref().err().map(emitter_error_message);
+        open.resume_retry_after = match &resumed {
+            Ok(()) => Duration::ZERO,
+            Err(error) => super::emitter_retry::emitter_minimum_retry_delay(error),
+        };
+        resumed
+    }
+
+    pub(super) async fn close_transport(&mut self, context: &EmitterConnectorContext) {
+        let Self::Open(open) = self else {
+            return;
+        };
+        match nervix_primitives::time::timeout(
+            PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE,
+            open.lifecycle
+                .close(open.connector.lifecycle_mut(), context),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => context.report_close_error(
+                open.connector.lifecycle().kind(),
+                &error.change_context(EmitterRuntimeError::CloseConnector),
+            ),
+            Err(error) => context.report_close_error(
+                open.connector.lifecycle().kind(),
+                &Report::new(error).change_context(EmitterRuntimeError::CloseConnector),
+            ),
         }
     }
 
@@ -428,19 +708,51 @@ impl EmitterConnectorState {
 
     /// Finishes the open connector's transport client by `deadline`. An emitter without an open
     /// connector has no client, so it holds nothing.
-    pub(super) async fn finish_transport(&mut self, deadline: Instant) -> EmitterFinishResult {
-        match self {
-            Self::Open(open) => open.connector.lifecycle_mut().finish(deadline).await,
+    pub(super) async fn finish_transport(
+        &mut self,
+        context: &EmitterConnectorContext,
+        deadline: Instant,
+    ) -> EmitterFinishResult {
+        let attempt = context.interactions.begin_finish();
+        let finished = match self {
+            Self::Open(open) => {
+                open.lifecycle
+                    .finish(open.connector.lifecycle_mut(), deadline)
+                    .await
+            }
             Self::Unavailable { .. } => Ok(EmitterFinish::NothingHeld),
-        }
+        };
+        let (outcome, unsent) = match &finished {
+            Ok(EmitterFinish::NothingHeld) => (EmitterFinishOutcome::NothingHeld, 0),
+            Ok(EmitterFinish::Flushed) => (EmitterFinishOutcome::Flushed, 0),
+            Err(error) => match error.current_context() {
+                nervix_connector::EmitterFinishError::Unsent { records, .. } => {
+                    (EmitterFinishOutcome::Unsent, *records)
+                }
+                nervix_connector::EmitterFinishError::Flush { .. } => {
+                    (EmitterFinishOutcome::Failed, 0)
+                }
+            },
+        };
+        attempt.finish(outcome, unsent);
+        finished
     }
 
-    pub(super) fn reconnect_after(&self, error: &Report<EmitterRuntimeError>) -> bool {
-        if let EmitterRuntimeError::PublishStalled = error.current_context() {
-            false
-        } else {
-            self.requires_publish_failure_reinitialization()
+    pub(super) fn reconnect_after(
+        &mut self,
+        error: &Report<EmitterRuntimeError>,
+        context: &EmitterConnectorContext,
+    ) -> bool {
+        if matches!(
+            error.current_context(),
+            EmitterRuntimeError::PublishStalled | EmitterRuntimeError::EncodingRefused
+        ) {
+            return false;
         }
+        if let Self::Open(open) = self {
+            open.lifecycle.recover(context);
+        }
+        true
     }
 
     pub(super) async fn flush_due(
@@ -451,8 +763,9 @@ impl EmitterConnectorState {
         buffer: &mut EmitterBatchBuffer,
         retry: bool,
     ) -> EmitterRuntimeResult<Option<PublishReport>> {
+        let kind = EmitterPublishAttemptKind::from_retry(retry);
         let flushed = if buffer.should_flush(context, retry)? {
-            self.flush_buffer(context, control, buffer).await?
+            self.flush_buffer(context, control, buffer, kind).await?
         } else {
             None
         };
@@ -472,11 +785,12 @@ impl EmitterConnectorState {
         context: &EmitterConnectorContext,
         control: &mut EmitterPublishControl<'_>,
         buffer: &mut EmitterBatchBuffer,
+        mut kind: EmitterPublishAttemptKind,
     ) -> EmitterRuntimeResult<Option<PublishReport>> {
         let flushed;
         loop {
             nervix_primitives::task::consume_budget().await;
-            match self.flush_buffer(context, control, buffer).await {
+            match self.flush_buffer(context, control, buffer, kind).await {
                 Ok(report) => {
                     control.backoff.reset();
                     context.status.clear();
@@ -489,23 +803,29 @@ impl EmitterConnectorState {
                     return Err(error);
                 }
                 Err(error) if emitter_publish_error_is_retryable(&error) => {
+                    self.reconnect_after(&error, context);
                     let reason = emitter_error_message(&error);
                     let wait = emitter_retry_delay(control.backoff, &error);
                     context.record_retry(reason.clone(), wait, EmitterRetryKind::Infrastructure);
                     context.report_flush_error(label, &reason);
-                    let waited = await_until_emitter_stop_deadline(
-                        control.stop_rx,
+                    let cause = error.current_context().retry_cause();
+                    let acks = buffer.pending_acks();
+                    let retry_wait = async {
+                        context.interactions.record_retry(cause, wait);
                         RuntimeReconnectBackoff::wait_duration_with_ack_alive(
                             wait,
                             control.shutdown_rx,
-                            &buffer.pending_acks(),
-                        ),
-                    )
-                    .await
-                    .map_err(|()| emitter_stop_deadline_elapsed())?;
+                            &acks,
+                        )
+                        .await
+                    };
+                    let waited = await_until_emitter_stop_deadline(control.stop_rx, retry_wait)
+                        .await
+                        .map_err(|()| emitter_stop_deadline_elapsed())?;
                     if !waited {
                         return Err(Report::new(EmitterRuntimeError::ShutdownWhileStalled));
                     }
+                    kind = EmitterPublishAttemptKind::Retry;
                 }
                 Err(error) => {
                     context.report_flush_error(label, &emitter_error_message(&error));
@@ -533,7 +853,7 @@ impl EmitterConnectorState {
             return Ok(None);
         }
         let flushed = self
-            .flush_buffer(context, control, buffer)
+            .flush_buffer(context, control, buffer, EmitterPublishAttemptKind::Initial)
             .await
             .map_err(EmitterPublishFailure::buffer)?;
         // The write may have reached the emitter's commit boundary, which publishes here rather than
@@ -574,6 +894,7 @@ impl EmitterConnectorState {
                     return Err(error);
                 }
                 Err(error) if error.current_context().is_retryable_publish_failure() => {
+                    self.reconnect_after(&error, context);
                     let acks = self.pending_acks(buffer);
                     if !Self::wait_for_commit_retry(label, context, control, &acks, &error).await? {
                         return match reason {
@@ -608,6 +929,15 @@ impl EmitterConnectorState {
         buffer: &mut EmitterBatchBuffer,
         reason: EmitterCommitReason,
     ) -> EmitterRuntimeResult<Option<PublishReport>> {
+        if self.staged_messages() != 0 && self.needs_resume() {
+            let acks = self.pending_acks(buffer);
+            await_until_emitter_stop_deadline(
+                control.stop_rx,
+                await_emitter_confirmation(&acks, self.resume_transport(context)),
+            )
+            .await
+            .map_err(|()| emitter_stop_deadline_elapsed())??;
+        }
         match self {
             Self::Open(open) => {
                 open.commit_staged_once(context, control, buffer, reason)
@@ -622,14 +952,29 @@ impl EmitterConnectorState {
         context: &EmitterConnectorContext,
         control: &mut EmitterPublishControl<'_>,
         buffer: &mut EmitterBatchBuffer,
+        kind: EmitterPublishAttemptKind,
     ) -> EmitterRuntimeResult<Option<PublishReport>> {
         if buffer.is_empty() {
             return Ok(None);
+        }
+        if self.needs_resume() {
+            let acks = self.pending_acks(buffer);
+            await_until_emitter_stop_deadline(
+                control.stop_rx,
+                await_emitter_confirmation(&acks, self.resume_transport(context)),
+            )
+            .await
+            .map_err(|()| emitter_stop_deadline_elapsed())??;
         }
         let attempt = context.interactions.begin(EmitterAttemptOperation::Publish);
         if let Err(error) = self.check_fault_injection(context, control) {
             attempt.finish(error.current_context().attempt_outcome());
             return Err(error);
+        }
+        if kind == EmitterPublishAttemptKind::Retry {
+            context
+                .interactions
+                .record_retried(buffer.unresolved_messages());
         }
         let pending_acks = buffer.pending_acks();
         {
@@ -651,6 +996,9 @@ impl EmitterConnectorState {
                 Ok(()) => EmitterAttemptOutcome::Succeeded,
                 Err(error) => error.current_context().attempt_outcome(),
             };
+            if let Err(error) = &published {
+                context.record_confirmation_timeout(error);
+            }
             attempt.finish(outcome);
             published?;
         }
@@ -734,14 +1082,18 @@ impl EmitterConnectorState {
         let wait = control.backoff.next_delay();
         context.record_retry(reason.clone(), wait, EmitterRetryKind::Commit);
         context.report_flush_error(connector, &reason);
-        await_until_emitter_stop_deadline(
-            control.stop_rx,
+        let retry_wait = async {
+            context
+                .interactions
+                .record_retry(EmitterRetryCause::Commit, wait);
             control
                 .backoff
-                .wait_with_ack_alive(control.shutdown_rx, acks),
-        )
-        .await
-        .map_err(|()| emitter_stop_deadline_elapsed())
+                .wait_with_ack_alive(control.shutdown_rx, acks)
+                .await
+        };
+        await_until_emitter_stop_deadline(control.stop_rx, retry_wait)
+            .await
+            .map_err(|()| emitter_stop_deadline_elapsed())
     }
 }
 
@@ -789,6 +1141,9 @@ impl OpenEmitterConnector {
         };
         buffer.report_staged_messages(self.connector.lifecycle().staged_messages());
         let committed = committed.map_err(emitter_publish_failure);
+        if let Err(error) = &committed {
+            context.record_confirmation_timeout(error);
+        }
         let outcome = match &committed {
             Ok(_) => EmitterAttemptOutcome::Succeeded,
             Err(error) => error.current_context().attempt_outcome(),
@@ -977,6 +1332,7 @@ pub(super) async fn finish_rejected_records(
     rejected: Vec<RejectedEmitterRecord>,
     operation: MessageErrorOperation,
 ) -> EmitterRuntimeResult<()> {
+    let mut outcomes = context.interactions.record_outcomes();
     for rejected in rejected {
         nervix_primitives::task::consume_budget().await;
         let EmitterRecordPosition {
@@ -989,18 +1345,8 @@ pub(super) async fn finish_rejected_records(
             ))
         })?;
         let execution_now = batch.execution_now();
-        let error = if let Some(error) = rejected.structured_error {
-            error
-        } else {
-            structured_message_error(
-                execution_now,
-                MessageErrorCode::External,
-                rejected.reason,
-                operation,
-                None,
-                std::iter::empty(),
-            )
-        };
+        let code = rejected.code;
+        let error = rejected.into_error(execution_now, operation);
         let RejectedRecordInput {
             record,
             partial_output,
@@ -1026,7 +1372,7 @@ pub(super) async fn finish_rejected_records(
                     "record rejection row {row_index} has no acknowledgment set"
                 ))
             })?;
-        batch
+        let newly_rejected = batch
             .mark_rejected_after_delivery(
                 row_index,
                 context
@@ -1047,6 +1393,9 @@ pub(super) async fn finish_rejected_records(
                     }),
             )
             .await?;
+        if newly_rejected {
+            outcomes.reject(code);
+        }
     }
     Ok(())
 }
@@ -1367,7 +1716,13 @@ mod tests {
             "a stopped domain has no domain time to read"
         );
         let drained = connector
-            .flush_all("staging", &context, &mut control, &mut buffer)
+            .flush_all(
+                "staging",
+                &context,
+                &mut control,
+                &mut buffer,
+                EmitterPublishAttemptKind::Initial,
+            )
             .await
             .expect("a drain commits what is staged without the domain clock");
 
@@ -1511,7 +1866,13 @@ mod tests {
             .expect("batch must buffer");
 
         let error = match connector
-            .flush_all("nats", &context, &mut control, &mut buffer)
+            .flush_all(
+                "nats",
+                &context,
+                &mut control,
+                &mut buffer,
+                EmitterPublishAttemptKind::Initial,
+            )
             .await
         {
             Err(error) => error,
@@ -1615,6 +1976,7 @@ mod tests {
         };
         let context = emitter_context();
         let mut connector = EmitterConnectorState::Unavailable {
+            retry_open: false,
             reason: "test emitter intentionally has no client".to_string(),
         };
         let mut buffer = EmitterBatchBuffer::default();

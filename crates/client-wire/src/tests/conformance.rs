@@ -468,6 +468,36 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             reply(19, ReplyBody::Command(Box::new(restore))),
         ),
         (
+            "server_command_state.nxsm",
+            reply(
+                20,
+                ReplyBody::Command(Box::new({
+                    let mut outcome = command_outcome(CommandDisposition::Completed {
+                        already_existed: false,
+                    });
+                    outcome.state = Some(Box::new(crate::state_inspection::tests::inspection(
+                        u64::MAX,
+                    )));
+                    outcome
+                })),
+            ),
+        ),
+        (
+            "server_command_state_refused.nxsm",
+            reply(
+                21,
+                ReplyBody::Command(Box::new({
+                    let mut outcome = command_outcome(CommandDisposition::Failed);
+                    let mut state = crate::state_inspection::tests::inspection(1);
+                    state.result = crate::StateInspectionResult::Rejected(
+                        crate::StateInspectionRejection::StaleContinuation,
+                    );
+                    outcome.state = Some(Box::new(state));
+                    outcome
+                })),
+            ),
+        ),
+        (
             "server_command_unknown.nxsm",
             command(
                 4,
@@ -1666,6 +1696,9 @@ fn render_command(head: &str, outcome: &CommandOutcome, lines: &mut Vec<String>)
     if let Some(report) = &outcome.restore {
         render_restore_report(report, lines);
     }
+    if let Some(state) = &outcome.state {
+        render_state_inspection(state, lines);
+    }
 }
 
 fn render_restore_report(report: &RestoreReport, lines: &mut Vec<String>) {
@@ -1967,4 +2000,80 @@ fn the_checked_in_corpus_is_what_the_encoder_writes_and_reads() {
     );
     let report = fs::read_to_string(directory.join(REPORT)).assured("the corpus report exists");
     assert_eq!(report_of(&checked_in), report);
+}
+
+fn render_state_inspection(state: &crate::StateInspection, lines: &mut Vec<String>) {
+    lines.push(format!(
+        "STATE domain={} kind={:?} name={}",
+        state.entity.domain.as_str(),
+        state.entity.kind(),
+        state.entity.identifier()
+    ));
+    let crate::StateInspectionResult::Page(page) = &state.result else {
+        let crate::StateInspectionResult::Rejected(reason) = &state.result else {
+            unreachable!()
+        };
+        lines.push(format!("STATE_REFUSED {reason:?}"));
+        return;
+    };
+    lines.push(format!(
+        "STATE_PAGE branches={} rows={} bytes={} units={} continuation={}",
+        page.counts.branches,
+        page.counts.rows,
+        page.counts.bytes,
+        page.unit_count,
+        page.continuation.as_deref().unwrap_or("none")
+    ));
+    for unit in &page.units {
+        let placement = match unit.unit.kind() {
+            nervix_models::UnitKind::Single => "single".to_string(),
+            nervix_models::UnitKind::Partition(index) => format!("partition:{index}"),
+            nervix_models::UnitKind::Instance(index) => format!("instance:{index}"),
+        };
+        lines.push(format!("STATE_PLACEMENT {placement}"));
+        lines.push(format!(
+            "STATE_UNIT owner={} replicas={} node={} incarnation={} fingerprint={} generation={} \
+             revision={} stage={:?} branches={} rows={} bytes={}",
+            unit.owner,
+            unit.replicas
+                .iter()
+                .map(|name| name.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+            unit.origin.node.node_id(),
+            unit.origin.node.incarnation(),
+            hex(&unit.origin.fingerprint),
+            unit.origin.generation,
+            unit.origin.revision,
+            unit.origin.stage,
+            unit.counts.branches,
+            unit.counts.rows,
+            unit.counts.bytes
+        ));
+        for section in &unit.sections {
+            lines.push(format!(
+                "STATE_SECTION name={} omitted={} watermarks={}",
+                section.name,
+                section.omitted_rows,
+                section
+                    .watermarks
+                    .map(|watermarks| format!("{},{}", watermarks.low, watermarks.high))
+                    .unwrap_or_else(|| "none".to_string())
+            ));
+            schema_lines(&section.schema, lines);
+            for frame in &section.frames {
+                let batch = frame.batch();
+                let key = match (batch.branch_key(), &section.schema.branch) {
+                    (Some(key), Some(branch)) => cells(key, branch.fields()),
+                    _ => String::new(),
+                };
+                for row in batch.rows() {
+                    lines.push(format!(
+                        "ROW [{key}] {}",
+                        cells(row, &section.schema.fields)
+                    ));
+                }
+            }
+        }
+    }
 }

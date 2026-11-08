@@ -42,6 +42,7 @@ fn materialized_owner_cost() {
             })
             .collect::<Vec<_>>();
         let state = Arc::new(ReplicatedMaterializedRelayState::new(
+            1,
             RuntimeStatePlacement {
                 domain: DomainName::parse("measurement").assured("valid domain"),
                 state: RuntimeState::MaterializedRelay {

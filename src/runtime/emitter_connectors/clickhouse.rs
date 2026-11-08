@@ -10,6 +10,8 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
+use nervix_connector::EmitterConnector as _;
+
 use super::*;
 
 const _: () = assert!(matches!(
@@ -18,7 +20,7 @@ const _: () = assert!(matches!(
 ));
 
 impl EmitterConnectorStarter {
-    pub(super) fn clickhouse(
+    pub(super) async fn clickhouse(
         connector: &ClickHouseTableEmitterPlan,
         context: &EmitterConnectorContext,
         input_schema: &CompiledSchema,
@@ -34,7 +36,7 @@ impl EmitterConnectorStarter {
             })?;
             Self::row(
                 projection,
-                ClickHouseTableEmitter::new(
+                ClickHouseTableEmitter::open(
                     ClickHouseTableEmitterConfig {
                         config: connector.client.config.entries.clone(),
                         table: connector.table.clone(),
@@ -42,7 +44,8 @@ impl EmitterConnectorStarter {
                         batch: connector.batch,
                     },
                     context.emitter_host(),
-                ),
+                )
+                .await,
             )?
         };
         Ok(opened)

@@ -630,7 +630,7 @@ Feature: Kafka emission
   # with an answer the producer retries, so the producer still holds the three records when STOP
   # tears the domain down. The finish counts the records the producer holds without a served
   # delivery report, never the events librdkafka queues beside them.
-  @emitter_unsent_at_stop
+  @emitter_unsent_at_stop @emitter_outcomes
   Scenario Outline: STOP reports exactly how many records a NO ACK Kafka emitter's producer still holds
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And schema change drain timeout is configured as "5s"
@@ -703,6 +703,20 @@ Feature: Kafka emission
     Then within "30s" the active session observes a server error containing
       """
       kafka emitter's transport client still held 3 records when its finish deadline passed
+      """
+
+    And node "{{unsent_owner}}" observability metric "nervix_emitter_finishes_total" with labels eventually equals 1
+      """
+      emitter="unsent_output"
+      outcome="unsent"
+      """
+    And node "{{unsent_owner}}" observability metric "nervix_emitter_unsent_records_total" with labels eventually equals 3
+      """
+      emitter="unsent_output"
+      """
+    And node "{{unsent_owner}}" observability metric "nervix_emitter_transient_failure" with labels eventually equals 0
+      """
+      emitter="unsent_output"
       """
 
     Examples:
@@ -990,7 +1004,7 @@ Feature: Kafka emission
   # producer gives that copy up by its next timeout scan, as the stale-copy scenario above
   # describes. The host keeps the envelope it evaluated when it admitted the record, so the attempt
   # after the broker accepts writes again carries the same record time.
-  @kafka_emitter_record_timestamp
+  @kafka_emitter_record_timestamp @emitter_outcomes
   Scenario Outline: A Kafka record its broker refused keeps its TIMESTAMP when the emitter sends it again
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -1036,6 +1050,11 @@ Feature: Kafka emission
       {"seq":1,"event_at":"2001-02-03T04:05:06.789+00:00"}
       """
     Then within "60s" DESCRIBE EMITTER "timestamped" on the leader node reports a transient error with its next attempt at most "8s" away
+    And the last command output owner is saved as placeholder "confirmation_owner"
+    And node "{{confirmation_owner}}" observability metric "nervix_emitter_confirmation_timeouts_total" with labels eventually reaches at least 1
+      """
+      emitter="timestamped"
+      """
     When the mock Kafka broker accepts writes again
     Then within "60s" DESCRIBE EMITTER "timestamped" on the leader node contains
       """

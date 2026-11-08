@@ -2020,6 +2020,11 @@ impl Application {
                 }
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        let inspection_service = service.clone();
+        interconnect.register_stream_handler::<nervix_interconnect::ReadMaterializedStatePage, _, _>(move |_context, request| {
+            let service = inspection_service.clone();
+            async move { service.stream_materialized_inspection_page(request).await }
+        }).change_context(AppError::RegisterInterconnectRequestHandler)?;
         service.register_state_replication_interconnect_handlers()?;
 
         let describe_relay_service = service.clone();

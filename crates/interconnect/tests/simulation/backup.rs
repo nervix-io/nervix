@@ -784,7 +784,9 @@ fn exercise_backup_section(run: ScenarioRun, sections: SectionSet) -> Result<(),
                         client.request_stream(&peer, stalled).await.is_err(),
                         "a stalled fetch must fail at its deadline"
                     );
-                    assert!(turmoil::elapsed() >= started + FetchCapturedSection::TIMEOUT);
+                    assert!(
+                        turmoil::elapsed() >= started + FetchCapturedSection::default_timeout()
+                    );
                     trace.record("client", "stalled fetch reached its deadline");
                     turmoil::partition("client", "server");
                     assert!(

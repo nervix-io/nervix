@@ -63,7 +63,7 @@ mod confirmation_window;
 use std::{cmp::Ordering, collections::VecDeque, time::Duration};
 
 use confirmation_window::RabbitMqConfirmationWindow;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use lapin::{
     Confirmation, ErrorKind, ExchangeKind, PublisherConfirm,
     message::BasicReturnMessage,
@@ -98,6 +98,7 @@ mod properties_tests;
 const RABBITMQ: &str = "rabbitmq";
 
 /// Where a RabbitMQ emitter's messages go.
+#[derive(Clone)]
 pub(crate) enum RabbitMqDestination {
     /// The broker's default exchange, which routes a message to the queue its routing key names:
     /// this queue.
@@ -167,8 +168,88 @@ pub(crate) struct RabbitMqPublisherConfig {
     pub(crate) mode: BrokerPublishingMode,
 }
 
-/// The connection and channel one RabbitMQ emitter publishes through, whichever entity it is.
+/// A retained publisher, including its prepared TLS broker and exact external destination.
 pub(crate) struct RabbitMqPublisher {
+    broker: RabbitMqBroker,
+    destination: RabbitMqDestination,
+    mode: BrokerPublishingMode,
+    round_trip: Option<ConfiguredDeadline>,
+    transport: Option<RabbitMqChannel>,
+}
+
+impl RabbitMqPublisher {
+    pub(crate) fn open(config: RabbitMqPublisherConfig) -> EmitterStartResult<Self> {
+        let round_trip = ConfiguredDeadline::timeout(&config.config)
+            .map_err(RabbitMqChannel::configuration_error)?;
+        let broker = RabbitMqBroker::from_config(&config.config, config.dns)
+            .map_err(RabbitMqChannel::connect_error)?;
+        Ok(Self {
+            broker,
+            destination: config.destination,
+            mode: config.mode,
+            round_trip,
+            transport: None,
+        })
+    }
+
+    /// An uncertain write must not share pending returns or confirmations with its retry.
+    pub(crate) fn suspend(&mut self) {
+        self.transport = None;
+    }
+
+    pub(crate) fn needs_resume(&self) -> bool {
+        self.transport.as_ref().is_none_or(|transport| {
+            !transport.connection.status().connected() || !transport.channel.status().connected()
+        })
+    }
+
+    pub(crate) async fn resume(
+        &mut self,
+    ) -> nervix_connector::EmitterLifecycleResult<nervix_connector::EmitterResume> {
+        let resuming = nervix_connector::EmitterLifecycleError::Resume {
+            connector: RABBITMQ,
+        };
+        if self.transport.as_ref().is_some_and(|transport| {
+            transport.connection.status().connected() && transport.channel.status().connected()
+        }) {
+            return Ok(nervix_connector::EmitterResume::Ready);
+        }
+        let transport = RabbitMqChannel::connect(
+            &self.broker,
+            self.destination.clone(),
+            self.mode,
+            self.round_trip,
+        )
+        .await
+        .change_context(resuming)?;
+        self.transport = Some(transport);
+        Ok(nervix_connector::EmitterResume::Ready)
+    }
+
+    pub(crate) fn finish(&self) -> EmitterFinishResult {
+        match &self.transport {
+            Some(transport) => transport.finish(),
+            None => Ok(EmitterFinish::NothingHeld),
+        }
+    }
+
+    pub(crate) async fn publish(
+        &mut self,
+        records: Vec<EmitterRecord>,
+    ) -> PerRecordOutcome<EmitterRecordId> {
+        let Some(transport) = &mut self.transport else {
+            let mut outcome = PerRecordOutcome::with_capacity(records.len());
+            outcome.fail(Report::new(EmitterWriteError::NotInitialized {
+                connector: RABBITMQ,
+            }));
+            return outcome;
+        };
+        transport.publish(records).await
+    }
+}
+
+/// The connection and channel one RabbitMQ emitter publishes through, whichever entity it is.
+pub(crate) struct RabbitMqChannel {
     /// The connection the emitter's channels run on. The broker's refusal of a message closes only
     /// the channel, so the emitter opens the next channel on the same connection.
     connection: lapin::Connection,
@@ -262,15 +343,15 @@ enum ConfirmedStop {
     },
 }
 
-impl RabbitMqPublisher {
+impl RabbitMqChannel {
     /// Connects, opens the channel the emitter publishes through and checks that its queue or its
     /// exchange exists, every step within the client's `connect_timeout_ms`.
-    pub(crate) async fn open(config: RabbitMqPublisherConfig) -> EmitterStartResult<Self> {
-        let mode = config.mode;
-        let round_trip =
-            ConfiguredDeadline::timeout(&config.config).map_err(Self::configuration_error)?;
-        let broker =
-            RabbitMqBroker::from_config(&config.config, config.dns).map_err(Self::connect_error)?;
+    async fn connect(
+        broker: &RabbitMqBroker,
+        destination: RabbitMqDestination,
+        mode: BrokerPublishingMode,
+        round_trip: Option<ConfiguredDeadline>,
+    ) -> EmitterStartResult<Self> {
         let opening = broker.connect().await.map_err(Self::connect_error)?;
         let closures = ChannelClosures::listen(opening.connection());
         let channel = opening
@@ -284,7 +365,7 @@ impl RabbitMqPublisher {
                     connector: RABBITMQ,
                 })
             })?;
-        match &config.destination {
+        match &destination {
             RabbitMqDestination::Queue(queue) => {
                 opening
                     .within_budget(
@@ -328,7 +409,7 @@ impl RabbitMqPublisher {
             connection: opening.opened(),
             closures,
             channel,
-            destination: config.destination,
+            destination,
             mode,
             round_trip,
         })
@@ -854,7 +935,7 @@ impl RabbitMqPublisher {
     }
 }
 
-impl RabbitMqPublisher {
+impl RabbitMqChannel {
     /// A `NO ACK` write ends with a round trip the broker answers only after it took every
     /// message written before it, and a confirmed write awaits each confirm, so the channel holds
     /// nothing once a publish returns.
@@ -1034,7 +1115,7 @@ mod tests {
         ];
         let mut outcome = PerRecordOutcome::empty();
 
-        RabbitMqPublisher::settle_answered("events", &answered, &mut outcome)
+        RabbitMqChannel::settle_answered("events", &answered, &mut outcome)
             .assured("every return names a message in this window");
 
         assert_eq!(settled(outcome), (vec![0], vec![(1, no_route())]));
@@ -1056,7 +1137,7 @@ mod tests {
             },
         ];
         let mut outcome = PerRecordOutcome::empty();
-        RabbitMqPublisher::settle_answered("events", &answered, &mut outcome)
+        RabbitMqChannel::settle_answered("events", &answered, &mut outcome)
             .assured("every return names a message in this window");
         assert_eq!(settled(outcome), (vec![1], vec![(0, no_route())]));
     }
@@ -1077,7 +1158,7 @@ mod tests {
             },
         ];
         let mut outcome = PerRecordOutcome::empty();
-        RabbitMqPublisher::settle_answered("events", &answered, &mut outcome)
+        RabbitMqChannel::settle_answered("events", &answered, &mut outcome)
             .assured("every return names a message in this window");
         assert_eq!(settled(outcome), (vec![1], vec![(0, no_route())]));
     }
@@ -1102,7 +1183,7 @@ mod tests {
             },
         ];
         let mut outcome = PerRecordOutcome::empty();
-        RabbitMqPublisher::settle_answered("events", &answered, &mut outcome)
+        RabbitMqChannel::settle_answered("events", &answered, &mut outcome)
             .assured("every return names a message in this window");
         assert_eq!(settled(outcome), (vec![0], vec![(1, no_route())]));
     }
@@ -1125,7 +1206,7 @@ mod tests {
         let mut unsent = VecDeque::from([message(4, 10)]);
         let mut outcome = PerRecordOutcome::empty();
 
-        RabbitMqPublisher::settle_unconfirmed_loss(
+        RabbitMqChannel::settle_unconfirmed_loss(
             "",
             size_refusal(),
             written,
@@ -1151,7 +1232,7 @@ mod tests {
             let mut unsent = VecDeque::from([message(2, 10)]);
             let mut outcome = PerRecordOutcome::empty();
 
-            let settled_loss = RabbitMqPublisher::settle_unconfirmed_loss(
+            let settled_loss = RabbitMqChannel::settle_unconfirmed_loss(
                 "",
                 closure,
                 written,
@@ -1185,7 +1266,7 @@ mod tests {
         let mut unsent = VecDeque::from([message(4, 10)]);
         let mut outcome = PerRecordOutcome::empty();
 
-        RabbitMqPublisher::settle_confirmed_loss(
+        RabbitMqChannel::settle_confirmed_loss(
             "",
             size_refusal(),
             answered,
@@ -1228,7 +1309,7 @@ mod tests {
             let mut unsent = VecDeque::from([message(3, 10)]);
             let mut outcome = PerRecordOutcome::empty();
 
-            let settled_loss = RabbitMqPublisher::settle_confirmed_loss(
+            let settled_loss = RabbitMqChannel::settle_confirmed_loss(
                 "",
                 size_refusal(),
                 answered,
@@ -1256,7 +1337,7 @@ mod tests {
         ];
         let mut unsent = VecDeque::from([message(3, 10)]);
         let mut outcome = PerRecordOutcome::empty();
-        let result = RabbitMqPublisher::settle_confirmed_loss(
+        let result = RabbitMqChannel::settle_confirmed_loss(
             "",
             size_refusal(),
             answered,
@@ -1285,7 +1366,7 @@ mod tests {
             let mut unsent = VecDeque::from([message(2, 10)]);
             let mut outcome = PerRecordOutcome::empty();
 
-            let settled_loss = RabbitMqPublisher::settle_confirmed_loss(
+            let settled_loss = RabbitMqChannel::settle_confirmed_loss(
                 "",
                 closure,
                 answered,
@@ -1309,7 +1390,7 @@ mod tests {
         let returns = vec![returned("events", &taken[1])];
         let mut outcome = PerRecordOutcome::empty();
 
-        RabbitMqPublisher::settle_taken("events", taken, returns, &mut outcome)
+        RabbitMqChannel::settle_taken("events", taken, returns, &mut outcome)
             .assured("the write's one return is its second message");
 
         assert_eq!(settled(outcome), (vec![0, 2], vec![(1, no_route())]));
@@ -1327,7 +1408,7 @@ mod tests {
         let returns = vec![returned("events", &taken[0]), returned("events", &taken[2])];
         let mut outcome = PerRecordOutcome::empty();
 
-        RabbitMqPublisher::settle_taken("events", taken, returns, &mut outcome)
+        RabbitMqChannel::settle_taken("events", taken, returns, &mut outcome)
             .assured("both returns match a message of the write in order");
 
         assert_eq!(
@@ -1356,7 +1437,7 @@ mod tests {
         assert!(!first.is_returned_by("events", &returned));
         assert!(second.is_returned_by("events", &returned));
         let mut outcome = PerRecordOutcome::empty();
-        RabbitMqPublisher::settle_answered(
+        RabbitMqChannel::settle_answered(
             "events",
             &[
                 AnsweredMessage {
@@ -1386,7 +1467,7 @@ mod tests {
             returned("audit", &written),
         ] {
             let mut outcome = PerRecordOutcome::empty();
-            let settled_write = RabbitMqPublisher::settle_taken(
+            let settled_write = RabbitMqChannel::settle_taken(
                 "events",
                 vec![keyed(0, "order.created", b"first")],
                 vec![stray],
@@ -1410,7 +1491,7 @@ mod tests {
         let mut unsent = VecDeque::new();
         let mut outcome = PerRecordOutcome::empty();
 
-        RabbitMqPublisher::settle_unconfirmed_loss(
+        RabbitMqChannel::settle_unconfirmed_loss(
             "",
             size_refusal(),
             written,
@@ -1501,7 +1582,7 @@ mod tests {
     #[test]
     fn a_missing_exchange_is_the_missing_entity_and_any_other_check_failure_initializes() {
         let name = RabbitMqExchangeName::parse("events").assured("events is an exchange name");
-        let missing = RabbitMqPublisher::exchange_check_error(
+        let missing = RabbitMqChannel::exchange_check_error(
             &name,
             OpeningStepFailure::Failed(protocol_error(
                 AMQPErrorKind::Soft(AMQPSoftError::NOTFOUND),
@@ -1539,7 +1620,7 @@ mod tests {
             OpeningStepFailure::Failed(lost_channel()),
             OpeningStepFailure::Elapsed(connect_timeout.elapsed("checking the RabbitMQ exchange")),
         ] {
-            let initialize = RabbitMqPublisher::exchange_check_error(&name, failure);
+            let initialize = RabbitMqChannel::exchange_check_error(&name, failure);
             assert!(matches!(
                 initialize.current_context(),
                 EmitterOpenError::Initialize {
@@ -1551,9 +1632,8 @@ mod tests {
 
     #[test]
     fn connection_failures_start_as_configuration_or_initialization_failures() {
-        let invalid = RabbitMqPublisher::connect_error(Report::new(
-            RabbitMqConnectError::InvalidCaCertificate,
-        ));
+        let invalid =
+            RabbitMqChannel::connect_error(Report::new(RabbitMqConnectError::InvalidCaCertificate));
         assert!(matches!(
             invalid.current_context(),
             EmitterOpenError::InvalidConfiguration {
@@ -1562,7 +1642,7 @@ mod tests {
         ));
 
         let unresolved =
-            RabbitMqPublisher::connect_error(Report::new(RabbitMqConnectError::Resolve {
+            RabbitMqChannel::connect_error(Report::new(RabbitMqConnectError::Resolve {
                 host: "rabbitmq.nervix.test".to_string(),
                 failure: DnsLookupFailure::NameNotFound,
             }));
@@ -1583,7 +1663,7 @@ mod tests {
 
         let connect_timeout = nervix_connector::ConfiguredDeadline::connect(&[])
             .expect("a client without the key takes the default");
-        let stalled = RabbitMqPublisher::connect_error(
+        let stalled = RabbitMqChannel::connect_error(
             Report::new(connect_timeout.elapsed("the TLS handshake with the RabbitMQ broker"))
                 .change_context(RabbitMqConnectError::TlsHandshake {
                     host: "rabbitmq.nervix.test".to_string(),
@@ -1615,7 +1695,7 @@ mod tests {
             .assured("the entries set timeout_ms");
 
         let stalled =
-            RabbitMqPublisher::answered_within(Some(deadline), std::future::pending()).await;
+            RabbitMqChannel::answered_within(Some(deadline), std::future::pending()).await;
         let Err(UnconfirmedStop::RoundTripElapsed(elapsed)) = stalled else {
             panic!("a round trip the broker never answers runs out of timeout_ms");
         };
@@ -1623,7 +1703,7 @@ mod tests {
             (elapsed.key, elapsed.bound),
             (DeadlineKey::Timeout, Duration::from_millis(50))
         );
-        let report = RabbitMqPublisher::round_trip_error(elapsed);
+        let report = RabbitMqChannel::round_trip_error(elapsed);
         assert!(matches!(
             report.current_context(),
             EmitterWriteError::Publish {
@@ -1646,10 +1726,10 @@ mod tests {
         );
 
         for deadline in [Some(deadline), None] {
-            let answered = RabbitMqPublisher::answered_within(deadline, async { Ok(()) }).await;
+            let answered = RabbitMqChannel::answered_within(deadline, async { Ok(()) }).await;
             assert!(matches!(answered, Ok(())));
             let lost =
-                RabbitMqPublisher::answered_within(deadline, async { Err(lost_channel()) }).await;
+                RabbitMqChannel::answered_within(deadline, async { Err(lost_channel()) }).await;
             assert!(matches!(lost, Err(UnconfirmedStop::ChannelLost(_))));
         }
     }
@@ -1659,7 +1739,7 @@ mod tests {
         let Err(invalid) = ConfiguredDeadline::timeout(&timeout_ms("0")) else {
             panic!("zero milliseconds is not a deadline");
         };
-        let report = RabbitMqPublisher::configuration_error(invalid);
+        let report = RabbitMqChannel::configuration_error(invalid);
         assert!(matches!(
             report.current_context(),
             EmitterOpenError::InvalidConfiguration {

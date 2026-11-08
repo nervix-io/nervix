@@ -57,6 +57,7 @@ mod command_reply;
 mod consensus;
 mod domain_clock;
 mod domain_resume;
+mod emitter_lifecycle;
 mod emitter_mode;
 mod entity_drain;
 #[cfg(test)]
@@ -185,6 +186,8 @@ struct FaultInjectionState {
     /// One bounded command-reply script per scenario domain, absent from ordinary builds.
     command_reply_scripts: DashMap<DomainName, CommandReplyScript, RandomState>,
     emitter_faults: DashMap<String, EmitterFaultMode, RandomState>,
+    /// Construction counts only for emitters explicitly observed by a scenario.
+    observed_emitter_opens: DashMap<EmitterName, usize, RandomState>,
     failed_ingestors: DashMap<String, (), RandomState>,
     unavailable_emitter_clients: DashMap<String, (), RandomState>,
     /// One-shot, emitter-scoped emitter stalls: the next write of the emitter keeps the emitter's answers
@@ -525,6 +528,7 @@ impl Default for FaultInjection {
                 orphaned_domain_pauses: orphaned_domain_pause::OrphanedDomainPauses::default(),
                 command_reply_scripts: DashMap::default(),
                 emitter_faults: DashMap::default(),
+                observed_emitter_opens: DashMap::default(),
                 failed_ingestors: DashMap::default(),
                 unavailable_emitter_clients: DashMap::default(),
                 stalled_emitter_connectors: DashMap::default(),

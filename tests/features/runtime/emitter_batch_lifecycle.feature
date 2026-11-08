@@ -213,7 +213,7 @@ Feature: Emitter batch lifecycle
       """
     Then within "10s" node "node-1" eventually reports materialized state for relay "settings" containing
       """
-      key={"tenant":"beta"} payload={"label":"beta-ready","tenant":"beta"}
+      {"branch":{"tenant":"beta"},"fields":{"label":"beta-ready","tenant":"beta"}}
       """
     When http payload is posted to host "batch-state-{{test_id}}.example.com" path "/settings"
       """
@@ -226,7 +226,7 @@ Feature: Emitter batch lifecycle
       """
     Then within "10s" node "node-1" eventually reports materialized state for relay "settings" containing
       """
-      key={"tenant":"acme"} payload={"label":"acme-later","tenant":"acme"}
+      {"branch":{"tenant":"acme"},"fields":{"label":"acme-later","tenant":"acme"}}
       """
     When these Plexus commands are executed on the leader node
       """
@@ -566,7 +566,7 @@ Feature: Emitter batch lifecycle
       """
     Then within "10s" node "node-1" eventually reports materialized state for relay "settings" containing
       """
-      key={"tenant":"acme"}
+      {"branch":{"tenant":"acme"},"fields":{"tenant":"acme","label":"ready"}}
       """
     When http payload is posted to host "batch-wait-expiry-{{test_id}}.example.com" path "/events"
       """

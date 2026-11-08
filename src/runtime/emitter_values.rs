@@ -596,18 +596,15 @@ impl MappedValuesProjection {
                 side_error.reason,
                 side_error.span
             );
-            rejected.push(RejectedEmitterRecord {
-                position: EmitterRecordPosition {
+            rejected.push(RejectedEmitterRecord::structured(
+                EmitterRecordPosition {
                     batch_index,
                     row_index: *row,
                 },
-                reason: String::new(),
-                structured_error: Some(self.program.structured_side_error(
-                    execution_now,
-                    reason,
-                    side_error.span,
-                )),
-            });
+                EmitterRejectionCode::Invalid,
+                self.program
+                    .structured_side_error(execution_now, reason, side_error.span),
+            ));
         }
         let columns = output
             .columns()
@@ -974,8 +971,7 @@ mod tests {
         assert_eq!(rejected.len(), 1);
         assert_eq!(rejected[0].position.row_index, 0);
         let error = rejected[0]
-            .structured_error
-            .as_ref()
+            .structured_error()
             .expect("a failed mapping carries its structured message error");
         assert_eq!(error.operation, MessageErrorOperation::Values);
         assert!(

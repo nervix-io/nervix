@@ -103,6 +103,15 @@ impl Outcome {
         Disposition::from(&self.outcome.disposition)
     }
 
+    /// Retain the typed report independently of this command outcome.
+    pub fn state_inspection(&self) -> Option<crate::Inspection> {
+        self.outcome
+            .state
+            .as_deref()
+            .cloned()
+            .map(crate::Inspection::new)
+    }
+
     pub fn command(&self) -> &CommandOutcome {
         &self.outcome
     }

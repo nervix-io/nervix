@@ -305,6 +305,11 @@ provides.
 | WASM runtime | The saved-state verdict of the guest-call failure, an invalid emission, or an exhausted execution limit | The stage the failure is reported under, whether rejected-state recovery starts, and whether the instance is discarded |
 | Restore conversion | An execution admission or staging refusal among the report's contexts | Release what the conversion holds and convert again within its wait for room |
 
+Emitter opening performs only local configuration and TLS preparation. `EmitterLifecycleError`
+names suspend, resume and close separately and retains the underlying typed report. A failed resume
+is transient and keeps the emitter instance for its next policy attempt. Readiness changes do not
+clear pending-work failures; only a successful publish or commit clears the host's task failure.
+
 Snapshot metadata and Arrow decoders refuse additional bulk scratch without queueing while they
 retain encoded input from that pool. The report preserves `AdmissionError` beneath the snapshot
 context, and refusal releases the input. A generator reports the failed read and tries a complete

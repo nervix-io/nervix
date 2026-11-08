@@ -49,6 +49,7 @@ pub struct CommandOutcome {
     pub inspection: Option<Box<TransactionInspection>>,
     /// State facts returned by `DESCRIBE WASM PROCESSOR`.
     pub wasm_state: Option<Box<nervix_models::WasmStateInspection>>,
+    pub state: Option<Box<nervix_client_wire::StateInspection>>,
     /// The versions, entries and bindings `DESCRIBE RESOURCE <name>` read, whichever text its
     /// message renders them as.
     pub resource: Option<Box<ResourceDescription>>,
@@ -109,6 +110,7 @@ impl CommandOutcome {
             transaction_admission: None,
             inspection: None,
             wasm_state: None,
+            state: None,
             resource: None,
             subscription: None,
             resource_upload: None,
@@ -246,6 +248,7 @@ impl From<wire::CommandOutcome> for CommandOutcome {
             transaction_admission: outcome.transaction_admission,
             inspection: outcome.inspection,
             wasm_state: outcome.wasm_state,
+            state: outcome.state,
             resource: outcome.resource,
             subscription: None,
             resource_upload: None,
