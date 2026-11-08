@@ -1414,8 +1414,14 @@ The phase records are the primary signal:
 | `warn` | `repeated termination signal received; abandoning graceful shutdown` |
 | `warn` | `shutdown deadline expired; abandoning graceful shutdown` |
 
-Drain decisions and failures are logged beside them: `stopping-node drain lost leadership; remaining
-work needs the next leader`, `preserving operator cordon across graceful
+An interrupted stopping-node drain logs at `info` with the stopping node's `node_id` and the
+original `report`: `stopping-node drain interrupted: <observation>; remaining work can be retried
+at the observed leader`. The typed observation names an unconfirmed lease and its term, a move to
+a known leader, or a move with no leader known yet. A lease refusal says the same leader may still
+lead. The stopping node waits 25 ms and observes the leader again, which may be that same node;
+the diagnostic does not promise a retry after the stopping node's deadline.
+
+Other drain decisions and failures are logged beside them: `preserving operator cordon across graceful
 shutdown`, `no live schedulable replacement node remains; admitted work completes in place`, `timed
 out reaching the leader before requesting a graceful shutdown drain`, `drained local node before
 graceful shutdown`, `failed to drain local node before graceful shutdown`, `the leader did not

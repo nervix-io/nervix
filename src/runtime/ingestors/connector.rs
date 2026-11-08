@@ -27,9 +27,9 @@ use nervix_connector::{
     IngestorAcknowledgementOutcome, IngestorAcknowledgementSupport, IngestorBatch,
     IngestorBatchAcknowledgement, IngestorBatchRequest, IngestorCapabilities, IngestorConnector,
     IngestorError, IngestorHost, IngestorHostServices, IngestorIntakeError, IngestorIntakeMessage,
-    IngestorIntakeResult, IngestorMessage, IngestorPlan, IngestorPoll, IngestorResume,
-    IngestorSettlement, PacedIngestorConnector, ParsedRetryPolicy, next_retry_delay,
-    physical_time::actual_utc_now,
+    IngestorIntakeResult, IngestorMessage, IngestorPlan, IngestorPoll, IngestorReadOutcome,
+    IngestorResume, IngestorSettlement, PacedIngestorConnector, ParsedRetryPolicy,
+    next_retry_delay, physical_time::actual_utc_now,
 };
 use nervix_models::{DomainClockPeriod, IngestAcknowledgement, PositionClass};
 use nervix_primitives::sync::CancellationToken;
@@ -439,6 +439,7 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         let host = RuntimeIngestorHost::new(RuntimeIngestorHostSpec {
+            kind: ingestor.declared_input.entity_kind(),
             handles: handles.clone(),
             runtime: self.clone(),
             domain: domain.clone(),
@@ -513,6 +514,7 @@ fn ingestor_failure_reason(error: &Report<IngestorError>) -> String {
 }
 
 pub(super) struct RuntimeIngestorHostSpec {
+    pub(super) kind: nervix_models::IngestorEntityKind,
     pub(super) handles: IngestTaskHandles,
     pub(super) runtime: Runtime,
     pub(super) domain: DomainName,
@@ -597,6 +599,7 @@ impl RuntimeIngestorHost {
                 &spec.ingestor,
                 spec.unit,
                 dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+                spec.kind,
             );
         let decode_rejections = DecodeRejections::new(
             spec.general_error_policy,
@@ -664,6 +667,7 @@ impl RuntimeIngestorHost {
             branched_senders: self.branched_senders.clone(),
             decode_rejections: self.decode_rejections.clone(),
             header_values_dropped: self.interactions.header_values_dropped.clone(),
+            unfolding_refused: self.interactions.unfolding_refused.clone(),
         }
     }
 
@@ -771,7 +775,7 @@ impl RuntimeIngestorHost {
             messages.len().max(1),
             self.metrics.clone(),
         );
-        let payloads = self
+        let decoded = self
             .runtime
             .decode_raw_ingest_payload(
                 &mut collector,
@@ -779,8 +783,14 @@ impl RuntimeIngestorHost {
                 &self.codec,
                 messages.iter().map(batch_payload),
             )
-            .await
-            .map_err(|refusal| refusal.change_context(IngestorIntakeError::Dispatch))?;
+            .await;
+        let payloads = match decoded {
+            Ok(payloads) => payloads,
+            Err(refusal) => {
+                self.count_refused(messages.len());
+                return Err(refusal.change_context(IngestorIntakeError::Dispatch));
+            }
+        };
 
         let ingested_at = actual_utc_now();
         let mut roots = BatchRoots::new(&self.ack_root_trackers, messages.len());
@@ -1050,7 +1060,7 @@ impl RuntimeIngestorHost {
         Ok(true)
     }
 
-    /// Counts `payloads` an unacknowledged intake did not deliver because the node's extension
+    /// Counts `payloads` an intake did not deliver because the node's extension
     /// workers had no room to unfold them.
     fn count_refused(&self, payloads: usize) {
         self.interactions
@@ -1098,6 +1108,14 @@ fn batch_payload<'a>(
 
 #[async_trait]
 impl IngestorHostServices for RuntimeIngestorHost {
+    fn record_read(&self, outcome: IngestorReadOutcome) {
+        self.interactions.reads.read(outcome);
+    }
+
+    fn record_read_payloads(&self, payloads: usize, bytes: u64) {
+        self.interactions.reads.payloads(payloads, bytes);
+    }
+
     async fn intake_unacknowledged(
         &mut self,
         messages: Vec<IngestorIntakeMessage<'_>>,
@@ -1341,6 +1359,7 @@ impl RuntimeIngestorHost {
     )
 )]
 trait PacedIngestorHostServices: IngestorHostServices {
+    fn record_poll(&self, outcome: IngestorReadOutcome, elapsed: Duration);
     /// Takes in the messages `poll` returned, in intake batches of at most `intake_batch`
     /// messages, each an ingest group of its own.
     async fn intake_poll(
@@ -1354,6 +1373,10 @@ trait PacedIngestorHostServices: IngestorHostServices {
 
 #[async_trait]
 impl PacedIngestorHostServices for RuntimeIngestorHost {
+    fn record_poll(&self, outcome: IngestorReadOutcome, elapsed: Duration) {
+        self.interactions.reads.poll(outcome, elapsed);
+    }
+
     async fn intake_poll(
         &mut self,
         poll: IngestorPoll,
@@ -1525,21 +1548,34 @@ async fn run_paced_ingestor<C, H, D>(
             continue;
         }
 
+        let started_at = Instant::now();
         let poll = nervix_primitives::select! {
             changed = shutdown.changed() => {
+                host.record_poll(IngestorReadOutcome::Interrupted, started_at.elapsed());
                 if changed.is_err() || *shutdown.borrow() {
                     break;
                 }
                 continue;
             }
             _ = host.wait_for_quiesce_change() => {
+                host.record_poll(IngestorReadOutcome::Interrupted, started_at.elapsed());
                 continue;
             }
             poll = connector.poll(due_at) => poll,
         };
+        let elapsed = started_at.elapsed();
         let poll = match poll {
-            Ok(poll) => poll,
+            Ok(poll) => {
+                let outcome = if poll.messages.is_empty() {
+                    IngestorReadOutcome::Empty
+                } else {
+                    IngestorReadOutcome::Delivered
+                };
+                host.record_poll(outcome, elapsed);
+                poll
+            }
             Err(error) => {
+                host.record_poll(IngestorReadOutcome::Failed, elapsed);
                 host.record_poll_error(format!("{error:#}"));
                 continue;
             }
@@ -1905,6 +1941,8 @@ async fn handle_batch<C>(
 where
     C: BrokerIngestorConnector,
 {
+    let bytes = raw_payload_bytes(messages.iter().map(|message| message.payload()));
+    host.record_read_payloads(messages.len(), bytes);
     let settlement = BatchSettlement {
         position_class: policy.position_class,
         retry_after,
@@ -2108,4 +2146,18 @@ impl Drop for RuntimeIngestorHost {
     fn drop(&mut self) {
         self.readiness.retire();
     }
+}
+
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(reason = "host-owned bounded payload iteration")
+)]
+fn raw_payload_bytes<'a>(payloads: impl Iterator<Item = &'a [u8]>) -> u64 {
+    let mut bytes = 0_u64;
+    for payload in payloads {
+        bytes = bytes
+            .checked_add(payload.len().arch_into())
+            .assured("the payload buffers of one transport batch fit the host address space");
+    }
+    bytes
 }

@@ -643,6 +643,7 @@ pub struct KafkaDomainOffsetDescribeEnvelope {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IngestorDescribeEnvelope {
+    pub source_metrics: Vec<String>,
     pub running: bool,
     pub ready: bool,
     pub quiesce_state: Option<String>,

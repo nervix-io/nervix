@@ -2402,7 +2402,10 @@ contract.
 
 An ingestor describe request carries its exact `Unit`. The receiver resolves the current owner
 for that unit and reports only its ingestor lifetime, readiness and transient state. The control
-plane composes the logical description from all scheduled unit owners.
+plane composes the logical description from all scheduled unit owners. The ingestor envelope
+also carries its complete ordered source-interaction metric lines, preserving the local counter
+and duration projection through remote inspection. The current wire fingerprint includes this
+required field.
 
 Entity-gate engagement and drain-status requests carry `EntityGateTargets`: complete logical
 entities for model changes, or exact `NodeUnitRef` units for ownership transfer. Lease identity

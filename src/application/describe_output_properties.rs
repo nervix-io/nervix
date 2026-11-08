@@ -204,7 +204,9 @@ impl<'a> Reports<'a> {
         };
         let kafka_domain_offsets = self.kafka_domain_offsets();
         let client_producers = self.client_producers();
+        let source_metrics = self.metrics();
         RuntimeIngestorDescribe {
+            source_metrics,
             running,
             ready,
             quiesce_state,

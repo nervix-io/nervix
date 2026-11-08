@@ -168,6 +168,7 @@ impl UnfoldingDomain {
         );
         self.entrypoints.extend(entrypoints.runtimes);
         RuntimeIngestorHost::new(RuntimeIngestorHostSpec {
+            kind: plan.ingestor.declared_input.entity_kind(),
             handles,
             runtime: self.runtime.clone(),
             domain: self.domain.clone(),
@@ -271,6 +272,25 @@ async fn a_poll_waits_for_the_extension_workers_when_the_node_cannot_unfold_it()
         (host, intake)
     });
     fixture.reach_unfolding().await;
+    let source = fixture
+        .runtime
+        .describe_local_ingestor(
+            &fixture.domain,
+            &fixture.ingestor,
+            Unit::SINGLE,
+            nervix_models::IngestorEntityKind::Http(nervix_models::HttpIngestorEntity::Endpoint),
+        )
+        .expect("the fixture's endpoint is running");
+    assert!(source.source_metrics.iter().any(|line| {
+        line.starts_with("nervix_ingestor_read_payloads_total{") && line.contains(" total=1 ")
+    }));
+    assert!(
+        source
+            .source_metrics
+            .iter()
+            .any(|line| line.starts_with("nervix_ingestor_read_bytes_total{")
+                && line.contains(" total=13 "))
+    );
     assert_eq!(
         fixture.executor.snapshot().extension_cpu.refused,
         0,
@@ -368,8 +388,13 @@ pub(super) fn quiesce_control(
     mode: IngestQuiesceMode,
 ) -> Arc<IngestorQuiesceControl> {
     let metrics = RuntimeMetrics::default();
-    let labels =
-        metrics.register_ingestor_quiesce(&fixture.domain, &fixture.ingestor, Unit::SINGLE, None);
+    let labels = metrics.register_ingestor_quiesce(
+        &fixture.domain,
+        &fixture.ingestor,
+        Unit::SINGLE,
+        None,
+        nervix_models::IngestorEntityKind::Http(nervix_models::HttpIngestorEntity::Endpoint),
+    );
     Arc::new(IngestorQuiesceControl::new(mode, metrics, labels))
 }
 
@@ -736,14 +761,15 @@ async fn an_acknowledged_batch_is_refused_for_redelivery_when_the_extension_work
     );
     assert_eq!(
         host.interactions.unfolding_refused.get(),
-        0,
-        "a batch its ingestor presents again is not counted as refused"
+        1,
+        "the refused unfolding is counted even though its transport can present the batch again"
     );
 
     filled.release().await;
     let mut acknowledgement = take_in_acknowledged(&mut host, 7)
         .await
         .expect("the extension workers have room for the batch presented again");
+    assert_eq!(host.interactions.unfolding_refused.get(), 1);
     assert_eq!(
         fixture.delivered_user_ids(1).await,
         vec![Some(RuntimeValue::I64(7))]

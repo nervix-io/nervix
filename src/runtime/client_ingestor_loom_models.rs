@@ -54,6 +54,9 @@ fn loom_a_client_batch_racing_a_quiesce_is_counted_by_its_drain_or_refused() {
             &ingestor,
             nervix_models::Unit::SINGLE,
             None,
+            nervix_models::IngestorEntityKind::Client(
+                nervix_models::ClientIngestorEntity::Producer,
+            ),
         );
         let control = Arc::new(IngestorQuiesceControl::new(
             IngestQuiesceMode::Suspend,
