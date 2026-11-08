@@ -750,9 +750,7 @@ and `frame.batch()` using each section's schema. `counts` describe the complete 
 datetime nanoseconds and bytes. `state.to_json()` and `state.display_text()` render the same value.
 
 The shared binding exposes `Outcome::state_inspection()` as an independently owned `Inspection`.
-It retains the envelope, lossless JSON, counts, section schemas and verified frame backing. The C
-ABI exposes `nx_outcome_inspection`, `nx_inspection_json`, `nx_inspection_counts`,
-`nx_inspection_schema`, `nx_inspection_row_frame` and `nx_inspection_free`. JSON and frame bytes
-borrow the inspection handle; schema handles are independently owned. Indices outside the result
-return an invalid-argument failure. Counts return false for a typed rejection. Release the inspection
-only after borrowed bytes are no longer used.
+It retains the envelope, lossless JSON, counts, section schemas and verified frame backing. C and
+C++ hosts read it through `nx_inspection`, which the
+[C and C++ Client Library](client-library-c.md#read-materialized-state) describes with a tested
+example.

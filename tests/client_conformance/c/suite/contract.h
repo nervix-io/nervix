@@ -31,6 +31,7 @@ SUITE_RELEASE(nx_execution, nx_execution_free)
 SUITE_RELEASE(nx_outcome, nx_outcome_free)
 SUITE_RELEASE(nx_schema, nx_schema_free)
 SUITE_RELEASE(nx_suggestions, nx_suggestions_free)
+SUITE_RELEASE(nx_inspection, nx_inspection_free)
 SUITE_RELEASE(nx_event, nx_event_release)
 SUITE_RELEASE(nx_clock_event, nx_clock_event_release)
 SUITE_RELEASE(nx_domain_clock, nx_domain_clock_release)
@@ -1091,6 +1092,91 @@ static void test_completion_pages_have_utf8_byte_ranges(void) {
     // ANCHOR_END: completion_pages
 }
 
+static bool suite_contains(const uint8_t *data, size_t length, const char *text) {
+    size_t wanted = strlen(text);
+    for (size_t at = 0; wanted <= length && at <= length - wanted; ++at) {
+        if (memcmp(data + at, text, wanted) == 0) return true;
+    }
+    return false;
+}
+
+/* Rows reach a materialized relay's owner after their submission completes, so a read polls,
+ * bounded at 30 seconds, until the owner reports the expected count. */
+static void suite_await_state_rows(nx_session *session, const char *show, uint64_t expected) {
+    for (int attempt = 0; attempt < 120; ++attempt) {
+        size_t mark = suite_mark();
+        nx_outcome *outcome = suite_completed(session, show);
+        nx_inspection *inspection = NULL;
+        suite_check(nx_outcome_inspection(outcome, &inspection));
+        HOLD(nx_inspection, inspection);
+        uint64_t branches = 0, rows = 0, bytes = 0;
+        bool page = nx_inspection_counts(inspection, &branches, &rows, &bytes);
+        suite_cleanup_to(mark);
+        REQUIRE(page);
+        if (rows == expected) return;
+        struct timespec pause = {0, 250000000};
+        nanosleep(&pause, NULL);
+    }
+    suite_require(false, "the materialized state reached its owner within 30 seconds");
+}
+
+static void test_inspection_retains_typed_state_after_its_outcome_is_released(void) {
+    nx_session *session = suite_connect(NULL, NULL);
+    nx_outcome *created = suite_completed(session,
+        "CREATE RELAY c_state SCHEMA suite_row UNBRANCHED WITH MATERIALIZED STATE LAST BY TIMESTAMP;");
+    suite_completed(session,
+        "CREATE CLIENT PRODUCER INGESTOR c_state_in FROM SCHEMA suite_row "
+        "MODE ACK SEQUENTIAL ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s ON QUIESCE SUSPEND "
+        "TIMESTAMP NOW TO c_state INHERIT ALL UNBRANCHED "
+        "FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;");
+    nx_producer *producer = suite_producer(session, "c_state_in");
+    uint64_t submission = suite_submit(producer, suite_build(producer, 1901));
+    REQUIRE(nx_submission_outcome_result(suite_rejoin(producer, submission)) == NX_SUBMISSION_COMPLETED);
+    suite_check(nx_producer_close(producer, suite_deadline(120000)));
+    const char *show = "SHOW RELAY c_state MATERIALIZED STATE FOR UNBRANCHED LIMIT 10 FORMAT JSON;";
+    suite_await_state_rows(session, show, 1);
+    // ANCHOR: inspection
+    nx_outcome *outcome = suite_completed(session, show);
+    nx_inspection *inspection = NULL;
+    suite_check(nx_outcome_inspection(outcome, &inspection));
+    HOLD(nx_inspection, inspection);
+    suite_drop(outcome); /* The inspection keeps what it read after its outcome is released. */
+    uint64_t branches = 0, rows = 0, bytes = 0;
+    REQUIRE(nx_inspection_counts(inspection, &branches, &rows, &bytes)); /* false when refused */
+    REQUIRE(branches == 0 && rows == 1 && bytes > 0); /* one row: the last of an unbranched relay */
+    const uint8_t *json = NULL;
+    size_t json_len = 0;
+    nx_inspection_json(inspection, &json, &json_len);
+    REQUIRE(json_len > 0 && json[0] == '{' && suite_contains(json, json_len, "\"c_state\""));
+    nx_schema *schema = NULL;
+    suite_check(nx_inspection_schema(inspection, 0, 0, &schema));
+    HOLD(nx_schema, schema);
+    const uint8_t *frame = NULL;
+    size_t frame_len = 0;
+    suite_check(nx_inspection_row_frame(inspection, 0, 0, 0, &frame, &frame_len));
+    REQUIRE(frame_len > 8 && memcmp(frame + 4, "NXRB", 4) == 0); /* a verified Row batch */
+    // ANCHOR_END: inspection
+    suite_kind(nx_inspection_row_frame(inspection, 0, 0, 1, &frame, &frame_len),
+               NX_ERROR_INVALID_ARGUMENT);
+    suite_drop(inspection);
+    size_t fields = 0;
+    suite_check(nx_schema_field_count(schema, NX_PART_ROWS, &fields)); /* owned past the inspection */
+    REQUIRE(fields == 13); /* suite_row's eleven fields, then the low and high ingestion watermarks */
+
+    nx_outcome *refused = suite_execute(session, "SHOW RELAY c_absent MATERIALIZED STATE FORMAT JSON;");
+    REQUIRE(nx_outcome_disposition(refused) == NX_DISPOSITION_FAILED);
+    nx_inspection *rejection = NULL;
+    suite_check(nx_outcome_inspection(refused, &rejection));
+    HOLD(nx_inspection, rejection);
+    REQUIRE(!nx_inspection_counts(rejection, &branches, &rows, &bytes));
+    nx_schema *absent = NULL;
+    suite_kind(nx_inspection_schema(rejection, 0, 0, &absent), NX_ERROR_INVALID_ARGUMENT);
+    REQUIRE(absent == NULL);
+    nx_inspection *none = NULL;
+    suite_kind(nx_outcome_inspection(created, &none), NX_ERROR_INVALID_ARGUMENT);
+    REQUIRE(none == NULL);
+}
+
 static void test_b7_subscription_gap_end_and_variant_accessors(void) {
     nx_session *publishing = suite_connect(NULL, NULL);
     struct suite_peer *peer = NULL;
@@ -1880,6 +1966,7 @@ static void test_b1_cancel_an_admitted_commit_and_recover_its_recorded_outcome(v
     {"cluster", "test_b5_calls_run_on_native_host_threads", test_b5_calls_run_on_native_host_threads}, \
     {"cluster", "test_b6_columns_use_size_queries_and_pointer_lengths", test_b6_columns_use_size_queries_and_pointer_lengths}, \
     {"cluster", "test_completion_pages_have_utf8_byte_ranges", test_completion_pages_have_utf8_byte_ranges}, \
+    {"cluster", "test_inspection_retains_typed_state_after_its_outcome_is_released", test_inspection_retains_typed_state_after_its_outcome_is_released}, \
     {"cluster", "test_b7_subscription_gap_end_and_variant_accessors", test_b7_subscription_gap_end_and_variant_accessors}, \
     {"cluster", "test_b7_refused_subscription_restoration_reports_its_cause_and_recovers", test_b7_refused_subscription_restoration_reports_its_cause_and_recovers}, \
     {"cluster", "test_b8_backup_recovers_under_its_execution_reference", test_b8_backup_recovers_under_its_execution_reference}, \

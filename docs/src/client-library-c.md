@@ -73,6 +73,24 @@ Cancellation ends a wait; it does not roll back a transaction the server already
 suite holds an admitted commit behind an unsettled delivery, cancels its wait, then recovers it
 through the same execution and checks the resulting configuration.
 
+### Read Materialized State
+
+`SHOW RELAY <relay> MATERIALIZED STATE` returns its typed result with the command's outcome.
+`nx_outcome_inspection` retains that result as an `nx_inspection` you own: it outlives the outcome
+and is released with `nx_inspection_free`. `nx_inspection_counts` reads the branches, rows and bytes
+of the complete selected cut, and returns false for a refused read, whose outcome is a failed
+disposition that still carries the inspection and its reason. `nx_inspection_json` borrows one
+lossless JSON document of the whole result, `nx_inspection_schema` returns an owned schema for one
+section of a unit, and `nx_inspection_row_frame` borrows one verified `NXRB` Row batch frame of that
+section. Borrowed bytes stay valid until the inspection is released, and an index outside the result
+fails with `NX_ERROR_INVALID_ARGUMENT`. [Reading Typed Materialized
+State](client-implementation-manual.md#reading-typed-materialized-state) states what a client must
+preserve.
+
+```c
+{{#include ../../tests/client_conformance/c/suite/contract.h:inspection}}
+```
+
 ## Complete A Statement
 
 `nx_session_suggest` takes the input and cursor, then returns replacement ranges and candidates.

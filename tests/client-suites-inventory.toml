@@ -600,6 +600,11 @@ tier = "cluster"
 
 [[test]]
 host = "c"
+identity = "test_inspection_retains_typed_state_after_its_outcome_is_released"
+tier = "cluster"
+
+[[test]]
+host = "c"
 identity = "test_b7_subscription_gap_end_and_variant_accessors"
 tier = "cluster"
 
@@ -713,6 +718,11 @@ tier = "cluster"
 [[test]]
 host = "cpp"
 identity = "test_completion_pages_have_utf8_byte_ranges"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_inspection_retains_typed_state_after_its_outcome_is_released"
 tier = "cluster"
 
 [[test]]
