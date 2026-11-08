@@ -10,6 +10,8 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
+use nervix_connector::EmitterConnector as _;
+
 use super::*;
 
 const _: () = assert!(matches!(
@@ -18,20 +20,21 @@ const _: () = assert!(matches!(
 ));
 
 impl EmitterConnectorStarter {
-    pub(super) fn http(
+    pub(super) async fn http(
         connector: &HttpRequestEmitterPlan,
         context: &EmitterConnectorContext,
         codec: Option<&Arc<CompiledCodec>>,
     ) -> EmitterRuntimeResult<Box<dyn EmitterConnector>> {
         let opened = Self::http_request(
             codec,
-            HttpRequestEmitter::new(
+            HttpRequestEmitter::open(
                 HttpRequestEmitterConfig {
                     config: connector.client.config.entries.clone(),
                     dns: context.dns()?,
                 },
                 context.emitter_host(),
-            ),
+            )
+            .await,
         )?;
         Ok(opened)
     }

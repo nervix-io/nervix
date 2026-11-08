@@ -241,16 +241,19 @@ fn both_directions_leave_every_retry_to_the_host() {
     let with_timeout = PulsarClientConnection::new(&[], Some(Duration::from_secs(7)));
     assert_eq!(PulsarClientConnection::connection_retries().max_retries, 0);
     for connection in [&without_timeout, &with_timeout] {
-        let operations = connection.operation_retries();
+        let operations =
+            PulsarClientConnection::operation_retry_options(connection.operation_timeout);
         assert_eq!(operations.max_retries, Some(0));
         assert!(!operations.allow_retry(0));
     }
     assert_eq!(
-        without_timeout.operation_retries().operation_timeout,
+        PulsarClientConnection::operation_retry_options(without_timeout.operation_timeout)
+            .operation_timeout,
         OperationRetryOptions::default().operation_timeout
     );
     assert_eq!(
-        with_timeout.operation_retries().operation_timeout,
+        PulsarClientConnection::operation_retry_options(with_timeout.operation_timeout)
+            .operation_timeout,
         Duration::from_secs(7)
     );
 }

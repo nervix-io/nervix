@@ -10,6 +10,8 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
+use nervix_connector::EmitterConnector as _;
+
 use super::*;
 
 const _: () = assert!(matches!(
@@ -31,13 +33,14 @@ impl EmitterConnectorStarter {
                 label,
                 codec,
                 batch,
-                RedisPubSubEmitter::new(
+                RedisPubSubEmitter::open(
                     RedisPubSubEmitterConfig {
                         pool,
                         channel: connector.channel.clone(),
                     },
                     context.emitter_host(),
-                ),
+                )
+                .await,
             )?
         };
         Ok(opened)

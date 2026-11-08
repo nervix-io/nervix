@@ -128,6 +128,7 @@ impl PublishScript {
 
 /// Everything this fixture was handed, kept under the boundary's original types.
 pub struct EmitterObservations<W> {
+    pub lifecycle: Vec<EmitterLifecycleOperation>,
     pub writes: Vec<W>,
     pub preparations: usize,
     pub finishes: Vec<Instant>,
@@ -137,12 +138,22 @@ pub struct EmitterObservations<W> {
 impl<W> Default for EmitterObservations<W> {
     fn default() -> Self {
         Self {
+            lifecycle: Vec::new(),
             writes: Vec::new(),
             preparations: 0,
             finishes: Vec::new(),
             commits: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmitterLifecycleOperation {
+    Open,
+    Suspend,
+    Resume,
+    Finish,
+    Close,
 }
 
 impl EmitterObservations<Vec<EmitterRecord>> {
@@ -342,6 +353,9 @@ pub struct FakeEmitter<F: EmitterFamily> {
     pub preparation: F::Preparation,
     pub finish_results: VecDeque<EmitterFinishResult>,
     pub commit_errors: VecDeque<Report<EmitterWriteError>>,
+    pub resume_results: VecDeque<EmitterLifecycleResult<EmitterResume>>,
+    pub resume_started: Option<Arc<nervix_primitives::sync::Notify>>,
+    pub resume_gate: Option<Arc<nervix_primitives::sync::Notify>>,
     staging: Option<Staging>,
     family: PhantomData<F>,
 }
@@ -355,6 +369,9 @@ impl<F: EmitterFamily> FakeEmitter<F> {
             staging: None,
             finish_results: VecDeque::new(),
             commit_errors: VecDeque::new(),
+            resume_results: VecDeque::new(),
+            resume_started: None,
+            resume_gate: None,
             family: PhantomData,
         }
     }
@@ -401,10 +418,88 @@ impl<F: EmitterFamily> FakeEmitter<F> {
     }
 }
 
+impl<F: EmitterFamily> EmitterConnector for FakeEmitter<F> {
+    const KIND: EmitterEntityKind = F::KIND;
+    type Plan = Self;
+
+    async fn open(plan: Self::Plan, _host: EmitterHost) -> EmitterStartResult<Self> {
+        plan.observations
+            .lock()
+            .lifecycle
+            .push(EmitterLifecycleOperation::Open);
+        Ok(plan)
+    }
+}
+
 #[async_trait]
 impl<F: EmitterFamily> EmitterLifecycle for FakeEmitter<F> {
     fn kind(&self) -> EmitterEntityKind {
         F::KIND
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the harness appends one lifecycle observation to this emitter's trace",
+            key = "one fake emitter observation log",
+            bound = "one event append under one mutex guard; the guard ends before any scripted \
+                     wait"
+        )
+    )]
+    fn suspend(&mut self) -> nervix_connector::EmitterLifecycleStep<'_, ()> {
+        self.observations
+            .lock()
+            .lifecycle
+            .push(EmitterLifecycleOperation::Suspend);
+        nervix_connector::EmitterLifecycleStep::ready(Ok(()))
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the harness appends one lifecycle observation to this emitter's trace",
+            key = "one fake emitter observation log",
+            bound = "one event append under one mutex guard; the guard ends before any scripted \
+                     wait"
+        )
+    )]
+    fn resume(&mut self) -> nervix_connector::EmitterLifecycleStep<'_, EmitterResume> {
+        nervix_connector::EmitterLifecycleStep::run(async move {
+            self.observations
+                .lock()
+                .lifecycle
+                .push(EmitterLifecycleOperation::Resume);
+            if let Some(started) = &self.resume_started {
+                started.notify_one();
+            }
+            if let Some(gate) = &self.resume_gate {
+                gate.notified().await;
+            }
+            match self.resume_results.pop_front() {
+                Some(result) => result,
+                None => Ok(EmitterResume::Ready),
+            }
+        })
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the harness appends one lifecycle observation to this emitter's trace",
+            key = "one fake emitter observation log",
+            bound = "one event append under one mutex guard; the guard ends before any scripted \
+                     wait"
+        )
+    )]
+    fn close(&mut self) -> nervix_connector::EmitterLifecycleStep<'_, ()> {
+        self.observations
+            .lock()
+            .lifecycle
+            .push(EmitterLifecycleOperation::Close);
+        nervix_connector::EmitterLifecycleStep::ready(Ok(()))
     }
 
     #[cfg_attr(
@@ -418,7 +513,13 @@ impl<F: EmitterFamily> EmitterLifecycle for FakeEmitter<F> {
         )
     )]
     async fn finish(&mut self, deadline: Instant) -> EmitterFinishResult {
-        self.observations.lock().finishes.push(deadline);
+        {
+            let mut observations = self.observations.lock();
+            observations
+                .lifecycle
+                .push(EmitterLifecycleOperation::Finish);
+            observations.finishes.push(deadline);
+        }
         match self.finish_results.pop_front() {
             Some(result) => result,
             None => {

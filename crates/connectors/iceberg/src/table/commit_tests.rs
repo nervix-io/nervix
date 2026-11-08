@@ -219,12 +219,13 @@ async fn fixture_emitter(catalog: StdArc<dyn Catalog>, executor: Executor) -> Ic
     let table = create_table(catalog.as_ref()).await;
     IcebergTableEmitter {
         host: nervix_connector_fake::FakeEmitterHost::on(executor.clone()).host(),
-        client: IcebergTableEmitterClient {
+        client: Some(IcebergTableEmitterClient {
             catalog,
             table,
             file_name_prefix: "commit-memory".to_string(),
             data_file_sequence: 0,
-        },
+        }),
+        prepared: None,
         commit_state: IcebergCommitState::default(),
         staged_schema: IcebergTableEmitter::staged_arrow_schema(&mapped_schema())
             .assured("the fixture's mapped columns are distinct"),
@@ -653,7 +654,12 @@ async fn a_table_that_declares_an_encryption_key_refuses_the_commit_and_keeps_it
         )
     );
     assert_eq!(
-        connector.client.data_file_sequence, 0,
+        connector
+            .client
+            .as_ref()
+            .assured("the fixture client is connected")
+            .data_file_sequence,
+        0,
         "a refused table receives no data file"
     );
     assert_eq!(

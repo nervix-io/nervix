@@ -32,7 +32,7 @@ use nervix_primitives::{
 use nervix_recovery::Discarded as _;
 use thiserror::Error;
 
-use super::{AnsweredMessage, ConfirmedStop, RABBITMQ, RabbitMqMessage, RabbitMqPublisher};
+use super::{AnsweredMessage, ConfirmedStop, RABBITMQ, RabbitMqChannel, RabbitMqMessage};
 
 #[cfg(all(test, not(feature = "shuttle")))]
 #[cfg_attr(
@@ -197,15 +197,15 @@ where
         let timeout = self.settings.timeout;
         match self.read().await {
             WindowEnd::Answered(answered) => {
-                let attribution = RabbitMqPublisher::settle_answered(exchange, &answered, outcome)
+                let attribution = RabbitMqChannel::settle_answered(exchange, &answered, outcome)
                     .map_err(ConfirmedStop::Failed)?;
                 attribution.require_decided().map_err(ConfirmedStop::Failed)
             }
             WindowEnd::TimedOut(answered) => {
-                RabbitMqPublisher::settle_answered(exchange, &answered, outcome)
+                RabbitMqChannel::settle_answered(exchange, &answered, outcome)
                     .map_err(ConfirmedStop::Failed)?;
                 Err(ConfirmedStop::Failed(
-                    RabbitMqPublisher::confirm_timeout_error(timeout),
+                    RabbitMqChannel::confirm_timeout_error(timeout),
                 ))
             }
             WindowEnd::ChannelLost { source, answered } => Err(ConfirmedStop::ChannelLost {
@@ -259,7 +259,7 @@ impl ReturnedRecord<'_> {
             outcome.reject(
                 self.message
                     .record
-                    .rejected(RabbitMqPublisher::returned_message_reason(returned)),
+                    .rejected(RabbitMqChannel::returned_message_reason(returned)),
             );
             return Ok(PositiveAnswerAttribution::Decided);
         }
@@ -302,7 +302,7 @@ impl RabbitMqConfirmationError {
     }
 }
 
-impl RabbitMqPublisher {
+impl RabbitMqChannel {
     /// At most one window's messages, each settled once. Returned-message attachment and the
     /// publisher acknowledgement are independent facts; only message content attributes a return.
     pub(super) fn settle_answered(

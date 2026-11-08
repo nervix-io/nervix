@@ -61,7 +61,7 @@ Feature: Shared database client pools
       """
     And Postgres never reports more than 2 connections for application "nervix_shared_{{test_id}}"
 
-  @retained_task_handles
+  @retained_task_handles @emitter_outcomes
   Scenario: A borrower waiting on a full pool reports the wait and recovers
     Given Postgres table "contended_pool_out_{{test_id}}" exists
     When these Plexus commands are executed
@@ -106,11 +106,20 @@ Feature: Shared database client pools
       """
       waiting for a connection from client 'postgres_contended'
       """
+    And the last command output emitter is saved as placeholder "waiting_emitter"
     And Postgres never reports more than 1 connections for application "nervix_contended_{{test_id}}"
     When the Postgres table lock is released
     Then the Postgres table eventually contains a row
       """
       {"postgres_user_id":2,"postgres_action":"open"}
+      """
+    And node "node-1" observability metric "nervix_emitter_pool_waits_total" with labels eventually reaches at least 1
+      """
+      emitter="{{waiting_emitter}}"
+      """
+    And node "node-1" observability metric "nervix_emitter_pool_wait_seconds_total" with labels eventually becomes positive
+      """
+      emitter="{{waiting_emitter}}"
       """
 
   @retained_task_handles

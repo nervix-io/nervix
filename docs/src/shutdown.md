@@ -934,6 +934,11 @@ holds nothing once a publish returns, so the publish itself is the
 completion point. [Finishing an emitter](./connector-contract.md#finishing-an-emitter) lists what each emitter
 holds and does.
 
+The emitter's instance survives every transient failure, including while draining. The host suspends
+and resumes its transport with the same retained acknowledgements and stop deadline, then retries
+the unresolved work. Only after the terminal finish outcome does it call close, bounded by the task
+shutdown grace. An unsuccessful stop leaves the running instance available for another drain.
+
 An emitter that stages what it accepts and publishes it later reaches its completion point at its
 commit instead. After the buffered batches are written into such an emitter, the drain calls the emitter
 contract's commit hook and forces it, so the commit runs whatever its commit cadence says and

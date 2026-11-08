@@ -358,7 +358,7 @@ async fn emitter_with(
             value: "true".to_string(),
         });
     }
-    HttpRequestEmitter::open(HttpRequestEmitterConfig {
+    HttpRequestEmitter::prepare_client(HttpRequestEmitterConfig {
         config: declared,
         dns,
     })
@@ -852,10 +852,6 @@ async fn a_refused_connection_keeps_its_cause_and_the_emitter_keeps_its_client()
         occurred_at: Timestamp::from_unix_nanos(1),
     };
     let mut connector = emitter_with(Redirects::Refused, None, None).await;
-    assert!(
-        connector.keeps_client_on_publish_failure(),
-        "a retry sends the pending request through the same emitter"
-    );
 
     let outcome = connector.publish(vec![request]).await.into_parts();
 
@@ -914,7 +910,7 @@ async fn emitter_resolving_through(
     .await
     .assured("the test's resolver configuration is valid");
     let timeout_ms = timeout.as_millis().to_string();
-    let connector = HttpRequestEmitter::open(HttpRequestEmitterConfig {
+    let connector = HttpRequestEmitter::prepare_client(HttpRequestEmitterConfig {
         config: vec![ClientConfigEntry {
             key: "timeout_ms".to_string(),
             value: timeout_ms,
