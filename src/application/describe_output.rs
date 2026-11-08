@@ -30,7 +30,7 @@ use nervix_models::{
     CreateReorderer, CreateWindowProcessor, EmitterBody, EmitterPayloadPresentation, FieldPath,
     HeaderModel, IcebergTableEmitter, IngestTimestampSource, IngestorEntity, IngestorInput,
     KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, Model, ModelKind, ModelName, NodeRef,
-    NodeUnitRef, PlacementName, PlacementPolicy, ProcessorInputs, ProcessorOutputs, RelayName,
+    NodeUnitRef, PlacementName, PlacementPolicy, ProcessorInputs, ProcessorOutputs,
     RequestedResourceVersion, ResourceDescription, ResourceEntryContent, ResourceManifestEntry,
     ResourceUsage, ResourceVersionEntries, ScheduledNode, Unit, WasmStateInspection,
     WasmUnitStateInspection, expression_to_plexus,
@@ -1365,27 +1365,6 @@ pub(in crate::application) fn format_resource_usage_lines(usages: &[ResourceUsag
         ));
     }
     lines
-}
-
-pub(in crate::application) fn format_materialized_stream_state_output(
-    relay: &RelayName,
-    scheduled_node: &ScheduledNode,
-    entries: Vec<String>,
-) -> String {
-    let mut lines = vec![
-        format!("materialized relay: {}", relay.as_str()),
-        "kind: RELAY".to_string(),
-    ];
-    lines.extend(format_schedule_placement_lines(Some(scheduled_node)));
-    if entries.is_empty() {
-        lines.push(format!(
-            "relay '{}' materialized state is empty",
-            relay.as_str()
-        ));
-    } else {
-        lines.extend(entries);
-    }
-    lines.join("\n")
 }
 
 fn format_window_aggregate_demand(

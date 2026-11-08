@@ -4,11 +4,13 @@
 //! May depend on: the production interconnect, shared simulation driver and Arrow fixtures.
 //! Must not know: server graphs, materialized snapshot decoding or disk durability.
 
+use error_stack::Report;
 use futures_util::stream;
 use nervix_interconnect::{
-    FetchStateCheckpoint, StateCheckpointRead, StreamHandlerError, StreamingResponse,
+    FetchStateCheckpoint, IncomingByteStream, ReadMaterializedStatePage, RequestError,
+    StateCheckpointRead, StreamHandlerError, StreamingResponse,
 };
-use nervix_models::{RemoteRuntimeField, RemoteRuntimeValue};
+use nervix_models::{RemoteRuntimeField, RemoteRuntimeValue, StateInspectionBranchSelection, Unit};
 
 use super::*;
 
@@ -104,6 +106,40 @@ fn serve(transport: &Transport, revision: u64) {
             }
         })
         .assured("one typed checkpoint stream handler per owner lifetime");
+    let executor = Executor::default();
+    transport
+        .register_stream_handler::<ReadMaterializedStatePage, _, _>(move |context, request| {
+            let executor = executor.clone();
+            async move {
+                assert_eq!(context.peer_node_id().as_str(), "client");
+                assert_eq!(request.control_revision, revision);
+                assert_eq!(request.unit, Unit::SINGLE);
+                assert_eq!(request.schema, SchemaFingerprint::from_digest([7; 32]));
+                assert_eq!(request.max_rows, 3);
+                assert_eq!(request.selection, StateInspectionBranchSelection::All);
+                let payload = large_arrow_batch();
+                assert!(u64::try_from(payload.len()).assured("fixture size") <= request.max_bytes);
+                let bytes = executor
+                    .charge_owned(MemoryClass::Bulk, payload)
+                    .await
+                    .map_err(StreamHandlerError::with_cause)?;
+                Ok(StreamingResponse::new(
+                    u64::try_from(bytes.len()).assured("fixture size"),
+                    stream::unfold((bytes, 0), |(bytes, offset)| async move {
+                        if offset >= bytes.len() {
+                            return None;
+                        }
+                        if offset != 0 {
+                            nervix_primitives::time::sleep(Duration::from_millis(2)).await;
+                        }
+                        let end = offset.saturating_add(64 * 1024).min(bytes.len());
+                        let chunk = bytes.slice(offset, end).assured("bounded fixture chunk");
+                        Some((Ok(chunk), (bytes, end)))
+                    }),
+                ))
+            }
+        })
+        .assured("one inspection page handler per owner lifetime");
     transport.replace_live_nodes(&BTreeSet::from([
         ClusterNodeName::parse("server").assured("valid fixture node"),
         ClusterNodeName::parse("client").assured("valid fixture node"),
@@ -140,6 +176,64 @@ fn materialized_branch_state_transfers_reconnect_to_the_replacement_owner() {
 }
 
 fn exchange(run: ScenarioRun) -> Result<(), SimulationError> {
+    exchange_operation(run, false)
+}
+
+#[test]
+fn materialized_inspection_pages_recover_after_partition_and_lost_stream_chunks() {
+    Scenario {
+        name: "bounded materialized inspection page",
+        fault_plan: "lose a page stream's remaining chunks under partition, repair, replace the \
+                     transport, then read a bounded page again",
+        seeds: &[51],
+    }
+    .check(checkpoint_config, |run| exchange_operation(run, true));
+}
+
+async fn open_state_stream(
+    client: &Transport,
+    peer: &ClusterNodeName,
+    revision: u64,
+    tenant: &str,
+    page: bool,
+) -> Result<IncomingByteStream, Report<RequestError>> {
+    if page {
+        client
+            .request_stream_with_timeout(
+                peer,
+                ReadMaterializedStatePage {
+                    domain: DomainName::parse("simulated").assured("fixture domain"),
+                    relay: RelayName::parse("profiles").assured("fixture relay"),
+                    unit: Unit::SINGLE,
+                    control_revision: revision,
+                    schema: SchemaFingerprint::from_digest([7; 32]),
+                    selection: StateInspectionBranchSelection::All,
+                    after: None,
+                    max_rows: 3,
+                    max_bytes: 4 * 1024 * 1024,
+                    target: ClusterNodeIdentity::new(
+                        peer.clone(),
+                        ClusterNodeIncarnation::new(revision),
+                    ),
+                },
+                Duration::from_secs(10),
+            )
+            .await
+    } else {
+        client
+            .request_stream(
+                peer,
+                FetchStateCheckpoint {
+                    placement: placement(tenant),
+                    lsm: revision,
+                    read: StateCheckpointRead::Published,
+                },
+            )
+            .await
+    }
+}
+
+fn exchange_operation(run: ScenarioRun, page: bool) -> Result<(), SimulationError> {
     let seed = run.seed();
     let authority = Authority::new();
     let server_credentials = authority.issue("server");
@@ -246,16 +340,10 @@ fn exchange(run: ScenarioRun) -> Result<(), SimulationError> {
                             let mut body =
                                 nervix_primitives::time::timeout(Duration::from_secs(90), async {
                                     loop {
-                                        let opened = client
-                                            .request_stream(
-                                                &peer,
-                                                FetchStateCheckpoint {
-                                                    placement: placement(tenant),
-                                                    lsm: snapshot.lsm,
-                                                    read: StateCheckpointRead::Published,
-                                                },
-                                            )
-                                            .await;
+                                        let opened = open_state_stream(
+                                            &client, &peer, revision, tenant, page,
+                                        )
+                                        .await;
                                         match opened {
                                             Ok(body) => break body,
                                             Err(_) if revision == 2 => {
@@ -297,17 +385,10 @@ fn exchange(run: ScenarioRun) -> Result<(), SimulationError> {
                         if revision == 1 {
                             let snapshot =
                                 fault_snapshot.assured("the first branch was transferred");
-                            let mut interrupted = client
-                                .request_stream(
-                                    &peer,
-                                    FetchStateCheckpoint {
-                                        placement: placement("acme"),
-                                        lsm: snapshot.lsm,
-                                        read: StateCheckpointRead::Published,
-                                    },
-                                )
-                                .await
-                                .assured("the checkpoint stream opens before the fault");
+                            let mut interrupted =
+                                open_state_stream(&client, &peer, snapshot.lsm, "acme", page)
+                                    .await
+                                    .assured("the checkpoint stream opens before the fault");
                             let first = interrupted
                                 .next_chunk()
                                 .await

@@ -165,6 +165,7 @@ fn foreign_execution_reply(request_id: RequestId) -> EncodedFrame<ServerFrame> {
             transaction_admission: None,
             inspection: None,
             wasm_state: None,
+            state: None,
             resource: None,
             backup: None,
             restore: None,

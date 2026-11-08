@@ -2,7 +2,7 @@
   "as_casts": 3,
   "files_over_3000_lines": 8,
   "functions_over_complexity_30": 117,
-  "hidden_tunables": 846,
+  "hidden_tunables": 845,
   "non_aws_lc_crypto": 81,
   "testing_feature_struct_fields": 0
 }

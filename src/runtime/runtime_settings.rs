@@ -54,6 +54,7 @@ impl SettingDefinition for RestoreStagingMaxBytes {
 /// The settings one runtime is constructed with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeSettings {
+    pub inspection: super::StateInspectionSettings,
     pub state_snapshot_interval: Setting<StateSnapshotInterval>,
     pub restore_staging_max_bytes: Setting<RestoreStagingMaxBytes>,
 }
@@ -65,6 +66,7 @@ impl RuntimeSettings {
         restore_staging_max_bytes: Option<ByteUnit>,
     ) -> Result<Self, Report<nervix_models::ClusterParameterError>> {
         Ok(Self {
+            inspection: super::StateInspectionSettings::default(),
             state_snapshot_interval: Setting::resolve(state_snapshot_interval, &())?,
             restore_staging_max_bytes: Setting::new(restore_staging_max_bytes, &())
                 .assured("the local restore capability accepts every optional byte bound"),

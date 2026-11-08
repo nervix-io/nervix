@@ -1,0 +1,4 @@
+include "session.fbs";
+namespace nervix.session;
+root_type RowBatch;
+file_identifier "NXRB";

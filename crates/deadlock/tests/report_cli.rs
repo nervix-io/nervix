@@ -125,7 +125,23 @@ fn local_report_selection_preserves_evidence_and_review_requires_complete_proof(
     let reviewed = root.path().join("reviewed.rkyv");
     let output_path = reviewed.to_str().assured("test path is UTF-8");
     for basis in ["correction", "non-overlap", "lifecycle"] {
-        run(&path, "triage", &["--finding", "0", "--basis", basis, "--reason", "Owner review supplies the disposition; evidence is retained", "--regression", "report_cli::local_report_selection_preserves_evidence_and_review_requires_complete_proof", "--output", output_path], 0);
+        run(
+            &path,
+            "triage",
+            &[
+                "--finding",
+                "0",
+                "--basis",
+                basis,
+                "--reason",
+                "Owner review supplies the disposition; evidence is retained",
+                "--regression",
+                "report_cli::local_report_selection_preserves_evidence_and_review_requires_complete_proof",
+                "--output",
+                output_path,
+            ],
+            0,
+        );
         let qualified = run(&reviewed, "qualify", &[], 0);
         assert!(
             String::from_utf8_lossy(&qualified.stdout).contains(
@@ -136,7 +152,23 @@ fn local_report_selection_preserves_evidence_and_review_requires_complete_proof(
             String::from_utf8_lossy(&qualified.stdout)
         );
     }
-    run(&path, "triage", &["--finding", "0", "--basis", "shared-readers", "--reason", "exclusive access is present", "--regression", "report_cli::local_report_selection_preserves_evidence_and_review_requires_complete_proof", "--output", output_path], 4);
+    run(
+        &path,
+        "triage",
+        &[
+            "--finding",
+            "0",
+            "--basis",
+            "shared-readers",
+            "--reason",
+            "exclusive access is present",
+            "--regression",
+            "report_cli::local_report_selection_preserves_evidence_and_review_requires_complete_proof",
+            "--output",
+            output_path,
+        ],
+        4,
+    );
     run(
         &path,
         "triage",
@@ -178,7 +210,23 @@ fn local_report_selection_preserves_evidence_and_review_requires_complete_proof(
     evidence(Some(cycle(Access::Shared)))
         .write_file(&path)
         .assured("shared evidence is written");
-    run(&path, "triage", &["--finding", "0", "--basis", "shared-readers", "--reason", "all observed acquisitions are shared", "--regression", "report_cli::local_report_selection_preserves_evidence_and_review_requires_complete_proof", "--output", output_path], 0);
+    run(
+        &path,
+        "triage",
+        &[
+            "--finding",
+            "0",
+            "--basis",
+            "shared-readers",
+            "--reason",
+            "all observed acquisitions are shared",
+            "--regression",
+            "report_cli::local_report_selection_preserves_evidence_and_review_requires_complete_proof",
+            "--output",
+            output_path,
+        ],
+        0,
+    );
     run(&reviewed, "qualify", &[], 0);
 }
 

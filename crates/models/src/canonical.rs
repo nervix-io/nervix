@@ -815,19 +815,7 @@ impl Statement {
                 ))
             }
             Self::ResetWasmState(reset) => {
-                let scope = match &reset.scope {
-                    crate::ResetWasmStateScope::Unbranched => "UNBRANCHED".to_string(),
-                    crate::ResetWasmStateScope::AllBranches => "ALL BRANCHES".to_string(),
-                    crate::ResetWasmStateScope::Branch(fields) => {
-                        let mut rendered = Vec::with_capacity(fields.len());
-                        for field in fields {
-                            let value =
-                                expression_to_plexus(&Expression::Literal(field.value.clone()))?;
-                            rendered.push(format!("{} = {value}", field.name.as_str()));
-                        }
-                        format!("BRANCH VALUES {{ {} }}", rendered.join(", "))
-                    }
-                };
+                let scope = reset.scope.to_canonical_plexus()?;
                 Ok(format!(
                     "RESET WASM PROCESSOR {} STATE IN DOMAIN {} FOR {scope};",
                     reset.processor.as_str(),
@@ -979,10 +967,23 @@ impl Statement {
             Self::ShowIngestors(_) => Ok("SHOW INGESTORS;".to_string()),
             Self::ShowEmitters(_) => Ok("SHOW EMITTERS;".to_string()),
             Self::ShowPlacements(_) => Ok("SHOW PLACEMENTS;".to_string()),
-            Self::ShowRelayMaterializedState(show) => Ok(format!(
-                "SHOW RELAY {} MATERIALIZED STATE;",
-                show.relay.as_str()
-            )),
+            Self::ShowRelayMaterializedState(show) => {
+                let mut text = format!("SHOW RELAY {} MATERIALIZED STATE", show.relay.as_str());
+                if let Some(selection) = &show.selection {
+                    text.push_str(&format!(" FOR {}", selection.to_canonical_plexus()?));
+                }
+                if let Some(page) = &show.page {
+                    text.push_str(&format!(" LIMIT {}", page.limit));
+                    if let Some(after) = &page.after {
+                        text.push_str(&format!(" AFTER {}", string_literal(after)));
+                    }
+                }
+                text.push_str(match show.format {
+                    crate::InspectionFormat::Text => " FORMAT TEXT;",
+                    crate::InspectionFormat::Json => " FORMAT JSON;",
+                });
+                Ok(text)
+            }
             Self::ShowClusterStatus(_) => Ok("SHOW CLUSTER STATUS;".to_string()),
             Self::DescribeCluster(_) => Ok("DESCRIBE CLUSTER;".to_string()),
             Self::ShowTransactions(_) => Ok("SHOW TRANSACTIONS;".to_string()),
@@ -3441,6 +3442,23 @@ impl NativeTypeToPlexus for CborType {
 impl NativeTypeToPlexus for AvroType {
     fn to_plexus_keyword(&self) -> String {
         self.to_string().to_ascii_uppercase()
+    }
+}
+
+impl crate::StateBranchSelection {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        Ok(match self {
+            crate::StateBranchSelection::Unbranched => "UNBRANCHED".to_string(),
+            crate::StateBranchSelection::AllBranches => "ALL BRANCHES".to_string(),
+            crate::StateBranchSelection::Branch(fields) => {
+                let mut rendered = Vec::with_capacity(fields.len());
+                for field in fields {
+                    let value = expression_to_plexus(&Expression::Literal(field.value.clone()))?;
+                    rendered.push(format!("{} = {value}", field.name.as_str()));
+                }
+                format!("BRANCH VALUES {{ {} }}", rendered.join(", "))
+            }
+        })
     }
 }
 

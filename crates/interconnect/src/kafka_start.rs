@@ -16,8 +16,8 @@ use nervix_models::ClusterNodeIdentity;
 use rkyv::{Archive, Deserialize, Serialize};
 
 use crate::{
-    FetchStateCheckpoint, InterconnectRequest, InterconnectStreamRequest, PoolClass,
-    RemoteOperationFailure, StatePlacementEnvelope, StateSnapshotEnvelope,
+    FetchStateCheckpoint, InterconnectRequest, PoolClass, RemoteOperationFailure,
+    StatePlacementEnvelope, StateSnapshotEnvelope,
 };
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -60,5 +60,5 @@ impl InterconnectRequest for KafkaStartRequest {
                       of introducing an independent timeout"
         )
     )]
-    const TIMEOUT: Duration = <FetchStateCheckpoint as InterconnectStreamRequest>::TIMEOUT;
+    const TIMEOUT: Duration = FetchStateCheckpoint::TRANSFER_TIMEOUT;
 }
