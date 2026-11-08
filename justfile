@@ -1822,6 +1822,8 @@ test-client-cpp-api:
     just cargo_target_dir={{ quote(cargo_target_dir) }} build-client-c-suites
     cargo test --package nervix-client-ffi --test native_suites cpp_application_suite -- --exact --nocapture
 
+# Run one native host's boundary tier from its prepared ordinary and sanitized programs, without
+# building them, and hold each run to the inventory.
 test-client-native-api-run host:
     #!/usr/bin/env bash
     set -euo pipefail
