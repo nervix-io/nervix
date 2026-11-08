@@ -123,6 +123,7 @@ impl GuestWasmStateResetRequest {
     /// guests of one state lifetime make resolves to the same coordinated reset and replaces that
     /// lifetime once, while the first request made from the lifetime that replaced it resolves to
     /// the next reset.
+    /// Non-security BLAKE3: deduplicates a selected branch/generation reset; it grants no authority.
     pub(crate) fn reference(&self) -> CommandExecutionReference {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"nervix/wasm-guest-state-reset");

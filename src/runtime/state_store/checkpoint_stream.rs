@@ -90,6 +90,7 @@ impl CheckpointStreamWriter {
                       cancellation between bounded chunks"
         )
     )]
+    /// Non-security BLAKE3: checks checkpoint consistency; installation authority is separate.
     pub(in crate::runtime) fn publish_checkpoint_stream(
         &self,
         placement: &RuntimeStatePlacement,
