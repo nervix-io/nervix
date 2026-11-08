@@ -1215,9 +1215,10 @@ pub enum EmitterBatchDecodeError {
 impl EmitterDelivery {
     /// Decodes the canonical Arrow stream and checks every field against the emitter's declared
     /// output schema before yielding it to the application.
-    pub fn record_batch(&self) -> error_stack::Result<arrow_array::RecordBatch, ClientError> {
+    pub fn record_batch(
+        &self,
+    ) -> error_stack::Result<arrow_array::RecordBatch, EmitterBatchDecodeError> {
         Self::decode_record_batch(&self.inner.description.fields, &self.batch, self.members)
-            .map_err(|error| error.change_context(ClientError::DecodeEmitterBatch))
     }
 
     /// Decodes the canonical Arrow stream one delivery carried: `batch` must declare exactly the

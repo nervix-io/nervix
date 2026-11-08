@@ -2832,8 +2832,9 @@ unwinds at that boundary. Restoration events expose the shared client's message 
 
 The shared Arrow delivery decoder reports `EmitterBatchDecodeError`: an unreadable stream, a
 schema mismatch, a missing or extra batch, an unreadable batch, or a row-count mismatch. An Arrow
-library error stays typed beneath its decoder context. A received delivery adds
-`ClientError::DecodeEmitterBatch`, which host bindings classify as `Protocol`. A host's local
+library error stays typed beneath its decoder context. Both the delivery method and the
+retained-bytes decoder return that report directly. The host failure owner projects a received
+delivery's report into `Protocol`. A host's local
 `Batch::decode` instead projects the same complete report into `InvalidArgument` at its reporting
 boundary. Neither path changes the exact schema, single-batch or member-count checks.
 

@@ -146,7 +146,7 @@ impl<'a> LevelData<'a> {
 impl Batch {
     /// Decodes the batch a delivery carried, held to its consumer's schema and its row count.
     pub(crate) fn delivered(delivery: &EmitterDelivery, schema: Schema) -> Result<Self, Failure> {
-        let batch = delivery.record_batch().map_err(Failure::from)?;
+        let batch = delivery.record_batch().map_err(Failure::received_batch)?;
         Ok(Self {
             batch,
             schema,

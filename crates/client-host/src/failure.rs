@@ -2,11 +2,10 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** The kinds of failure a host branches on, how every client error, producer error and
-//!   refused read of an attached domain clock is classified into one, and the message, execution
-//!   reference and refusal of an open a host reads from it.
-//! - **Depends on.** The Rust client's errors, its producer errors and domain clock read errors,
-//!   the reports that carry them, and the endpoint vocabulary.
+//! - **Owns.** The kinds of failure a host branches on, how client, producer, received-batch and
+//!   domain-clock-read reports become one, and its message, execution reference and open refusal.
+//! - **Depends on.** The Rust client's errors, its producer, batch-decoder and domain clock read
+//!   errors, the reports that carry them, and the endpoint vocabulary.
 //! - **Must not know.** How a host reacts to a failure, or how a binding raises it.
 //!
 //! A failure is the reporting boundary of every binding: the client's typed error, with every
@@ -21,8 +20,8 @@
 use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_client_core::{
-    BackupDownloadError, ClientError, CommandExecutionReference, DomainClockReadError, ProducerEnd,
-    ProducerError,
+    BackupDownloadError, ClientError, CommandExecutionReference, DomainClockReadError,
+    EmitterBatchDecodeError, ProducerEnd, ProducerError,
 };
 
 use crate::endpoint::OpenRefusal;
@@ -66,6 +65,11 @@ pub struct Failure {
 }
 
 impl Failure {
+    /// Projects a received delivery's decoder report without allocating another report context.
+    pub(crate) fn received_batch(report: Report<EmitterBatchDecodeError>) -> Self {
+        Self::new(FailureKind::Protocol, format!("{report:#}"))
+    }
+
     pub fn new(kind: FailureKind, message: impl Into<String>) -> Self {
         Self {
             kind,
@@ -162,7 +166,6 @@ impl Failure {
                 FailureKind::Cancelled
             }
             ClientError::UnexpectedReply { .. }
-            | ClientError::DecodeEmitterBatch
             | ClientError::InvalidUploadReply
             | ClientError::InvalidRestoreReply
             | ClientError::ExecutionReferenceMismatch { .. }
@@ -324,9 +327,8 @@ mod call_cancellation_tests {
         let report = Report::new(nervix_client_core::EmitterBatchDecodeError::RowCount {
             expected: 2,
             actual: 1,
-        })
-        .change_context(ClientError::DecodeEmitterBatch);
-        let failure = Failure::from(report);
+        });
+        let failure = Failure::received_batch(report);
         assert_eq!(failure.kind(), FailureKind::Protocol);
         assert!(failure.message().contains("the caller declared 2"));
         assert_eq!(failure.execution_reference(), None);

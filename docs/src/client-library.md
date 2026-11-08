@@ -616,12 +616,12 @@ consumer.close().await?;
 
 `record_batch` accepts a delivery only when its Arrow IPC stream declares exactly the Arrow schema
 of the fields the emitter declares and holds one record batch of the delivery's member count; any
-other stream is a `ClientError::DecodeEmitterBatch`, above a typed `EmitterBatchDecodeError` and
-the Arrow cause when one occurred. `EmitterDelivery::decode_record_batch(fields,
+other stream returns a typed `EmitterBatchDecodeError`, above the Arrow cause when one occurred.
+`EmitterDelivery::decode_record_batch(fields,
 batch, members)` applies the same check to bytes an application kept: it takes the fields of
 `consumer.description()`, a delivery's `batch` bytes and its `members`, and needs no live delivery.
-That decoder returns `EmitterBatchDecodeError` directly, since its caller decides whether the
-bytes are received data or local application input.
+Both methods return the same decoder report directly; the caller decides whether the bytes are
+received data or local application input.
 
 `delivery.retry().await` keeps the same bytes and asks the server to reassign after physical
 backoff. `delivery.reject(reason).await` sends one bounded, non-sensitive reason through the

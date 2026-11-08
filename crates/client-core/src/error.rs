@@ -208,9 +208,6 @@ pub enum ClientError {
     /// The server answered the request with a reply of a kind that does not answer it.
     #[error("the server answered the {request} request with a reply of another kind")]
     UnexpectedReply { request: RequestKind },
-    /// A received delivery did not contain its declared canonical Arrow batch.
-    #[error("failed to decode the emitter delivery batch")]
-    DecodeEmitterBatch,
     /// The directory could not be archived. The I/O error is beneath when one occurred.
     #[error("failed to build upload archive")]
     BuildUploadArchive,
