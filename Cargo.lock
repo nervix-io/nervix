@@ -5631,6 +5631,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "jose-b64"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bec69375368709666b21c76965ce67549f2d2db7605f1f8707d17c9656801b56"
+dependencies = [
+ "base64ct",
+ "serde",
+ "serde_json",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "jose-jwa"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ab78e053fe886a351d67cf0d194c000f9d0dcb92906eb34d853d7e758a4b3a7"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "jose-jwk"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "280fa263807fe0782ecb6f2baadc28dffc04e00558a58e33bfdb801d11fd58e7"
+dependencies = [
+ "jose-b64",
+ "jose-jwa",
+ "serde",
+ "zeroize",
+]
+
+[[package]]
+name = "jose-jws"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b5d49df4f553a811aa2e378155ade5c7aac0f410086d3010faca127417c1c26"
+dependencies = [
+ "jose-b64",
+ "jose-jwa",
+ "jose-jwk",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5639,6 +5687,22 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "jsonwebtoken"
+version = "11.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e75fe14a82d81e5f5af639997db37d8b96045938a7ac6ab18cdbe1c7467e05e1"
+dependencies = [
+ "aws-lc-rs",
+ "base64 0.22.1",
+ "getrandom 0.2.17",
+ "js-sys",
+ "serde",
+ "serde_json",
+ "signature",
+ "zeroize",
 ]
 
 [[package]]
@@ -7567,10 +7631,12 @@ dependencies = [
  "bolero",
  "error-stack",
  "faster-hex",
+ "jsonwebtoken",
  "meticulous",
  "nervix-primitives",
  "nervix-recovery",
  "rustls",
+ "serde",
  "sha2 0.10.9",
  "thiserror 2.0.21",
 ]
@@ -7733,6 +7799,27 @@ dependencies = [
  "serde_json",
  "strum 0.26.3",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "nervix-licensing-protocol"
+version = "0.1.0-dev"
+dependencies = [
+ "base64 0.22.1",
+ "bolero",
+ "chrono",
+ "error-stack",
+ "jose-b64",
+ "jose-jws",
+ "meticulous",
+ "nervix-bounded-write",
+ "nervix-crypto",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "url",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -14852,6 +14939,21 @@ name = "zeroize"
 version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
+dependencies = [
+ "serde",
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "zeromq"
