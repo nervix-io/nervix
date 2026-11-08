@@ -247,11 +247,20 @@ fn comparison_names_execution_units_and_physical_owners() {
         nervix_models::Unit::try_instance(2).expect("fixture instance should be valid");
     report.relay_buffers[0].unit = nervix_models::Unit::partition(3);
     report.write(&path).expect("report should persist");
-    let comparison = BenchmarkComparison::from_run_directories(&[directory])
+    let comparison = BenchmarkComparison::from_run_directories(std::slice::from_ref(&directory))
         .expect("current report should compare");
     let markdown = comparison.render_markdown();
     assert!(markdown.contains("`kafka_in_0` instance 2 on `node-1`"));
     assert!(markdown.contains("`benchmark_ingested_0` partition 3 on `node-1`"));
+    report.relay_buffers[0].physical_node_id = None;
+    report.write(&path).expect("unplaced report should persist");
+    let comparison = BenchmarkComparison::from_run_directories(&[directory])
+        .expect("unplaced report should compare");
+    assert!(
+        comparison
+            .render_markdown()
+            .contains("`benchmark_ingested_0` partition 3 on `-`")
+    );
 }
 
 #[test]

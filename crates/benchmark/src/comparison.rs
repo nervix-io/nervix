@@ -761,11 +761,15 @@ impl NervixMetricsReport {
 }
 
 fn metric_owner_label(name: &str, unit: Unit, physical_node: Option<&ClusterNodeName>) -> String {
+    let physical_node = match physical_node {
+        Some(node) => node.as_str(),
+        None => "-",
+    };
     format!(
         "`{}`{} on `{}`",
         escape_code(name),
         unit.label_suffix(),
-        escape_code(physical_node.map_or("-", ClusterNodeName::as_str)),
+        escape_code(physical_node),
     )
 }
 
