@@ -34,7 +34,7 @@ use super::{
 use crate::{
     PoolClass, RequestError, RequestSubquota, TransportError,
     observation::TransferDirection,
-    request::{RequestAdmission, RequestEnvelope, StreamingResponse},
+    request::{RequestAdmission, StreamRequestEnvelope, StreamingResponse},
     wire,
 };
 
@@ -143,6 +143,21 @@ impl IncomingByteStream {
         let chunk_bytes = u64::try_from(chunk.len()).map_err(|error| {
             RequestError::stream_with_cause(Report::new(error), self.node.clone(), self.request)
         })?;
+        let limit = self
+            .lease
+            .state
+            .local_receive_bounds()
+            .bulk_chunk_bytes
+            .get();
+        if chunk_bytes > limit {
+            self.finished = true;
+            return Err(Report::new(RequestError::StreamChunkBound {
+                node: self.node.clone(),
+                request: self.request,
+                received: chunk_bytes,
+                limit,
+            }));
+        }
         let received = self.received.checked_add(chunk_bytes).ok_or_else(|| {
             Report::new(RequestError::Stream {
                 node: self.node.clone(),
@@ -219,7 +234,7 @@ impl TransportState {
             body,
         )
         .await?;
-        let decoded = wire::decode_rkyv::<RequestEnvelope>(
+        let decoded = wire::decode_rkyv::<StreamRequestEnvelope>(
             &self.executor,
             class.memory_class(),
             class.cpu_class(),
@@ -235,6 +250,14 @@ impl TransportState {
             }
         };
         let (request, _reservation) = decoded.into_parts();
+        let receive = match self.targets.load().get(&peer_node_id) {
+            Some(target) => match target.pool.capabilities.receive_bounds() {
+                Some(committed) => committed.intersection(request.receive),
+                None => request.receive,
+            },
+            None => request.receive,
+        };
+        let request = request.request;
         if request.class != class {
             send_static_error(
                 &mut respond,
@@ -272,7 +295,8 @@ impl TransportState {
             }
         };
         let (response, _admission) = handled.into_parts();
-        self.send_streaming_response(class, respond, response).await
+        self.send_streaming_response(class, respond, response, receive.bulk_chunk_bytes)
+            .await
     }
 
     pub(crate) async fn open_byte_stream(
@@ -334,6 +358,7 @@ async fn send_stream_chunk(
     stream: &mut SendStream<Bytes>,
     body: ChargedBytes,
     progress_timeout: Duration,
+    chunk_limit: std::num::NonZeroU64,
 ) -> Result<(), Report<TransportError>> {
     let mut offset = 0;
     while offset < body.len() {
@@ -342,7 +367,8 @@ async fn send_stream_chunk(
             .len()
             .checked_sub(offset)
             .verified("the send offset never advances beyond the streamed chunk");
-        let wanted = remaining.min(BODY_CHUNK_BYTES);
+        let chunk_limit = usize::try_from(chunk_limit.get()).unwrap_or(usize::MAX);
+        let wanted = remaining.min(BODY_CHUNK_BYTES).min(chunk_limit);
         stream.reserve_capacity(wanted);
         let assigned = match timeout(progress_timeout, granted_send_capacity(stream)).await {
             Ok(assigned) => assigned?,
@@ -398,6 +424,7 @@ impl TransportState {
         class: PoolClass,
         mut respond: server::SendResponse<Bytes>,
         mut response: StreamingResponse,
+        chunk_limit: std::num::NonZeroU64,
     ) -> Result<(), Report<TransportError>> {
         let progress_timeout = self.options.progress_timeout;
         let headers = Response::builder()
@@ -451,7 +478,7 @@ impl TransportState {
                     "stream producer exceeded its declared content length".to_string(),
                 )));
             }
-            send_stream_chunk(&mut stream, chunk, progress_timeout).await?;
+            send_stream_chunk(&mut stream, chunk, progress_timeout, chunk_limit).await?;
             self.observations
                 .bulk_transferred(class, TransferDirection::Sent, chunk_bytes);
         }

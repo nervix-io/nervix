@@ -75,6 +75,7 @@ mod model_publication;
 mod pause;
 mod relay_memory;
 mod relay_partition_fanout;
+mod relay_slicing;
 mod relocation_commit;
 mod resource_discovery;
 mod resource_publication;
@@ -309,6 +310,8 @@ struct FaultInjectionState {
     /// A receiver pauses after it admitted a remote relay batch and returned the admission to the
     /// batch's owner, before it hands the batch to its local runtime consumers.
     remote_relay_dispatch_pauses: DashMap<String, Arc<TestPause>, RandomState>,
+    relay_before_grant_pauses:
+        DashMap<String, Arc<relay_slicing::RelayCapabilityProbe>, RandomState>,
     /// One-shot losses of the terminal record acknowledgement a node returns to the node that
     /// registered it. Each keeps whether it fired, so a scenario waits for the loss instead of
     /// assuming it.
@@ -571,6 +574,7 @@ impl Default for FaultInjection {
                 entity_gate_response_pauses: DashMap::default(),
                 remote_relay_admission_pauses: DashMap::default(),
                 remote_relay_dispatch_pauses: DashMap::default(),
+                relay_before_grant_pauses: DashMap::default(),
                 lost_remote_acknowledgements: DashMap::default(),
                 live_view_gaps: DashMap::default(),
                 relay_memory_fills: DashMap::default(),

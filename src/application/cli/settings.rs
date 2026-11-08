@@ -168,6 +168,10 @@ impl TryFrom<SettingsArgs> for NodeSettings {
             .capacity
             .settings()
             .change_context(AppError::InvalidCapacitySettings)?;
+        let peer_receive = args
+            .capacity
+            .peer_receive()
+            .change_context(AppError::InvalidPeerReceiveSettings)?;
         Ok(Self {
             parameter_seeds,
             raft,
@@ -181,6 +185,7 @@ impl TryFrom<SettingsArgs> for NodeSettings {
             shutdown,
             resources: args.resources.settings(),
             capacity,
+            peer_receive,
         })
     }
 }
@@ -202,7 +207,7 @@ impl From<&NodeSettings> for SettingsArgs {
             memory_pressure: MemoryPressureArgs::from_settings(&settings.memory_pressure),
             shutdown: ShutdownArgs::from_settings(&settings.shutdown),
             resources: ResourceArgs::from_settings(&settings.resources),
-            capacity: CapacityArgs::from_settings(&settings.capacity),
+            capacity: CapacityArgs::from_settings(&settings.capacity, &settings.peer_receive),
         }
     }
 }

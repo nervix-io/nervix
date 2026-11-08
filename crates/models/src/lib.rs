@@ -47,6 +47,7 @@ mod message_error;
 mod model_index;
 mod name_spelling;
 mod names;
+mod node_capabilities;
 mod node_endpoint;
 mod node_ref;
 mod prerequisites;
@@ -280,6 +281,7 @@ pub use names::{
     SubscriptionName, UdfName, UserName, VhostName, WasmProcessorName, WindowProcessorName,
     WireSchemaName,
 };
+pub use node_capabilities::{NodeCapabilities, NodeCapabilityRecord, PeerReceiveBounds};
 pub use node_endpoint::{
     NodeEndpoint, NodeEndpointParseError, NodeServiceUrl, NodeServiceUrlParseError,
 };
@@ -361,9 +363,7 @@ pub use schema::{
     WireSchemaField, WireSchemaStrictness,
 };
 pub use schema_fingerprint::SchemaFingerprint;
-pub use settings::{
-    ClusterParameters, NodeCapabilities, Prerequisites, Setting, SettingClass, SettingDefinition,
-};
+pub use settings::{ClusterParameters, Prerequisites, Setting, SettingClass, SettingDefinition};
 pub use statement::{
     AckWindow, AlterBranch, AlterBranchError, AlterBranchOperation, AlterDomain, AlterGenerator,
     AlterGeneratorError, AlterGeneratorOperation, AlterIngestor, AlterIngestorError,

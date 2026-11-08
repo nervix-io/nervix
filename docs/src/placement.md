@@ -599,6 +599,29 @@ every partition in the same handoff; each retains its unit identity, state and r
 Use `SUGGEST SEPARATION` as a performance hint only. Security, tenant isolation, and failure-domain
 requirements need controls outside placement policies.
 
+## Capacity At The Load Tier
+
+Only live eligible voters with a committed capability record for their current incarnation receive
+placements. Captured claims are part of the replicated schedule fence and transaction planning
+basis. A capacity change invalidates a plan captured before it.
+
+The sticky scheduler keeps placement policy and upstream-locality scores ahead of capacity. At its
+load tier it divides primary-unit counts and ordinary assignment load by relative capacity, then
+keeps round-robin and node-name ties. Relative capacity is the smaller of CPU/minimum-CPU and
+memory/minimum-memory among eligible nodes. A dimension participates only when every eligible node
+has a measurement; with neither dimension available, weighting is uniform. Ratios compare exactly
+as integers, including full-width claims. Doubling both CPU and memory therefore receives twice the
+independent units: 32 independent partitions on capacities 1:2:1 distribute 8:16:8.
+
+Unchanged inputs produce the same assignment, and existing live assignments remain sticky. A
+restarting node retains its stored assignments while publication catches up; its current run waits
+for the matching claim before activation. Eligibility restricts every new automatic or explicit
+relocation destination.
+Weighting does not override colocation, locality, explicit relocation or the independent publication
+of server listeners on every live node. Inspect the claims and negotiated receive bounds with
+`DESCRIBE CLUSTER`; [Node Settings](node-settings.md#committed-node-capabilities) owns their detection
+and restart procedure.
+
 ## Ingestor Instance Units
 
 An instance-capable ingestor with `INSTANCES n` has one `Instance(i)` placement per global index.

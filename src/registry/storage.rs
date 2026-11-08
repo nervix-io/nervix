@@ -2038,6 +2038,9 @@ mod tests {
                 &[ClusterNodeName::parse("node-1").expect("valid name")],
                 0,
                 PlacementPolicy::Neutral,
+                &crate::registry::uniform_capabilities(&[
+                    ClusterNodeName::parse("node-1").expect("valid name")
+                ]),
             );
         let scheduled_relay = schedule
             .nodes

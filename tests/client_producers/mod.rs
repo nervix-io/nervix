@@ -923,6 +923,53 @@ async fn when_producer_submits_rows(
     submit(world, producer, batch, SubmittedBody::Rows(rows)).await;
 }
 
+#[when(
+    expr = "producer {string} submits {int} interleaved rows with {int}-byte ids as batch {string}"
+)]
+async fn when_producer_submits_interleaved_rows(
+    world: &mut ScenarioWorld,
+    producer: String,
+    count: usize,
+    id_bytes: usize,
+    batch: String,
+) {
+    let fields = world
+        .scenario_producer(&producer)
+        .description()
+        .fields
+        .clone();
+    assert_eq!(
+        fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["id", "amount", "tenant"]
+    );
+    let ids = (0..count)
+        .map(|row| {
+            let prefix = format!("row-{row:04}-");
+            let padding = id_bytes
+                .checked_sub(prefix.len())
+                .expect("id holds its row identity");
+            format!("{prefix}{}", "x".repeat(padding))
+        })
+        .collect::<Vec<_>>();
+    let amounts = (0..count)
+        .map(|row| i64::try_from(row).expect("bounded scenario row count"))
+        .collect::<Vec<_>>();
+    let tenants = (0..count)
+        .map(|row| if row % 2 == 0 { "acme" } else { "globex" })
+        .collect::<Vec<_>>();
+    let columns: Vec<ArrayRef> = vec![
+        StdArc::new(StringArray::from(ids)),
+        StdArc::new(Int64Array::from(amounts)),
+        StdArc::new(StringArray::from(tenants)),
+    ];
+    let rows = RecordBatch::try_new(StdArc::new(SchemaField::arrow_schema(&fields)), columns)
+        .expect("the three columns match the producer schema");
+    submit(world, producer, batch, SubmittedBody::Rows(rows)).await;
+}
+
 #[when(expr = "producer {string} submits batch {string} with one {int}-byte id")]
 async fn when_producer_submits_long_id(
     world: &mut ScenarioWorld,

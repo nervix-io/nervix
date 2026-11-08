@@ -268,6 +268,10 @@ metadata and streamed checkpoint I/O, following the backup guidance in `referenc
 Size node memory for every execution pool, including active snapshots and optional retained materialized-source reads;
 the default startup requirement is 2,723 MiB. Read [Node Settings](https://docs.nervix.io/node-settings.html)
 for the complete prerequisite checks.
+For detected CPU/memory claims, capability rolls, peer receive bounds and placement weighting, read
+[Node Settings](../../../docs/src/node-settings.md#committed-node-capabilities) and
+[Placement](../../../docs/src/placement.md#capacity-at-the-load-tier). Verify the committed
+incarnation with `DESCRIBE CLUSTER` before attributing a distribution to an override.
 Use `SHOW TRANSACTIONS;` when transaction state or a retained outcome needs
 verification. Use `DESCRIBE TRANSACTION [ '<id>' ] [ OPERATION <n> ] [ FORMAT TEXT | JSON ];` to
 explain what an open, committing, or retained transaction requires and changes before or after

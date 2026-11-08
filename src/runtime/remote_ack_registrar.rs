@@ -85,9 +85,13 @@ impl RegistrarPresence {
         let Some(incarnation) = live else {
             return self.missed(now);
         };
-        if incarnation != registrar {
-            // Another run of the node replaced the registrar, and nothing in it holds this
-            // acknowledgement.
+        if incarnation < registrar {
+            // Transport admission can precede gossip learning the registering run. Its
+            // predecessor is an undiscovered/missing view, not evidence of replacement.
+            return self.missed(now);
+        }
+        if incarnation > registrar {
+            // A newer run replaced the registrar, and nothing in it holds this acknowledgement.
             return RegistrarLook::Release;
         }
         *self = Self::Present;

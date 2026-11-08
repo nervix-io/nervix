@@ -1345,6 +1345,10 @@ mod tests {
             ],
             0,
             PlacementPolicy::RequireColocation,
+            &crate::registry::uniform_capabilities(&[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+            ]),
         );
         let owner = scheduled_node(&schedule, ModelKind::Ingestor, "ing")
             .assigned_single_node()

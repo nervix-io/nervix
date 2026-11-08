@@ -144,6 +144,7 @@ class InventoryTests(unittest.TestCase):
         inventory = bolero.load_inventory()
         self.assertEqual({target.id for target in inventory.targets}, {
             "benchmark-metrics-report",
+            "node-capability-records",
             "crypto-p256-keys",
             "crypto-p256-signatures",
             "runtime-kafka-unit-layouts",
@@ -516,9 +517,9 @@ class InventoryTests(unittest.TestCase):
             "plexus-format-text": 53,
             "models-archived-models": 54,
             "registry-archived-models": 49,
-            "consensus-state-records": 46,
-            "consensus-state-corruption": 46,
-            "consensus-raft-records": 45,
+            "consensus-state-records": 47,
+            "consensus-state-corruption": 47,
+            "consensus-raft-records": 46,
             "registry-stored-models": 42,
             "registry-stored-models-corruption": 42,
             "inferencer-tensor-columns": 1,

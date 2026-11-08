@@ -66,6 +66,14 @@ pub struct RequestEnvelope {
     pub(crate) payload: Vec<u8>,
 }
 
+/// The receiver's operation bound also permits consensus snapshot transfer before it has joined.
+#[doc(hidden)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StreamRequestEnvelope {
+    pub(crate) request: RequestEnvelope,
+    pub(crate) receive: nervix_models::PeerReceiveBounds,
+}
+
 #[doc(hidden)]
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResponseEnvelope {
@@ -744,6 +752,16 @@ pub enum RequestError {
         declared: u64,
         received: u64,
     },
+    #[error(
+        "streamed response for '{request}' from node '{node}' sent a {received}-byte chunk above \
+         the {limit}-byte receiver bound"
+    )]
+    StreamChunkBound {
+        node: ClusterNodeName,
+        request: &'static str,
+        received: u64,
+        limit: u64,
+    },
 }
 
 impl RequestError {
@@ -783,6 +801,7 @@ impl RequestError {
             | Self::ResponseMismatch { .. }
             | Self::Stream { .. }
             | Self::StreamLengthMismatch { .. } => false,
+            Self::StreamChunkBound { .. } => false,
         }
     }
 }
@@ -1759,10 +1778,13 @@ impl Transport {
             )
             .await
             .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
-        let request = RequestEnvelope {
-            class: M::CLASS,
-            request: M::NAME.to_string(),
-            payload,
+        let request = StreamRequestEnvelope {
+            receive: self.inner.local_receive_bounds(),
+            request: RequestEnvelope {
+                class: M::CLASS,
+                request: M::NAME.to_string(),
+                payload,
+            },
         };
         let body = wire::encode_stream_request(self.inner.executor(), request, payload_reservation)
             .await

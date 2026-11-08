@@ -512,8 +512,8 @@ the bounded storage executor, but consensus has its own single ordered worker.
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_kind_key_logs`, `raft_kind_key_meta`, `raft_kind_key_state`, and
-`raft_kind_key_snapshots`. Opening it validates the complete keyspace namespace before reading
+`raft_capability_logs`, `raft_capability_meta`, `raft_capability_state`, and
+`raft_capability_snapshots`. Opening it validates the complete keyspace namespace before reading
 any records. This namespace identifies the current Model shape, including the separate JSON
 and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec encoding, a Pulsar
 subscription's required type, an owned Pulsar subscription's required start position, a Kafka
@@ -529,8 +529,9 @@ resolved branch declaration of the committed schedule carries. It identifies
 the current statement shape as well, which the statements a transaction keeps are stored in:
 `ALTER BRANCH` among those statements, and an `ALTER INGESTOR` or `ALTER EMITTER` operation that
 changes one part of its entity's body, an envelope clause or the properties, or one part of a
-construction where it stands. Its state metadata requires the current `ClusterState` encoding, 14,
-including committed cluster parameters, the durable restore installation gate and the unit-keyed
+construction where it stands. Its state metadata requires the current `ClusterState` encoding, 15,
+including incarnation-bound node capability claims under record-family tag `C`, committed cluster
+parameters, the durable restore installation gate and the unit-keyed
 committed schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,
 typed ingestor instancing, exact-unit placement-group members

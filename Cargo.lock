@@ -8138,6 +8138,7 @@ dependencies = [
  "nervix-wasm",
  "nix",
  "nonzero_ext",
+ "num-rational",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

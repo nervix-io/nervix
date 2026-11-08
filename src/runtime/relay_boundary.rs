@@ -28,7 +28,10 @@ use super::{
 
 #[path = "relay_channels.rs"]
 mod channels;
+#[path = "relay_sizing_position.rs"]
+mod sizing_position;
 use channels::{RelayBranchChannels, RelayChannels};
+pub(super) use sizing_position::UnusedRelayPosition;
 
 #[path = "relay_boundary_routed.rs"]
 mod routed;
@@ -1492,12 +1495,14 @@ impl RelayBoundaryServices {
                 .is_some_and(|gate| gate.is_engaged())
     }
 
-    /// Whether `node_id` owns `unit`. A unit no schedule places is owned wherever it runs.
+    /// Whether `node_id` owns `unit`. Only a standalone runtime owns an unplaced unit.
     pub(super) fn is_owned_by(&self, node_id: Option<&ClusterNodeName>, unit: Unit) -> bool {
         let owners = self.owners.load();
-        owners
-            .owner_of(unit)
-            .is_none_or(|owner| Some(owner) == node_id)
+        match (owners.owner_of(unit), node_id) {
+            (Some(owner), Some(local)) => owner == local,
+            (None, None) => true,
+            (Some(_), None) | (None, Some(_)) => false,
+        }
     }
 
     /// The cluster node the owner of `unit` runs on, when a schedule places it.
@@ -1738,9 +1743,10 @@ impl RelayBoundaryServices {
         };
         let delivery = ingress_slot.next_delivery();
         let admission_result = dispatcher
-            .dispatch_admitted_relay_payload(
+            .dispatch_sliced_relay_payload(
                 &owner_node,
                 RelayPayload {
+                    decoded_bytes: crate::runtime_schema::batch_payload_bytes(batch.batch.batch()),
                     delivery,
                     kind: RelayPayloadKind::Ingress,
                     domain: domain.clone(),
@@ -1752,9 +1758,11 @@ impl RelayBoundaryServices {
                     acks: remote_acks.registrations().to_vec(),
                     admission: None,
                 },
+                &batch.batch,
                 &ingress_slot,
                 deadline,
                 GrantCapacityRefusals::Hold,
+                Some(&mut remote_acks),
             )
             .await;
         if let Err(error) = admission_result {
@@ -1767,15 +1775,27 @@ impl RelayBoundaryServices {
                 "failed to admit relay batch on its owner"
             );
             let reason = format!("{error:#}");
-            for registration in remote_acks.registrations().iter().flatten() {
+            for registration in remote_acks.registrations()[remote_acks.admitted_rows()..]
+                .iter()
+                .flatten()
+            {
                 dispatcher.clear_pending_ack(registration);
             }
-            for ack in batch.acks.iter() {
+            for ack in batch.acks[remote_acks.admitted_rows()..].iter() {
                 ack.no_ack(reason.clone());
             }
-            return Err(Box::new(batch.clone()));
+            let admitted = remote_acks.admitted_rows();
+            let remaining = batch
+                .acks
+                .len()
+                .checked_sub(admitted)
+                .verified("the admission owner counts rows of this batch");
+            return Err(Box::new(
+                batch
+                    .slice(admitted, remaining)
+                    .verified("the unadmitted suffix lies within this batch"),
+            ));
         }
-        remote_acks.admit();
         Ok(())
     }
 
@@ -1917,7 +1937,7 @@ impl RelayBoundaryServices {
         // the loop. A destination's slot is what orders the batches published to it, and an
         // encode is long enough that hoisting it out lets a later batch finish serializing first
         // and reach the slot ahead of an earlier one, delivering the relay out of order.
-        let mut encoded_body: Option<ChargedBytes> = None;
+        let mut encoded_body: Option<(ChargedBytes, u64)> = None;
         for consumer in remote_runtime_consumers.iter() {
             let Some(mode) = consumer.mode_for(unit) else {
                 continue;
@@ -1971,10 +1991,14 @@ impl RelayBoundaryServices {
             } else {
                 None
             };
-            let batch_ipc = match encoded_body.clone() {
+            let (batch_ipc, decoded_bytes) = match encoded_body.clone() {
                 Some(bytes) => bytes,
                 None => match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
                     Ok(bytes) => {
+                        let bytes = (
+                            bytes,
+                            crate::runtime_schema::batch_payload_bytes(batch.batch.batch()),
+                        );
                         encoded_body = Some(bytes.clone());
                         bytes
                     }
@@ -2007,9 +2031,10 @@ impl RelayBoundaryServices {
             };
             let delivery = outbound_slot.next_delivery();
             let result = dispatcher
-                .dispatch_admitted_relay_payload(
+                .dispatch_sliced_relay_payload(
                     &consumer.node_id,
                     routed_payload(RoutedDelivery {
+                        decoded_bytes,
                         delivery,
                         domain,
                         unit,
@@ -2018,22 +2043,26 @@ impl RelayBoundaryServices {
                         batch_ipc: batch_ipc.clone(),
                         acks: remote_acks.clone(),
                     }),
+                    &remote_batch.batch,
                     &outbound_slot,
                     deadline,
                     GrantCapacityRefusals::Hold,
+                    registration_owner.as_mut(),
                 )
                 .await;
 
             match (mode, result) {
-                (AckMode::Attached, Ok(())) => {
-                    registration_owner
-                        .as_mut()
-                        .verified("attached delivery registers an acknowledgement owner")
-                        .admit();
-                }
+                (AckMode::Attached, Ok(())) => {}
                 (AckMode::Attached, Err(error)) => {
                     let reason = format!("{error:#}");
-                    for (ack_set, remote_ack) in remote_batch.acks.iter().zip(remote_acks.iter()) {
+                    let admitted = registration_owner
+                        .as_ref()
+                        .verified("attached delivery has a registration owner")
+                        .admitted_rows();
+                    for (ack_set, remote_ack) in remote_batch.acks[admitted..]
+                        .iter()
+                        .zip(remote_acks[admitted..].iter())
+                    {
                         if let Some(remote_ack) = remote_ack {
                             dispatcher.clear_pending_ack(remote_ack);
                         }

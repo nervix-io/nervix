@@ -635,7 +635,9 @@ impl PeerHost {
         assert_eq!(observation.leased(PoolClass::Bulk), self.streams.len());
         let streams = u64::try_from(self.streams.len()).assured("fixture stream counts are small");
         let windows = TransportOptions::default()
-            .bulk_receive_window
+            .peer_receive
+            .unwrap_or_default()
+            .bulk_window_bytes
             .value()
             .as_u64()
             .checked_mul(streams)
@@ -748,6 +750,7 @@ impl PeerHost {
             .try_charge_owned(MemoryClass::Relay, arrow_batch())
             .assured("the Arrow fixture fits the relay memory budget");
         RelayPayload {
+            decoded_bytes: 0,
             delivery,
             kind: RelayPayloadKind::Routed,
             domain: DomainName::parse("simulated").assured("fixture domain is valid"),
@@ -1195,7 +1198,12 @@ impl HubHost {
     /// and memory, and the healthy peer's stream is unaffected throughout.
     async fn stall_bulk_flow_control(&mut self) {
         let options = TransportOptions::default();
-        let window = options.bulk_receive_window.value().as_u64();
+        let window = options
+            .peer_receive
+            .unwrap_or_default()
+            .bulk_window_bytes
+            .value()
+            .as_u64();
         assert!(
             window < STREAM_BYTES,
             "the fixture stream outlasts one bulk receive window"

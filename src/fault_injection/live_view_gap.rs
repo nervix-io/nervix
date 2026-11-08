@@ -7,7 +7,7 @@
 //! - **Must not know.** Gossip, the failure detector, acknowledgement records or the interconnect.
 
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_models::ClusterNodeName;
+use nervix_models::{ClusterNodeIncarnation, ClusterNodeName};
 use nervix_primitives::sync::watch;
 
 use super::FaultInjection;
@@ -28,6 +28,8 @@ pub(super) enum LiveViewGapState {
     Open,
     /// A watcher has missed the run at least once.
     Read,
+    /// Every look observes this incarnation until the scenario closes the gap.
+    Retained(ClusterNodeIncarnation),
 }
 
 impl FaultInjection {
@@ -38,6 +40,19 @@ impl FaultInjection {
         let gap = LiveViewGap { observer, missing };
         let (state, _) = watch::channel(LiveViewGapState::Opening);
         self.inner.live_view_gaps.insert(gap, state);
+    }
+
+    /// Keeps one observer's ACK live view at the captured incarnation across a node restart.
+    pub fn hold_live_view_incarnation(
+        &self,
+        observer: ClusterNodeName,
+        missing: ClusterNodeName,
+        incarnation: ClusterNodeIncarnation,
+    ) {
+        let (state, _) = watch::channel(LiveViewGapState::Retained(incarnation));
+        self.inner
+            .live_view_gaps
+            .insert(LiveViewGap { observer, missing }, state);
     }
 
     /// Waits until an acknowledgement watcher of `observer` read the gap opened for `missing`.
@@ -74,8 +89,8 @@ impl FaultInjection {
         self.inner.live_view_gaps.remove(&gap);
     }
 
-    /// Whether `observer`'s live view misses `missing`'s run at this look, for a scenario's gap,
-    /// which this look advances.
+    /// The scenario's override, if armed: an absent run or a retained incarnation.
+    /// An opening gap first delegates one look to the actual live view.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -85,23 +100,23 @@ impl FaultInjection {
             bound = "one keyed read and a retained watch transition; no guard across await"
         )
     )]
-    pub(crate) fn misses_live_run(
+    pub(crate) fn registrar_live_view_override(
         &self,
         observer: &ClusterNodeName,
         missing: &ClusterNodeName,
-    ) -> bool {
+    ) -> Option<Option<ClusterNodeIncarnation>> {
         let gap = LiveViewGap {
             observer: observer.clone(),
             missing: missing.clone(),
         };
         let Some(state) = self.inner.live_view_gaps.get(&gap) else {
-            return false;
+            return None;
         };
-        let mut missed = true;
+        let mut observed = Some(None);
         state.send_if_modified(|state| match state {
             LiveViewGapState::Opening => {
                 *state = LiveViewGapState::Open;
-                missed = false;
+                observed = None;
                 false
             }
             LiveViewGapState::Open => {
@@ -109,7 +124,11 @@ impl FaultInjection {
                 true
             }
             LiveViewGapState::Read => false,
+            LiveViewGapState::Retained(incarnation) => {
+                observed = Some(Some(*incarnation));
+                false
+            }
         });
-        missed
+        observed
     }
 }

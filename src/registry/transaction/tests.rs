@@ -62,7 +62,13 @@ pub(super) fn scheduled_snapshot(
         .graph;
     let node = ClusterNodeName::parse("node-a")
         .assured("the scheduler fixture node is an identifier-shaped literal");
-    let schedule = graph.schedule_for_domain(&domain, &[node], 0, PlacementPolicy::Neutral);
+    let schedule = graph.schedule_for_domain(
+        &domain,
+        &[node.clone()],
+        0,
+        PlacementPolicy::Neutral,
+        &crate::registry::uniform_capabilities(&[node]),
+    );
     TransactionPlanningSnapshot {
         parameters: nervix_models::ClusterParameterValues::default(),
         domain: domain_state(status),
@@ -547,7 +553,13 @@ fn stopped_schedule_move_keeps_the_execution_gate_without_reporting_a_pause() {
         false,
         move |graph, placement, _current, attribution| TransactionScheduleDecision {
             schedule: graph.map(|graph| {
-                graph.schedule_for_domain(&domain, std::slice::from_ref(&destination), 0, placement)
+                graph.schedule_for_domain(
+                    &domain,
+                    std::slice::from_ref(&destination),
+                    0,
+                    placement,
+                    &crate::registry::uniform_capabilities(std::slice::from_ref(&destination)),
+                )
             }),
             ownership_moves: CanonicalImpactSet::new([OwnershipMoveImpact {
                 node: ImpactNodeCoverage::all_executions(moved.clone()),
@@ -649,6 +661,7 @@ fn entity_pause_report_and_execution_share_the_exact_affected_graph() {
                     std::slice::from_ref(&cluster_node),
                     0,
                     placement,
+                    &crate::registry::uniform_capabilities(std::slice::from_ref(&cluster_node)),
                 )
             }),
             ownership_moves: CanonicalImpactSet::default(),
@@ -773,7 +786,13 @@ fn schedule_reassignment_raises_a_dynamic_change_to_an_entity_pause() {
         false,
         move |graph, placement, _current, _attribution| TransactionScheduleDecision {
             schedule: graph.map(|graph| {
-                graph.schedule_for_domain(&domain, std::slice::from_ref(&destination), 0, placement)
+                graph.schedule_for_domain(
+                    &domain,
+                    std::slice::from_ref(&destination),
+                    0,
+                    placement,
+                    &crate::registry::uniform_capabilities(std::slice::from_ref(&destination)),
+                )
             }),
             ownership_moves: CanonicalImpactSet::default(),
         },
@@ -829,6 +848,7 @@ fn schedule_rebuild_raises_entity_creation_to_a_domain_pause() {
                     std::slice::from_ref(&cluster_node),
                     0,
                     placement,
+                    &crate::registry::uniform_capabilities(std::slice::from_ref(&cluster_node)),
                 )
             }),
             ownership_moves: CanonicalImpactSet::default(),
@@ -893,6 +913,7 @@ fn drop_recreate_retains_both_sides_of_a_rewired_graph() {
                     std::slice::from_ref(&cluster_node),
                     0,
                     placement,
+                    &crate::registry::uniform_capabilities(std::slice::from_ref(&cluster_node)),
                 )
             }),
             ownership_moves: CanonicalImpactSet::default(),

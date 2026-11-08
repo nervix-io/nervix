@@ -202,6 +202,13 @@ typed validation report on failure, and provides no mutable access around that b
 class is a compile-time error. [Node Settings](node-settings.md) owns their operational meaning,
 carriers, defaults, change procedures and source ratchet.
 
+`NodeCapabilities` also holds resolved optional positive CPU/memory measurements and positive
+`PeerReceiveBounds`. `NodeCapabilityRecord` binds those values to the shared `ClusterNodeIdentity`.
+The committed node-name key must match its identity. Schedule topology and transaction planning
+fences include the captured records; data-plane payload attempts and row admission prefixes remain
+volatile. A peer-pool publication retains the committed claim without replacing its connection
+slots, and `RelaySliceCursor` advances a contiguous prefix only after confirmed admission.
+
 Redis subscription plans carry a nonzero bounded message capacity and a validated idle deadline.
 The ingestor's absent subscription means it needs a resume. An installed subscription owns its
 bounded receiver and exact reader task; close and suspend join that task before replacing it.

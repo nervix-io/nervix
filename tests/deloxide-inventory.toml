@@ -742,6 +742,8 @@ tags = [
   "@rabbitmq_consumer_modes",
   "@rabbitmq_exchange_lifecycle",
   "@node_prerequisite_refusal",
+  "@node_capability_roll",
+  "@node_capability_unfit",
   "@backup_holder_download",
   "@snapshot_receive_admission",
   "@session_shutdown_ending",
@@ -807,6 +809,8 @@ tags = [
   "@ingestor_instance_lifecycle",
   "@processor_partitions",
   "@processor_partition_recovery",
+  "@node_capability_roll",
+  "@node_capability_unfit",
 ]
 target = "test:scenarios"
 
@@ -4328,6 +4332,54 @@ workloads = [
   "stress.execution-class-drain",
   "stress.inferencer-inspection-admission",
 ]
+
+[[owner]]
+path = "src/fault_injection/relay_slicing.rs"
+workloads = ["scenario.node-capability-roll", "stress.node-capability-roll"]
+
+[[owner]]
+path = "src/runtime/relay_sizing_position.rs"
+workloads = ["scenario.node-capability-unfit", "stress.node-capability-unfit"]
+
+[[workload]]
+coverage = "The actual rejected Arrow row returns its unused outbound position through the tracked sequence lock while holding its delivery gate, then both concrete branch channels deliver a smaller batch with their original ACK owners. No lock guard crosses an await."
+examples = 1
+feature = "tests/features/cluster/node_capability_delivery.feature"
+id = "scenario.node-capability-unfit"
+invariant = "Rejecting an oversized single row never consumes the unused sequence or stalls a later fitting batch."
+invocation = "scenarios"
+scenario = "A refused oversized row leaves its channel ready for the next smaller batch"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: the same production sequence return and subsequent two-branch delivery through the tracked channel and ACK owners."
+examples = 1
+feature = "tests/features/cluster/node_capability_delivery.feature"
+id = "stress.node-capability-unfit"
+invariant = "Rejecting an oversized single row never consumes the unused sequence or stalls a later fitting batch."
+invocation = "stress-scenarios"
+scenario = "A refused oversized row leaves its channel ready for the next smaller batch"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "The production announcement and admission paths use the existing consensus and ACK owners' tracked locks. The bounded test probe observes actual accepted slices under its tracked mutex, released before every wait. Pure placement ranking, ArcSwap publication and asynchronous Raft/network waits are outside detector evidence."
+examples = 2
+feature = "tests/features/cluster/node_capability_delivery.feature"
+id = "scenario.node-capability-roll"
+invariant = "A raised or lowered committed receive bound preserves all eight interleaved rows and their acknowledgements across a receiver restart without a tracked deadlock."
+invocation = "scenarios"
+scenario = "A pending two-branch batch adopts a receiver's <change> relay bound"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: the same real announcement, ACK and bounded probe lock paths; the scheduler's pure capacity scoring and asynchronous waits are untracked."
+examples = 2
+feature = "tests/features/cluster/node_capability_delivery.feature"
+id = "stress.node-capability-roll"
+invariant = "A raised or lowered committed receive bound preserves all eight interleaved rows and their acknowledgements across a receiver restart without a tracked deadlock."
+invocation = "stress-scenarios"
+scenario = "A pending two-branch batch adopts a receiver's <change> relay bound"
+selections = ["deloxide-stress"]
 
 [[owner]]
 path = "src/metrics.rs"

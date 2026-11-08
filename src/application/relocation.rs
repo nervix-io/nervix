@@ -55,6 +55,8 @@ enum RelocationError {
     DestinationTerminating { node: ClusterNodeName },
     #[error("node '{node}' is cordoned")]
     DestinationCordoned { node: ClusterNodeName },
+    #[error("node '{node}' has no committed capacity claim for its live incarnation")]
+    DestinationCapabilityUncommitted { node: ClusterNodeName },
     #[error("{kind} '{name}' is not scheduled in domain '{domain}'", kind = .member.kind.as_str(), name = .member.identifier.as_str())]
     MemberNotScheduled { domain: DomainName, member: NodeRef },
     #[error("{kind} '{name}' has no owner in domain '{domain}'", kind = .member.kind.as_str(), name = .member.identifier.as_str())]
@@ -446,6 +448,7 @@ impl SessionServiceImpl {
             &inputs,
             &live_nodes,
             terminating_node_ids,
+            planning.capabilities(),
         )?;
 
         let moved = unit
@@ -465,6 +468,7 @@ impl SessionServiceImpl {
             &graph,
             &schedulable_nodes,
             domain_state.config.placement,
+            planning.capabilities(),
         );
         let planned = (!moved.is_empty()).then(|| {
             planned_relocation_schedule(
@@ -566,6 +570,7 @@ impl SessionServiceImpl {
         inputs: &DomainPlanningInputs,
         live_nodes: &BTreeSet<ClusterNodeName>,
         terminating_node_ids: &BTreeSet<ClusterNodeName>,
+        capabilities: &std::collections::BTreeMap<ClusterNodeName, nervix_models::NodeCapabilities>,
     ) -> error_stack::Result<(), RelocationError> {
         if !inputs.topology().members().contains(destination) {
             return Err(Report::new(RelocationError::DestinationNotMember {
@@ -587,6 +592,13 @@ impl SessionServiceImpl {
                 node: destination.clone(),
             }));
         }
+        if !capabilities.contains_key(destination) {
+            return Err(Report::new(
+                RelocationError::DestinationCapabilityUncommitted {
+                    node: destination.clone(),
+                },
+            ));
+        }
         Ok(())
     }
 
@@ -598,6 +610,7 @@ impl SessionServiceImpl {
         graph: &ActiveGraph,
         schedulable_nodes: &BTreeSet<ClusterNodeName>,
         placement: PlacementPolicy,
+        capabilities: &std::collections::BTreeMap<ClusterNodeName, nervix_models::NodeCapabilities>,
     ) -> DomainSchedule {
         let cluster_nodes = schedulable_nodes.iter().cloned().collect::<Vec<_>>();
         #[cfg(feature = "testing")]
@@ -609,6 +622,7 @@ impl SessionServiceImpl {
                     .assured("the committed count fits a supported target"),
                 placement,
                 self.inner.runtime.scheduler_mode(),
+                capabilities,
             )
         }
         #[cfg(not(feature = "testing"))]
@@ -619,6 +633,7 @@ impl SessionServiceImpl {
                 usize::try_from(self.cluster_parameters().replica_count())
                     .assured("the committed count fits a supported target"),
                 placement,
+                capabilities,
             )
         }
     }
@@ -907,6 +922,7 @@ mod tests {
             &inputs,
             &planning.live_node_ids(),
             planning.terminating_node_ids(),
+            &std::collections::BTreeMap::new(),
         )
         .expect_err("a live cordoned voter is not a relocation destination");
         assert!(
@@ -948,6 +964,7 @@ mod tests {
             &inputs,
             &planning.live_node_ids(),
             planning.terminating_node_ids(),
+            &std::collections::BTreeMap::new(),
         )
         .expect_err("a terminating cordoned voter is not a relocation destination");
         assert!(

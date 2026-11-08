@@ -82,6 +82,7 @@ impl PeerFixture {
             registration: registration.clone(),
         };
         let metadata = wire::RelayMetadata {
+            decoded_bytes: 0,
             kind: RelayPayloadKind::Routed,
             domain: nervix_models::DomainName::parse("test").assured("the fixture domain is valid"),
             relay: nervix_models::RelayName::parse("records").assured("the fixture relay is valid"),

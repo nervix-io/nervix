@@ -36,14 +36,64 @@ impl InterconnectStreamRequest for WindowedBulkStream {
     const TIMEOUT: Duration = Duration::from_secs(10);
 }
 
+#[nervix_primitives::test]
+async fn a_bulk_response_respects_a_smaller_receiver_chunk_before_membership_publication() {
+    let receive = PeerReceiveSettings::resolve(
+        None,
+        None,
+        Some(ByteUnit::Kibibyte(8)),
+        None,
+        &nervix_execution::OperationLimits::default(),
+    )
+    .assured("positive chunk bound");
+    let pair = connected_transports_with_options(TransportOptions {
+        peer_receive: Some(receive),
+        ..TransportOptions::default()
+    })
+    .await;
+    let executor = pair.executor_b.clone();
+    pair.transport_b
+        .register_stream_handler::<WindowedBulkStream, _, _>(move |_, _| {
+            let executor = executor.clone();
+            async move {
+                let chunks = futures_util::stream::once(async move {
+                    executor
+                        .charge_owned(MemoryClass::Bulk, vec![9; 64 * 1024])
+                        .await
+                        .map_err(StreamHandlerError::with_cause)
+                });
+                Ok(StreamingResponse::new(64 * 1024, chunks))
+            }
+        })
+        .assured("bulk handler registers once");
+    let mut response = pair
+        .transport_a
+        .request_stream(&pair.node_b, WindowedBulkStream)
+        .await
+        .assured("bootstrap stream opens without a committed claim");
+    let mut total = 0_usize;
+    while let Some(chunk) = response.next_chunk().await.assured("bounded chunks arrive") {
+        assert!(chunk.len() <= 8 * 1024);
+        assert!(chunk.as_ref().iter().all(|byte| *byte == 9));
+        total = total
+            .checked_add(chunk.len())
+            .assured("bounded response length");
+    }
+    assert_eq!(total, 64 * 1024);
+    drop(response);
+    assert_eq!(bulk_window_reserved(&pair.transport_a), 0);
+    pair.transport_a.shutdown().await;
+    pair.transport_b.shutdown().await;
+}
+
 /// A replica fetching a guest save, or a node fetching a resource archive, reads a bulk response
 /// that a loaded node otherwise moves one receive window per round trip. The sender therefore
 /// has to be able to put a whole bulk receive window on the wire while the reader has taken
 /// nothing yet.
 #[nervix_primitives::test]
 async fn a_bulk_response_puts_a_whole_bulk_receive_window_in_flight_before_its_reader_reads() {
-    let window = TransportOptions::default()
-        .bulk_receive_window
+    let window = PeerReceiveSettings::default()
+        .bulk_window_bytes
         .value()
         .as_u64();
     let ConnectedTransports {
@@ -272,8 +322,11 @@ async fn a_transport_refuses_to_bind_a_bulk_receive_window_its_budget_cannot_bac
         .checked_mul(2)
         .assured("twice the fixture budget fits in u64");
     let options = TransportOptions {
-        bulk_receive_window: BulkReceiveWindow::resolve(Some(ByteUnit::Byte(window)))
-            .assured("twice the fixture budget is a valid window"),
+        peer_receive: Some(PeerReceiveSettings {
+            bulk_window_bytes: BulkReceiveWindow::resolve(Some(ByteUnit::Byte(window)))
+                .assured("twice the fixture budget is a valid window"),
+            ..PeerReceiveSettings::default()
+        }),
         ..TransportOptions::default()
     };
     let node = ClusterNodeName::parse("node-a").assured("the fixture node name is valid");

@@ -1558,7 +1558,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/__fuzz__/archive_count_tests__bolero_consensus_counts_round_trip/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "consensus-archived-counts"
 invariant = "Every native count in current consensus commands, outcomes, limits, progress, report headers and topology headers survives the production bounded storage codec with complete record equality."
@@ -2473,7 +2473,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__properties__bolero_consensus_state_records_recover_every_stored_value/corpus"
-domain_version = 46
+domain_version = 47
 features = []
 id = "consensus-state-records"
 invariant = "A generated replicated state holding records of every family, including unit-keyed schedules, stored by the consensus state writer into a real keyspace, and a second revision stored as the changes from it each recover with complete equality of every record, index and metadata field."
@@ -2488,7 +2488,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__properties__bolero_corrupt_consensus_state_records_fail_typed_or_recover_canonically/corpus"
-domain_version = 46
+domain_version = 47
 features = []
 id = "consensus-state-corruption"
 invariant = "Flipped, truncated, extended, rekeyed, copied, unknown and missing consensus state records free every decoding allocation and either fail recovery with the typed invalid-state failure or recover a state stored under its own canonical keys whose readers' invariants hold and which recovers again unchanged."
@@ -2503,7 +2503,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__raft_properties__bolero_consensus_raft_records_round_trip_through_the_storage_codec/corpus"
-domain_version = 45
+domain_version = 46
 features = []
 id = "consensus-raft-records"
 invariant = "Votes, log positions, log entries of every consensus command, current state metadata, snapshot manifests and sections restore with complete equality through the storage codec, and every log and section key names exactly the position or section it was built for."
@@ -2518,7 +2518,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__raft_properties__bolero_malformed_consensus_raft_records_fail_typed/corpus"
-domain_version = 33
+domain_version = 34
 features = []
 id = "consensus-raft-records-malformed"
 invariant = "Arbitrary bytes read as any Raft record, log key or section key free every decoding allocation and fail with the typed storage failure or name a value that stores back to the same record."
@@ -2938,7 +2938,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/wire__properties__bolero_relay_messages_reach_the_receiver_whole/corpus"
-domain_version = 8
+domain_version = 9
 features = []
 id = "relay-wire-messages"
 invariant = "Every relay grant request with its delivery position, body length, branch key fields to the bit, row watermarks, registrations and admission, the payload the receiver rebuilds from it, and every grant reply, its typed refusals included, admission exchange, acknowledgement resolution, connection hello with its prerequisite record and accepted or refused connection answer round trip through the bounded codec, and nothing stays charged."
@@ -2968,7 +2968,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/wire__properties__bolero_bulk_request_envelopes_preserve_payload_and_release_charges/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "bulk-request-envelope-wire"
 invariant = "A complete current Bulk request envelope preserves class, request name and every payload byte through the production stream encoder and wire decoder; encoding returns the input charge before stream admission, and dropping the decoded value returns all charges."
@@ -2983,7 +2983,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/wire__properties__bolero_damaged_relay_messages_fail_typed_or_decode_to_a_message/corpus"
-domain_version = 8
+domain_version = 9
 features = []
 id = "relay-wire-messages-malformed"
 invariant = "Truncated, bit-flipped or overwritten encodings of every relay message, and arbitrary bytes, fail with the codec's typed decode failure within the depth bound, or decode to a message that encodes and decodes back to itself, and either way leave no charge and no allocation of the decoder behind."
@@ -4063,7 +4063,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/application/cli/__fuzz__/application__cli__properties__bolero_node_settings_survive_their_command_line/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "node-settings-command-line"
 invariant = "Current valid node settings of every group, with the Raft timings ordered in whole milliseconds, the drain shorter than the shutdown and the memory watermarks paired and ordered, render as the server's options and read back through the same options and validation unchanged; every duration and byte quantity help prints reads back as the same value."
@@ -4466,3 +4466,18 @@ random_iterations = 256
 source = "crates/benchmark/tests/metrics_report_properties.rs"
 test = "bolero_metrics_report_round_trip"
 test_target = "test:metrics_report_properties"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/consensus/src/__fuzz__/node_capabilities__tests__bolero_node_capability_records_preserve_every_committed_value/corpus"
+domain_version = 1
+features = []
+id = "node-capability-records"
+invariant = "Every bounded current incarnation-bound capability claim, including unknown host measurements and full-width positive receive bounds, preserves every value through the production canonical storage codec."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-consensus"
+random_iterations = 128
+source = "crates/consensus/src/node_capabilities.rs"
+test = "node_capabilities::tests::bolero_node_capability_records_preserve_every_committed_value"
+test_target = "lib"

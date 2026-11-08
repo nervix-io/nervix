@@ -918,6 +918,7 @@ impl SessionServiceImpl {
                         .assured("the committed count fits a supported target"),
                     alter.policy,
                     self.inner.runtime.scheduler_mode(),
+                    planning.capabilities(),
                 );
                 #[cfg(not(feature = "testing"))]
                 let mut schedule = graph.schedule_for_domain(
@@ -926,6 +927,7 @@ impl SessionServiceImpl {
                     usize::try_from(self.cluster_parameters().replica_count())
                         .assured("the committed count fits a supported target"),
                     alter.policy,
+                    planning.capabilities(),
                 );
                 Self::merge_existing_schedule_data(
                     &mut schedule,
