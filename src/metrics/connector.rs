@@ -29,6 +29,11 @@ mod ingestor;
 pub(crate) use ingestor::IngestorInteractionMetrics;
 mod payloads;
 pub(crate) use payloads::{EmitterWork, EmitterWorkKind};
+mod outcomes;
+pub(crate) use outcomes::{
+    EmitterFinishOutcome, EmitterOpenOutcome, EmitterRejectionCode, EmitterRetryCause,
+};
+mod status;
 
 #[cfg(test)]
 mod interaction_metrics;
@@ -99,6 +104,7 @@ pub(super) struct ConnectorInteractionMetrics {
     attempts: IntCounterVec,
     durations: HistogramVec,
     payloads: payloads::PayloadFamilies,
+    outcomes: outcomes::OutcomeFamilies,
 }
 
 impl ConnectorInteractionMetrics {
@@ -138,6 +144,7 @@ impl ConnectorInteractionMetrics {
             attempts,
             durations,
             payloads: payloads::PayloadFamilies::register(registry),
+            outcomes: outcomes::OutcomeFamilies::register(registry),
         }
     }
 
@@ -175,6 +182,7 @@ impl ConnectorInteractionMetrics {
                     series: Arc::new(EmitterInteractions {
                         selector: EmitterInteractions::selector(&values),
                         payloads: self.payloads.emitter(&values),
+                        outcomes: self.outcomes.emitter(&values),
                         publish: OperationMetrics::register(
                             self,
                             &values,
@@ -263,6 +271,7 @@ struct EmitterInteractions {
     publish: OperationMetrics,
     commit: OperationMetrics,
     payloads: payloads::PayloadMetrics,
+    outcomes: outcomes::OutcomeMetrics,
 }
 
 impl EmitterInteractions {
@@ -327,6 +336,9 @@ impl EmitterInteractionMetrics {
         }
         self.series
             .payloads
+            .describe_lines(&self.series.selector, &mut lines);
+        self.series
+            .outcomes
             .describe_lines(&self.series.selector, &mut lines);
         lines
     }

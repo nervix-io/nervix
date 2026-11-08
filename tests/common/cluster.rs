@@ -3758,6 +3758,20 @@ impl Cluster {
         self.fault_injection.clear_emitter_client_fault(emitter);
     }
 
+    pub(crate) fn observe_emitter_opens(&self, emitter: &str) {
+        let emitter = nervix_models::EmitterName::parse(emitter)
+            .assured("the scenario supplies a valid emitter name");
+        self.fault_injection.observe_emitter_opens(emitter);
+    }
+
+    pub(crate) fn emitter_open_count(&self, emitter: &str) -> usize {
+        let emitter = nervix_models::EmitterName::parse(emitter)
+            .assured("the scenario supplies a valid emitter name");
+        self.fault_injection
+            .emitter_open_count(&emitter)
+            .verified("the scenario armed its emitter construction observation")
+    }
+
     pub(crate) fn stall_emitter_connector_after_resolving_on_all_nodes(
         &self,
         emitter: &str,

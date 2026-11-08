@@ -268,7 +268,7 @@ impl ClickHouseTableEmitter {
     pub const KIND: nervix_models::EmitterEntityKind =
         nervix_models::EmitterEntityKind::ClickHouse(nervix_models::ClickHouseEmitterEntity::Table);
 
-    pub fn new(
+    fn prepare(
         config: ClickHouseTableEmitterConfig,
         host: EmitterHost,
     ) -> EmitterStartResult<Self> {
@@ -569,6 +569,14 @@ impl RowEmitter for ClickHouseTableEmitter {
             "emitter published clickhouse rows"
         );
         outcome
+    }
+}
+
+impl nervix_connector::EmitterConnector for ClickHouseTableEmitter {
+    const KIND: nervix_models::EmitterEntityKind = Self::KIND;
+    type Plan = ClickHouseTableEmitterConfig;
+    async fn open(plan: Self::Plan, host: EmitterHost) -> EmitterStartResult<Self> {
+        Self::prepare(plan, host)
     }
 }
 

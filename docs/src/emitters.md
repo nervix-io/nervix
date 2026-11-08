@@ -5,6 +5,13 @@
 Emitters publish relay records to external systems or to application consumers through a client
 session.
 
+The host exposes each emitter's [failure gauge, retry counters and outcome
+observations](metrics-and-observability.md#emitter-outcomes-and-lifecycle) through `/metrics` and
+the owner-routed `destination:` section of `DESCRIBE EMITTER`. The gauge follows the current host
+and connector failures; retry counters retain the scheduled causes and delays. Record outcomes,
+transport acquisition, pool waits, confirmation timeouts and finishes retain their process-local
+totals across task restarts.
+
 A typical emitter:
 
 ```plexus
@@ -648,7 +655,7 @@ Header invocations appear in `SHOW CREATE EMITTER` rather than in `DESCRIBE`.
 
 While a request is pending after a failed attempt — waiting out its backoff or `Retry-After`,
 or sent again and not yet answered — `DESCRIBE EMITTER` reports that failure as its
-`transient error`, with the `reconnect backoff` the retry waited and the `reconnect wait` still
+[transient error](metrics-and-observability.md#emitter-outcomes-and-lifecycle), with the `reconnect backoff` the retry waited and the `reconnect wait` still
 left, and the node reports it as a runtime event. It clears once the pending request is delivered.
 The failure names its cause and, for a response, its status, such as
 `HTTP endpoint answered with retryable status 503`,
@@ -1505,7 +1512,7 @@ When the emitter stops, it flushes what the producer still queues, in both modes
 regardless of `linger.ms`: a `STOP`, an alteration or ownership move that replaces the emitter, and
 the node's graceful shutdown each give that flush their deadline. Records still awaiting their
 delivery report when the deadline passes are lost; `DESCRIBE EMITTER` reports how many as its
-transient error, counting records alone and never the errors or statistics waiting in librdkafka's
+[transient error](metrics-and-observability.md#emitter-outcomes-and-lifecycle), counting records alone and never the errors or statistics waiting in librdkafka's
 queue beside them, and a replacement that cannot flush fails and keeps the running emitter. Because
 a record counts until its delivery report arrives, the producer always reports every record.
 `delivery.report.only.error` is reserved for Nervix and refused in the client's `CONFIG` at CREATE.
@@ -1836,7 +1843,7 @@ envelope fields. The same operations apply to an `EXCHANGE` emitter. `SHOW CREAT
 
 Nervix never declares an exchange or a binding. When an exchange emitter opens, it checks that its
 exchange exists with a passive declaration; while it is missing, the emitter stays unavailable with
-`RabbitMQ exchange '<name>' does not exist` as its transient error, confirms nothing, so its input
+`RabbitMQ exchange '<name>' does not exist` as its [transient error](metrics-and-observability.md#emitter-outcomes-and-lifecycle), confirms nothing, so its input
 stays unacknowledged, and opens on its `RETRY POLICY` backoff once the exchange is declared.
 
 A message no binding routes, such as one whose key no binding of a direct exchange names or one for
@@ -2115,7 +2122,7 @@ as `SET QOS 2, SET MODE ACK SEQUENTIAL ...` on a `NO ACK` emitter, because no mo
 QoS 0 acknowledges client acceptance. When the emitter stops, it waits within the stop or shutdown
 deadline for its client to send the publishes it still holds, which a client cut off from its
 broker holds until it connects again; publishes still unsent at that deadline fail the stop and are
-counted in the emitter's transient error. Sending a QoS 0 publish to the connection does not
+counted in the emitter's [transient error](metrics-and-observability.md#emitter-outcomes-and-lifecycle). Sending a QoS 0 publish to the connection does not
 confirm that the broker received it.
 
 QoS 1 waits for `PUBACK`; QoS 2 waits for the complete exactly-once handshake, which `PUBCOMP`
@@ -2929,7 +2936,7 @@ Opening an emitter reads its TLS files and builds its transport, but contacts no
 connects when a request needs one. Both resolve the endpoint's host through the node's configured
 DNS resolver for every new connection, and keep that host for the HTTP authority and the TLS server
 name. An endpoint that does not resolve, refuses the connection or never answers is therefore never
-an initialization error: the export fails, `DESCRIBE EMITTER` reports a transient error, and the
+an initialization error: the export fails, `DESCRIBE EMITTER` reports a [transient error](metrics-and-observability.md#emitter-outcomes-and-lifecycle), and the
 emitter retries the export on its `RETRY POLICY`. A missing or invalid TLS file, or a header the
 emitter refuses, fails its initialization instead. Nervix does not provision collectors, indexes,
 tenants or vendor-side telemetry objects; the OTLP receiver must already exist.
@@ -3604,7 +3611,7 @@ first looks the collection up by name in the client's database. The lookup needs
 beyond those that let the client's user write the collection. A missing collection fails the write
 before any document is sent: every row stays unresolved and is written again on the emitter's
 `RETRY POLICY` backoff, and `DESCRIBE EMITTER` shows `MongoDB target collection is not provisioned`
-as the emitter's `transient error` until the collection exists. The lookup and the write are
+as the emitter's [transient error](metrics-and-observability.md#emitter-outcomes-and-lifecycle) until the collection exists. The lookup and the write are
 separate commands, so a collection dropped between them can be created again by the write, as
 MongoDB creates a missing collection on its first insert.
 
@@ -3862,7 +3869,7 @@ before `@` and its account's storage service in its host:
 `wasb://<container>@<account>.blob.<suffix>/...` and `wasbs://...` name the Blob service, while
 `abfs://<container>@<account>.dfs.<suffix>/...` and `abfss://...` name the Data Lake service. The
 emitter checks the container and the service when it opens; a location that lacks either fails the
-open as a configuration failure, which `DESCRIBE EMITTER` shows as the emitter's transient error
+open as a configuration failure, which `DESCRIBE EMITTER` shows as the emitter's [transient error](metrics-and-observability.md#emitter-outcomes-and-lifecycle)
 while the emitter retries the open on its declared retry policy. `COMMIT EACH ... MAX SIZE` uses the
 same positive whole-byte size syntax as `BATCH MAX SIZE`.
 

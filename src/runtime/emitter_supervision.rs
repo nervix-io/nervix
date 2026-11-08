@@ -340,6 +340,14 @@ impl Runtime {
         status
     }
 
+    pub(super) fn register_emitter_readiness(&self, key: &DomainNodeRef) -> Arc<AtomicBool> {
+        let ready = Arc::new(AtomicBool::new(false));
+        self.inner
+            .emitter_readiness
+            .insert(key.clone(), ready.clone());
+        ready
+    }
+
     #[cfg(test)]
     pub(in crate::runtime) fn record_emitter_transient_error_with_backoff(
         &self,
@@ -464,6 +472,7 @@ pub(super) struct EmitterTaskRegistration {
     key: DomainNodeRef,
     status: Arc<task_status::TaskStatus<EmitterRetryStatus>>,
     confirmations: Arc<AtomicUsize>,
+    readiness: Arc<AtomicBool>,
 }
 
 impl EmitterTaskRegistration {
@@ -477,12 +486,19 @@ impl EmitterTaskRegistration {
             ),
             status: context.status.clone(),
             confirmations: context.confirmation_waits.clone(),
+            readiness: context.readiness.clone(),
         }
     }
 }
 
 impl Drop for EmitterTaskRegistration {
     fn drop(&mut self) {
+        self.runtime
+            .inner
+            .emitter_readiness
+            .remove_if(&self.key, |_, current| {
+                Arc::ptr_eq(current, &self.readiness)
+            });
         self.runtime
             .inner
             .emitter_statuses
@@ -502,6 +518,33 @@ impl Drop for EmitterTaskRegistration {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    #[test]
+    fn retiring_readiness_cannot_change_or_remove_its_replacement() {
+        use super::*;
+        let predecessor = crate::runtime::test_fixtures::emitter_context();
+        let key = DomainNodeRef::node_in(
+            predecessor.domain.clone(),
+            ModelKind::Emitter,
+            predecessor.emitter.clone(),
+        );
+        let registration = EmitterTaskRegistration::new(&predecessor);
+        let replacement = predecessor.runtime.register_emitter_readiness(&key);
+        predecessor.emitter_host().mark_ready();
+        assert!(!replacement.load(Ordering::Relaxed));
+        replacement.store(true, Ordering::Relaxed);
+        predecessor.emitter_host().mark_unready();
+        assert!(replacement.load(Ordering::Relaxed));
+        drop(registration);
+        assert!(
+            predecessor
+                .runtime
+                .inner
+                .emitter_readiness
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(&current, &replacement))
+        );
+    }
+
     use std::time::Duration;
 
     use nervix_models::{

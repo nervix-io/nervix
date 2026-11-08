@@ -10,6 +10,8 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
+use nervix_connector::EmitterConnector as _;
+
 use super::*;
 
 const _: () = assert!(matches!(
@@ -29,7 +31,7 @@ impl EmitterConnectorStarter {
             label,
             codec,
             batch,
-            PulsarTopicEmitter::new(
+            PulsarTopicEmitter::open(
                 PulsarTopicEmitterConfig {
                     config: connector.client.config.entries.clone(),
                     topic: connector.topic.clone(),

@@ -110,6 +110,8 @@ impl ConfiguredFaultInjection {
         false
     }
 
+    pub(in crate::runtime) fn record_emitter_open(&self, _emitter: &EmitterName) {}
+
     pub(in crate::runtime) fn take_emitter_connector_stall(
         &self,
         _emitter: &EmitterName,
