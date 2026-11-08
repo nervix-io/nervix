@@ -365,6 +365,12 @@ Source counts have no semantic exception channel. A current structural occurrenc
 until its owner changes it; a compiler expectation cannot hide its inactive source. Likewise,
 source provenance cannot be waived by declaring a lifecycle or error contract.
 
+The cryptography count's source-owned non-security purpose is part of that rule's definition,
+not a compiler expectation. The [classification register](cryptography.md#classification-register)
+specifies its Rustdoc form and lexical scope. It classifies only the operation's BLAKE3 uses;
+containers, empty reasons, neighboring operations and other algorithms remain counted. Source
+fixtures and the bounded `typed-non-aws-lc-crypto` property qualify those distinctions.
+
 Review still owns the truth of reasons, lifetime classifications, architectural roles and bounds.
 The compiler checks their placement, shape and supported effects, not arbitrary whole-program
 ownership. Finite API recognition does not establish business semantics for an unrelated custom

@@ -166,6 +166,7 @@ struct TransactionPlanningBasisSource<'a> {
     schedule_inputs: &'a DomainSchedulePlanningSnapshot,
 }
 
+/// Non-security BLAKE3: detects changed trusted planning inputs, not client authority.
 fn transaction_planning_basis(
     source: TransactionPlanningBasisSource<'_>,
 ) -> Result<ImpactPlanningBasis, Report<TransactionPlanningError>> {

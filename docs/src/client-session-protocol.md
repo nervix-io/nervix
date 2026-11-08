@@ -1992,6 +1992,12 @@ retaining the archive, whether resource bytes are included, the number of users,
 revision, cut kind and quiesce counters, section count, and bytes. The summary is part of the recorded outcome, so repeating the
 command under its reference returns the same summary and never assembles a second archive.
 
+The BLAKE3 digest checks content consistency with that summary and binds a restore to the
+operator-selected archive. It is not a signature or credential: matching it does not authenticate
+an archive's provenance or authorize a command. Session authentication and configured transport
+security retain those separate roles; the [cryptography register](cryptography.md#classification-register)
+names the checksum owners.
+
 A quiesced cut whose pause commits after its cut deadline is refused before the coordinator
 starts installation, even if reconciliation already installed that pause. The command records
 the timeout after resuming the domain and produces no archive. This is the cut's deadline;
