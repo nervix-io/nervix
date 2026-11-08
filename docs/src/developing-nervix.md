@@ -44,8 +44,18 @@ Install:
 The JVM library requires a JDK 21 or later (`openjdk-21-jdk-headless` on Debian and Ubuntu).
 `just build-client-jvm` compiles the API with `javac --release 21` and packages it with the current
 target's JNI library into `target/client-conformance/java/nervix-client.jar`; all generated classes,
-probe classes and native files stay under `target`. `just test-client-jvm-api` exercises bulk columns,
-handle cleanup and cancellation with `-Xcheck:jni`. `just test-client-jvm` also embeds the JVM for
+probe classes and native files stay under `target`. `just test-client-jvm-api` runs the inventoried
+JUnit 5 boundary tier with `-Xcheck:jni`,
+including bulk columns, Cleaner cleanup, cancellation and the original fresh-class-loader checks.
+`just build-client-jvm-tests` downloads JUnit Platform console-standalone 1.13.4 from Maven Central
+and verifies SHA-256 before use; it compiles the suite with `javac --release 21 -Xlint:all -Werror`,
+without Maven or Gradle. `just test-client-jvm-cluster` runs its one- and three-node cluster tier
+over TLS and plaintext through `client_suites.feature`. Java test identities are `class#method`; JUnit reports them
+only after test teardown. `just validate-client-suites` uses Java 21 compiler trees and resolved
+elements to check every public type, constructor, method, record component and enum constant.
+Comments, string contents and methods on a different receiver never satisfy that member;
+`just test-client-suites` checks these controls. Validation and documentation tooling require a
+JDK 21 as well. `just test-client-jvm` also embeds the JVM for
 the JNI failure and representation tests. The all-features workspace recipes `just test` and
 `just test-coverage` enable `jvm-tests` and prepare the same fixtures, so they also require JDK 21.
 The coverage build packages the jar and fixtures for its restored unit runner. Client conformance

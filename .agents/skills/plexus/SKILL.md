@@ -75,6 +75,10 @@ the queue/default-exchange and named-exchange choices, `MANDATORY`, persistence,
 `PROPERTIES` types and envelope alterations. Do not promise consumer completion from a publisher
 confirm or message durability from routing alone.
 
+For applications submitting Plexus, use [Client Libraries](../../../docs/src/client-libraries.md)
+to select the host guide; Java and JVM programs follow [JVM Client Library](../../../docs/src/client-library-jvm.md).
+Read its execution, clock and endpoint sections before choosing application-side lifecycle handling.
+
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
 contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and
@@ -86,6 +90,12 @@ follow the CLI's [Asynchronous Output](../../../docs/src/client-tools-cli.md#asy
 section.
 For secure CLI connections and console leader redirects, follow those chapters' connection
 sections and [Native session TLS](../../../docs/src/installation-cargo.md#native-session-tls).
+For scripted CLI use, read [Modes](../../../docs/src/client-tools-cli.md#modes) and
+[Exit Status](../../../docs/src/client-tools-cli.md#exit-status) for completion JSON, transaction
+inspection JSON, event output and partial drain outcomes. For browser access and transaction
+commits, read [Signing In](../../../docs/src/client-tools-web-console.md#signing-in) and
+[Inspecting a transaction](../../../docs/src/client-tools-web-console.md#inspecting-a-transaction).
+Read [Layout](../../../docs/src/client-tools-web-console.md#layout) before interpreting footer totals.
 Listener certificates are node provisioning, configured outside Plexus statements.
 For TLS algorithm choices, read [Cryptography](../../../docs/src/cryptography.md#algorithm-policy):
 the interconnect uses its fixed provider, while native sessions and connectors use the outward

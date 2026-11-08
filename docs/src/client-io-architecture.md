@@ -362,6 +362,14 @@ canonical IPC, without per-value language callbacks or row-map payloads.
 | Delivery/batch retain and release | Keep borrowed views alive; releasing storage never settles a delivery |
 | `nx_producer_close`, `nx_consumer_close`, handle free | End attachments and fence late restoration; an abandoned close continues cleanup |
 
+The JVM host suite and its [guide](client-library-jvm.md) use the published Java API. Its
+JUnit boundary tier retains the original bulk-column, cancellation, Cleaner and reentrant-close
+checks; its cluster tier exercises the public session/endpoint lifecycle on one and three nodes,
+over TLS and plaintext.
+The inventory accounts for every test after teardown. Java compiler elements resolve the suite
+references to the binding's declared public members; the guide includes compiled, executed suite
+examples. JNI representation properties remain a separate instrument.
+
 The JNI edge leases every input before a blocking host call, then releases the Java handle's
 monitor. Cleaner cleanup and explicit `close()` release each allocation once, after any admitted
 short call returns; reentrant close ends new admission immediately, and nested access is refused.
