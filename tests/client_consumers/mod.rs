@@ -90,9 +90,8 @@ async fn then_consumer_receives_interleaved_rows(
             let fingerprint = delivery
                 .branch_fingerprint
                 .expect("concrete branch identity");
-            match branches.insert(tenant, fingerprint) {
-                Some(prior) => assert_eq!(prior, fingerprint),
-                None => {}
+            if let Some(prior) = branches.insert(tenant, fingerprint) {
+                assert_eq!(prior, fingerprint);
             }
         }
         assert_eq!(
