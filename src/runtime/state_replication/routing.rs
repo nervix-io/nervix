@@ -84,6 +84,26 @@ impl MaterializedRelayPublication {
         None
     }
 
+    /// Visit one immutable publication without allocating a second list of its routes.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the observer visits materialized read handles from one \
+                                   immutable publication; its caller owns bounded capture and \
+                                   cancellation")
+    )]
+    pub(in crate::runtime) fn visit_states<E>(
+        &self,
+        mut visit: impl FnMut(Option<&BranchKey>, MaterializedRelayStateRead) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let routes = self.current.load();
+        for (branch, route) in routes.iter() {
+            if let Some(state) = route.materialized_read() {
+                visit(branch.as_ref(), state)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(in crate::runtime) fn states(&self) -> Vec<MaterializedRelayStateRead> {
         let mut states = Vec::new();
         for route in self.current.load().values() {

@@ -33,7 +33,7 @@ use nervix_interconnect::{
 use nervix_models::{
     ClusterNodeName, CommandExecutionReference, DomainName, DomainSchedule, DomainStatus,
     ModelKind, ModelName, NodeRef, RelayName, RemoteRuntimeField, ResetWasmState,
-    ResolvedBranching, ResolvedResetWasmStateScope, WasmStateResetPhase, WasmStateResetReason,
+    ResolvedBranching, ResolvedStateBranchSelection, WasmStateResetPhase, WasmStateResetReason,
     WasmStateResetScope,
 };
 #[cfg(feature = "testing")]
@@ -143,9 +143,9 @@ impl SessionServiceImpl {
             })
         })?;
         let target = match selection {
-            ResolvedResetWasmStateScope::Unbranched => WasmStateResetTarget::Unbranched,
-            ResolvedResetWasmStateScope::AllBranches => WasmStateResetTarget::AllBranches,
-            ResolvedResetWasmStateScope::Branch { fields, .. } => {
+            ResolvedStateBranchSelection::Unbranched => WasmStateResetTarget::Unbranched,
+            ResolvedStateBranchSelection::AllBranches => WasmStateResetTarget::AllBranches,
+            ResolvedStateBranchSelection::Branch { fields, .. } => {
                 WasmStateResetTarget::Branch(fields)
             }
         };

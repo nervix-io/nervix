@@ -43,6 +43,7 @@ mod archive_allocation_tests;
 pub mod capacity;
 #[cfg(test)]
 mod captured_logs;
+mod client_row;
 pub mod cluster;
 mod domain_clock_authority;
 mod emitter_execution_plan;
@@ -60,6 +61,7 @@ pub mod runtime_ack;
 pub mod runtime_schema;
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_selection_tests;
+mod state_inspection_cursor;
 #[doc(hidden)]
 pub mod subscription_row;
 pub(crate) mod task_shutdown;

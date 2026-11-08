@@ -186,6 +186,9 @@ class InventoryTests(unittest.TestCase):
             "relay-admission-owners",
             "relay-channel-watermark-turnover",
             "client-emitter-wire",
+            "client-state-inspection",
+            "interconnect-state-inspection",
+            "state-inspection-cursor",
             "client-requests",
             "client-replies",
             "client-events",
@@ -524,19 +527,19 @@ class InventoryTests(unittest.TestCase):
         }
         for target, version in {
             "benchmark-metrics-report": 1,
-            "plexus-model": 54,
-            "plexus-archive-model": 56,
-            "plexus-statement": 55,
-            "plexus-statement-text": 54,
-            "plexus-format-document": 54,
-            "plexus-format-text": 53,
-            "models-archived-models": 54,
-            "registry-archived-models": 49,
+            "plexus-model": 55,
+            "plexus-archive-model": 57,
+            "plexus-statement": 56,
+            "plexus-statement-text": 55,
+            "plexus-format-document": 55,
+            "plexus-format-text": 54,
+            "models-archived-models": 55,
+            "registry-archived-models": 50,
             "consensus-state-records": 47,
             "consensus-state-corruption": 47,
             "consensus-raft-records": 46,
-            "registry-stored-models": 42,
-            "registry-stored-models-corruption": 42,
+            "registry-stored-models": 43,
+            "registry-stored-models-corruption": 43,
             "inferencer-tensor-columns": 1,
             "inferencer-state-snapshots": 1,
             "inferencer-state-snapshots-malformed": 1,
@@ -544,6 +547,14 @@ class InventoryTests(unittest.TestCase):
         }.items():
             with self.subTest(target=target):
                 self.assertEqual(versions[target], version)
+
+    def test_state_inspection_representations_are_bounded_pairs(self) -> None:
+        targets = {target.id: target for target in bolero.load_inventory().targets}
+        for name in ("client-state-inspection", "state-inspection-cursor"):
+            with self.subTest(target=name):
+                self.assertEqual(targets[name].domain_version, 1)
+                self.assertEqual(targets[name].max_input_bytes, 512)
+                self.assertEqual(targets[name].random_iterations, 128)
 
     def test_invalid_case_budget_and_duplicate_id_fail(self) -> None:
         text = bolero.INVENTORY.read_text()

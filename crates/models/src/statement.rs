@@ -429,6 +429,17 @@ pub struct ShowEmitters;
 )]
 pub struct ShowRelayMaterializedState {
     pub relay: RelayName,
+    pub selection: Option<crate::StateBranchSelection>,
+    pub page: Option<StateInspectionPageRequest>,
+    pub format: InspectionFormat,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct StateInspectionPageRequest {
+    pub limit: NonZeroU64,
+    pub after: Option<String>,
 }
 
 #[derive(

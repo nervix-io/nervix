@@ -11,7 +11,7 @@ use nervix_models::SubscriptionName;
 use crate::{
     codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_enum},
     frame::{EncodedFrame, ServerFrame, VerifiedFrame},
-    limits::{MIN_FRAME_BYTES, SessionLimits},
+    limits::SessionLimits,
     row::{CellWriter, RowBatchView},
     server::finish_server_message,
     wire,
@@ -59,22 +59,6 @@ impl SubscriptionHandle {
     }
 }
 
-/// The depth of a row's or branch key's cell tables in a rows frame: the server message, the rows
-/// event, the batch, the row or branch key, and the cell.
-const ROW_CELL_DEPTH: usize = 5;
-
-/// The bytes a rows frame keeps free for what it writes once the last row is accepted: the rows
-/// vector's length prefix, the batch, rows event and server message tables with their vtables, the
-/// root offset and identifier, and alignment padding, with room for the one row table a refused
-/// row writes before it is checked. The subscription handle and branch key are written first and
-/// counted as they are written. A test fills batches up to the frame limit and finishes them.
-const ROWS_ENVELOPE_BYTES: usize = 256;
-
-/// The offset each row adds to the batch's rows vector.
-const ROW_OFFSET_BYTES: usize = 4;
-
-const _: () = assert!(ROWS_ENVELOPE_BYTES < MIN_FRAME_BYTES);
-
 /// Writes one batch of a subscription's rows straight into a server frame.
 ///
 /// Every row of a batch belongs to one concrete branch, chosen when the encoder is created. Rows
@@ -83,11 +67,9 @@ const _: () = assert!(ROWS_ENVELOPE_BYTES < MIN_FRAME_BYTES);
 /// bytes behind that still fit the frame: finish the rows accepted before it, or discard the
 /// encoder.
 pub struct SubscriptionRowsEncoder {
-    encoder: Encoder<'static>,
+    batch: crate::row_batch::RowBatchBuilder,
     subscription: SubscriptionHandle,
     handle: WIPOffset<wire::SubscriptionHandle<'static>>,
-    branch_key: Option<WIPOffset<wire::BranchKey<'static>>>,
-    rows: Vec<WIPOffset<wire::Row<'static>>>,
 }
 
 impl SubscriptionRowsEncoder {
@@ -99,11 +81,9 @@ impl SubscriptionRowsEncoder {
         let mut encoder = Encoder::new(limits.frame_bytes(), limits);
         let handle = subscription.encode(&mut encoder)?;
         Ok(Self {
-            encoder,
+            batch: crate::row_batch::RowBatchBuilder::new(encoder),
             subscription,
             handle,
-            branch_key: None,
-            rows: Vec::new(),
         })
     }
 
@@ -114,16 +94,7 @@ impl SubscriptionRowsEncoder {
         write_key: impl FnOnce(&mut CellWriter<'_, 'static>) -> Result<(), Report<WireEncodeError>>,
     ) -> Result<Self, Report<WireEncodeError>> {
         let mut batch = Self::unbranched(subscription, limits)?;
-        batch.encoder.keep_free(Self::free_bytes(1));
-        let mut key = CellWriter::new(&mut batch.encoder, "BranchKey.cells", ROW_CELL_DEPTH);
-        write_key(&mut key)?;
-        let cells = key.finish()?;
-        let branch_key = wire::BranchKey::create(
-            batch.encoder.fbb(),
-            &wire::BranchKeyArgs { cells: Some(cells) },
-        );
-        batch.encoder.within_limit("RowBatch.branch_key")?;
-        batch.branch_key = Some(branch_key);
+        batch.batch.branch_key(write_key)?;
         Ok(batch)
     }
 
@@ -132,68 +103,30 @@ impl SubscriptionRowsEncoder {
         &mut self,
         write_cells: impl FnOnce(&mut CellWriter<'_, 'static>) -> Result<(), Report<WireEncodeError>>,
     ) -> Result<(), Report<WireEncodeError>> {
-        let rows = self
-            .rows
-            .len()
-            .checked_add(1)
-            .assured("a vector of four-byte offsets holds at most isize::MAX / 4 entries");
-        self.encoder.entries("RowBatch.rows", rows)?;
-        self.encoder.keep_free(Self::free_bytes(rows));
-        let mut cells = CellWriter::new(&mut self.encoder, "Row.cells", ROW_CELL_DEPTH);
-        write_cells(&mut cells)?;
-        let cells = cells.finish()?;
-        let row = wire::Row::create(self.encoder.fbb(), &wire::RowArgs { cells: Some(cells) });
-        self.encoder.within_limit("RowBatch.rows")?;
-        self.rows.push(row);
-        Ok(())
-    }
-
-    /// The bytes the frame keeps free while `rows` rows are written: their offsets and the
-    /// envelope.
-    fn free_bytes(rows: usize) -> usize {
-        let offsets = rows.checked_mul(ROW_OFFSET_BYTES).assured(
-            "the row count is at most one past the length of an in-memory vector of four-byte \
-             offsets, whose byte size is at most isize::MAX",
-        );
-        offsets
-            .checked_add(ROWS_ENVELOPE_BYTES)
-            .assured("the offsets take at most isize::MAX bytes, leaving room for the envelope")
+        self.batch.push_row(write_cells)
     }
 
     /// The rows written so far.
     pub fn rows(&self) -> usize {
-        self.rows.len()
+        self.batch.rows()
     }
 
     /// The bytes written so far, for deciding when to start the next batch.
     pub fn encoded_bytes(&self) -> usize {
-        self.encoder.encoded_bytes()
+        self.batch.encoded_bytes()
     }
 
-    pub fn finish(mut self) -> Result<EncodedFrame<ServerFrame>, Report<WireEncodeError>> {
-        if self.rows.is_empty() {
-            return Err(Report::new(WireEncodeError::EmptyCollection {
-                field: "RowBatch.rows",
-            }));
-        }
-        self.encoder.keep_free(0);
-        let rows = self.encoder.tables("RowBatch.rows", &self.rows)?;
-        let batch = wire::RowBatch::create(
-            self.encoder.fbb(),
-            &wire::RowBatchArgs {
-                branch_key: self.branch_key,
-                rows: Some(rows),
-            },
-        );
+    pub fn finish(self) -> Result<EncodedFrame<ServerFrame>, Report<WireEncodeError>> {
+        let (mut encoder, batch) = self.batch.finish()?;
         let message = wire::SubscriptionRows::create(
-            self.encoder.fbb(),
+            encoder.fbb(),
             &wire::SubscriptionRowsArgs {
                 subscription: Some(self.handle),
                 batch: Some(batch),
             },
         );
         finish_server_message(
-            self.encoder,
+            encoder,
             EncodedUnion::new(wire::ServerBody::SubscriptionRows, message),
         )
     }
@@ -204,9 +137,9 @@ impl fmt::Debug for SubscriptionRowsEncoder {
         formatter
             .debug_struct("SubscriptionRowsEncoder")
             .field("subscription", &self.subscription)
-            .field("branched", &self.branch_key.is_some())
-            .field("rows", &self.rows.len())
-            .field("encoded_bytes", &self.encoder.encoded_bytes())
+            .field("branched", &self.batch.is_branched())
+            .field("rows", &self.batch.rows())
+            .field("encoded_bytes", &self.batch.encoded_bytes())
             .finish()
     }
 }

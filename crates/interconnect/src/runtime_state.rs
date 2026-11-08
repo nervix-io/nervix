@@ -245,7 +245,10 @@ impl InterconnectStreamRequest for SyncKafkaOffsets {
     const NAME: &'static str = "sync_kafka_offsets";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const TIMEOUT: Duration = Duration::from_secs(30);
+    #[inline]
+    fn default_timeout() -> Duration {
+        Duration::from_secs(30)
+    }
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
@@ -352,11 +355,19 @@ impl InterconnectRequest for StateSyncRequest {
     const TIMEOUT: Duration = Duration::from_secs(5);
 }
 
+impl FetchStateCheckpoint {
+    /// Checkpoint fetching and its canonical Kafka-start coordinator share this one deadline.
+    pub(crate) const TRANSFER_TIMEOUT: Duration = Duration::from_secs(60);
+}
+
 impl InterconnectStreamRequest for FetchStateCheckpoint {
     const NAME: &'static str = "fetch_state_checkpoint";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const TIMEOUT: Duration = Duration::from_secs(60);
+    #[inline]
+    fn default_timeout() -> Duration {
+        Self::TRANSFER_TIMEOUT
+    }
 }
 
 #[cfg(all(
