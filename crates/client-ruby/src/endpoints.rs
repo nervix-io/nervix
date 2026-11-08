@@ -5,7 +5,10 @@
 //! - **Depends on.** The host endpoint owners, typed batches, schemas and Ruby cancellation.
 //! - **Must not know.** Routing, credit accounting, retries, restoration or acknowledgement policy.
 
-use std::time::Duration;
+use std::{
+    hash::{Hash, Hasher},
+    time::Duration,
+};
 
 use magnus::{
     DataTypeFunctions, Error, RArray, RClass, RHash, RModule, RString, Ruby, TypedData, Value,
@@ -24,6 +27,7 @@ use crate::{
     enums, errors, gvl,
     schema::{Fields, Schema},
     sessions::{Cancel, Session},
+    value_object::ValueObject,
     values,
 };
 
@@ -60,7 +64,7 @@ impl OpenArguments {
 }
 
 impl Session {
-    fn open_ingestor(&self, args: &[Value]) -> Result<Producer, Error> {
+    fn open_ingestor(&self, args: &[Value]) -> Result<Value, Error> {
         let OpenArguments {
             domain,
             entity,
@@ -71,16 +75,26 @@ impl Session {
         } = OpenArguments::parse(args)?;
         let (batches, bytes) = host::credit(batches, bytes).map_err(errors::raise)?;
         let limits = ClientProducerLimits { batches, bytes };
+        let ruby = Ruby::get().assured("a native Ruby callback holds the GVL");
+        let cleanup = ruby
+            .block_given()
+            .then(|| cancel.as_ref().map(host::Cancel::child));
         let token = cancel;
         let session = self.held()?;
         let producer = gvl::without_gvl(token, |cancel| {
             host::Producer::open(&session, &domain, &entity, &fields, limits, Some(cancel))
         })?;
-        Ok(Producer {
+        let producer = ruby.obj_wrap(Producer {
             producer: Arc::new(producer),
-        })
+        });
+        let Some(cleanup) = cleanup else {
+            return Ok(producer.as_value());
+        };
+        let result = ruby.yield_value(producer);
+        producer.close_with_cancel(cleanup)?;
+        result
     }
-    fn subscribe_emitter(&self, args: &[Value]) -> Result<Consumer, Error> {
+    fn subscribe_emitter(&self, args: &[Value]) -> Result<Value, Error> {
         let OpenArguments {
             domain,
             entity,
@@ -91,18 +105,28 @@ impl Session {
         } = OpenArguments::parse(args)?;
         let (batches, bytes) = host::credit(batches, bytes).map_err(errors::raise)?;
         let limits = ClientConsumerLimits { batches, bytes };
+        let ruby = Ruby::get().assured("a native Ruby callback holds the GVL");
+        let cleanup = ruby
+            .block_given()
+            .then(|| cancel.as_ref().map(host::Cancel::child));
         let token = cancel;
         let session = self.held()?;
         let consumer = gvl::without_gvl(token, |cancel| {
             host::Consumer::open(&session, &domain, &entity, &fields, limits, Some(cancel))
         })?;
-        Ok(Consumer {
+        let consumer = ruby.obj_wrap(Consumer {
             consumer: Arc::new(consumer),
-        })
+        });
+        let Some(cleanup) = cleanup else {
+            return Ok(consumer.as_value());
+        };
+        let result = ruby.yield_value(consumer);
+        consumer.close_with_cancel(cleanup)?;
+        result
     }
 }
 
-#[derive(DataTypeFunctions, TypedData)]
+#[derive(Debug, PartialEq, Eq, Hash, DataTypeFunctions, TypedData)]
 #[magnus(class = "Nervix::Client::Grant", free_immediately)]
 struct Grant {
     batches: u32,
@@ -110,6 +134,7 @@ struct Grant {
     max_batch_rows: u32,
     max_batch_bytes: u64,
 }
+impl ValueObject for Grant {}
 impl Grant {
     fn batches(&self) -> u32 {
         self.batches
@@ -125,7 +150,7 @@ impl Grant {
     }
 }
 
-#[derive(DataTypeFunctions, TypedData)]
+#[derive(Debug, PartialEq, Eq, DataTypeFunctions, TypedData)]
 #[magnus(class = "Nervix::Client::Policy", free_immediately)]
 struct Policy {
     window: host::Window,
@@ -133,6 +158,16 @@ struct Policy {
     retry_backoff: u64,
     retry_max_backoff: u64,
 }
+impl Hash for Policy {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.window().hash(state);
+        self.outstanding().hash(state);
+        self.ack_timeout.hash(state);
+        self.retry_backoff.hash(state);
+        self.retry_max_backoff.hash(state);
+    }
+}
+impl ValueObject for Policy {}
 impl Policy {
     fn new(
         window: AckWindow,
@@ -324,6 +359,9 @@ impl Producer {
     fn close(&self, args: &[Value]) -> Result<(), Error> {
         let args = scan_args::<(), (), (), (), RHash, ()>(args)?;
         let token = Cancel::keyword(args.keywords)?;
+        self.close_with_cancel(token)
+    }
+    fn close_with_cancel(&self, token: Option<host::Cancel>) -> Result<(), Error> {
         let producer = self.producer.clone();
         gvl::without_gvl(token, |cancel| producer.close(Some(cancel)))
     }
@@ -382,6 +420,9 @@ impl Consumer {
     fn close(&self, args: &[Value]) -> Result<(), Error> {
         let args = scan_args::<(), (), (), (), RHash, ()>(args)?;
         let token = Cancel::keyword(args.keywords)?;
+        self.close_with_cancel(token)
+    }
+    fn close_with_cancel(&self, token: Option<host::Cancel>) -> Result<(), Error> {
         let consumer = self.consumer.clone();
         gvl::without_gvl(token, |cancel| consumer.close(Some(cancel)))
     }
@@ -476,6 +517,10 @@ impl Grant {
         grant.define_method("bytes", method!(Grant::bytes, 0))?;
         grant.define_method("max_batch_rows", method!(Grant::max_batch_rows, 0))?;
         grant.define_method("max_batch_bytes", method!(Grant::max_batch_bytes, 0))?;
+        grant.define_method("==", method!(Grant::same_value, 1))?;
+        grant.define_method("eql?", method!(Grant::same_value, 1))?;
+        grant.define_method("hash", method!(Grant::value_hash, 0))?;
+        grant.define_method("inspect", method!(Grant::inspect, 0))?;
         Ok(())
     }
 }
@@ -484,6 +529,10 @@ impl Policy {
     fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
         let policy = crate::class(ruby, module, "Policy")?;
         policy.define_method("window", method!(Policy::window, 0))?;
+        policy.define_method("==", method!(Policy::same_value, 1))?;
+        policy.define_method("eql?", method!(Policy::same_value, 1))?;
+        policy.define_method("hash", method!(Policy::value_hash, 0))?;
+        policy.define_method("inspect", method!(Policy::inspect, 0))?;
         policy.define_method("outstanding", method!(Policy::outstanding, 0))?;
         policy.define_method("ack_timeout_nanos", method!(Policy::ack_timeout_nanos, 0))?;
         policy.define_method(
