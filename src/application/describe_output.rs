@@ -30,7 +30,7 @@ use nervix_models::{
     CreateReorderer, CreateWindowProcessor, EmitterBody, EmitterPayloadPresentation, FieldPath,
     HeaderModel, IcebergTableEmitter, IngestTimestampSource, IngestorEntity, IngestorInput,
     KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, Model, ModelKind, ModelName, NodeRef,
-    NodeUnitRef, PlacementName, PlacementPolicy, ProcessorInputs, ProcessorOutputs, RelayName,
+    NodeUnitRef, PlacementName, PlacementPolicy, ProcessorInputs, ProcessorOutputs,
     RequestedResourceVersion, ResourceDescription, ResourceEntryContent, ResourceManifestEntry,
     ResourceUsage, ResourceVersionEntries, ScheduledNode, Unit, WasmStateInspection,
     WasmUnitStateInspection, expression_to_plexus,
