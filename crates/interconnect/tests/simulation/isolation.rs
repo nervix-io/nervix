@@ -1291,7 +1291,7 @@ impl HubHost {
         );
 
         let waited = self.stalled.call(PeerCommand::OverflowResourceSlots).await;
-        assert!(waited >= ResourceStream::TIMEOUT, "{waited:?}");
+        assert!(waited >= ResourceStream::default_timeout(), "{waited:?}");
         let read = self.healthy.call(PeerCommand::ReadStream).await;
         assert_eq!(read, STREAM_BYTES);
         let during = self.observe();
