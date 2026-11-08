@@ -43,6 +43,7 @@ mod archive_allocation_tests;
 pub mod capacity;
 #[cfg(test)]
 mod captured_logs;
+mod client_row;
 pub mod cluster;
 mod domain_clock_authority;
 mod emitter_execution_plan;
