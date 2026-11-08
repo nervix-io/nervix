@@ -20,7 +20,7 @@ use nervix_models::{
     CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,
     DomainClockAuthority, DomainConfig, DomainName, DomainNodeRef, DomainPace, DomainStartPoint,
     DomainState, DomainStatus, EmitterName, ErrorPolicies, FieldName, ModelKind, ParseAsType,
-    PlacementPolicy, ResolvedCodecWireFormat, SchemaName, Timestamp,
+    ResolvedCodecWireFormat, SchemaName, Timestamp,
 };
 
 use super::{

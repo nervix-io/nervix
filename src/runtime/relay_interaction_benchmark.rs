@@ -10,7 +10,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     BranchKeyFingerprint, ClusterNodeName, CreateSchema, DomainClockAuthority, DomainConfig,
     DomainName, DomainPace, DomainStartPoint, DomainState, DomainStatus, FieldName, ModelKind,
-    ModelName, ParseAsType, PlacementPolicy, RelayName, SchemaName, Timestamp,
+    ModelName, ParseAsType, RelayName, SchemaName, Timestamp,
 };
 use nervix_primitives::{
     sync::{mpsc, watch},
