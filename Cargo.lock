@@ -6682,10 +6682,12 @@ version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "arch-into",
+ "bolero",
  "clap",
  "error-stack",
  "meticulous",
  "nervix-approx-into",
+ "nervix-arbitrary",
  "nervix-client-core",
  "nervix-models",
  "nervix-primitives",
