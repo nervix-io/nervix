@@ -52,6 +52,7 @@ mod endpoint;
 mod event;
 mod failure;
 mod fields;
+mod inspection;
 mod outcome;
 mod producer;
 mod schema;
@@ -85,3 +86,5 @@ pub use suggestions::{CompletionKind, CompletionStatus, Suggestions};
 
 #[cfg(test)]
 mod tests;
+
+pub use inspection::Inspection;

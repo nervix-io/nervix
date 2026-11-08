@@ -158,6 +158,14 @@ impl CommandResponse {
     }
 }
 
+/// One logical state inspection and the caller's requested presentation. The edge carries the
+/// presentation only through reply construction; the wire envelope is format independent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::application) struct RenderedStateInspection {
+    pub(in crate::application) inspection: nervix_client_wire::StateInspection,
+    pub(in crate::application) format: nervix_models::InspectionFormat,
+}
+
 /// The outcome of one session command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::application) struct CommandResult {
@@ -176,6 +184,7 @@ pub(in crate::application) struct CommandResult {
     pub(in crate::application) inspection: Option<Box<TransactionInspection>>,
     /// The read-only state facts returned by a WASM processor description.
     pub(in crate::application) wasm_state: Option<Box<nervix_models::WasmStateInspection>>,
+    pub(in crate::application) state: Option<Box<RenderedStateInspection>>,
     /// The versions, entries and bindings a resource description read.
     pub(in crate::application) resource: Option<Box<ResourceDescription>>,
     /// The archive a completed backup assembled and retains for download.
@@ -197,6 +206,7 @@ impl CommandResult {
             transaction_admission: None,
             inspection: None,
             wasm_state: None,
+            state: None,
             resource: None,
             backup: None,
             restore: None,

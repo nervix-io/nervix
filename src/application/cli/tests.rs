@@ -33,7 +33,7 @@ const SETTINGS_HEADINGS: [&str; 9] = [
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 34] = [
+const SETTING_NAMES: [&str; 37] = [
     "raft-heartbeat-interval",
     "raft-snapshot-entry-threshold",
     "raft-snapshot-byte-threshold",
@@ -45,6 +45,9 @@ const SETTING_NAMES: [&str; 34] = [
     "clock-skew-tolerance",
     "replica-count",
     "state-snapshot-interval",
+    "inspection-max-rows",
+    "inspection-max-sections",
+    "inspection-read-timeout",
     "restore-staging-max-bytes",
     "transaction-idle-timeout",
     "transaction-tombstone-retention",
@@ -246,8 +249,18 @@ fn rendered_settings_read_back_as_the_same_settings() {
             override_of("memory-high-watermark", "2MiB"),
             override_of("memory-low-watermark", "1MiB"),
             override_of("resource-max-file-count", "9"),
+            override_of("inspection-max-rows", "7"),
+            override_of("inspection-max-sections", "2"),
+            override_of("inspection-read-timeout", "3s"),
         ])
         .assured("the overrides are valid settings");
+
+    assert_eq!(settings.runtime.inspection.max_rows.value().get(), 7);
+    assert_eq!(settings.runtime.inspection.max_sections.value().get(), 2);
+    assert_eq!(
+        *settings.runtime.inspection.read_timeout.value(),
+        Duration::from_secs(3)
+    );
 
     let read = settings
         .with_overrides(&[])

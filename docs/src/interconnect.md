@@ -2424,3 +2424,29 @@ installation until its applied Raft record reaches that revision; equal revision
 equal values. The interconnect simulation qualifies this encoding and catch-up decision under a
 partition over the real transport, without claiming whole-node Raft or Fjall crash simulation.
 [Node Settings](node-settings.md#committed-parameter-changes) owns policy application.
+
+## Materialized Inspection Page Operation
+
+`read_materialized_state_page` is a process-targeted Bulk stream request using the Snapshot
+subquota. It names domain, relay, execution unit, committed control revision, schema fingerprint,
+resolved branch selector, optional branch/offset position, row/byte limits and exact owner process.
+The handler verifies the current control cut, schema, unit owner and target incarnation before
+capturing shared Arrow views. Selection and row/byte bounds run on the bounded Bulk executor before
+transport; source metadata and stored-column lifetimes retain their memory admission.
+
+The stream has an eight-byte little-endian descriptor length, a bounded typed rkyv descriptor and
+an optional native Arrow snapshot container. A zero-row/count-only page has no body. A body declares
+its exact byte count and SHA-256 digest. The receiver bounds all buffering, verifies the digest
+before decoding, and checks schema, fence, generation/revision, row count, returned offset and last
+branch against the descriptor. A typed refusal carries no body. Chunks share charged backing bytes
+and obey the ordinary Bulk chunk bound. No operator payload crosses the interconnect as Row frames
+or row maps; the coordinator uses the shared Arrow-to-Row writer at the session reporting boundary.
+
+The configured inspection deadline controls stream admission/setup via
+`request_stream_with_timeout`; ordinary `request_stream` obtains its request type's default
+from the pure `InterconnectStreamRequest::default_timeout()` getter. Static request deadlines keep
+their existing values; the inspection getter reads `StateInspectionReadTimeout`'s definition,
+so that definition owns the sole default and configured callers retain the same override path.
+The complete frontend inspection also has that elapsed-time bound. Failed or cancelled reads retain
+no historical cursor or page cache. The existing materialized dependency/generator snapshot request
+and its grouping, confirmation, integrity and admission behavior remain unchanged.

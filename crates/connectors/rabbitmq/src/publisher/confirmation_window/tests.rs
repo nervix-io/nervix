@@ -16,7 +16,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{AckConfirmation, EmitterRecordId, PerRecordOutcome};
 use nervix_primitives::{sync::oneshot, time::Instant};
 
-use super::{AnsweredMessage, ConfirmedStop, RabbitMqConfirmationWindow, RabbitMqPublisher};
+use super::{AnsweredMessage, ConfirmedStop, RabbitMqChannel, RabbitMqConfirmationWindow};
 use crate::publisher::tests::{keyed, no_route, returned, settled};
 
 type Answer = Pin<Box<dyn Future<Output = lapin::Result<Confirmation>> + Send>>;
@@ -160,7 +160,7 @@ async fn a_channel_failure_keeps_returns_carried_by_other_ready_answers() {
     else {
         panic!("the channel failure must retain its window");
     };
-    RabbitMqPublisher::settle_answered("events", &answered, &mut outcome)
+    RabbitMqChannel::settle_answered("events", &answered, &mut outcome)
         .assured("the returned message is in the window");
     assert_eq!(settled(outcome), (Vec::new(), vec![(1, no_route())]));
 }
@@ -188,7 +188,7 @@ fn a_publish_failure_collects_ready_returns_without_losing_unanswered_records() 
         panic!("a failed publish ends the current channel's window");
     };
     let mut outcome = PerRecordOutcome::empty();
-    let attribution = RabbitMqPublisher::settle_answered("events", &answered, &mut outcome)
+    let attribution = RabbitMqChannel::settle_answered("events", &answered, &mut outcome)
         .assured("the return belongs to the unanswered message");
     assert!(attribution.require_decided().is_err());
     assert_eq!(settled(outcome), (Vec::new(), vec![(1, no_route())]));
@@ -251,7 +251,7 @@ fn an_unattributed_return_fails_without_settling_any_record() {
         answer: Some(Confirmation::Ack(Some(returned("events", &stray)))),
     }];
     let mut outcome = PerRecordOutcome::empty();
-    let Err(error) = RabbitMqPublisher::settle_answered("events", &answered, &mut outcome) else {
+    let Err(error) = RabbitMqChannel::settle_answered("events", &answered, &mut outcome) else {
         panic!("a return outside the window cannot be attributed");
     };
     assert!(error.contains::<super::RabbitMqConfirmationError>());

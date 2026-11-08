@@ -346,6 +346,11 @@ it adds no map or lock and does not change relay-frame or ACK protocol maps.
 
 ### Connectors and host maps reached through them
 
+`RuntimeInner::emitter_readiness` is a cold lifecycle registry: one insertion per emitter task,
+one identity-checked removal at retirement, and observer lookups for health. Host readiness
+callbacks touch only their retained scalar atomic, never the map or a recurring record path.
+
+
 The connector crates and the connector contract crate own no concurrent map, cache or lock over a
 map in product code. Their plan- and task-local maps have one owner. RabbitMQ's one-slot
 `ConcurrentQueue` hands one broker stream to the client library per connection: retain: bounded
@@ -400,6 +405,7 @@ awaiting replicas offers its revision through the offset state it retains and re
 | `FaultInjectionState::lost_resource_upload_replies` | Armed for one node before an upload; a testing build's gRPC upload transport looks the node up once per upload call whose reply reports that it installed a version, after the installation completed, and records the delivery there; explicit scenario observations read that retained state. The entry remains until that world's injector is dropped; absent from product builds | test-only installed upload reply loss in `fault_injection/resource_upload_reply.rs` |
 | `FaultInjectionState::refused_resource_upload_starts` | Armed for one node before an upload; a testing build looks the node up once per upload installation that reaches its upload start, before the start is proposed, and records the delivery there; explicit scenario observations read that retained state. The entry remains until that world's injector is dropped; absent from product builds | test-only resource upload start refusal in `fault_injection/resource_upload_start.rs` |
 | `FaultInjectionState::command_reply_scripts` | Armed for one domain and exact query; testing session commands read that domain once after execution and either substitute three bounded uncertainty causes, retaining at most four execution references, or answer once with another execution's failure or with a listing of the domain, a reply of another kind, each retaining at most two. Scenario observations read those references; arming the domain again replaces its script, and the world's injector drop disposes the entry. Absent from ordinary builds | test-only command reply script in `fault_injection/command_reply.rs` |
+| `FaultInjectionState::observed_emitter_opens` | Armed only for explicit scenario emitter names; the cold emitter composition boundary increments an existing scalar entry before opening its connector, releasing the guard before awaiting. Explicit harness observations read it. No recurring publication, acknowledgement or retry scheduling reads it. Entries end with the scenario injector; absent from ordinary builds. | test-only construction observation in `fault_injection/emitter_lifecycle.rs` |
 | Other `src/fault_injection.rs` maps, consensus `append_stream_counts`, the test DNS authority | Test-only. The consensus probe counts each setup attempt and successful open for explicit harness observations. Promotion-interruption arming clones each current node's probe once; explicit witness observations read those retained controls outside product execution. The delayed-heartbeat scenario reaches the existing `consensus_probes` map once to arm each follower and during its bounded condition poll to read each follower's atomic request count; no product heartbeat reads that map. A failed-append fixture clones its consensus probe once when arming and once per explicit failure observation, releasing the registry guard before awaiting; submissions retain their scoped control and reach no map. All such entries end with the scenario's fault injector. | test-only |
 
 A leader's transaction reconciliation takes one replicated snapshot for cleanup eligibility in

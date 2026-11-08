@@ -178,7 +178,10 @@ impl TryFrom<SettingsArgs> for NodeSettings {
             raft_retention: args.consensus.retention(),
             membership,
             scheduling: args.scheduling.settings(),
-            runtime: args.runtime.settings(),
+            runtime: args
+                .runtime
+                .settings()
+                .change_context(AppError::InvalidStateInspectionSettings)?,
             transactions: args.transactions.limits(),
             commands: args.transactions.commands(),
             memory_pressure,

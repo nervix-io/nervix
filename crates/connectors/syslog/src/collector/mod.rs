@@ -27,6 +27,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use arch_into::ArchInto as _;
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_connector::{
     ConfiguredDeadline, EmitterFinish, EmitterFinishResult, EmitterHost, EmitterLifecycle,
     EmitterOpenError, EmitterRecord, EmitterRecordId, EmitterStartResult, EmitterWriteError,
@@ -57,7 +58,11 @@ pub struct SyslogCollectorEmitterConfig {
 }
 
 pub struct SyslogCollectorEmitter {
-    sender: SyslogSender,
+    sender: Option<SyslogSender>,
+    client: SyslogCollectorClient,
+    dns: DnsResolver,
+    connect_timeout: ConfiguredDeadline,
+    tls: Option<(TlsConnector, ServerName<'static>)>,
     /// The client's `timeout_ms`, which bounds writing and flushing each frame, where it sets one.
     write_timeout: Option<ConfiguredDeadline>,
 }
@@ -86,16 +91,42 @@ enum SyslogPayloadError {
 }
 
 impl SyslogCollectorEmitter {
-    pub async fn new(
+    async fn prepare(
         config: SyslogCollectorEmitterConfig,
         _host: EmitterHost,
     ) -> EmitterStartResult<Self> {
         let client = Self::client_config(&config.config)?;
         let connect_timeout = Self::connect_timeout(&config.config)?;
         let write_timeout = Self::write_timeout(&config.config)?;
-        let sender = Self::connect(&client, &config.config, connect_timeout, &config.dns).await?;
+        let tls = if client.transport == SyslogCollectorTransport::Tls {
+            let server_name = client.target.host();
+            let name = match ServerName::try_from(server_name.clone()) {
+                Ok(name) => name,
+                Err(error) => {
+                    let description = format!(
+                        "invalid Syslog client config key 'addr' TLS server name '{server_name}': \
+                         {error}"
+                    );
+                    return Err(Report::new(error)
+                        .change_context(EmitterOpenError::InvalidConfiguration {
+                            connector: SYSLOG,
+                        })
+                        .attach_printable(description));
+                }
+            };
+            Some((
+                TlsConnector::from(tls_client_config(&config.config).map_err(Self::config_error)?),
+                name,
+            ))
+        } else {
+            None
+        };
         Ok(Self {
-            sender,
+            sender: None,
+            client,
+            dns: config.dns,
+            connect_timeout,
+            tls,
             write_timeout,
         })
     }
@@ -165,7 +196,7 @@ impl SyslogCollectorEmitter {
 
     async fn connect(
         client: &SyslogCollectorClient,
-        entries: &[ClientConfigEntry],
+        tls: &Option<(TlsConnector, ServerName<'static>)>,
         connect_timeout: ConfiguredDeadline,
         dns: &DnsResolver,
     ) -> EmitterStartResult<SyslogSender> {
@@ -244,15 +275,9 @@ impl SyslogCollectorEmitter {
                 ))
             }
             SyslogCollectorTransport::Tls => {
-                let verified_name = ServerName::try_from(server_name.clone()).map_err(|error| {
-                    Report::new(EmitterOpenError::InvalidConfiguration { connector: SYSLOG })
-                        .attach_printable(format!(
-                            "invalid Syslog client config key 'addr' TLS server name \
-                             '{server_name}': {error}"
-                        ))
-                })?;
-                let connector =
-                    TlsConnector::from(tls_client_config(entries).map_err(Self::config_error)?);
+                let (connector, verified_name) = tls
+                    .as_ref()
+                    .verified("TLS configuration is prepared during open");
                 let mut failures = Vec::new();
                 for attempt in budget.attempts(&addresses) {
                     nervix_primitives::task::consume_budget().await;
@@ -285,8 +310,8 @@ impl SyslogCollectorEmitter {
     /// state them.
     fn validate_payload(&self, payload: &[u8]) -> error_stack::Result<(), SyslogPayloadError> {
         let size: u64 = payload.len().arch_into();
-        match &self.sender {
-            SyslogSender::Udp(_) => {
+        match &self.client.transport {
+            SyslogCollectorTransport::Udp => {
                 let datagram_payload = SYSLOG_FRAME_LIMITS.datagram_payload();
                 if size > datagram_payload {
                     return Err(Report::new(SyslogPayloadError::OversizedUdp {
@@ -296,20 +321,18 @@ impl SyslogCollectorEmitter {
                 }
                 Ok(())
             }
-            SyslogSender::Tcp {
+            SyslogCollectorTransport::Tcp {
                 framing: SyslogFraming::NonTransparent,
-                ..
             } => {
                 if payload.contains(&SYSLOG_FRAME_LIMITS.non_transparent_trailer()) {
                     return Err(Report::new(SyslogPayloadError::NonTransparentLf));
                 }
                 Ok(())
             }
-            SyslogSender::Tcp {
+            SyslogCollectorTransport::Tcp {
                 framing: SyslogFraming::OctetCounting,
-                ..
             }
-            | SyslogSender::Tls(_) => Self::validate_octet_count_size(size),
+            | SyslogCollectorTransport::Tls => Self::validate_octet_count_size(size),
         }
     }
 
@@ -326,18 +349,26 @@ impl SyslogCollectorEmitter {
 
     /// Writes one frame, and fails the write once it has taken longer than the client's
     /// `timeout_ms`: a server that stops reading fills the connection's buffers and holds the
-    /// write. The host rebuilds the connection after a failed publish, so the frame a timed-out
+    /// write. The retained emitter replaces a failed connection before retrying, so the frame a timed-out
     /// write left partly written is never continued.
     async fn publish_payload(&mut self, payload: &[u8]) -> EmitterWriteResult<()> {
-        let write_timeout = self.write_timeout;
-        let write = self.write_frame(payload);
-        let Some(deadline) = write_timeout else {
-            return write.await;
+        let Some(mut sender) = self.sender.take() else {
+            return Err(Report::new(EmitterWriteError::NotInitialized {
+                connector: SYSLOG,
+            }));
         };
-        match timeout(deadline.bound(), write).await {
-            Ok(written) => written,
-            Err(_) => Err(Self::write_elapsed(deadline)),
+        let write = Self::write_frame(&mut sender, payload);
+        let written = match self.write_timeout {
+            None => write.await,
+            Some(deadline) => match timeout(deadline.bound(), write).await {
+                Ok(written) => written,
+                Err(_) => Err(Self::write_elapsed(deadline)),
+            },
+        };
+        if written.is_ok() {
+            self.sender = Some(sender);
         }
+        written
     }
 
     /// The failure of a frame write that ran out of the client's `timeout_ms`, with the elapsed
@@ -350,8 +381,8 @@ impl SyslogCollectorEmitter {
             .attach_printable(message)
     }
 
-    async fn write_frame(&mut self, payload: &[u8]) -> EmitterWriteResult<()> {
-        match &mut self.sender {
+    async fn write_frame(sender: &mut SyslogSender, payload: &[u8]) -> EmitterWriteResult<()> {
+        match sender {
             SyslogSender::Udp(socket) => {
                 let written = socket.send(payload).await.map_err(Self::publish_error)?;
                 if written != payload.len() {
@@ -380,9 +411,11 @@ impl SyslogCollectorEmitter {
             .attach_printable(reason)
     }
 
-    fn start_error(error: impl std::fmt::Display) -> Report<EmitterOpenError> {
-        Report::new(EmitterOpenError::Initialize { connector: SYSLOG })
-            .attach_printable(error.to_string())
+    fn start_error(error: std::io::Error) -> Report<EmitterOpenError> {
+        let description = error.to_string();
+        Report::new(error)
+            .change_context(EmitterOpenError::Initialize { connector: SYSLOG })
+            .attach_printable(description)
     }
 
     #[cfg_attr(
@@ -405,6 +438,37 @@ impl SyslogCollectorEmitter {
 impl EmitterLifecycle for SyslogCollectorEmitter {
     fn kind(&self) -> nervix_models::EmitterEntityKind {
         Self::KIND
+    }
+
+    fn needs_resume(&mut self) -> bool {
+        self.sender.is_none()
+    }
+
+    fn resume(
+        &mut self,
+    ) -> nervix_connector::EmitterLifecycleStep<'_, nervix_connector::EmitterResume> {
+        if !self.needs_resume() {
+            return nervix_connector::EmitterLifecycleStep::ready(Ok(
+                nervix_connector::EmitterResume::Ready,
+            ));
+        }
+        nervix_connector::EmitterLifecycleStep::run(async move {
+            if self.sender.is_none() {
+                self.sender = Some(
+                    Self::connect(&self.client, &self.tls, self.connect_timeout, &self.dns)
+                        .await
+                        .change_context(nervix_connector::EmitterLifecycleError::Resume {
+                            connector: SYSLOG,
+                        })?,
+                );
+            }
+            Ok(nervix_connector::EmitterResume::Ready)
+        })
+    }
+
+    fn close(&mut self) -> nervix_connector::EmitterLifecycleStep<'_, ()> {
+        self.sender = None;
+        nervix_connector::EmitterLifecycleStep::ready(Ok(()))
     }
 
     /// Each frame is written and flushed to the socket before the publish returns, so the
@@ -484,6 +548,14 @@ async fn write_stream_frame(
         .map_err(SyslogCollectorEmitter::publish_error)
 }
 
+impl nervix_connector::EmitterConnector for SyslogCollectorEmitter {
+    const KIND: nervix_models::EmitterEntityKind = Self::KIND;
+    type Plan = SyslogCollectorEmitterConfig;
+    async fn open(plan: Self::Plan, host: EmitterHost) -> EmitterStartResult<Self> {
+        Self::prepare(plan, host).await
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(
     nervix_lint,
@@ -493,7 +565,7 @@ mod tests {
     use std::{net::Ipv6Addr, time::Duration};
 
     use error_stack::{AttachmentKind, FrameKind};
-    use meticulous::{OptionExt as _, ResultExt as _};
+    use meticulous::ResultExt as _;
     use nervix_connector::DeadlineElapsed;
     use nervix_dns::{DnsConfiguration, NameServers};
     use nervix_models::{ClientConfigSchemaError, DeadlineKey};
@@ -547,6 +619,36 @@ mod tests {
         );
     }
 
+    async fn sender_fixture(
+        sender: SyslogSender,
+        write_timeout: Option<ConfiguredDeadline>,
+    ) -> SyslogCollectorEmitter {
+        let (address, transport) = match &sender {
+            SyslogSender::Udp(socket) => (socket.peer_addr(), SyslogCollectorTransport::Udp),
+            SyslogSender::Tcp { stream, framing } => (
+                stream.peer_addr(),
+                SyslogCollectorTransport::Tcp { framing: *framing },
+            ),
+            SyslogSender::Tls(stream) => (
+                stream.get_ref().0.peer_addr(),
+                SyslogCollectorTransport::Tls,
+            ),
+        };
+        let address = address.assured("the test sender is connected");
+        let mut client = endpoint_config("udp", &address.to_string());
+        client.transport = transport;
+        SyslogCollectorEmitter {
+            sender: Some(sender),
+            client,
+            dns: DnsResolver::load(DnsConfiguration::system())
+                .await
+                .assured("the host resolver loads"),
+            connect_timeout: default_connect_timeout(),
+            tls: None,
+            write_timeout,
+        }
+    }
+
     async fn udp_connector() -> SyslogCollectorEmitter {
         let receiver = UdpSocket::bind("127.0.0.1:0")
             .await
@@ -562,10 +664,7 @@ mod tests {
             )
             .await
             .expect("test UDP sender must connect");
-        SyslogCollectorEmitter {
-            sender: SyslogSender::Udp(sender),
-            write_timeout: None,
-        }
+        sender_fixture(SyslogSender::Udp(sender), None).await
     }
 
     /// An emitter connected to a listener nothing reads, holding `framing` on its stream.
@@ -579,10 +678,7 @@ mod tests {
         let stream = TcpStream::connect(address)
             .await
             .assured("the listener accepts connections");
-        let connector = SyslogCollectorEmitter {
-            sender: SyslogSender::Tcp { stream, framing },
-            write_timeout: None,
-        };
+        let connector = sender_fixture(SyslogSender::Tcp { stream, framing }, None).await;
         (connector, listener)
     }
 
@@ -665,7 +761,7 @@ mod tests {
             stream: mut sender, ..
         } = SyslogCollectorEmitter::connect(
             &config,
-            &[],
+            &None,
             default_connect_timeout(),
             &fixture.resolver,
         )
@@ -699,7 +795,7 @@ mod tests {
         let config = endpoint_config("udp", &address.to_string());
         let SyslogSender::Udp(sender) = SyslogCollectorEmitter::connect(
             &config,
-            &[],
+            &None,
             default_connect_timeout(),
             &fixture.resolver,
         )
@@ -739,7 +835,7 @@ mod tests {
         let config = endpoint_config("tcp", &format!("listed.nervix.test:{port}"));
         let sender = SyslogCollectorEmitter::connect(
             &config,
-            &[],
+            &None,
             default_connect_timeout(),
             &fixture.resolver,
         )
@@ -765,7 +861,7 @@ mod tests {
         let config = endpoint_config("tcp", "missing.nervix.test:6514");
         let failure = SyslogCollectorEmitter::connect(
             &config,
-            &[],
+            &None,
             default_connect_timeout(),
             &fixture.resolver,
         )
@@ -810,9 +906,13 @@ mod tests {
             SyslogCollectorClient::read(&entries).assured("the test endpoint is a valid client");
         let connect_timeout =
             SyslogCollectorEmitter::connect_timeout(&entries).assured("200 ms is a valid deadline");
+        let tls = Some((
+            TlsConnector::from(tls_client_config(&entries).assured("fixture TLS prepares")),
+            ServerName::try_from(config.target.host()).assured("fixture server name is valid"),
+        ));
         let failure = nervix_primitives::time::timeout(
             Duration::from_secs(10),
-            SyslogCollectorEmitter::connect(&config, &entries, connect_timeout, &fixture.resolver),
+            SyslogCollectorEmitter::connect(&config, &tls, connect_timeout, &fixture.resolver),
         )
         .await
         .assured("connect_timeout_ms bounds the connection")
@@ -937,13 +1037,14 @@ mod tests {
         }])
         .assured("two seconds is a valid deadline")
         .assured("the entry sets timeout_ms");
-        let mut connector = SyslogCollectorEmitter {
-            sender: SyslogSender::Tcp {
+        let mut connector = sender_fixture(
+            SyslogSender::Tcp {
                 stream,
                 framing: SyslogFraming::OctetCounting,
             },
-            write_timeout: Some(write_timeout),
-        };
+            Some(write_timeout),
+        )
+        .await;
         let started = Instant::now();
 
         let failure = connector
@@ -984,13 +1085,14 @@ mod tests {
             .await
             .assured("the listener accepts connections");
         let (mut server, _) = listener.accept().await.assured("the connection arrives");
-        let mut connector = SyslogCollectorEmitter {
-            sender: SyslogSender::Tcp {
+        let mut connector = sender_fixture(
+            SyslogSender::Tcp {
                 stream,
                 framing: SyslogFraming::OctetCounting,
             },
-            write_timeout: None,
-        };
+            None,
+        )
+        .await;
         let frame = vec![b'x'; 4 * 1024 * 1024];
         let reader = nervix_primitives::task::spawn(async move {
             // The server reads nothing for an hour, then all of the frame.
@@ -1032,13 +1134,14 @@ mod tests {
         }])
         .assured("thirty seconds is a valid deadline")
         .assured("the entry sets timeout_ms");
-        let mut connector = SyslogCollectorEmitter {
-            sender: SyslogSender::Tcp {
+        let mut connector = sender_fixture(
+            SyslogSender::Tcp {
                 stream,
                 framing: SyslogFraming::OctetCounting,
             },
-            write_timeout: Some(write_timeout),
-        };
+            Some(write_timeout),
+        )
+        .await;
         let payload = b"<13>1 - - - - - - within the deadline";
 
         connector

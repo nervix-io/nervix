@@ -569,3 +569,8 @@ and domains. A node installs that policy before constructing its execution revis
 prepared/ready. A returning node fences this step with the live revision used at construction and
 verifies equal values as it catches up. It does not activate a locally stored graph before that
 boundary. Policy installation changes no placement identity, stored state generation or ACK owner.
+
+Emitter task installation consumes its decided configuration and pooled leases once at the
+connector's open boundary. Transient recovery suspends and resumes that retained instance; it does
+not lower another plan, rebind programs or acquire a second lease. Connection acquisition is a
+resume operation and never changes the plan or the ownership of retained records and commits.

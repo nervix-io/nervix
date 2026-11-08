@@ -122,6 +122,8 @@ pub enum AppError {
     InvalidCapacitySettings,
     #[error("invalid peer receive settings")]
     InvalidPeerReceiveSettings,
+    #[error("invalid state inspection capabilities")]
+    InvalidStateInspectionSettings,
     #[error("invalid shutdown timeouts")]
     InvalidShutdownTimeouts,
     #[error("failed to read the node settings")]

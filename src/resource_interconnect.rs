@@ -57,7 +57,10 @@ impl InterconnectStreamRequest for FetchResourceArchive {
     const NAME: &'static str = "fetch_resource_archive";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Resource;
-    const TIMEOUT: Duration = Duration::from_secs(30);
+    #[inline]
+    fn default_timeout() -> Duration {
+        Duration::from_secs(30)
+    }
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]

@@ -17,11 +17,9 @@
 )]
 
 use nervix_interconnect::DescribeMetricsEnvelope;
-use nervix_models::{DomainName, ModelKind, ModelName, RelayName, ScheduledNode};
-use nervix_vm::SchemaSensitivity;
+use nervix_models::{DomainName, ModelKind, ModelName, ScheduledNode};
 
 use super::{super::session_service::SessionServiceImpl, ObservationError};
-use crate::runtime::{BranchKey, MaterializedReadError, MaterializedRecordReport};
 
 impl SessionServiceImpl {
     /// Metrics and checkpoint facts gathered once per distinct owner. Each owner reports only the
@@ -50,41 +48,5 @@ impl SessionServiceImpl {
             described.checkpoints.extend(owned.checkpoints);
         }
         Ok(described)
-    }
-
-    /// The materialized records of every unit of `relay`, in the canonical order of their keys.
-    /// Each unit reports its own keys: from this node's copy when it holds one or runs the unit,
-    /// otherwise from the node the schedule places the unit's owner on.
-    pub(super) async fn materialized_state_of_every_unit(
-        &self,
-        domain: &DomainName,
-        relay: &RelayName,
-        relay_node: &ScheduledNode,
-        sensitivity: &SchemaSensitivity,
-    ) -> error_stack::Result<Vec<MaterializedRecordReport>, MaterializedReadError> {
-        let local_node_id = self.inner.consensus.local_node_id();
-        let mut entries = Vec::new();
-        for unit in relay_node.units.keys() {
-            let local = self
-                .inner
-                .runtime
-                .local_materialized_stream_state(domain, relay, *unit, sensitivity)
-                .await?;
-            if !local.is_empty() || relay_node.unit_executes_on(*unit, local_node_id) {
-                entries.extend(local);
-                continue;
-            }
-            let Some(owner) = relay_node.unit_execution_node(*unit) else {
-                continue;
-            };
-            let remote = self
-                .inner
-                .runtime
-                .remote_materialized_stream_state(owner, domain, relay, *unit, sensitivity)
-                .await?;
-            entries.extend(remote);
-        }
-        entries.sort_by(|left, right| BranchKey::canonical_order(&left.branch, &right.branch));
-        Ok(entries)
     }
 }

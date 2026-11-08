@@ -27,6 +27,9 @@ pub struct Runtime {
 /// a `Runtime` handle and therefore hold their values directly. The few that keep an `Arc` of
 /// their own have a second owner that outlives the handle's borrow, and each names that owner.
 pub(in crate::runtime) struct RuntimeInner {
+    /// Process-local lifetimes of materialized state, allocated once at construction.
+    pub(in crate::runtime) inspection_instances: AtomicU64,
+    pub(in crate::runtime) inspection_settings: StateInspectionSettings,
     /// Installed at node startup and shared by each connector that opens an HTTP connection.
     /// Unit-only runtimes without external connectors have no resolver.
     pub(in crate::runtime) dns: Option<DnsResolver>,
@@ -43,6 +46,7 @@ pub(in crate::runtime) struct RuntimeInner {
         DashMap<DomainNodeUnitRef, IngestorInstanceReadiness, RandomState>,
     pub(in crate::runtime) emitter_statuses:
         DashMap<DomainNodeRef, Arc<task_status::TaskStatus<EmitterRetryStatus>>, RandomState>,
+    pub(in crate::runtime) emitter_readiness: DashMap<DomainNodeRef, Arc<AtomicBool>, RandomState>,
     pub(in crate::runtime) emitter_confirmation_waits:
         DashMap<DomainNodeRef, Arc<AtomicUsize>, RandomState>,
     /// One connector instance per named client on this node, keyed by the client it belongs to and

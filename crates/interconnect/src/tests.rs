@@ -323,7 +323,10 @@ struct ResourceStreamRequest;
 impl InterconnectStreamRequest for ResourceStreamRequest {
     const NAME: &'static str = "test_resource_stream";
     const SUBQUOTA: RequestSubquota = RequestSubquota::Resource;
-    const TIMEOUT: Duration = Duration::from_secs(2);
+    #[inline]
+    fn default_timeout() -> Duration {
+        Duration::from_secs(2)
+    }
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -332,7 +335,10 @@ struct SnapshotStreamRequest;
 impl InterconnectStreamRequest for SnapshotStreamRequest {
     const NAME: &'static str = "test_snapshot_stream";
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const TIMEOUT: Duration = Duration::from_secs(2);
+    #[inline]
+    fn default_timeout() -> Duration {
+        Duration::from_secs(2)
+    }
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -343,7 +349,10 @@ struct DeadlineStreamRequest {
 impl InterconnectStreamRequest for DeadlineStreamRequest {
     const NAME: &'static str = "test_deadline_stream";
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const TIMEOUT: Duration = Duration::from_millis(200);
+    #[inline]
+    fn default_timeout() -> Duration {
+        Duration::from_millis(200)
+    }
 }
 
 pub(crate) struct ConnectedTransports {

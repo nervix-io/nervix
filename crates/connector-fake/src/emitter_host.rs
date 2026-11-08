@@ -18,6 +18,7 @@ use nervix_primitives::sync::{Arc, blocking::Mutex};
 
 #[derive(Debug, Default, Clone)]
 pub struct EmitterHostObservations {
+    pub readiness: Vec<bool>,
     pub payloads: Vec<EmitterPayloadMeasurement>,
     pub subdivisions: u64,
 }
@@ -88,6 +89,34 @@ impl EmitterPayloadObserver for FakeEmitterHost {
 impl EmitterTransientErrorStatus for FakeEmitterHost {
     fn record_transient_error(&self, _reason: String, _retry_after: Duration) {}
     fn clear_transient_error(&self) {}
+}
+
+impl nervix_connector::EmitterReadiness for FakeEmitterHost {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the harness records this host's readiness transition",
+            key = "one fake host readiness log",
+            bound = "one boolean append under one mutex guard; the callback never awaits"
+        )
+    )]
+    fn mark_ready(&self) {
+        self.observations.lock().readiness.push(true);
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the harness records this host's readiness transition",
+            key = "one fake host readiness log",
+            bound = "one boolean append under one mutex guard; the callback never awaits"
+        )
+    )]
+    fn mark_unready(&self) {
+        self.observations.lock().readiness.push(false);
+    }
 }
 
 impl EmitterEventReporter for FakeEmitterHost {

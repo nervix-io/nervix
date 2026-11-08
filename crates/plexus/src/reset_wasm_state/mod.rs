@@ -10,93 +10,17 @@
     nervix::layer(language, reason = "owns the language boundary declared above")
 )]
 
-use std::collections::BTreeSet;
-
 use chumsky::prelude::*;
-use nervix_models::{
-    Float64Literal, Literal, ResetWasmBranchField, ResetWasmState, ResetWasmStateScope,
-};
+use nervix_models::ResetWasmState;
 
 use crate::{
     lexer::{Identifier, Token},
-    parser_support::{
-        ParseError, domain_ref, field_ref, kw, kw_phrase2, string_lit, tok, wasm_processor_ref,
-    },
+    parser_support::{ParseError, domain_ref, kw, kw_phrase2, tok, wasm_processor_ref},
 };
-
-fn branch_literal<'src>()
--> impl Parser<'src, &'src [Token], Literal, extra::Err<ParseError<'src>>> + Clone {
-    let number = tok(Token::Hyphen)
-        .or_not()
-        .then(select! { Token::NumberLiteral(raw) => raw })
-        .labelled("number_literal")
-        .try_map(|(negative, raw), span| {
-            let signed = if negative.is_some() {
-                format!("-{raw}")
-            } else {
-                raw
-            };
-            if signed.contains(['.', 'e', 'E']) {
-                let value = signed
-                    .parse::<f64>()
-                    .map_err(|error| Rich::custom(span, error.to_string()))?;
-                Ok(Literal::F64(Float64Literal::new(value)))
-            } else {
-                let value = signed
-                    .parse::<i64>()
-                    .map_err(|error| Rich::custom(span, error.to_string()))?;
-                Ok(Literal::I64(value))
-            }
-        });
-    choice((
-        string_lit().map(Literal::String),
-        number,
-        kw(Identifier::True).to(Literal::Bool(true)),
-        kw(Identifier::False).to(Literal::Bool(false)),
-    ))
-    .boxed()
-}
-
-fn branch_fields<'src>()
--> impl Parser<'src, &'src [Token], Vec<ResetWasmBranchField>, extra::Err<ParseError<'src>>> + Clone
-{
-    let field = field_ref()
-        .then_ignore(tok(Token::Eq))
-        .then(branch_literal())
-        .map(|(name, value)| ResetWasmBranchField { name, value });
-    tok(Token::LBrace)
-        .ignore_then(
-            field
-                .separated_by(tok(Token::Comma))
-                .at_least(1)
-                .collect::<Vec<_>>(),
-        )
-        .then_ignore(tok(Token::RBrace))
-        .try_map(|fields, span| {
-            let mut names = BTreeSet::new();
-            for field in &fields {
-                if !names.insert(&field.name) {
-                    return Err(Rich::custom(
-                        span,
-                        format!("duplicate branch field '{}'", field.name.as_str()),
-                    ));
-                }
-            }
-            Ok(fields)
-        })
-        .boxed()
-}
 
 pub fn reset_wasm_state_parser<'src>()
 -> impl Parser<'src, &'src [Token], ResetWasmState, extra::Err<ParseError<'src>>> + Clone {
-    let scope = kw(Identifier::For).ignore_then(choice((
-        kw(Identifier::Unbranched).to(ResetWasmStateScope::Unbranched),
-        kw_phrase2(Identifier::All, Identifier::Branches).to(ResetWasmStateScope::AllBranches),
-        kw(Identifier::Branch)
-            .ignore_then(kw(Identifier::Values))
-            .ignore_then(branch_fields())
-            .map(ResetWasmStateScope::Branch),
-    )));
+    let scope = crate::state_branch_selection::branch_selection();
     kw_phrase2(Identifier::Reset, Identifier::Wasm)
         .ignore_then(kw(Identifier::Processor))
         .ignore_then(wasm_processor_ref())
@@ -117,7 +41,7 @@ pub fn reset_wasm_state_parser<'src>()
 #[cfg(test)]
 mod tests {
     use meticulous::ResultExt as _;
-    use nervix_models::{Literal, ResetWasmStateScope, Statement};
+    use nervix_models::{Literal, StateBranchSelection, Statement};
 
     use crate::statement::{parse_statement, suggest_statement};
 
@@ -133,7 +57,7 @@ mod tests {
         };
         assert_eq!(reset.domain.as_str(), "sales");
         assert_eq!(reset.processor.as_str(), "counter");
-        let ResetWasmStateScope::Branch(fields) = reset.scope else {
+        let StateBranchSelection::Branch(fields) = reset.scope else {
             panic!("expected one branch selection");
         };
         assert_eq!(fields.len(), 1);
@@ -151,11 +75,11 @@ mod tests {
                 .assured("the test command has an explicit all-branches scope");
         assert!(matches!(
             unbranched,
-            Statement::ResetWasmState(reset) if reset.scope == ResetWasmStateScope::Unbranched
+            Statement::ResetWasmState(reset) if reset.scope == StateBranchSelection::Unbranched
         ));
         assert!(matches!(
             all,
-            Statement::ResetWasmState(reset) if reset.scope == ResetWasmStateScope::AllBranches
+            Statement::ResetWasmState(reset) if reset.scope == StateBranchSelection::AllBranches
         ));
         let numeric = parse_statement(
             "RESET WASM PROCESSOR counter STATE IN DOMAIN sales FOR BRANCH VALUES { shard = -7 };",
@@ -164,7 +88,7 @@ mod tests {
         assert!(matches!(
             numeric,
             Statement::ResetWasmState(reset)
-                if matches!(&reset.scope, ResetWasmStateScope::Branch(fields)
+                if matches!(&reset.scope, StateBranchSelection::Branch(fields)
                     if fields[0].value == Literal::I64(-7))
         ));
         let fractional = parse_statement(
@@ -175,7 +99,7 @@ mod tests {
         assert!(matches!(
             fractional,
             Statement::ResetWasmState(reset)
-                if matches!(&reset.scope, ResetWasmStateScope::Branch(fields)
+                if matches!(&reset.scope, StateBranchSelection::Branch(fields)
                     if fields[0].value == Literal::F64(nervix_models::Float64Literal::new(-1.25)))
         ));
     }
@@ -204,6 +128,10 @@ mod tests {
             (
                 "RESET WASM PROCESSOR counter STATE IN DOMAIN sales FOR ",
                 "ALL BRANCHES",
+            ),
+            (
+                "RESET WASM PROCESSOR counter STATE IN DOMAIN sales FOR ",
+                "BRANCH VALUES",
             ),
             (
                 "RESET WASM PROCESSOR counter STATE IN DOMAIN sales FOR BRANCH ",

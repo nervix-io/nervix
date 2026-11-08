@@ -24,6 +24,14 @@
 )]
 
 mod ingestor;
+impl nervix_connector::EmitterConnector for NatsSubjectEmitter {
+    const KIND: nervix_models::EmitterEntityKind = Self::KIND;
+    type Plan = NatsSubjectEmitterConfig;
+    async fn open(plan: Self::Plan, host: EmitterHost) -> EmitterStartResult<Self> {
+        Self::prepare(plan, host).await
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(
     nervix_lint,
@@ -74,7 +82,8 @@ pub struct NatsSubjectEmitterConfig {
 }
 
 pub struct NatsSubjectEmitter {
-    client: NatsClient,
+    client: Option<NatsClient>,
+    prepared: Option<NatsClientOptions>,
     writes: CoreWrites,
     subject: Subject,
 }
@@ -358,17 +367,18 @@ impl CoreWrites {
 }
 
 impl NatsSubjectEmitter {
-    pub async fn new(
+    async fn prepare(
         config: NatsSubjectEmitterConfig,
         host: EmitterHost,
     ) -> EmitterStartResult<Self> {
         // Read before the client connects, so a value that breaks the deadline rule fails the
         // start as configuration whether or not the server answers.
         let write_timeout = Self::write_timeout(&config.config)?;
-        let client =
-            Self::client_from_config(&host.executor(), &config.config, config.retry_policy).await?;
+        let prepared =
+            Self::prepare_client(&host.executor(), &config.config, config.retry_policy).await?;
         Ok(Self {
-            client,
+            client: None,
+            prepared: Some(prepared),
             writes: CoreWrites::new(write_timeout),
             subject: Subject::from(config.subject.as_str().to_string()),
         })
@@ -382,11 +392,11 @@ impl NatsSubjectEmitter {
             .change_context(EmitterOpenError::InvalidConfiguration { connector: NATS })
     }
 
-    pub(crate) async fn client_from_config(
+    pub(crate) async fn prepare_client(
         executor: &Executor,
         config: &[ClientConfigEntry],
         retry_policy: ParsedRetryPolicy,
-    ) -> EmitterStartResult<NatsClient> {
+    ) -> EmitterStartResult<NatsClientOptions> {
         let prepared = match NatsClientOptions::from_config(executor, config).await {
             Ok(prepared) => prepared,
             Err(report) => {
@@ -420,10 +430,21 @@ impl NatsSubjectEmitter {
                     delay_connected_once.load(Ordering::Relaxed),
                 )
             });
-        match options.connect(prepared.address).await {
-            Ok(client) => Ok(client),
-            Err(source) => Err(Self::connection_failure(source)),
-        }
+        Ok(NatsClientOptions {
+            address: prepared.address,
+            options,
+        })
+    }
+
+    pub(crate) async fn connect_client(
+        prepared: &NatsClientOptions,
+    ) -> EmitterStartResult<NatsClient> {
+        prepared
+            .options
+            .clone()
+            .connect(prepared.address.clone())
+            .await
+            .map_err(Self::connection_failure)
     }
 
     fn connection_failure(source: async_nats::ConnectError) -> Report<EmitterOpenError> {
@@ -494,17 +515,38 @@ impl EmitterLifecycle for NatsSubjectEmitter {
         Self::KIND
     }
 
+    fn needs_resume(&mut self) -> bool {
+        self.client.is_none()
+    }
+
+    fn resume(
+        &mut self,
+    ) -> nervix_connector::EmitterLifecycleStep<'_, nervix_connector::EmitterResume> {
+        if !self.needs_resume() {
+            return nervix_connector::EmitterLifecycleStep::ready(Ok(
+                nervix_connector::EmitterResume::Ready,
+            ));
+        }
+        nervix_connector::EmitterLifecycleStep::run(async move {
+            if let Some(prepared) = &self.prepared {
+                let client = Self::connect_client(prepared).await.change_context(
+                    nervix_connector::EmitterLifecycleError::Resume { connector: NATS },
+                )?;
+                self.client = Some(client);
+                self.prepared = None;
+            }
+            Ok(nervix_connector::EmitterResume::Ready)
+        })
+    }
+
     /// A failed or timed-out core write retains its count and connection expectation. Finishing
     /// validates that connection's flush by `deadline`; a replacement connection cannot certify
     /// discarded bytes.
     async fn finish(&mut self, deadline: Instant) -> EmitterFinishResult {
-        self.writes.finish(&self.client, deadline).await
-    }
-
-    /// A publish failure leaves the client connected: it reconnects on its own schedule, and
-    /// dropping it would discard the session the broker still holds.
-    fn keeps_client_on_publish_failure(&self) -> bool {
-        true
+        match &self.client {
+            Some(client) => self.writes.finish(client, deadline).await,
+            None => Ok(EmitterFinish::NothingHeld),
+        }
     }
 }
 
@@ -512,7 +554,13 @@ impl EmitterLifecycle for NatsSubjectEmitter {
 impl RecordEmitter for NatsSubjectEmitter {
     async fn publish(&mut self, records: Vec<EmitterRecord>) -> PerRecordOutcome<EmitterRecordId> {
         self.writes
-            .publish(&self.client, &self.subject, records)
+            .publish(
+                self.client
+                    .as_ref()
+                    .verified("the host resumes the emitter before publishing"),
+                &self.subject,
+                records,
+            )
             .await
     }
 }
@@ -552,7 +600,7 @@ mod tests {
             backoff: Duration::from_millis(100),
             max_backoff: Duration::from_secs(1),
         };
-        let error = NatsSubjectEmitter::client_from_config(
+        let result = NatsSubjectEmitter::prepare_client(
             &executor,
             &[
                 ClientConfigEntry {
@@ -566,8 +614,11 @@ mod tests {
             ],
             policy,
         )
-        .await
-        .expect_err("no bytes can be read without admission");
+        .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("no bytes can be read without admission"),
+        };
         assert_eq!(
             error.current_context(),
             &EmitterOpenError::Initialize { connector: NATS }
@@ -625,16 +676,20 @@ mod tests {
         }
         let write_timeout = NatsSubjectEmitter::write_timeout(&entries)
             .expect("the checks configure a valid timeout_ms");
-        let client = NatsSubjectEmitter::client_from_config(
+        let prepared = NatsSubjectEmitter::prepare_client(
             &nervix_execution::Executor::default(),
             &entries,
             policy,
         )
         .await
-        .expect("the emitter connects to the scripted server");
+        .assured("the emitter configuration prepares");
+        let client = NatsSubjectEmitter::connect_client(&prepared)
+            .await
+            .assured("the emitter connects to the scripted server");
         NatsSubjectEmitter {
             writes: CoreWrites::new(write_timeout),
-            client,
+            client: Some(client),
+            prepared: None,
             subject: Subject::from("events"),
         }
     }
@@ -658,7 +713,14 @@ mod tests {
         });
         let connector = core_emitter(&addr, config).await;
         let server = script.await.expect("the scripted server ran");
-        wait_for_state(&connector.client, State::Disconnected).await;
+        wait_for_state(
+            connector
+                .client
+                .as_ref()
+                .assured("the fixture is connected"),
+            State::Disconnected,
+        )
+        .await;
         StrandedEmitter { connector, server }
     }
 
@@ -895,7 +957,14 @@ mod tests {
             let second = connection.expect_publish().await;
             (first.message, second.message, connection)
         });
-        wait_for_state(&connector.client, State::Connected).await;
+        wait_for_state(
+            connector
+                .client
+                .as_ref()
+                .assured("the fixture is connected"),
+            State::Connected,
+        )
+        .await;
         let next = bounded(connector.publish(vec![record(0, b"next", &[])]))
             .await
             .into_parts();
@@ -1071,13 +1140,22 @@ mod tests {
         assert_eq!(message, b"held");
         connector
             .client
+            .as_ref()
+            .assured("the fixture is connected")
             .drain()
             .await
             .expect("the client takes the request to close");
         // The client closes once its connection handler takes the request; from then on a flush
         // fails.
         let closed = nervix_primitives::time::timeout(CHECK_BOUND, async {
-            while connector.client.flush().await.is_ok() {
+            while connector
+                .client
+                .as_ref()
+                .assured("the fixture is connected")
+                .flush()
+                .await
+                .is_ok()
+            {
                 nervix_primitives::task::consume_budget().await;
             }
         })

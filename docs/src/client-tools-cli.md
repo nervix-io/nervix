@@ -70,8 +70,8 @@ The client runs in one of these modes. A subcommand takes precedence over the ot
 
 1. **A subcommand**, such as `subscribe`, `domain-clock`, `backup`, `restore`, or `drain-node`.
 2. **`--suggest`**, which prints completion candidates as JSON and exits; see [Completion](#completion).
-3. **`--command`**, which submits Plexus, prints the result, and exits. A single
-   `DESCRIBE TRANSACTION ... FORMAT JSON` reserves stdout for its JSON report; see
+3. **`--command`**, which submits Plexus, prints the result, and exits. A single supported
+   inspection with `FORMAT JSON` reserves stdout for its typed JSON report; see
    [Session And Transaction Statements](#session-and-transaction-statements).
 4. **The interactive REPL**, when none of the above is given.
 
@@ -386,15 +386,18 @@ nervix-cli --domain production --command \
   "DESCRIBE TRANSACTION '01a0ca64-7062-7302-ac1e-43138ccc2067' OPERATION 2 FORMAT JSON;"
 ```
 
-When `--command` contains exactly one `DESCRIBE TRANSACTION ... FORMAT JSON` statement, stdout
-contains exactly one JSON document serialized from the typed report, without terminal decoration
-or unrelated events. Failures in this mode print one JSON object with `error.code` and
-`error.message` on stdout and exit nonzero;
-a configuration, connection or request failure's message is the whole chain of causes, such as
-`invalid server URL: relative URL without a base`. Diagnostic details and unrelated events go to
-stderr. `FORMAT TEXT` uses the normal readable
-terminal output. Inspection output is complete rather than paginated or truncated, so redirect a
-large text or JSON report to a file or downstream process when terminal output is impractical.
+For a standalone `--command` inspection with `FORMAT JSON`, stdout contains exactly one JSON
+document serialized from the typed report, without terminal decoration or unrelated events.
+A materialized-state refusal prints its typed envelope with `rejection` and exits nonzero.
+Other failures print one JSON object with `error.code` and `error.message` on stdout and exit
+nonzero; a configuration, connection or request failure's message is the whole chain of causes,
+such as `invalid server URL: relative URL without a base`.
+Diagnostic details and unrelated events go to stderr. `FORMAT TEXT` uses normal readable terminal
+output. Transaction inspection is complete; materialized relay inspection is bounded and carries
+an opaque continuation. See [Inspect Materialized State](./relay.md#inspect-materialized-state)
+for selector clauses, typed counts, row limits and stale-token handling. Standalone JSON mode accepts
+`DESCRIBE TRANSACTION`, `DESCRIBE WASM PROCESSOR` and `SHOW RELAY ... MATERIALIZED STATE` with
+`FORMAT JSON`.
 After a stale-preview `COMMIT` refusal, run `DESCRIBE TRANSACTION` for the
 attached transaction before retrying the commit so the client fences it to the newly reviewed
 planning basis.
