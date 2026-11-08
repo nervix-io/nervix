@@ -3154,7 +3154,7 @@ clippy_foundation_packages_2 := [
     "nervix-models",
 ]
 
-clippy_foundation_packages_3 := ["nervix-simd-kernels", "nervix-wasm-protocol", "nervix-wasm-sdk"]
+clippy_foundation_packages_3 := ["nervix-licensing-protocol", "nervix-simd-kernels", "nervix-wasm-protocol", "nervix-wasm-sdk"]
 
 clippy_cluster_packages := ["nervix-dns", "nervix-test-environment"]
 

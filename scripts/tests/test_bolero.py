@@ -143,6 +143,12 @@ class InventoryTests(unittest.TestCase):
     def test_inventory_has_current_targets_and_exact_corpus_paths(self) -> None:
         inventory = bolero.load_inventory()
         self.assertEqual({target.id for target in inventory.targets}, {
+            "licensing-protocol-json-roundtrip",
+            "licensing-conditions-resolution",
+            "licensing-jws-malformed",
+            "licensing-trust-chain",
+            "licensing-impact-assessment",
+            "licensing-request-digest",
             "benchmark-metrics-report",
             "crypto-p256-keys",
             "crypto-p256-signatures",
@@ -493,6 +499,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-connector-redis",
             "nervix-web-console",
             "nervix-dns",
+            "nervix-licensing-protocol",
             "nervix-crypto",
         })
         for target in inventory.targets:
