@@ -2673,3 +2673,27 @@ failure outcomes. No transfer starts before this admission check and no wire sha
 Producer and consumer session-byte admission uses the committed cluster limits. A producer's
 existing grant carries its exact row bound, which the admission worker enforces for that
 attachment. The compiled defaults are request preferences, not server admission ceilings.
+
+## Materialized State Inspection Envelope
+
+`CommandOutcome.state` carries `StateInspection`, independently of the display message. Its result
+is exactly one `Page` or `Rejected` value. A page contains complete counts, unit count, ordered unit
+entries and an optional continuation. Unit entries preserve execution identity, owner, replicas,
+process-bound read origin, complete counts and named sections. A section carries the shared
+`RowSchema`, bounded `NXRB` RowBatch frames, omitted-row count and optional positional watermark
+indices. Watermarks are distinct, non-sensitive datetime columns. Frames conform to their section
+schema, keep branch keys and redaction, and share the verified outer reply's backing bytes.
+
+Embedded frames use the session transfer bound; transport frames still obey the smaller frame
+bound and the ordinary reply-transfer protocol. The service checks the complete typed outcome plus
+its requested rendering against the actual session limits before publication. Bound overflow yields
+an unsuccessful typed `ReplyTooLarge` inspection in the requested format. Cancellation and the
+single-terminal reply gate still govern that outcome. Other typed reasons are `UnknownEntity`,
+`NotMaterialized`, `InvalidSelection`, `InvalidLimit`, `StaleContinuation`, `OwnerUnavailable`,
+`NotReady` and `Deadline`.
+
+The JSON projection preserves cell types: integer values, float bits, datetime nanoseconds, base64
+bytes, nested typed lists, null and redacted cells. Counts and origin fields remain structural
+metadata. See [Inspect Materialized State](./relay.md#inspect-materialized-state) for token fencing
+and query semantics. This operator page protocol does not change subscription batches or the
+internal dependency/generator full-snapshot protocol.

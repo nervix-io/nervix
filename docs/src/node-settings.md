@@ -599,3 +599,21 @@ Existing users and admitted CREATE USER command executions retain their exact cr
 Verification uses a persisted common work count that never falls below any cost the cluster has
 admitted, preserving equal work for known and unknown names across changes, restart and restore.
 [Cryptography](cryptography.md#password-credentials) owns the credential and workload contract.
+
+## State Inspection Capabilities
+
+The runtime declares three local `NodeCapabilities` through `SettingDefinition`:
+
+| Setting / CLI flag | Environment | Default | Validation |
+| --- | --- | --- | --- |
+| `inspection-max-rows` | `NERVIX_INSPECTION_MAX_ROWS` | 1024 | Nonzero, at most the 32-bit collection bound |
+| `inspection-max-sections` | `NERVIX_INSPECTION_MAX_SECTIONS` | 128 | Nonzero, at most the 32-bit collection bound |
+| `inspection-read-timeout` | `NERVIX_INSPECTION_READ_TIMEOUT` | 10s | Positive duration, at most an unsigned 32-bit seconds value |
+
+Defaults and validation belong only to their definitions. CLI values resolve before runtime
+construction and round-trip through the runtime argument projection. Each serving node enforces
+its bounds; the coordinator also checks session collection and complete reply limits. The deadline
+bounds the complete operator read and governs remote admission/setup as well as owner work.
+The byte-stream request obtains its fallback read deadline through the same definition's
+`default_value`; no independent transport timeout duplicates that policy.
+These capabilities do not change materialized row delivery, replication or stored snapshot bounds.

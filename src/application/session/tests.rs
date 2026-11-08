@@ -1176,3 +1176,82 @@ async fn a_restoration_expecting_another_schema_than_its_relay_announces_is_refu
     session.close().await;
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");
 }
+
+#[test]
+fn bounded_state_inspection_reply_preserves_its_typed_refusal_and_requested_format() {
+    use nervix_client_wire::{
+        Reply, ReplyDelivery, StateInspection, StateInspectionCounts, StateInspectionPage,
+        StateInspectionRejection, StateInspectionResult,
+    };
+    use nervix_models::{
+        CommandExecutionReference, DomainNodeRef, InspectionFormat, ModelKind, RelayName,
+    };
+
+    use crate::application::{
+        command_result::{CommandOrigin, CommandResponse, RenderedStateInspection},
+        model_mutation::command_ok,
+    };
+
+    for format in [InspectionFormat::Json, InspectionFormat::Text] {
+        let state = StateInspection {
+            entity: DomainNodeRef::node_in(
+                named("tenant"),
+                ModelKind::Relay,
+                named::<RelayName>("events"),
+            ),
+            result: StateInspectionResult::Page(StateInspectionPage {
+                counts: StateInspectionCounts::default(),
+                unit_count: 0,
+                units: Vec::new(),
+                continuation: None,
+            }),
+        };
+        let mut result = command_ok("x".repeat(8192));
+        result.state = Some(Box::new(RenderedStateInspection {
+            inspection: state,
+            format,
+        }));
+        let outcome = super::outcome::command_outcome(
+            CommandExecutionReference::parse("bounded-state").assured("valid reference"),
+            CommandResponse {
+                result,
+                origin: CommandOrigin::Executed,
+            },
+        );
+        let limits = small_limits(4096);
+        let delivery = super::encode_presented_state_reply(
+            Reply {
+                request_id: request_id(1),
+                body: ReplyBody::Command(Box::new(outcome)),
+            },
+            &limits,
+            Some(format),
+        )
+        .assured("a typed refusal fits the actual reply limit");
+        let ReplyDelivery::Frame(frame) = delivery else {
+            panic!("a bounded refusal fits one frame")
+        };
+        let frame = VerifiedFrame::<ServerFrame>::verify(frame.into_bytes(), &limits)
+            .assured("the reply frame passes verification");
+        let ServerMessage::Reply(reply) = ServerMessage::decode(&frame).assured("refusal verifies")
+        else {
+            panic!("reply")
+        };
+        let ReplyBody::Command(outcome) = reply.body else {
+            panic!("command")
+        };
+        assert_eq!(outcome.disposition, WireCommandDisposition::Failed);
+        let state = outcome.state.assured("typed state is retained");
+        assert_eq!(
+            state.result,
+            StateInspectionResult::Rejected(StateInspectionRejection::ReplyTooLarge)
+        );
+        match format {
+            InspectionFormat::Json => assert_eq!(outcome.message, state.to_json()),
+            InspectionFormat::Text => assert_eq!(
+                outcome.message,
+                state.display_text().assured("refusal text")
+            ),
+        }
+    }
+}

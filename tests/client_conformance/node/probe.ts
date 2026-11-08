@@ -785,6 +785,8 @@ function commandLines(head: string, outcome: wire.CommandOutcome): string[] {
   if (restore !== null) {
     lines.push(...restoreReportLines(restore));
   }
+  const state = outcome.state();
+  if (state !== null) lines.push(...stateInspectionLines(state));
   return lines;
 }
 
@@ -1523,3 +1525,58 @@ run.then(
     process.exit(1);
   },
 );
+
+function stateInspectionLines(state: wire.StateInspection): string[] {
+  const entity = member(state.entity());
+  const lines = [`STATE domain=${state.domain()} kind=${wire.ModelKind[member(entity.kind())]} name=${entity.name()}`];
+  if (state.resultType() === wire.StateInspectionResult.StateInspectionRefused) {
+    const refused = member(state.result(new wire.StateInspectionRefused()) as wire.StateInspectionRefused | null);
+    lines.push(`STATE_REFUSED ${wire.StateInspectionRejection[member(refused.reason())]}`);
+    return lines;
+  }
+  if (state.resultType() !== wire.StateInspectionResult.StateInspectionPage) throw new Error('unknown inspection result');
+  const page = member(state.result(new wire.StateInspectionPage()) as wire.StateInspectionPage | null);
+  const counts = member(page.counts());
+  lines.push(`STATE_PAGE branches=${counts.branches()} rows=${counts.rows()} bytes=${counts.bytes()} units=${page.unitCount()} continuation=${page.continuation() ?? 'none'}`);
+  for (let i = 0; i < page.unitsLength(); i += 1) {
+    const unit = member(page.units(i));
+    let placement = 'single';
+    switch (unit.unitType()) {
+      case wire.PlacementUnit.SingleUnit: break;
+      case wire.PlacementUnit.PartitionUnit: {
+        const value = member(unit.unit(new wire.PartitionUnit()) as wire.PartitionUnit | null);
+        placement = `partition:${value.partition()}`; break;
+      }
+      case wire.PlacementUnit.InstanceUnit: {
+        const value = member(unit.unit(new wire.InstanceUnit()) as wire.InstanceUnit | null);
+        placement = `instance:${value.instance()}`; break;
+      }
+      default: throw new Error('unknown inspection placement');
+    }
+    lines.push(`STATE_PLACEMENT ${placement}`);
+    const origin = member(unit.origin());
+    const counts = member(unit.counts());
+    const replicas: string[] = [];
+    for (let r = 0; r < unit.replicasLength(); r += 1) replicas.push(member(unit.replicas(r)));
+    lines.push(`STATE_UNIT owner=${unit.owner()} replicas=${replicas.join(',')} node=${origin.node()} incarnation=${origin.incarnation()} fingerprint=${hex(member(origin.fingerprintArray()))} generation=${origin.generation()} revision=${origin.revision()} stage=${wire.StateInspectionStage[member(origin.stage())]} branches=${counts.branches()} rows=${counts.rows()} bytes=${counts.bytes()}`);
+    for (let j = 0; j < unit.sectionsLength(); j += 1) {
+      const section = member(unit.sections(j));
+      const watermarks = section.watermarks();
+      lines.push(`STATE_SECTION name=${section.name()} omitted=${section.omittedRows()} watermarks=${watermarks === null ? 'none' : `${watermarks.low()},${watermarks.high()}`}`);
+      const schema = rowSchema(member(section.schema()));
+      lines.push(...schema.lines);
+      for (let f = 0; f < section.framesLength(); f += 1) {
+        const bytes = member(member(section.frames(f)).dataArray());
+        const buffer = frameBuffer(bytes, 'NXRB');
+        const batch = new wire.RowBatch().__init(buffer.readInt32(buffer.position()) + buffer.position(), buffer);
+        const branch = batch.branchKey();
+        const key = branch === null ? '' : renderCells(branch.cellsLength(), (i, obj) => branch.cells(i, obj), schema.keys);
+        for (let r = 0; r < batch.rowsLength(); r += 1) {
+          const row = member(batch.rows(r));
+          lines.push(`ROW [${key}] ${renderCells(row.cellsLength(), (i, obj) => row.cells(i, obj), schema.fields)}`);
+        }
+      }
+    }
+  }
+  return lines;
+}

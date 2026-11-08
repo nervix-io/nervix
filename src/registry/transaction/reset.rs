@@ -112,7 +112,7 @@ impl Registry {
                 error,
             })
         })?;
-        let scope = selection.scope();
+        let scope = selection.reset_scope();
         let selected_units = node.units_for_wasm_state_scope(&scope);
         if node.units.values().any(|unit| {
             unit.wasm_state_reset.as_ref().is_some_and(|current| {
@@ -142,7 +142,7 @@ impl Registry {
             _ => {
                 return Err(Report::new(TransactionPlanningError::ResetInvalidScope {
                     processor: reset.processor.clone(),
-                    error: Report::new(nervix_models::ResetWasmStateSelectionError::InvalidScope),
+                    error: Report::new(nervix_models::StateBranchSelectionError::InvalidScope),
                 }));
             }
         };

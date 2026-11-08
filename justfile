@@ -321,7 +321,7 @@ test: tests-deps build-client-jvm-tests
 # Check capability examples with rustdoc, including runtime exports enabled only for tests.
 test-capability-docs: build-web-console
     cargo test --package nervix-server --package nervix-roto --package nervix-vm --package nervix-models \
-        --package nervix-consensus --package nervix-dns --package nervix-recovery \
+        --package nervix-consensus --package nervix-interconnect --package nervix-dns --package nervix-recovery \
         --package nervix-simd-kernels --package nervix-client-core \
         --features nervix-server/testing,nervix-client-core/arrow --doc
 
@@ -392,6 +392,34 @@ test-inferencer-state *args: build-deps
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/inferencer_state.feature {{ quote(args) }}
+
+# Inspect materialized relay pages through the native client and in-process cluster.
+test-state-inspection *args: build-deps build-test-cli
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/materialized_state_inspection*.feature") }} {{ quote(args) }}
+
+# Replay one affected materialized-state feature without unrelated binding/tool preparation.
+test-state-inspection-feature feature *args: build-deps build-test-cli
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(feature) }} {{ quote(args) }}
+
+# Verify typed materialized-state diagnostics without preparing unrelated host-language suites.
+test-state-inspection-diagnostics: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test harness_liveness -- materialized_state_diagnostics
+
+# Existing Row owner tests qualify the shared column writer without unrelated tool builds.
+test-client-row-encoding filter="subscription_row::tests" *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-server --features testing,benchmarks --lib {{ quote(filter) }} -- {{ quote(args) }}
 
 # Exercise processor and generator partition ownership through the public interface.
 test-processor-partitions *args: build-deps
@@ -1547,6 +1575,10 @@ test-crypto-scenarios *args: build-deps build-plexus-format build-test-cli build
 # Run the node transport's production owners and their protocol fixtures.
 test-interconnect *args:
     cargo test --package nervix-interconnect --lib -- {{ args }}
+
+# Verify the current stream-deadline API and its compile-time Duration contract.
+test-interconnect-docs filter="":
+    cargo test --package nervix-interconnect --doc {{ quote(filter) }}
 
 # Run the resolver's unit tests and its focused protocol tests, which ask local DNS authorities the
 # tests start themselves.

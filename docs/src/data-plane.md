@@ -158,3 +158,23 @@ The runtime ownership above produces a per-branch resource cost. See
 structure and the current signal gaps.
 
 This design keeps latency low and avoids turning the runtime into a transactional storage engine.
+
+## Operator State Pages
+
+Materialized relay inspection captures admitted shared Arrow row views from the published
+unit index. It preserves the existing assignment barrier: branch membership is fixed while the
+views are copied, while replacements of established records may proceed. Row watermarks strictly
+increase for an accepted replacement. Each captured-cut fingerprint therefore includes every source
+lifetime, source stamps, concrete branch identity and both captured watermarks; a row changed during
+capture cannot silently reuse an earlier cut. Source lifetime numbers belong to the Runtime and
+are assigned once when state is constructed, without adding per-record work or ambient atomics.
+Inspection charges its row-view metadata against the finite Bulk budget;
+backup archive grouping metadata and its staging ceiling do not constrain an operator capture.
+Backup capture keeps its own grouping reservation and staging bound.
+
+The owner scans and selects under the bounded Bulk executor, applies the resolved selector and
+row/byte budget before sending, and carries selected columns using the native snapshot container.
+Geometric row-view/source metadata growth is admitted before allocation, and stored pages retain
+their decoded-column admission. No row maps or scalar payload copies are introduced. Dependency and
+generator full-snapshot reads retain their separate production path and verified-generation reuse.
+Only the session reporting boundary converts captured columns to the shared typed Row encoding.

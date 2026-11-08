@@ -1327,3 +1327,21 @@ worker. A successful Exchange or WebSocket establishes the user once for that se
 and events reuse that identity. HTTP authentication probes deliberately verify the credentials
 they present. An unjudged attempt remains retryable through UNAVAILABLE or HTTP 503; a wrong
 password remains refused. Clients never receive a stored credential, salt or digest.
+
+## Reading Typed Materialized State
+
+Clients MUST retain `CommandOutcome.state` independently of the command message and preserve its
+Page-or-Rejected distinction, complete counts, unit identities, owners/replicas, captured origins,
+section schemas, watermark positions, row frames and continuation. A refused inspection has an
+unsuccessful command disposition while retaining its typed reason. Clients MUST NOT derive success
+from the presence of `state` or parse text to reconstruct rows.
+
+Embedded `NXRB` frames use the existing verified Row/Cell representation and the session transfer
+bound. A retained frame MUST keep its backing bytes alive after its containing outcome is released.
+Clients MUST preserve full integer widths, float bits, datetime values, bytes, nested lists, null
+and redaction. Watermark column identities are their declared positions, never guessed names.
+
+Resume the opaque continuation with the same domain, relay and selector. On `StaleContinuation`,
+start a new read; do not combine it with rows from the abandoned sequence. Complete counts describe
+the whole selected cut. An empty page has no row sections or continuation. See
+[Materialized State Inspection Envelope](./client-session-protocol.md#materialized-state-inspection-envelope).

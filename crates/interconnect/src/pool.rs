@@ -134,7 +134,9 @@ impl PoolClass {
         }
     }
 
-    pub(crate) fn payload_limit(self, executor: &Executor) -> u64 {
+    /// The admitted application payload bound for this class. Stream framing can use this
+    /// for its independently bounded descriptor before carrying a larger chunked body.
+    pub fn payload_limit(self, executor: &Executor) -> u64 {
         match self {
             Self::Management => executor.limits().management_event_bytes.as_u64(),
             Self::Commands => executor.limits().command_bytes.as_u64(),

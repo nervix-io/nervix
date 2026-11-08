@@ -418,7 +418,26 @@ async fn capture_missing_materialized_state(
         |node, relay| {
             let node = node.clone();
             let query = format!("SHOW RELAY state_{relay} MATERIALIZED STATE;");
-            async move { cluster.run_command(node.as_str(), domain, &query).await }
+            async move {
+                let uri = cluster.grpc_uri(node.as_str())?;
+                let options = crate::client_connect_options(&uri)?;
+                let client = nervix_client_core::Client::connect_with_options(
+                    &uri,
+                    crate::client_domain(domain),
+                    options,
+                )
+                .await
+                .map_err(std::io::Error::other)?;
+                client
+                    .execute(query)
+                    .await
+                    .map_err(std::io::Error::other)?
+                    .state
+                    .map(|state| *state)
+                    .ok_or_else(|| {
+                        std::io::Error::other("the materialized read returned no typed inspection")
+                    })
+            }
         },
     )
     .await;
