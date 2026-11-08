@@ -559,6 +559,23 @@ During branch compaction, a temporary observation owns payloads still held by th
 and the store owns the survivors already reinserted. Cancelling that future withdraws the
 temporary contribution without clearing the surviving store's work.
 
+Emitter outcome recording keeps pre-resolved counter children. A rejection-routing future owns
+its local per-class accumulation and publishes completed settlements when that scope ends,
+including cancellation. The classified rejection retains one error body, with the source position
+and existing policy error intact. Retry observations receive the existing typed attempt decision
+and count unresolved members after acquisition. A pending pool borrow retains its original start
+instant in its guard through success, failure or cancellation.
+
+Failure collection loads the current task's observation and samples the coherent `TaskStatus`
+publication. The task's binding withdraws only its own source by identity through the publication's
+read-copy-update operation. Ending a predecessor preserves a replacement's source; ending the
+current task makes later samples zero even when an in-flight collection retains its earlier
+snapshot. Registration publishes the source at task startup. Recording continues through retained
+children and task-local accumulators; source collection belongs to inspection and metric scraping.
+Ordinary owner tests qualify lifetime orderings, including collection across task end, and public
+one-/three-node scenarios qualify the exported observations. Standard shared ownership and the
+Prometheus counters remain outside modeled reference-count ordering.
+
 An Iceberg emitter retains the first table's `FileIO` while replacing catalog metadata. Its storage
 factory initializes one operator for the configured object-store root; data, manifest and metadata
 files use that same initialized storage after refreshes, successful commits and ambiguous-result
@@ -736,6 +753,16 @@ internals. Listener ownership and network primitives retain their existing contr
 outside this owner's scope. Public scenarios cover one and three nodes, and the external chaos
 `endpoints` workload qualifies this owner against immutable images in the smoke and soak suites. The
 inventory ledger records the routing measurement and verification evidence.
+
+## Emitter Construction Observations
+
+The scenario injector's `observed_emitter_opens` map contains only explicitly observed emitter
+names. Arming and inspection are harness operations; emitter composition increments the existing
+entry at its cold construction boundary, releasing the guard before opening the connector.
+Publication, acknowledgement and retry scheduling read no counter. A scenario retains one scalar
+per armed name until its injector ends. This observation does not supply protocol ordering or
+concurrency evidence; production-owner checks and public delivery assertions keep their own
+contracts.
 
 ## Mutable Execution State
 
@@ -2746,7 +2773,9 @@ compiler finds a tracked blocking acquisition in a diagnostic configuration. Eac
 registered workloads whose processes reach its tracked locks, the path the lane does not reach and
 why, or both. `just validate-deloxide-applicability`, part of `just validate` and CI's `checks`
 job, reads the acquisition catalog `just ratchet` writes and fails on an owner without a record and
-on a record whose file no longer acquires a tracked lock. It reports how many owners registered
+on a record whose file no longer acquires a tracked lock. The lane validates its inventory, then
+delegates the comparison to `nervix-ratchet applicability`, which consumes the shared Rust
+`MatrixReport` and finding types; Python never decodes the compiler catalog. It reports how many owners registered
 workloads reach and how many record a path the lane does not reach. The catalog is the compiler's
 resolution of the Deloxide adapters' operations, not a search for lock names. Every diagnostic
 library and binary configuration enables `testing`, as the lane's server builds do, so acquisitions
@@ -3535,3 +3564,35 @@ through the existing test-pause owner and exercises observation, refusal and rel
 pause, network waits and standard-library once publication remain outside the blocking-lock detector.
 The diagnostic parameter workloads reach the surrounding tracked owners; the public scenario and
 external partition recovery verify admission and observation during an isolated process restart.
+
+## Retained Emitter Lifecycle
+
+One emitter task exclusively owns `EmitterLifecycleState` and its concrete connector. A completed
+suspension advances the state to resumption before the next await; cancellation during resume
+therefore retains that exact owner and does not repeat an already completed suspension. The owner
+keeps driver confirmations, prepared requests, staged commit state and their ACK guards through
+failure and cancellation. Retry timing and finish deadlines remain the host's responsibility.
+Composition is an explicit lifecycle operation. Its one admitted entry from the task is initial
+installation, including a retry while `Unavailable` still holds no instance. A narrow expectation
+at that operation states the phase; an `Open` instance never reaches composition again. This keeps
+pool or executor admission refusals retryable before installation without reconstructing a running
+connector during recovery.
+The registered Shuttle check races a scripted resume with cancellation through this production
+owner and verifies one opening, one completed suspension, and that close is refused before a
+finish outcome is received. A failed stop withdraws that close permission; a deadline-free terminal
+ending records its unfinished disposition explicitly. It models no native
+transport or reference-count ordering.
+
+The diagnostic catalogue compiles the fake connector library directly in
+`deloxide-connector-harness`, since it is otherwise only a test dependency of the server. The
+registered retained-lifecycle workloads reach its emitter and host observation mutexes. The
+diagnostic drivers install the detector before invoking the ordinary async test entry points,
+which then construct their runtimes and fixtures. The
+inventory records the fake ingestor's observation locks separately as unreached by those
+workloads; ordinary and Shuttle ingestor tests do not establish a Deloxide result for them.
+
+`RuntimeInner::emitter_readiness` is a cold lifetime registry keyed by the existing emitter identity.
+Installation inserts a fresh `Arc<AtomicBool>`, host callbacks store only that instance's scalar
+readiness, and task registration removes it only by pointer identity. Inspection loads the scalar
+with relaxed ordering; it publishes no other data, admits no work and supplies no wakeup. Pending
+failure status has a separate owner. A retiring handle cannot update or remove its replacement.

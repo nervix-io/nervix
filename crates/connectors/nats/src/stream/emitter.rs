@@ -29,7 +29,8 @@ use async_nats::{
     },
 };
 use async_trait::async_trait;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_connector::{
     AckConfirmation, BrokerAnswer, BrokerVerdict, ConfirmationWindow, EmitterFinish,
     EmitterFinishResult, EmitterHost, EmitterLifecycle, EmitterOpenError, EmitterRecord,
@@ -54,8 +55,9 @@ pub struct NatsStreamEmitterConfig {
 
 /// One open JetStream publisher, with a client kept alive for its connection.
 pub struct NatsStreamEmitter {
-    _client: NatsClient,
-    context: NatsJetStream,
+    client: Option<NatsClient>,
+    context: Option<NatsJetStream>,
+    prepared: Option<crate::client::NatsClientOptions>,
     stream: NatsStreamName,
     subject: Subject,
     confirmation: AckConfirmation,
@@ -68,39 +70,20 @@ impl NatsStreamEmitter {
     pub const KIND: nervix_models::EmitterEntityKind =
         nervix_models::EmitterEntityKind::Nats(nervix_models::NatsEmitterEntity::Stream);
 
-    pub async fn new(
+    async fn prepare(
         config: NatsStreamEmitterConfig,
         host: EmitterHost,
     ) -> EmitterStartResult<Self> {
-        let client = NatsSubjectEmitter::client_from_config(
+        let prepared = NatsSubjectEmitter::prepare_client(
             &host.executor(),
             &config.config,
             config.retry_policy,
         )
         .await?;
-        let context = Self::context(&client, config.confirmation);
-        if let Err(error) = context.get_stream(config.stream.as_str()).await {
-            let kind = error.kind();
-            if matches!(kind, GetStreamErrorKind::JetStream(ref cause)
-                if cause.error_code() == ErrorCode::STREAM_NOT_FOUND)
-            {
-                let missing = EmitterOpenError::MissingExternalEntity {
-                    connector: NATS,
-                    kind: "NATS stream",
-                    name: config.stream.as_str().to_owned(),
-                };
-                let description = missing.to_string();
-                return Err(Report::new(error)
-                    .change_context(missing)
-                    .attach_printable(description));
-            }
-            return Err(
-                Report::new(error).change_context(EmitterOpenError::Initialize { connector: NATS })
-            );
-        }
         Ok(Self {
-            _client: client,
-            context,
+            client: None,
+            context: None,
+            prepared: Some(prepared),
             stream: config.stream,
             subject: Subject::from(config.subject.as_str().to_owned()),
             confirmation: config.confirmation,
@@ -162,18 +145,79 @@ impl EmitterLifecycle for NatsStreamEmitter {
         Self::KIND
     }
 
-    async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
-        Ok(EmitterFinish::NothingHeld)
+    fn needs_resume(&mut self) -> bool {
+        self.context.is_none()
     }
 
-    fn keeps_client_on_publish_failure(&self) -> bool {
-        true
+    fn resume(
+        &mut self,
+    ) -> nervix_connector::EmitterLifecycleStep<'_, nervix_connector::EmitterResume> {
+        if !self.needs_resume() {
+            return nervix_connector::EmitterLifecycleStep::ready(Ok(
+                nervix_connector::EmitterResume::Ready,
+            ));
+        }
+        nervix_connector::EmitterLifecycleStep::run(async move {
+            let resuming = nervix_connector::EmitterLifecycleError::Resume { connector: NATS };
+            if self.client.is_none() {
+                let prepared = self
+                    .prepared
+                    .as_ref()
+                    .verified("an unconnected emitter retains its prepared options");
+                self.client = Some(
+                    NatsSubjectEmitter::connect_client(prepared)
+                        .await
+                        .change_context(resuming)?,
+                );
+                self.prepared = None;
+            }
+            if self.context.is_none() {
+                let context = Self::context(
+                    self.client
+                        .as_ref()
+                        .verified("resumption acquired the client"),
+                    self.confirmation,
+                );
+                if let Err(error) = context.get_stream(self.stream.as_str()).await {
+                    let missing = matches!(error.kind(), GetStreamErrorKind::JetStream(ref cause)
+                    if cause.error_code() == ErrorCode::STREAM_NOT_FOUND);
+                    let report = if missing {
+                        let missing = EmitterOpenError::MissingExternalEntity {
+                            connector: NATS,
+                            kind: "NATS stream",
+                            name: self.stream.as_str().to_owned(),
+                        };
+                        let description = missing.to_string();
+                        Report::new(error)
+                            .change_context(missing)
+                            .attach_printable(description)
+                    } else {
+                        Report::new(error)
+                            .change_context(EmitterOpenError::Initialize { connector: NATS })
+                    };
+                    return Err(report.change_context(resuming));
+                }
+                self.context = Some(context);
+            }
+            Ok(nervix_connector::EmitterResume::Ready)
+        })
+    }
+
+    async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
+        Ok(EmitterFinish::NothingHeld)
     }
 }
 
 #[async_trait]
 impl RecordEmitter for NatsStreamEmitter {
     async fn publish(&mut self, records: Vec<EmitterRecord>) -> PerRecordOutcome<EmitterRecordId> {
+        let Some(context) = self.context.as_ref() else {
+            let mut outcome = PerRecordOutcome::with_capacity(records.len());
+            outcome.fail(Report::new(EmitterWriteError::NotInitialized {
+                connector: NATS,
+            }));
+            return outcome;
+        };
         let mut window: ConfirmationWindow<NatsAnswer> =
             ConfirmationWindow::new(NATS, self.confirmation, records.len());
         for record in records {
@@ -188,10 +232,7 @@ impl RecordEmitter for NatsStreamEmitter {
             let message = PublishMessage::build()
                 .payload(record.payload.into())
                 .headers(headers);
-            let handed_over = self
-                .context
-                .send_publish(self.subject.clone(), message)
-                .await;
+            let handed_over = context.send_publish(self.subject.clone(), message).await;
             let pending = match handed_over {
                 Ok(pending) => pending,
                 Err(error) if Self::is_record_rejection(&error) => {
@@ -213,6 +254,14 @@ impl RecordEmitter for NatsStreamEmitter {
     }
 }
 
+impl nervix_connector::EmitterConnector for NatsStreamEmitter {
+    const KIND: nervix_models::EmitterEntityKind = Self::KIND;
+    type Plan = NatsStreamEmitterConfig;
+    async fn open(plan: Self::Plan, host: EmitterHost) -> EmitterStartResult<Self> {
+        Self::prepare(plan, host).await
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(
     nervix_lint,
@@ -221,6 +270,7 @@ impl RecordEmitter for NatsStreamEmitter {
 mod tests {
     use std::{num::NonZeroUsize, time::Duration};
 
+    use meticulous::ResultExt as _;
     use nervix_models::Timestamp;
 
     use super::*;
@@ -237,20 +287,24 @@ mod tests {
             key: "addr".to_owned(),
             value: addr.to_owned(),
         }];
-        let client = NatsSubjectEmitter::client_from_config(
+        let prepared = NatsSubjectEmitter::prepare_client(
             &nervix_execution::Executor::default(),
             &config,
             policy,
         )
         .await
         .expect("the emitter connects to the scripted server");
+        let client = NatsSubjectEmitter::connect_client(&prepared)
+            .await
+            .assured("the fixture connects");
         let confirmation = AckConfirmation {
             max_in_flight: NonZeroUsize::new(max_in_flight).expect("the window holds a record"),
             timeout: Duration::from_secs(5),
         };
         NatsStreamEmitter {
-            context: NatsStreamEmitter::context(&client, confirmation),
-            _client: client,
+            context: Some(NatsStreamEmitter::context(&client, confirmation)),
+            client: Some(client),
+            prepared: None,
             stream: NatsStreamName::try_from("orders").expect("valid stream"),
             subject: Subject::from("orders.created"),
             confirmation,

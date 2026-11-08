@@ -200,6 +200,13 @@ reason = "Every TLS bundle shares the same fixed provider for the process lifeti
 
 [[permission]]
 items = ["sync::OnceLock"]
+limit = "Only immutable external-provider installation is cached; it carries no licensing state or modeled protocol ordering."
+owner = "The cryptography boundary's maintained JWS provider."
+path = "crates/crypto/src/jws.rs"
+reason = "The maintained library's provider is a process default that must outlive individual model executions; a foreign provider is refused."
+
+[[permission]]
+items = ["sync::OnceLock"]
 limit = "Creating the process's ONNX Runtime environment is outside every model."
 owner = "The ONNX inferencer's session loading and model inspection."
 path = "src/runtime/inferencer.rs"

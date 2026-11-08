@@ -37,6 +37,12 @@ rustls failures. Ed25519 key preparation and signing retain AWS-LC's typed cause
 cryptography context; the NATS owner adds its configuration context or hands the complete report
 to the driver's authentication callback error, without rendering credentials.
 
+P-256 key generation, PKCS#8 import/export, signing and verification retain AWS-LC's typed
+`KeyRejected` or `Unspecified` cause beneath the corresponding `EcdsaP256Error` operation.
+Neither these contexts nor the private-key owners' `Debug` output contain key bytes. Digest
+inequality is a boolean outcome, and backend FIPS status is a typed observation rather than a
+key, signature or authentication refusal.
+
 Client CONFIG validation keeps vocabulary `ClientConfigSchemaError` beneath the registry's
 client/domain context. The server's changed-model binding validation runs connector-owned offline
 checks before standalone mutation or transaction commit. `OfflineClientConfigError` retains typed
@@ -298,6 +304,11 @@ provides.
 | Emitter host | The retry delay an emitter attached to its publish failure | Lengthen the retry schedule to the delay the receiver stated |
 | WASM runtime | The saved-state verdict of the guest-call failure, an invalid emission, or an exhausted execution limit | The stage the failure is reported under, whether rejected-state recovery starts, and whether the instance is discarded |
 | Restore conversion | An execution admission or staging refusal among the report's contexts | Release what the conversion holds and convert again within its wait for room |
+
+Emitter opening performs only local configuration and TLS preparation. `EmitterLifecycleError`
+names suspend, resume and close separately and retains the underlying typed report. A failed resume
+is transient and keeps the emitter instance for its next policy attempt. Readiness changes do not
+clear pending-work failures; only a successful publish or commit clears the host's task failure.
 
 Snapshot metadata and Arrow decoders refuse additional bulk scratch without queueing while they
 retain encoded input from that pool. The report preserves `AdmissionError` beneath the snapshot
@@ -2829,6 +2840,14 @@ execution reference and typed open refusal. It never reclassifies by message tex
 command disposition as a thrown operation error. A JNI library error stays at JNI's foreign
 boundary; an already pending Java exception is preserved. Checked native exports contain Rust
 unwinds at that boundary. Restoration events expose the shared client's message and retry wait.
+
+The shared Arrow delivery decoder reports `EmitterBatchDecodeError`: an unreadable stream, a
+schema mismatch, a missing or extra batch, an unreadable batch, or a row-count mismatch. An Arrow
+library error stays typed beneath its decoder context. Both the delivery method and the
+retained-bytes decoder return that report directly. The host failure owner projects a received
+delivery's report into `Protocol`. A host's local
+`Batch::decode` instead projects the same complete report into `InvalidArgument` at its reporting
+boundary. Neither path changes the exact schema, single-batch or member-count checks.
 
 Resource archive construction returns its first I/O failure beneath `BuildUploadArchive`.
 Reusing an upload identity for another archive returns the typed `UploadFailure::IdentityConflict`

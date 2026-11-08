@@ -122,7 +122,7 @@ opening succeeds. This case observes that recovery through the live cluster.
 
 ## Follow A Domain Clock
 
-The shared C binding reads the same events and attached clocks for C, C++ and Ruby hosts; its
+The shared C binding reads the same events and attached clocks for C and C++ hosts; its
 header is `crates/client-ffi/include/nervix_client.h`. `ATTACH DOMAIN CLOCK;` and
 `DETACH DOMAIN CLOCK;` run through `nx_session_prepare` and `nx_session_execute` like any statement,
 for the session's selected domain, and fail with `NX_ERROR_INVALID_ARGUMENT` when none is selected.
@@ -211,7 +211,7 @@ copying the mapping arithmetic.
 
 ## Publish Through A Client Ingestor
 
-The shared C binding exposes the same producers and consumers to C, C++ and Ruby hosts,
+The shared C binding exposes the same producers and consumers to C and C++ hosts,
 through `crates/client-ffi/include/nervix_client.h`. Every call forwards to the Rust handles
 above, so credit, retries of temporary refusals, restoration, outcomes and settlements behave
 exactly as described; the binding keeps no acknowledgement or reconnect state of its own.

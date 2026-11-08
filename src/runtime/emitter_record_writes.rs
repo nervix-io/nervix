@@ -120,11 +120,7 @@ impl From<PerRecordOutcome<EmitterRecordPosition>> for RowAnswers {
         let parts = outcome.into_parts();
         let mut rejected = Vec::with_capacity(parts.rejected.len());
         for RejectedEmitterMember { id, error } in parts.rejected {
-            rejected.push(RejectedEmitterRecord {
-                position: id,
-                reason: String::new(),
-                structured_error: Some(error),
-            });
+            rejected.push(RejectedEmitterRecord::member(id, error));
         }
         Self {
             delivered: parts.delivered,
@@ -453,11 +449,7 @@ impl CheckedPreparation {
         let mut checked_rejections = Vec::with_capacity(rejected.len());
         for RejectedEmitterMember { id, error } in rejected {
             answers.answer(id)?;
-            checked_rejections.push(RejectedEmitterRecord {
-                position: id,
-                reason: String::new(),
-                structured_error: Some(error),
-            });
+            checked_rejections.push(RejectedEmitterRecord::member(id, error));
         }
         answers.finish()?;
         Ok(Self {
@@ -709,11 +701,7 @@ impl<Content: PreparedContent> PreparedPayloads<Content> {
                 batch.release_prepared(member.row_index)?;
                 let mut member_error = error.clone();
                 member_error.occurred_at = batch.execution_now();
-                rejected.push(RejectedEmitterRecord {
-                    position: member,
-                    reason: String::new(),
-                    structured_error: Some(member_error),
-                });
+                rejected.push(RejectedEmitterRecord::member(member, member_error));
             }
         }
         Ok(RowAnswers {
@@ -1056,8 +1044,7 @@ mod tests {
             .iter()
             .map(|rejected| {
                 let error = rejected
-                    .structured_error
-                    .as_ref()
+                    .structured_error()
                     .expect("an emitter rejection carries its structured error");
                 (rejected.position, error.reference, error.occurred_at)
             })
@@ -1294,8 +1281,7 @@ mod tests {
         assert_eq!(refusal.position, position(2, 3));
         assert_eq!(
             refusal
-                .structured_error
-                .as_ref()
+                .structured_error()
                 .map(|error| error.message.as_str()),
             Some("refused")
         );
@@ -1719,8 +1705,7 @@ mod tests {
                         let mut kept_refusals = Vec::with_capacity(checked.rejected.len());
                         for refusal in &checked.rejected {
                             let error = refusal
-                                .structured_error
-                                .as_ref()
+                                .structured_error()
                                 .assured("a refused row keeps the emitter's error");
                             kept_refusals.push((refusal.position, error.message.clone()));
                         }
@@ -2020,8 +2005,7 @@ mod tests {
             let mut references = BTreeMap::new();
             for rejection in &answered.rejected {
                 let error = rejection
-                    .structured_error
-                    .as_ref()
+                    .structured_error()
                     .assured("an emitter rejection carries its structured error");
                 let batch = &self.batches[rejection.position.batch_index];
                 assert_eq!(error.occurred_at, batch.execution_now());

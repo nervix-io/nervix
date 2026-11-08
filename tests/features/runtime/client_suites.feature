@@ -2,7 +2,7 @@ Feature: Language-level client suites
   Every host binding has a test suite written in its own language, in that language's standard test
   framework, that uses the binding as an application does. A suite's boundary tier needs no cluster
   and runs through `just test-client-<host>-api`; its cluster tier runs here, against a cluster whose
-  session listener serves the example's HTTP or HTTPS, starting on a follower when the cluster has one. The harness holds
+  session listener serves the example's transport, starting on a follower when the cluster has one. The harness holds
   the run to the tests `tests/client-suites-inventory.toml` registers for the host's cluster tier:
   every one ran once and passed, nothing was skipped, and nothing else ran.
 
@@ -90,22 +90,30 @@ Feature: Language-level client suites
 
     @client_conformance_toolchain @client_suite_python @long_running @slots_1
     Examples: CPython over the Python package
-      | runtime | transport | cluster_size | tags_type   | grid_type     |
-      | python  | https     | 1            | VEC<STRING> | ARRAY<I16, 2> |
-      | python  | https     | 3            | VEC<STRING> | ARRAY<I16, 2> |
+      | runtime | cluster_size | transport | tags_type   | grid_type     |
+      | python  | 1            | https     | VEC<STRING> | ARRAY<I16, 2> |
+      | python  | 3            | https     | VEC<STRING> | ARRAY<I16, 2> |
+
+    @client_conformance_toolchain @client_suite_java @long_running @slots_1
+    Examples: Java over the JVM library on TLS and plaintext listeners
+      | runtime | cluster_size | transport | tags_type   | grid_type     |
+      | java    | 1            | https     | VEC<STRING> | ARRAY<I16, 2> |
+      | java    | 3            | https     | VEC<STRING> | ARRAY<I16, 2> |
+      | java    | 1            | http      | VEC<STRING> | ARRAY<I16, 2> |
+      | java    | 3            | http      | VEC<STRING> | ARRAY<I16, 2> |
 
     @client_conformance_toolchain @client_suite_c @long_running @slots_1
-    Examples: C11 over the shared C binding
-      | runtime | transport | cluster_size | tags_type   | grid_type     |
-      | c       | https     | 1            | VEC<STRING> | ARRAY<I16, 2> |
-      | c       | https     | 3            | VEC<STRING> | ARRAY<I16, 2> |
-      | c       | http      | 1            | VEC<STRING> | ARRAY<I16, 2> |
-      | c       | http      | 3            | VEC<STRING> | ARRAY<I16, 2> |
+    Examples: C11 over the shared C binding on TLS and plaintext listeners
+      | runtime | cluster_size | transport | tags_type   | grid_type     |
+      | c       | 1            | https     | VEC<STRING> | ARRAY<I16, 2> |
+      | c       | 3            | https     | VEC<STRING> | ARRAY<I16, 2> |
+      | c       | 1            | http      | VEC<STRING> | ARRAY<I16, 2> |
+      | c       | 3            | http      | VEC<STRING> | ARRAY<I16, 2> |
 
     @client_conformance_toolchain @client_suite_cpp @long_running @slots_1
-    Examples: C++17 over the shared C binding
-      | runtime | transport | cluster_size | tags_type   | grid_type     |
-      | cpp     | https     | 1            | VEC<STRING> | ARRAY<I16, 2> |
-      | cpp     | https     | 3            | VEC<STRING> | ARRAY<I16, 2> |
-      | cpp     | http      | 1            | VEC<STRING> | ARRAY<I16, 2> |
-      | cpp     | http      | 3            | VEC<STRING> | ARRAY<I16, 2> |
+    Examples: C++17 over the shared C binding on TLS and plaintext listeners
+      | runtime | cluster_size | transport | tags_type   | grid_type     |
+      | cpp     | 1            | https     | VEC<STRING> | ARRAY<I16, 2> |
+      | cpp     | 3            | https     | VEC<STRING> | ARRAY<I16, 2> |
+      | cpp     | 1            | http      | VEC<STRING> | ARRAY<I16, 2> |
+      | cpp     | 3            | http      | VEC<STRING> | ARRAY<I16, 2> |

@@ -317,6 +317,12 @@ caller; the recipe does not expand their contents as shell code. The reuse recip
 `NERVIX_TESTCONTAINERS_MODE=reusable`. [Developing Nervix](./developing-nervix.md#validation-and-tests)
 shows a named selection and the focused argument-forwarding check.
 
+`just build-scenarios` prepares those same tools and compiles the scenario executable without
+running it. A bounded local check can complete this preparation separately before spending its
+execution budget on a selected scenario. Preparation is not a scenario result; retain its exit
+and source identity separately from the subsequent run. `just test-scenarios-binary` replays a
+prepared executable against its recorded source without rebuilding it.
+
 `just test-resource-upload-identity-scenarios` prepares the in-process server's console assets,
 WASM guests and ONNX runtime, then runs the four `@resource_upload_idempotency` examples in
 `resource_describe.feature`, on one and three nodes with two concurrent scenarios and no retries.

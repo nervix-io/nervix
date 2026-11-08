@@ -115,6 +115,7 @@ impl CommandExecutionReference {
     ///
     /// The derived reference has a fixed size, so every accepted request reference can identify
     /// its statements even when the caller used the complete request-reference byte budget.
+    /// Non-security BLAKE3: derives a bounded step identity; authenticated command ownership is separate.
     pub fn derive_step(&self, position: usize) -> Self {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"nervix.command.step\0");

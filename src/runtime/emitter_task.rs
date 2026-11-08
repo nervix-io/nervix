@@ -33,7 +33,9 @@ use nervix_connector::{
 };
 
 use super::{
-    emitter_publishing::EmitterStopDrainOutcome, emitter_retry::EmitterBufferedKeepalive, *,
+    emitter_publishing::{EmitterPublishAttemptKind, EmitterStopDrainOutcome},
+    emitter_retry::EmitterBufferedKeepalive,
+    *,
 };
 
 #[path = "emitter_branch_retention.rs"]
@@ -53,6 +55,8 @@ pub(in crate::runtime) struct EmitterConnectorContext {
     pub(super) metrics_dirty: BranchMetricsMark,
     /// The status registry retains this owner for DESCRIBE and drain observations.
     pub(super) status: Arc<task_status::TaskStatus<EmitterRetryStatus>>,
+    /// Cold observers retain this exact task's readiness, separately from pending-work errors.
+    pub(super) readiness: Arc<AtomicBool>,
     /// Drain observers retain the registered counter independently of this context.
     pub(super) confirmation_waits: Arc<AtomicUsize>,
     /// The process-local metric store independently retains these children for inspection.
@@ -80,6 +84,7 @@ struct EmitterBatchContext<'a> {
     emitter: &'a EmitterName,
     node: &'a ModelName,
     output_metrics: &'a EmitterOutputMetrics,
+    interactions: &'a EmitterInteractionMetrics,
     error_policies: &'a ErrorPolicies,
     source_filters: &'a HashMap<RelayName, CompiledProgramWithMaterializedInterest>,
     filter_map: Option<&'a CompiledEmitterFilterMapProgram>,
@@ -129,6 +134,12 @@ pub(in crate::runtime) enum EmitterRuntimeError {
     InvalidConnectorConfig,
     #[error("failed to initialize emitter connector")]
     InitializeConnector,
+    #[error("failed to resume emitter connector")]
+    ResumeConnector,
+    #[error("emitter transport is waiting for readiness")]
+    ConnectorWaiting,
+    #[error("failed to close emitter connector")]
+    CloseConnector,
     #[error("emitter connector client is not initialized")]
     ConnectorNotInitialized,
     #[error("emitter flush policy is not initialized")]
@@ -208,9 +219,20 @@ pub(in crate::runtime) enum EmitterRuntimeError {
 }
 
 impl EmitterRuntimeError {
+    pub(super) fn retry_cause(&self) -> EmitterRetryCause {
+        match self {
+            Self::ConnectorNotInitialized
+            | Self::InitializeConnector
+            | Self::ResumeConnector
+            | Self::ConnectorWaiting => EmitterRetryCause::Connect,
+            _ => EmitterRetryCause::Publish,
+        }
+    }
     pub(super) fn is_retryable_publish_failure(&self) -> bool {
         match self {
             Self::ConnectorNotInitialized
+            | Self::ResumeConnector
+            | Self::ConnectorWaiting
             | Self::PublishBatch
             | Self::PublishStalled
             | Self::EncodingRefused
@@ -232,6 +254,7 @@ impl EmitterRuntimeError {
             | Self::RowPreparation { .. }
             | Self::InvalidConnectorConfig
             | Self::InitializeConnector
+            | Self::CloseConnector
             | Self::FaultInjected
             | Self::ShutdownWhileStalled
             | Self::StopDeadlineElapsed
@@ -265,6 +288,17 @@ pub(super) fn emitter_init_error(error: impl std::fmt::Display) -> Report<Emitte
 }
 
 impl EmitterConnectorContext {
+    pub(super) fn record_confirmation_timeout(&self, error: &Report<EmitterRuntimeError>) {
+        let timed_out = error.frames().any(|frame| {
+            matches!(
+                frame.downcast_ref::<nervix_connector::ConfirmationWindowError>(),
+                Some(nervix_connector::ConfirmationWindowError::AnswerTimedOut { .. })
+            )
+        });
+        if timed_out {
+            self.interactions.record_confirmation_timeout();
+        }
+    }
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "the connector failure becomes a retained status string \
@@ -323,6 +357,23 @@ impl EmitterConnectorContext {
             error,
             "failed to initialize emitter connector"
         );
+    }
+
+    pub(super) fn report_close_error(
+        &self,
+        kind: nervix_models::EmitterEntityKind,
+        error: &Report<EmitterRuntimeError>,
+    ) {
+        let reason = emitter_error_message(error);
+        self.runtime.events().report_error(format!(
+            "failed to close {} emitter '{}' in domain '{}': {reason}",
+            kind.connector().to_string().to_ascii_lowercase(),
+            self.emitter.as_str(),
+            self.domain.as_str(),
+        ));
+        warn!(domain = self.domain.as_str(), emitter = self.emitter.as_str(), error = %reason,
+            "failed to close emitter connector");
+        self.record_failure(reason);
     }
 
     fn report_publish_error(&self, connector: &str, error: &str) {
@@ -461,6 +512,16 @@ impl EmitterTransientErrorStatus for EmitterConnectorContext {
 
     fn clear_transient_error(&self) {
         self.status.clear_connector();
+    }
+}
+
+impl nervix_connector::EmitterReadiness for EmitterConnectorContext {
+    fn mark_ready(&self) {
+        self.readiness.store(true, Ordering::Relaxed);
+    }
+
+    fn mark_unready(&self) {
+        self.readiness.store(false, Ordering::Relaxed);
     }
 }
 
@@ -641,7 +702,8 @@ impl EmitterTaskState {
             retry.defer(
                 context,
                 EmitterRetryDeferral {
-                    wait: backoff.take_next_delay(),
+                    cause: EmitterRetryCause::Connect,
+                    wait: connector.installation_retry_delay(&mut backoff),
                     acks: EmitterAcknowledgements::default(),
                     waiting_for_stall_clear: false,
                     reason: Some(reason),
@@ -689,6 +751,7 @@ impl EmitterTaskState {
         deadline: Option<Instant>,
     ) {
         let Some(deadline) = deadline else {
+            self.connector.record_unfinished_ending();
             debug!(
                 domain = context.domain.as_str(),
                 emitter = context.emitter.as_str(),
@@ -698,7 +761,7 @@ impl EmitterTaskState {
             );
             return;
         };
-        match self.connector.finish_transport(deadline).await {
+        match self.connector.finish_transport(context, deadline).await {
             Ok(finished) => context.record_finished(connector, ending, finished),
             Err(error) => context.record_unfinished(connector, ending, &error),
         }
@@ -723,6 +786,7 @@ impl EmitterTaskState {
                 pending_batch.take();
             }
             Err(failure) if emitter_publish_error_is_retryable(failure.error()) => {
+                let cause = failure.retry_cause();
                 let (error, batch_owner) = failure.into_parts();
                 let wait = emitter_retry_delay(&mut self.backoff, &error);
                 if let EmitterPublishBatchOwner::Caller = batch_owner {
@@ -748,6 +812,7 @@ impl EmitterTaskState {
                 self.retry.defer(
                     context,
                     EmitterRetryDeferral {
+                        cause,
                         wait,
                         acks: self.connector.pending_acks(&self.buffer),
                         waiting_for_stall_clear: error.current_context()
@@ -755,7 +820,7 @@ impl EmitterTaskState {
                         reason: Some(&reason),
                     },
                 );
-                self.reconnect_on_wake = self.connector.reconnect_after(&error);
+                self.reconnect_on_wake = self.connector.reconnect_after(&error, context);
                 outcome_context.report_error(context, &reason);
             }
             Err(failure) => {
@@ -782,8 +847,8 @@ struct EmitterTaskLoop<'a> {
     state: EmitterTaskState,
     retention: EmitterBranchRetention,
     interaction: RelayInteraction<EmitterTaskCommand>,
-    plan: &'a EmitterStartPlan,
     connector_label: String,
+    plan: &'a EmitterStartPlan,
     input_schema: &'a CompiledSchema,
     output_schema: &'a Arc<CompiledSchema>,
     codec: Option<&'a Arc<CompiledCodec>>,
@@ -1020,6 +1085,7 @@ impl EmitterTask {
             let status = runtime.emitter_status(&emitter_key);
             let confirmation_waits = runtime.emitter_confirmation_counter(&emitter_key);
             let context = EmitterConnectorContext {
+                readiness: runtime.register_emitter_readiness(&emitter_key),
                 routing: shared_routing,
                 metrics_dirty: runtime.branch_metrics_mark(
                     &task_domain,
@@ -1037,6 +1103,10 @@ impl EmitterTask {
                 clock: domain_clock.clone(),
             };
             let _registration = super::emitter_supervision::EmitterTaskRegistration::new(&context);
+            let failure_status = context.status.clone();
+            let _failure_observation = context
+                .interactions
+                .bind_failure_source(move || failure_status.failures().is_some());
             let backoff = RuntimeReconnectBackoff::from_policy(plan.retry_policy);
             let buffer =
                 EmitterBatchBuffer::new(&context, &task_flush_policy, buffered_messages.clone());
@@ -1062,6 +1132,7 @@ impl EmitterTask {
                 emitter: &task_emitter,
                 node: &task_emitter_node,
                 output_metrics: &task_output_metrics,
+                interactions: &context.interactions,
                 error_policies: &task_error_policies,
                 source_filters: &programs.source_filters,
                 filter_map: programs.filter_map.as_ref(),
@@ -1076,8 +1147,8 @@ impl EmitterTask {
                 state,
                 retention,
                 interaction,
-                plan: &plan,
                 connector_label,
+                plan: &plan,
                 input_schema: &input_schema,
                 output_schema: &output_compiled_schema,
                 codec: codec.as_ref(),
@@ -1124,6 +1195,7 @@ impl EmitterTaskLoop<'_> {
                 self.finish_after_loop(ending).await;
             }
         }
+        self.state.connector.close_transport(self.context).await;
     }
 
     /// Finishes the emitter once the loop ended without a stop, by the deadline on the task's stop
@@ -1236,6 +1308,7 @@ impl EmitterTaskLoop<'_> {
                             .means_peer_left("emitter stop requester");
                         continue;
                     }
+                    let kind = EmitterPublishAttemptKind::from_retry(self.state.retry.is_active());
                     let EmitterTaskState {
                         connector,
                         buffer,
@@ -1255,6 +1328,7 @@ impl EmitterTaskLoop<'_> {
                             &mut control,
                             buffer,
                             deadline,
+                            kind,
                         )
                         .await;
                     let result = match drained {
@@ -1323,6 +1397,7 @@ impl EmitterTaskLoop<'_> {
                             self.state.retry.defer(
                                 self.context,
                                 EmitterRetryDeferral {
+                                    cause: self.state.connector.retry_cause(),
                                     wait: self.state.backoff.take_next_delay(),
                                     acks: self.state.connector.pending_acks(&self.state.buffer),
                                     waiting_for_stall_clear: self
@@ -1338,6 +1413,8 @@ impl EmitterTaskLoop<'_> {
                         continue;
                     }
                     let publish_result = {
+                        let kind =
+                            EmitterPublishAttemptKind::from_retry(self.state.retry.is_active());
                         let EmitterTaskState {
                             connector,
                             buffer,
@@ -1351,7 +1428,13 @@ impl EmitterTaskLoop<'_> {
                             backoff,
                         };
                         connector
-                            .flush_all(&self.connector_label, self.context, &mut control, buffer)
+                            .flush_all(
+                                &self.connector_label,
+                                self.context,
+                                &mut control,
+                                buffer,
+                                kind,
+                            )
                             .await
                             .map_err(EmitterPublishFailure::buffer)
                     };
@@ -1399,6 +1482,8 @@ impl EmitterTaskLoop<'_> {
                         break EmitterEnding::InteractionStopped;
                     }
                     let flush_result = {
+                        let kind =
+                            EmitterPublishAttemptKind::from_retry(self.state.retry.is_active());
                         let EmitterTaskState {
                             connector,
                             buffer,
@@ -1412,7 +1497,13 @@ impl EmitterTaskLoop<'_> {
                             backoff,
                         };
                         connector
-                            .flush_all(&self.connector_label, self.context, &mut control, buffer)
+                            .flush_all(
+                                &self.connector_label,
+                                self.context,
+                                &mut control,
+                                buffer,
+                                kind,
+                            )
                             .await
                     };
                     match flush_result {
@@ -1456,14 +1547,29 @@ impl EmitterTaskLoop<'_> {
                     if self.state.reconnect_on_wake
                         || self.state.connector.unavailable_reason().is_some()
                     {
-                        self.state.connector = EmitterConnectorState::open_until_cancelled(
-                            self.plan,
-                            self.context,
-                            self.input_schema,
-                            self.output_schema,
-                            self.codec,
-                            &mut *self.work_cancel_rx,
-                        )
+                        let acks = self.state.connector.pending_acks(&self.state.buffer);
+                        super::emitter_publishing::await_emitter_confirmation(&acks, async {
+                            if self.state.connector.retries_installation() {
+                                self.state.connector = EmitterConnectorState::open_until_cancelled(
+                                    self.plan,
+                                    self.context,
+                                    self.input_schema,
+                                    self.output_schema,
+                                    self.codec,
+                                    &mut *self.work_cancel_rx,
+                                )
+                                .await;
+                            } else {
+                                self.state
+                                    .connector
+                                    .resume_until_cancelled(self.context, &mut *self.work_cancel_rx)
+                                    .await
+                                    .discarded(
+                                        "the retained connector records its resume failure for \
+                                         the host retry",
+                                    );
+                            }
+                        })
                         .await;
                         self.state
                             .buffer
@@ -1472,7 +1578,11 @@ impl EmitterTaskLoop<'_> {
                             self.state.retry.defer(
                                 self.context,
                                 EmitterRetryDeferral {
-                                    wait: self.state.backoff.take_next_delay(),
+                                    cause: EmitterRetryCause::Connect,
+                                    wait: self
+                                        .state
+                                        .connector
+                                        .installation_retry_delay(&mut self.state.backoff),
                                     acks: self.state.connector.pending_acks(&self.state.buffer),
                                     waiting_for_stall_clear: false,
                                     reason: Some(reason),
@@ -1482,7 +1592,6 @@ impl EmitterTaskLoop<'_> {
                             continue;
                         }
                         self.state.reconnect_on_wake = false;
-                        self.context.status.clear();
                     }
                     let publish_result = {
                         let EmitterTaskState {
@@ -1590,6 +1699,7 @@ impl EmitterTaskLoop<'_> {
                             self.state.retry.defer(
                                 self.context,
                                 EmitterRetryDeferral {
+                                    cause: self.state.connector.retry_cause(),
                                     wait: self.state.backoff.take_next_delay(),
                                     acks: self.state.connector.pending_acks(&self.state.buffer),
                                     waiting_for_stall_clear: self
@@ -1705,6 +1815,7 @@ impl EmitterBatchContext<'_> {
                 return;
             }
         };
+        let mut outcomes = self.interactions.record_outcomes();
         for (row, message) in messages.into_iter().enumerate() {
             if resolved.get(row).copied().unwrap_or(false) {
                 continue;
@@ -1732,6 +1843,7 @@ impl EmitterBatchContext<'_> {
                     execution_now,
                 })
                 .await;
+            outcomes.fail();
         }
     }
 
@@ -2156,830 +2268,4 @@ impl EmitterBatchContext<'_> {
     nervix_lint,
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
-mod tests {
-    use nervix_connector::{EmitterFinishResult, EmitterLifecycle};
-
-    use super::*;
-    use crate::runtime::test_fixtures::{emitter_context, input_batch};
-
-    fn task_state(context: &EmitterConnectorContext) -> EmitterTaskState {
-        let mut buffer = EmitterBatchBuffer::default();
-        buffer.set_flush_policy(RuntimeFlushPolicy::Immediate);
-        EmitterTaskState::new(
-            EmitterConnectorState::Unavailable {
-                reason: "test emitter is unavailable".to_string(),
-            },
-            buffer,
-            RuntimeReconnectBackoff::default(),
-            context,
-        )
-    }
-
-    fn output_metrics(context: &EmitterConnectorContext) -> EmitterOutputMetrics {
-        EmitterOutputMetrics::WithoutRelay(
-            context
-                .runtime
-                .inner
-                .metrics
-                .resolve_global_node_message_metrics(
-                    &context.domain,
-                    ModelKind::Emitter,
-                    &ModelName::from(&context.emitter),
-                    None,
-                    "sent",
-                ),
-        )
-    }
-
-    fn batch_context<'a>(
-        context: &'a EmitterConnectorContext,
-        routing: &'a mut DomainRoutingCache,
-        output_metrics: &'a EmitterOutputMetrics,
-        node: &'a ModelName,
-        source_filters: &'a HashMap<RelayName, CompiledProgramWithMaterializedInterest>,
-        materialized_state: &'a [nervix_models::MaterializedStateDependency],
-    ) -> EmitterBatchContext<'a> {
-        EmitterBatchContext {
-            error_routing: &context.routing,
-            metrics_dirty: &context.metrics_dirty,
-            runtime: &context.runtime,
-            routing,
-            domain_clock: &context.clock,
-            domain: &context.domain,
-            emitter: &context.emitter,
-            node,
-            output_metrics,
-            error_policies: &context.error_policies,
-            source_filters,
-            filter_map: None,
-            ordering_group: None,
-            envelope: None,
-            http_requests: None,
-            materialized_state,
-        }
-    }
-
-    #[test]
-    fn emitter_context_reports_missing_node_dns_as_initialization_failure() {
-        let context = emitter_context();
-        let error = context
-            .dns()
-            .err()
-            .assured("the fixture runtime has no DNS resolver");
-        assert!(matches!(
-            error.current_context(),
-            EmitterRuntimeError::InitializeConnector
-        ));
-        assert_eq!(
-            emitter_error_message(&error),
-            "the node DNS resolver is not installed"
-        );
-    }
-
-    #[test]
-    fn emitter_error_classification_is_explicit_for_every_context() {
-        for retryable in [
-            EmitterRuntimeError::ConnectorNotInitialized,
-            EmitterRuntimeError::PublishBatch,
-            EmitterRuntimeError::PublishStalled,
-            EmitterRuntimeError::UnansweredEmitterRecords {
-                unanswered: 1,
-                records: 2,
-            },
-        ] {
-            assert!(retryable.is_retryable_publish_failure());
-            assert!(emitter_publish_error_is_retryable(&Report::new(retryable)));
-        }
-        for terminal in [
-            EmitterRuntimeError::InvalidConnectorConfig,
-            EmitterRuntimeError::InitializeConnector,
-            EmitterRuntimeError::FlushPolicyNotInitialized,
-            EmitterRuntimeError::FaultInjected,
-            EmitterRuntimeError::EncodeBatch,
-            EmitterRuntimeError::PreparedRowOutOfBounds {
-                row: 1,
-                row_count: 1,
-            },
-            EmitterRuntimeError::RowAlreadyPrepared { row: 0 },
-            EmitterRuntimeError::UnknownEmitterRecord {
-                record: 2,
-                records: 2,
-            },
-            EmitterRuntimeError::EmitterRecordAnsweredTwice { record: 0 },
-        ] {
-            assert!(!terminal.is_retryable_publish_failure());
-            assert!(!emitter_publish_error_is_retryable(&Report::new(terminal)));
-        }
-
-        assert_eq!(
-            emitter_message_error_operation(&Report::new(EmitterRuntimeError::EncodeBatch), true),
-            MessageErrorOperation::Encode
-        );
-        assert_eq!(
-            emitter_message_error_operation(&Report::new(EmitterRuntimeError::EncodeBatch), false),
-            MessageErrorOperation::Values
-        );
-        assert_eq!(
-            emitter_message_error_operation(&Report::new(EmitterRuntimeError::PublishBatch), true),
-            MessageErrorOperation::Publish
-        );
-    }
-
-    #[test]
-    fn emitter_error_message_prefers_printable_context() {
-        let attached = Report::new(EmitterRuntimeError::PublishBatch)
-            .attach_printable("specific broker failure");
-        assert_eq!(emitter_error_message(&attached), "specific broker failure");
-
-        let bare = Report::new(EmitterRuntimeError::EncodeBatch);
-        assert_eq!(
-            emitter_error_message(&bare),
-            "failed to encode emitter batch"
-        );
-    }
-
-    #[nervix_primitives::test]
-    async fn publish_success_clears_retry_state_and_releases_the_caller_batch() {
-        let context = emitter_context();
-        let routing = DomainRouting::new(DomainRoutingSnapshot::default());
-        let mut routing = DomainRoutingCache::new(routing.shared());
-        let output_metrics = output_metrics(&context);
-        let node = ModelName::from(&context.emitter);
-        let source_filters = HashMap::default();
-        let materialized_state = Vec::new();
-        let batch_context = batch_context(
-            &context,
-            &mut routing,
-            &output_metrics,
-            &node,
-            &source_filters,
-            &materialized_state,
-        );
-        let mut state = task_state(&context);
-        let mut pending_batch = Some(EmitterPublishBatch::from_batch(
-            input_batch(),
-            Timestamp::from_unix_nanos(100),
-        ));
-
-        state
-            .handle_publish_result(
-                Ok(None),
-                &mut pending_batch,
-                &context,
-                &batch_context,
-                EmitterPublishOutcomeContext {
-                    emitter_label: "test",
-                    codec_route: true,
-                    error_report: EmitterPublishErrorReport::Publish,
-                },
-            )
-            .await;
-
-        assert!(pending_batch.is_none());
-        assert!(!state.retry.is_active());
-        assert_eq!(
-            context
-                .runtime
-                .dataflow_node_transient_state(&context.domain, "EMITTER", &context.emitter)
-                .error,
-            None
-        );
-        let mut fresh_backoff = RuntimeReconnectBackoff::default();
-        assert_eq!(
-            state.backoff.take_next_delay(),
-            fresh_backoff.take_next_delay(),
-            "success must reset the declared retry sequence"
-        );
-    }
-
-    #[nervix_primitives::test]
-    async fn retryable_caller_failure_retains_the_batch_and_defers_one_retry() {
-        let context = emitter_context();
-        let routing = DomainRouting::new(DomainRoutingSnapshot::default());
-        let mut routing = DomainRoutingCache::new(routing.shared());
-        let output_metrics = output_metrics(&context);
-        let node = ModelName::from(&context.emitter);
-        let source_filters = HashMap::default();
-        let materialized_state = Vec::new();
-        let batch_context = batch_context(
-            &context,
-            &mut routing,
-            &output_metrics,
-            &node,
-            &source_filters,
-            &materialized_state,
-        );
-        let mut state = task_state(&context);
-        state.retry.clear();
-        let mut pending_batch = Some(EmitterPublishBatch::from_batch(
-            input_batch(),
-            Timestamp::from_unix_nanos(100),
-        ));
-        let failure = EmitterPublishFailure::caller(
-            Report::new(EmitterRuntimeError::PublishBatch)
-                .attach_printable("test emitter rejected the attempt"),
-        );
-
-        state
-            .handle_publish_result(
-                Err(failure),
-                &mut pending_batch,
-                &context,
-                &batch_context,
-                EmitterPublishOutcomeContext {
-                    emitter_label: "test",
-                    codec_route: true,
-                    error_report: EmitterPublishErrorReport::Publish,
-                },
-            )
-            .await;
-
-        assert!(pending_batch.is_none());
-        assert_eq!(state.buffer.pending().len(), 1);
-        assert!(state.retry.is_active());
-        assert!(state.reconnect_on_wake);
-        assert_eq!(
-            context
-                .runtime
-                .dataflow_node_transient_state(&context.domain, "EMITTER", &context.emitter)
-                .error,
-            Some("test emitter rejected the attempt".to_string())
-        );
-    }
-
-    #[nervix_primitives::test]
-    async fn terminal_buffer_failure_drains_and_routes_every_owned_batch() {
-        let context = emitter_context();
-        let routing = DomainRouting::new(DomainRoutingSnapshot::default());
-        let mut routing = DomainRoutingCache::new(routing.shared());
-        let output_metrics = output_metrics(&context);
-        let node = ModelName::from(&context.emitter);
-        let source_filters = HashMap::default();
-        let materialized_state = Vec::new();
-        let batch_context = batch_context(
-            &context,
-            &mut routing,
-            &output_metrics,
-            &node,
-            &source_filters,
-            &materialized_state,
-        );
-        let mut state = task_state(&context);
-        state
-            .buffer
-            .push(
-                &context,
-                EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100)),
-            )
-            .expect("test batch must buffer");
-        let failure = EmitterPublishFailure::buffer(
-            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable("test encoding failed"),
-        );
-        let mut pending_batch = None;
-
-        state
-            .handle_publish_result(
-                Err(failure),
-                &mut pending_batch,
-                &context,
-                &batch_context,
-                EmitterPublishOutcomeContext {
-                    emitter_label: "test",
-                    codec_route: true,
-                    error_report: EmitterPublishErrorReport::Flush,
-                },
-            )
-            .await;
-
-        assert!(state.buffer.is_empty());
-        assert!(!state.retry.is_active());
-        assert_eq!(
-            context
-                .runtime
-                .dataflow_node_transient_state(&context.domain, "EMITTER", &context.emitter)
-                .error,
-            Some("test encoding failed".to_string())
-        );
-    }
-
-    #[nervix_primitives::test]
-    async fn a_terminal_failure_counts_the_rows_delivered_before_it_as_sent() {
-        let context = emitter_context();
-        let routing = DomainRouting::new(DomainRoutingSnapshot::default());
-        let mut routing = DomainRoutingCache::new(routing.shared());
-        let output_metrics = output_metrics(&context);
-        let node = ModelName::from(&context.emitter);
-        let source_filters = HashMap::default();
-        let materialized_state = Vec::new();
-        let batch_context = batch_context(
-            &context,
-            &mut routing,
-            &output_metrics,
-            &node,
-            &source_filters,
-            &materialized_state,
-        );
-        let mut state = task_state(&context);
-        let mut messages = Vec::with_capacity(2);
-        for value in [1, 2] {
-            messages.push(RelayMessage {
-                key: None,
-                record: test_runtime_row([("value".to_string(), RuntimeValue::I64(value))]),
-                acks: AckSet::empty(),
-            });
-        }
-        let two_rows = RelayRecordBatch::from_messages(
-            crate::runtime::test_fixtures::input_schema(),
-            messages,
-        )
-        .expect("the test records match the emitter input schema");
-        let mut batch = EmitterPublishBatch::from_batch(two_rows, Timestamp::from_unix_nanos(100));
-        batch
-            .mark_delivered(0, DeliveredAcknowledgements::Host)
-            .expect("an earlier attempt delivered the first row");
-        state
-            .buffer
-            .push(&context, batch)
-            .expect("test batch must buffer");
-        let failure = EmitterPublishFailure::buffer(
-            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable("test encoding failed"),
-        );
-        let mut pending_batch = None;
-
-        state
-            .handle_publish_result(
-                Err(failure),
-                &mut pending_batch,
-                &context,
-                &batch_context,
-                EmitterPublishOutcomeContext {
-                    emitter_label: "test",
-                    codec_route: true,
-                    error_report: EmitterPublishErrorReport::Flush,
-                },
-            )
-            .await;
-
-        let sent = context.runtime.inner.metrics.dataflow_edge_statistics(
-            &context.domain,
-            &nervix_dataflow_graph::DataflowMetricRef::new(
-                "EMITTER",
-                context.emitter.as_str(),
-                "sent",
-                None::<String>,
-            ),
-        );
-        assert_eq!(
-            sent.messages_total, 1,
-            "the delivered row is sent, and the row the failure routes is not"
-        );
-        assert!(state.buffer.is_empty());
-    }
-
-    #[nervix_primitives::test]
-    async fn emitter_context_reports_configuration_and_publish_failures() {
-        let context = emitter_context();
-        let mut events = context.runtime.events().subscribe();
-
-        context.report_init_error("nats", "init failed");
-        context.report_publish_error("nats", "publish failed");
-        context.report_flush_error("nats", "flush failed");
-        assert!(
-            context
-                .parse_flush_policy(&FlushPolicy::Each {
-                    interval: "not-a-duration".to_string(),
-                    max_batch_size: "1MiB".to_string()
-                })
-                .is_none()
-        );
-
-        let mut messages = Vec::with_capacity(4);
-        for _ in 0..4 {
-            nervix_primitives::task::consume_budget().await;
-            let RuntimeEvent::Error(message) =
-                events.recv().await.expect("error event must be emitted");
-            messages.push(message);
-        }
-        assert!(messages[0].contains("failed to initialize nats emitter"));
-        assert!(messages[1].contains("failed to publish nats message"));
-        assert!(messages[2].contains("failed to flush nats rows"));
-        assert!(messages[3].contains(
-            "emitter 'output' in domain 'emitter_tests' has an invalid flush policy: invalid \
-             flush_each 'not-a-duration'"
-        ));
-    }
-
-    #[nervix_primitives::test]
-    async fn connector_status_progress_keeps_publish_and_commit_failures() {
-        use meticulous::OptionExt as _;
-
-        for kind in [EmitterRetryKind::Infrastructure, EmitterRetryKind::Commit] {
-            let context = emitter_context();
-            let host = context.emitter_host();
-            let reason = "the broker did not answer within ACK TIMEOUT 10s";
-            let backoff = Duration::from_secs(1);
-            context.record_retry(reason, backoff, kind);
-
-            host.clear_transient_error();
-
-            let failure = context
-                .status
-                .snapshot()
-                .assured("connection progress preserves the task's unresolved failure");
-            assert_eq!(failure.error, reason);
-            let retry = failure
-                .retry
-                .as_ref()
-                .assured("record_retry supplied the pending retry");
-            assert_eq!(retry.kind, kind);
-            assert_eq!(retry.reconnect.backoff, backoff);
-
-            context.status.clear();
-            assert!(context.status.snapshot().is_none());
-        }
-    }
-
-    #[nervix_primitives::test]
-    async fn connector_and_task_failures_are_both_described() {
-        let context = emitter_context();
-        let host = context.emitter_host();
-        let task_reason = "mqtt client refused the record: Request channel is full";
-        let connector_reason =
-            "resolving MQTT host 'mqtt.nervix.test' failed: the name does not exist";
-        let backoff = Duration::from_secs(1);
-
-        context.record_retry(task_reason, backoff, EmitterRetryKind::Infrastructure);
-        host.record_transient_error(connector_reason.to_string(), Duration::from_millis(25));
-
-        let observed = transient_error(&context).assured("both failures remain published");
-        assert!(observed.contains(task_reason), "{observed}");
-        assert!(observed.contains(connector_reason), "{observed}");
-
-        let selected = context
-            .status
-            .snapshot()
-            .assured("the task retry is active");
-        let retry = selected.retry.as_ref().assured("the task selected a retry");
-        assert_eq!(retry.kind, EmitterRetryKind::Infrastructure);
-        assert_eq!(retry.reconnect.backoff, backoff);
-
-        host.clear_transient_error();
-        assert_eq!(transient_error(&context).as_deref(), Some(task_reason));
-        host.record_transient_error(connector_reason.to_string(), Duration::from_millis(25));
-        context.status.clear();
-        assert_eq!(transient_error(&context).as_deref(), Some(connector_reason));
-        host.clear_transient_error();
-        assert!(context.status.snapshot().is_none());
-    }
-
-    #[nervix_primitives::test]
-    async fn connector_status_failure_survives_task_success() {
-        let context = emitter_context();
-        let host = context.emitter_host();
-        let reason = "the MQTT connection is unavailable";
-        host.record_transient_error(reason.to_string(), Duration::from_millis(25));
-
-        context.status.clear();
-
-        assert_eq!(transient_error(&context).as_deref(), Some(reason));
-        host.clear_transient_error();
-        assert!(context.status.snapshot().is_none());
-    }
-
-    #[nervix_primitives::test]
-    async fn emitter_host_delegates_runtime_services_and_general_error_policy() {
-        let context = emitter_context();
-        let host = context.emitter_host();
-        let mut events = context.runtime.events().subscribe();
-
-        host.record_transient_error(
-            "broker temporarily unavailable".to_string(),
-            Duration::from_millis(25),
-        );
-        assert_eq!(
-            context
-                .runtime
-                .dataflow_node_transient_state(&context.domain, "EMITTER", &context.emitter)
-                .error,
-            Some("broker temporarily unavailable".to_string())
-        );
-        assert!(
-            context
-                .runtime
-                .dataflow_node_transient_state(&context.domain, "EMITTER", &context.emitter)
-                .reconnect_backoff
-                .is_some()
-        );
-        host.clear_transient_error();
-        assert_eq!(
-            context
-                .runtime
-                .dataflow_node_transient_state(&context.domain, "EMITTER", &context.emitter)
-                .error,
-            None
-        );
-
-        host.report_error("connector background error".to_string());
-        let RuntimeEvent::Error(message) = events
-            .recv()
-            .await
-            .expect("the host must publish the event");
-        assert_eq!(
-            message,
-            "emitter error for emitter 'output' in domain 'emitter_tests': connector background \
-             error"
-        );
-        assert_eq!(host.staging_directory(), context.runtime.temp_dir());
-
-        let (logged_acks, logged_completion) = AckSet::root();
-        let logged_acks = EmitterRecordAcknowledgements::new(logged_acks);
-        host.handle_general_error(&logged_acks, "publish failed".to_string());
-        let logged_report =
-            "emitter 'output' general error in domain 'emitter_tests': publish failed";
-        let RuntimeEvent::Error(message) = events
-            .recv()
-            .await
-            .expect("the logged general error must publish an event");
-        assert_eq!(message, logged_report);
-        assert_eq!(
-            logged_completion.wait().await,
-            AckOutcome::NoAck(logged_report.to_string())
-        );
-
-        let mut ignored_context = emitter_context();
-        ignored_context.error_policies.general = GeneralErrorPolicy::Ignore;
-        let (ignored_acks, ignored_completion) = AckSet::root();
-        ignored_context.emitter_host().handle_general_error(
-            &EmitterRecordAcknowledgements::new(ignored_acks),
-            "ignored failure".to_string(),
-        );
-        assert_eq!(ignored_completion.wait().await, AckOutcome::Ack);
-    }
-
-    #[nervix_primitives::test]
-    async fn emitter_acknowledgement_handle_preserves_ack_lifecycle() {
-        let (acks, mut completion) = AckSet::root();
-        let acks = EmitterRecordAcknowledgements::new(acks);
-
-        assert!(!acks.is_empty());
-        acks.keep_alive();
-        assert_eq!(completion.wait_for_progress().await, AckProgress::Alive);
-        acks.acknowledge();
-        assert_eq!(completion.wait().await, AckOutcome::Ack);
-        assert!(EmitterRecordAcknowledgements::new(AckSet::empty()).is_empty());
-    }
-
-    /// An emitter whose transport client still holds records once the loop ends. It answers its
-    /// finish as `answer` says and reports the deadline the host finished it by.
-    struct HoldingEmitter {
-        answer: fn() -> EmitterFinishResult,
-        finished_by: watch::Sender<Option<Instant>>,
-    }
-
-    struct DeadlineFinishEmitter {
-        overrun: bool,
-    }
-
-    #[async_trait::async_trait]
-    impl EmitterLifecycle for DeadlineFinishEmitter {
-        fn kind(&self) -> nervix_models::EmitterEntityKind {
-            nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic)
-        }
-
-        async fn finish(&mut self, deadline: Instant) -> EmitterFinishResult {
-            if self.overrun {
-                nervix_primitives::time::sleep_until(
-                    deadline + PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE + Duration::from_millis(1),
-                )
-                .await;
-            } else {
-                nervix_primitives::time::sleep_until(deadline).await;
-                nervix_primitives::task::yield_now().await;
-            }
-            Err(Report::new(EmitterFinishError::Unsent {
-                connector: "test",
-                records: 3,
-            }))
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl EmitterConnector for DeadlineFinishEmitter {
-        fn lifecycle(&self) -> &dyn EmitterLifecycle {
-            self
-        }
-
-        fn lifecycle_mut(&mut self) -> &mut dyn EmitterLifecycle {
-            self
-        }
-
-        async fn publish_batches(
-            &mut self,
-            _context: &EmitterConnectorContext,
-            _publication: EmitterPublication<'_>,
-        ) -> EmitterRuntimeResult<()> {
-            Ok(())
-        }
-    }
-
-    async fn stop_drain_with_emitter(
-        connector: &mut EmitterConnectorState,
-        deadline: Instant,
-    ) -> EmitterStopDrainOutcome {
-        let fault_injection = ConfiguredFaultInjection::default();
-        let mut backoff = RuntimeReconnectBackoff::default();
-        let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
-        let (_stop_tx, mut stop_rx) = watch::channel(Some(deadline));
-        let mut control = EmitterPublishControl {
-            fault_injection: &fault_injection,
-            shutdown_rx: &mut shutdown_rx,
-            stop_rx: &mut stop_rx,
-            backoff: &mut backoff,
-        };
-        let context = emitter_context();
-        let mut buffer = EmitterBatchBuffer::default();
-        connector
-            .drain_for_stop("test", &context, &mut control, &mut buffer, deadline)
-            .await
-    }
-
-    #[nervix_primitives::test(start_paused = true)]
-    async fn a_stop_keeps_the_finish_answer_given_on_its_deadline() {
-        let mut connector =
-            EmitterConnectorState::opened(Box::new(DeadlineFinishEmitter { overrun: false }));
-        let deadline = Instant::now() + Duration::from_secs(1);
-
-        match stop_drain_with_emitter(&mut connector, deadline).await {
-            EmitterStopDrainOutcome::Failed(error) => {
-                assert_eq!(
-                    error.current_context(),
-                    &EmitterRuntimeError::FinishTransport
-                );
-                assert_eq!(
-                    emitter_error_message(&error),
-                    "test emitter's transport client still held 3 records when its finish \
-                     deadline passed"
-                );
-            }
-            _ => panic!("the emitter's own finish outcome must win the deadline race"),
-        }
-    }
-
-    #[nervix_primitives::test(start_paused = true)]
-    async fn a_stop_bounds_a_finish_that_overruns_its_deadline() {
-        let mut connector =
-            EmitterConnectorState::opened(Box::new(DeadlineFinishEmitter { overrun: true }));
-        let deadline = Instant::now() + Duration::from_secs(1);
-
-        assert!(matches!(
-            stop_drain_with_emitter(&mut connector, deadline).await,
-            EmitterStopDrainOutcome::DeadlineElapsed
-        ));
-    }
-
-    #[async_trait::async_trait]
-    impl EmitterLifecycle for HoldingEmitter {
-        fn kind(&self) -> nervix_models::EmitterEntityKind {
-            nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic)
-        }
-
-        async fn finish(&mut self, deadline: Instant) -> EmitterFinishResult {
-            self.finished_by.send_replace(Some(deadline));
-            (self.answer)()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl EmitterConnector for HoldingEmitter {
-        fn lifecycle(&self) -> &dyn EmitterLifecycle {
-            self
-        }
-
-        fn lifecycle_mut(&mut self) -> &mut dyn EmitterLifecycle {
-            self
-        }
-
-        async fn publish_batches(
-            &mut self,
-            _context: &EmitterConnectorContext,
-            _publication: EmitterPublication<'_>,
-        ) -> EmitterRuntimeResult<()> {
-            Ok(())
-        }
-    }
-
-    /// The state of an emitter whose open emitter is a [`HoldingEmitter`] answering `answer`, and what
-    /// reports the deadline that emitter was finished by.
-    fn holding_task_state(
-        context: &EmitterConnectorContext,
-        answer: fn() -> EmitterFinishResult,
-    ) -> (EmitterTaskState, watch::Receiver<Option<Instant>>) {
-        let (finished_by, finished) = watch::channel(None);
-        let state = EmitterTaskState::new(
-            EmitterConnectorState::opened(Box::new(HoldingEmitter {
-                answer,
-                finished_by,
-            })),
-            EmitterBatchBuffer::default(),
-            RuntimeReconnectBackoff::default(),
-            context,
-        );
-        (state, finished)
-    }
-
-    fn transient_error(context: &EmitterConnectorContext) -> Option<String> {
-        context
-            .runtime
-            .dataflow_node_transient_state(&context.domain, "EMITTER", &context.emitter)
-            .error
-    }
-
-    #[nervix_primitives::test]
-    async fn teardown_finishes_the_emitter_by_the_deadline_its_stopping_execution_gave() {
-        let context = emitter_context();
-        let (mut state, finished) = holding_task_state(&context, || Ok(EmitterFinish::Flushed));
-        let deadline = Instant::now() + Duration::from_secs(5);
-
-        state
-            .finish_after_loop(&context, "test", EmitterEnding::Teardown, Some(deadline))
-            .await;
-
-        assert_eq!(
-            *finished.borrow(),
-            Some(deadline),
-            "teardown finishes the emitter by the deadline on the task's stop signal"
-        );
-        assert_eq!(
-            transient_error(&context),
-            None,
-            "a client that sent what it held leaves no transient error"
-        );
-    }
-
-    #[nervix_primitives::test]
-    async fn teardown_reports_the_records_a_finish_left_unsent() {
-        let context = emitter_context();
-        let mut events = context.runtime.events().subscribe();
-        let (mut state, _finished) = holding_task_state(&context, || {
-            Err(Report::new(EmitterFinishError::Unsent {
-                connector: "test",
-                records: 2,
-            }))
-        });
-
-        state
-            .finish_after_loop(
-                &context,
-                "test",
-                EmitterEnding::Teardown,
-                Some(Instant::now()),
-            )
-            .await;
-
-        let error = transient_error(&context).expect("an unsent finish is the transient error");
-        assert_eq!(
-            error,
-            "test emitter's transport client still held 2 records when its finish deadline passed"
-        );
-        let RuntimeEvent::Error(message) = events
-            .recv()
-            .await
-            .expect("the unsent finish publishes an error event");
-        assert_eq!(
-            message,
-            "emitter 'output' in domain 'emitter_tests' stopped before its test transport client \
-             sent every record it held: test emitter's transport client still held 2 records when \
-             its finish deadline passed"
-        );
-    }
-
-    #[nervix_primitives::test]
-    async fn a_task_ended_without_a_stop_deadline_leaves_its_emitter_unfinished() {
-        let context = emitter_context();
-        let (mut state, finished) = holding_task_state(&context, || Ok(EmitterFinish::Flushed));
-
-        state
-            .finish_after_loop(&context, "test", EmitterEnding::InteractionStopped, None)
-            .await;
-
-        assert_eq!(
-            *finished.borrow(),
-            None,
-            "nothing bounds a finish the task was given no deadline for"
-        );
-    }
-
-    #[nervix_primitives::test]
-    async fn an_emitter_without_an_open_emitter_holds_nothing_to_finish() {
-        let mut connector = EmitterConnectorState::Unavailable {
-            reason: "test emitter is unavailable".to_string(),
-        };
-
-        let finished = connector
-            .finish_transport(Instant::now())
-            .await
-            .expect("an emitter without a client has nothing to send");
-
-        assert_eq!(finished, EmitterFinish::NothingHeld);
-    }
-}
+mod tests;

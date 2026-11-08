@@ -89,6 +89,10 @@ pub enum AuditRecord {
 
 #[derive(Clone, Copy, Debug, thiserror::Error)]
 pub enum Issue {
+    #[error("the catalog holds no diagnostic configuration; run the full compiler matrix")]
+    DiagnosticConfiguration,
+    #[error("a tracked acquisition in the catalog names no source file")]
+    TrackedOwnerPath,
     #[error("missing or ambiguous complete compiler report")]
     Report,
     #[error("partial, stale or cross-worktree compiler report")]

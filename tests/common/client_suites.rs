@@ -56,6 +56,8 @@ pub(crate) enum SuiteHost {
     C,
     /// C++17 over the same C ABI, with native RAII owners.
     Cpp,
+    /// Java 21 over the JVM library, with the pinned JUnit 5 console launcher.
+    Java,
 }
 
 impl FromStr for SuiteHost {
@@ -66,6 +68,7 @@ impl FromStr for SuiteHost {
             "python" => Ok(Self::Python),
             "c" => Ok(Self::C),
             "cpp" => Ok(Self::Cpp),
+            "java" => Ok(Self::Java),
             other => Err(io::Error::other(format!(
                 "unknown client suite host '{other}'"
             ))),
@@ -86,6 +89,7 @@ impl SuiteHost {
             Self::Python => "python",
             Self::C => "c",
             Self::Cpp => "cpp",
+            Self::Java => "java",
         }
     }
 
@@ -114,6 +118,40 @@ impl SuiteHost {
                 let mut command =
                     Command::new(artifacts.join(format!("{}-suite-sanitized", self.name())));
                 command.arg("cluster").current_dir(self.suite());
+                Ok(command)
+            }
+            Self::Java => {
+                let java = artifacts.join("java");
+                let classpath = std::env::join_paths([
+                    java.join("nervix-client.jar"),
+                    java.join("tests"),
+                    java.join("junit-platform-console-standalone.jar"),
+                ])
+                .map_err(io::Error::other)?;
+                let mut command = Command::new("java");
+                command
+                    .args(["-Xcheck:jni", "-cp"])
+                    .arg(classpath)
+                    .args([
+                        "org.junit.platform.console.ConsoleLauncher",
+                        "execute",
+                        "--scan-class-path",
+                    ])
+                    .arg(java.join("tests"))
+                    .args([
+                        "--include-tag",
+                        "cluster",
+                        "--include-classname",
+                        ".*",
+                        "--fail-if-no-tests",
+                        "--disable-banner",
+                        "--details",
+                        "summary",
+                        "--config",
+                        "junit.jupiter.testclass.order.default=org.junit.jupiter.api.\
+                         ClassOrderer$OrderAnnotation",
+                    ])
+                    .env("NERVIX_CLIENT_JVM_JAR", java.join("nervix-client.jar"));
                 Ok(command)
             }
         }

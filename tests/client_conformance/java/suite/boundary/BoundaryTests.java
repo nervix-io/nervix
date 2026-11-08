@@ -1,5 +1,8 @@
 package io.nervix.client;
 
+import org.junit.jupiter.api.Tag;
+import org.junit.jupiter.api.Test;
+
 import java.net.ServerSocket;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -11,14 +14,15 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 /** Checks the actual Java/JNI boundary, including cancellation from a second host thread. */
+@Tag("boundary")
 public final class BoundaryTests {
-    private BoundaryTests() {}
 
     private static void require(boolean condition, String message) {
         if (!condition) throw new AssertionError(message);
     }
 
-    private static void columns() {
+    @Test
+    void columns() {
         try (var fields = new Nervix.Fields()) {
             fields.add("id", Nervix.FieldType.U64, 0, false, false);
             fields.add("text", Nervix.FieldType.STRING, 0, true, false);
@@ -49,7 +53,8 @@ public final class BoundaryTests {
         }
     }
 
-    private static void cancellation() throws Exception {
+    @Test
+    void cancellation() throws Exception {
         try (var listener = new ServerSocket(0)) {
             var cancel = new Nervix.Cancel();
             var entered = new CountDownLatch(1);
@@ -77,7 +82,8 @@ public final class BoundaryTests {
         }
     }
 
-    private static void cleanup() throws Exception {
+    @Test
+    void cleanup() throws Exception {
         var fields = new Nervix.Fields();
         fields.add("value", Nervix.FieldType.U64, 0, false, false);
         var field = Nervix.Handle.class.getDeclaredField("state"); field.setAccessible(true);
@@ -85,17 +91,20 @@ public final class BoundaryTests {
         var pointer = state.getClass().getDeclaredField("pointer"); pointer.setAccessible(true);
         var owner = new java.lang.ref.WeakReference<>(fields);
         fields = null;
-        for (int attempt = 0; attempt < 100; attempt++) {
-            System.gc(); Thread.sleep(10);
+        long expires = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        while (System.nanoTime() < expires) {
+            System.gc();
             synchronized (state) {
                 if (owner.get() == null && pointer.getLong(state) == 0) return;
             }
+            Thread.yield();
         }
         throw new AssertionError("Cleaner did not release its unreachable native allocation");
     }
 
     /** A failed buffer-view allocation can release its lease while the root's Cleaner does too. */
-    private static void concurrentLeaseCleanup() throws Exception {
+    @Test
+    void concurrentLeaseCleanup() throws Exception {
         var lease = new AtomicReference<AutoCloseable>();
         var start = new CyclicBarrier(3);
         var finished = new CyclicBarrier(3);
@@ -122,11 +131,4 @@ public final class BoundaryTests {
         }
     }
 
-    public static void main(String[] arguments) throws Exception {
-        columns();
-        cleanup();
-        concurrentLeaseCleanup();
-        cancellation();
-        System.out.println("Java binding boundary checks passed");
-    }
 }

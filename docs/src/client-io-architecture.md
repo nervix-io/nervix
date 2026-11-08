@@ -337,10 +337,13 @@ the supported signatures, errors and examples.
 
 ### Shared C Binding And Buffer Lifetimes
 
-C, C++ and Ruby hosts use the existing Rust binding through
+C and C++ hosts use the existing Rust binding through
 [`nervix_client.h`](https://github.com/nervix-io/nervix/blob/main/crates/client-ffi/include/nervix_client.h),
 CPython hosts through its Python package, `nervix_client`, and JVM hosts through the Java 21 JNI
-classes in `crates/client-jvm`. All forward through the host session
+classes in `crates/client-jvm`. Ruby 3.3+ hosts load the magnus gem `nervix-client` from
+`crates/client-ruby`; its collector owns native objects, blocking calls release the GVL, and
+immutable IPC buffers mark their owner through every derived slice. Ruby builders copy inputs
+and endpoint opens retain a complete field snapshot. All forward through the host session
 runtime to the same Rust handles and recovery owner. Its blocking calls belong on application
 threads, never a thread driving a Tokio runtime. Native data access is bulk column access or
 canonical IPC, without per-value language callbacks or row-map payloads.
@@ -358,6 +361,14 @@ canonical IPC, without per-value language callbacks or row-map payloads.
 | `nx_delivery_ack` / `retry` / `reject` | Settle through the delivering attachment and await the server's settlement result |
 | Delivery/batch retain and release | Keep borrowed views alive; releasing storage never settles a delivery |
 | `nx_producer_close`, `nx_consumer_close`, handle free | End attachments and fence late restoration; an abandoned close continues cleanup |
+
+The JVM host suite and its [guide](client-library-jvm.md) use the published Java API. Its
+JUnit boundary tier retains the original bulk-column, cancellation, Cleaner and reentrant-close
+checks; its cluster tier exercises the public session/endpoint lifecycle on one and three nodes,
+over TLS and plaintext.
+The inventory accounts for every test after teardown. Java compiler elements resolve the suite
+references to the binding's declared public members; the guide includes compiled, executed suite
+examples. JNI representation properties remain a separate instrument.
 
 The JNI edge leases every input before a blocking host call, then releases the Java handle's
 monitor. Cleaner cleanup and explicit `close()` release each allocation once, after any admitted

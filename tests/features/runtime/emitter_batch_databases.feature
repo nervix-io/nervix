@@ -187,7 +187,7 @@ Feature: Database emitter batches
       | 1            | MongoDB        | 147B       | 146B          | CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };                            | db COLLECTION | MONGODB COLLECTION | BSON bulk write      |
       | 3            | MongoDB        | 147B       | 146B          | CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };                            | db COLLECTION | MONGODB COLLECTION | BSON bulk write      |
 
-  @emitter_batch_databases @database_batch_rejections
+  @emitter_batch_databases @database_batch_rejections @emitter_outcomes
   Scenario Outline: Rows <connector_body> or MAX SIZE rejects follow ON MESSAGE ERROR and the rest of their batch is written
     Given <connector_body> is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -251,6 +251,26 @@ Feature: Database emitter batches
       {"seq":4,"note":"healthy_b"}
       """
     And the relay subscription does not receive a payload within "1s"
+
+    And within "30s" DESCRIBE EMITTER "batched" on the leader node contains
+      """
+      destination:
+      """
+    And the last command output owner is saved as placeholder "rejection_owner"
+    And node "{{rejection_owner}}" observability metric "nervix_emitter_records_rejected_total" with labels eventually equals 1
+      """
+      emitter="batched"
+      code="external"
+      """
+    And node "{{rejection_owner}}" observability metric "nervix_emitter_records_rejected_total" with labels eventually equals 1
+      """
+      emitter="batched"
+      code="oversize"
+      """
+    And node "{{rejection_owner}}" observability metric "nervix_emitter_records_failed_total" with labels eventually equals 0
+      """
+      emitter="batched"
+      """
 
     Examples:
       | cluster_size | connector_body | client                                                                                                                                   | target        | emitter_kind       |

@@ -134,8 +134,7 @@ pub fn create_wasm_processor_parser<'src>() -> impl Parser<
 > + Clone {
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
-        .then_ignore(kw(Identifier::Wasm))
-        .then_ignore(kw(Identifier::Processor))
+        .then_ignore(kw_phrase2(Identifier::Wasm, Identifier::Processor))
         .then(wasm_processor_name())
         .then_ignore(kw(Identifier::From))
         .then(from_relay_clauses())

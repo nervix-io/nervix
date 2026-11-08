@@ -412,7 +412,7 @@ connection delivers it.
 | Interconnect pool slot | Fails that connection attempt and counts it with reason `resolution` | The slot's reconnect backoff, described in [Connection And Credential Lifecycle](./interconnect.md#connection-and-credential-lifecycle) |
 | Node startup | Fails startup when its own endpoint does not resolve, or when the bootstrap endpoint does not resolve and there are no recovered Raft peer endpoints; otherwise logs and skips an unresolved bootstrap or recovered peer endpoint | The operator or process supervisor for a failed start; reachable recovered peers for a restart with an unresolved bootstrap endpoint |
 | An ingestor | Fails its connection or its resume | The ingestor host, on the ingestor's retry policy or, for an ingestor in `MODE NO ACK`, its reconnect cadence |
-| An emitter | Fails its start, its reopening or its publish | The emitter host, on its backoff and retry policy |
+| An emitter | Fails transport resume or publish; its prepared instance remains retained | The emitter host, on its backoff and retry policy |
 | A Redis command pool | Fails the physical connection the pool was opening: when the pool opens, its open | The emitter that borrows from the pool, on its retry policy, and, for a connection that restores the pool's `POOL SIZE MIN`, the pool itself as soon as the attempt ends |
 | A native session | Fails the connection attempt as `ClientError::ConnectServer` | The session's bounded reconnect policy until its command wait ends; `BACKUP` uses `backup_wait_timeout` |
 
@@ -736,3 +736,11 @@ These follow from the contract above; [Evidence](#evidence) names the checks beh
 - **A node will not start.** `failed to load the name resolver configuration` names the file and
   the reason. Make the file readable, give it a `nameserver` line or pass `--dns-name-server`, or
   correct the search domain, and start the node again.
+
+Emitter open performs configuration and TLS preparation without a connection or lookup. Transport
+resume performs the existing resolver hook and bounded dial sequence. A transient publish failure
+suspends and resumes the same emitter; a healthy native reconnecting driver or pooled connection
+keeps its owner and resolver. Replacing a broken transport resolves again under its original budget,
+while retained queue URLs, TLS material, pending confirmations and staged commits are not rebuilt.
+RabbitMQ still passively verifies its known destination during recovery under the same connect
+budget, preserving the refusal to write to a queue or exchange that no longer exists.

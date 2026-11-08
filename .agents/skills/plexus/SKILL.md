@@ -33,6 +33,10 @@ reference. `DESCRIBE CLIENT <name>` shows effective defaults and configured valu
 For delivery durations and direct-value mappings, follow the Ingestors delivery-mode and Emitters
 direct-value sections. Nervix validates the entity's declared limits and exact mapping types at
 `CREATE` and `ALTER`; correct a refused declaration before starting the domain.
+For statement heads, endpoint and codec kinds, addressing and input acknowledgement, read
+`Plexus Overview` → `Statement catalog`, `Schemas And Codecs` → `Codecs` and the processor or
+emitter input synopsis. Select the full kinded head before assembling its body; use only the
+alteration operations that the owning chapter supports.
 For MQTT ingestors, read [Ingestors → MQTT](../../../docs/src/ingestors.md#mqtt) for the session/QoS/mode
 pairings and the broker's shared-subscription requirement, including with one instance. Read its
 session and identity rules before sharing a client between entities or promising recovery after an
@@ -71,21 +75,34 @@ the queue/default-exchange and named-exchange choices, `MANDATORY`, persistence,
 `PROPERTIES` types and envelope alterations. Do not promise consumer completion from a publisher
 confirm or message durability from routing alone.
 
+For applications submitting Plexus, use [Client Libraries](../../../docs/src/client-libraries.md)
+to select the host guide; Java and JVM programs follow [JVM Client Library](../../../docs/src/client-library-jvm.md).
+Read its execution, clock and endpoint sections before choosing application-side lifecycle handling.
+
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
 contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and
-completion status messages. For connector expression completion, including filters, HTTP request
-expressions, ALTER constructions, metadata fields and entity-specific header functions, follow
+completion status messages, and completing multi-word creation heads. For connector expression
+completion, including filters, HTTP request expressions, ALTER constructions, metadata fields and
+entity-specific header functions, follow
 the CLI's Completion section.
 For live subscription, clock and notice output while editing, and terminal omission notices,
 follow the CLI's [Asynchronous Output](../../../docs/src/client-tools-cli.md#asynchronous-output)
 section.
 For secure CLI connections and console leader redirects, follow those chapters' connection
 sections and [Native session TLS](../../../docs/src/installation-cargo.md#native-session-tls).
+For scripted CLI use, read [Modes](../../../docs/src/client-tools-cli.md#modes) and
+[Exit Status](../../../docs/src/client-tools-cli.md#exit-status) for completion JSON, transaction
+inspection JSON, event output and partial drain outcomes. For browser access and transaction
+commits, read [Signing In](../../../docs/src/client-tools-web-console.md#signing-in) and
+[Inspecting a transaction](../../../docs/src/client-tools-web-console.md#inspecting-a-transaction).
+Read [Layout](../../../docs/src/client-tools-web-console.md#layout) before interpreting footer totals.
 Listener certificates are node provisioning, configured outside Plexus statements.
 For TLS algorithm choices, read [Cryptography](../../../docs/src/cryptography.md#algorithm-policy):
 the interconnect uses its fixed provider, while native sessions and connectors use the outward
 provider and each connector's declared trust and identity keys.
+For backend validation claims, follow that chapter's P-256 signing and backend-status guidance;
+selecting an approved algorithm does not establish a validated deployment.
 For authentication refusals and retry behavior, follow
 [Authentication](../../../docs/src/client-session-protocol.md#authentication); a response delay
 does not establish that a user exists.
@@ -94,6 +111,13 @@ their inspection contracts distinguish effective options from canonical `SHOW CR
 For batching inspection, read [Emitter payload preparation](../../../docs/src/metrics-and-observability.md#emitter-payload-preparation)
 alongside Emitters: check the effective container and distinguish encoded payload measurements,
 retained work, retries and confirmed source records before interpreting a throughput figure.
+For packing, exact byte boundaries, native containers, retry membership and the scope of measured
+tuning evidence, read [Emitter Batching](../../../docs/src/emitter-batching.md). Choose the policy
+from the entity's current declaration before applying its tuning guidance.
+For emitter recovery and shutdown inspection, read
+[Emitter outcomes and lifecycle](../../../docs/src/metrics-and-observability.md#emitter-outcomes-and-lifecycle)
+for record outcomes, retry causes and waits, acquisition, pool waits, finish outcomes and the
+current failure gauge in `/metrics` and `DESCRIBE EMITTER`.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
 Roto UDFs, ingestors for every connector and entity pair, junctions, reingestors, and session
@@ -154,7 +178,7 @@ defines each status.
 For `RESTORE`, retain the same archive bytes as well as the statement and execution reference after
 status `3`, including an invalid reply after upload. Follow the Rust client guide's
 [Restoring](https://docs.nervix.io/client-library.html#restoring) contract when recovering it.
-For browser restore recovery, read [the web console's Backup And Restore section](../../../docs/src/client-tools-web-console.md#backup-and-restore)
+For browser restore recovery, read [the web console's Backing Up And Restoring section](../../../docs/src/client-tools-web-console.md#backing-up-and-restoring)
 before interpreting a later request failure as the result of an earlier possibly admitted restore.
 For a native CLI or Rust-client session addressed by hostname, Hickory resolves the selected
 server, seeds, and redirects on connection. Keep the hostname in the `http://` or `https://` server
@@ -505,7 +529,8 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   Include every dependent wire, internal, codec, and node mutation required for the candidate graph
   to validate in the same transaction.
 - Treat JSON, CBOR, and AVRO wire schemas as distinct entity kinds. Their names may coincide, so
-  every create, alter, show, drop, and codec reference must include the exact format.
+  creation, alteration and addressing must select the exact format. For codec reference syntax,
+  follow `Schemas And Codecs` → `Codecs`; its head supplies the wire format.
 - Use `BYTES` for arbitrary octets, including `ARRAY` and `VEC` elements. Keep branch key schemas
   free of `BYTES`. Check the wire representation and required encoding rule in `Schemas And
   Codecs` → `Codecs`; CBOR and AVRO `bytes` fields need no rule. A cast never converts `BYTES`; use

@@ -417,17 +417,24 @@ during the detach waits for it to end and attaches the clock only if the client 
 C and C++ clock accessors and ownership are described in the
 [C and C++ Client Library](client-library-c.md#follow-a-domain-clock).
 
-### Through The JVM Library
+### Through The Native Ruby Gem
 
-Java 21 and later use `io.nervix.client.Nervix` from `crates/client-jvm`. Its `Session`, prepared
-`Execution`, `Outcome`, `ClockEvent` and immutable `DomainClock` expose the shared Rust client's
-state and projection arithmetic. `Event.endReason()` reads why an ended subscription ended,
-`RELAY_REMOVED` or `RELAY_CHANGED`, and a subscription's or clock's `RestorationFailure` carries
-its typed `RestorationCause`, the message and the physical wait.
-`Cancel` supports deadlines and cancellation from another Java thread while a native call waits.
-Close handles with try-with-resources; Cleaner supplies fallback cleanup. Build the jar and its
-native library with `just build-client-jvm`. The [implementation manual](./client-implementation-manual.md#using-the-jvm-library)
-owns the Java lifetime, unsigned-width, error and threading rules.
+Ruby 3.3+ uses the gem built by `just build-client-ruby`: `require 'nervix_client'` exposes
+`Nervix::Client::Session.connect(uri, domain: ..., username: ..., password: ..., cancel: ...)`.
+Connection keywords also select TLS, CA PEM, seeds and connect/request/retry/backup waits in
+seconds. Optional connection and cancellation keywords accept `nil`.
+`Cancel.new(deadline: seconds)` bounds a call and `trigger` cancels it from another Ruby
+thread. Blocking calls release the GVL and use the Rust client's state and recovery decisions.
+Prepare a durable command once with `session.prepare(statement)`, then recover by calling
+`session.execute(execution)` on that same object. Typed `ClientError` subclasses keep the whole
+message, kind, execution reference and endpoint refusal.
+
+`next_event` and `next_clock_event` return native event objects. `domain_clock(domain)` returns
+the current clock snapshot with its logical-time, wall-duration, admission-window and admits
+projections. Paced state, ticks, ends and restoration failures carry the same fields as the Rust
+client, including the restoration message and retry wait in nanoseconds. Variant-inappropriate
+reads raise `TypeMismatchError`. Frame buffers retain their event; `frame.get_string` copies it.
+The collector owns native objects, including clocks that outlive their session.
 
 ## Events Across Reconnects
 
@@ -556,9 +563,12 @@ consumer.close().await?;
 
 `record_batch` accepts a delivery only when its Arrow IPC stream declares exactly the Arrow schema
 of the fields the emitter declares and holds one record batch of the delivery's member count; any
-other stream is a `ClientError::UnexpectedReply`. `EmitterDelivery::decode_record_batch(fields,
+other stream returns a typed `EmitterBatchDecodeError`, above the Arrow cause when one occurred.
+`EmitterDelivery::decode_record_batch(fields,
 batch, members)` applies the same check to bytes an application kept: it takes the fields of
 `consumer.description()`, a delivery's `batch` bytes and its `members`, and needs no live delivery.
+Both methods return the same decoder report directly; the caller decides whether the bytes are
+received data or local application input.
 
 `delivery.retry().await` keeps the same bytes and asks the server to reassign after physical
 backoff. `delivery.reject(reason).await` sends one bounded, non-sensitive reason through the
@@ -588,15 +598,28 @@ submissions with their original handle rather than resending them.
 C and C++ endpoint accessors, credit and ownership are described in the
 [C and C++ Client Library](client-library-c.md#publish-through-a-client-ingestor).
 
-### Endpoints Through The JVM Library
+### Endpoints Through The Native Ruby Gem
 
-The JNI library exposes `Session.openProducer` and `openConsumer`, `Fields`, `Schema`,
-`BatchBuilder`, `Batch`, `Delivery` and `Submission`. Builders copy one column level per call;
-readers copy states, offsets and scalar bytes in bulk. `Batch.fromIpc` and `ipc` exchange canonical
-Arrow IPC with Arrow Java. Direct `ipcBuffer` views retain their data through every derived buffer.
-Endpoint `description`, `pending`, `state`, `admission` and `reopen` read the shared client's typed
-results. `submit`, `rejoin`, `next`, `ack`, `retry`, `reject` and `end` take optional cancellation
-and deadline tokens; none owns a Java retry policy. `close` releases ownership and settles nothing.
+`Fields.new`, `add(name, type, length = 0, nullable: false, sensitive: false)` and
+`element(type, length = 0)` describe each field completely. `session.open_ingestor(domain, name,
+fields, batches: ..., bytes: ..., cancel: ...)` and `subscribe_emitter` retain an immutable field
+snapshot before waiting. Producer and consumer objects expose their schema, generation,
+contract, grants, policy, state and reopen reason and keep their session runtime alive.
+
+`BatchBuilder.new(schema, rows)` accepts `states(column, presence)`, `offsets(column, level,
+values)`, `fixed(column, level, bytes)` and `varlen(column, level, offsets, bytes)`, copying all
+inputs before return; `finish` validates the complete batch. `Batch.decode(schema, ipc, rows)`
+reads canonical Arrow IPC. A batch exposes typed `column` arrays and bulk states, offsets, fixed
+and variable-length values. Unsigned integers keep their full width and fixed-width bytes keep
+float bits. `ipc` is an immutable owner-retaining `IO::Buffer`; `get_string` makes a binary copy.
+
+`producer.submit(batch)` or `submit_ipc(ipc)` returns a submission identity; `pending`,
+`rejoin(id)` and `release(id)` inspect, take or release interest in that submission. A consumer's
+`next` returns a delivery with its identity, reference, relay, branch, members, execution time,
+IPC and decoded batch. `ack`, `retry` and `reject` await settlement; collection never settles a
+delivery. Endpoint `close(cancel: ...)` waits for closure with the GVL released. The
+[Client Implementation Manual](client-implementation-manual.md#using-the-ruby-gem) owns these
+host rules.
 
 ## Transaction Handles And Attach
 

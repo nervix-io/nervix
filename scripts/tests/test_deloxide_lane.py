@@ -470,7 +470,7 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(
             list(inventory.invocations),
             ["rate-limit-store", "emitter-branch-retirement", "probes", "primitive-conformance", "owner-tests", "scenarios", "paced-simulation",
-             "stress-transaction-retention", "stress-scenarios", "stress-endpoint-acknowledgement", "stress-paced-simulation", "stress-restore-scenarios", "cluster-parameters"],
+             "stress-transaction-retention", "stress-scenarios", "stress-endpoint-acknowledgement", "stress-paced-simulation", "stress-restore-scenarios", "cluster-parameters", "emitter-retained-lifecycle"],
         )
         for name in ("scenarios", "paced-simulation"):
             self.assertEqual(inventory.invocations[name].selections, {"deloxide", "deloxide-order"})
@@ -1868,97 +1868,37 @@ class QualificationTests(unittest.TestCase):
 
 
 class ApplicabilityTests(unittest.TestCase):
-    def catalog(self, *sites: tuple[str, str, str]) -> dict[str, object]:
-        findings = []
-        for configuration, receiver, path in sites:
-            findings.append({
-                "configurations": {
-                    f"{configuration}:crate": [
-                        {"receiver": receiver, "span": {"site": {"path": path, "start": 1}}}
-                    ]
-                },
-                "site": {"path": path, "start": 1},
-            })
-        return {
-            "configurations": [
-                {"name": "ordinary", "features": ["nervix-deadlock/report-tool"]},
-                {"name": "deloxide", "features": ["native", "deloxide", "testing"]},
-                {"name": "deloxide-order-binaries", "features": ["native", "deloxide-order", "testing"]},
-            ],
-            "findings": findings,
-        }
-
-    def test_every_tracked_owner_needs_one_record_and_every_record_an_owner(self) -> None:
-        inventory = deloxide_lane.parse_inventory(INVENTORY)
-        tracked = "nervix_primitives::sync::blocking::tracked::Mutex"
-        catalog = self.catalog(
-            ("deloxide", tracked, "src/store.rs"),
-            ("deloxide-order-binaries", "nervix_primitives::sync::blocking::tracked::RwLock", "crates/client/src/lib.rs"),
-            ("ordinary", "lock_api::mutex::Mutex", "src/ordinary.rs"),
-            ("deloxide", "dashmap::DashMap", "src/map.rs"),
-        )
-        self.assertEqual(deloxide_lane.catalog_owners(catalog), {"src/store.rs", "crates/client/src/lib.rs"})
-        self.assertEqual(deloxide_lane.applicability(inventory, catalog), [])
-        changed = self.catalog(
-            ("deloxide", tracked, "src/store.rs"),
-            ("deloxide", tracked, "src/new_owner.rs"),
-        )
-        problems = deloxide_lane.applicability(inventory, changed)
-        self.assertEqual(len(problems), 2)
-        self.assertIn("src/new_owner.rs acquires tracked blocking locks in a diagnostic build and has no [[owner]] record", problems[0])
-        self.assertIn("records the owner crates/client/src/lib.rs, which acquires no tracked lock", problems[1])
-
-    def test_a_catalog_without_a_diagnostic_configuration_is_refused(self) -> None:
-        catalog = self.catalog()
-        catalog["configurations"] = [{"name": "ordinary", "features": []}]
-        with self.assertRaisesRegex(LaneError, "holds no diagnostic configuration"):
-            deloxide_lane.catalog_owners(catalog)
-        with self.assertRaisesRegex(LaneError, "holds no configurations or findings"):
-            deloxide_lane.catalog_owners({})
-        broken = self.catalog(("deloxide", "nervix_primitives::sync::blocking::tracked::Mutex", ""))
-        with self.assertRaisesRegex(LaneError, "names no source file"):
-            deloxide_lane.catalog_owners(broken)
-
-    def test_testing_only_acquisitions_require_an_owner_in_each_diagnostic_selection(self) -> None:
-        inventory = deloxide_lane.parse_inventory(INVENTORY)
-        tracked = "nervix_primitives::sync::blocking::tracked::Mutex"
-        path = "src/testing_owner.rs"
-        owner = deloxide_lane.Owner(path, ("owner.store",), None)
-        registered = replace(inventory, owners={**inventory.owners, path: owner})
-        for selection in ("deloxide", "deloxide-order", "deloxide-stress"):
-            with self.subTest(selection=selection):
-                catalog = self.catalog(
-                    ("deloxide", tracked, "src/store.rs"),
-                    ("deloxide-order-binaries", tracked, "crates/client/src/lib.rs"),
-                    ("testing-diagnostic", tracked, path),
-                    ("testing", "lock_api::mutex::Mutex", "src/ordinary_testing.rs"),
-                )
-                catalog["configurations"].extend([
-                    {"name": "testing", "features": ["testing"]},
-                    {"name": "testing-diagnostic", "features": ["native", "testing", selection]},
-                ])
-                self.assertEqual(
-                    deloxide_lane.catalog_owners(catalog),
-                    {"src/store.rs", "crates/client/src/lib.rs", path},
-                )
-                problems = deloxide_lane.applicability(inventory, catalog)
-                self.assertEqual(len(problems), 1)
-                self.assertIn(f"{path} acquires tracked blocking locks", problems[0])
-                self.assertEqual(deloxide_lane.applicability(registered, catalog), [])
-
-    def test_the_command_reports_owners_and_fails_on_a_gap_in_the_records(self) -> None:
+    def test_the_command_delegates_without_reading_compiler_evidence(self) -> None:
         fixture = Fixture(self)
         catalog_path = fixture.root / "gate.json"
-        tracked = "nervix_primitives::sync::blocking::tracked::Mutex"
-        catalog_path.write_text(json.dumps(self.catalog(("deloxide", tracked, "src/store.rs"), ("deloxide", tracked, "crates/client/src/lib.rs"))))
-        arguments = ["--root", str(fixture.root), "applicability", "--catalog", str(catalog_path)]
-        self.assertEqual(quietly(lambda: deloxide_lane.main(arguments)), 0)
-        catalog_path.write_text(json.dumps(self.catalog(("deloxide", tracked, "src/store.rs"))))
-        self.assertEqual(quietly(lambda: deloxide_lane.main(arguments)), 1)
-        catalog_path.write_text("{")
-        self.assertEqual(quietly(lambda: deloxide_lane.main(arguments)), 1)
+        # The evidence path deliberately does not exist: only the Rust owner may open it.
+        arguments = ["--root", str(fixture.root), "--target-dir", str(fixture.target),
+                     "applicability", "--catalog", str(catalog_path)]
+        for status in (0, 1):
+            with self.subTest(status=status):
+                with mock.patch.object(deloxide_lane.subprocess, "run") as run:
+                    run.return_value.returncode = status
+                    self.assertEqual(quietly(lambda: deloxide_lane.main(arguments)), status)
+                    run.assert_called_once_with([
+                        str(fixture.target / "typed-ratchet/source/debug/nervix-ratchet"),
+                        "applicability", "--root", str(fixture.root),
+                        "--catalog", str(catalog_path),
+                    ], check=False)
+        with mock.patch.object(deloxide_lane.subprocess, "run", side_effect=OSError("fixture refusal")):
+            self.assertEqual(quietly(lambda: deloxide_lane.main(arguments)), 1)
         self.assertEqual(quietly(lambda: deloxide_lane.main(["--root", str(fixture.root), "validate"])), 0)
         self.assertEqual(quietly(lambda: deloxide_lane.main(["--root", str(fixture.root), "run", "deloxide"])), 1)
+
+    def test_the_delegate_uses_the_selected_cargo_target_directory(self) -> None:
+        fixture = Fixture(self)
+        arguments = ["--root", str(fixture.root), "applicability", "--catalog", "gate.json"]
+        for environment, target in (({}, fixture.root / "target"),
+                                    ({"CARGO_TARGET_DIR": str(fixture.target)}, fixture.target)):
+            with self.subTest(target=target):
+                with mock.patch.object(deloxide_lane.subprocess, "run") as run:
+                    run.return_value.returncode = 0
+                    self.assertEqual(quietly(lambda: deloxide_lane.main(arguments, environment=environment)), 0)
+                    self.assertEqual(run.call_args.args[0][0], str(target / "typed-ratchet/source/debug/nervix-ratchet"))
 
 
 class CommandLineTests(unittest.TestCase):

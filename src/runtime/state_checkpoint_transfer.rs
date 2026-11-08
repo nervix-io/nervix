@@ -87,6 +87,7 @@ impl Runtime {
             .descriptor)
     }
 
+    /// Non-security BLAKE3: describes checkpoint consistency; the interconnect authenticates peers.
     pub(super) async fn describe_retained_state_checkpoint(
         &self,
         placement: &RuntimeStatePlacement,
@@ -275,6 +276,7 @@ impl Runtime {
     }
 
     /// A layout join retains each admitted allocation until its bounded merge has consumed it.
+    /// Non-security BLAKE3: checks selected checkpoint bytes; peer/placement admission is separate.
     pub(super) async fn fetch_state_checkpoint_charged(
         &self,
         target: &ClusterNodeName,

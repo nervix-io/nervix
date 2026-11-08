@@ -149,6 +149,38 @@ pub(super) struct PulsarClientConnection<'a> {
     operation_timeout: Option<Duration>,
 }
 
+pub(super) struct PreparedPulsarClient {
+    address: String,
+    authentication: Option<Authentication>,
+    tls: Option<nervix_primitives::sync::StdArc<rustls::ClientConfig>>,
+    operation_timeout: Option<Duration>,
+}
+
+impl PreparedPulsarClient {
+    pub(super) async fn open(&self) -> Result<Pulsar<TokioExecutor>, Report<PulsarClientError>> {
+        self.builder()
+            .build()
+            .await
+            .map_err(PulsarClientError::connecting)
+    }
+
+    pub(super) fn builder(&self) -> PulsarBuilder<TokioExecutor> {
+        let mut builder = Pulsar::builder(self.address.clone(), TokioExecutor)
+            .with_connection_retry_options(PulsarClientConnection::connection_retries())
+            .with_operation_retry_options(PulsarClientConnection::operation_retry_options(
+                self.operation_timeout,
+            ))
+            .with_outbound_channel_size(PULSAR_OUTBOUND_CAPACITY);
+        if let Some(auth) = &self.authentication {
+            builder = builder.with_auth(auth.clone());
+        }
+        if let Some(tls) = &self.tls {
+            builder = builder.with_rustls_client_config(tls.clone());
+        }
+        builder
+    }
+}
+
 impl<'a> PulsarClientConnection<'a> {
     pub(super) fn new(
         config: &'a [ClientConfigEntry],
@@ -170,24 +202,29 @@ impl<'a> PulsarClientConnection<'a> {
             .map_err(PulsarClientError::connecting)
     }
 
-    fn builder(&self) -> Result<PulsarBuilder<TokioExecutor>, Report<PulsarClientError>> {
-        let addr = client_config_value(self.config, "addr", PULSAR.keyword())
+    pub(super) fn prepare(&self) -> Result<PreparedPulsarClient, Report<PulsarClientError>> {
+        let address = client_config_value(self.config, "addr", PULSAR.keyword())
             .change_context(PulsarClientError::Configuration)?;
-        let address = Url::parse(&addr).change_context(PulsarClientError::Configuration)?;
-        let mut builder = Pulsar::builder(addr, TokioExecutor)
-            .with_connection_retry_options(Self::connection_retries())
-            .with_operation_retry_options(self.operation_retries())
-            .with_outbound_channel_size(PULSAR_OUTBOUND_CAPACITY);
-        if let Some(authentication) = self.authentication() {
-            builder = builder.with_auth(authentication);
-        }
-        if address.scheme() == TLS_SCHEME {
-            let tls = RustlsClientConfigProvider::new(self.config)
-                .build_with_server_trust(self.server_certificate_trust()?)
-                .change_context(PulsarClientError::Configuration)?;
-            builder = builder.with_rustls_client_config(tls);
-        }
-        Ok(builder)
+        let parsed = Url::parse(&address).change_context(PulsarClientError::Configuration)?;
+        let tls = if parsed.scheme() == TLS_SCHEME {
+            Some(
+                RustlsClientConfigProvider::new(self.config)
+                    .build_with_server_trust(self.server_certificate_trust()?)
+                    .change_context(PulsarClientError::Configuration)?,
+            )
+        } else {
+            None
+        };
+        Ok(PreparedPulsarClient {
+            address,
+            authentication: self.authentication(),
+            tls,
+            operation_timeout: self.operation_timeout,
+        })
+    }
+
+    fn builder(&self) -> Result<PulsarBuilder<TokioExecutor>, Report<PulsarClientError>> {
+        Ok(self.prepare()?.builder())
     }
 
     /// The driver makes one attempt at a connection.
@@ -199,12 +236,14 @@ impl<'a> PulsarClientConnection<'a> {
     }
 
     /// The driver makes one attempt at an operation, within this connection's operation timeout.
-    pub(super) fn operation_retries(&self) -> OperationRetryOptions {
+    pub(super) fn operation_retry_options(
+        operation_timeout: Option<Duration>,
+    ) -> OperationRetryOptions {
         let mut options = OperationRetryOptions {
             max_retries: Some(0),
             ..Default::default()
         };
-        if let Some(operation_timeout) = self.operation_timeout {
+        if let Some(operation_timeout) = operation_timeout {
             options.operation_timeout = operation_timeout;
         }
         options

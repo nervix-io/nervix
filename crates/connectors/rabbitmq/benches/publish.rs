@@ -34,10 +34,11 @@ use lapin::{
 };
 use meticulous::OptionExt as _;
 use nervix_connector::{
-    BrokerPublishingMode, EmitterBoundedExecution, EmitterEventReporter, EmitterFinish,
-    EmitterGeneralErrorHandler, EmitterHost, EmitterLifecycle, EmitterPayloadMeasurement,
-    EmitterPayloadObserver, EmitterRecord, EmitterRecordAcknowledgements, EmitterRecordId,
-    EmitterStagingDirectory, EmitterTransientErrorStatus, RecordEmitter,
+    BrokerPublishingMode, EmitterBoundedExecution, EmitterConnector as _, EmitterEventReporter,
+    EmitterFinish, EmitterGeneralErrorHandler, EmitterHost, EmitterLifecycle,
+    EmitterPayloadMeasurement, EmitterPayloadObserver, EmitterReadiness, EmitterRecord,
+    EmitterRecordAcknowledgements, EmitterRecordId, EmitterResume, EmitterStagingDirectory,
+    EmitterTransientErrorStatus, RecordEmitter,
 };
 use nervix_connector_rabbitmq::{RabbitMqQueueEmitter, RabbitMqQueueEmitterConfig};
 use nervix_dns::{DnsConfiguration, DnsResolver};
@@ -77,6 +78,16 @@ async fn reply<T>(operation: impl Future<Output = lapin::Result<T>>) -> T {
 /// No host service is reached by the record publisher. A future dependency must be measured
 /// explicitly instead of silently disappearing into an inert benchmark implementation.
 struct BenchmarkHost;
+
+impl EmitterReadiness for BenchmarkHost {
+    fn mark_ready(&self) {
+        panic!("the benchmark drives the emitter lifecycle directly");
+    }
+
+    fn mark_unready(&self) {
+        panic!("the benchmark drives the emitter lifecycle directly");
+    }
+}
 
 impl EmitterTransientErrorStatus for BenchmarkHost {
     fn record_transient_error(&self, _reason: String, _retry_after: Duration) {
@@ -159,8 +170,8 @@ impl<'runtime> PublicationBenchmark<'runtime> {
             ))
             .await;
             let dns = require(DnsResolver::load(DnsConfiguration::system()).await);
-            let emitter = require(
-                RabbitMqQueueEmitter::new(
+            let mut emitter = require(
+                RabbitMqQueueEmitter::open(
                     RabbitMqQueueEmitterConfig {
                         config: vec![
                             ClientConfigEntry {
@@ -183,6 +194,10 @@ impl<'runtime> PublicationBenchmark<'runtime> {
                     EmitterHost::new(BenchmarkHost),
                 )
                 .await,
+            );
+            assert_eq!(
+                require(require(timeout(WAIT, emitter.resume()).await)),
+                EmitterResume::Ready
             );
             Publication {
                 broker,
@@ -324,6 +339,9 @@ impl<'runtime> PublicationBenchmark<'runtime> {
                 timeout(WAIT, self.publication.emitter.finish(deadline)).await,
             ));
             assert!(matches!(finished, EmitterFinish::NothingHeld));
+            require(require(
+                timeout(WAIT, self.publication.emitter.close()).await,
+            ));
             reply(
                 self.publication
                     .connection

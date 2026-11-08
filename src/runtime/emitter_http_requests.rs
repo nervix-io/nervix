@@ -70,14 +70,14 @@ impl HttpRequestBody {
                 let body = match body {
                     Ok(body) => body,
                     Err(error) => {
-                        rejected.push(RejectedEmitterRecord {
+                        rejected.push(RejectedEmitterRecord::message(
                             position,
-                            reason: format!(
+                            EmitterRejectionCode::Encode,
+                            format!(
                                 "emitter '{}' failed to encode record: {error:#}",
                                 context.emitter.as_str()
                             ),
-                            structured_error: None,
-                        });
+                        ));
                         continue;
                     }
                 };
@@ -433,7 +433,13 @@ mod tests {
             .push(&context, batch)
             .expect("the configured buffer takes the batch");
         connector
-            .flush_all("HTTP", &context, &mut control, &mut buffer)
+            .flush_all(
+                "HTTP",
+                &context,
+                &mut control,
+                &mut buffer,
+                crate::runtime::emitter_publishing::EmitterPublishAttemptKind::Initial,
+            )
             .await
             .expect("the flush resolves both requests")
     }

@@ -105,7 +105,7 @@ use nervix_primitives::{
     stream::StreamExt,
     sync::{
         Arc, CancellationToken, Mutex, Notify, StdArc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         broadcast, mpsc, oneshot, watch,
     },
     task::{AbortOnDropHandle, JoinHandle, TaskTracker},
@@ -165,9 +165,10 @@ use crate::{
     emitter_start_plan::*,
     metrics::{
         BatchMetricsHandle, BranchEvictionReason, ClientIngestorSeries, EmitterAttemptOperation,
-        EmitterAttemptOutcome, EmitterInteractionMetrics, IngestorQuiesceMetrics,
-        MessageMetricsHandle, NodeBatchMetricsSpec, NodeInputMetricsHandle, RelayMetricRecorders,
-        RelayMetricsHandle, RuntimeMetrics, RuntimeMetricsSnapshot,
+        EmitterAttemptOutcome, EmitterFinishOutcome, EmitterInteractionMetrics, EmitterOpenOutcome,
+        EmitterRejectionCode, EmitterRetryCause, IngestorQuiesceMetrics, MessageMetricsHandle,
+        NodeBatchMetricsSpec, NodeInputMetricsHandle, RelayMetricRecorders, RelayMetricsHandle,
+        RuntimeMetrics, RuntimeMetricsSnapshot,
     },
     registry::{
         BranchInstanceAckBoundary, BranchedNodeSpecs, BranchedProcessorNodeSpec,
@@ -231,6 +232,7 @@ mod emitter_connectors;
 mod emitter_encoding;
 mod emitter_envelope;
 mod emitter_http_requests;
+mod emitter_lifecycle;
 mod emitter_ordering_group;
 mod emitter_publishing;
 mod emitter_record_writes;

@@ -293,6 +293,7 @@ impl HyperLogLog {
         nervix::dispatch(reason = "the caller supplies the branch-retained row and pane \
                                    visitors; local callback bodies remain analyzed")
     )]
+    /// Non-security BLAKE3: distributes sketch registers for approximate cardinality.
     fn admit(&mut self, key: &[u8]) {
         let digest = blake3::hash(key);
         let hash = u64::from_le_bytes(
