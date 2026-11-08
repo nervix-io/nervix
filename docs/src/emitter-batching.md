@@ -278,14 +278,18 @@ for shutdown phases and the behavior when its drain budget ends.
 
 `SHOW CREATE EMITTER` retains the authored policy. `DESCRIBE EMITTER` reports `batch:`, the effective
 `batch container:` and its owner-routed `destination:` observations. Use
-[Emitter payload preparation](./metrics-and-observability.md#emitter-payload-preparation) for exact
-family names and labels:
+[Emitter payload preparation](./metrics-and-observability.md#emitter-payload-preparation) and
+[Emitter outcomes and lifecycle](./metrics-and-observability.md#emitter-outcomes-and-lifecycle)
+for exact family names, labels and observation units:
 
 - Payload and member counters measure successful preparation, before any external answer.
   Encoded bytes and size-bound bytes use the same exact measurement boundary. Prepared bytes can
   include additional content, such as a Sentry envelope.
 - A retry of retained bytes adds attempts, not another payload preparation. A native row path
   that reconstructs its request observes its new preparation. Neither count alone proves delivery.
+- Retry record totals count unresolved source records presented again, including the first forced
+  flush or live drain of an already pending retry. Confirmed, rejected and staged members stay
+  outside that total.
 - Buffered, prepared, in-flight and staged work gauges overlap; summing them double-counts
   ownership. Gauge withdrawal follows owner teardown; counters retain process-local history.
 - Sent source-record counts, destination outcomes, split counts and records-per-payload histograms

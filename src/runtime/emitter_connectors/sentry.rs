@@ -10,6 +10,8 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
+use nervix_connector::EmitterConnector as _;
+
 use super::*;
 
 const _: () = assert!(matches!(
@@ -18,7 +20,7 @@ const _: () = assert!(matches!(
 ));
 
 impl EmitterConnectorStarter {
-    pub(super) fn sentry(
+    pub(super) async fn sentry(
         connector: &SentryEventEmitterPlan,
         context: &EmitterConnectorContext,
         codec: Option<&Arc<CompiledCodec>>,
@@ -29,14 +31,15 @@ impl EmitterConnectorStarter {
             label,
             codec,
             batch,
-            SentryEventEmitter::new(
+            SentryEventEmitter::open(
                 SentryEventEmitterConfig {
                     config: connector.client.config.entries.clone(),
                     dns: context.dns()?,
                     platform: connector.platform.clone(),
                 },
                 context.emitter_host(),
-            ),
+            )
+            .await,
         )?;
         Ok(opened)
     }

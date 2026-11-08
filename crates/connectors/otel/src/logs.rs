@@ -36,7 +36,7 @@ impl OtelLogsEmitter {
     pub const KIND: nervix_models::EmitterEntityKind =
         nervix_models::EmitterEntityKind::Otel(nervix_models::OtelEmitterEntity::Logs);
 
-    pub fn new(config: OtelLogsEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
+    fn prepare(config: OtelLogsEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
         OtlpEncoder::new(config.export.into_encoder(OtlpSignal::Logs), _host).map(Self)
     }
 }
@@ -64,5 +64,13 @@ impl RowRequestEmitter for OtelLogsEmitter {
         requests: Vec<EmitterRowRequest>,
     ) -> PerRecordOutcome<EmitterRecordId> {
         self.0.publish(requests).await
+    }
+}
+
+impl nervix_connector::EmitterConnector for OtelLogsEmitter {
+    const KIND: nervix_models::EmitterEntityKind = Self::KIND;
+    type Plan = OtelLogsEmitterConfig;
+    async fn open(plan: Self::Plan, host: EmitterHost) -> EmitterStartResult<Self> {
+        Self::prepare(plan, host)
     }
 }

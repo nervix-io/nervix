@@ -569,9 +569,9 @@ async fn plan(
     ownership: PulsarSubscriptionOwnership,
 ) -> PulsarTopicIngestorPlan {
     let client = Pulsar::builder(broker.service_url.clone(), TokioExecutor)
-        .with_operation_retry_options(
-            PulsarClientConnection::new(&[], Some(OPERATION_TIMEOUT)).operation_retries(),
-        )
+        .with_operation_retry_options(PulsarClientConnection::operation_retry_options(Some(
+            OPERATION_TIMEOUT,
+        )))
         .build()
         .await
         .expect("the loopback broker serves the client's handshake");
