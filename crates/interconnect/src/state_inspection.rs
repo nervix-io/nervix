@@ -39,7 +39,10 @@ impl InterconnectStreamRequest for ReadMaterializedStatePage {
     const NAME: &'static str = "read_materialized_state_page";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const TIMEOUT: Duration = nervix_models::StateInspectionReadTimeout::DEFAULT;
+    #[inline]
+    fn default_timeout() -> Duration {
+        <nervix_models::StateInspectionReadTimeout as nervix_models::SettingDefinition>::default_value(&())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]

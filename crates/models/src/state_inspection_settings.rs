@@ -64,10 +64,6 @@ macro_rules! inspection_count {
 inspection_count!(StateInspectionMaxRows, "inspection-max-rows", 1024);
 inspection_count!(StateInspectionMaxSections, "inspection-max-sections", 128);
 
-impl StateInspectionReadTimeout {
-    pub const DEFAULT: Duration = Duration::from_secs(10);
-}
-
 impl SettingDefinition for StateInspectionReadTimeout {
     type Class = NodeCapabilities;
     type Value = Duration;
@@ -77,7 +73,7 @@ impl SettingDefinition for StateInspectionReadTimeout {
     const DERIVATION: Option<&'static str> = None;
 
     fn default_value(_: &()) -> Duration {
-        Self::DEFAULT
+        Duration::from_secs(10)
     }
 
     fn validate(value: &Duration, _: &()) -> Result<(), Report<Self::Error>> {

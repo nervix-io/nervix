@@ -2418,7 +2418,10 @@ and obey the ordinary Bulk chunk bound. No operator payload crosses the intercon
 or row maps; the coordinator uses the shared Arrow-to-Row writer at the session reporting boundary.
 
 The configured inspection deadline controls stream admission/setup via
-`request_stream_with_timeout`; ordinary `request_stream` keeps its request type's existing default.
+`request_stream_with_timeout`; ordinary `request_stream` obtains its request type's default
+from the pure `InterconnectStreamRequest::default_timeout()` getter. Static request deadlines keep
+their existing values; the inspection getter reads `StateInspectionReadTimeout`'s definition,
+so that definition owns the sole default and configured callers retain the same override path.
 The complete frontend inspection also has that elapsed-time bound. Failed or cancelled reads retain
 no historical cursor or page cache. The existing materialized dependency/generator snapshot request
 and its grouping, confirmation, integrity and admission behavior remain unchanged.

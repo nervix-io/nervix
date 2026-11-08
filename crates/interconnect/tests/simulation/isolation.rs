@@ -141,7 +141,10 @@ struct ResourceStream;
 impl InterconnectStreamRequest for ResourceStream {
     const NAME: &'static str = "simulation_resource_stream";
     const SUBQUOTA: RequestSubquota = RequestSubquota::Resource;
-    const TIMEOUT: Duration = Duration::from_secs(2);
+    #[inline]
+    fn default_timeout() -> Duration {
+        Duration::from_secs(2)
+    }
 }
 
 /// Worker counts fixed independently of the machine, so every replay admits the same jobs.

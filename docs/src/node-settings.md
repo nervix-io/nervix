@@ -602,4 +602,6 @@ Defaults and validation belong only to their definitions. CLI values resolve bef
 construction and round-trip through the runtime argument projection. Each serving node enforces
 its bounds; the coordinator also checks session collection and complete reply limits. The deadline
 bounds the complete operator read and governs remote admission/setup as well as owner work.
+The byte-stream request obtains its fallback read deadline through the same definition's
+`default_value`; no independent transport timeout duplicates that policy.
 These capabilities do not change materialized row delivery, replication or stored snapshot bounds.

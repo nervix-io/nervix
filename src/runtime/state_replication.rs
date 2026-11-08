@@ -2335,7 +2335,7 @@ impl Runtime {
             self.announce_checkpoint(offsets.placement(), offsets.replication(), lsm);
         }
         offsets
-            .wait_for_replica_quorum(lsm, SyncKafkaOffsets::TIMEOUT)
+            .wait_for_replica_quorum(lsm, SyncKafkaOffsets::default_timeout())
             .await
     }
 
@@ -2365,7 +2365,7 @@ impl Runtime {
         }
         self.announce_checkpoint(offsets.placement(), offsets.replication(), lsm);
         offsets
-            .wait_for_replica_quorum(lsm, SyncKafkaOffsets::TIMEOUT)
+            .wait_for_replica_quorum(lsm, SyncKafkaOffsets::default_timeout())
             .await
     }
 

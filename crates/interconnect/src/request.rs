@@ -616,7 +616,27 @@ pub trait InterconnectStreamRequest: RkyvMessage {
     const NAME: &'static str;
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Shared;
-    const TIMEOUT: Duration;
+    /// The declared fallback opening deadline; configured callers pass their remaining deadline.
+    ///
+    /// ```
+    /// use nervix_interconnect::{InterconnectStreamRequest, ReadMaterializedStatePage};
+    /// use nervix_models::{SettingDefinition, StateInspectionReadTimeout};
+    /// assert_eq!(ReadMaterializedStatePage::default_timeout(),
+    ///            StateInspectionReadTimeout::default_value(&()));
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use nervix_interconnect::{InterconnectStreamRequest, ReadMaterializedStatePage};
+    /// let seconds: u64 = ReadMaterializedStatePage::default_timeout();
+    /// ```
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "request drivers read the pure declaration for each stream opening"
+        )
+    )]
+    fn default_timeout() -> Duration;
     const REQUIRES_LIVE_TARGET: bool = true;
 
     /// Bind a coordinated stream to the authenticated peer process before its handler runs.
@@ -1729,7 +1749,7 @@ impl Transport {
     where
         M: InterconnectStreamRequest,
     {
-        self.request_stream_with_timeout(node, message, M::TIMEOUT)
+        self.request_stream_with_timeout(node, message, M::default_timeout())
             .await
     }
 
@@ -2090,7 +2110,10 @@ mod tests {
         const NAME: &'static str = "test_bulk_decode";
         const CLASS: PoolClass = PoolClass::Bulk;
         const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-        const TIMEOUT: Duration = Duration::from_secs(5);
+        #[inline]
+        fn default_timeout() -> Duration {
+            Duration::from_secs(5)
+        }
     }
 
     #[nervix_primitives::test]

@@ -1534,6 +1534,10 @@ test-crypto-scenarios *args: build-deps build-plexus-format build-test-cli build
 test-interconnect *args:
     cargo test --package nervix-interconnect --lib -- {{ args }}
 
+# Verify the current stream-deadline API and its compile-time Duration contract.
+test-interconnect-docs filter="":
+    cargo test --package nervix-interconnect --doc {{ quote(filter) }}
+
 # Run the resolver's unit tests and its focused protocol tests, which ask local DNS authorities the
 # tests start themselves.
 test-dns *args:
