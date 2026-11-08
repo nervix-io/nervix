@@ -251,7 +251,7 @@ mod shuttle_tests {
     use nervix_model_harness::shuttle::check_interleavings;
     use nervix_primitives::{
         sync::{Arc, Notify, oneshot},
-        task::spawn,
+        task::{spawn, yield_now},
     };
 
     use super::*;
@@ -276,9 +276,12 @@ mod shuttle_tests {
                 let controller = spawn(async move {
                     started.notified().await;
                     cancel.send(()).assured("the retained host is waiting");
+                    yield_now().await;
                     gate.notify_one();
                 });
                 nervix_primitives::select! {
+                    // The scheduler explores event order; DFS requires deterministic polling.
+                    biased;
                     resumed = state.resume(&mut connector, &host) => { resumed.assured("resume completes"); },
                     cancelled = cancelled => { cancelled.assured("cancellation arrives"); },
                 }
