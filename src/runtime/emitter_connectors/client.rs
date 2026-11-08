@@ -19,16 +19,11 @@ impl EmitterConnectorStarter {
         output_schema: &Arc<CompiledSchema>,
         plan: &EmitterStartPlan,
     ) -> EmitterRuntimeResult<Box<dyn EmitterConnector>> {
-        let opened = Box::new(nervix_primitives::expect_lint!(
-            nervix::lifecycle_call,
-            "emitter initialization publishes one concrete client-emitter endpoint lifetime \
-             before processing records",
-            ClientConsumerConnector::new(
-                context,
-                connector,
-                output_schema.clone(),
-                plan.retry_policy,
-            )
+        let opened = Box::new(ClientConsumerConnector::new(
+            context,
+            connector,
+            output_schema.clone(),
+            plan.retry_policy,
         ));
         Ok(opened)
     }

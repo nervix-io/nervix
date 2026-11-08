@@ -228,6 +228,7 @@ mod domain_clock_attachment;
 mod domain_resume;
 mod emitter_destinations;
 mod emitter_finish;
+mod emitter_lifecycle;
 mod emitter_metrics;
 mod endpoint_intake;
 mod generated_http_payloads;

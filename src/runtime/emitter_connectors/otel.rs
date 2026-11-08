@@ -10,6 +10,8 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
+use nervix_connector::EmitterConnector as _;
+
 use super::*;
 
 const _: () = assert!(matches!(
@@ -28,7 +30,7 @@ const _: () = assert!(matches!(
 ));
 
 impl EmitterConnectorStarter {
-    pub(super) fn otel(
+    pub(super) async fn otel(
         connector: &OtelEmitterPlan,
         context: &EmitterConnectorContext,
         input_schema: &CompiledSchema,
@@ -49,7 +51,7 @@ impl EmitterConnectorStarter {
                     batch: connector.batch, values: connector.values.clone(), attributes: connector.attributes.clone(),
                     resource: connector.resource.clone(), scope: connector.scope.clone(), mapped_schema: projection.mapped_schema().clone(),
                 };
-                Self::row_request(projection, $entity::new($config { export $(, metric: $metric.clone())? }, context.emitter_host()))?
+                Self::row_request(projection, $entity::open($config { export $(, metric: $metric.clone())? }, context.emitter_host()).await)?
             }};
         }
         let opened = match connector {

@@ -776,7 +776,7 @@ Feature: NATS emission
   # of each record, or by finishing it, which flushes what the client holds. Either way STOP returns
   # only once the endpoint forwards again, and every held record reaches the subscriber, a retried
   # one possibly twice.
-  @nats_finish_at_stop @emitter_finish_at_stop @deloxide_stress
+  @nats_finish_at_stop @emitter_finish_at_stop @deloxide_stress @emitter_outcomes
   Scenario Outline: STOP sends the records a core NATS write left with its client
     Given NATS is running
     And a NATS endpoint the scenario controls is configured
@@ -840,6 +840,7 @@ Feature: NATS emission
       """
       did not finish within timeout_ms 1s
       """
+    And the last command output owner is saved as placeholder "finish_owner"
     When STOP runs while the controlled NATS endpoint forwards everything after "2s"
     Then STOP completed after the controlled NATS endpoint forwarded everything
     And within "30s" the observed broker receives payloads
@@ -847,6 +848,12 @@ Feature: NATS emission
       {"sequence":1}
       {"sequence":2}
       {"sequence":3}
+      """
+
+    And node "{{finish_owner}}" records one completed transport finish for emitter "held_output"
+    And node "{{finish_owner}}" observability metric "nervix_emitter_transient_failure" with labels eventually equals 0
+      """
+      emitter="held_output"
       """
 
     Examples:

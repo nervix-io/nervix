@@ -10,6 +10,8 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
+use nervix_connector::EmitterConnector as _;
+
 use super::*;
 
 const _: () = assert!(matches!(
@@ -18,7 +20,7 @@ const _: () = assert!(matches!(
 ));
 
 impl EmitterConnectorStarter {
-    pub(super) fn kafka(
+    pub(super) async fn kafka(
         connector: &KafkaTopicEmitterPlan,
         context: &EmitterConnectorContext,
         codec: Option<&Arc<CompiledCodec>>,
@@ -29,7 +31,7 @@ impl EmitterConnectorStarter {
             label,
             codec,
             batch,
-            KafkaTopicEmitter::new(
+            KafkaTopicEmitter::open(
                 KafkaTopicEmitterConfig {
                     config: connector.client.config.entries.clone(),
                     topic: connector.topic.clone(),
@@ -37,7 +39,8 @@ impl EmitterConnectorStarter {
                     partition_from_branch: connector.partition_from_branch,
                 },
                 context.emitter_host(),
-            ),
+            )
+            .await,
         )?;
         Ok(opened)
     }

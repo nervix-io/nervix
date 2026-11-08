@@ -238,6 +238,7 @@ impl TransformedEncodingBenchmark {
                     &emitter,
                 ),
                 status: node_runtime.emitter_status(&key),
+                readiness: node_runtime.register_emitter_readiness(&key),
                 confirmation_waits: node_runtime.emitter_confirmation_counter(&key),
                 interactions: node_runtime.inner.metrics.register_emitter_interactions(
                     &domain,
