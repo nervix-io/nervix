@@ -209,18 +209,16 @@ impl ClientConsumerConnector {
                             batch_index,
                             row_index: first_row,
                         };
-                        rejected.push(RejectedEmitterRecord {
+                        rejected.push(RejectedEmitterRecord::structured(
                             position,
-                            reason: String::new(),
-                            structured_error: Some(
-                                RejectedEmitterMember::oversize(
-                                    position,
-                                    batch.execution_now(),
-                                    format!("client output row exceeds {} IPC bytes", max_bytes),
-                                )
-                                .error,
-                            ),
-                        });
+                            EmitterRejectionCode::Oversize,
+                            RejectedEmitterMember::oversize(
+                                position,
+                                batch.execution_now(),
+                                format!("client output row exceeds {} IPC bytes", max_bytes),
+                            )
+                            .error,
+                        ));
                         next += 1;
                         break (&pending[0..0], Bytes::new());
                     }
@@ -285,10 +283,6 @@ impl EmitterLifecycle for ClientConsumerConnector {
     /// for one are the host's retained payloads, not a client's, so nothing is left to send.
     async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
         Ok(EmitterFinish::NothingHeld)
-    }
-
-    fn keeps_client_on_publish_failure(&self) -> bool {
-        false
     }
 }
 

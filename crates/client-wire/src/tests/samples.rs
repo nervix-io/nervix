@@ -368,6 +368,7 @@ pub(crate) fn command_outcome(disposition: CommandDisposition) -> CommandOutcome
         }),
         inspection: None,
         wasm_state: None,
+        state: None,
         resource: None,
         backup: None,
         restore: None,

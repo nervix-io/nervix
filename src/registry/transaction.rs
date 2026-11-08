@@ -26,8 +26,8 @@ use nervix_models::{
     ImpactTopologyEdge, ModelChangeAspect, ModelIndex, NodeRef, OperationImpactReason,
     OperationImpactReport, OwnershipMoveImpact, PauseRequirement, PlannedExecutionStepImpact,
     QuiesceLevel, QuiesceSubgraph, RebuildImpact, RebuildReason, RequestedResourceVersion,
-    ResetWasmState, ResetWasmStateSelectionError, ResourceBindingImpact, ResourceCatalogAction,
-    ResourceCatalogImpact, ResourceName, ResourceUploads, ResourceVersionResolutionError,
+    ResetWasmState, ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact,
+    ResourceName, ResourceUploads, ResourceVersionResolutionError, StateBranchSelectionError,
     StateResetImpact, Statement, TransactionCommitPlanStep, TransactionCommitStepKind,
     TransactionImpactReport, TransactionOperation, TransactionOperationNumber,
     TransactionOperationRange, TransactionPosition,
@@ -233,7 +233,7 @@ pub(crate) enum TransactionPlanningError {
     #[error("WASM processor '{processor}' reset has invalid branch scope: {error}")]
     ResetInvalidScope {
         processor: nervix_models::WasmProcessorName,
-        error: Report<ResetWasmStateSelectionError>,
+        error: Report<StateBranchSelectionError>,
     },
     #[error("WASM processor '{processor}' is publishing another reset")]
     ResetInProgress {

@@ -339,17 +339,56 @@ replicates each partition to its own state replicas. A materialized dependency r
 from the owner of that key's partition, and a generator reads every partition's rows from their
 owners.
 
-`SHOW RELAY <relay> MATERIALIZED STATE` reports `kind: RELAY`, the relay owner, and its
-scheduler-selected state replicas before the materialized entries or empty-state message. A
-partitioned relay reports its partitions instead of one owner, as `DESCRIBE RELAY` does, and gathers
-each partition's entries from its owner. Each entry keeps its typed branch key through collection
-and renders it at this reporting boundary; fields declared `SENSITIVE` in the relay schema and in
-the branch-key schema render as `"<masked>"`, using the same policy as session subscriptions.
-Non-sensitive fields retain their values. This applies both on an owner and when another node reads
-its state. Unbranched entries render as `key=(root)`. An entry's payload is written as JSON, which
-has no number for a NaN or an infinity, so a float field holding one is written as the string `NaN`,
-`Infinity` or `-Infinity`. A record holds one when a payload's number rounds past its `F32` field's
-range, or when an Avro payload or a producer's Arrow batch carries one.
+### Inspect Materialized State
+
+```plexus
+SHOW RELAY events MATERIALIZED STATE
+  FOR ALL BRANCHES LIMIT 100 FORMAT JSON;
+SHOW RELAY events MATERIALIZED STATE
+  FOR BRANCH VALUES { tenant = 'alpha' } LIMIT 10 FORMAT TEXT;
+```
+
+The clauses are ordered: optional `FOR ALL BRANCHES`, `FOR UNBRANCHED` or
+`FOR BRANCH VALUES { field = literal, ... }`; optional `LIMIT n` with optional
+`AFTER 'continuation'`; optional `FORMAT TEXT` or `FORMAT JSON`. The default selector reads all
+branches and the default format is text. `LIMIT` is positive and cannot exceed the serving node's
+inspection row capability. Branch values follow the same typed, complete-key rules as state reset: string, boolean, signed
+64-bit integer and 64-bit float literals match their declared field types exactly. `FOR ALL
+BRANCHES` reads every branch regardless of its key field types.
+
+Every successful read carries `CommandOutcome.state`, a typed `StateInspection` envelope. It names
+the domain and relay, complete selected branch/row/Arrow-byte counts, and each execution unit's
+owner, replicas and read origin. Branch counts count concrete branched keys; unbranched state has
+zero branches even when it has a row. Each origin includes the serving process incarnation, a captured-cut
+fingerprint, generation and revision high-watermarks, and the `live` or `stored` stage. The
+fingerprint includes every captured branch-local state lifetime and its generation/revision; the
+high-watermarks alone do not identify a multi-branch cut. Stopped-state inspection reads stored
+state without starting the domain.
+
+Sections carry their name, the existing `RowSchema`, verified Row batches, omitted-row count and
+positional low/high watermark column identities. A user payload field with a watermark-like name
+retains its name and type; metadata receives a distinct name. Typed branch keys accompany each
+branched batch. Sensitive payload and branch cells are `Redacted`, exactly as for subscriptions;
+text renders them as `"<masked>"`. Empty state has zero counts, no row sections and no continuation.
+
+Text prints owner and origin headers followed by the shared subscription Row presentation, one
+line per row. JSON is one document containing the same envelope; cells carry their types, floating
+point bits, datetime nanoseconds and base64 bytes, preserving values that ordinary JSON numbers
+cannot express exactly. Programs should read the typed envelope rather than parse text.
+
+Rows are ordered by unit and canonical branch key, with the unbranched execution first. A bounded reply may include a continuation even
+when fewer than `LIMIT` rows fit. Resume with the same relay and selector, `LIMIT n AFTER 'token'`.
+Complete counts remain counts of the selected state, not just this page. Tokens bind the committed
+control revision, schema, all captured source lifetimes/origins and the last branch/offset. A changed
+cut is refused as `stale_continuation`; obtain a fresh first page. Inspection retains no historical
+cursor cache and does not provide a snapshot spanning independent requests.
+
+A non-owner requests a bounded native Arrow page from each unit owner through the interconnect's
+snapshot subquota. Selection and row/byte bounds apply before transport. Session reply encoding
+checks the complete envelope and rendering against the actual reply bound; a page that cannot fit
+returns typed `reply_too_large`. Other typed refusals include `unknown_entity`, `not_materialized`,
+`invalid_selection`, `invalid_limit`, `owner_unavailable`, `not_ready` and `deadline`. Refusals keep
+the command's unsuccessful disposition and use the requested text or JSON format.
 
 `DESCRIBE RELAY <relay>` reports the owner and state replicas immediately after `kind: RELAY`, then
 the logical definition and owner buffer-utilization metrics. An ordinary relay reports

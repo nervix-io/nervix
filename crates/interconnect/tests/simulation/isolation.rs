@@ -141,7 +141,10 @@ struct ResourceStream;
 impl InterconnectStreamRequest for ResourceStream {
     const NAME: &'static str = "simulation_resource_stream";
     const SUBQUOTA: RequestSubquota = RequestSubquota::Resource;
-    const TIMEOUT: Duration = Duration::from_secs(2);
+    #[inline]
+    fn default_timeout() -> Duration {
+        Duration::from_secs(2)
+    }
 }
 
 /// Worker counts fixed independently of the machine, so every replay admits the same jobs.
@@ -1288,7 +1291,7 @@ impl HubHost {
         );
 
         let waited = self.stalled.call(PeerCommand::OverflowResourceSlots).await;
-        assert!(waited >= ResourceStream::TIMEOUT, "{waited:?}");
+        assert!(waited >= ResourceStream::default_timeout(), "{waited:?}");
         let read = self.healthy.call(PeerCommand::ReadStream).await;
         assert_eq!(read, STREAM_BYTES);
         let during = self.observe();

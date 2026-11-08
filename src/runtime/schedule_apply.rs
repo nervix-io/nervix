@@ -1023,16 +1023,22 @@ impl Runtime {
                         .change_context(build()));
                     };
                     if desired_materialized {
-                        execution.materialized_stream_specs.insert(
-                            RelayName::from(&entity.identifier),
-                            RuntimeMaterializedRelaySpec::new(
-                                schema.arrow_schema(),
-                                schema.vm_sensitivity(),
-                                desired_node.resolved_branching.clone().assured(
-                                    "the schedule resolves every relay branch declaration",
-                                ),
-                            ),
+                        let spec = RuntimeMaterializedRelaySpec::new(
+                            schema.arrow_schema(),
+                            schema.vm_sensitivity(),
+                            desired_node
+                                .resolved_branching
+                                .clone()
+                                .assured("the schedule resolves every relay branch declaration"),
                         );
+                        let publication =
+                            self.materialized_relay_publication(domain, &relay, &spec);
+                        execution
+                            .materialized_stream_specs
+                            .insert(relay.clone(), spec);
+                        execution
+                            .materialized_stream_reads
+                            .insert(relay.clone(), publication);
                         execution.materialized_stream_owner_nodes.insert(
                             RelayName::from(&entity.identifier),
                             RelayOwnerRoutes::new(desired_node.unit_execution_nodes()),
@@ -1044,6 +1050,7 @@ impl Runtime {
                         execution
                             .materialized_stream_owner_nodes
                             .remove(&RelayName::from(&entity.identifier));
+                        execution.materialized_stream_reads.remove(&relay);
                     }
                     let previous_state_tasks = execution.take_relay_state_tasks(&relay);
                     (

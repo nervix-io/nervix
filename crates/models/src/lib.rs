@@ -63,6 +63,9 @@ mod schedule;
 mod schema;
 mod schema_fingerprint;
 mod settings;
+mod state_branch_selection;
+mod state_inspection;
+mod state_inspection_settings;
 mod statement;
 mod timestamp;
 mod udf;
@@ -334,10 +337,7 @@ pub use remote::{
     RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeElementValue,
     RemoteRuntimeField, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
 };
-pub use reset_wasm_state::{
-    ResetWasmBranchField, ResetWasmState, ResetWasmStateScope, ResetWasmStateSelectionError,
-    ResolvedResetWasmStateScope,
-};
+pub use reset_wasm_state::ResetWasmState;
 pub use resource::{
     RequestedResourceVersion, ResourceDescription, ResourceEntryContent, ResourceId,
     ResourceManifestEntry, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey,
@@ -369,6 +369,17 @@ pub use schema_fingerprint::SchemaFingerprint;
 pub use settings::{
     ClusterParameters, NodeCapabilities, Prerequisites, Setting, SettingClass, SettingDefinition,
 };
+pub use state_branch_selection::{
+    ResolvedStateBranchSelection, StateBranchField, StateBranchSelection, StateBranchSelectionError,
+};
+pub use state_inspection::{
+    StateInspectionBranchSelection, StateInspectionCounts, StateInspectionOrigin,
+    StateInspectionPosition, StateInspectionRejection, StateInspectionStage,
+};
+pub use state_inspection_settings::{
+    StateInspectionMaxRows, StateInspectionMaxSections, StateInspectionReadTimeout,
+    StateInspectionSettings, StateInspectionSettingsError,
+};
 pub use statement::{
     AckWindow, AlterBranch, AlterBranchError, AlterBranchOperation, AlterGenerator,
     AlterGeneratorError, AlterGeneratorOperation, AlterIngestor, AlterIngestorError,
@@ -391,9 +402,9 @@ pub use statement::{
     RetryPolicy, ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowPlacements,
     ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SignalingProtobufConfig,
     SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat, StartDomain,
-    Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral,
-    UncordonNode, UniquelyKindedModel, UploadResource, VhostTlsResource, WireSchemaLookup,
-    default_relay_buffer,
+    StateInspectionPageRequest, Statement, StopDomain, SubscriptionBinding,
+    SubscriptionDeliveryBehavior, SubscriptionLiteral, UncordonNode, UniquelyKindedModel,
+    UploadResource, VhostTlsResource, WireSchemaLookup, default_relay_buffer,
 };
 pub use timestamp::{AtomicTimestamp, Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};

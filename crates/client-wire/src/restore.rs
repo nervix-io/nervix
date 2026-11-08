@@ -301,7 +301,12 @@ impl RestoreReply {
             None => None,
         };
         let disposition = if let Some(outcome) = reply.disposition_as_command_outcome() {
-            RestoreDisposition::Outcome(Box::new(CommandOutcome::decode(decoder, outcome)?))
+            RestoreDisposition::Outcome(Box::new(CommandOutcome::decode(
+                decoder,
+                outcome,
+                frame.bytes(),
+                frame.limits(),
+            )?))
         } else if let Some(failed) = reply.disposition_as_restore_upload_failed() {
             RestoreDisposition::UploadFailed {
                 failure: decoder

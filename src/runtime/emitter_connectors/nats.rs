@@ -10,6 +10,8 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
+use nervix_connector::EmitterConnector as _;
+
 use super::*;
 
 const _: () = assert!(matches!(
@@ -34,7 +36,7 @@ impl EmitterConnectorStarter {
             label,
             codec,
             batch,
-            NatsSubjectEmitter::new(
+            NatsSubjectEmitter::open(
                 NatsSubjectEmitterConfig {
                     config: connector.client.config.entries.clone(),
                     subject: connector.subject.clone(),
@@ -59,7 +61,7 @@ impl EmitterConnectorStarter {
             label,
             codec,
             batch,
-            NatsStreamEmitter::new(
+            NatsStreamEmitter::open(
                 NatsStreamEmitterConfig {
                     config: connector.client.config.entries.clone(),
                     stream: connector.stream.clone(),

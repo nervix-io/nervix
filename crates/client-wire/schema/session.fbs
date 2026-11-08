@@ -1696,6 +1696,21 @@ table StatementOutcome {
   diagnostics: [Diagnostic] (required);
 }
 
+/// The captured state a read was served from.
+enum StateInspectionStage : ubyte { Live, Stored }
+enum StateInspectionRejection : ubyte { UnknownEntity, NotMaterialized, InvalidSelection, InvalidLimit, StaleContinuation, OwnerUnavailable, NotReady, Deadline, ReplyTooLarge }
+table StateInspectionCounts { branches: ulong; rows: ulong; bytes: ulong; }
+table StateInspectionOrigin { node: string (required); incarnation: ulong; fingerprint: [ubyte] (required); generation: ulong; revision: ulong; stage: StateInspectionStage = null; }
+/// Independently verified NXRB RowBatch frame, sharing its enclosing reply's backing bytes.
+table StateRowFrame { data: [ubyte] (required); }
+table StateWatermarkColumns { low: uint; high: uint; }
+table StateInspectionSection { name: string (required); schema: RowSchema (required); frames: [StateRowFrame] (required); omitted_rows: ulong; watermarks: StateWatermarkColumns; }
+table StateInspectionUnit { unit: PlacementUnit (required); owner: string (required); replicas: [string] (required); origin: StateInspectionOrigin (required); counts: StateInspectionCounts (required); sections: [StateInspectionSection] (required); }
+table StateInspectionPage { counts: StateInspectionCounts (required); unit_count: ulong; units: [StateInspectionUnit] (required); continuation: string; }
+table StateInspectionRefused { reason: StateInspectionRejection = null; }
+union StateInspectionResult { StateInspectionPage, StateInspectionRefused }
+table StateInspection { domain: string (required); entity: NodeRef (required); result: StateInspectionResult (required); }
+
 table CommandOutcome {
   /// The execution_reference of the request.
   execution_reference: string (required);
@@ -1726,6 +1741,8 @@ table CommandOutcome {
   /// Present when the command was a RESTORE that verified its archive: what it applied, the step
   /// it failed at if one failed, or for a dry run what it would apply.
   restore: RestoreReport;
+  /// Typed bounded state inspection, independent of the requested presentation format.
+  state: StateInspection;
 }
 
 table TransactionAttached {

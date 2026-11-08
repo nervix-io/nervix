@@ -390,7 +390,7 @@ Feature: Relay deduplication
       """
     Then within "5s" node "node-1" eventually reports materialized state for relay "state_txns" containing
       """
-      key={"transaction_id":"txn-1"} payload={"amount":10,"source":"state","transaction_id":"txn-1"}
+      {"branch":{"transaction_id":"txn-1"},"fields":{"amount":10,"source":"state","transaction_id":"txn-1"}}
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup"
       """

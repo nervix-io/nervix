@@ -131,6 +131,8 @@ impl Runtime {
             );
         Ok(Self {
             inner: Arc::new(RuntimeInner {
+                inspection_instances: AtomicU64::new(0),
+                inspection_settings: settings.inspection,
                 dns,
                 ingestors: Arc::new(DashMap::default()),
                 ingestor_quiescence: Arc::new(DashMap::default()),
@@ -138,6 +140,7 @@ impl Runtime {
                 ingestor_statuses: DashMap::default(),
                 ingestor_readiness: DashMap::default(),
                 emitter_statuses: DashMap::default(),
+                emitter_readiness: DashMap::default(),
                 shared_clients: DashMap::default(),
                 pool_waits: DashMap::default(),
                 emitter_confirmation_waits: DashMap::default(),

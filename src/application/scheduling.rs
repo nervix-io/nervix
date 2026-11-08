@@ -17,7 +17,7 @@
     )
 )]
 
-use std::{collections::BTreeSet, num::NonZeroU64, time::Duration};
+use std::{collections::BTreeSet, fmt, num::NonZeroU64, time::Duration};
 
 use ahash::{HashMap, HashSet};
 use error_stack::{Report, ResultExt as _};
@@ -44,7 +44,7 @@ use tracing::{info, warn};
 use super::{
     AppError,
     background_task::BackgroundTask,
-    command_result::CommandResult,
+    command_result::{CommandDisposition, CommandResult, LeaderRedirect},
     describe_output::format_placement_unit_nodes,
     model_mutation::{command_error, command_ok, quiesce_level_message},
     ownership_handoff::{
@@ -169,6 +169,28 @@ enum KafkaPartitionPublicationError {
         domain: DomainName,
         ingestor: IngestorName,
     },
+}
+
+/// A drain's retained leadership observation, borrowed at its reporting boundary.
+struct ShutdownDrainObservation<'a>(&'a CommandDisposition);
+
+impl fmt::Display for ShutdownDrainObservation<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            CommandDisposition::NotLeader(LeaderRedirect::UnconfirmedLease { term }) => write!(
+                formatter,
+                "the leader could not confirm its lease in term {term} and may still lead"
+            ),
+            CommandDisposition::NotLeader(LeaderRedirect::Leader(location)) => {
+                write!(formatter, "leadership moved to node '{}'", location.node)
+            }
+            CommandDisposition::NotLeader(LeaderRedirect::NoLeader) => {
+                formatter.write_str("leadership moved, and no leader is known yet")
+            }
+            // The caller separately observed that this node stopped leading after the failure.
+            _ => formatter.write_str("leadership moved"),
+        }
+    }
 }
 
 /// The one drain timeout that a graceful shutdown's ownership move and local graph drain share,
@@ -1456,12 +1478,7 @@ impl SessionServiceImpl {
                     || self.inner.consensus.current_leader().await.as_ref()
                         != Some(self.inner.consensus.local_node_id())
                 {
-                    info!(
-                        node_id = %node_id,
-                        report = %drained.message,
-                        "stopping-node drain lost leadership; remaining work needs the next leader"
-                    );
-                    StoppingNodeDrainResponse::NotLeader
+                    Self::stopping_node_drain_retry_response(&node_id, &drained)
                 } else {
                     StoppingNodeDrainResponse::Failed {
                         report: drained.message,
@@ -1485,6 +1502,20 @@ impl SessionServiceImpl {
                 Self::cordon_release_response(&node_id, released)
             }
         }
+    }
+
+    /// Reports an interrupted drain before asking the stopping node to observe its leader again.
+    fn stopping_node_drain_retry_response(
+        node_id: &ClusterNodeName,
+        drained: &CommandResult,
+    ) -> StoppingNodeDrainResponse {
+        let observation = ShutdownDrainObservation(&drained.disposition);
+        info!(
+            node_id = %node_id,
+            report = %drained.message,
+            "stopping-node drain interrupted: {observation}; remaining work can be retried at the observed leader"
+        );
+        StoppingNodeDrainResponse::NotLeader
     }
 
     /// The answer to stopping node `node_id`'s request to release its drain cordon, from what this

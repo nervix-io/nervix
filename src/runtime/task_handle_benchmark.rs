@@ -159,9 +159,16 @@ impl TaskHandleBenchmark {
             .assured("empty guest state is valid");
         let coordinator = DomainForceFlush::new();
         let force_flush = DomainForceFlush::subscribe(&coordinator, None);
+        let pool_metrics = runtime.metrics().register_emitter_interactions(
+            &domain,
+            &EmitterName::parse("destination").assured("the fixture emitter is valid"),
+            None,
+            nervix_models::EmitterEntityKind::Postgres(nervix_models::PostgresEmitterEntity::Table),
+        );
         let pool = runtime.register_pool_wait(
             entity.clone(),
             ClientName::parse("pool").assured("the client is valid"),
+            pool_metrics,
         );
         let confirmations = Arc::new(AtomicUsize::new(0));
         let generator = runtime.domain_ack_root_tracker(&domain);
