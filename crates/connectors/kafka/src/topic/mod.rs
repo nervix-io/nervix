@@ -130,13 +130,21 @@ struct KafkaProducerPreparation {
     partitioned: bool,
 }
 
+/// Startup configuration shares the producer's slot; no preparation storage remains beside a
+/// live native producer. Its optional partition metadata supplies the space for the cold pointer.
+enum KafkaProducerState {
+    Prepared(Box<KafkaProducerPreparation>),
+    Ready {
+        producer: Retiring<KafkaProducer>,
+        partitioning: Option<Box<KafkaPartitionMetadata>>,
+    },
+}
+
 pub struct KafkaTopicEmitter {
     /// Shared with the flush a finish runs on the runtime's blocking pool, which keeps the producer
     /// until librdkafka's flush returns, and whichever lets it go last retires it.
-    producer: Option<Retiring<KafkaProducer>>,
-    prepared: Option<KafkaProducerPreparation>,
+    producer: KafkaProducerState,
     topic: Box<str>,
-    partitioning: Option<Box<KafkaPartitionMetadata>>,
     mode: BrokerPublishingMode,
     /// librdkafka's validated payload-byte capacity, resolved once with the producer's config.
     #[cfg_attr(
@@ -460,14 +468,12 @@ impl KafkaTopicEmitter {
         let producer_config = Self::producer_config(&config.config, config.mode)?;
         let queue_capacity_bytes = Self::producer_queue_capacity(&producer_config)?;
         Ok(Self {
-            producer: None,
-            prepared: Some(KafkaProducerPreparation {
+            producer: KafkaProducerState::Prepared(Box::new(KafkaProducerPreparation {
                 config: producer_config,
                 executor: host.executor(),
                 partitioned: config.partition_from_branch,
-            }),
+            })),
             topic: config.topic.into_boxed_str(),
-            partitioning: None,
             mode: config.mode,
             queue_capacity_bytes,
         })
@@ -493,9 +499,11 @@ impl KafkaTopicEmitter {
     }
 
     fn producer(&self) -> &Retiring<KafkaProducer> {
-        self.producer
-            .as_ref()
-            .verified("the host resumes the emitter before publishing")
+        match &self.producer {
+            KafkaProducerState::Prepared(_) => None,
+            KafkaProducerState::Ready { producer, .. } => Some(producer),
+        }
+        .verified("the host resumes the emitter before publishing")
     }
 
     fn invalid_configuration(error: KafkaError) -> Report<EmitterOpenError> {
@@ -869,8 +877,8 @@ impl KafkaTopicEmitter {
     /// this is not librdkafka's own out-queue length, which counts them too.
     fn retained_records(&self) -> u64 {
         match &self.producer {
-            Some(producer) => producer.context().retained_records(),
-            None => 0,
+            KafkaProducerState::Ready { producer, .. } => producer.context().retained_records(),
+            KafkaProducerState::Prepared(_) => 0,
         }
     }
 
@@ -896,7 +904,7 @@ impl EmitterLifecycle for KafkaTopicEmitter {
     }
 
     fn needs_resume(&mut self) -> bool {
-        self.producer.is_none()
+        matches!(self.producer, KafkaProducerState::Prepared(_))
     }
 
     fn resume(
@@ -908,12 +916,12 @@ impl EmitterLifecycle for KafkaTopicEmitter {
             ));
         }
         nervix_connector::EmitterLifecycleStep::run(async move {
-            if let Some(KafkaProducerPreparation {
-                config,
-                executor,
-                partitioned,
-            }) = &self.prepared
-            {
+            if let KafkaProducerState::Prepared(prepared) = &self.producer {
+                let KafkaProducerPreparation {
+                    config,
+                    executor,
+                    partitioned,
+                } = prepared.as_ref();
                 let partitioning = if *partitioned {
                     Some(Box::new(
                         KafkaPartitionMetadata::new(config, executor.clone()).change_context(
@@ -926,9 +934,10 @@ impl EmitterLifecycle for KafkaTopicEmitter {
                 let producer = Self::create_producer(config, executor.clone()).change_context(
                     nervix_connector::EmitterLifecycleError::Resume { connector: KAFKA },
                 )?;
-                self.partitioning = partitioning;
-                self.producer = Some(producer);
-                self.prepared = None;
+                self.producer = KafkaProducerState::Ready {
+                    producer,
+                    partitioning,
+                };
             }
             Ok(nervix_connector::EmitterResume::Ready)
         })
@@ -981,14 +990,18 @@ impl EmitterLifecycle for KafkaTopicEmitter {
 #[async_trait]
 impl RecordEmitter for KafkaTopicEmitter {
     async fn publish(&mut self, records: Vec<EmitterRecord>) -> PerRecordOutcome<EmitterRecordId> {
-        let Some(producer) = self.producer.as_ref() else {
+        let KafkaProducerState::Ready {
+            producer,
+            partitioning,
+        } = &self.producer
+        else {
             let mut outcome = PerRecordOutcome::with_capacity(records.len());
             outcome.fail(Report::new(EmitterWriteError::NotInitialized {
                 connector: KAFKA,
             }));
             return outcome;
         };
-        let partitions = match &self.partitioning {
+        let partitions = match partitioning {
             None => None,
             Some(metadata) => match metadata.partition_count(producer, &self.topic).await {
                 Ok(count) => Some(count),

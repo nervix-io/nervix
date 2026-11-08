@@ -2295,6 +2295,9 @@ and host handles once. It performs local validation and TLS preparation without 
 The awaitable `suspend`, `resume` and `close` hooks return `EmitterLifecycleStep`: immediate outcomes
 stay inline, and only asynchronous transport work owns a boxed future. A retained usable client
 therefore adds no allocation to recovery. The host protocol borrows its existing readiness service.
+Startup preparation shares a mutually exclusive state with a live producer instead of increasing
+its native footprint. Kafka and Pulsar box only their temporary preparation; their live producer
+and its existing confirmation or retirement owners stay inline.
 
 `EmitterLifecycle::resume` acquires the connection; a transient publish failure calls `suspend`
 then `resume` on that same instance after the policy's backoff. A failed resume retains that owner,

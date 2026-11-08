@@ -189,9 +189,19 @@ struct PulsarProducerPreparation {
     policy: RoutingPolicy,
 }
 
+/// Preparation and the live producer occupy the same slot. Only startup data is boxed, so a
+/// ready emitter keeps the native producer's inline footprint and allocation behavior.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the live native producer stays inline; only temporary startup preparation is boxed"
+)]
+enum PulsarProducerState {
+    Prepared(Box<PulsarProducerPreparation>),
+    Ready(pulsar::Producer<TokioExecutor>),
+}
+
 pub struct PulsarTopicEmitter {
-    producer: Option<pulsar::Producer<TokioExecutor>>,
-    prepared: Option<PulsarProducerPreparation>,
+    producer: PulsarProducerState,
     publishing: PulsarPublishing,
 }
 
@@ -487,12 +497,11 @@ impl PulsarTopicEmitter {
             }
         };
         Ok(Self {
-            producer: None,
-            prepared: Some(PulsarProducerPreparation {
+            producer: PulsarProducerState::Prepared(Box::new(PulsarProducerPreparation {
                 connection,
                 topic: topic_name,
                 policy,
-            }),
+            })),
             publishing,
         })
     }
@@ -628,7 +637,7 @@ impl EmitterLifecycle for PulsarTopicEmitter {
     }
 
     fn needs_resume(&mut self) -> bool {
-        self.producer.is_none()
+        matches!(self.producer, PulsarProducerState::Prepared(_))
     }
 
     fn resume(
@@ -640,12 +649,12 @@ impl EmitterLifecycle for PulsarTopicEmitter {
             ));
         }
         nervix_connector::EmitterLifecycleStep::run(async move {
-            if let Some(PulsarProducerPreparation {
-                connection,
-                topic,
-                policy,
-            }) = &self.prepared
-            {
+            if let PulsarProducerState::Prepared(prepared) = &self.producer {
+                let PulsarProducerPreparation {
+                    connection,
+                    topic,
+                    policy,
+                } = prepared.as_ref();
                 let resuming = nervix_connector::EmitterLifecycleError::Resume {
                     connector: PULSAR.keyword(),
                 };
@@ -665,8 +674,7 @@ impl EmitterLifecycle for PulsarTopicEmitter {
                     .await
                     .map_err(Self::start_error)
                     .change_context(resuming)?;
-                self.producer = Some(producer);
-                self.prepared = None;
+                self.producer = PulsarProducerState::Ready(producer);
             }
             Ok(nervix_connector::EmitterResume::Ready)
         })
@@ -686,30 +694,19 @@ impl EmitterLifecycle for PulsarTopicEmitter {
 #[async_trait]
 impl RecordEmitter for PulsarTopicEmitter {
     async fn publish(&mut self, records: Vec<EmitterRecord>) -> PerRecordOutcome<EmitterRecordId> {
+        let producer = match &mut self.producer {
+            PulsarProducerState::Prepared(_) => None,
+            PulsarProducerState::Ready(producer) => Some(producer),
+        }
+        .verified("the host resumes the emitter before publishing");
         let (publishing, selected) = self.publishing.parts();
         let settings = match publishing {
             PulsarPublicationRef::NoAck(receipts) => {
-                return receipts
-                    .publish(
-                        self.producer
-                            .as_mut()
-                            .verified("the host resumes the emitter before publishing"),
-                        records,
-                        selected,
-                    )
-                    .await;
+                return receipts.publish(producer, records, selected).await;
             }
             PulsarPublicationRef::Ack(settings) => settings,
         };
-        Self::publish_confirmed(
-            self.producer
-                .as_mut()
-                .verified("the host resumes the emitter before publishing"),
-            records,
-            settings,
-            selected,
-        )
-        .await
+        Self::publish_confirmed(producer, records, settings, selected).await
     }
 }
 
