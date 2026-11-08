@@ -737,6 +737,16 @@ outside this owner's scope. Public scenarios cover one and three nodes, and the 
 `endpoints` workload qualifies this owner against immutable images in the smoke and soak suites. The
 inventory ledger records the routing measurement and verification evidence.
 
+## Emitter Construction Observations
+
+The scenario injector's `observed_emitter_opens` map contains only explicitly observed emitter
+names. Arming and inspection are harness operations; emitter composition increments the existing
+entry at its cold construction boundary, releasing the guard before opening the connector.
+Publication, acknowledgement and retry scheduling read no counter. A scenario retains one scalar
+per armed name until its injector ends. This observation does not supply protocol ordering or
+concurrency evidence; production-owner checks and public delivery assertions keep their own
+contracts.
+
 ## Mutable Execution State
 
 Per-row mutation is kept close to the lane that orders it. A global concurrent map is an index into
@@ -3537,3 +3547,35 @@ through the existing test-pause owner and exercises observation, refusal and rel
 pause, network waits and standard-library once publication remain outside the blocking-lock detector.
 The diagnostic parameter workloads reach the surrounding tracked owners; the public scenario and
 external partition recovery verify admission and observation during an isolated process restart.
+
+## Retained Emitter Lifecycle
+
+One emitter task exclusively owns `EmitterLifecycleState` and its concrete connector. A completed
+suspension advances the state to resumption before the next await; cancellation during resume
+therefore retains that exact owner and does not repeat an already completed suspension. The owner
+keeps driver confirmations, prepared requests, staged commit state and their ACK guards through
+failure and cancellation. Retry timing and finish deadlines remain the host's responsibility.
+Composition is an explicit lifecycle operation. Its one admitted entry from the task is initial
+installation, including a retry while `Unavailable` still holds no instance. A narrow expectation
+at that operation states the phase; an `Open` instance never reaches composition again. This keeps
+pool or executor admission refusals retryable before installation without reconstructing a running
+connector during recovery.
+The registered Shuttle check races a scripted resume with cancellation through this production
+owner and verifies one opening, one completed suspension, and that close is refused before a
+finish outcome is received. A failed stop withdraws that close permission; a deadline-free terminal
+ending records its unfinished disposition explicitly. It models no native
+transport or reference-count ordering.
+
+The diagnostic catalogue compiles the fake connector library directly in
+`deloxide-connector-harness`, since it is otherwise only a test dependency of the server. The
+registered retained-lifecycle workloads reach its emitter and host observation mutexes. The
+diagnostic drivers install the detector before invoking the ordinary async test entry points,
+which then construct their runtimes and fixtures. The
+inventory records the fake ingestor's observation locks separately as unreached by those
+workloads; ordinary and Shuttle ingestor tests do not establish a Deloxide result for them.
+
+`RuntimeInner::emitter_readiness` is a cold lifetime registry keyed by the existing emitter identity.
+Installation inserts a fresh `Arc<AtomicBool>`, host callbacks store only that instance's scalar
+readiness, and task registration removes it only by pointer identity. Inspection loads the scalar
+with relaxed ordering; it publishes no other data, admits no work and supplies no wakeup. Pending
+failure status has a separate owner. A retiring handle cannot update or remove its replacement.

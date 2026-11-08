@@ -10,6 +10,8 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
+use nervix_connector::EmitterConnector as _;
+
 use super::*;
 
 const _: () = assert!(matches!(
@@ -38,16 +40,18 @@ impl EmitterConnectorStarter {
                     .map_err(emitter_init_error)?;
             Self::row(
                 projection,
-                MongoDbCollectionEmitter::new(
+                MongoDbCollectionEmitter::open(
                     MongoDbCollectionEmitterConfig {
                         config: connector.client.config.entries.clone(),
                         collection: connector.collection.clone(),
                         conflict_action: connector.conflict_action.clone(),
                         batch: connector.batch,
+
+                        client: Box::new(client),
                     },
-                    Box::new(client),
                     context.emitter_host(),
-                ),
+                )
+                .await,
             )?
         };
         Ok(opened)

@@ -40,7 +40,7 @@ use aws_sdk_sqs::{
 };
 pub use connection::{EmptyCaFile, InvalidSqsClientKey};
 use connection::{SqsClientConfig, SqsRequest, SqsServiceClient};
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 pub use ingestor::{
     SqsMessageAttributes, SqsQueueIngestor, SqsQueueIngestorError, SqsQueueIngestorMessage,
     SqsQueueIngestorPlan, SqsQueueIngestorPosition,
@@ -90,8 +90,15 @@ pub struct SqsQueueEmitterConfig {
 
 pub struct SqsQueueEmitter {
     client: SqsServiceClient,
-    queue_url: String,
+    queue_url: Option<String>,
+    queue: nervix_models::SqsQueueName,
     send: SqsSend,
+}
+
+#[derive(Debug, Error)]
+#[error("{connector} queue '{queue}' has no URL", connector = nervix_models::ConnectorKind::Sqs)]
+struct MissingSqsQueueUrl {
+    queue: String,
 }
 
 /// Why one record is not a message this emitter can send.
@@ -255,7 +262,7 @@ impl PreparedSqsRecord {
 }
 
 impl SqsQueueEmitter {
-    pub async fn new(
+    async fn prepare(
         config: SqsQueueEmitterConfig,
         _host: EmitterHost,
     ) -> EmitterStartResult<Self> {
@@ -266,10 +273,10 @@ impl SqsQueueEmitter {
             dns,
         } = config;
         let client = Self::client_from_config(&config, dns).await?;
-        let queue_url = Self::queue_url(&client, queue.as_str()).await?;
         Ok(Self {
             client,
-            queue_url,
+            queue_url: None,
+            queue,
             send,
         })
     }
@@ -323,7 +330,10 @@ impl SqsQueueEmitter {
     fn require_queue_url(queue: &str, queue_url: Option<String>) -> EmitterStartResult<String> {
         match queue_url {
             Some(queue_url) => Ok(queue_url),
-            None => Err(Self::start_error(format!("SQS queue '{queue}' has no URL"))),
+            None => Err(Report::new(MissingSqsQueueUrl {
+                queue: queue.to_owned(),
+            })
+            .change_context(EmitterOpenError::Initialize { connector: SQS })),
         }
     }
 
@@ -338,7 +348,11 @@ impl SqsQueueEmitter {
                 .client
                 .sdk()
                 .send_message()
-                .queue_url(&self.queue_url)
+                .queue_url(
+                    self.queue_url
+                        .as_deref()
+                        .verified("the host resumes the emitter before publishing"),
+                )
                 .message_body(&record.body)
                 .set_message_attributes(
                     (!record.attributes.is_empty())
@@ -381,11 +395,11 @@ impl SqsQueueEmitter {
     ) {
         for records in Self::batch_chunks(records) {
             nervix_primitives::task::consume_budget().await;
-            let mut request = self
-                .client
-                .sdk()
-                .send_message_batch()
-                .queue_url(&self.queue_url);
+            let mut request = self.client.sdk().send_message_batch().queue_url(
+                self.queue_url
+                    .as_deref()
+                    .verified("the host resumes the emitter before publishing"),
+            );
             for (index, record) in records.iter().enumerate() {
                 let entry = match Self::batch_entry(index, record) {
                     Ok(entry) => entry,
@@ -721,11 +735,6 @@ impl SqsQueueEmitter {
         character.is_ascii_alphanumeric() || character.is_ascii_punctuation()
     }
 
-    fn start_error(error: impl std::fmt::Display) -> Report<EmitterOpenError> {
-        Report::new(EmitterOpenError::Initialize { connector: SQS })
-            .attach_printable(error.to_string())
-    }
-
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "formats the typed external SQS SDK failure; no internal \
@@ -746,6 +755,32 @@ impl SqsQueueEmitter {
 impl EmitterLifecycle for SqsQueueEmitter {
     fn kind(&self) -> nervix_models::EmitterEntityKind {
         Self::KIND
+    }
+
+    fn needs_resume(&mut self) -> bool {
+        self.queue_url.is_none()
+    }
+
+    fn resume(
+        &mut self,
+    ) -> nervix_connector::EmitterLifecycleStep<'_, nervix_connector::EmitterResume> {
+        if !self.needs_resume() {
+            return nervix_connector::EmitterLifecycleStep::ready(Ok(
+                nervix_connector::EmitterResume::Ready,
+            ));
+        }
+        nervix_connector::EmitterLifecycleStep::run(async move {
+            if self.queue_url.is_none() {
+                self.queue_url = Some(
+                    Self::queue_url(&self.client, self.queue.as_str())
+                        .await
+                        .change_context(nervix_connector::EmitterLifecycleError::Resume {
+                            connector: SQS,
+                        })?,
+                );
+            }
+            Ok(nervix_connector::EmitterResume::Ready)
+        })
     }
 
     /// Each send is answered before the publish returns, so the client holds nothing.
@@ -777,6 +812,14 @@ impl RecordEmitter for SqsQueueEmitter {
             SqsSend::Batch => self.publish_batches(prepared, &mut outcome).await,
         }
         outcome
+    }
+}
+
+impl nervix_connector::EmitterConnector for SqsQueueEmitter {
+    const KIND: nervix_models::EmitterEntityKind = Self::KIND;
+    type Plan = SqsQueueEmitterConfig;
+    async fn open(plan: Self::Plan, host: EmitterHost) -> EmitterStartResult<Self> {
+        Self::prepare(plan, host).await
     }
 }
 
@@ -1066,6 +1109,10 @@ mod tests {
             no_url.current_context(),
             &EmitterOpenError::Initialize { connector: SQS }
         );
+        assert!(matches!(
+            no_url.downcast_ref::<MissingSqsQueueUrl>(),
+            Some(MissingSqsQueueUrl { queue }) if queue == "orders"
+        ));
     }
 
     #[test]

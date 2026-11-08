@@ -25,6 +25,14 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
+impl nervix_connector::EmitterConnector for RedisPubSubEmitter {
+    const KIND: nervix_models::EmitterEntityKind = Self::KIND;
+    type Plan = RedisPubSubEmitterConfig;
+    async fn open(plan: Self::Plan, host: EmitterHost) -> EmitterStartResult<Self> {
+        Self::prepare(plan, host)
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(
     nervix_lint,
@@ -557,7 +565,7 @@ pub struct RedisPubSubEmitter {
 }
 
 impl RedisPubSubEmitter {
-    pub fn new(config: RedisPubSubEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
+    fn prepare(config: RedisPubSubEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
         Ok(Self {
             pool: config.pool,
             channel: config.channel,

@@ -10,8 +10,8 @@ use std::time::Duration;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
-    DeadlineElapsed, EmitterOpenError, EmitterRecord, EmitterRecordId, EmitterStartResult,
-    EmitterWriteError, PerRecordOutcomeParts, RecordEmitter,
+    DeadlineElapsed, EmitterConnector as _, EmitterLifecycle as _, EmitterOpenError, EmitterRecord,
+    EmitterRecordId, EmitterStartResult, EmitterWriteError, PerRecordOutcomeParts, RecordEmitter,
 };
 use nervix_models::{ClientConfigEntry, DEFAULT_CONNECT_TIMEOUT, DeadlineKey, Timestamp};
 use nervix_primitives::{
@@ -68,19 +68,82 @@ async fn pull_peer() -> (PullSocket, String) {
     (peer, endpoint.to_string())
 }
 
-/// Opens an emitter with the client entries `config` lists, and fails the test if nothing bounds the
-/// open.
-async fn open(config: &[(&str, &str)]) -> EmitterStartResult<ZeroMqPushEmitter> {
-    let opened = timeout(UNBOUNDED_WAIT, ZeroMqPushEmitter::open(&entries(config))).await;
-    let Ok(opened) = opened else {
-        panic!("nothing bounded the open, which still waited after {UNBOUNDED_WAIT:?}");
+/// Constructs the network-free owner from the test's client entries.
+async fn prepared(config: &[(&str, &str)]) -> EmitterStartResult<ZeroMqPushEmitter> {
+    ZeroMqPushEmitter::open(
+        super::ZeroMqPushEmitterConfig {
+            config: entries(config),
+        },
+        nervix_connector_fake::FakeEmitterHost::default().host(),
+    )
+    .await
+}
+
+/// Acquires the transport and fails if the configured connect deadline does not bound it.
+async fn connected(
+    config: &[(&str, &str)],
+) -> nervix_connector::EmitterLifecycleResult<ZeroMqPushEmitter> {
+    let mut emitter = prepared(config)
+        .await
+        .assured("the connection fixture has valid configuration");
+    let resumed = timeout(UNBOUNDED_WAIT, emitter.resume()).await;
+    let Ok(resumed) = resumed else {
+        panic!("nothing bounded resume after {UNBOUNDED_WAIT:?}");
     };
-    opened
+    resumed?;
+    Ok(emitter)
+}
+
+#[nervix_primitives::test]
+async fn a_failed_bind_keeps_its_typed_cause_and_the_same_owner_can_resume() {
+    let occupied = TcpListener::bind("127.0.0.1:0")
+        .await
+        .assured("a loopback TCP port is available");
+    let address = occupied.local_addr().assured("the listener is bound");
+    let address = format!("tcp://{address}");
+    let mut emitter = prepared(&[("addr", &address), ("bind", "true")])
+        .await
+        .assured("opening prepares the occupied address without binding it");
+    let resumed = timeout(READ_BOUND, emitter.resume())
+        .await
+        .assured("the occupied bind returns");
+    let Err(refused) = resumed else {
+        panic!("another listener owns the configured address");
+    };
+    assert!(refused.downcast_ref::<zeromq::ZmqError>().is_some());
+    assert!(emitter.needs_resume());
+    drop(occupied);
+    timeout(READ_BOUND, emitter.resume())
+        .await
+        .assured("the released address can be bound")
+        .assured("the retained owner resumes without opening again");
+    assert!(!emitter.needs_resume());
+    assert_eq!(
+        emitter
+            .finish(Instant::now())
+            .await
+            .assured("nothing was published"),
+        nervix_connector::EmitterFinish::NothingHeld
+    );
+    emitter.close().await.assured("the bound socket closes");
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn opening_prepares_configuration_without_dialling_or_binding() {
+    let (_occupied, address) = refusing_address();
+    let started = Instant::now();
+    for bind in ["false", "true"] {
+        let mut emitter = prepared(&[("addr", &address), ("bind", bind)])
+            .await
+            .assured("opening uses no socket even when the port is occupied");
+        assert!(emitter.needs_resume());
+        assert_eq!(started.elapsed(), Duration::ZERO);
+    }
 }
 
 #[nervix_primitives::test]
 async fn invalid_bind_is_a_configuration_refusal_before_the_socket_opens() {
-    let error = match open(&[("addr", "tcp://127.0.0.1:not-a-port"), ("bind", "yes")]).await {
+    let error = match prepared(&[("addr", "tcp://127.0.0.1:not-a-port"), ("bind", "yes")]).await {
         Ok(_) => panic!("an invalid bind value cannot open a socket"),
         Err(error) => error,
     };
@@ -127,11 +190,11 @@ fn assert_elapsed<C>(failure: &Report<C>, key: DeadlineKey, bound: Duration, mes
 }
 
 #[nervix_primitives::test(start_paused = true)]
-async fn an_open_whose_peer_refuses_every_connection_fails_at_connect_timeout_ms() {
+async fn a_resume_whose_peer_refuses_every_connection_fails_at_connect_timeout_ms() {
     let (_refusing, address) = refusing_address();
     let started = Instant::now();
 
-    let failure = open(&[("addr", &address), ("connect_timeout_ms", "1000")])
+    let failure = connected(&[("addr", &address), ("connect_timeout_ms", "1000")])
         .await
         .err()
         .assured("a peer that refuses every connection never accepts the emitter");
@@ -139,7 +202,7 @@ async fn an_open_whose_peer_refuses_every_connection_fails_at_connect_timeout_ms
     assert_eq!(started.elapsed(), Duration::from_secs(1));
     assert!(matches!(
         failure.current_context(),
-        EmitterOpenError::Initialize { connector: ZEROMQ }
+        nervix_connector::EmitterLifecycleError::Resume { connector: ZEROMQ }
     ));
     assert_elapsed(
         &failure,
@@ -150,7 +213,7 @@ async fn an_open_whose_peer_refuses_every_connection_fails_at_connect_timeout_ms
 }
 
 #[nervix_primitives::test(start_paused = true)]
-async fn an_open_whose_peer_never_answers_its_handshake_fails_at_connect_timeout_ms() {
+async fn a_resume_whose_peer_never_answers_its_handshake_fails_at_connect_timeout_ms() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .assured("a loopback TCP port is available");
@@ -168,7 +231,7 @@ async fn an_open_whose_peer_never_answers_its_handshake_fails_at_connect_timeout
     });
     let started = Instant::now();
 
-    let failure = open(&[("addr", &address), ("connect_timeout_ms", "1000")])
+    let failure = connected(&[("addr", &address), ("connect_timeout_ms", "1000")])
         .await
         .err()
         .assured("a peer that never greets the emitter never completes the handshake");
@@ -176,7 +239,7 @@ async fn an_open_whose_peer_never_answers_its_handshake_fails_at_connect_timeout
     assert_eq!(started.elapsed(), Duration::from_secs(1));
     assert!(matches!(
         failure.current_context(),
-        EmitterOpenError::Initialize { connector: ZEROMQ }
+        nervix_connector::EmitterLifecycleError::Resume { connector: ZEROMQ }
     ));
     assert_elapsed(
         &failure,
@@ -190,11 +253,11 @@ async fn an_open_whose_peer_never_answers_its_handshake_fails_at_connect_timeout
 }
 
 #[nervix_primitives::test(start_paused = true)]
-async fn an_open_without_connect_timeout_ms_takes_the_default_deadline() {
+async fn a_resume_without_connect_timeout_ms_takes_the_default_deadline() {
     let (_refusing, address) = refusing_address();
     let started = Instant::now();
 
-    let failure = open(&[("addr", &address)])
+    let failure = connected(&[("addr", &address)])
         .await
         .err()
         .assured("a peer that refuses every connection never accepts the emitter");
@@ -214,7 +277,7 @@ async fn a_deadline_that_breaks_the_rule_fails_the_open_as_invalid_configuration
     for bind in ["false", "true"] {
         for key in ["connect_timeout_ms", "timeout_ms"] {
             for value in ["0", "1s", ""] {
-                let failure = open(&[("addr", &address), ("bind", bind), (key, value)])
+                let failure = prepared(&[("addr", &address), ("bind", bind), (key, value)])
                     .await
                     .err()
                     .assured("a deadline that breaks the rule never opens a socket");
@@ -233,7 +296,7 @@ async fn a_deadline_that_breaks_the_rule_fails_the_open_as_invalid_configuration
 #[nervix_primitives::test]
 async fn a_send_to_a_peer_that_stops_reading_fails_at_timeout_ms() {
     let (_peer, address) = pull_peer().await;
-    let mut connector = open(&[("addr", &address), ("timeout_ms", "2000")])
+    let mut connector = connected(&[("addr", &address), ("timeout_ms", "2000")])
         .await
         .assured("the peer completes the handshake");
     // The send fills every buffer between the emitter and the peer and then waits for room, which
@@ -251,6 +314,10 @@ async fn a_send_to_a_peer_that_stops_reading_fails_at_timeout_ms() {
         "the send failed after {elapsed:?}"
     );
     assert!(outcome.delivered.is_empty());
+    assert!(
+        connector.needs_resume(),
+        "a partial failed frame retires its socket"
+    );
     let failure = outcome
         .infrastructure_error
         .assured("a send the peer never reads fails the publish");
@@ -269,7 +336,7 @@ async fn a_send_to_a_peer_that_stops_reading_fails_at_timeout_ms() {
 #[nervix_primitives::test]
 async fn a_send_its_peer_reads_within_timeout_ms_delivers_the_message() {
     let (mut peer, address) = pull_peer().await;
-    let mut connector = open(&[("addr", &address), ("timeout_ms", "2000")])
+    let mut connector = connected(&[("addr", &address), ("timeout_ms", "2000")])
         .await
         .assured("the peer completes the handshake");
     let reader = spawn(async move {
@@ -296,7 +363,7 @@ async fn a_send_its_peer_reads_within_timeout_ms_delivers_the_message() {
 #[nervix_primitives::test]
 async fn a_send_without_timeout_ms_waits_for_its_peer_to_read() {
     let (mut peer, address) = pull_peer().await;
-    let mut connector = open(&[("addr", &address)])
+    let mut connector = connected(&[("addr", &address)])
         .await
         .assured("the peer completes the handshake");
     pause();

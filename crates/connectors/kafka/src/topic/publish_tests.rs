@@ -16,10 +16,10 @@ use std::{
 
 use meticulous::ResultExt as _;
 use nervix_connector::{
-    AckConfirmation, BrokerPublishingMode, EmitterBoundedExecution, EmitterEventReporter,
-    EmitterFinish, EmitterFinishError, EmitterGeneralErrorHandler, EmitterHost, EmitterLifecycle,
-    EmitterRecord, EmitterRecordAcknowledgements, EmitterRecordId, EmitterStagingDirectory,
-    EmitterTransientErrorStatus, RecordEmitter, RecordEnvelope,
+    AckConfirmation, BrokerPublishingMode, EmitterBoundedExecution, EmitterConnector as _,
+    EmitterEventReporter, EmitterFinish, EmitterFinishError, EmitterGeneralErrorHandler,
+    EmitterHost, EmitterLifecycle, EmitterRecord, EmitterRecordAcknowledgements, EmitterRecordId,
+    EmitterStagingDirectory, EmitterTransientErrorStatus, RecordEmitter, RecordEnvelope,
 };
 use nervix_models::{ClientConfigEntry, KafkaTopicName, Timestamp};
 use nervix_primitives::{
@@ -91,6 +91,11 @@ impl EmitterTransientErrorStatus for SilentHost {
     fn record_transient_error(&self, _reason: String, _retry_after: Duration) {}
 
     fn clear_transient_error(&self) {}
+}
+
+impl nervix_connector::EmitterReadiness for SilentHost {
+    fn mark_ready(&self) {}
+    fn mark_unready(&self) {}
 }
 
 impl EmitterEventReporter for SilentHost {
@@ -187,7 +192,7 @@ pub(super) fn cluster(
 
 /// An emitter publishing in `mode` to the test topic of `cluster`, through a client whose entries add
 /// `entries` to the cluster's bootstrap servers.
-fn emitter(
+async fn emitter(
     cluster: &MockCluster<'static, DefaultProducerContext>,
     entries: &[(&str, &str)],
     mode: BrokerPublishingMode,
@@ -198,20 +203,24 @@ fn emitter(
         mode,
         nervix_execution::Executor::default(),
     )
+    .await
 }
 
 /// An emitter like [`emitter`]'s, whose host hands it `executor`.
-pub(super) fn emitter_on(
+pub(super) async fn emitter_on(
     cluster: &MockCluster<'static, DefaultProducerContext>,
     entries: &[(&str, &str)],
     mode: BrokerPublishingMode,
     executor: nervix_execution::Executor,
 ) -> KafkaTopicEmitter {
-    KafkaTopicEmitter::new(
+    let mut emitter = KafkaTopicEmitter::open(
         emitter_config(cluster, entries, mode),
         EmitterHost::new(SilentHost::on(executor)),
     )
-    .expect("librdkafka accepts the test producer configuration")
+    .await
+    .assured("librdkafka accepts the test producer configuration");
+    emitter.resume().await.assured("the native producer starts");
+    emitter
 }
 
 /// The configuration of an emitter publishing in `mode` to the test topic of `cluster`, through a
@@ -277,7 +286,7 @@ pub(super) fn awaited_hand_over(emitter: &KafkaTopicEmitter, record: EmitterReco
     let create_time =
         KafkaCreateTime::of(&record).expect("a test record's timestamp is a Kafka record time");
     emitter
-        .hand_over(&record, create_time, Some(answer), None)
+        .hand_over(emitter.producer(), &record, create_time, Some(answer), None)
         .expect("the producer takes the record");
     KafkaAnswer { report }
 }
@@ -344,7 +353,8 @@ async fn a_confirmed_window_larger_than_the_producer_queue_delivers_every_record
         &cluster,
         &[("queue.buffering.max.messages", "2"), ("linger.ms", "200")],
         confirmed(8, Duration::from_secs(60)),
-    );
+    )
+    .await;
     let records = (0..8)
         .map(|index| record(index, PARTITION_ZERO_KEYS[0], small_payload(index)))
         .collect();
@@ -372,7 +382,8 @@ async fn a_record_larger_than_the_whole_producer_queue_is_rejected() {
         &cluster,
         &[ONE_KIB_QUEUE],
         confirmed(8, Duration::from_secs(60)),
-    );
+    )
+    .await;
     let parts = emitter
         .publish(vec![
             record(0, PARTITION_ZERO_KEYS[0], small_payload(0)),
@@ -407,7 +418,8 @@ async fn a_producer_queue_still_occupied_by_a_served_callback_waits_for_its_retu
         &cluster,
         &[("queue.buffering.max.messages", "1")],
         confirmed(8, Duration::from_secs(60)),
-    );
+    )
+    .await;
     let hold = PollingThreadHold::waker();
     let mut probe = awaited_hand_over(
         &emitter,
@@ -457,7 +469,8 @@ async fn a_producer_queue_held_without_an_outstanding_answer_expires_its_admissi
         &cluster,
         &[("queue.buffering.max.messages", "1")],
         confirmed(8, ack_timeout),
-    );
+    )
+    .await;
     let hold = PollingThreadHold::waker();
     let mut probe = awaited_hand_over(
         &emitter,
@@ -504,7 +517,7 @@ async fn a_producer_queue_held_without_an_outstanding_answer_expires_its_admissi
 #[nervix_primitives::test]
 async fn an_unconfirmed_publish_rejects_a_payload_larger_than_its_producer_queue() {
     let cluster = cluster(1, 1);
-    let mut emitter = emitter(&cluster, &[ONE_KIB_QUEUE], BrokerPublishingMode::NoAck);
+    let mut emitter = emitter(&cluster, &[ONE_KIB_QUEUE], BrokerPublishingMode::NoAck).await;
     let parts = emitter
         .publish(vec![
             record(0, PARTITION_ZERO_KEYS[0], vec![0; OVERSIZED_PAYLOAD_BYTES]),
@@ -527,7 +540,8 @@ async fn a_producer_queue_accepts_its_exact_payload_capacity_with_key_and_header
         &cluster,
         &[ONE_KIB_QUEUE],
         confirmed(1, Duration::from_secs(60)),
-    );
+    )
+    .await;
     let mut message = record(0, &"k".repeat(2048), vec![0; 1024]);
     message.headers = vec![("large-header".to_string(), "v".repeat(2048))];
     let parts = emitter.publish(vec![message]).await.into_parts();
@@ -555,7 +569,8 @@ async fn a_producer_queue_size_rejection_keeps_the_answers_the_broker_already_ga
         &cluster,
         &[ONE_KIB_QUEUE],
         confirmed(3, Duration::from_secs(60)),
-    );
+    )
+    .await;
 
     // The final record exceeds the whole queue's byte capacity while the window still holds
     // answers for the preceding records.
@@ -582,7 +597,7 @@ async fn a_producer_queue_size_rejection_keeps_the_answers_the_broker_already_ga
 #[nervix_primitives::test]
 async fn a_confirmed_publish_delivers_each_record_its_broker_answers() {
     let cluster = cluster(1, 1);
-    let mut emitter = emitter(&cluster, &[], confirmed(2, Duration::from_secs(60)));
+    let mut emitter = emitter(&cluster, &[], confirmed(2, Duration::from_secs(60))).await;
 
     let outcome = emitter
         .publish(vec![
@@ -612,7 +627,7 @@ async fn a_record_its_broker_refuses_for_good_is_rejected() {
         RDKafkaApiKey::Produce,
         &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_MSG_SIZE_TOO_LARGE],
     );
-    let mut emitter = emitter(&cluster, &[], confirmed(1, Duration::from_secs(60)));
+    let mut emitter = emitter(&cluster, &[], confirmed(1, Duration::from_secs(60))).await;
 
     // A window of one hands the second record over only after the first one's answer, so each
     // travels in a produce request of its own and only the first meets the refusal.
@@ -652,7 +667,8 @@ async fn a_record_the_producer_refuses_for_its_own_size_is_rejected_and_the_publ
         &cluster,
         &[THOUSAND_BYTE_MESSAGES],
         confirmed(2, Duration::from_secs(60)),
-    );
+    )
+    .await;
 
     let outcome = emitter
         .publish(vec![
@@ -695,7 +711,7 @@ async fn the_producer_gives_up_a_record_the_publish_stopped_waiting_for() {
         .broker_down(1)
         .expect("the mock cluster takes broker 1 down");
     let ack_timeout = Duration::from_millis(300);
-    let mut emitter = emitter(&cluster, &[], confirmed(1, ack_timeout));
+    let mut emitter = emitter(&cluster, &[], confirmed(1, ack_timeout)).await;
 
     let outcome = emitter
         .publish(vec![record(0, PARTITION_ZERO_KEYS[0], small_payload(0))])
@@ -729,7 +745,8 @@ async fn an_unconfirmed_publish_delivers_each_record_the_producer_takes() {
         &cluster,
         &[THOUSAND_BYTE_MESSAGES],
         BrokerPublishingMode::NoAck,
-    );
+    )
+    .await;
 
     let outcome = emitter
         .publish(vec![
@@ -767,7 +784,8 @@ async fn a_full_producer_queue_ends_an_unconfirmed_publish_after_the_records_it_
         &cluster,
         &[("queue.buffering.max.messages", "2")],
         BrokerPublishingMode::NoAck,
-    );
+    )
+    .await;
 
     let outcome = emitter
         .publish(vec![
@@ -796,7 +814,7 @@ async fn a_full_producer_queue_ends_an_unconfirmed_publish_after_the_records_it_
 #[nervix_primitives::test]
 async fn finishing_sends_the_records_a_lingering_producer_still_queues() {
     let cluster = cluster(1, 1);
-    let mut emitter = emitter(&cluster, &[TWO_MINUTE_LINGER], BrokerPublishingMode::NoAck);
+    let mut emitter = emitter(&cluster, &[TWO_MINUTE_LINGER], BrokerPublishingMode::NoAck).await;
     let outcome = emitter
         .publish(vec![
             record(0, PARTITION_ZERO_KEYS[0], small_payload(0)),
@@ -835,7 +853,7 @@ async fn finishing_sends_the_records_a_lingering_producer_still_queues() {
 #[nervix_primitives::test]
 async fn finishing_a_producer_that_queues_nothing_has_nothing_to_send() {
     let cluster = cluster(1, 1);
-    let mut emitter = emitter(&cluster, &[], confirmed(2, Duration::from_secs(60)));
+    let mut emitter = emitter(&cluster, &[], confirmed(2, Duration::from_secs(60))).await;
     let outcome = emitter
         .publish(vec![record(0, PARTITION_ZERO_KEYS[0], small_payload(0))])
         .await;
@@ -858,7 +876,7 @@ async fn finishing_after_its_deadline_counts_the_records_the_producer_still_queu
     cluster
         .broker_down(1)
         .expect("the mock cluster takes broker 1 down");
-    let mut emitter = emitter(&cluster, &[], BrokerPublishingMode::NoAck);
+    let mut emitter = emitter(&cluster, &[], BrokerPublishingMode::NoAck).await;
     let outcome = emitter
         .publish(vec![
             record(0, PARTITION_ZERO_KEYS[0], small_payload(0)),
@@ -912,7 +930,7 @@ async fn finishing_counts_the_queued_records_while_a_served_report_holds_the_pol
     cluster
         .broker_down(1)
         .expect("the mock cluster takes broker 1 down");
-    let mut emitter = emitter(&cluster, &FAST_RECONNECT, BrokerPublishingMode::NoAck);
+    let mut emitter = emitter(&cluster, &FAST_RECONNECT, BrokerPublishingMode::NoAck).await;
     let outcome = emitter
         .publish(vec![
             record(0, PARTITION_ONE_KEY, small_payload(0)),
@@ -977,7 +995,7 @@ async fn finishing_while_only_a_served_report_holds_the_polling_thread_finds_no_
     cluster
         .broker_down(1)
         .expect("the mock cluster takes broker 1 down");
-    let mut emitter = emitter(&cluster, &FAST_RECONNECT, BrokerPublishingMode::NoAck);
+    let mut emitter = emitter(&cluster, &FAST_RECONNECT, BrokerPublishingMode::NoAck).await;
     let hold = PollingThreadHold::waker();
     let mut probe = awaited_hand_over(
         &emitter,
@@ -1018,7 +1036,8 @@ async fn a_record_the_producer_refuses_for_its_own_size_is_never_retained() {
         &cluster,
         &[THOUSAND_BYTE_MESSAGES],
         BrokerPublishingMode::NoAck,
-    );
+    )
+    .await;
 
     let outcome = emitter
         .publish(vec![
@@ -1068,7 +1087,8 @@ async fn a_record_a_full_producer_queue_refuses_is_never_retained() {
         &cluster,
         &[("queue.buffering.max.messages", "2")],
         BrokerPublishingMode::NoAck,
-    );
+    )
+    .await;
 
     let outcome = emitter
         .publish(vec![
@@ -1103,7 +1123,7 @@ async fn finishing_counts_a_record_a_confirmed_publish_stopped_waiting_for() {
     cluster
         .broker_down(1)
         .expect("the mock cluster takes broker 1 down");
-    let mut emitter = emitter(&cluster, &[], confirmed(1, Duration::from_secs(60)));
+    let mut emitter = emitter(&cluster, &[], confirmed(1, Duration::from_secs(60))).await;
     // Cancelling the wait does not release the record librdkafka already took.
     let mut publishing =
         Box::pin(emitter.publish(vec![record(0, PARTITION_ZERO_KEYS[0], small_payload(0))]));
@@ -1135,7 +1155,7 @@ async fn a_flush_that_gives_up_after_every_report_was_served_sent_every_record()
     cluster
         .broker_down(1)
         .expect("the mock cluster takes broker 1 down");
-    let mut emitter = emitter(&cluster, &FAST_RECONNECT, BrokerPublishingMode::NoAck);
+    let mut emitter = emitter(&cluster, &FAST_RECONNECT, BrokerPublishingMode::NoAck).await;
     let outcome = emitter
         .publish(vec![record(0, PARTITION_ZERO_KEYS[0], small_payload(0))])
         .await;
@@ -1185,7 +1205,7 @@ async fn a_flush_that_gives_up_after_every_report_was_served_sent_every_record()
 #[nervix_primitives::test]
 async fn a_record_carries_its_envelope_timestamp_as_the_time_its_kafka_record_was_created() {
     let cluster = cluster(1, 1);
-    let mut emitter = emitter(&cluster, &[], confirmed(1, Duration::from_secs(60)));
+    let mut emitter = emitter(&cluster, &[], confirmed(1, Duration::from_secs(60))).await;
 
     let parts = emitter
         .publish(vec![
@@ -1228,7 +1248,7 @@ async fn a_record_carries_its_envelope_timestamp_as_the_time_its_kafka_record_wa
 #[nervix_primitives::test]
 async fn a_record_without_a_timestamp_carries_the_create_time_its_producer_gives_it() {
     let cluster = cluster(1, 1);
-    let mut emitter = emitter(&cluster, &[], confirmed(1, Duration::from_secs(60)));
+    let mut emitter = emitter(&cluster, &[], confirmed(1, Duration::from_secs(60))).await;
 
     // The timed record goes first, so a record that took its create time from the record before it
     // would read back with the timed record's 2001 time.
@@ -1269,7 +1289,7 @@ async fn a_record_without_a_timestamp_carries_the_create_time_its_producer_gives
 #[nervix_primitives::test]
 async fn a_confirmed_publish_rejects_a_record_whose_timestamp_precedes_the_first_record_time() {
     let cluster = cluster(1, 1);
-    let mut emitter = emitter(&cluster, &[], confirmed(4, Duration::from_secs(60)));
+    let mut emitter = emitter(&cluster, &[], confirmed(4, Duration::from_secs(60))).await;
 
     let parts = emitter
         .publish(vec![
@@ -1331,7 +1351,7 @@ async fn a_confirmed_publish_rejects_a_record_whose_timestamp_precedes_the_first
 #[nervix_primitives::test]
 async fn an_unconfirmed_publish_rejects_a_record_whose_timestamp_precedes_the_first_record_time() {
     let cluster = cluster(1, 1);
-    let mut emitter = emitter(&cluster, &[], BrokerPublishingMode::NoAck);
+    let mut emitter = emitter(&cluster, &[], BrokerPublishingMode::NoAck).await;
 
     let parts = emitter
         .publish(vec![

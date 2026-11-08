@@ -107,7 +107,7 @@ enum SentryEventError {
 }
 
 impl SentryEventEmitter {
-    pub fn new(config: SentryEventEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
+    fn prepare(config: SentryEventEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
         let dns = config.dns;
         let platform = config.platform;
         let config = config.config.as_slice();
@@ -374,6 +374,14 @@ impl RecordEmitter for SentryEventEmitter {
             return outcome;
         }
         outcome
+    }
+}
+
+impl nervix_connector::EmitterConnector for SentryEventEmitter {
+    const KIND: nervix_models::EmitterEntityKind = Self::KIND;
+    type Plan = SentryEventEmitterConfig;
+    async fn open(plan: Self::Plan, host: EmitterHost) -> EmitterStartResult<Self> {
+        Self::prepare(plan, host)
     }
 }
 

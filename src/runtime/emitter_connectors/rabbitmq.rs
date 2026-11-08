@@ -10,6 +10,8 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
+use nervix_connector::EmitterConnector as _;
+
 use super::*;
 
 const _: () = assert!(matches!(
@@ -33,7 +35,7 @@ impl EmitterConnectorStarter {
             label,
             codec,
             batch,
-            RabbitMqQueueEmitter::new(
+            RabbitMqQueueEmitter::open(
                 RabbitMqQueueEmitterConfig {
                     config: connector.client.config.entries.clone(),
                     dns: context.dns()?,
@@ -58,7 +60,7 @@ impl EmitterConnectorStarter {
             label,
             codec,
             batch,
-            RabbitMqExchangeEmitter::new(
+            RabbitMqExchangeEmitter::open(
                 RabbitMqExchangeEmitterConfig {
                     config: connector.client.config.entries.clone(),
                     dns: context.dns()?,

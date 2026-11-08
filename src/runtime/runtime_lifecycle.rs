@@ -138,6 +138,7 @@ impl Runtime {
                 ingestor_statuses: DashMap::default(),
                 ingestor_readiness: DashMap::default(),
                 emitter_statuses: DashMap::default(),
+                emitter_readiness: DashMap::default(),
                 shared_clients: DashMap::default(),
                 pool_waits: DashMap::default(),
                 emitter_confirmation_waits: DashMap::default(),

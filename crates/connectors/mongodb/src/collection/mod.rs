@@ -76,6 +76,14 @@ const MEASURED_REQUEST: &str = "MongoDB write";
 /// sending it, and the server adds it to a document an upsert inserts.
 const GENERATED_ID_BYTES: u64 = 17;
 
+impl nervix_connector::EmitterConnector for MongoDbCollectionEmitter {
+    const KIND: nervix_models::EmitterEntityKind = Self::KIND;
+    type Plan = MongoDbCollectionEmitterConfig;
+    async fn open(plan: Self::Plan, host: EmitterHost) -> EmitterStartResult<Self> {
+        Self::prepare(plan, host)
+    }
+}
+
 #[cfg(test)]
 mod mapping_tests;
 
@@ -100,6 +108,7 @@ pub trait MongoDbClientProvider: Send + Sync + 'static {
 
 /// What one MongoDB emitter writes with, from its typed emitter plan.
 pub struct MongoDbCollectionEmitterConfig {
+    pub client: Box<dyn MongoDbClientProvider>,
     pub config: Vec<ClientConfigEntry>,
     pub collection: MongoDbCollectionName,
     pub conflict_action: MongoDbConflictAction,
@@ -259,12 +268,12 @@ impl MongoDbCollectionEmitter {
                       effects"
         )
     )]
-    pub fn new(
+    fn prepare(
         config: MongoDbCollectionEmitterConfig,
-        client: Box<dyn MongoDbClientProvider>,
         host: EmitterHost,
     ) -> EmitterStartResult<Self> {
         let MongoDbCollectionEmitterConfig {
+            client,
             config,
             collection,
             conflict_action,

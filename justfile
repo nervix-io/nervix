@@ -348,6 +348,10 @@ test-scenario-arguments:
 test-scenario-shards:
     python3 -m unittest scripts.tests.test_scenario_shards
 
+# Prepare the public scenario executable without spending a runtime check's execution budget.
+build-scenarios: tests-deps
+    cargo test --package nervix-scenarios --test scenarios --no-run
+
 test-scenarios *args: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail

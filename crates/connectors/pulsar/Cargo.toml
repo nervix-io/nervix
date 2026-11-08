@@ -24,6 +24,7 @@ nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }
 pulsar = { workspace = true }
+rustls = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }

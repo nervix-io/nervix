@@ -87,6 +87,15 @@ packages = [
   "nervix-server",
 ]
 
+# The fake connector is a test dependency, so product library targets do not compile its owners.
+# Select it directly with the same diagnostic primitive backend its registered owner tests use.
+[[configuration]]
+features = ["native", "deloxide"]
+kinds = ["lib"]
+manifest = "Cargo.toml"
+name = "deloxide-connector-harness"
+packages = ["nervix-connector-fake", "nervix-primitives"]
+
 # The local report tool is an ordinary product binary. Diagnostic binaries are checked separately
 # from the reporting library, so these configurations never enable its report-tool capability.
 [[configuration]]
