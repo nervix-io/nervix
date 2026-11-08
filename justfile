@@ -3436,6 +3436,11 @@ lint-targets: build-web-console lint-inner
 audit:
     cargo audit
 
+# Inspect the pinned complexity analyzer on one source path during a focused edit. The full
+# ratchet remains the complete workspace gate and reads no coverage for its complexity verdict.
+complexity-path path: typed-ratchet-source-build install-cargo-crap
+    {{ quote(cargo_target_dir / "typed-ratchet/source/debug/nervix-ratchet") }} crap run -- --path {{ quote(path) }} --no-default-excludes --format json --sort file
+
 # Count the architecture debt and fail when a count is above its baseline in debt-baseline.json.
 ratchet *args: typed-ratchet-build typed-ratchet-source-build install-cargo-crap
     #!/usr/bin/env bash
