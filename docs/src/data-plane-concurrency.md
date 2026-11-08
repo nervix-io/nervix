@@ -1005,6 +1005,33 @@ published generation. They never read or lock the live keyspace. Publication occ
 replication cadence, before a handoff checkpoint, and when the branch stops, so snapshot encoding
 can proceed while the current task continues processing rows.
 
+### Periodically snapshotted branch state
+
+`ReplicatedBranchState<C>` is the shared data-plane owner for the published state of a
+deduplicator or window branch. Its snapshot codec selects the immutable published value and
+implements persistence; the owner retains the placement, `PublishedGenerations`,
+`CheckpointReplication` and branch checkpoint-catalog registration together. Publishing replaces
+the generation before recording its revision in the catalog, and persistence advances only after
+the codec's write succeeds. Dropping the state drops its exact catalog registration. The concrete
+deduplicator and window state types are specializations of this carrier, with no additional
+allocation or shared handle. Their live state, snapshot codecs, branch-incarnation checks and
+restore/rebuild logic remain with their processor owners.
+
+`PublishedBranchState` selects the concrete state at composition and forwards publication and
+persistence to that owner. The shared writer in `state_replication/tasks.rs` requests a dirty
+branch's publication at the replication cadence, persists at the snapshot cadence and persists its
+last publication when the branch stops, even when its task is already gone. A window codec keeps
+its resident or quota-owned segmented write; the deduplicator keeps its resident key checkpoint.
+Neither a snapshot nor a replica takes the live branch state from its task.
+
+`StateSnapshotTasks`, `CheckpointWriter` and `SnapshotCadence` also provide the task lifetime,
+domain tracking, periodic cadence and final-write signal for Kafka domain offsets. Offsets keep
+their own commit and start-coordination owner: their writer captures offsets directly and takes
+the existing initialization guard for its final write. They do not pass through a branch
+publication request or acquire a synthetic branch lifetime. A new periodically snapshotted branch
+kind specializes the shared carrier with its codec and restore logic and joins the existing typed
+composition and state routes.
+
 ### Window and WASM state
 
 A window and its aggregate accumulators belong to one branch task. The task mutates the live window
@@ -2551,6 +2578,14 @@ state and the one-shot atomic claim; fault selection remains in the harness's ow
 These async observations introduce no tracked blocking-lock owner. Deloxide continues to measure
 the registered product locks, while the public scenarios and model checks exercise pause ordering
 at their applicable boundaries.
+
+The host suites' declared action channel arms subscription-opening refusals on every node and
+confirms their application before a suite restores its session relay. Its teardown action removes
+unused entries from the testing-only refusal map before another test can open a subscription.
+The map operations and the host's pipe waits are untracked; they add no blocking-lock owner or
+product synchronization protocol. The action owner's ordered-confirmation and deadline checks,
+the Python pipe-adapter checks and the one- and three-node `client_suites.feature` rows hold this
+harness exchange to its contract. Deloxide does not observe the host processes.
 
 The `@restore_client_inspection` one- and three-node examples fill the real filesystem execution
 class before an accepted restore applies its client configuration, then release capacity and require

@@ -315,6 +315,7 @@ test: tests-deps build-client-jvm-tests
     just test-capability-docs
     just test-turmoil
     just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-python-api
+    just test-client-suite-actions
 
 # Check capability examples with rustdoc, including runtime exports enabled only for tests.
 test-capability-docs: build-web-console
@@ -388,6 +389,19 @@ test-emitter-native-metrics *args: build-deps
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/{client_emitters,emitter_batch_databases,http_emitter,iceberg_emission,otel_export_retries}.feature") }} --tags '@emitter_payload_observations' {{ quote(args) }}
+
+# Complete batch values and explicit sensitivity leakage through one- and three-node public graphs.
+build-emitter-batch-boundaries: build-deps
+    cargo test --package nervix-scenarios --test scenarios --no-run
+
+test-emitter-batch-boundaries *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input 'tests/features/runtime/{emitter_batch_containers,sensitive_data}.feature' \
+        --name 'ON EMITTING BATCH maps, wraps and expands the array of member values|Sensitive external emission requires explicit leakage' \
+        {{ quote(args) }}
 
 # Exercise NATS authentication through real brokers and one-/three-node public graphs.
 test-nats-authentication *args: build-deps
@@ -509,12 +523,29 @@ build-codec-heads: generate-test-onnx download-onnxruntime build-web-console was
 # Public codec-head inspection and completion through the real native session and CLI.
 test-codec-heads: (test-codec-scenarios (justfile_directory() + "/tests/features/runtime/kinded_codec_heads.feature"))
 
+# Qualify endpoint and codec heads together with processor/emitter body acknowledgement modes.
+[positional-arguments]
+test-kinded-heads *args: build-codec-heads
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input {{ quote(justfile_directory() / "tests/features/runtime/{kinded_endpoint_heads,kinded_codec_heads,acknowledgement_clause}.feature") }} \
+        --concurrency 4 --retry 0 "$@"
+
 # Exercise CLI stream recovery and terminal endings without unrelated client probes.
 test-cli-streams *args: build-deps build-test-cli
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/tools/cli_session*.feature") }} --tags '@cli_stream_termination or @cli_stream_recovery' {{ quote(args) }}
+
+# Observe interactive output without sending keys to wake the prompt or preparing unrelated guests.
+test-cli-repl tags="@cli_repl_output" *args: build-web-console download-onnxruntime build-test-cli
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/tools/cli_session*.feature") }} --tags {{ quote(tags) }} {{ quote(args) }}
 
 # Select codec round trips or browser cases with the same ordinary runner and prepared tools.
 test-codec-scenarios input *args: build-codec-heads
@@ -1453,9 +1484,24 @@ test-otel-declarations:
     cargo test --package nervix-models --lib --features arrow connector::otel::
     cargo test --package nervix-plexus --lib emitter::
 
-# Run the cryptography boundary's provider and signing unit tests.
+# Run the cryptography boundary's provider, signing, digest and randomness unit tests.
 test-crypto *args:
     cargo test --package nervix-crypto --lib -- {{ args }}
+
+# Run the boundary's registered properties with canonical corpus and case accounting. They have
+# no server or console assets, so this focused owner does not need bolero-deps.
+test-crypto-properties:
+    python3 -c 'from scripts.bolero import load_inventory, select, test_targets; inventory = load_inventory(); selected = select(inventory, "crypto-"); test_targets(inventory, selected)'
+
+# Qualify digest output, password salts and transport identity through their existing public cases.
+test-crypto-scenarios *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input {{ quote(justfile_directory() / "tests/features/{runtime/bytes_functions,cluster/authentication,cluster/internal_tls}.feature") }} \
+        --name 'Binary values survive conversion and hashing across the public data path|Encoding and hashing sensitive bytes keeps subscription values masked|Client authentication requires a valid user password|Resources replicate over the authenticated interconnect|Interconnect peers connect with certificate identities|Interconnect certificate authority rotates without restarting the cluster' \
+        --concurrency 2 --retry 0 {{ quote(args) }}
 
 # Run the node transport's production owners and their protocol fixtures.
 test-interconnect *args:
@@ -2708,6 +2754,18 @@ bench-smoke-bodies:
 bench-admitted-work *args: build-web-console
     cargo bench --package nervix-server --bench admitted_work --features benchmarks -- {{ args }}
 
+# Real RabbitMQ write costs. Serialize measurements across checkouts of this repository.
+bench-rabbitmq-publish *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    benchmark_lock="$(git rev-parse --path-format=absolute --git-common-dir)/nervix-benchmark.lock"
+    flock --exclusive --timeout 60 "$benchmark_lock" \
+        cargo bench --package nervix-connector-rabbitmq --features benchmarks --bench publish -- {{ quote(args) }}
+
+# Exercise the same real-broker fixture and publication/count oracles once per benchmark body.
+test-rabbitmq-publish-benchmark:
+    cargo bench --profile dev --package nervix-connector-rabbitmq --features benchmarks --bench publish -- --test
+
 # Measure ordinary native atomic, publication, lock and reference-count costs on this host.
 # Model and diagnostic builds have different instrumentation and are not performance baselines.
 bench-primitives *args:
@@ -3892,6 +3950,10 @@ validate-skill:
 # mypy run checks the suite and the paced simulation driver with `--strict`.
 validate-client-suites:
     uv run --locked python -m scripts.client_suites validate
+
+# Exercise the host suite's bounded action adapter over real pipes, without a cluster.
+test-client-suite-actions:
+    uv run --locked python -m unittest scripts.tests.test_client_suite_actions
 
 # Collect the line coverage of the client suite check and its tests.
 coverage-client-suites-runner:

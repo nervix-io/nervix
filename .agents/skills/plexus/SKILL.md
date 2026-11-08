@@ -77,12 +77,17 @@ contract. Refer users to those chapters for cursor edits, transaction-aware cand
 completion status messages. For connector expression completion, including filters, HTTP request
 expressions, ALTER constructions, metadata fields and entity-specific header functions, follow
 the CLI's Completion section.
+For live subscription, clock and notice output while editing, and terminal omission notices,
+follow the CLI's [Asynchronous Output](../../../docs/src/client-tools-cli.md#asynchronous-output)
+section.
 For secure CLI connections and console leader redirects, follow those chapters' connection
 sections and [Native session TLS](../../../docs/src/installation-cargo.md#native-session-tls).
 Listener certificates are node provisioning, configured outside Plexus statements.
 For TLS algorithm choices, read [Cryptography](../../../docs/src/cryptography.md#algorithm-policy):
 the interconnect uses its fixed provider, while native sessions and connectors use the outward
 provider and each connector's declared trust and identity keys.
+For backend validation claims, follow that chapter's P-256 signing and backend-status guidance;
+selecting an approved algorithm does not establish a validated deployment.
 For authentication refusals and retry behavior, follow
 [Authentication](../../../docs/src/client-session-protocol.md#authentication); a response delay
 does not establish that a user exists.
@@ -816,7 +821,9 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
 - For syslog, read the dedicated `Common` → `Syslog` documentation entry. Reference the predefined
   singleton wire schema with a `SYSLOG CODEC` head, keep the format independent of the UDP/TCP/TLS
   client transport, and use only the documented `SYSLOG LISTENER INGESTOR ... MODE NO ACK` ingestor
-  and `NO ACK` emitter forms.
+  and `SYSLOG COLLECTOR EMITTER ... MODE NO ACK` forms. Read its `Client`, `Quiesce` and `Emitter`
+  sections before choosing direction-specific keys, promising retention across a suspension, or
+  sizing a frame; a successful collector write confirms local socket acceptance and flush.
 - For a Sentry emitter, reference a `SENTRY CLIENT` containing the project DSN and a positive
   `timeout_ms`, and use a codec that emits one Sentry event JSON object per record. Do not add header
   writes to the Sentry route.

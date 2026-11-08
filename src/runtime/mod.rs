@@ -319,6 +319,7 @@ mod remote_ack_registrar;
 mod remote_ack_watch_charge;
 mod remote_dispatch;
 mod reorderer;
+mod replicated_branch_state;
 mod resources;
 #[cfg(feature = "testing")]
 #[doc(hidden)]
@@ -726,8 +727,7 @@ use window_processor::{
 };
 use window_state::{
     LinearHistogramDelayedRemovalSnapshot, ReplicatedWindowProcessorState,
-    WindowAccumulatorSnapshot, WindowEntrySnapshot, WindowPersistence,
-    WindowProcessorStateSnapshot,
+    WindowAccumulatorSnapshot, WindowEntrySnapshot, WindowProcessorStateSnapshot,
 };
 
 #[cfg(test)]

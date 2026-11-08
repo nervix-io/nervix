@@ -277,6 +277,13 @@ follows the changed protocol or lifecycle, as [Data-Plane
 Concurrency](./data-plane-concurrency.md) describes; changing labels or documentation alone does
 not introduce a synchronization claim.
 
+The RabbitMQ publication benchmark invokes the public queue emitter against an explicitly
+provisioned broker, with bounded write sizes and an exact external message-count check outside
+timing. Its driver controls isolate the channel round trip from enqueue completion; neither
+control replaces the production delivery contract. The benchmark guide under `benches/README.md`
+defines its measurement boundaries and commands. Qualification records distinguish these write
+costs from full-graph throughput, flush latency and memory measurements.
+
 Before closing a connector epic, review changes landed from parallel work for additional name
 sources, free-text causes, inaccurate boundary annotations, and publish, mapping, batch or
 acknowledgement paths missing their unit or property coverage, and hold them to the
@@ -2750,7 +2757,12 @@ Syslog sends a completed codec payload as one transport frame. Its UDP writer re
 65,507 bytes, octet-counted TCP and TLS reject a count needing more than ten digits, and
 non-transparent TCP rejects one containing LF. These frame limits are declared once in the Syslog
 vocabulary, which the collector's payload checks, the listener's octet-count decoder and the
-generated SYSLOG COLLECTOR reference all read. The Sentry writer accepts one
+generated SYSLOG COLLECTOR reference all read. The [Syslog emitter manual](syslog.md#emitter)
+states the framing bytes and local completion boundary; the
+[emitter limits table](emitters.md#broker-and-message-emitters) applies those limits to a complete
+codec payload, including a batch container.
+
+The Sentry writer accepts one
 JSON event per envelope and prepares that envelope once, before the host retains it. Preparation
 validates the event, preserves a supplied `event_id` with its exact spelling, generates one UUID
 only when the field is absent, and fills an absent `timestamp` from the batch's execution time.
