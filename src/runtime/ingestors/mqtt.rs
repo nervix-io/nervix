@@ -130,6 +130,7 @@ impl MqttTopicIngestorStartPlan {
             &ingestor.name,
             ingestor.unit,
             dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+            ingestor.declared_input.entity_kind(),
         );
         let cached = match runtime.inner.executions.get(&ingestor.domain) {
             Some(execution) => match execution.mqtt_ingestor_clients.get(&ingestor.name) {

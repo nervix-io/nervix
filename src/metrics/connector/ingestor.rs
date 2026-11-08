@@ -18,7 +18,8 @@ use super::RuntimeMetrics;
 /// Native children kept by value, with the same ownership and recording cost as individual fields.
 #[derive(Debug, Clone)]
 pub(crate) struct IngestorInteractionMetrics {
-    /// Unacknowledged payloads refused because the extension workers had no room to unfold them.
+    pub(crate) reads: super::IngestorReadMetrics,
+    /// Payloads refused because the extension workers had no room to unfold them.
     pub(crate) unfolding_refused: IntCounter,
     /// Positions discarded after a reconnect because their broker redelivers them.
     pub(crate) transport_redeliveries: IntCounter,
@@ -43,35 +44,41 @@ impl RuntimeMetrics {
         ingestor: &IngestorName,
         unit: Unit,
         physical_node: Option<&ClusterNodeName>,
+        kind: nervix_models::IngestorEntityKind,
     ) -> (IngestorInteractionMetrics, IntCounter) {
         let interactions = IngestorInteractionMetrics {
+            reads: self.register_ingestor_reads(domain, ingestor, unit, physical_node, kind),
             unfolding_refused: self.ingestor_unfolding_refused(
                 domain,
                 ingestor,
                 unit,
                 physical_node,
+                kind,
             ),
             transport_redeliveries: self.ingestor_transport_redeliveries(
                 domain,
                 ingestor,
                 unit,
                 physical_node,
+                kind,
             ),
             oversized_payloads: self.ingestor_oversized_payloads(
                 domain,
                 ingestor,
                 unit,
                 physical_node,
+                kind,
             ),
             header_values_dropped: self.ingestor_header_values_dropped(
                 domain,
                 ingestor,
                 unit,
                 physical_node,
+                kind,
             ),
         };
         let decode_rejections =
-            self.ingestor_decode_rejections(domain, ingestor, unit, physical_node);
+            self.ingestor_decode_rejections(domain, ingestor, unit, physical_node, kind);
         (interactions, decode_rejections)
     }
 }

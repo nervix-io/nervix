@@ -64,8 +64,13 @@ async fn runtime_report_chain_admitted_client_batch_log() {
     )
     .assured("the fixture route binds its one field");
     let metrics = runtime.inner.metrics.clone();
-    let labels =
-        metrics.register_ingestor_quiesce(&domain, &ingestor, nervix_models::Unit::SINGLE, None);
+    let labels = metrics.register_ingestor_quiesce(
+        &domain,
+        &ingestor,
+        nervix_models::Unit::SINGLE,
+        None,
+        nervix_models::IngestorEntityKind::Client(nervix_models::ClientIngestorEntity::Producer),
+    );
     let intake = ClientIntake {
         handles,
         runtime: runtime.clone(),
@@ -848,8 +853,13 @@ fn a_batch_validated_under_a_hold_is_refused_with_its_root_resolved() {
     let metrics = RuntimeMetrics::default();
     let domain = DomainName::parse("tenant").assured("a literal domain name");
     let ingestor = IngestorName::parse("orders_in").assured("a literal ingestor name");
-    let metric_labels =
-        metrics.register_ingestor_quiesce(&domain, &ingestor, nervix_models::Unit::SINGLE, None);
+    let metric_labels = metrics.register_ingestor_quiesce(
+        &domain,
+        &ingestor,
+        nervix_models::Unit::SINGLE,
+        None,
+        nervix_models::IngestorEntityKind::Client(nervix_models::ClientIngestorEntity::Producer),
+    );
     let control = IngestorQuiesceControl::new(IngestQuiesceMode::Suspend, metrics, metric_labels);
     let trackers = IngestorAckRootTrackers::detached();
 

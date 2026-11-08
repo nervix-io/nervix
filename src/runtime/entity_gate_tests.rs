@@ -41,10 +41,15 @@ async fn releasing_an_ended_unit_leaves_its_prepared_replacement_and_sibling_ins
         Arc::new(IngestorQuiesceControl::new(
             IngestQuiesceMode::Suspend,
             runtime.inner.metrics.clone(),
-            runtime
-                .inner
-                .metrics
-                .register_ingestor_quiesce(&domain, &ingestor, unit, None),
+            runtime.inner.metrics.register_ingestor_quiesce(
+                &domain,
+                &ingestor,
+                unit,
+                None,
+                nervix_models::IngestorEntityKind::Http(
+                    nervix_models::HttpIngestorEntity::Endpoint,
+                ),
+            ),
         ))
     };
     let ending = control(Unit::FIRST_INSTANCE);
