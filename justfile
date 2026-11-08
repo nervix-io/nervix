@@ -315,6 +315,7 @@ test: tests-deps build-client-jvm-tests
     just test-capability-docs
     just test-turmoil
     just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-python-api
+    just test-client-suite-actions
 
 # Check capability examples with rustdoc, including runtime exports enabled only for tests.
 test-capability-docs: build-web-console
@@ -3888,6 +3889,10 @@ validate-skill:
 # mypy run checks the suite and the paced simulation driver with `--strict`.
 validate-client-suites:
     uv run --locked python -m scripts.client_suites validate
+
+# Exercise the host suite's bounded action adapter over real pipes, without a cluster.
+test-client-suite-actions:
+    uv run --locked python -m unittest scripts.tests.test_client_suite_actions
 
 # Collect the line coverage of the client suite check and its tests.
 coverage-client-suites-runner:
