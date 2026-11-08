@@ -130,6 +130,7 @@ pub fn plan() -> Conditions {
 
 pub fn resolution_facts() -> ResolutionFacts {
     ResolutionFacts {
+        organization_status: OrganizationStatus::Active,
         license_status: LicenseStatus::Active,
         term_starts_at: at(-3_600),
         term_ends_at: at(3_600),

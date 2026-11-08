@@ -357,3 +357,17 @@ fn transition_policy_comes_from_complete_bounded_signed_operating_values() {
     operating.durations.remove(QUOTA_GRACE);
     assert!(TransitionPolicy::from_operating(&operating).is_err());
 }
+
+#[test]
+fn organization_suspension_uses_free_usage_with_an_active_license() {
+    let mut plan = plan();
+    plan.usage = usage(Quota::Bounded { value: 2 }, Quota::Bounded { value: 3 });
+    let mut facts = resolution_facts();
+    facts.organization_status = OrganizationStatus::Suspended;
+    let resolved = plan
+        .resolve(&empty_conditions(), facts, limits().bytes)
+        .assured("suspended organization still has a resolved relationship policy");
+    assert_eq!(resolved.status(), DecisionStatus::Suspended);
+    assert_eq!(resolved.values().usage, FREE_POLICY.usage());
+    assert_eq!(resolved.values().operating, plan.operating);
+}

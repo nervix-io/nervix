@@ -103,10 +103,11 @@ an unknown name's complete external JSON and ignores it during evaluation; a kno
 invalid value is always refused. This extension behavior is part of the external contract.
 
 Resolution validates the complete plan and partial overrides, applies overrides, derives status
-from the supplied license/activation facts and instant, and hashes the complete result using
+from the supplied organization/license/activation facts and instant, and hashes the complete result using
 SHA-256 over typed serialization with fixed field order and sorted maps. Active usage is resolved
 from the assignment. Every non-active status uses the free usage policy, except expired ephemeral
 activations, whose usage is empty. Operating conditions remain authoritative in each state.
+An organization suspension yields suspended/free usage even when the license itself is active.
 The free policy grants every current cluster quota without a limit and has no operating half.
 An expired lifetime is a firm stop even if the license or activation also has another terminal state.
 

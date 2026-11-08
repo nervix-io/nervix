@@ -38,6 +38,17 @@ fn bolero_conditions_resolution() {
                     .assured("complete canonical encoding")
             );
             round_trip(resolved.values());
+            let mut suspended_facts = resolution_facts();
+            suspended_facts.organization_status = OrganizationStatus::Suspended;
+            let suspended = plan
+                .resolve(&empty_conditions(), suspended_facts, limits().bytes)
+                .assured("organization suspension is an explicit shared input");
+            assert_eq!(
+                suspended.status(),
+                crate::documents::DecisionStatus::Suspended
+            );
+            assert_eq!(suspended.values().usage, FREE_POLICY.usage());
+            assert_eq!(suspended.values().operating, plan.operating);
             // Reversing insertion history cannot change the canonical digest.
             let mut reordered = empty_conditions();
             for (name, value) in expected.usage.quotas.iter().rev() {

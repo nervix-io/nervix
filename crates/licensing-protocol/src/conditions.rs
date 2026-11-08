@@ -478,6 +478,12 @@ pub enum LicenseStatus {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrganizationStatus {
+    Active,
+    Suspended,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActivationStatus {
     Active,
     Released,
@@ -493,6 +499,7 @@ pub enum ActivationLifetime {
 
 #[derive(Clone, Copy, Debug)]
 pub struct ResolutionFacts {
+    pub organization_status: OrganizationStatus,
     pub license_status: LicenseStatus,
     pub term_starts_at: DateTime<Utc>,
     pub term_ends_at: DateTime<Utc>,
@@ -525,6 +532,9 @@ impl ResolutionFacts {
             LicenseStatus::Suspended => return Ok(DecisionStatus::Suspended),
             LicenseStatus::Revoked => return Ok(DecisionStatus::Revoked),
             LicenseStatus::Active => {}
+        }
+        if self.organization_status == OrganizationStatus::Suspended {
+            return Ok(DecisionStatus::Suspended);
         }
         if self.at < self.term_starts_at {
             return Err(Report::new(ConditionError::Timing));
