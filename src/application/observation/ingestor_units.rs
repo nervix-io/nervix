@@ -36,12 +36,16 @@ impl SessionServiceImpl {
         ingestor_node: &ScheduledNode,
         unit: nervix_models::Unit,
     ) -> error_stack::Result<(RuntimeIngestorDescribe, Vec<String>), ObservationError> {
+        let nervix_models::Model::Ingestor(config) = ingestor_node.config.as_ref() else {
+            unreachable!("ingestor inspection was resolved as an ingestor");
+        };
+        let ingestor_kind = config.input.entity_kind();
         let local_node_id = self.inner.consensus.local_node_id();
         if ingestor_node.unit_executes_on(unit, local_node_id) {
             let summary = self
                 .inner
                 .runtime
-                .describe_local_ingestor(domain, ingestor, unit)
+                .describe_local_ingestor(domain, ingestor, unit, ingestor_kind)
                 .change_context(ObservationError::LocalDescribe {
                     domain: domain.clone(),
                     entity: NodeRef::new(ModelKind::Ingestor, ModelName::from(ingestor)),
@@ -57,6 +61,7 @@ impl SessionServiceImpl {
             .and_then(|placement| placement.execution_node())
         else {
             let summary = RuntimeIngestorDescribe {
+                source_metrics: Vec::new(),
                 running: false,
                 ready: false,
                 quiesce_state: None,
