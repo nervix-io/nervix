@@ -52,7 +52,7 @@ executable through Cargo's configured runner, and writes its record where the co
 It measures an initial and a warm pass over every selected build in the same compiler context;
 both share the build budget and finish before the workload clock starts.
 
-`applicability --catalog <gate.json>` reads the compiler's acquisition catalog and requires every
+`applicability --catalog <gate.json>` delegates to the Rust compiler-evidence owner, which requires every
 source file with a tracked blocking acquisition in a diagnostic configuration to have exactly one
 `[[owner]]` record, and every record to name such a file.
 
@@ -121,11 +121,6 @@ SUMMARY_KEYS = (
     "lost-order-history",
     "lost-retention",
 )
-# The compiler-resolved receivers of a tracked blocking acquisition in a diagnostic build.
-TRACKED_RECEIVERS = frozenset({
-    "nervix_primitives::sync::blocking::tracked::Mutex",
-    "nervix_primitives::sync::blocking::tracked::RwLock",
-})
 DIAGNOSTIC_FEATURES = frozenset({"deloxide", "deloxide-order", "deloxide-stress"})
 _WORKLOAD_ID = re.compile(r"^[a-z]+(?:\.[a-z0-9]+(?:-[a-z0-9]+)*)+$")
 _LISTED_TEST = re.compile(r"^(?P<name>\S+): test$")
@@ -2450,59 +2445,6 @@ def qualify(inventory: Inventory, processes: Processes, workspace: Workspace, se
     return 0
 
 
-# Applicability.
-
-
-def catalog_owners(catalog: Mapping[str, object]) -> set[str]:
-    """Every source file with a tracked blocking acquisition in a diagnostic configuration of the
-    compiler's acquisition catalog."""
-
-    configurations = catalog.get("configurations")
-    findings = catalog.get("findings")
-    if not isinstance(configurations, list) or not isinstance(findings, list):
-        raise LaneError("the catalog holds no configurations or findings")
-    diagnostic: set[str] = set()
-    for configuration in configurations:
-        if not isinstance(configuration, dict):
-            raise LaneError("the catalog holds a malformed configuration")
-        features = configuration.get("features", [])
-        if isinstance(features, list) and DIAGNOSTIC_FEATURES & set(features):
-            diagnostic.add(str(configuration.get("name")))
-    if not diagnostic:
-        raise LaneError("the catalog holds no diagnostic configuration; run the full compiler matrix")
-    owners: set[str] = set()
-    for finding in findings:
-        if not isinstance(finding, dict):
-            raise LaneError("the catalog holds a malformed finding")
-        for key, items in dict(finding.get("configurations", {})).items():
-            name, _, _ = str(key).partition(":")
-            if name not in diagnostic:
-                continue
-            for item in items:
-                if item.get("receiver") not in TRACKED_RECEIVERS:
-                    continue
-                site = dict(dict(item.get("span", {})).get("site", {}))
-                path = site.get("path")
-                if not isinstance(path, str) or not path:
-                    raise LaneError("a tracked acquisition in the catalog names no source file")
-                owners.add(path)
-    return owners
-
-
-def applicability(inventory: Inventory, catalog: Mapping[str, object]) -> list[str]:
-    owners = catalog_owners(catalog)
-    problems: list[str] = []
-    for path in sorted(owners - set(inventory.owners)):
-        problems.append(
-            f"{path} acquires tracked blocking locks in a diagnostic build and has no [[owner]] "
-            f"record in {INVENTORY}: name the workloads that reach its locks, or the path the lane "
-            "does not reach and why"
-        )
-    for path in sorted(set(inventory.owners) - owners):
-        problems.append(f"{INVENTORY} records the owner {path}, which acquires no tracked lock")
-    return problems
-
-
 # The command line.
 
 
@@ -2549,23 +2491,18 @@ def main(
             )
             return 0
         if arguments.command == "applicability":
+            target = arguments.target_dir
+            if target is None:
+                target = Path(current.get("CARGO_TARGET_DIR", root / "target"))
+            executable = target.resolve() / "typed-ratchet/source/debug/nervix-ratchet"
             try:
-                catalog = json.loads(arguments.catalog.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as error:
-                raise LaneError(f"cannot read the compiler catalog {arguments.catalog}: {error}") from error
-            problems = applicability(inventory, catalog)
-            for problem in problems:
-                print(f"deloxide applicability: {problem}", file=sys.stderr)
-            if problems:
-                return FAILURE_STATUS
-            gaps = sum(owner.gap is not None for owner in inventory.owners.values())
-            reached = sum(bool(owner.workloads) for owner in inventory.owners.values())
-            print(
-                f"deloxide applicability: {len(inventory.owners)} owners of tracked locks, "
-                f"{reached} reached by registered workloads, {gaps} with a recorded gap",
-                flush=True,
-            )
-            return 0
+                completed = subprocess.run([
+                    str(executable), "applicability", "--root", str(root),
+                    "--catalog", str(arguments.catalog),
+                ], check=False)
+            except OSError as error:
+                raise LaneError(f"cannot start the compiler-evidence owner {executable}: {error}") from error
+            return completed.returncode
         if arguments.target_dir is None:
             raise LaneError(f"`{arguments.command}` needs --target-dir")
         processes = processes_for(current, inventory.bounds.stop_grace_seconds)

@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** Basic credentials on every transport, the password hash, the user record, and the
 //!   rate limit an unauthenticated caller is held to.
-//! - **Depends on.** Consensus for the stored user credentials.
+//! - **Depends on.** Consensus, the bounded executor and the cryptography boundary.
 //! - **Must not know.** What an authenticated caller goes on to do.
 
 #![cfg_attr(
@@ -23,7 +23,7 @@ use argon2::Algorithm;
 use argon2::Version;
 use argon2::{
     Argon2, Params, PasswordHasher, PasswordVerifier,
-    password_hash::{PasswordHash, SaltString, rand_core::OsRng},
+    password_hash::{PasswordHash, Salt, SaltString},
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use error_stack::{Report, ResultExt as _};
@@ -264,7 +264,10 @@ async fn hash_password(
                 cancellation
                     .check()
                     .change_context(PasswordHashError::Cancelled)?;
-                let salt = SaltString::generate(&mut OsRng);
+                let salt_bytes = nervix_crypto::random::bytes::<{ Salt::RECOMMENDED_LENGTH }>();
+                let salt = SaltString::encode_b64(&salt_bytes).assured(
+                    "the password-hash library's recommended salt length fits its base64 storage",
+                );
                 match argon2.hash_password(password.as_bytes(), &salt) {
                     Ok(hash) => Ok(hash.to_string()),
                     Err(cause) => {

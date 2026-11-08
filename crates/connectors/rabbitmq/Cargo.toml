@@ -9,10 +9,13 @@ version.workspace = true
 workspace = true
 
 [features]
+# Real-broker publication benchmarks are selected explicitly.
+benchmarks = []
 default = []
 shuttle = [
   "dep:shuttle",
   "nervix-connector/shuttle",
+  "nervix-execution/shuttle",
   "nervix-model-harness/shuttle",
   "nervix-primitives/shuttle",
 ]
@@ -39,16 +42,26 @@ url = { workspace = true }
 
 [dev-dependencies]
 bolero = { workspace = true }
+criterion = { workspace = true }
 nervix-crypto = { workspace = true }
+nervix-execution = { workspace = true }
 nervix-model-harness = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native", "test-util"] }
 nervix-test-environment = { workspace = true }
 rcgen = { workspace = true }
 tempfile = { workspace = true }
+tikv-jemalloc-ctl = { workspace = true }
+tikv-jemallocator = { workspace = true }
 tokio = { workspace = true, features = [
   "io-util",
   "macros",
   "net",
+  "process",
   "rt-multi-thread",
 ] }
 tokio-rustls = { workspace = true }
+
+[[bench]]
+harness = false
+name = "publish"
+required-features = ["benchmarks"]

@@ -1,3 +1,15 @@
+//! Signaling protocol declaration grammar.
+//!
+//! Layer: language.
+//! - **Owns.** Signaling formats, handshake steps and grammar-derived completion.
+//! - **Depends on.** Shared Plexus tokens, parser primitives and vocabulary Models.
+//! - **Must not know.** Network connections, handshake execution or registry state.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the language boundary declared above")
+)]
+
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
@@ -10,7 +22,7 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, config_entries_block, duration_lit,
-        if_not_exists_clause, into_parse_error, kw, lex_input, resource_ref,
+        if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input, resource_ref,
         resource_version_clause, signaling_protocol_name, string_lit, suggest_from, tok,
     },
 };
@@ -149,8 +161,7 @@ pub fn create_signaling_protocol_parser<'src>() -> impl Parser<
 > + Clone {
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
-        .then_ignore(kw(Identifier::Signaling))
-        .then_ignore(kw(Identifier::Protocol))
+        .then_ignore(kw_phrase2(Identifier::Signaling, Identifier::Protocol))
         .then(signaling_protocol_name())
         .then_ignore(kw(Identifier::Format))
         .then(signaling_wire_format())

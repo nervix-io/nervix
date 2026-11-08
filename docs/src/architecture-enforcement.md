@@ -24,6 +24,19 @@ complete gate passes. No numeric allowance controls a semantic rule.
 | Gate | `nervix-ratchet gate` (`just ratchet`) | Requires the complete diagnostic gate, reads the product's dependency graph with `cargo tree` and compares the six structural counts with `debt-baseline.json`. |
 | Complexity analyzer | `nervix-ratchet crap` | Pins and runs the analyzer behind `functions_over_complexity_30`. |
 | Audit | `tools/nervix-lint/ratchet/src/audit` (`nervix-ratchet audit`, `just lint-audit`) | Consumes one in-process matrix report and attributes review candidates to the history that produced them. |
+| Diagnostic owner applicability | `nervix-ratchet applicability` (`just validate-deloxide-applicability`) | Reads the typed matrix report and compares diagnostic tracked-lock owners with the workload inventory's owner declarations. Its projection uses the shared matrix schema and findings without materializing unused completion payloads. The Python lane validates its inventory and delegates this comparison without opening compiler evidence. |
+
+Compiler evidence has one Rust owner in this workspace. The driver writes compiler side reports;
+the report crate defines and aggregates them; the ratchet owns the matrix, compilation and
+completion records and the audit. Enforcement consumes those shared types in-process, including
+the diagnostic owner comparison, rather than decoding their JSON in a Python script. A new
+structural count or gate rule joins the binary, and every tooling encode/decode pair has a
+registered bounded Bolero property.
+
+This boundary does not move the source validators for primitives, clocks, typed errors or mode
+dependencies, or the coverage, Bolero and CI runners. They own their distinct declarations,
+profiles, test results and workflow evidence. They may execute the Rust binary and use its exit
+status; they do not read or write its compiler reports or reconstruct its types.
 
 Product source owns the policy: the [source contracts](#source-contracts) and the reason-bearing
 expectations at the operations they cover. The tooling owns recognition and evidence, and nothing it
@@ -182,7 +195,7 @@ recognition the new compiler changes is a rule change and ships its fixtures. It
 a `fuzz`-labeled run of the sanitizer campaigns. The new compiler identity re-establishes every
 report, so no evidence from the previous compiler is reused.
 
-Source discovery includes tracked Rust and newly authored Rust not ignored by Git. The five
+Source discovery includes tracked Rust and newly authored Rust not ignored by Git. The six
 counts retain their product-debt scope: directory components named `tests`, `benches` or
 `examples` are excluded. In-crate `tests.rs`, `*_tests.rs` and `test_fixtures.rs` count toward
 file size and function complexity but are excluded from cast/field debt. Test-only items are excluded from those two
@@ -364,6 +377,12 @@ operation fails. Arithmetic reasons state the actual ceiling, capacity or modula
 Source counts have no semantic exception channel. A current structural occurrence remains counted
 until its owner changes it; a compiler expectation cannot hide its inactive source. Likewise,
 source provenance cannot be waived by declaring a lifecycle or error contract.
+
+The cryptography count's source-owned non-security purpose is part of that rule's definition,
+not a compiler expectation. The [classification register](cryptography.md#classification-register)
+specifies its Rustdoc form and lexical scope. It classifies only the operation's BLAKE3 uses;
+containers, empty reasons, neighboring operations and other algorithms remain counted. Source
+fixtures and the bounded `typed-non-aws-lc-crypto` property qualify those distinctions.
 
 Review still owns the truth of reasons, lifetime classifications, architectural roles and bounds.
 The compiler checks their placement, shape and supported effects, not arbitrary whole-program

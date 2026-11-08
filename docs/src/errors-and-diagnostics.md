@@ -2,6 +2,12 @@
 
 *Plexus, the Nervix graph definition language.*
 
+Secure random values come from `nervix-crypto`. Its pinned AWS-LC generator returns complete
+random bytes or aborts if sufficient entropy cannot be obtained; it has no recoverable entropy
+failure to classify as a record, authentication or transport rejection. No default value replaces
+an unavailable random draw. Digest computation and the deterministic transport-entropy callback
+retain their infallible contracts.
+
 The allowance engine returns `Admission` decisions separately from input and conversion errors.
 `WaitUntil`, `NeverAdmissible` and `KeyBudgetExhausted` are ordinary outcomes, not decode failures
 or dropped payloads. `QuotaError` identifies invalid rates, bursts, costs, TTLs and horizon ranges;
@@ -30,6 +36,12 @@ the fixed algorithm set without claiming FIPS module validation. Handshake refus
 rustls failures. Ed25519 key preparation and signing retain AWS-LC's typed cause beneath the
 cryptography context; the NATS owner adds its configuration context or hands the complete report
 to the driver's authentication callback error, without rendering credentials.
+
+P-256 key generation, PKCS#8 import/export, signing and verification retain AWS-LC's typed
+`KeyRejected` or `Unspecified` cause beneath the corresponding `EcdsaP256Error` operation.
+Neither these contexts nor the private-key owners' `Debug` output contain key bytes. Digest
+inequality is a boolean outcome, and backend FIPS status is a typed observation rather than a
+key, signature or authentication refusal.
 
 Client CONFIG validation keeps vocabulary `ClientConfigSchemaError` beneath the registry's
 client/domain context. The server's changed-model binding validation runs connector-owned offline
@@ -163,6 +175,10 @@ as waiting for materialized state or following a new leader, remain distinct fro
 The web console applies the same distinction to structured choice lookups: an absent form
 prerequisite shows a neutral hint, and stale context offers a fresh request. A failed lookup,
 closed session channel, or unreadable reply appears as an alert.
+For relay-tab restoration, the console decides from the typed `SubscriptionRefusal`: a missing
+domain or relay, or a changed relay schema, ends the tab; other failures retain it for a bounded
+backoff. Restoration causes, server diagnostics and retry waits appear only in that tab, preserving
+the operator's REPL history. The [Web Console](client-tools-web-console.md) owns the presentation.
 Client creation names its choice as a connector and presents the composed Plexus
 `<CONNECTOR> CLIENT` head; a missing choice asks the operator to choose a client connector.
 
@@ -2819,6 +2835,14 @@ execution reference and typed open refusal. It never reclassifies by message tex
 command disposition as a thrown operation error. A JNI library error stays at JNI's foreign
 boundary; an already pending Java exception is preserved. Checked native exports contain Rust
 unwinds at that boundary. Restoration events expose the shared client's message and retry wait.
+
+The shared Arrow delivery decoder reports `EmitterBatchDecodeError`: an unreadable stream, a
+schema mismatch, a missing or extra batch, an unreadable batch, or a row-count mismatch. An Arrow
+library error stays typed beneath its decoder context. Both the delivery method and the
+retained-bytes decoder return that report directly. The host failure owner projects a received
+delivery's report into `Protocol`. A host's local
+`Batch::decode` instead projects the same complete report into `InvalidArgument` at its reporting
+boundary. Neither path changes the exact schema, single-batch or member-count checks.
 
 Resource archive construction returns its first I/O failure beneath `BuildUploadArchive`.
 Reusing an upload identity for another archive returns the typed `UploadFailure::IdentityConflict`

@@ -852,6 +852,7 @@ impl ClientIngestorStartPlan {
 /// The identity of a client ingestor's endpoint contract: the ingestor as producers see it, its
 /// input schema, and the branch declarations its routes construct. Flush cadence is left out, so
 /// a change that only retunes flushing keeps every producer attached.
+/// Non-security BLAKE3: detects endpoint contract changes; authentication/admission are separate.
 fn client_endpoint_contract(
     ingestor: &CreateIngestor,
     schema: &CreateSchema,

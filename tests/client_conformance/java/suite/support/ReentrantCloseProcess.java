@@ -1,8 +1,8 @@
 package io.nervix.client;
 
 /** Verifies admitted JNI calls survive close reentered from the library's class loader. */
-public final class ReentrantClose {
-    private ReentrantClose() {}
+public final class ReentrantCloseProcess {
+    private ReentrantCloseProcess() {}
     private static void require(boolean condition, String message) {
         if (!condition) throw new AssertionError(message);
     }

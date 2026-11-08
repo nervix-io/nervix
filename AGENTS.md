@@ -164,11 +164,17 @@ violates instead of softening the contract to match today's imports.
   treat as one item.
 - Grammar labels use underscore style (`field_name`, `string_literal`); completion labels of
   composed keyword phrases use their space-separated human-readable form.
-- Ingestor and emitter statement heads name the connector and entity, even when the connector serves
-  one entity; client heads name the connector. An ingestor or emitter `ALTER` repeats its stored
-  connector and entity. The head selects the kind, and the body writes that entity's declared
-  reference, locator and options. Each pair owns its grammar body and Model variant, and completion
-  composes its head from the shared tokens and the vocabulary declaration.
+- A `CREATE` head names the entity's kind as one composed keyword phrase and selects that kind's
+  own grammar and semantic Model. A kind never enters a generic statement through `TYPE`,
+  `FROM <KIND>` or a grammar-selecting `FORMAT` clause, and a combination the selected kind cannot
+  express never waits for registry rejection. An alterable property belongs in the body and pairs
+  with its corresponding `ALTER` operation, never in the head. A supported kinded `ALTER` repeats
+  the stored kind; addressing statements name the Model kind alone unless the kind is part of the identity,
+  as with wire schemas. Connector heads name connector and entity even for a single-entity
+  connector; client heads name the connector. Shared tokens and vocabulary declarations compose
+  heads for parsing and completion. [Statement heads and body
+  properties](docs/src/architecture.md#statement-heads-and-body-properties) owns the contract,
+  existing body-format choices and the checklist for adding a kind.
 
 ### Control plane and runtime
 
@@ -410,9 +416,16 @@ debt only decreases ([the ratchet](#the-ratchet)).
 Each chapter below is the authoritative reference for its area, and any change within that area
 keeps the chapter current in the same change. Where areas meet, each chapter keeps its own contract.
 
+- [Architecture Overview](docs/src/architecture.md#statement-heads-and-body-properties): the
+  language-to-Model boundary, statement heads and body properties, kind-preserving alterations,
+  addressing identities and adding a statement kind.
 - [Connector Crates And The Connector Contract](docs/src/connector-contract.md): a connector crate,
   the shared connector contract, connector planning or composition, host ingestor and emitter
   execution.
+- [Emitter Batching](docs/src/emitter-batching.md): compatible-row packing, exact encoded-size
+  boundaries and subdivision, retained payload membership and outcomes, batching observation units
+  and the scope of measured tuning evidence. The connector contract retains the general host and
+  engine boundary; the Emitters and Schemas And Codecs manuals own public clauses and containers.
 - [Cluster Interconnect](docs/src/interconnect.md): interconnect code and every node-to-node
   operation, including application progress reports, queries and completion-participant views.
 - [Name Resolution](docs/src/name-resolution.md): `nervix-dns`; how a node or a native client loads
@@ -1064,6 +1077,16 @@ Bolero properties qualify changed source parsing and lossless tooling representa
 detector and its numeric entry go at the same cutover.
 
 ### Analysis toolchain
+
+Repository enforcement that reads or writes compiler evidence belongs in the isolated
+`tools/nervix-lint` Rust workspace: the driver, report vocabulary, ratchet binary and compiler
+fixtures with their macro crate. Matrix reports, compiler side reports, compilation records,
+completion evidence and audit reports are consumed through their shared Rust types; Python under
+`scripts/` neither reads nor writes them. Add a structural count or gate rule to `nervix-ratchet`,
+and give each tooling encode/decode pair its registered bounded Bolero property. Source validators
+for primitives, clocks, typed errors and mode dependencies, and the coverage, Bolero and CI runners,
+keep their own inputs and evidence; they may invoke the Rust owner as a process without interpreting
+its compiler evidence.
 
 The synchronization driver, its isolated artifacts and Bolero's sanitizer campaigns use
 `nightly-2026-09-17`; product builds stay stable. An upgrade moves every declaration of that nightly

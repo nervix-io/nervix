@@ -78,6 +78,14 @@ class Host:
 
 
 HOSTS = {
+    "java": Host(
+        name="java",
+        module="io.nervix.client",
+        sources="crates/client-jvm/java/io/nervix/client/Nervix.java",
+        stub="",
+        suite="tests/client_conformance/java/suite",
+        guide="docs/src/client-library-jvm.md",
+    ),
     "python": Host(
         name="python",
         module="nervix_client",
@@ -583,6 +591,13 @@ def read_inventory(root: Path) -> dict[str, dict[str, str]]:
 
 def check_inventory(root: Path, host: Host, registered: dict[str, str]) -> list[str]:
     tests, problems = discover_tests(root, host)
+    return problems + compare_inventory(host, registered, tests)
+
+
+def compare_inventory(host: Host, registered: dict[str, str], tests: dict[str, str]) -> list[str]:
+    """Hold discovered stable identities and their tiers to the shared inventory."""
+
+    problems = []
     for missing in sorted(set(tests) - set(registered)):
         problems.append(f"{INVENTORY} does not register {host.name} test {missing}")
     for extra in sorted(set(registered) - set(tests)):
@@ -766,10 +781,65 @@ def check_include(guide: Path, suite: Path, include: re.Match[str], line: int,
 # ---- Commands ----------------------------------------------------------------------------------
 
 
+@dataclass
+class JavaAnalysis:
+    """Declared members and resolved suite references from the Java compiler's source model."""
+
+    surface: set[str] = field(default_factory=set)
+    references: set[str] = field(default_factory=set)
+    tests: dict[str, str] = field(default_factory=dict)
+    problems: list[str] = field(default_factory=list)
+
+
+def analyze_java(root: Path, host: Host) -> JavaAnalysis:
+    """Read the prepared Java analyzer; a validation never builds or runs the native library."""
+
+    artifacts = Path(os.environ.get("NERVIX_CLIENT_CONFORMANCE_DIR", root / "target/client-conformance"))
+    checker = Path(os.environ.get("NERVIX_CLIENT_SUITE_JAVA_CHECKER", root / "target/client-suites/java"))
+    junit = artifacts / "java/junit-platform-console-standalone.jar"
+    result = subprocess.run(
+        ["java", "-cp", str(checker), "SurfaceCheck", str(root / host.sources),
+         str(root / host.suite), str(junit)],
+        capture_output=True, text=True, check=False,
+    )
+    analysis = JavaAnalysis()
+    if result.returncode:
+        analysis.problems.append(f"JVM suite source analysis failed:\n{result.stderr}{result.stdout}")
+        return analysis
+    for line in result.stdout.splitlines():
+        kind, value = line.split("\t", 1)
+        if kind == "SURFACE":
+            analysis.surface.add(value)
+        elif kind == "REFERENCE":
+            analysis.references.add(value)
+        elif kind == "TEST":
+            tier, identity = value.split("\t", 1)
+            if identity in analysis.tests:
+                analysis.problems.append(f"JVM suite defines {identity} twice")
+            analysis.tests[identity] = tier
+        elif kind == "PROBLEM":
+            analysis.problems.append(value)
+        else:
+            raise ValueError(f"unknown JVM suite analysis result: {line}")
+    if not analysis.surface:
+        analysis.problems.append("JVM source analysis discovered no public binding members")
+    if not analysis.tests:
+        analysis.problems.append("JVM suite declares no JUnit tests")
+    return analysis
+
+
 def validate(root: Path, hosts: list[Host]) -> list[str]:
     problems = Problems()
     registered = read_inventory(root)
     for host in hosts:
+        if host.name == "java":
+            analysis = analyze_java(root, host)
+            problems.extend(analysis.problems)
+            for missing in sorted(analysis.surface - analysis.references):
+                problems.add(f"{host.suite} does not reference JVM member {missing}")
+            problems.extend(compare_inventory(host, registered.get(host.name, {}), analysis.tests))
+            problems.extend(check_guide(root, host))
+            continue
         surface = read_surface(root, host)
         problems.extend(check_stub(surface, root / host.stub))
         problems.extend(check_inventory(root, host, registered.get(host.name, {})))

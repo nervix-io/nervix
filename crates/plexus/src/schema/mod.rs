@@ -1,3 +1,15 @@
+//! Internal and wire-schema grammar.
+//!
+//! Layer: language.
+//! - **Owns.** Schema declarations, alterations and grammar-derived completion.
+//! - **Depends on.** Shared Plexus tokens, parser primitives and vocabulary Models.
+//! - **Must not know.** Registry installation, codecs or runtime execution.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the language boundary declared above")
+)]
+
 use std::num::NonZeroU32;
 
 use chumsky::prelude::*;
@@ -14,7 +26,8 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, boxed_choice, field_ref, if_not_exists_clause, into_parse_error, kw,
-        kw_phrase2, lex_input, schema_field_ref, schema_name, suggest_from, tok, wire_schema_name,
+        kw_phrase2, kw_phrase3, lex_input, schema_field_ref, schema_name, suggest_from, tok,
+        wire_schema_name,
     },
 };
 
@@ -367,9 +380,7 @@ where
         .collect::<Vec<_>>()
         .delimited_by(tok(Token::LParen), tok(Token::RParen));
 
-    let wire_schema_header = kw(Identifier::Wire)
-        .then_ignore(kw(format_kw))
-        .then_ignore(kw(Identifier::Schema));
+    let wire_schema_header = kw_phrase3(Identifier::Wire, format_kw, Identifier::Schema);
 
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
@@ -1192,10 +1203,12 @@ mod tests {
     }
 
     #[test]
-    fn suggests_wire_after_create_without_mode_leakage() {
+    fn suggests_wire_schema_heads_after_create_without_mode_leakage() {
         let input = "CREATE ";
         let suggestions = suggest_create_wire_schema(input, input.len());
-        assert!(suggestions.contains(&"WIRE".to_string()));
+        for head in ["WIRE JSON SCHEMA", "WIRE CBOR SCHEMA", "WIRE AVRO SCHEMA"] {
+            assert!(suggestions.contains(&head.to_string()));
+        }
         assert!(!suggestions.contains(&"STRICT".to_string()));
         assert!(!suggestions.contains(&"LOOSE".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));

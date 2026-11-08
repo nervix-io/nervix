@@ -27,8 +27,8 @@ Without an explicit advertise address, the HTTPS listen address is used. The cer
 trusted by the browser and cover that host. It is loaded at startup, so restart after rotation.
 These options configure the console independently of the native session listener's TLS options.
 
-Any node works. Opening the console on a follower is supported — the console follows the leader
-redirect, reconnects there, and reports which node it reached:
+Opening the console on a follower works when the leader advertises a browser-reachable console
+URL. The console follows that redirect, reconnects there, and reports which node it reached:
 
 ```text
 connected to leader 'node-2'
@@ -41,16 +41,22 @@ redirect took it, selects its domain, attaches its clock, restores its subscript
 attaches its transaction again, and then sends its pending commands under their execution
 references.
 
+The browser page stays at the URL you opened, while its session and upload requests follow the
+leader's advertised console URL. Later reconnects keep using that destination until another
+redirect changes it. If the redirect has no leader console URL, the console prints a topology
+notice and retries its current destination. Configure each node's advertised console address so
+the browser can reach it after a leadership change.
+
 ## Signing In
 
-Without credentials in the URL the console shows a login form for a registry user. Two other forms
-are accepted, which is what automation and bookmarks use:
-
-- an `Authorization: Basic <base64(user:password)>` request header
-- an `?auth=<base64(user:password)>` query parameter
+Without credentials in the URL the console shows a login form for a registry user. Automation and
+bookmarks can supply `?auth=<base64(user:password)>`, with the token URL-encoded. The browser app
+reads credentials from that query parameter or the login form. An `Authorization: Basic` header
+authenticates the server's console requests, but supplying it when loading the page does not sign
+the browser app in; the page still shows its login form.
 
 The query parameter puts credentials into browser history and server access logs, so prefer the
-login form or the header for anything but a local cluster.
+login form for anything but a local cluster.
 
 ## Layout
 
@@ -93,8 +99,11 @@ kinds and the notice stream's bounds.
 
 Sidebar entries are counted per kind and each group collapses. Selecting an endpoint runs its
 `DESCRIBE` in the REPL; selecting a resource does the same and opens its version dialog.
-The **Cluster** footer stays independent of the selected domain: it reports the number of running
-domains, non-relay graph nodes, and relays across the current cluster graph.
+The **Cluster** footer reports the number of running domains, non-relay graph nodes, and relays
+across the cluster graph. Its counters start at zero and are refreshed alongside the selected
+domain's snapshot, so the first cluster totals arrive only after a domain is selected. With no
+domain selected, the footer receives no fresh totals; its values do not establish that the cluster
+is empty.
 
 ### Following the selected domain clock
 
@@ -437,9 +446,17 @@ not submit it again.
 
 The console restores its tabs before it attaches the session's transaction again, because a session
 that holds a transaction refuses subscriptions, so an open transaction does not keep a tab from
-coming back. A tab stays **restoring** until the server opens its subscription again. A restoration
-the server refuses leaves the tab **interrupted** with the reason, and the console tries it again
-every second while no transaction is attached; closing an interrupted tab stops that.
+coming back. A tab stays **restoring** until the server answers. Restoration includes the complete
+schema the tab previously acknowledged. If the domain or relay no longer exists, or the relay's
+schema changed, the refusal turns the tab **ended**, retaining its rows and the reason. The tab
+offers the same **↻** resubscribe action as a subscription the server ended.
+
+Other restoration failures leave the tab **interrupted**. Each attempt reports its typed refusal,
+server diagnostics and next wait in that tab, preserving the REPL's history. Retry waits start at
+one second and double to five seconds while the session holds no transaction. The shared retry
+timer may add up to one second to that minimum wait. Closing the waiting tab stops its retries and
+frees its name immediately. A replacement connection restores desired tabs immediately before
+reattaching a transaction and starts a fresh retry sequence.
 
 When a relay is redefined or removed, the server ends the subscriptions that read it. Such a tab
 turns **ended**: it keeps the rows it showed together with the reason, receives nothing more, and
@@ -495,6 +512,11 @@ console follows the transaction's domain, so attaching switches the domain selec
 with an id it reads another transaction of the same user while the prompt, domain selector, and
 attached transaction stay as they were. See
 [Plexus Overview](plexus-overview.md) for its forms and output.
+
+Before typing `COMMIT`, inspect the attached transaction at its current position with
+`DESCRIBE TRANSACTION;` or **Transaction · Inspect**. The console refuses to send the commit until
+that inspection is complete; [Inspecting a transaction](#inspecting-a-transaction) explains when
+to refresh it after another queued statement or a stale-preview refusal.
 
 Every persistent command keeps one execution reference while the browser waits, reconnects, or
 follows leadership. When its outcome is not known yet, the console repeats it on the open session

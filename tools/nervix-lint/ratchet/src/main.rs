@@ -18,6 +18,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Operation {
     Analyze(nervix_ratchet::matrix::Analyze),
+    Applicability(nervix_ratchet::applicability::Options),
     Audit(nervix_ratchet::audit::Options),
     PrepareContracts(nervix_ratchet::contracts::PrepareContracts),
     QualifyCache(nervix_ratchet::cache::QualifyCache),
@@ -33,8 +34,8 @@ fn main() -> anyhow::Result<()> {
             Some(Entry::Explicit)
         }
         Some(
-            "analyze" | "audit" | "prepare-contracts" | "qualify-cache" | "gate" | "crap"
-            | "--help" | "-h" | "help" | "--version" | "-V",
+            "analyze" | "applicability" | "audit" | "prepare-contracts" | "qualify-cache" | "gate"
+            | "crap" | "--help" | "-h" | "help" | "--version" | "-V",
         )
         | None => None,
         // Cargo supplies the actual rustc path as the first wrapper argument. A wrapper path
@@ -48,6 +49,13 @@ fn main() -> anyhow::Result<()> {
         }
     } else {
         match Cli::parse().command {
+            Operation::Applicability(options) => match options.run() {
+                Ok(status) => Ok(status),
+                Err(error) => {
+                    eprintln!("deloxide applicability: {error:#}");
+                    Ok(1)
+                }
+            },
             Operation::Audit(options) => match options.run() {
                 Ok(()) => Ok(0),
                 Err(error) => {

@@ -74,6 +74,7 @@ const RESTORE_FRAME_CAPACITY: usize = 8;
 const RESTORE_REQUEST_ID: RequestId = RequestId::new(NonZeroU64::MIN);
 
 /// Reads the whole archive at `path` once, off the async workers, to measure and digest it.
+/// Non-security BLAKE3: identifies operator-selected restore bytes, not their provenance.
 async fn measure_archive(path: PathBuf) -> io::Result<RestoreDigest> {
     let measure = nervix_primitives::task::spawn_blocking(move || -> io::Result<RestoreDigest> {
         let mut file = std::fs::File::open(&path)?;

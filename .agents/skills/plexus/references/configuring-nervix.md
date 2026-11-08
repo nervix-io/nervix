@@ -18,6 +18,11 @@ not a second grammar.
 
 Always read `Plexus Overview`. Add the indexed topics relevant to the requested graph:
 
+Its `Statement catalog` explains kinded heads and addressing. Read `Schemas And Codecs` → `Codecs`
+for the complete codec head and wire reference, `Ingestors` for endpoint declarations, and the
+`Processors` or `Emitters` input synopsis for acknowledgement placement and supported alterations.
+Keep detailed grammar in those chapters when reviewing a configuration.
+
 | User need | Documentation index entry |
 | --- | --- |
 | Domain timing and lifecycle | `Domains And Time` |
@@ -28,7 +33,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Roto language syntax for UDF bodies | `Roto Language Reference` |
 | Branches, relays, capacity, TTL, and materialized state | `Relay` |
 | Resources, uploads, mounts, and TLS files | `Resources` |
-| Syslog wire schema, codec fields, UDP/TCP/TLS framing, per-connection versus total buffer bounds, clients, sources, and emitters | `Common` → `Syslog`, and `Connector Capabilities` |
+| Syslog wire schema, codec fields, UDP/TCP/TLS framing and frame limits, buffer bounds, per-direction client keys, listener quiesce and collector delivery | `Common` → `Syslog`, then `Ingestors` → `Syslog`, `Emitters` → `Syslog` and `Connector Capabilities` |
 | Ingestor transports, delivery modes, headers, and routes | `Ingestors` |
 | HTTP polling requests and client secrets, responses, failed polls, the response bound, and the `HTTP CLIENT` keys, redirects and proxy both directions share | `Ingestors` → `HTTP REQUEST`, then `Emitters` → `HTTP client transport` |
 | Client, ingestor and emitter heads, their connector/entity choice, and kind-preserving ALTER | `Plexus Overview` → `Statement catalog`, then `Connector Capabilities` and the entity's manual section |
@@ -42,6 +47,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Processor and emitter input attachment, its body-clause position and default | `Runtime Nodes` → `Shared input and branch contracts`, and `Emitters` → `Statement heads and external names` |
 | Timed generation from materialized state | `Plexus Overview` and `Examples` |
 | Emitter transports, publishing modes, confirmation windows/timeouts, retry pacing, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
+| Emitter batching legality, compatible membership, encoded limits, native containers, retained retries and measured sizing | `Emitters` → `Batching`, then [Emitter Batching](../../../../docs/src/emitter-batching.md) and `Metrics And Observability` → `Emitter payload preparation` |
 | Emitter envelope clauses and `PROPERTIES`: timestamps, flags, delays, reply targets and message identities a transport carries beside each payload | `Emitters` → `Envelope clauses`, then `Connector Capabilities` |
 | MongoDB collection names and the lookup before each write, BSON field-name admission, native widths/date precision, conflict filters and upserts, write-concern outcomes, client URL configuration, the client database, paired TLS identity files, pool waits and driver deadlines | `Emitters` → `MongoDB`, `Database Client Connection Pools`, then `Connector Capabilities` |
 | MySQL table path parts, exact value bindings, duplicate-key actions, placeholder and packet limits, operation deadlines, TLS verification and identity file formats, the declared checkout budget, connection lifetimes and maintained pool minimums | `Emitters` → `MySQL`, `Database Client Connection Pools`, then `Connector Capabilities` → `MYSQL client` |
@@ -250,13 +256,15 @@ current connection, retry and deadline limits.
   unfolds into several messages is decoded, acknowledged, and redelivered as a whole.
 - Every codec using the SYSLOG wire schema uses a `SYSLOG CODEC` head and only the exact fixed fields
   documented in `Common` → `Syslog`; keep the format separate from the `SYSLOG CLIENT` transport,
-  use only `MODE NO ACK` on a `SYSLOG LISTENER` ingestor and `NO ACK` on a syslog emitter,
+  use only `MODE NO ACK` on a `SYSLOG LISTENER` ingestor and a `SYSLOG COLLECTOR` emitter,
   configure TLS identity for the client direction that consumes it, and set a key only one side
   reads, such as `max_message_size`, `idle_timeout_ms`, `tls_client_ca_file`, `timeout_ms` or
   `tls_ca_file`, only on a client that side uses, because the statement that binds a client refuses
   the other side's keys. A listener's `addr` is a literal IP address and port; the SYSLOG client
   reference in `Connector Capabilities` names those keys. Read `Common` → `Syslog` →
   `Ingestor` for transport metadata and when a TLS connection exposes a verified client subject.
+  Check its `Quiesce` section before promising retention and its `Emitter` section before sizing
+  the complete codec payload or interpreting a local write as delivery.
 - Every relay declares a schema and explicit branch selection. Its `CAPACITY` is the cluster-wide
   owner-buffer bound, once per partition when its branch declares `PARTITIONS <n>`, not a
   per-branch or per-consumer bound; nonowner producer and remote consumer nodes each have one
