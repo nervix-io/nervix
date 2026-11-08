@@ -19,7 +19,7 @@ use super::{
     ChoiceControl, CreateSignals, RequestSender,
     choice_group::ChoiceGroup,
     event_target_checked, event_target_textarea_value, event_target_value,
-    processor_draft::{JunctionBranchDraft, ProcessorFamily},
+    processor_draft::{NodeBranchDraft, ProcessorFamily},
     processor_editor::indices,
 };
 
@@ -39,15 +39,15 @@ pub(super) fn ProcessorInputEditor(
                 <fieldset class="create-field create-processor-branching">
                     <legend>"Junction branch"</legend>
                     <button type="button" data-branch="unbranched"
-                        class:active=move || draft.get().branching == JunctionBranchDraft::Unbranched
+                        class:active=move || draft.get().branching == NodeBranchDraft::Unbranched
                         disabled=pending
                         on:click=move |_| { draft.update(|state| state.choose_unbranched()); signals.edit(); }>"UNBRANCHED"</button>
                     <button type="button" data-branch="named"
-                        class:active=move || matches!(draft.get().branching, JunctionBranchDraft::Branched(_))
+                        class:active=move || matches!(draft.get().branching, NodeBranchDraft::Branched(_))
                         disabled=pending
                         on:click=move |_| { draft.update(|state| state.choose_branched()); signals.edit(); }>"Named branch"</button>
                 </fieldset>
-                <Show when=move || matches!(draft.get().branching, JunctionBranchDraft::Branched(_)) fallback=|| ()>
+                <Show when=move || matches!(draft.get().branching, NodeBranchDraft::Branched(_)) fallback=|| ()>
                     <ChoiceGroup class_name="create-processor-branch" label="Junction branch"
                         control=ChoiceControl::ProcessorBranch signals=signals request_tx=request_tx
                         session_generation=session_generation show_detail=true />

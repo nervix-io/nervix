@@ -2155,7 +2155,7 @@ fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceCon
             if kind == CreateKind::Junction
                 && matches!(
                     draft.branching,
-                    processor_draft::JunctionBranchDraft::Branched(_)
+                    processor_draft::NodeBranchDraft::Branched(_)
                 )
             {
                 controls.push(ChoiceControl::ProcessorBranch);

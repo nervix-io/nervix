@@ -61,14 +61,14 @@ impl InputDraft {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(super) enum JunctionBranchDraft {
+pub(super) enum NodeBranchDraft {
     #[default]
     Unselected,
     Unbranched,
     Branched(Option<SelectedReference<BranchName>>),
 }
 
-impl JunctionBranchDraft {
+impl NodeBranchDraft {
     pub(super) fn choose_unbranched(&mut self) {
         *self = Self::Unbranched;
     }
@@ -217,7 +217,7 @@ pub(super) struct ProcessorDraft {
     pub(super) active_input: usize,
     pub(super) collect: Option<InputCollectPolicy>,
     pub(super) filter: String,
-    pub(super) branching: JunctionBranchDraft,
+    pub(super) branching: NodeBranchDraft,
     pub(super) state: Vec<StateDependencyDraft>,
     pub(super) active_state: usize,
     pub(super) routes: Vec<IngestRouteDraft>,
@@ -235,7 +235,7 @@ impl ProcessorDraft {
             active_input: 0,
             collect: None,
             filter: String::new(),
-            branching: JunctionBranchDraft::Unselected,
+            branching: NodeBranchDraft::Unselected,
             state: Vec::new(),
             active_state: 0,
             routes: vec![IngestRouteDraft::default()],
@@ -287,14 +287,14 @@ impl ProcessorDraft {
     }
 
     pub(super) fn choose_unbranched(&mut self) {
-        if self.branching != JunctionBranchDraft::Unbranched {
+        if self.branching != NodeBranchDraft::Unbranched {
             self.branching.choose_unbranched();
             self.invalidate_relays();
         }
     }
 
     pub(super) fn choose_branched(&mut self) {
-        if !matches!(self.branching, JunctionBranchDraft::Branched(_)) {
+        if !matches!(self.branching, NodeBranchDraft::Branched(_)) {
             self.branching.choose_branched();
             self.invalidate_relays();
         }

@@ -19,7 +19,7 @@ use nervix_models::{ModelKind, NodeRef, RelayName};
 use super::{
     ChoiceControl, ChoiceQuery, CreateSignals,
     ingestor_route_draft::RouteBranchDraft,
-    processor_draft::{JunctionBranchDraft, ProcessorFamily},
+    processor_draft::{NodeBranchDraft, ProcessorFamily},
 };
 
 impl CreateSignals {
@@ -89,14 +89,14 @@ impl CreateSignals {
                         "Select a domain before choosing an input relay",
                     ),
                     ProcessorFamily::Junction => match &draft.branching {
-                        JunctionBranchDraft::Unselected => {
+                        NodeBranchDraft::Unselected => {
                             Err("Choose the junction branch before its input relays")
                         }
-                        JunctionBranchDraft::Unbranched => self.domain_question(
+                        NodeBranchDraft::Unbranched => self.domain_question(
                             ChoiceTarget::IngestUnbranchedRelay,
                             "Select a domain before choosing an input relay",
                         ),
-                        JunctionBranchDraft::Branched(_) => {
+                        NodeBranchDraft::Branched(_) => {
                             let Some(branch) = draft.branching.current_branch() else {
                                 return Err(
                                     "Choose the named junction branch before its input relays"
