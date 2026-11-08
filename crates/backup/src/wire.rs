@@ -115,6 +115,7 @@ pub(crate) struct ManifestWire {
     pub(crate) producer_version: String,
     pub(crate) language_version: String,
     pub(crate) cluster_id: String,
+    pub(crate) cluster_uid: [u8; 16],
     pub(crate) captured_at_unix_nanos: i64,
     pub(crate) scope: ScopeWire,
     pub(crate) resources: ResourcesWire,

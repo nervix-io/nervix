@@ -714,6 +714,7 @@ mod tests {
                 producer_version: "0.1.0".to_string(),
                 language_version: "0.1.0".to_string(),
                 cluster_id: "source".to_string(),
+                cluster_uid: uuid::Builder::from_random_bytes([0x27; 16]).into_uuid(),
                 captured_at: Timestamp::from_unix_nanos(10),
                 scope,
                 resources: BackupResources::Included,

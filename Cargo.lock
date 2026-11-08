@@ -6779,6 +6779,7 @@ dependencies = [
  "strum 0.26.3",
  "tar",
  "thiserror 2.0.21",
+ "uuid",
 ]
 
 [[package]]
@@ -7666,9 +7667,11 @@ dependencies = [
  "imbl",
  "meticulous",
  "nervix-arbitrary",
+ "nervix-crypto",
  "nervix-dns",
  "nervix-execution",
  "nervix-interconnect",
+ "nervix-licensing-protocol",
  "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
@@ -7677,6 +7680,7 @@ dependencies = [
  "rcgen",
  "rkyv",
  "serde",
+ "serde_json",
  "sorted-vec",
  "storekey",
  "strum 0.26.3",
@@ -7685,6 +7689,8 @@ dependencies = [
  "tokio",
  "tracing",
  "ubyte",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]

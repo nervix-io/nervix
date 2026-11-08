@@ -512,8 +512,8 @@ the bounded storage executor, but consensus has its own single ordered worker.
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_kind_key_logs`, `raft_kind_key_meta`, `raft_kind_key_state`, and
-`raft_kind_key_snapshots`. Opening it validates the complete keyspace namespace before reading
+`raft_cluster_identity_logs`, `raft_cluster_identity_meta`, `raft_cluster_identity_state`, and
+`raft_cluster_identity_snapshots`. Opening it validates the complete keyspace namespace before reading
 any records. This namespace identifies the current Model shape, including the separate JSON
 and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec encoding, a Pulsar
 subscription's required type, an owned Pulsar subscription's required start position, a Kafka
@@ -529,8 +529,8 @@ resolved branch declaration of the committed schedule carries. It identifies
 the current statement shape as well, which the statements a transaction keeps are stored in:
 `ALTER BRANCH` among those statements, and an `ALTER INGESTOR` or `ALTER EMITTER` operation that
 changes one part of its entity's body, an envelope clause or the properties, or one part of a
-construction where it stands. Its state metadata requires the current `ClusterState` encoding, 14,
-including committed cluster parameters, the durable restore installation gate and the unit-keyed
+construction where it stands. Its state metadata requires the current `ClusterState` encoding, 15,
+including the cluster identity reference, committed cluster parameters, the durable restore installation gate and the unit-keyed
 committed schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,
 typed ingestor instancing, exact-unit placement-group members
@@ -712,6 +712,34 @@ cross that boundary. The current state encoding requires these records and rejec
 whose encoding does not match, requiring recreation under the alpha persistence contract. The current encoding also requires a restore's explicit lifecycle policy and its
 installed-state effect's clock. RESUME changes the domain to running and removes its complete-set
 installation gate in that single applied effect; it preserves the archived generation and mapping.
+
+## Permanent Cluster Identity
+
+The applied state owns one `ClusterIdentityRecord`: a version-4 `cluster_uid`, one leader-sampled
+creation timestamp, a nonzero key generation, the current key, and optional retired and pending
+keys with their lifecycle timestamps. Every key holds its shared protocol `kid`, public P-256 JWK
+and private PKCS#8 DER. Its private allocation clears on drop and diagnostics show only public
+identity fields. The data directory remains sensitive; this record adds no encryption at rest.
+
+The local leader generates a candidate through `nervix-crypto` on the bounded control executor and
+proposes `InstallClusterIdentity` before initial parameter publication. The first committed
+candidate wins. Later proposals leave the complete installed record and graph revision unchanged;
+their unused candidates are discarded. Ordinary observations expose only the public projection.
+The leader coordinator obtains a separate signing-only handle and owns that handle's leadership
+lifetime.
+
+The singleton lives at state key `K`. Metadata carries its expected UUID, and both are written in
+the same durable batch. Only an absent reference together with an absent record denotes an
+uninitialized cluster. A missing or disagreeing record fails as invalid consensus record storage;
+it cannot trigger generation of a replacement identity. Recovery validates the UUID and re-derives
+each key's public JWK and RFC 7638 `kid` from its private key before publishing state. Normal open
+and snapshot installation use this same validation. Snapshots include the complete singleton, so
+restart, leader transfer and membership changes preserve its identity and signing key.
+
+Backup archives carry the source UUID as display metadata. They carry no private key or licensing
+state, and restore retains the target cluster's identity. Rebuilding from an archive is a clone;
+recovering a licensed installation requires an administrative transfer to the rebuilt cluster.
+[Backup And Restore](backup-and-restore.md#what-a-restore-recreates) owns that archive contract.
 
 ## Cluster Parameter Publication
 

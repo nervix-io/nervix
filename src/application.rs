@@ -161,6 +161,7 @@ mod client_description;
 mod client_producers;
 mod client_traffic;
 mod cluster_description;
+mod cluster_identity;
 mod cluster_parameters;
 mod cluster_status;
 mod command_execution;
@@ -885,6 +886,8 @@ impl Application {
         let cluster_for_membership_reconcile = cluster.clone();
         let administrator_for_membership_reconcile = consensus.administrator();
         let proposer_for_parameter_seeding = consensus.proposer();
+        #[cfg(feature = "testing")]
+        let fault_for_identity_seeding = fault_injection.clone();
         let membership_reconcile_shutdown = shutdown.clone();
         let interconnect_tls_transport = interconnect.clone();
         let interconnect_tls_shutdown = shutdown.clone();
@@ -955,7 +958,15 @@ impl Application {
                         }
                     }
                 }
+                if let Err(error) = cluster_identity::seed(
+                    &proposer_for_parameter_seeding,
+                    #[cfg(feature = "testing")]
+                    &fault_for_identity_seeding,
+                ).await {
+                    warn!(error = %format_args!("{error:#}"), "failed to seed cluster identity");
+                }
                 if allow_bootstrap
+                    && proposer_for_parameter_seeding.cluster_identity().is_some()
                     && proposer_for_parameter_seeding
                         .cluster_parameters()
                         .is_none()

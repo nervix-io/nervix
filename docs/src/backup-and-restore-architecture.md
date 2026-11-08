@@ -74,6 +74,13 @@ window rows travel as Arrow IPC under the user's own schemas beside an rkyv desc
 JSON in an archive. [Archive Format](./backup-and-restore.md#archive-format) lists every section and
 record.
 
+The manifest records the source cluster's configured `cluster_id` and permanent `cluster_uid` for
+display. The UID is a version-4 UUID in manifest record version `3`. The archive carries no cluster
+private key, identity record or licensing state. A restore is a clone: it retains the target's own
+identity, including when the source cluster still runs. Recovery of a licensed installation
+requires an administrative transfer to the rebuilt cluster. Consensus snapshots preserve identity
+independently of this archive format.
+
 ### Records Mirror The Contract
 
 Archive records embed vocabulary types, such as names, timestamps, typed scalar values, branch keys

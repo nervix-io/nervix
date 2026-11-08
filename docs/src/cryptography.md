@@ -325,6 +325,15 @@ error beneath its context and disables generic JWT time/audience policy; callers
 own document validation. The protocol's `jose-jws`/`jose-b64` edges are format-only and enable no
 cryptographic backend.
 
+The consensus cluster identity stores its private DER in an owner that zeroizes on drop, alongside
+the shared protocol's `PublicKey` and `KeyId`. Recovery re-derives both public values from each
+private key. Observers receive a public projection. A leader coordinator receives `ClusterSigner`,
+which wraps the existing `DocumentSigner`, exposes signing without key export, and prints only its
+`kid` in `Debug`. The coordinator owns its leadership lifetime and supplies document limits and a
+working-set reservation; signing runs on the bounded control executor with cancellation checks.
+The maintained signer clears its owned private material. Raft persistence and replication carry
+the identity; public backup archives carry only its source UUID as display metadata.
+
 ## What The FIPS Migration Will Refuse
 
 The migration enables the FIPS module underneath the boundary: `aws-lc-rs` with its FIPS feature on

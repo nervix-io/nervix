@@ -97,6 +97,7 @@ use tracing::{debug, error, info, warn};
 mod append_submission_fault;
 #[cfg(test)]
 mod archive_count_tests;
+mod cluster_identity;
 mod cluster_parameters;
 mod command_execution;
 #[cfg(any(test, feature = "testing"))]
@@ -104,6 +105,9 @@ pub use append_submission_fault::AppendSubmissionFailure;
 use append_submission_fault::AppendSubmissionFault;
 #[cfg(feature = "testing")]
 use append_submission_fault::AppendSubmissionFaults;
+pub use cluster_identity::{
+    ClusterIdentity, ClusterIdentityError, ClusterIdentityRecord, ClusterSigner,
+};
 pub use cluster_parameters::ClusterParameterPlanningInputs;
 mod connectivity_fault;
 mod domain_mutation;
@@ -402,6 +406,9 @@ pub struct TransactionControlSnapshot {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum ConsensusCommand {
+    InstallClusterIdentity {
+        identity: Box<ClusterIdentityRecord>,
+    },
     SeedClusterParameters {
         values: ClusterParameterValues,
     },
@@ -697,6 +704,7 @@ pub struct AppliedLogPosition {
 impl std::fmt::Display for ConsensusCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InstallClusterIdentity { .. } => f.write_str("install-cluster-identity"),
             Self::SeedClusterParameters { .. } => f.write_str("seed-cluster-parameters"),
             Self::AlterClusterParameters { reference, .. } => {
                 write!(f, "alter-cluster-parameters:{reference}")
@@ -1459,6 +1467,7 @@ impl ReportedAdmissionRefusals {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct StateMachineData {
+    cluster_identity: Option<Arc<ClusterIdentityRecord>>,
     parameters: Option<ClusterParameterRecord>,
     last_applied_log_id: Option<LogIdOf>,
     // Independently retained revisions share unchanged membership.
@@ -1860,6 +1869,8 @@ enum SnapshotTransferError {
 
 #[derive(Debug, Error)]
 pub enum ConsensusError {
+    #[error("cluster identity operation failed")]
+    ClusterIdentity,
     #[error("consensus storage failed")]
     Storage,
     #[error("consensus storage failed")]
@@ -5691,6 +5702,9 @@ fn apply_consensus_command_at(
 ) -> AppliedConsensusCommand {
     let mut changes = StateMachineChanges::default();
     match command {
+        ConsensusCommand::InstallClusterIdentity { identity } => {
+            return cluster_identity::install(state, identity);
+        }
         ConsensusCommand::SeedClusterParameters { values } => {
             return cluster_parameters::seed(state, *values);
         }

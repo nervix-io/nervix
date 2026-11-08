@@ -74,6 +74,14 @@ driver TLS options from a complete split-file identity awaiting preparation; a p
 is a configuration error. Preparation returns native options together with their private combined
 PEM guard. One shared client owner retains both driver and guard until its last handle ends.
 
+The consensus identity record validates a version-4 UUID and nonzero key generation, and derives
+all current, retired and pending public keys and key IDs from their actual private keys at each
+read boundary. Its secret-clearing DER owner never enters the public observer projection.
+Metadata's optional UUID is a required consistency reference to the optional singleton: only both
+absent denotes an uninitialized cluster. A missing or disagreeing record fails recovery. The
+[consensus identity contract](consensus-storage-and-replication.md#permanent-cluster-identity)
+owns installation and preservation.
+
 Nervix represents absence and distinct semantic states in its types. A zero, empty string,
 empty collection, maximum integer, or all-zero digest is a value in its own right; it does not
 stand for a missing value or a different state. The owner of each state decides when a value is
@@ -348,8 +356,8 @@ service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of s
 emitter writes beside its publishing mode, its retained-publication flag and MQTT 5 property
 mappings, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a `PATTERN`,
 that header state, and inferencer state bindings with their initial expressions.
-Consensus's `raft_kind_key_` keyspaces and current `ClusterState`
-metadata encoding, 14, identify its stored shapes, including the partition count of every resolved branch
+Consensus's `raft_cluster_identity_` keyspaces and current `ClusterState`
+metadata encoding, 15, identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations. The runtime state store's
 `ranked-intake-unit-checkpoint-segments` format identifies the checkpoints it keeps, including the

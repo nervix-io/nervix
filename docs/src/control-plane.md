@@ -898,6 +898,16 @@ every node synchronizes its registry cache from the committed schedule across le
 
 What it does not do is provide transactional semantics for the actual records flowing through the graph. Message batches and ACK state are data-plane hot-path state and are never persisted by the control plane.
 
+## Cluster Identity Bootstrap
+
+The membership loop asks the local leader to install a permanent cluster identity whenever applied
+state has none. It samples creation time once, submits a generated candidate, and waits for the
+commit before seeding initial cluster parameters. Generation or executor admission failures remain
+retryable. A later leader can finish an interrupted bootstrap without replacing an installed
+identity. First-commit-wins application needs no graph notification or new coordination protocol.
+[Consensus Storage](consensus-storage-and-replication.md#permanent-cluster-identity) owns persistence
+and recovery; [Node Settings](node-settings.md#permanent-cluster-identity) owns public inspection.
+
 ## Cluster Policy Administration
 
 `ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;`
