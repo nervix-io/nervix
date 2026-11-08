@@ -492,53 +492,116 @@ impl Suggestion {
 }
 
 pub(crate) fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
-    let cancel = crate::class(ruby, module, "Cancel")?;
-    cancel.define_singleton_method("new", function!(Cancel::new, -1))?;
-    cancel.define_method("trigger", method!(Cancel::trigger, 0))?;
-    let execution = crate::class(ruby, module, "Execution")?;
-    execution.define_method("reference", method!(Execution::reference, 0))?;
-    let session = crate::class(ruby, module, "Session")?;
-    session.define_singleton_method("connect", function!(Session::connect, -1))?;
-    session.define_method("close", method!(Session::close, 0))?;
-    session.define_method("prepare", method!(Session::prepare, -1))?;
-    session.define_method("execute", method!(Session::execute, -1))?;
-    session.define_method("next_event", method!(Session::next_event, -1))?;
-    session.define_method("next_clock_event", method!(Session::next_clock_event, -1))?;
-    session.define_method("domain_clock", method!(Session::domain_clock, 1))?;
-    session.define_method("suggest", method!(Session::suggest, -1))?;
-    let outcome = crate::class(ruby, module, "Outcome")?;
-    outcome.define_method("disposition", method!(Outcome::disposition, 0))?;
-    outcome.define_method("message", method!(Outcome::message, 0))?;
-    outcome.define_method(
-        "execution_reference",
-        method!(Outcome::execution_reference, 0),
-    )?;
-    outcome.define_method("upload_failure", method!(Outcome::upload_failure, 0))?;
-    outcome.define_method("diagnostics", method!(Outcome::diagnostics, 0))?;
-    outcome.define_method("subscription", method!(Outcome::subscription, 0))?;
-    outcome.define_method("schema", method!(Outcome::schema, 0))?;
-    outcome.define_method("backup", method!(Outcome::backup, 0))?;
-    outcome.define_method("restore", method!(Outcome::restore, 0))?;
-    let diagnostic = crate::class(ruby, module, "Diagnostic")?;
-    diagnostic.define_method("message", method!(Diagnostic::message, 0))?;
-    diagnostic.define_method("span", method!(Diagnostic::span, 0))?;
-    let backup = crate::class(ruby, module, "Backup")?;
-    backup.define_method("total_bytes", method!(Backup::total_bytes, 0))?;
-    backup.define_method("digest", method!(Backup::digest, 0))?;
-    let restore = crate::class(ruby, module, "Restore")?;
-    restore.define_method("dry_run", method!(Restore::dry_run, 0))?;
-    restore.define_method("domains", method!(Restore::domains, 0))?;
-    restore.define_method("resource_versions", method!(Restore::resource_versions, 0))?;
-    restore.define_method("models", method!(Restore::models, 0))?;
-    restore.define_method("failed", method!(Restore::failed, 0))?;
-    let suggestions = crate::class(ruby, module, "Suggestions")?;
-    suggestions.define_method("status", method!(Suggestions::status, 0))?;
-    suggestions.define_method("suggestions", method!(Suggestions::suggestions, 0))?;
-    suggestions.define_method("continuation", method!(Suggestions::continuation, 0))?;
-    let suggestion = crate::class(ruby, module, "Suggestion")?;
-    suggestion.define_method("value", method!(Suggestion::value, 0))?;
-    suggestion.define_method("kind", method!(Suggestion::kind, 0))?;
-    suggestion.define_method("span", method!(Suggestion::span, 0))?;
-    suggestion.define_method("replacement", method!(Suggestion::replacement, 0))?;
+    Cancel::register(ruby, module)?;
+    Execution::register(ruby, module)?;
+    Session::register(ruby, module)?;
+    Outcome::register(ruby, module)?;
+    Diagnostic::register(ruby, module)?;
+    Backup::register(ruby, module)?;
+    Restore::register(ruby, module)?;
+    Suggestions::register(ruby, module)?;
+    Suggestion::register(ruby, module)?;
     Ok(())
+}
+
+impl Cancel {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let cancel = crate::class(ruby, module, "Cancel")?;
+        cancel.define_singleton_method("new", function!(Cancel::new, -1))?;
+        cancel.define_method("trigger", method!(Cancel::trigger, 0))?;
+        Ok(())
+    }
+}
+
+impl Execution {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let execution = crate::class(ruby, module, "Execution")?;
+        execution.define_method("reference", method!(Execution::reference, 0))?;
+        Ok(())
+    }
+}
+
+impl Session {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let session = crate::class(ruby, module, "Session")?;
+        session.define_singleton_method("connect", function!(Session::connect, -1))?;
+        session.define_method("close", method!(Session::close, 0))?;
+        session.define_method("prepare", method!(Session::prepare, -1))?;
+        session.define_method("execute", method!(Session::execute, -1))?;
+        session.define_method("next_event", method!(Session::next_event, -1))?;
+        session.define_method("next_clock_event", method!(Session::next_clock_event, -1))?;
+        session.define_method("domain_clock", method!(Session::domain_clock, 1))?;
+        session.define_method("suggest", method!(Session::suggest, -1))?;
+        Ok(())
+    }
+}
+
+impl Outcome {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let outcome = crate::class(ruby, module, "Outcome")?;
+        outcome.define_method("disposition", method!(Outcome::disposition, 0))?;
+        outcome.define_method("message", method!(Outcome::message, 0))?;
+        outcome.define_method(
+            "execution_reference",
+            method!(Outcome::execution_reference, 0),
+        )?;
+        outcome.define_method("upload_failure", method!(Outcome::upload_failure, 0))?;
+        outcome.define_method("diagnostics", method!(Outcome::diagnostics, 0))?;
+        outcome.define_method("subscription", method!(Outcome::subscription, 0))?;
+        outcome.define_method("schema", method!(Outcome::schema, 0))?;
+        outcome.define_method("backup", method!(Outcome::backup, 0))?;
+        outcome.define_method("restore", method!(Outcome::restore, 0))?;
+        Ok(())
+    }
+}
+
+impl Diagnostic {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let diagnostic = crate::class(ruby, module, "Diagnostic")?;
+        diagnostic.define_method("message", method!(Diagnostic::message, 0))?;
+        diagnostic.define_method("span", method!(Diagnostic::span, 0))?;
+        Ok(())
+    }
+}
+
+impl Backup {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let backup = crate::class(ruby, module, "Backup")?;
+        backup.define_method("total_bytes", method!(Backup::total_bytes, 0))?;
+        backup.define_method("digest", method!(Backup::digest, 0))?;
+        Ok(())
+    }
+}
+
+impl Restore {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let restore = crate::class(ruby, module, "Restore")?;
+        restore.define_method("dry_run", method!(Restore::dry_run, 0))?;
+        restore.define_method("domains", method!(Restore::domains, 0))?;
+        restore.define_method("resource_versions", method!(Restore::resource_versions, 0))?;
+        restore.define_method("models", method!(Restore::models, 0))?;
+        restore.define_method("failed", method!(Restore::failed, 0))?;
+        Ok(())
+    }
+}
+
+impl Suggestions {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let suggestions = crate::class(ruby, module, "Suggestions")?;
+        suggestions.define_method("status", method!(Suggestions::status, 0))?;
+        suggestions.define_method("suggestions", method!(Suggestions::suggestions, 0))?;
+        suggestions.define_method("continuation", method!(Suggestions::continuation, 0))?;
+        Ok(())
+    }
+}
+
+impl Suggestion {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let suggestion = crate::class(ruby, module, "Suggestion")?;
+        suggestion.define_method("value", method!(Suggestion::value, 0))?;
+        suggestion.define_method("kind", method!(Suggestion::kind, 0))?;
+        suggestion.define_method("span", method!(Suggestion::span, 0))?;
+        suggestion.define_method("replacement", method!(Suggestion::replacement, 0))?;
+        Ok(())
+    }
 }

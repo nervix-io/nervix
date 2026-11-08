@@ -458,75 +458,131 @@ pub(crate) fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     let session: RClass = module.const_get("Session")?;
     session.define_method("open_ingestor", method!(Session::open_ingestor, -1))?;
     session.define_method("subscribe_emitter", method!(Session::subscribe_emitter, -1))?;
-    let grant = crate::class(ruby, module, "Grant")?;
-    grant.define_method("batches", method!(Grant::batches, 0))?;
-    grant.define_method("bytes", method!(Grant::bytes, 0))?;
-    grant.define_method("max_batch_rows", method!(Grant::max_batch_rows, 0))?;
-    grant.define_method("max_batch_bytes", method!(Grant::max_batch_bytes, 0))?;
-    let policy = crate::class(ruby, module, "Policy")?;
-    policy.define_method("window", method!(Policy::window, 0))?;
-    policy.define_method("outstanding", method!(Policy::outstanding, 0))?;
-    policy.define_method("ack_timeout_nanos", method!(Policy::ack_timeout_nanos, 0))?;
-    policy.define_method(
-        "retry_backoff_nanos",
-        method!(Policy::retry_backoff_nanos, 0),
-    )?;
-    policy.define_method(
-        "retry_max_backoff_nanos",
-        method!(Policy::retry_max_backoff_nanos, 0),
-    )?;
-    let reopen = crate::class(ruby, module, "Reopen")?;
-    reopen.define_method("reason", method!(Reopen::reason, 0))?;
-    reopen.define_method("refusal", method!(Reopen::refusal, 0))?;
-    let pending = crate::class(ruby, module, "PendingSubmission")?;
-    pending.define_method("id", method!(PendingSubmission::id, 0))?;
-    pending.define_method("resolved", method!(PendingSubmission::resolved, 0))?;
-    let outcome = crate::class(ruby, module, "SubmissionOutcome")?;
-    outcome.define_method("result", method!(SubmissionOutcome::result, 0))?;
-    outcome.define_method("message", method!(SubmissionOutcome::message, 0))?;
-    outcome.define_method("refusal", method!(SubmissionOutcome::refusal, 0))?;
-    outcome.define_method("defect", method!(SubmissionOutcome::defect, 0))?;
-    outcome.define_method("failure", method!(SubmissionOutcome::failure, 0))?;
-    outcome.define_method("uncertainty", method!(SubmissionOutcome::uncertainty, 0))?;
-    let producer = crate::class(ruby, module, "Producer")?;
-    producer.define_method("schema", method!(Producer::schema, 0))?;
-    producer.define_method("state", method!(Producer::state, 0))?;
-    producer.define_method("admission", method!(Producer::admission, 0))?;
-    producer.define_method("generation", method!(Producer::generation, 0))?;
-    producer.define_method("contract", method!(Producer::contract, 0))?;
-    producer.define_method("grant", method!(Producer::grant, 0))?;
-    producer.define_method("policy", method!(Producer::policy, 0))?;
-    producer.define_method("reopen", method!(Producer::reopen, 0))?;
-    producer.define_method("submit", method!(Producer::submit, -1))?;
-    producer.define_method("submit_ipc", method!(Producer::submit_ipc, -1))?;
-    producer.define_method("rejoin", method!(Producer::rejoin, -1))?;
-    producer.define_method("release", method!(Producer::release, 1))?;
-    producer.define_method("pending", method!(Producer::pending, 0))?;
-    producer.define_method("close", method!(Producer::close, -1))?;
-    let consumer = crate::class(ruby, module, "Consumer")?;
-    consumer.define_method("schema", method!(Consumer::schema, 0))?;
-    consumer.define_method("state", method!(Consumer::state, 0))?;
-    consumer.define_method("generation", method!(Consumer::generation, 0))?;
-    consumer.define_method("contract", method!(Consumer::contract, 0))?;
-    consumer.define_method("grant", method!(Consumer::grant, 0))?;
-    consumer.define_method("policy", method!(Consumer::policy, 0))?;
-    consumer.define_method("reopen", method!(Consumer::reopen, 0))?;
-    consumer.define_method("next", method!(Consumer::next, -1))?;
-    consumer.define_method("close", method!(Consumer::close, -1))?;
-    let delivery = crate::class(ruby, module, "Delivery")?;
-    delivery.define_method("identity", method!(Delivery::identity, 0))?;
-    delivery.define_method("reference", method!(Delivery::reference, 0))?;
-    delivery.define_method("source_relay", method!(Delivery::source_relay, 0))?;
-    delivery.define_method(
-        "branch_fingerprint",
-        method!(Delivery::branch_fingerprint, 0),
-    )?;
-    delivery.define_method("members", method!(Delivery::members, 0))?;
-    delivery.define_method("execution_now", method!(Delivery::execution_now, 0))?;
-    delivery.define_method("ipc", method!(Delivery::ipc, 0))?;
-    delivery.define_method("batch", method!(Delivery::batch, 0))?;
-    delivery.define_method("ack", method!(Delivery::ack, -1))?;
-    delivery.define_method("retry", method!(Delivery::retry, -1))?;
-    delivery.define_method("reject", method!(Delivery::reject, -1))?;
+    Grant::register(ruby, module)?;
+    Policy::register(ruby, module)?;
+    Reopen::register(ruby, module)?;
+    PendingSubmission::register(ruby, module)?;
+    SubmissionOutcome::register(ruby, module)?;
+    Producer::register(ruby, module)?;
+    Consumer::register(ruby, module)?;
+    Delivery::register(ruby, module)?;
     Ok(())
+}
+
+impl Grant {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let grant = crate::class(ruby, module, "Grant")?;
+        grant.define_method("batches", method!(Grant::batches, 0))?;
+        grant.define_method("bytes", method!(Grant::bytes, 0))?;
+        grant.define_method("max_batch_rows", method!(Grant::max_batch_rows, 0))?;
+        grant.define_method("max_batch_bytes", method!(Grant::max_batch_bytes, 0))?;
+        Ok(())
+    }
+}
+
+impl Policy {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let policy = crate::class(ruby, module, "Policy")?;
+        policy.define_method("window", method!(Policy::window, 0))?;
+        policy.define_method("outstanding", method!(Policy::outstanding, 0))?;
+        policy.define_method("ack_timeout_nanos", method!(Policy::ack_timeout_nanos, 0))?;
+        policy.define_method(
+            "retry_backoff_nanos",
+            method!(Policy::retry_backoff_nanos, 0),
+        )?;
+        policy.define_method(
+            "retry_max_backoff_nanos",
+            method!(Policy::retry_max_backoff_nanos, 0),
+        )?;
+        Ok(())
+    }
+}
+
+impl Reopen {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let reopen = crate::class(ruby, module, "Reopen")?;
+        reopen.define_method("reason", method!(Reopen::reason, 0))?;
+        reopen.define_method("refusal", method!(Reopen::refusal, 0))?;
+        Ok(())
+    }
+}
+
+impl PendingSubmission {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let pending = crate::class(ruby, module, "PendingSubmission")?;
+        pending.define_method("id", method!(PendingSubmission::id, 0))?;
+        pending.define_method("resolved", method!(PendingSubmission::resolved, 0))?;
+        Ok(())
+    }
+}
+
+impl SubmissionOutcome {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let outcome = crate::class(ruby, module, "SubmissionOutcome")?;
+        outcome.define_method("result", method!(SubmissionOutcome::result, 0))?;
+        outcome.define_method("message", method!(SubmissionOutcome::message, 0))?;
+        outcome.define_method("refusal", method!(SubmissionOutcome::refusal, 0))?;
+        outcome.define_method("defect", method!(SubmissionOutcome::defect, 0))?;
+        outcome.define_method("failure", method!(SubmissionOutcome::failure, 0))?;
+        outcome.define_method("uncertainty", method!(SubmissionOutcome::uncertainty, 0))?;
+        Ok(())
+    }
+}
+
+impl Producer {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let producer = crate::class(ruby, module, "Producer")?;
+        producer.define_method("schema", method!(Producer::schema, 0))?;
+        producer.define_method("state", method!(Producer::state, 0))?;
+        producer.define_method("admission", method!(Producer::admission, 0))?;
+        producer.define_method("generation", method!(Producer::generation, 0))?;
+        producer.define_method("contract", method!(Producer::contract, 0))?;
+        producer.define_method("grant", method!(Producer::grant, 0))?;
+        producer.define_method("policy", method!(Producer::policy, 0))?;
+        producer.define_method("reopen", method!(Producer::reopen, 0))?;
+        producer.define_method("submit", method!(Producer::submit, -1))?;
+        producer.define_method("submit_ipc", method!(Producer::submit_ipc, -1))?;
+        producer.define_method("rejoin", method!(Producer::rejoin, -1))?;
+        producer.define_method("release", method!(Producer::release, 1))?;
+        producer.define_method("pending", method!(Producer::pending, 0))?;
+        producer.define_method("close", method!(Producer::close, -1))?;
+        Ok(())
+    }
+}
+
+impl Consumer {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let consumer = crate::class(ruby, module, "Consumer")?;
+        consumer.define_method("schema", method!(Consumer::schema, 0))?;
+        consumer.define_method("state", method!(Consumer::state, 0))?;
+        consumer.define_method("generation", method!(Consumer::generation, 0))?;
+        consumer.define_method("contract", method!(Consumer::contract, 0))?;
+        consumer.define_method("grant", method!(Consumer::grant, 0))?;
+        consumer.define_method("policy", method!(Consumer::policy, 0))?;
+        consumer.define_method("reopen", method!(Consumer::reopen, 0))?;
+        consumer.define_method("next", method!(Consumer::next, -1))?;
+        consumer.define_method("close", method!(Consumer::close, -1))?;
+        Ok(())
+    }
+}
+
+impl Delivery {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let delivery = crate::class(ruby, module, "Delivery")?;
+        delivery.define_method("identity", method!(Delivery::identity, 0))?;
+        delivery.define_method("reference", method!(Delivery::reference, 0))?;
+        delivery.define_method("source_relay", method!(Delivery::source_relay, 0))?;
+        delivery.define_method(
+            "branch_fingerprint",
+            method!(Delivery::branch_fingerprint, 0),
+        )?;
+        delivery.define_method("members", method!(Delivery::members, 0))?;
+        delivery.define_method("execution_now", method!(Delivery::execution_now, 0))?;
+        delivery.define_method("ipc", method!(Delivery::ipc, 0))?;
+        delivery.define_method("batch", method!(Delivery::batch, 0))?;
+        delivery.define_method("ack", method!(Delivery::ack, -1))?;
+        delivery.define_method("retry", method!(Delivery::retry, -1))?;
+        delivery.define_method("reject", method!(Delivery::reject, -1))?;
+        Ok(())
+    }
 }

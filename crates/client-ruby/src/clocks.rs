@@ -195,46 +195,74 @@ impl DomainClock {
 }
 
 pub(crate) fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
-    let paced = crate::class(ruby, module, "PacedClock")?;
-    paced.define_method("generation", method!(PacedClock::generation, 0))?;
-    paced.define_method("period_nanos", method!(PacedClock::period_nanos, 0))?;
-    paced.define_method("skew_nanos", method!(PacedClock::skew_nanos, 0))?;
-    paced.define_method("origin", method!(PacedClock::origin, 0))?;
-    paced.define_method("anchor", method!(PacedClock::anchor, 0))?;
-    paced.define_method("rate", method!(PacedClock::rate, 0))?;
-    let tick = crate::class(ruby, module, "Tick")?;
-    tick.define_method("generation", method!(Tick::generation, 0))?;
-    tick.define_method("id", method!(Tick::id, 0))?;
-    tick.define_method("boundary", method!(Tick::boundary, 0))?;
-    tick.define_method("authority_utc", method!(Tick::authority_utc, 0))?;
-    tick.define_method("serving_logical", method!(Tick::serving_logical, 0))?;
-    let event = crate::class(ruby, module, "ClockEvent")?;
-    event.define_method("kind", method!(ClockEvent::kind, 0))?;
-    event.define_method("domain", method!(ClockEvent::domain, 0))?;
-    event.define_method("generation", method!(ClockEvent::generation, 0))?;
-    event.define_method("state", method!(ClockEvent::state, 0))?;
-    event.define_method("paced", method!(ClockEvent::paced, 0))?;
-    event.define_method("tick", method!(ClockEvent::tick, 0))?;
-    event.define_method("end_reason", method!(ClockEvent::end_reason, 0))?;
-    event.define_method(
-        "restoration_failure",
-        method!(ClockEvent::restoration_failure, 0),
-    )?;
-    let clock = crate::class(ruby, module, "DomainClock")?;
-    clock.define_method("domain", method!(DomainClock::domain, 0))?;
-    clock.define_method("generation", method!(DomainClock::generation, 0))?;
-    clock.define_method("state", method!(DomainClock::state, 0))?;
-    clock.define_method("paced", method!(DomainClock::paced, 0))?;
-    clock.define_method("tick", method!(DomainClock::tick, 0))?;
-    clock.define_method("logical_time_at", method!(DomainClock::logical_time_at, 1))?;
-    clock.define_method(
-        "wall_duration_until",
-        method!(DomainClock::wall_duration_until, 2),
-    )?;
-    clock.define_method(
-        "admission_window",
-        method!(DomainClock::admission_window, 1),
-    )?;
-    clock.define_method("admits", method!(DomainClock::admits, 2))?;
+    PacedClock::register(ruby, module)?;
+    Tick::register(ruby, module)?;
+    ClockEvent::register(ruby, module)?;
+    DomainClock::register(ruby, module)?;
     Ok(())
+}
+
+impl PacedClock {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let paced = crate::class(ruby, module, "PacedClock")?;
+        paced.define_method("generation", method!(PacedClock::generation, 0))?;
+        paced.define_method("period_nanos", method!(PacedClock::period_nanos, 0))?;
+        paced.define_method("skew_nanos", method!(PacedClock::skew_nanos, 0))?;
+        paced.define_method("origin", method!(PacedClock::origin, 0))?;
+        paced.define_method("anchor", method!(PacedClock::anchor, 0))?;
+        paced.define_method("rate", method!(PacedClock::rate, 0))?;
+        Ok(())
+    }
+}
+
+impl Tick {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let tick = crate::class(ruby, module, "Tick")?;
+        tick.define_method("generation", method!(Tick::generation, 0))?;
+        tick.define_method("id", method!(Tick::id, 0))?;
+        tick.define_method("boundary", method!(Tick::boundary, 0))?;
+        tick.define_method("authority_utc", method!(Tick::authority_utc, 0))?;
+        tick.define_method("serving_logical", method!(Tick::serving_logical, 0))?;
+        Ok(())
+    }
+}
+
+impl ClockEvent {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let event = crate::class(ruby, module, "ClockEvent")?;
+        event.define_method("kind", method!(ClockEvent::kind, 0))?;
+        event.define_method("domain", method!(ClockEvent::domain, 0))?;
+        event.define_method("generation", method!(ClockEvent::generation, 0))?;
+        event.define_method("state", method!(ClockEvent::state, 0))?;
+        event.define_method("paced", method!(ClockEvent::paced, 0))?;
+        event.define_method("tick", method!(ClockEvent::tick, 0))?;
+        event.define_method("end_reason", method!(ClockEvent::end_reason, 0))?;
+        event.define_method(
+            "restoration_failure",
+            method!(ClockEvent::restoration_failure, 0),
+        )?;
+        Ok(())
+    }
+}
+
+impl DomainClock {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let clock = crate::class(ruby, module, "DomainClock")?;
+        clock.define_method("domain", method!(DomainClock::domain, 0))?;
+        clock.define_method("generation", method!(DomainClock::generation, 0))?;
+        clock.define_method("state", method!(DomainClock::state, 0))?;
+        clock.define_method("paced", method!(DomainClock::paced, 0))?;
+        clock.define_method("tick", method!(DomainClock::tick, 0))?;
+        clock.define_method("logical_time_at", method!(DomainClock::logical_time_at, 1))?;
+        clock.define_method(
+            "wall_duration_until",
+            method!(DomainClock::wall_duration_until, 2),
+        )?;
+        clock.define_method(
+            "admission_window",
+            method!(DomainClock::admission_window, 1),
+        )?;
+        clock.define_method("admits", method!(DomainClock::admits, 2))?;
+        Ok(())
+    }
 }
