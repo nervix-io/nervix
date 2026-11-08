@@ -1,3 +1,10 @@
+//! Comparison and presentation of fully identified benchmark run observations.
+//!
+//! Outside the layer order: a benchmark harness.
+//! - **Owns.** Artifact validation, comparisons and human-readable result tables.
+//! - **Depends on.** Benchmark reports, vocabulary identities and filesystem artifacts.
+//! - **Must not know.** Runtime scheduling, connector implementation or graph policy.
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -7,6 +14,7 @@ use std::{
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
+use nervix_models::{ClusterNodeName, Unit};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -715,9 +723,13 @@ impl NervixMetricsReport {
         );
         for target in &self.batch_targets {
             markdown.push_str(&format!(
-                "| {} `{}` | {} | `{}` | {} | ≤{} | ≤{} | ≤{} | {} / {} |\n",
+                "| {} {} | {} | `{}` | {} | ≤{} | ≤{} | ≤{} | {} / {} |\n",
                 escape_markdown(&target.target_kind),
-                escape_code(&target.target),
+                metric_owner_label(
+                    &target.target,
+                    target.unit,
+                    target.physical_node_id.as_ref()
+                ),
                 escape_markdown(&target.direction),
                 escape_code(&target.relay),
                 format_metric_decimal(target.mean_messages_per_batch(), 2),
@@ -734,8 +746,8 @@ impl NervixMetricsReport {
         );
         for relay in &self.relay_buffers {
             markdown.push_str(&format!(
-                "| `{}` | {} | ≤{} | ≤{} | ≤{} | {} |\n",
-                escape_code(&relay.relay),
+                "| {} | {} | ≤{} | ≤{} | ≤{} | {} |\n",
+                metric_owner_label(&relay.relay, relay.unit, relay.physical_node_id.as_ref()),
                 escape_markdown(&relay.direction),
                 format_metric_value(relay.p50),
                 format_metric_value(relay.p90),
@@ -746,6 +758,15 @@ impl NervixMetricsReport {
         markdown.push_str("\n</details>\n");
         markdown
     }
+}
+
+fn metric_owner_label(name: &str, unit: Unit, physical_node: Option<&ClusterNodeName>) -> String {
+    format!(
+        "`{}`{} on `{}`",
+        escape_code(name),
+        unit.label_suffix(),
+        escape_code(physical_node.map_or("-", ClusterNodeName::as_str)),
+    )
 }
 
 impl ImageIdentity {

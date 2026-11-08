@@ -1,3 +1,10 @@
+//! Presentation and integrity of current benchmark artifacts.
+//!
+//! Outside the layer order: a test harness.
+//! - **Owns.** Exact-run comparisons, identity presentation and invalid-artifact assertions.
+//! - **Depends on.** The public benchmark report and comparison API.
+//! - **Must not know.** Product execution, placement or connector internals.
+
 use std::{fs, path::Path};
 
 use nervix_benchmark::{
@@ -123,6 +130,7 @@ domain = "benchmark_run"
 target_kind = "INGESTOR"
 target = "kafka_in_0"
 physical_node_id = "node-1"
+unit = "Single"
 direction = "sent"
 relay = "benchmark_ingested_0"
 messages_total = 36000
@@ -135,6 +143,7 @@ p99 = 2048.0
 domain = "benchmark_run"
 relay = "benchmark_ingested_0"
 physical_node_id = "node-1"
+unit = "Single"
 direction = "concrete"
 observations = 100
 p50 = 1.0
@@ -198,10 +207,13 @@ fn renders_a_deterministic_markdown_comparison_from_exact_run_directories() {
     assert!(markdown.contains("Nervix reached the configured backlog cap"));
     assert!(markdown.contains("<summary>Nervix runtime observations</summary>"));
     assert!(markdown.contains(
-        "| INGESTOR `kafka_in_0` | sent | `benchmark_ingested_0` | 1,000.00 | ≤500 | ≤1,000 | \
-         ≤2,048 | 36,000 / 36 |"
+        "| INGESTOR `kafka_in_0` on `node-1` | sent | `benchmark_ingested_0` | 1,000.00 | ≤500 | \
+         ≤1,000 | ≤2,048 | 36,000 / 36 |"
     ));
-    assert!(markdown.contains("| `benchmark_ingested_0` | concrete | ≤1 | ≤8 | ≤32 | 100 |"));
+    assert!(
+        markdown
+            .contains("| `benchmark_ingested_0` on `node-1` | concrete | ≤1 | ≤8 | ≤32 | 100 |")
+    );
     assert!(markdown.contains(
         "Means use `messages_total / batches_total`; percentiles are upper bounds from the \
          scraped Prometheus histogram buckets."
@@ -209,6 +221,37 @@ fn renders_a_deterministic_markdown_comparison_from_exact_run_directories() {
     assert!(markdown.contains("`ghcr.io/nervix-io/nervix:pr-109`"));
     assert!(markdown.contains("`timberio/vector:0.57.0-debian`"));
     assert_eq!(markdown, comparison.render_markdown());
+}
+
+#[test]
+fn comparison_names_execution_units_and_physical_owners() {
+    let artifacts = tempfile::tempdir().expect("temporary artifacts should be created");
+    let directory = write_run(
+        artifacts.path(),
+        Fixture {
+            implementation: "nervix",
+            image: "nervix:test",
+            input_messages: 36_000,
+            expected_output_records: 36_000,
+            output_records: 36_000,
+            end_to_end_rate: 1_200.0,
+            payload_rate: 0.16,
+            completion_seconds: 0.1,
+            peak_backlog: 512,
+        },
+    );
+    let path = directory.join("nervix-metrics.toml");
+    let mut report =
+        nervix_benchmark::NervixMetricsReport::read(&path).expect("current report should load");
+    report.batch_targets[0].unit =
+        nervix_models::Unit::try_instance(2).expect("fixture instance should be valid");
+    report.relay_buffers[0].unit = nervix_models::Unit::partition(3);
+    report.write(&path).expect("report should persist");
+    let comparison = BenchmarkComparison::from_run_directories(&[directory])
+        .expect("current report should compare");
+    let markdown = comparison.render_markdown();
+    assert!(markdown.contains("`kafka_in_0` instance 2 on `node-1`"));
+    assert!(markdown.contains("`benchmark_ingested_0` partition 3 on `node-1`"));
 }
 
 #[test]

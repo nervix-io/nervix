@@ -515,6 +515,13 @@ benchmark projection to `nervix-metrics.toml`. The comparison reports `messages_
 p90, and p99 bucket upper bounds for every runtime target, the exact mean from `messages_total /
 batches_total`, and `relay_buffer_len` p50, p90, and p99 bucket upper bounds.
 
+Every runtime series carries both `partition` and `instance` labels, using `-` for an absent
+dimension. Reports retain their vocabulary `Unit` identity and physical node; distinct partitions
+or ingestor instances never share counters or histograms. Comparisons display those identities
+beside each target. The report's required `unit` field also retains the identity when written to
+and read from `nervix-metrics.toml`. Invalid indices and a series naming both dimensions are typed
+sample errors, with the scrape line and underlying integer or execution-unit validation cause.
+
 `run-all` writes `benchmark-comparison.md` from the exact run directories produced by that
 invocation; it never selects unrelated runs by timestamp. It attempts every declared workload and
 implementation even when an earlier entry fails, and records every execution in a status table
