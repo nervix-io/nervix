@@ -437,9 +437,17 @@ not submit it again.
 
 The console restores its tabs before it attaches the session's transaction again, because a session
 that holds a transaction refuses subscriptions, so an open transaction does not keep a tab from
-coming back. A tab stays **restoring** until the server opens its subscription again. A restoration
-the server refuses leaves the tab **interrupted** with the reason, and the console tries it again
-every second while no transaction is attached; closing an interrupted tab stops that.
+coming back. A tab stays **restoring** until the server answers. Restoration includes the complete
+schema the tab previously acknowledged. If the domain or relay no longer exists, or the relay's
+schema changed, the refusal turns the tab **ended**, retaining its rows and the reason. The tab
+offers the same **↻** resubscribe action as a subscription the server ended.
+
+Other restoration failures leave the tab **interrupted**. Each attempt reports its typed refusal,
+server diagnostics and next wait in that tab, preserving the REPL's history. Retry waits start at
+one second and double to five seconds while the session holds no transaction. The shared retry
+timer may add up to one second to that minimum wait. Closing the waiting tab stops its retries and
+frees its name immediately. A replacement connection restores desired tabs immediately before
+reattaching a transaction and starts a fresh retry sequence.
 
 When a relay is redefined or removed, the server ends the subscriptions that read it. Such a tab
 turns **ended**: it keeps the rows it showed together with the reason, receives nothing more, and

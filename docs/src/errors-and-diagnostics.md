@@ -169,6 +169,10 @@ as waiting for materialized state or following a new leader, remain distinct fro
 The web console applies the same distinction to structured choice lookups: an absent form
 prerequisite shows a neutral hint, and stale context offers a fresh request. A failed lookup,
 closed session channel, or unreadable reply appears as an alert.
+For relay-tab restoration, the console decides from the typed `SubscriptionRefusal`: a missing
+domain or relay, or a changed relay schema, ends the tab; other failures retain it for a bounded
+backoff. Restoration causes, server diagnostics and retry waits appear only in that tab, preserving
+the operator's REPL history. The [Web Console](client-tools-web-console.md) owns the presentation.
 Client creation names its choice as a connector and presents the composed Plexus
 `<CONNECTOR> CLIENT` head; a missing choice asks the operator to choose a client connector.
 
