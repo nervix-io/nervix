@@ -524,6 +524,7 @@ class InventoryTests(unittest.TestCase):
         }
         for target, version in {
             "benchmark-metrics-report": 1,
+            "ingestor-describe-envelope": 7,
             "plexus-model": 56,
             "plexus-archive-model": 58,
             "plexus-statement": 57,

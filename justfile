@@ -379,6 +379,20 @@ test-ingestor-payload-owners: download-onnxruntime build-web-console
     cargo test --package nervix-server --features testing --lib -- runtime::ingest_metadata::tests:: --skip bolero
     cargo test --package nervix-connector --lib -- ingest_metadata::tests:: --skip bolero
 
+# Read/poll interaction regressions use in-process nodes and native transport fixtures.
+test-ingestor-read-metrics *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/ingestor_read_metrics.feature {{ quote(args) }}
+
+# Exercise retained interaction metrics and the native ingestor owners without client fixtures.
+test-ingestor-interactions filter="runtime::ingestors::connector::" *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-server --features testing --lib {{ quote(filter) }} -- {{ quote(args) }}
+
 # Endpoint inspection/refusal cases use in-process nodes and the native session client.
 test-endpoint-heads *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash

@@ -1270,6 +1270,7 @@ impl Runtime {
             &ingestor.name,
             ingestor.unit,
             dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+            ingestor.declared_input.entity_kind(),
         );
         let control = Arc::new(IngestorQuiesceControl::new(
             ingestor.declared_input.quiesce_mode().clone(),
@@ -2313,6 +2314,9 @@ mod tests {
                 &named("paused_ingestor"),
                 nervix_models::Unit::SINGLE,
                 None,
+                nervix_models::IngestorEntityKind::Http(
+                    nervix_models::HttpIngestorEntity::Endpoint,
+                ),
             );
             let control = Arc::new(IngestorQuiesceControl::new(
                 IngestQuiesceMode::Buffer {
@@ -2498,6 +2502,9 @@ mod tests {
                     &named("paused_ingestor"),
                     nervix_models::Unit::SINGLE,
                     None,
+                    nervix_models::IngestorEntityKind::Http(
+                        nervix_models::HttpIngestorEntity::Endpoint,
+                    ),
                 );
                 let control = Arc::new(IngestorQuiesceControl::new(
                     IngestQuiesceMode::EndpointBuffer {
@@ -2615,6 +2622,9 @@ mod tests {
                     &named("paused_ingestor"),
                     nervix_models::Unit::SINGLE,
                     None,
+                    nervix_models::IngestorEntityKind::Http(
+                        nervix_models::HttpIngestorEntity::Endpoint,
+                    ),
                 );
                 let control = Arc::new(IngestorQuiesceControl::new(
                     IngestQuiesceMode::Buffer {

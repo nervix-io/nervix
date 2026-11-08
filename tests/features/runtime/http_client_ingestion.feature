@@ -76,6 +76,8 @@ Feature: HTTP client ingestion
       domain="{{domain}}"
       ingestor="polled"
       physical_node_id="{{poll_owner}}"
+      connector="HTTP"
+      entity="REQUEST"
       """
 
     Examples:

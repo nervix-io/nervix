@@ -455,10 +455,12 @@ A codec with an `ON INGESTION` transformation [unfolds](schemas-and-codecs.md#un
 every payload on the node's extension workers. When every worker is busy and the class's wait queue
 is full, what happens to a payload depends on whether its sender can present it again:
 
-- An acknowledged delivery mode rejects the batch, and its ingestor delivers it again on its
+- An acknowledged delivery mode counts the refused raw payloads in
+  `nervix_ingestor_unfolding_refused_total`, rejects the batch, and delivers it again on its
   `RETRY POLICY`.
 - An [endpoint ingestor](#http-endpoint-and-websockets-endpoint) answers an HTTP body 503 without
-  `Retry-After` and closes an established WebSocket with 1013, so the sender sends it again.
+  `Retry-After` and closes an established WebSocket with 1013, counts the refused request payload,
+  and lets the sender send it again.
 - A payload that `BUFFER` retained waits for a place when its buffer drains; see
   [Quiesce Modes](#quiesce-modes).
 - A paced ingestor has already moved past its poll, so the poll waits for a place. Waiting delays the
@@ -3762,3 +3764,12 @@ and share its `START AT`: whichever instance takes a partition the group holds n
 starts it there, and a partition that moves to another instance resumes from the group's committed
 offset. Under `OFFSET BY DOMAIN` the domain's start point places every partition, whichever instance
 the schedule assigns it to.
+
+### Inspecting Transport Reads
+
+Read `DESCRIBE INGESTOR`'s `source:` section and the matching Prometheus families to distinguish raw
+transport reads from graph traffic. Kafka reads count returned payloads before the filter runs;
+HTTP REQUEST and PROMETHEUS QUERY polls also report empty answers and elapsed poll duration.
+[Ingestor Source Interactions](metrics-and-observability.md#ingestor-source-interactions) defines
+outcomes, labels, timing and replay accounting. The existing graph edge metrics retain their own
+row and batch meanings.

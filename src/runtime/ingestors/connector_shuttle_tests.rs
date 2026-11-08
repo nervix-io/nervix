@@ -77,6 +77,9 @@ impl ChannelHost {
 
 #[async_trait]
 impl IngestorHostServices for ChannelHost {
+    fn record_read(&self, _outcome: nervix_connector::IngestorReadOutcome) {}
+    fn record_read_payloads(&self, _payloads: usize, _bytes: u64) {}
+
     async fn intake_unacknowledged(
         &mut self,
         messages: Vec<IngestorIntakeMessage<'_>>,
@@ -189,6 +192,8 @@ impl IngestorHostServices for ChannelHost {
 
 #[async_trait]
 impl PacedIngestorHostServices for ChannelHost {
+    fn record_poll(&self, _outcome: nervix_connector::IngestorReadOutcome, _elapsed: Duration) {}
+
     /// The channel double takes in a whole poll at once: the checks drive polls of one message.
     async fn intake_poll(
         &mut self,
@@ -269,7 +274,13 @@ fn engagement_during_dispatch(family: IngestorFamily, cause: IngestorQuiesceCaus
             .assured("the check's domain is an identifier-shaped name");
         let ingestor = IngestorName::try_from("ingestor")
             .assured("the check's ingestor is an identifier-shaped name");
-        let labels = metrics.register_ingestor_quiesce(&domain, &ingestor, Unit::SINGLE, None);
+        let labels = metrics.register_ingestor_quiesce(
+            &domain,
+            &ingestor,
+            Unit::SINGLE,
+            None,
+            nervix_models::IngestorEntityKind::Http(nervix_models::HttpIngestorEntity::Endpoint),
+        );
         let quiesce = Arc::new(IngestorQuiesceControl::new(
             IngestQuiesceMode::Drop,
             metrics,
@@ -629,6 +640,9 @@ struct GraphHost {
 
 #[async_trait]
 impl IngestorHostServices for GraphHost {
+    fn record_read(&self, _outcome: nervix_connector::IngestorReadOutcome) {}
+    fn record_read_payloads(&self, _payloads: usize, _bytes: u64) {}
+
     async fn intake_unacknowledged(
         &mut self,
         _messages: Vec<IngestorIntakeMessage<'_>>,
@@ -839,6 +853,9 @@ struct RefusingGraphHost {
 
 #[async_trait]
 impl IngestorHostServices for RefusingGraphHost {
+    fn record_read(&self, _outcome: nervix_connector::IngestorReadOutcome) {}
+    fn record_read_payloads(&self, _payloads: usize, _bytes: u64) {}
+
     async fn intake_unacknowledged(
         &mut self,
         _messages: Vec<IngestorIntakeMessage<'_>>,
@@ -1073,6 +1090,9 @@ fn instance_unit_handoff() {
                     Unit::try_instance(index)
                         .assured("the fixture index fits the execution-unit range"),
                     None,
+                    nervix_models::IngestorEntityKind::Http(
+                        nervix_models::HttpIngestorEntity::Endpoint,
+                    ),
                 ),
             ))
         };

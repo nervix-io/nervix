@@ -1196,6 +1196,8 @@ Feature: Syslog support
       domain="{{domain}}"
       ingestor="syslog_intake"
       physical_node_id="node-1"
+      connector="SYSLOG"
+      entity="LISTENER"
       """
 
     Examples:

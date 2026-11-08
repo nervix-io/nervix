@@ -64,6 +64,7 @@ pub(crate) struct EndpointIngestBinding {
     /// Counts the header values of the requests and WebSocket upgrades routed to the ingestor that
     /// are not UTF-8, which it does not read.
     pub(super) header_values_dropped: prometheus::IntCounter,
+    pub(super) unfolding_refused: prometheus::IntCounter,
 }
 
 /// The metadata an `HTTP ENDPOINT` ingestor declares, as one admitted request carries it.
@@ -648,6 +649,7 @@ impl Runtime {
                 }
             }
             Err(PayloadDecodeFailure::NotAdmitted(error)) => {
+                binding.unfolding_refused.inc();
                 debug!(
                     domain = binding.domain.as_str(),
                     ingestor = binding.ingestor.as_str(),

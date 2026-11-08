@@ -66,6 +66,7 @@ fn assert_rejected(fixture: &UnfoldingDomain, report: &str, rejections: u64) {
             &fixture.domain,
             &fixture.ingestor,
             nervix_models::Unit::SINGLE,
+            nervix_models::IngestorEntityKind::Http(nervix_models::HttpIngestorEntity::Endpoint),
         )
         .expect("the fixture's ingestor describes itself");
     assert_eq!(described.decode_rejections_total, rejections);

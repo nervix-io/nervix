@@ -744,6 +744,8 @@ Feature: MQTT ingestion
       domain="{{domain}}"
       ingestor="mqtt_notifications"
       physical_node_id="{{mqtt_owner}}"
+      connector="MQTT"
+      entity="TOPIC"
       """
     And within "10s" DESCRIBE INGESTOR "mqtt_notifications" on the leader node contains
       """

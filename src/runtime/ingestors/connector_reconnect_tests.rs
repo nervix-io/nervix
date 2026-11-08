@@ -269,6 +269,9 @@ impl RedeliveryHost {
 
 #[async_trait]
 impl IngestorHostServices for RedeliveryHost {
+    fn record_read(&self, _outcome: nervix_connector::IngestorReadOutcome) {}
+    fn record_read_payloads(&self, _payloads: usize, _bytes: u64) {}
+
     async fn intake_unacknowledged(
         &mut self,
         _messages: Vec<IngestorIntakeMessage<'_>>,

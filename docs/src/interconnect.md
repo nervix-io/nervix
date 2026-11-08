@@ -494,9 +494,9 @@ before decoding histogram delayed-removal bucket indices in the same count repre
 
 Emitter statements exchanged through the control plane use explicit `KEY` expressions and
 `PARTITION FROM BRANCH`, and SQS FIFO groups have one expression shape. The current
-`WIRE_CONTRACT` fingerprint identifies both that archived Model layout, including the typed
-`payload` expression scope, and the typed materialized relay inspection exchange. Peers must match
-it exactly.
+`WIRE_CONTRACT` fingerprint identifies that archived Model layout, including the typed
+`payload` expression scope, together with typed materialized relay inspection and ingestor read
+interaction fields. Peers must match it exactly.
 
 Execution-unit identities use an eight-byte rank with four-byte archive alignment. Single and
 partition relay grants retain that bounded footprint when other entities declare external
@@ -2379,7 +2379,10 @@ contract.
 
 An ingestor describe request carries its exact `Unit`. The receiver resolves the current owner
 for that unit and reports only its ingestor lifetime, readiness and transient state. The control
-plane composes the logical description from all scheduled unit owners.
+plane composes the logical description from all scheduled unit owners. The ingestor envelope
+also carries its complete ordered source-interaction metric lines, preserving the local counter
+and duration projection through remote inspection. The current wire fingerprint includes this
+required field.
 
 Entity-gate engagement and drain-status requests carry `EntityGateTargets`: complete logical
 entities for model changes, or exact `NodeUnitRef` units for ownership transfer. Lease identity
