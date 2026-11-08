@@ -505,6 +505,16 @@ build-codec-heads: generate-test-onnx download-onnxruntime build-web-console was
 # Public codec-head inspection and completion through the real native session and CLI.
 test-codec-heads: (test-codec-scenarios (justfile_directory() + "/tests/features/runtime/kinded_codec_heads.feature"))
 
+# Qualify endpoint and codec heads together with processor/emitter body acknowledgement modes.
+[positional-arguments]
+test-kinded-heads *args: build-codec-heads
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input {{ quote(justfile_directory() / "tests/features/runtime/{kinded_endpoint_heads,kinded_codec_heads,acknowledgement_clause}.feature") }} \
+        --concurrency 4 --retry 0 "$@"
+
 # Exercise CLI stream recovery and terminal endings without unrelated client probes.
 test-cli-streams *args: build-deps build-test-cli
     #!/usr/bin/env bash

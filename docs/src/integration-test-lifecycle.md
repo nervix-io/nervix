@@ -128,6 +128,16 @@ inferencers and WASM processors. The recipe prepares the ONNX fixtures/runtime, 
 console assets and test CLI used for resource uploads. Additional arguments reach the ordinary
 runner unchanged; broad scenario and CI runs retain their full prerequisites.
 
+## Focused Kinded Head Qualification
+
+`just test-kinded-heads` runs the endpoint-head, codec-head and acknowledgement-clause features
+together through the ordinary in-process harness, with four run slots and no retries. The cases
+cover kind-specific bodies and references, canonical `SHOW CREATE` output, session completion,
+and processor/emitter acknowledgement modes after their complete input declarations on one and
+three nodes. Preparation includes the console, ONNX fixtures/runtime, WASM guests and native tools
+used for resource uploads and completion. Additional arguments reach the runner unchanged; the
+complete ordinary suite, completion walks and concurrency checks retain their separate verdicts.
+
 ## Delayed Consensus Heartbeat Answers
 
 The leader-lease regression uses a testing-only control on each follower's consensus probe. The
