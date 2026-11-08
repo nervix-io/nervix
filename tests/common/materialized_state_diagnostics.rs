@@ -3,12 +3,14 @@
 //! Layer: test harness.
 //! - **Owns.** A bounded sequence of failure observations retaining placement, branch, round,
 //!   value length and watermarks without copying large fixture values into failure output.
-//! - **Depends on.** Typed node names, primitive timers, current public materialized-state output
-//!   and JSON.
+//! - **Depends on.** Typed node names, primitive timers, verified public materialized-state envelopes.
 //! - **Must not know.** Runtime publications, checkpoint storage or restore installation internals.
 
 use std::{future::Future, io, time::Duration};
 
+use nervix_client_wire::{
+    CellView, CellsView, StateInspection, StateInspectionResult, StateInspectionSection,
+};
 use nervix_models::ClusterNodeName;
 use nervix_primitives::time::{Instant, timeout};
 
@@ -20,7 +22,7 @@ pub(crate) async fn observe<F, Q>(
 ) -> Vec<String>
 where
     F: FnMut(&ClusterNodeName, usize) -> Q,
-    Q: Future<Output = io::Result<String>>,
+    Q: Future<Output = io::Result<StateInspection>>,
 {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut observations = vec![
@@ -57,37 +59,70 @@ where
     observations
 }
 
-/// Keep every observed row and placement, but replace the fixture value with its byte length.
-pub(crate) fn summarize(output: &str) -> String {
-    let mut lines = Vec::new();
-    for line in output.lines() {
-        if line.starts_with("key=") {
-            lines.push(summarize_row(line));
-        } else {
-            lines.push(line.to_string());
+/// Keep placement, exact branch identity and fixture measurements without copying payload values.
+pub(crate) fn summarize(state: &StateInspection) -> String {
+    let mut lines = vec![format!(
+        "entity: {}/{}",
+        state.entity.domain,
+        state.entity.identifier()
+    )];
+    let StateInspectionResult::Page(page) = &state.result else {
+        if let StateInspectionResult::Rejected(reason) = &state.result {
+            lines.push(format!("rejection: {}", reason.as_ref()));
+        }
+        return lines.join("\n");
+    };
+    lines.push(format!("rows: {}", page.counts.rows));
+    for unit in &page.units {
+        lines.push(format!(
+            "unit: {:?} owner: {} replicas: {:?} origin: {:?}",
+            unit.unit, unit.owner, unit.replicas, unit.origin
+        ));
+        for section in &unit.sections {
+            for frame in &section.frames {
+                let batch = frame.batch();
+                let key = serde_json::to_string(&batch.branch_key())
+                    .unwrap_or_else(|error| format!("unreadable branch: {error}"));
+                for row in batch.rows() {
+                    lines.push(summarize_row(&key, section, row));
+                }
+            }
         }
     }
     lines.join("\n")
 }
 
-fn summarize_row(line: &str) -> String {
-    let Some((key, body)) = line.split_once(" payload=") else {
-        return "unrecognized public materialized row: no payload boundary".to_string();
+fn summarize_row(key: &str, section: &StateInspectionSection, row: CellsView<'_>) -> String {
+    let cell = |name: &str| {
+        section
+            .schema
+            .fields
+            .iter()
+            .position(|field| field.name.as_str() == name)
+            .and_then(|index| row.get(index))
     };
-    let Some((payload, watermarks)) = body.rsplit_once(" low=") else {
-        return "unrecognized public materialized row: no watermark boundary".to_string();
+    let Some(CellView::I64(round)) = cell("round") else {
+        return format!("key={key}: fixture round is not I64");
     };
-    let row = match serde_json::from_str::<serde_json::Value>(payload) {
-        Ok(row) => row,
-        Err(error) => return format!("unreadable public materialized row: {error}"),
+    let Some(CellView::String(value)) = cell("value") else {
+        return format!("key={key}: fixture value is not a string");
     };
-    let round = match row.get("round") {
-        Some(serde_json::Value::Number(round)) => round,
-        _ => return format!("{key}: fixture round is not a number"),
+    let Some(watermarks) = section.watermarks else {
+        return format!("key={key}: watermark identities are absent");
     };
-    let value_bytes = match row.get("value") {
-        Some(serde_json::Value::String(value)) => value.len(),
-        _ => return format!("{key}: fixture value is not a string"),
+    let timestamp = |index| {
+        usize::try_from(index)
+            .ok()
+            .and_then(|index| row.get(index))
+            .and_then(|cell| match cell {
+                CellView::Datetime(value) => Some(value.unix_nanos()),
+                _ => None,
+            })
     };
-    format!("{key} round={round} value_bytes={value_bytes} low={watermarks}")
+    format!(
+        "key={key} round={round} value_bytes={} low={:?} high={:?}",
+        value.len(),
+        timestamp(watermarks.low),
+        timestamp(watermarks.high)
+    )
 }

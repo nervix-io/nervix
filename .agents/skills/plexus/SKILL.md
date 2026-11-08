@@ -124,6 +124,10 @@ Roto UDFs, ingestors and emitters for every connector and entity pair, junctions
 subscriptions; use the same web-console chapter for their typed fields, resource versions, program
 editors, reference lookup, and transaction behavior.
 
+For materialized relay inspection, read [Relay → Inspect Materialized State](../../../docs/src/relay.md#inspect-materialized-state)
+for selector, LIMIT/AFTER and FORMAT clause order, typed rows, sensitivity and stale continuations.
+Read the CLI chapter for one-shot JSON output; programs consume `CommandOutcome.state` directly.
+
 ## Gather the configuration contract
 
 Establish these inputs before finalizing Plexus. Ask only for missing details that materially change

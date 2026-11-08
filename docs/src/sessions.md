@@ -504,3 +504,13 @@ window reports `COMMITTED`, `FAILED`, `REVERTED`, or `EXPIRED` with the structur
 the transaction's aggregate outcome. After retention, attach reports an unknown transaction id. See
 [Replicated Plexus Transactions](control-plane.md#replicated-plexus-transactions) and [Transactions Over
 The Protocol](./client-session-protocol.md#transactions-over-the-protocol).
+
+## Materialized State Results
+
+A materialized relay inspection returns the typed `CommandOutcome.state` envelope beside its text
+or JSON message. Clients read verified Row frames using their section schemas; sensitive cells use
+the subscription redaction policy. Bounded pages carry complete counts and an opaque continuation.
+A changed generation, source lifetime, committed control revision or captured row set refuses a
+resume as stale. See [Inspect Materialized State](./relay.md#inspect-materialized-state) for clause
+order and [the protocol](./client-session-protocol.md#materialized-state-inspection-envelope) for
+wire ownership and reply bounds.

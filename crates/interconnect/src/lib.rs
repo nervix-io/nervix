@@ -1485,3 +1485,9 @@ pub enum TlsConfigError {
 
 #[cfg(test)]
 mod tests;
+
+mod state_inspection;
+pub use state_inspection::{
+    MaterializedStatePageBody, MaterializedStatePageDescriptor, MaterializedStatePageReply,
+    MaterializedStatePageTransfer, ReadMaterializedStatePage,
+};

@@ -1509,14 +1509,6 @@ impl RuntimeRecordBatch {
         &self,
         row: usize,
     ) -> error_stack::Result<String, RuntimeSchemaError> {
-        self.row_to_json_string_masking(row, &nervix_vm::SchemaSensitivity::default())
-    }
-
-    fn row_to_json_string_masking(
-        &self,
-        row: usize,
-        sensitivity: &nervix_vm::SchemaSensitivity,
-    ) -> error_stack::Result<String, RuntimeSchemaError> {
         if row >= self.batch.num_rows() {
             return Err(Report::new(RuntimeSchemaError::RowOutOfBounds {
                 row,
@@ -1534,17 +1526,13 @@ impl RuntimeRecordBatch {
             if column.is_null(row) {
                 continue;
             }
-            let value = if sensitivity.is_sensitive(field.name()) {
-                JsonValue::String("<masked>".to_string())
+            let ty = parse_as_type_from_arrow(field.data_type())?;
+            let value = if ty.contains_bytes() {
+                json_value_from_binary_arrow(column.as_ref(), &ty, row, field.name())?
             } else {
-                let ty = parse_as_type_from_arrow(field.data_type())?;
-                if ty.contains_bytes() {
-                    json_value_from_binary_arrow(column.as_ref(), &ty, row, field.name())?
-                } else {
-                    self.value(row, field.name())?
-                        .verified("the checked field is not null")
-                        .to_json_value()
-                }
+                self.value(row, field.name())?
+                    .verified("the checked field is not null")
+                    .to_json_value()
             };
             json.insert(field.name().clone(), value);
         }
@@ -1869,13 +1857,6 @@ impl RuntimeRow {
         RuntimeRecordBatch {
             batch: self.batch.batch.slice(self.row, 1),
         }
-    }
-
-    pub(crate) fn to_json_string_masking(
-        &self,
-        sensitivity: &nervix_vm::SchemaSensitivity,
-    ) -> error_stack::Result<String, RuntimeSchemaError> {
-        self.batch.row_to_json_string_masking(self.row, sensitivity)
     }
 }
 

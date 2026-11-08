@@ -140,6 +140,31 @@ RESTORE_STEP kind=Users domain=none outcome=Applied
 RESTORE_STEP kind=CreateDomain domain=tenant_copy outcome=Planned
 RESTORE_STEP kind=ImportResources domain=tenant_copy outcome=Failed
 RESTORE_STEP kind=ApplyModels domain=tenant_copy outcome=NotAttempted
+FRAME server_command_state.nxsm
+REPLY 20 COMMAND completed reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
+DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927
+DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206d61726b73206120706f736974696f6e
+DIAGNOSTIC span=none message=str:
+STATE domain=sales kind=Relay name=events
+STATE_PAGE branches=2 rows=2 bytes=80 units=1 continuation=one-opaque-position
+STATE_PLACEMENT partition:3
+STATE_UNIT owner=node_a replicas=node_b node=node_a incarnation=17 fingerprint=2525252525252525252525252525252525252525252525252525252525252525 generation=4 revision=19 stage=Live branches=2 rows=2 bytes=80
+STATE_SECTION name=records omitted=1 watermarks=3,4
+FIELD sequence U64 required public
+FIELD secret STRING required sensitive
+FIELD sample F32 required public
+FIELD low DATETIME required public
+FIELD high DATETIME required public
+BRANCH by_tenant
+KEY tenant STRING required sensitive
+ROW [tenant=redacted] sequence=u64:18446744073709551615 secret=redacted sample=f32:80000000 low=datetime:-9223372036854775808 high=datetime:9223372036854775807
+FRAME server_command_state_refused.nxsm
+REPLY 21 COMMAND failed reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
+DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927
+DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206d61726b73206120706f736974696f6e
+DIAGNOSTIC span=none message=str:
+STATE domain=sales kind=Relay name=events
+STATE_REFUSED StaleContinuation
 FRAME server_command_unknown.nxsm
 REPLY 4 COMMAND outcome_unknown reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
 DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927

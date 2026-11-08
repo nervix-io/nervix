@@ -196,19 +196,19 @@ Feature: Relay partition failover
       """
     Then within "30s" node "{{leader}}" eventually reports materialized state for relay "notifications" containing
       """
-      key={"tenant":"eta"} payload={"seq":1,"tenant":"eta"}
+      {"branch":{"tenant":"eta"},"fields":{"seq":1,"tenant":"eta"}}
       """
     And within "30s" node "{{leader}}" eventually reports materialized state for relay "notifications" containing
       """
-      key={"tenant":"beta"} payload={"seq":1,"tenant":"beta"}
+      {"branch":{"tenant":"beta"},"fields":{"seq":1,"tenant":"beta"}}
       """
     And within "30s" node "{{leader}}" eventually reports materialized state for relay "notifications" containing
       """
-      key={"tenant":"lambda"} payload={"seq":1,"tenant":"lambda"}
+      {"branch":{"tenant":"lambda"},"fields":{"seq":1,"tenant":"lambda"}}
       """
     And within "30s" node "{{leader}}" eventually reports materialized state for relay "notifications" containing
       """
-      key={"tenant":"acme"} payload={"seq":1,"tenant":"acme"}
+      {"branch":{"tenant":"acme"},"fields":{"seq":1,"tenant":"acme"}}
       """
     When node "{{failed_owner}}" is stopped
     Then within "90s" node "{{leader}}" eventually reports no partition of relay "notifications" owned by node "{{failed_owner}}"
@@ -230,17 +230,17 @@ Feature: Relay partition failover
       """
     Then within "30s" node "{{leader}}" eventually reports materialized state for relay "notifications" containing
       """
-      key={"tenant":"eta"} payload={"seq":2,"tenant":"eta"}
+      {"branch":{"tenant":"eta"},"fields":{"seq":2,"tenant":"eta"}}
       """
     And within "30s" node "{{leader}}" eventually reports materialized state for relay "notifications" containing
       """
-      key={"tenant":"beta"} payload={"seq":2,"tenant":"beta"}
+      {"branch":{"tenant":"beta"},"fields":{"seq":2,"tenant":"beta"}}
       """
     And within "30s" node "{{leader}}" eventually reports materialized state for relay "notifications" containing
       """
-      key={"tenant":"lambda"} payload={"seq":2,"tenant":"lambda"}
+      {"branch":{"tenant":"lambda"},"fields":{"seq":2,"tenant":"lambda"}}
       """
     And within "30s" node "{{leader}}" eventually reports materialized state for relay "notifications" containing
       """
-      key={"tenant":"acme"} payload={"seq":2,"tenant":"acme"}
+      {"branch":{"tenant":"acme"},"fields":{"seq":2,"tenant":"acme"}}
       """

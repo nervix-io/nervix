@@ -40,7 +40,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     Then within "10s" node "{{state_owner}}" eventually reports materialized state for relay "moving_state" containing
       """
-      key={"tenant":"acme"} payload={"id":1,"tenant":"acme"}
+      {"branch":{"tenant":"acme"},"fields":{"id":1,"tenant":"acme"}}
       """
     When these Plexus commands are executed on the active session
       """
@@ -48,7 +48,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     Then within "10s" node "{{state_destination}}" eventually reports materialized state for relay "moving_state" containing
       """
-      key={"tenant":"acme"} payload={"id":1,"tenant":"acme"}
+      {"branch":{"tenant":"acme"},"fields":{"id":1,"tenant":"acme"}}
       """
 
   @ownership-state-handoff
@@ -91,11 +91,11 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     Then within "10s" node "{{state_owner}}" eventually reports materialized state for relay "moving_state" containing
       """
-      key={"tenant":"acme"} payload={"id":1,"tenant":"acme"}
+      {"branch":{"tenant":"acme"},"fields":{"id":1,"tenant":"acme"}}
       """
     And within "10s" node "{{state_replica}}" eventually reports materialized state for relay "moving_state" containing
       """
-      key={"tenant":"acme"} payload={"id":1,"tenant":"acme"}
+      {"branch":{"tenant":"acme"},"fields":{"id":1,"tenant":"acme"}}
       """
 
   @ownership-state-handoff
@@ -571,7 +571,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     Then within "10s" node "{{promoted_state_replica}}" eventually reports materialized state for relay "moving_state" containing
       """
-      key={"tenant":"acme"} payload={"id":7,"tenant":"acme"}
+      {"branch":{"tenant":"acme"},"fields":{"id":7,"tenant":"acme"}}
       """
     When physical time passes for "1s"
     When node "{{failed_state_owner}}" is stopped
@@ -579,7 +579,7 @@ Feature: Relocating runtime nodes onto a named cluster node
     And within "20s" node "{{promoted_state_replica}}" eventually reports scheduled "relay" "moving_state" owner equals placeholder "promoted_state_replica"
     And within "10s" node "{{promoted_state_replica}}" eventually reports materialized state for relay "moving_state" containing
       """
-      key={"tenant":"acme"} payload={"id":7,"tenant":"acme"}
+      {"branch":{"tenant":"acme"},"fields":{"id":7,"tenant":"acme"}}
       """
     When these Plexus commands are executed through the client on node "{{promoted_state_replica}}"
       """
@@ -617,7 +617,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     Then the last command output contains
       """
-      relay 'moving_state' materialized state is empty
+      rows: 0
       """
     When these Plexus commands are executed through the client on node "{{surviving_node}}"
       """
@@ -1839,19 +1839,19 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     Then within "20s" node "{{state_owner}}" eventually reports materialized state for relay "moving_state" containing
       """
-      key={"tenant":"acme"} payload={"id":1,"source":"before-acme","tenant":"acme"}
+      {"branch":{"tenant":"acme"},"fields":{"id":1,"source":"before-acme","tenant":"acme"}}
       """
     And within "20s" node "{{state_owner}}" eventually reports materialized state for relay "moving_state" containing
       """
-      key={"tenant":"beta"} payload={"id":2,"source":"before-beta","tenant":"beta"}
+      {"branch":{"tenant":"beta"},"fields":{"id":2,"source":"before-beta","tenant":"beta"}}
       """
     And within "20s" node "{{state_replica}}" eventually reports materialized state for relay "moving_state" containing
       """
-      key={"tenant":"acme"} payload={"id":1,"source":"before-acme","tenant":"acme"}
+      {"branch":{"tenant":"acme"},"fields":{"id":1,"source":"before-acme","tenant":"acme"}}
       """
     And within "20s" node "{{state_replica}}" eventually reports materialized state for relay "moving_state" containing
       """
-      key={"tenant":"beta"} payload={"id":2,"source":"before-beta","tenant":"beta"}
+      {"branch":{"tenant":"beta"},"fields":{"id":2,"source":"before-beta","tenant":"beta"}}
       """
     When Kafka message is published to topic "relay_reader_{{test_id}}"
       """
@@ -1885,11 +1885,11 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     Then within "20s" node "{{state_replica}}" eventually reports materialized state for relay "moving_state" containing
       """
-      key={"tenant":"acme"} payload={"id":1,"source":"before-acme","tenant":"acme"}
+      {"branch":{"tenant":"acme"},"fields":{"id":1,"source":"before-acme","tenant":"acme"}}
       """
     And within "20s" node "{{state_replica}}" eventually reports materialized state for relay "moving_state" containing
       """
-      key={"tenant":"beta"} payload={"id":2,"source":"before-beta","tenant":"beta"}
+      {"branch":{"tenant":"beta"},"fields":{"id":2,"source":"before-beta","tenant":"beta"}}
       """
     When Kafka message is published to topic "relay_reader_{{test_id}}"
       """
@@ -1914,11 +1914,11 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     Then within "20s" node "{{state_replica}}" eventually reports materialized state for relay "moving_state" containing
       """
-      key={"tenant":"beta"} payload={"id":3,"source":"after-beta","tenant":"beta"}
+      {"branch":{"tenant":"beta"},"fields":{"id":3,"source":"after-beta","tenant":"beta"}}
       """
     And within "20s" node "{{state_replica}}" eventually reports materialized state for relay "moving_state" containing
       """
-      key={"tenant":"acme"} payload={"id":4,"source":"after-acme","tenant":"acme"}
+      {"branch":{"tenant":"acme"},"fields":{"id":4,"source":"after-acme","tenant":"acme"}}
       """
     When Kafka message is published to topic "relay_reader_{{test_id}}"
       """

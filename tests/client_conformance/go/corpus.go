@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 
+	flatbuffers "github.com/google/flatbuffers/go"
 	session "nervix.dev/conformance/nervix/session"
 )
 
@@ -250,6 +251,14 @@ func commandLines(head string, outcome *session.CommandOutcome) ([]string, error
 		}
 		lines = append(lines, restore...)
 	}
+	if state := outcome.State(nil); state != nil {
+		inspected, err := stateInspectionLines(state)
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, inspected...)
+	}
+
 	return lines, nil
 }
 
@@ -1322,4 +1331,113 @@ func corpus(directory string) error {
 		}
 	}
 	return nil
+}
+
+func stateInspectionLines(state *session.StateInspection) ([]string, error) {
+	entity := state.Entity(nil)
+	if entity == nil || entity.Kind() == nil {
+		return nil, errors.New("inspection lacks entity")
+	}
+	lines := []string{fmt.Sprintf("STATE domain=%s kind=%s name=%s", state.Domain(), session.EnumNamesModelKind[*entity.Kind()], entity.Name())}
+	if state.ResultType() == session.StateInspectionResultStateInspectionRefused {
+		refused := new(session.StateInspectionRefused)
+		if err := union(state.Result, refused); err != nil {
+			return nil, err
+		}
+		if refused.Reason() == nil {
+			return nil, errors.New("inspection lacks refusal")
+		}
+		return append(lines, "STATE_REFUSED "+session.EnumNamesStateInspectionRejection[*refused.Reason()]), nil
+	}
+	if state.ResultType() != session.StateInspectionResultStateInspectionPage {
+		return nil, errors.New("unknown inspection result")
+	}
+	page := new(session.StateInspectionPage)
+	if err := union(state.Result, page); err != nil {
+		return nil, err
+	}
+	counts := page.Counts(nil)
+	if counts == nil {
+		return nil, errors.New("inspection lacks counts")
+	}
+	lines = append(lines, fmt.Sprintf("STATE_PAGE branches=%d rows=%d bytes=%d units=%d continuation=%s", counts.Branches(), counts.Rows(), counts.Bytes(), page.UnitCount(), orNone(page.Continuation())))
+	for i := 0; i < page.UnitsLength(); i++ {
+		unit := new(session.StateInspectionUnit)
+		page.Units(unit, i)
+		placement := "single"
+		switch unit.UnitType() {
+		case session.PlacementUnitSingleUnit:
+		case session.PlacementUnitPartitionUnit:
+			value := new(session.PartitionUnit)
+			if err := union(unit.Unit, value); err != nil {
+				return nil, err
+			}
+			placement = fmt.Sprintf("partition:%d", value.Partition())
+		case session.PlacementUnitInstanceUnit:
+			value := new(session.InstanceUnit)
+			if err := union(unit.Unit, value); err != nil {
+				return nil, err
+			}
+			placement = fmt.Sprintf("instance:%d", value.Instance())
+		default:
+			return nil, errors.New("unknown inspection placement")
+		}
+		lines = append(lines, "STATE_PLACEMENT "+placement)
+		origin := unit.Origin(nil)
+		counts := unit.Counts(nil)
+		if origin == nil || counts == nil || origin.Stage() == nil {
+			return nil, errors.New("inspection lacks origin or counts")
+		}
+		replicas := []string{}
+		for r := 0; r < unit.ReplicasLength(); r++ {
+			replicas = append(replicas, string(unit.Replicas(r)))
+		}
+		lines = append(lines, fmt.Sprintf("STATE_UNIT owner=%s replicas=%s node=%s incarnation=%d fingerprint=%s generation=%d revision=%d stage=%s branches=%d rows=%d bytes=%d", unit.Owner(), strings.Join(replicas, ","), origin.Node(), origin.Incarnation(), hex.EncodeToString(origin.FingerprintBytes()), origin.Generation(), origin.Revision(), session.EnumNamesStateInspectionStage[*origin.Stage()], counts.Branches(), counts.Rows(), counts.Bytes()))
+		for j := 0; j < unit.SectionsLength(); j++ {
+			section := new(session.StateInspectionSection)
+			unit.Sections(section, j)
+			watermarks := "none"
+			if marks := section.Watermarks(nil); marks != nil {
+				watermarks = fmt.Sprintf("%d,%d", marks.Low(), marks.High())
+			}
+			lines = append(lines, fmt.Sprintf("STATE_SECTION name=%s omitted=%d watermarks=%s", section.Name(), section.OmittedRows(), watermarks))
+			schema := section.Schema(nil)
+			if schema == nil {
+				return nil, errors.New("inspection lacks schema")
+			}
+			fields, keys, declared, err := rowSchemaLines(schema)
+			if err != nil {
+				return nil, err
+			}
+			lines = append(lines, declared...)
+			for f := 0; f < section.FramesLength(); f++ {
+				frame := new(session.StateRowFrame)
+				section.Frames(frame, f)
+				bytes := frame.DataBytes()
+				if err := frameRoot(bytes, "NXRB"); err != nil {
+					return nil, err
+				}
+				batch := new(session.RowBatch)
+				batch.Init(bytes, flatbuffers.GetUOffsetT(bytes))
+				key := ""
+				if branch := batch.BranchKey(nil); branch != nil {
+					rendered, err := renderCells(branch.CellsLength(), branch.Cells, keys)
+					if err != nil {
+						return nil, err
+					}
+					key = rendered
+				}
+				for r := 0; r < batch.RowsLength(); r++ {
+					row := new(session.Row)
+					batch.Rows(row, r)
+					rendered, err := renderCells(row.CellsLength(), row.Cells, fields)
+					if err != nil {
+						return nil, err
+					}
+					lines = append(lines, "ROW ["+key+"] "+rendered)
+				}
+			}
+		}
+	}
+	return lines, nil
 }
