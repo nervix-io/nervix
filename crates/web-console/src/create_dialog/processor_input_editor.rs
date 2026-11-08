@@ -2,8 +2,8 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** Browser editing of relay input order, source predicates, collection, and junction
-//!   branch selection.
+//! - **Owns.** Browser editing of relay input order, source predicates, collection, and the
+//!   node-wide branch selection of junctions, deduplicators and reorderers.
 //! - **Depends on.** Shared processor drafts and typed choice controls.
 //! - **Must not know.** Runtime input collection or registry implementation.
 
@@ -32,27 +32,30 @@ pub(super) fn ProcessorInputEditor(
 ) -> impl IntoView {
     let draft = signals.processor(family);
     let pending = move || signals.progress.get().is_pending();
-    view! {
+    let node_branch = family.node_branch_label().map(|label| {
+        view! {
+            <fieldset class="create-field create-processor-branching">
+                <legend>{label}</legend>
+                <button type="button" data-branch="unbranched"
+                    class:active=move || draft.get().branching == NodeBranchDraft::Unbranched
+                    disabled=pending
+                    on:click=move |_| { draft.update(|state| state.choose_unbranched()); signals.edit(); }>"UNBRANCHED"</button>
+                <button type="button" data-branch="named"
+                    class:active=move || matches!(draft.get().branching, NodeBranchDraft::Branched(_))
+                    disabled=pending
+                    on:click=move |_| { draft.update(|state| state.choose_branched()); signals.edit(); }>"Named branch"</button>
+            </fieldset>
+            <Show when=move || matches!(draft.get().branching, NodeBranchDraft::Branched(_)) fallback=|| ()>
+                <ChoiceGroup class_name="create-processor-branch" label=label
+                    control=ChoiceControl::ProcessorBranch signals=signals request_tx=request_tx
+                    session_generation=session_generation show_detail=true />
+            </Show>
+        }
+    });
+    let section = view! {
         <section class="create-processor-inputs">
             <h3>"Ordered input relays"</h3>
-            <Show when=move || family == ProcessorFamily::Junction fallback=|| ()>
-                <fieldset class="create-field create-processor-branching">
-                    <legend>"Junction branch"</legend>
-                    <button type="button" data-branch="unbranched"
-                        class:active=move || draft.get().branching == NodeBranchDraft::Unbranched
-                        disabled=pending
-                        on:click=move |_| { draft.update(|state| state.choose_unbranched()); signals.edit(); }>"UNBRANCHED"</button>
-                    <button type="button" data-branch="named"
-                        class:active=move || matches!(draft.get().branching, NodeBranchDraft::Branched(_))
-                        disabled=pending
-                        on:click=move |_| { draft.update(|state| state.choose_branched()); signals.edit(); }>"Named branch"</button>
-                </fieldset>
-                <Show when=move || matches!(draft.get().branching, NodeBranchDraft::Branched(_)) fallback=|| ()>
-                    <ChoiceGroup class_name="create-processor-branch" label="Junction branch"
-                        control=ChoiceControl::ProcessorBranch signals=signals request_tx=request_tx
-                        session_generation=session_generation show_detail=true />
-                </Show>
-            </Show>
+            {node_branch}
             <div class="create-processor-input-list">
                 <For each=move || indices(draft.get().inputs.len()) key=|index| *index
                     children=move |index| view! {
@@ -143,5 +146,9 @@ pub(super) fn ProcessorInputEditor(
                 </label>
             </Show>
         </section>
-    }
+    };
+    // Erased at the section boundary: the processor editor composing this section then holds and
+    // names a boxed view, so neither its rendering frames nor the debug names of every form that
+    // embeds it repeat this section's complete nested view.
+    section.into_any()
 }

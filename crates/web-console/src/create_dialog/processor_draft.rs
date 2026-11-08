@@ -1,9 +1,10 @@
-//! Incomplete visual junction and reingestor state until it becomes a semantic Model.
+//! Incomplete visual junction, deduplicator, reorderer and reingestor state until it becomes a
+//! semantic Model.
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** Ordered browser drafts for processor inputs, state dependencies, routes, and
-//!   branch-boundary choices, and their conversion to current semantic Models.
+//! - **Owns.** Ordered browser drafts for processor inputs, key expressions, state dependencies,
+//!   routes, and branch-boundary choices, and their conversion to current semantic Models.
 //! - **Depends on.** Typed vocabulary, expression parsing, and shared route drafts.
 //! - **Must not know.** Registry state, runtime execution, or session transport.
 
@@ -16,11 +17,14 @@ use std::collections::BTreeSet;
 
 use error_stack::{Report, ResultExt as _};
 use nervix_models::{
-    AckMode, BranchName, BranchSelection, CreateJunction, CreateReingestor, InputCollectPolicy,
-    JunctionName, MaterializedStateDependency, MaterializedStatePolicy, ModelKind, NodeRef,
+    AckMode, BranchName, BranchSelection, CreateDeduplicator, CreateJunction, CreateReingestor,
+    CreateReorderer, DeduplicatorName, Expression, InputCollectPolicy, JunctionName,
+    MaterializedStateDependency, MaterializedStatePolicy, Model, ModelKind, NodeRef,
     ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, ReingestorName, RelayName,
+    ReordererName,
 };
 use nervix_plexus::parse_expression;
+use strum::Display;
 use thiserror::Error;
 
 use super::{
@@ -28,10 +32,179 @@ use super::{
     ingestor_route_draft::{AssignmentDraft, IngestRouteDraft, IngestRouteDraftError},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The processor kinds the shared visual processor form creates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Display)]
+#[strum(serialize_all = "lowercase")]
 pub(super) enum ProcessorFamily {
     Junction,
+    Deduplicator,
+    Reorderer,
     Reingestor,
+}
+
+impl ProcessorFamily {
+    /// Whether one node-wide `BRANCHED BY` or `UNBRANCHED` declaration governs every input and
+    /// route. A reingestor instead preserves, drops or constructs the branch route by route.
+    pub(super) fn declares_node_branch(self) -> bool {
+        match self {
+            Self::Junction | Self::Deduplicator | Self::Reorderer => true,
+            Self::Reingestor => false,
+        }
+    }
+
+    /// The ordered expression clause the family writes before its `MAX TIME`, when it keys or
+    /// orders its branch-local state by one.
+    pub(super) fn key_clause(self) -> Option<KeyClause> {
+        match self {
+            Self::Deduplicator => Some(KeyClause::DeduplicateOn),
+            Self::Reorderer => Some(KeyClause::By),
+            Self::Junction | Self::Reingestor => None,
+        }
+    }
+
+    pub(super) fn name_label(self) -> &'static str {
+        match self {
+            Self::Junction => "Junction name",
+            Self::Deduplicator => "Deduplicator name",
+            Self::Reorderer => "Reorderer name",
+            Self::Reingestor => "Reingestor name",
+        }
+    }
+
+    /// The label of the node-wide branch choice, for the families that declare one.
+    pub(super) fn node_branch_label(self) -> Option<&'static str> {
+        match self {
+            Self::Junction => Some("Junction branch"),
+            Self::Deduplicator => Some("Deduplicator branch"),
+            Self::Reorderer => Some("Reorderer branch"),
+            Self::Reingestor => None,
+        }
+    }
+}
+
+/// The ordered expression clause of a keyed processor, spelled as Plexus writes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Display)]
+pub(super) enum KeyClause {
+    #[strum(serialize = "DEDUPLICATE ON")]
+    DeduplicateOn,
+    #[strum(serialize = "BY")]
+    By,
+}
+
+/// The ordered key or ordering expressions and the holding time of a deduplicator or reorderer,
+/// kept exactly as typed until the draft builds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct KeyedDraft {
+    pub(super) expressions: Vec<String>,
+    pub(super) active: usize,
+    pub(super) max_time: String,
+}
+
+impl Default for KeyedDraft {
+    /// One empty expression to type into, as a keyed processor needs at least one.
+    fn default() -> Self {
+        Self {
+            expressions: vec![String::new()],
+            active: 0,
+            max_time: String::new(),
+        }
+    }
+}
+
+impl KeyedDraft {
+    pub(super) fn active_expression(&self) -> Option<&String> {
+        self.expressions.get(self.active)
+    }
+
+    pub(super) fn active_expression_mut(&mut self) -> Option<&mut String> {
+        self.expressions.get_mut(self.active)
+    }
+
+    pub(super) fn add(&mut self) {
+        self.expressions.push(String::new());
+        self.active = self.expressions.len() - 1;
+    }
+
+    /// Removes the active expression unless it is the only one.
+    pub(super) fn remove_active(&mut self) {
+        if self.expressions.len() > 1 {
+            self.expressions.remove(self.active);
+            self.active = self.active.min(self.expressions.len() - 1);
+        }
+    }
+
+    pub(super) fn move_active(&mut self, up: bool) {
+        let other = if up {
+            self.active.checked_sub(1)
+        } else if self.active + 1 < self.expressions.len() {
+            Some(self.active + 1)
+        } else {
+            None
+        };
+        if let Some(other) = other {
+            self.expressions.swap(self.active, other);
+            self.active = other;
+        }
+    }
+
+    fn build(&self, clause: KeyClause) -> error_stack::Result<KeyedParts, ProcessorDraftError> {
+        if self.expressions.is_empty() {
+            return Err(Report::new(ProcessorDraftError::Keys { clause }));
+        }
+        let mut expressions = Vec::with_capacity(self.expressions.len());
+        for (index, text) in self.expressions.iter().enumerate() {
+            let expression = parse_expression(text.trim()).change_context(
+                ProcessorDraftError::KeyExpression {
+                    clause,
+                    index: index + 1,
+                },
+            )?;
+            expressions.push(expression);
+        }
+        let max_time = self.max_time.trim();
+        if max_time.is_empty() {
+            return Err(Report::new(ProcessorDraftError::MaxTime));
+        }
+        Ok(KeyedParts {
+            expressions,
+            max_time: max_time.to_string(),
+        })
+    }
+}
+
+/// The checked expressions and holding time of a keyed processor.
+struct KeyedParts {
+    expressions: Vec<Expression>,
+    max_time: String,
+}
+
+/// The kind of processor a draft creates, with what only that kind declares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProcessorStage {
+    Junction,
+    Deduplicator(KeyedDraft),
+    Reorderer(KeyedDraft),
+    Reingestor,
+}
+
+impl ProcessorStage {
+    fn new(family: ProcessorFamily) -> Self {
+        match family {
+            ProcessorFamily::Junction => Self::Junction,
+            ProcessorFamily::Deduplicator => Self::Deduplicator(KeyedDraft::default()),
+            ProcessorFamily::Reorderer => Self::Reorderer(KeyedDraft::default()),
+            ProcessorFamily::Reingestor => Self::Reingestor,
+        }
+    }
+
+    fn family(&self) -> ProcessorFamily {
+        match self {
+            Self::Junction => ProcessorFamily::Junction,
+            Self::Deduplicator(_) => ProcessorFamily::Deduplicator,
+            Self::Reorderer(_) => ProcessorFamily::Reorderer,
+            Self::Reingestor => ProcessorFamily::Reingestor,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -102,11 +275,14 @@ impl NodeBranchDraft {
         }
     }
 
-    fn build(&self) -> error_stack::Result<BranchSelection, ProcessorDraftError> {
+    fn build(
+        &self,
+        family: ProcessorFamily,
+    ) -> error_stack::Result<BranchSelection, ProcessorDraftError> {
         match self {
-            Self::Unselected => Err(Report::new(ProcessorDraftError::Branching)),
+            Self::Unselected => Err(Report::new(ProcessorDraftError::Branching { family })),
             Self::Unbranched => Ok(BranchSelection::Unbranched),
-            Self::Branched(None) => Err(Report::new(ProcessorDraftError::Branch)),
+            Self::Branched(None) => Err(Report::new(ProcessorDraftError::Branch { family })),
             Self::Branched(Some(branch)) => Ok(BranchSelection::BranchedBy {
                 branch: branch
                     .current_name()
@@ -222,7 +398,7 @@ pub(super) struct ProcessorDraft {
     pub(super) active_state: usize,
     pub(super) routes: Vec<IngestRouteDraft>,
     pub(super) active_route: usize,
-    pub(super) family: ProcessorFamily,
+    stage: ProcessorStage,
 }
 
 impl ProcessorDraft {
@@ -240,7 +416,26 @@ impl ProcessorDraft {
             active_state: 0,
             routes: vec![IngestRouteDraft::default()],
             active_route: 0,
-            family,
+            stage: ProcessorStage::new(family),
+        }
+    }
+
+    pub(super) fn family(&self) -> ProcessorFamily {
+        self.stage.family()
+    }
+
+    /// The ordered expressions and holding time of a deduplicator or reorderer draft.
+    pub(super) fn keyed(&self) -> Option<&KeyedDraft> {
+        match &self.stage {
+            ProcessorStage::Deduplicator(keyed) | ProcessorStage::Reorderer(keyed) => Some(keyed),
+            ProcessorStage::Junction | ProcessorStage::Reingestor => None,
+        }
+    }
+
+    pub(super) fn keyed_mut(&mut self) -> Option<&mut KeyedDraft> {
+        match &mut self.stage {
+            ProcessorStage::Deduplicator(keyed) | ProcessorStage::Reorderer(keyed) => Some(keyed),
+            ProcessorStage::Junction | ProcessorStage::Reingestor => None,
         }
     }
 
@@ -415,41 +610,99 @@ impl ProcessorDraft {
         }
     }
 
-    pub(super) fn build_junction(
-        &self,
-    ) -> error_stack::Result<CreateJunction, ProcessorDraftError> {
+    /// The complete semantic Model of the processor kind this draft creates, or the first missing
+    /// or invalid choice in form order.
+    pub(super) fn build(&self) -> error_stack::Result<Model, ProcessorDraftError> {
+        match &self.stage {
+            ProcessorStage::Junction => Ok(Model::Junction(self.build_junction()?)),
+            ProcessorStage::Deduplicator(keyed) => {
+                Ok(Model::Deduplicator(self.build_deduplicator(keyed)?))
+            }
+            ProcessorStage::Reorderer(keyed) => Ok(Model::Reorderer(self.build_reorderer(keyed)?)),
+            ProcessorStage::Reingestor => Ok(Model::Reingestor(self.build_reingestor()?)),
+        }
+    }
+
+    fn build_junction(&self) -> error_stack::Result<CreateJunction, ProcessorDraftError> {
         let name = JunctionName::parse(self.name.trim())
             .map_err(|cause| cause.change_context(ProcessorDraftError::JunctionName))?;
-        let branching = self.branching.build()?;
-        let parts = self.build_parts()?;
+        let branching = self.branching.build(self.family())?;
+        let input = self.build_input()?;
+        let output = self.build_output()?;
         Ok(CreateJunction {
             name,
-            from: parts.inputs,
-            output_routes: parts.routes,
+            from: input.inputs,
+            output_routes: output.routes,
             branched_by: branching,
             mode: self.mode,
-            filter_where: parts.filter,
-            materialized_state: parts.state,
+            filter_where: input.filter,
+            materialized_state: output.state,
         })
     }
 
-    pub(super) fn build_reingestor(
+    fn build_deduplicator(
         &self,
-    ) -> error_stack::Result<CreateReingestor, ProcessorDraftError> {
+        keyed: &KeyedDraft,
+    ) -> error_stack::Result<CreateDeduplicator, ProcessorDraftError> {
+        let name = DeduplicatorName::parse(self.name.trim())
+            .map_err(|cause| cause.change_context(ProcessorDraftError::DeduplicatorName))?;
+        let branching = self.branching.build(self.family())?;
+        let input = self.build_input()?;
+        let keys = keyed.build(KeyClause::DeduplicateOn)?;
+        let output = self.build_output()?;
+        Ok(CreateDeduplicator {
+            name,
+            from: input.inputs,
+            output_routes: output.routes,
+            branched_by: branching,
+            deduplicate_on: keys.expressions,
+            max_time: keys.max_time,
+            mode: self.mode,
+            filter_where: input.filter,
+            materialized_state: output.state,
+        })
+    }
+
+    fn build_reorderer(
+        &self,
+        keyed: &KeyedDraft,
+    ) -> error_stack::Result<CreateReorderer, ProcessorDraftError> {
+        let name = ReordererName::parse(self.name.trim())
+            .map_err(|cause| cause.change_context(ProcessorDraftError::ReordererName))?;
+        let branching = self.branching.build(self.family())?;
+        let input = self.build_input()?;
+        let keys = keyed.build(KeyClause::By)?;
+        let output = self.build_output()?;
+        Ok(CreateReorderer {
+            name,
+            from: input.inputs,
+            output_routes: output.routes,
+            branched_by: branching,
+            order_by: keys.expressions,
+            max_time: keys.max_time,
+            mode: self.mode,
+            filter_where: input.filter,
+            materialized_state: output.state,
+        })
+    }
+
+    fn build_reingestor(&self) -> error_stack::Result<CreateReingestor, ProcessorDraftError> {
         let name = ReingestorName::parse(self.name.trim())
             .map_err(|cause| cause.change_context(ProcessorDraftError::ReingestorName))?;
-        let parts = self.build_parts()?;
+        let input = self.build_input()?;
+        let output = self.build_output()?;
         Ok(CreateReingestor {
             name,
-            from: parts.inputs,
-            output_routes: parts.routes,
+            from: input.inputs,
+            output_routes: output.routes,
             mode: self.mode,
-            filter_where: parts.filter,
-            materialized_state: parts.state,
+            filter_where: input.filter,
+            materialized_state: output.state,
         })
     }
 
-    fn build_parts(&self) -> error_stack::Result<ProcessorParts, ProcessorDraftError> {
+    /// The ordered inputs with their predicates and collection, and the node filter.
+    fn build_input(&self) -> error_stack::Result<ProcessorInputParts, ProcessorDraftError> {
         if self.inputs.is_empty() {
             return Err(Report::new(ProcessorDraftError::Inputs));
         }
@@ -496,6 +749,11 @@ impl ProcessorDraft {
         } else {
             Some(parse_expression(self.filter.trim()).change_context(ProcessorDraftError::Filter)?)
         };
+        Ok(ProcessorInputParts { inputs, filter })
+    }
+
+    /// The ordered materialized dependencies and output routes.
+    fn build_output(&self) -> error_stack::Result<ProcessorOutputParts, ProcessorDraftError> {
         let mut state = Vec::new();
         let mut seen_state = BTreeSet::new();
         for (index, dependency) in self.state.iter().enumerate() {
@@ -510,11 +768,13 @@ impl ProcessorDraft {
         if self.routes.is_empty() {
             return Err(Report::new(ProcessorDraftError::Routes));
         }
+        let preserves_node_branch = self.family().declares_node_branch();
         let mut routes = Vec::new();
         for (index, route) in self.routes.iter().enumerate() {
-            let built = match self.family {
-                ProcessorFamily::Junction => route.build_preserving(),
-                ProcessorFamily::Reingestor => route.build_reingestor(),
+            let built = if preserves_node_branch {
+                route.build_preserving()
+            } else {
+                route.build_reingestor()
             };
             routes.push({
                 let mapping_input = built;
@@ -530,26 +790,33 @@ impl ProcessorDraft {
                 }
             }?);
         }
-        Ok(ProcessorParts {
-            inputs,
-            routes: ProcessorOutputs::new(routes),
-            filter,
+        Ok(ProcessorOutputParts {
             state,
+            routes: ProcessorOutputs::new(routes),
         })
     }
 }
 
-struct ProcessorParts {
+/// The checked inputs and node filter every processor family declares.
+struct ProcessorInputParts {
     inputs: ProcessorInputs,
-    routes: ProcessorOutputs,
-    filter: Option<nervix_models::Expression>,
+    filter: Option<Expression>,
+}
+
+/// The checked materialized dependencies and output routes every processor family declares.
+struct ProcessorOutputParts {
     state: Vec<MaterializedStateDependency>,
+    routes: ProcessorOutputs,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(super) enum ProcessorDraftError {
     #[error("Junction name is invalid")]
     JunctionName,
+    #[error("Deduplicator name is invalid")]
+    DeduplicatorName,
+    #[error("Reorderer name is invalid")]
+    ReordererName,
     #[error("Reingestor name is invalid")]
     ReingestorName,
     #[error("Add at least one input relay")]
@@ -566,10 +833,16 @@ pub(super) enum ProcessorDraftError {
     CollectFor,
     #[error("Enter a valid node FILTER WHERE expression")]
     Filter,
-    #[error("Choose UNBRANCHED or a named branch for this junction")]
-    Branching,
-    #[error("Choose the junction's named branch")]
-    Branch,
+    #[error("Choose UNBRANCHED or a named branch for this {family}")]
+    Branching { family: ProcessorFamily },
+    #[error("Choose the {family}'s named branch")]
+    Branch { family: ProcessorFamily },
+    #[error("Add at least one {clause} expression")]
+    Keys { clause: KeyClause },
+    #[error("{clause} expression {index}: enter a valid expression")]
+    KeyExpression { clause: KeyClause, index: usize },
+    #[error("Enter the MAX TIME duration")]
+    MaxTime,
     #[error("The selected branch belongs to a changed context; select it again")]
     BranchChanged,
     #[error("Materialized dependency {index}: choose a relay")]
@@ -620,6 +893,13 @@ mod tests {
         NodeRef::new(kind, ModelName::parse(name).assured("test name is valid"))
     }
 
+    const FAMILIES: [ProcessorFamily; 4] = [
+        ProcessorFamily::Junction,
+        ProcessorFamily::Deduplicator,
+        ProcessorFamily::Reorderer,
+        ProcessorFamily::Reingestor,
+    ];
+
     fn complete(family: ProcessorFamily) -> ProcessorDraft {
         let mut draft = ProcessorDraft::new(family);
         draft.name = "route_events".into();
@@ -628,19 +908,29 @@ mod tests {
         draft.routes[0].inherit = InheritDraft::All;
         draft.routes[0].flush = FlushDraft::Immediate;
         draft.routes[0].message_error = MessageErrorDraft::Log;
-        if family == ProcessorFamily::Junction {
+        if family.declares_node_branch() {
             draft.choose_unbranched();
             draft.select_input(&node(ModelKind::Relay, "incoming"));
             draft.routes[0].select_relay(&node(ModelKind::Relay, "outgoing"));
         } else {
             draft.routes[0].branch.choose_preserve();
         }
+        if let Some(keyed) = draft.keyed_mut() {
+            keyed.expressions = vec!["input.message".into()];
+            keyed.max_time = "10m".into();
+        }
         draft
+    }
+
+    fn statement(draft: &ProcessorDraft) -> Statement {
+        let model: Model<RequestedResourceVersion> =
+            draft.build().assured("the draft is complete").into();
+        Statement::Create(CreateStatement::new(Box::new(model), draft.if_not_exists))
     }
 
     #[test]
     fn processor_previews_render_input_acknowledgement_after_collection() {
-        for family in [ProcessorFamily::Junction, ProcessorFamily::Reingestor] {
+        for family in FAMILIES {
             for mode in [AckMode::Attached, AckMode::Detached] {
                 for collect in [false, true] {
                     let mut draft = complete(family);
@@ -657,15 +947,7 @@ mod tests {
                     } else {
                         ""
                     };
-                    let model: Model<RequestedResourceVersion> = match family {
-                        ProcessorFamily::Junction => {
-                            Model::Junction(draft.build_junction().assured("the draft is complete"))
-                        }
-                        ProcessorFamily::Reingestor => Model::Reingestor(
-                            draft.build_reingestor().assured("the draft is complete"),
-                        ),
-                    };
-                    let statement = Statement::Create(CreateStatement::new(Box::new(model), false));
+                    let statement = statement(&draft);
                     let canonical = statement.to_canonical_plexus().assured("the draft renders");
                     let input_contract =
                         format!("\n  FROM incoming{collection}\n  {}\n", mode.as_ref());
@@ -915,15 +1197,19 @@ mod tests {
     fn junction_branch_and_state_policy_are_explicit() {
         let mut draft = ProcessorDraft::new(ProcessorFamily::Junction);
         draft.name = "route_events".into();
-        assert!(matches!(
+        assert_eq!(
             draft.build_junction().unwrap_err().current_context(),
-            ProcessorDraftError::Branching
-        ));
+            &ProcessorDraftError::Branching {
+                family: ProcessorFamily::Junction
+            }
+        );
         draft.choose_branched();
-        assert!(matches!(
+        assert_eq!(
             draft.build_junction().unwrap_err().current_context(),
-            ProcessorDraftError::Branch
-        ));
+            &ProcessorDraftError::Branch {
+                family: ProcessorFamily::Junction
+            }
+        );
         draft.select_branch(&node(ModelKind::Branch, "by_tenant"));
         assert!(matches!(
             draft.build_junction().unwrap_err().current_context(),
@@ -1046,6 +1332,175 @@ mod tests {
                 .assured("state relay exists")
                 .as_str(),
             "profile"
+        );
+    }
+
+    #[test]
+    fn each_family_builds_its_own_model_kind_and_only_keyed_families_hold_keys() {
+        for family in FAMILIES {
+            let draft = complete(family);
+            let expected = match family {
+                ProcessorFamily::Junction => ModelKind::Junction,
+                ProcessorFamily::Deduplicator => ModelKind::Deduplicator,
+                ProcessorFamily::Reorderer => ModelKind::Reorderer,
+                ProcessorFamily::Reingestor => ModelKind::Reingestor,
+            };
+            assert_eq!(draft.family(), family);
+            assert_eq!(
+                draft.build().assured("the draft is complete").kind(),
+                expected
+            );
+            assert_eq!(draft.keyed().is_some(), family.key_clause().is_some());
+        }
+    }
+
+    #[test]
+    fn keyed_processors_keep_expression_order_and_holding_time() {
+        for family in [ProcessorFamily::Deduplicator, ProcessorFamily::Reorderer] {
+            let clause = family
+                .key_clause()
+                .assured("deduplicators and reorderers write a key clause");
+            let mut draft = complete(family);
+            let keyed = draft.keyed_mut().assured("a keyed family holds its keys");
+            keyed.expressions = vec!["input.tenant".into()];
+            keyed.add();
+            *keyed
+                .active_expression_mut()
+                .assured("the added expression is active") = " lower(input.message) ".into();
+            keyed.add();
+            *keyed
+                .active_expression_mut()
+                .assured("the added expression is active") = "input.sequence".into();
+            keyed.move_active(true);
+            keyed.max_time = " 30s ".into();
+            assert_eq!(keyed.active, 1);
+
+            let statement = statement(&draft);
+            let canonical = statement
+                .to_canonical_plexus()
+                .assured("keyed processors render");
+            let keys = format!(
+                "\n  {clause} input.tenant, input.sequence, lower(input.message)\n  MAX TIME \
+                 30s\n  UNBRANCHED\n"
+            );
+            assert!(canonical.contains(&keys), "{canonical}");
+            assert_eq!(
+                parse_statement(&canonical).assured("the preview is executable Plexus"),
+                statement
+            );
+        }
+    }
+
+    #[test]
+    fn keyed_processors_require_valid_expressions_and_a_holding_time() {
+        for family in [ProcessorFamily::Deduplicator, ProcessorFamily::Reorderer] {
+            let clause = family
+                .key_clause()
+                .assured("deduplicators and reorderers write a key clause");
+            let mut draft = complete(family);
+            let refusal = |draft: &ProcessorDraft| {
+                draft
+                    .build()
+                    .err()
+                    .assured("the draft is incomplete")
+                    .current_context()
+                    .clone()
+            };
+
+            let keyed = draft.keyed_mut().assured("a keyed family holds its keys");
+            keyed.expressions = vec!["input.tenant".into(), "  ".into()];
+            assert_eq!(
+                refusal(&draft),
+                ProcessorDraftError::KeyExpression { clause, index: 2 }
+            );
+            let keyed = draft.keyed_mut().assured("a keyed family holds its keys");
+            keyed.expressions[1] = "input.tenant +".into();
+            assert_eq!(
+                refusal(&draft),
+                ProcessorDraftError::KeyExpression { clause, index: 2 }
+            );
+            let keyed = draft.keyed_mut().assured("a keyed family holds its keys");
+            keyed.expressions[1] = "input.sequence".into();
+            keyed.max_time = "  ".into();
+            assert_eq!(refusal(&draft), ProcessorDraftError::MaxTime);
+            let keyed = draft.keyed_mut().assured("a keyed family holds its keys");
+            keyed.expressions.clear();
+            assert_eq!(refusal(&draft), ProcessorDraftError::Keys { clause });
+        }
+    }
+
+    #[test]
+    fn the_last_key_expression_stays_editable_and_moves_stay_in_bounds() {
+        let mut keyed = KeyedDraft::default();
+        keyed.remove_active();
+        assert_eq!(keyed.expressions, vec![String::new()]);
+        keyed.move_active(true);
+        keyed.move_active(false);
+        assert_eq!(keyed.active, 0);
+        keyed.add();
+        keyed.add();
+        assert_eq!(keyed.active, 2);
+        keyed.move_active(false);
+        assert_eq!(keyed.active, 2);
+        keyed.remove_active();
+        assert_eq!(keyed.active, 1);
+        assert_eq!(keyed.expressions.len(), 2);
+    }
+
+    #[test]
+    fn a_changed_scope_keeps_typed_keys_and_requires_references_again() {
+        let mut draft = complete(ProcessorFamily::Deduplicator);
+        draft.invalidate_references();
+        let keyed = draft.keyed().assured("a deduplicator holds its keys");
+        assert_eq!(keyed.expressions, vec!["input.message".to_string()]);
+        assert_eq!(keyed.max_time, "10m");
+        assert_eq!(
+            draft
+                .build()
+                .err()
+                .assured("its input belongs to the earlier scope")
+                .current_context(),
+            &ProcessorDraftError::InputChanged { index: 1 }
+        );
+    }
+
+    #[test]
+    fn processor_draft_errors_name_their_family_and_clause() {
+        assert_eq!(
+            ProcessorDraftError::Branching {
+                family: ProcessorFamily::Junction
+            }
+            .to_string(),
+            "Choose UNBRANCHED or a named branch for this junction"
+        );
+        assert_eq!(
+            ProcessorDraftError::Branching {
+                family: ProcessorFamily::Deduplicator
+            }
+            .to_string(),
+            "Choose UNBRANCHED or a named branch for this deduplicator"
+        );
+        assert_eq!(
+            ProcessorDraftError::Branch {
+                family: ProcessorFamily::Reorderer
+            }
+            .to_string(),
+            "Choose the reorderer's named branch"
+        );
+        assert_eq!(
+            ProcessorDraftError::KeyExpression {
+                clause: KeyClause::DeduplicateOn,
+                index: 1
+            }
+            .to_string(),
+            "DEDUPLICATE ON expression 1: enter a valid expression"
+        );
+        assert_eq!(
+            ProcessorDraftError::Keys {
+                clause: KeyClause::By
+            }
+            .to_string(),
+            "Add at least one BY expression"
         );
     }
 }

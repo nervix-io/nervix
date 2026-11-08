@@ -1,4 +1,5 @@
-//! Ordered transforming routes shared by visual junctions and reingestors.
+//! Ordered transforming routes shared by visual junctions, deduplicators, reorderers and
+//! reingestors.
 //!
 //! Layer: edges.
 //!
@@ -55,7 +56,7 @@ pub(super) fn ProcessorRouteEditor(
 ) -> impl IntoView {
     let draft = signals.processor(family);
     let pending = move || signals.progress.get().is_pending();
-    view! {
+    let section = view! {
         <section class="create-processor-routes">
             <h3>"Ordered output routes"</h3>
             <div class="create-processor-route-list">
@@ -83,7 +84,7 @@ pub(super) fn ProcessorRouteEditor(
                         disabled=move || { pending() || draft.get().routes.len() == 1 }
                         on:click=move |_| { draft.update(|state| state.remove_route()); signals.edit(); }>"Remove route"</button>
                 </div>
-                <Show when=move || family == ProcessorFamily::Reingestor fallback=|| ()>
+                <Show when=move || !family.declares_node_branch() fallback=|| ()>
                     <fieldset class="create-field create-processor-route-branching">
                         <legend>"Route branch"</legend>
                         <button type="button" data-branch="preserve"
@@ -236,5 +237,9 @@ pub(super) fn ProcessorRouteEditor(
                 </Show>
             </div>
         </section>
-    }
+    };
+    // Erased at the section boundary: the processor editor composing this section then holds and
+    // names a boxed view, so neither its rendering frames nor the debug names of every form that
+    // embeds it repeat this section's complete nested view.
+    section.into_any()
 }

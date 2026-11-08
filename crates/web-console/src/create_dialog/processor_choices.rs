@@ -1,4 +1,4 @@
-//! Typed semantic questions asked by junction and reingestor controls.
+//! Typed semantic questions asked by junction, deduplicator, reorderer and reingestor controls.
 //!
 //! Layer: edges.
 //!
@@ -19,8 +19,14 @@ use nervix_models::{ModelKind, NodeRef, RelayName};
 use super::{
     ChoiceControl, ChoiceQuery, CreateSignals,
     ingestor_route_draft::RouteBranchDraft,
-    processor_draft::{NodeBranchDraft, ProcessorFamily},
+    processor_draft::{NodeBranchDraft, ProcessorDraft, ProcessorFamily},
 };
+
+/// What a node-wide branch family asks for before its first input relay can be offered.
+struct NodeBranchPrerequisites {
+    unselected: &'static str,
+    unnamed: &'static str,
+}
 
 impl CreateSignals {
     fn processor_model_question(
@@ -62,12 +68,58 @@ impl CreateSignals {
         )
     }
 
+    /// The question for the first input relay: any relay for a reingestor, and relays with exactly
+    /// the node-wide branch for the families that declare one.
+    fn processor_first_input_question(
+        self,
+        draft: &ProcessorDraft,
+    ) -> Result<ChoiceQuery, &'static str> {
+        let prerequisites = match draft.family() {
+            ProcessorFamily::Reingestor => {
+                return self.domain_question(
+                    ChoiceTarget::Relay,
+                    "Select a domain before choosing an input relay",
+                );
+            }
+            ProcessorFamily::Junction => NodeBranchPrerequisites {
+                unselected: "Choose the junction branch before its input relays",
+                unnamed: "Choose the named junction branch before its input relays",
+            },
+            ProcessorFamily::Deduplicator => NodeBranchPrerequisites {
+                unselected: "Choose the deduplicator branch before its input relays",
+                unnamed: "Choose the named deduplicator branch before its input relays",
+            },
+            ProcessorFamily::Reorderer => NodeBranchPrerequisites {
+                unselected: "Choose the reorderer branch before its input relays",
+                unnamed: "Choose the named reorderer branch before its input relays",
+            },
+        };
+        match &draft.branching {
+            NodeBranchDraft::Unselected => Err(prerequisites.unselected),
+            NodeBranchDraft::Unbranched => self.domain_question(
+                ChoiceTarget::IngestUnbranchedRelay,
+                "Select a domain before choosing an input relay",
+            ),
+            NodeBranchDraft::Branched(_) => {
+                let Some(branch) = draft.branching.current_branch() else {
+                    return Err(prerequisites.unnamed);
+                };
+                self.processor_model_question(
+                    ChoiceTarget::IngestBranchedRelay,
+                    NodeRef::new(ModelKind::Branch, branch),
+                    "Select a domain before choosing an input relay",
+                    20,
+                )
+            }
+        }
+    }
+
     pub(super) fn processor_choice_query(
         self,
         control: ChoiceControl,
     ) -> Result<ChoiceQuery, &'static str> {
         let Some(signal) = self.active_processor() else {
-            return Err("Open a junction or reingestor form first");
+            return Err("Open a junction, deduplicator, reorderer or reingestor form first");
         };
         let draft = signal.get_untracked();
         match control {
@@ -83,34 +135,7 @@ impl CreateSignals {
                         20,
                     );
                 }
-                match draft.family {
-                    ProcessorFamily::Reingestor => self.domain_question(
-                        ChoiceTarget::Relay,
-                        "Select a domain before choosing an input relay",
-                    ),
-                    ProcessorFamily::Junction => match &draft.branching {
-                        NodeBranchDraft::Unselected => {
-                            Err("Choose the junction branch before its input relays")
-                        }
-                        NodeBranchDraft::Unbranched => self.domain_question(
-                            ChoiceTarget::IngestUnbranchedRelay,
-                            "Select a domain before choosing an input relay",
-                        ),
-                        NodeBranchDraft::Branched(_) => {
-                            let Some(branch) = draft.branching.current_branch() else {
-                                return Err(
-                                    "Choose the named junction branch before its input relays"
-                                );
-                            };
-                            self.processor_model_question(
-                                ChoiceTarget::IngestBranchedRelay,
-                                NodeRef::new(ModelKind::Branch, branch),
-                                "Select a domain before choosing an input relay",
-                                20,
-                            )
-                        }
-                    },
-                }
+                self.processor_first_input_question(&draft)
             }
             ChoiceControl::ProcessorBranch | ChoiceControl::ProcessorRouteBranch => self
                 .domain_question(
@@ -144,7 +169,7 @@ impl CreateSignals {
                 let Some(route) = draft.active_route() else {
                     return Err("Add a route before choosing an output relay");
                 };
-                if draft.family == ProcessorFamily::Junction
+                if draft.family().declares_node_branch()
                     || matches!(route.branch, RouteBranchDraft::Preserve)
                 {
                     let Some(input) = draft.current_first_input() else {
