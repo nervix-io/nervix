@@ -676,8 +676,13 @@ fn placement_creation_collapses_duplicate_members() {
     )
     .expect("placement should be valid");
 
-    assert_eq!(placement.from, vec![named("ingest")]);
-    assert_eq!(placement.to, vec![named("emit")]);
+    assert_eq!(
+        placement.scope,
+        crate::PlacementScope::Corridor {
+            from: vec![named("ingest")],
+            to: vec![named("emit")]
+        }
+    );
 }
 
 #[test]
@@ -717,8 +722,13 @@ fn placement_alter_applies_operations_in_order_and_is_atomic() {
     assert_eq!(placement.name, named("critical"));
     assert_eq!(placement.rank, Some(nonzero!(1u64)));
     assert_eq!(placement.policy, PlacementPolicy::RequireColocation);
-    assert_eq!(placement.from, vec![named("source")]);
-    assert_eq!(placement.to, vec![named("emitter")]);
+    assert_eq!(
+        placement.scope,
+        crate::PlacementScope::Corridor {
+            from: vec![named("source")],
+            to: vec![named("emitter")]
+        }
+    );
 
     let before = placement.clone();
     assert_eq!(

@@ -22,7 +22,7 @@ use nervix_backup::{
 };
 use nervix_models::{
     BackupCut, BackupResources, CreateStatement, DomainName, DomainPace, DomainStartPoint,
-    DomainStatus, Model, PlacementPolicy, RequestedResourceVersion, Statement, Timestamp, UserName,
+    DomainStatus, Model, RequestedResourceVersion, Statement, Timestamp, UserName,
     canonical_plexus_document,
 };
 
@@ -118,7 +118,6 @@ impl ModelArchive {
             let record = DomainRecord {
                 domain: domain.clone(),
                 pace: DomainPace::Unpaced,
-                placement: PlacementPolicy::Neutral,
                 status: DomainStatus::Stopped,
                 start_version: arbitrary.entropy().any_u64(),
                 start_point: DomainStartPoint::Resume,

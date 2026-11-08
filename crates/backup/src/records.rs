@@ -10,15 +10,14 @@ use std::num::NonZeroU64;
 use error_stack::Report;
 use nervix_models::{
     ClusterNodeName, DomainClockPeriod, DomainClockSkew, DomainClockState, DomainName, DomainPace,
-    DomainStartPoint, DomainStatus, DomainTimeRate, PlacementPolicy, ResourceName, Timestamp,
-    UserName,
+    DomainStartPoint, DomainStatus, DomainTimeRate, ResourceName, Timestamp, UserName,
 };
 
 use crate::{
     error::{ArchiveReadError, ArchiveWriteError},
     section::{ArchiveRecord, RecordKind, decode_record, encode_record},
     wire::{
-        ClockMappingWire, DeclaredResourceWire, DomainWire, NodeNameWire, PaceWire, PlacementWire,
+        ClockMappingWire, DeclaredResourceWire, DomainWire, NodeNameWire, PaceWire,
         PublishedVersionWire, ResourceVersionWire, StartPointWire, StatusWire, UserWire, UsersWire,
         VersionStateWire,
     },
@@ -27,7 +26,7 @@ use crate::{
 /// The users record's format version.
 const USERS_VERSION: u16 = 2;
 /// The domain record's format version.
-const DOMAIN_VERSION: u16 = 1;
+const DOMAIN_VERSION: u16 = 2;
 /// The resource version record's format version.
 const RESOURCE_VERSION_VERSION: u16 = 1;
 
@@ -49,8 +48,6 @@ pub struct UserRecord {
 pub struct DomainRecord {
     pub domain: DomainName,
     pub pace: DomainPace,
-    /// The placement policy nodes of the domain default to.
-    pub placement: PlacementPolicy,
     pub status: DomainStatus,
     /// How many times the domain has been started.
     pub start_version: u64,
@@ -156,12 +153,6 @@ impl ArchiveRecord for DomainRecord {
                 skew_nanos: skew.as_nanos(),
             },
         };
-        let placement = match self.placement {
-            PlacementPolicy::RequireColocation => PlacementWire::RequireColocation,
-            PlacementPolicy::PreferColocation => PlacementWire::PreferColocation,
-            PlacementPolicy::Neutral => PlacementWire::Neutral,
-            PlacementPolicy::SuggestSeparation => PlacementWire::SuggestSeparation,
-        };
         let status = match self.status {
             DomainStatus::Stopped => StatusWire::Stopped,
             DomainStatus::Running => StatusWire::Running,
@@ -188,7 +179,6 @@ impl ArchiveRecord for DomainRecord {
         let wire = DomainWire {
             domain: self.domain.as_str().to_string(),
             pace,
-            placement,
             status,
             start_version: self.start_version,
             start_point,
@@ -224,12 +214,6 @@ impl ArchiveRecord for DomainRecord {
                     skew: DomainClockSkew::from_nanos(skew_nanos),
                 }
             }
-        };
-        let placement = match wire.placement {
-            PlacementWire::RequireColocation => PlacementPolicy::RequireColocation,
-            PlacementWire::PreferColocation => PlacementPolicy::PreferColocation,
-            PlacementWire::Neutral => PlacementPolicy::Neutral,
-            PlacementWire::SuggestSeparation => PlacementPolicy::SuggestSeparation,
         };
         let status = match wire.status {
             StatusWire::Stopped => DomainStatus::Stopped,
@@ -272,7 +256,6 @@ impl ArchiveRecord for DomainRecord {
         Ok(Self {
             domain,
             pace,
-            placement,
             status,
             start_version: wire.start_version,
             start_point,

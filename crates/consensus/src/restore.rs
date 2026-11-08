@@ -581,7 +581,7 @@ mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::{
         ArchiveDigest, ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, DomainConfig,
-        DomainPace, DomainStartPoint, DomainStatus, PlacementPolicy, ResourceId, ResourceNodeState,
+        DomainPace, DomainStartPoint, DomainStatus, ResourceId, ResourceNodeState,
         ResourceReplicaKey, ResourceUploadIdentity, ResourceUploadState, RestoreMode, Timestamp,
     };
 
@@ -699,7 +699,6 @@ mod tests {
             id: domain(name),
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
-                placement: PlacementPolicy::Neutral,
             },
             status: DomainStatus::Stopped,
             start_version: 3,

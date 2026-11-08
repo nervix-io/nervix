@@ -824,6 +824,12 @@ rkyv = { git = "https://github.com/glebpom/rkyv.git", rev = "868fa9c3c268560ad34
 # hang (https://github.com/fjall-rs/fjall/issues/260). Pin the 3.1.10 fix that never blocks on that
 # channel until a release carries one.
 fjall = { git = "https://github.com/glebpom/fjall.git", rev = "f2fad4eeb774943c0ed03af6f1db0319b6af7db5" }
+# mio 1.2.4 writes a vectored TCP buffer with `writev`, which raises SIGPIPE when the peer has gone,
+# while single-buffer writes send with MSG_NOSIGNAL. A C or C++ host that keeps SIGPIPE's default
+# disposition was terminated when a session's connection broke instead of seeing the transport
+# failure. Pin the 1.2.4 fix that sends vectored TCP writes with MSG_NOSIGNAL on Linux and Android
+# until a release carries one.
+mio = { git = "https://github.com/glebpom/mio.git", rev = "2d7c39e458c66c958c95a0f261c5ee4f452f3cbc" }
 
 [profile.release]
 panic = "unwind"

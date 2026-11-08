@@ -422,7 +422,6 @@ fn fixture_domain(id: DomainName) -> nervix_models::DomainState {
         id,
         config: nervix_models::DomainConfig {
             pace: nervix_models::DomainPace::Unpaced,
-            placement: nervix_models::PlacementPolicy::Neutral,
         },
         status: nervix_models::DomainStatus::Stopped,
         start_version: 0,

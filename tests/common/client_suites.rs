@@ -52,6 +52,10 @@ const INVENTORY: &str = "tests/client-suites-inventory.toml";
 pub(crate) enum SuiteHost {
     /// CPython over the Python package, `nervix_client`, with pytest.
     Python,
+    /// C11 over the public C header and shared binding.
+    C,
+    /// C++17 over the same C ABI, with native RAII owners.
+    Cpp,
     /// Java 21 over the JVM library, with the pinned JUnit 5 console launcher.
     Java,
 }
@@ -62,6 +66,8 @@ impl FromStr for SuiteHost {
     fn from_str(host: &str) -> io::Result<Self> {
         match host {
             "python" => Ok(Self::Python),
+            "c" => Ok(Self::C),
+            "cpp" => Ok(Self::Cpp),
             "java" => Ok(Self::Java),
             other => Err(io::Error::other(format!(
                 "unknown client suite host '{other}'"
@@ -81,6 +87,8 @@ impl SuiteHost {
     fn name(self) -> &'static str {
         match self {
             Self::Python => "python",
+            Self::C => "c",
+            Self::Cpp => "cpp",
             Self::Java => "java",
         }
     }
@@ -104,6 +112,12 @@ impl SuiteHost {
                     .args(["-m", "cluster_runner", "cluster"])
                     .current_dir(self.suite())
                     .env("PYTHONDONTWRITEBYTECODE", "1");
+                Ok(command)
+            }
+            Self::C | Self::Cpp => {
+                let mut command =
+                    Command::new(artifacts.join(format!("{}-suite-sanitized", self.name())));
+                command.arg("cluster").current_dir(self.suite());
                 Ok(command)
             }
             Self::Java => {
@@ -172,10 +186,16 @@ pub(crate) struct SuiteTarget {
 }
 
 impl SuiteTarget {
-    fn environment(&self) -> BTreeMap<&'static str, String> {
-        BTreeMap::from([
+    fn environment(&self) -> io::Result<BTreeMap<&'static str, String>> {
+        let leader = url::Url::parse(&self.leader_grpc_uri).map_err(io::Error::other)?;
+        let port = leader
+            .port_or_known_default()
+            .ok_or_else(|| io::Error::other("the suite leader listener has no TCP port"))?;
+        Ok(BTreeMap::from([
             ("NERVIX_PROBE_GRPC_URI", self.grpc_uri.clone()),
             ("NERVIX_SUITE_LEADER_GRPC_URI", self.leader_grpc_uri.clone()),
+            ("NERVIX_SUITE_LEADER_PORT", port.to_string()),
+            ("NERVIX_SUITE_SCHEME", leader.scheme().to_string()),
             ("NERVIX_SUITE_SEEDS", self.seeds.join(",")),
             ("NERVIX_PROBE_USERNAME", self.username.clone()),
             ("NERVIX_PROBE_PASSWORD", self.password.clone()),
@@ -188,7 +208,7 @@ impl SuiteTarget {
                 "NERVIX_SUITE_BACKUP_DIRECTORY",
                 self.backups.display().to_string(),
             ),
-        ])
+        ]))
     }
 }
 
@@ -254,7 +274,7 @@ impl ClientSuite {
     ) -> io::Result<Self> {
         let mut command = host.command()?;
         command
-            .envs(target.environment())
+            .envs(target.environment()?)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

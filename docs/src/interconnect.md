@@ -497,6 +497,9 @@ before decoding histogram delayed-removal bucket indices in the same count repre
 Emitter statements exchanged through the control plane use explicit `KEY` expressions and
 `PARTITION FROM BRANCH`, and SQS FIFO groups have one expression shape. The current
 `WIRE_CONTRACT` fingerprint identifies that archived Model layout; peers must match it exactly.
+The same fingerprint covers corridor/domain-wide placement coverage, pace-only domain
+configuration, exact partition/instance relocation selections and the current transaction
+operation and commit-step alternatives.
 
 Execution-unit identities use an eight-byte rank with four-byte archive alignment. Single and
 partition relay grants retain that bounded footprint when other entities declare external

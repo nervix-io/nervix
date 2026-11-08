@@ -9,9 +9,9 @@ This chapter describes the public language and runtime behavior. See
 
 Nervix currently supports:
 
-- `CREATE PACED DOMAIN <id> WITH PERIOD <duration> SKEW <duration> [PLACEMENT <policy>];`
-- `CREATE UNPACED DOMAIN <id> [PLACEMENT <policy>];`
-- `CREATE DOMAIN <id> [PLACEMENT <policy>];`
+- `CREATE PACED DOMAIN <id> WITH PERIOD <duration> SKEW <duration>;`
+- `CREATE UNPACED DOMAIN <id>;`
+- `CREATE DOMAIN <id>;`
 
 `CREATE DOMAIN <id>` is the short spelling for `CREATE UNPACED DOMAIN <id>`.
 
@@ -87,33 +87,25 @@ Unpaced domains do not produce ticks.
 
 Ingestors in an unpaced domain admit records as they arrive, and branch TTL uses wall clock time.
 
-## Placement Default
+## Placement Rules
 
-Every domain has a fallback placement policy. It applies to directly connected runtime-node pairs
-that no named placement rule claims. Because relays are scheduled runtime nodes, a
-producer-to-relay edge and a relay-to-consumer edge each receive the default independently. The
-clause is optional on every domain-creation form, and omission means `NEUTRAL` so ordinary
-scheduler heuristics remain active:
+Placement belongs to named rules in the active domain. Create a domain, then use a domain-wide
+rule to express a policy on all eligible hops:
 
 ```plexus
-CREATE PACED DOMAIN production
-  WITH PERIOD 1s SKEW 100ms
-  PLACEMENT REQUIRE COLOCATION;
-
-CREATE UNPACED DOMAIN archive
-  PLACEMENT SUGGEST SEPARATION;
+CREATE PACED DOMAIN production WITH PERIOD 1s SKEW 100ms;
+CREATE PLACEMENT prefer_local DOMAIN WIDE PREFER COLOCATION;
 ```
 
-Change the default for the session's active domain with the nameless domain alteration:
+Domain-wide and corridor rules share ordinary rank precedence and per-hop validation. Hard and
+preferred colocation require a data-independent unit correspondence; a competing-consumer intake
+into a partitioned relay permits only `NEUTRAL`. A stronger neutral corridor can carve that hop
+out of a broader rule.
 
-```plexus
-ALTER DOMAIN SET PLACEMENT PREFER COLOCATION;
-```
-
-A newly effective `REQUIRE COLOCATION` default can relocate runtime nodes during graph activation.
-Soft policies influence only future placement decisions and do not migrate existing assignments.
-See [Placement Policies](placement.md) for named overlays, path-gating, rank resolution, and
-enforcement.
+A newly effective hard requirement can move corresponding execution-unit groups during graph
+activation. Soft policies influence future decisions and preserve existing assignments. With no
+rule on a hop, ordinary scheduler heuristics apply. See [Placement Policies](placement.md) for
+unit classes, path-gated coverage, rank resolution and inspection.
 
 ## Start And Stop
 

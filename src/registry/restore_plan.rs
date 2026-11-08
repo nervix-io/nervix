@@ -428,10 +428,7 @@ fn plan_domain(
     })?;
     let state = DomainState {
         id: target.clone(),
-        config: DomainConfig {
-            pace: record.pace,
-            placement: record.placement,
-        },
+        config: DomainConfig { pace: record.pace },
         status: DomainStatus::Stopped,
         start_version: record.start_version,
         last_start: record.start_point.clone(),
@@ -563,9 +560,7 @@ mod tests {
         BackupManifest, DeclaredResource, DomainCapture, DomainRecord, PublishedResourceVersion,
         RaftLogPosition, ResourceVersionRecord, SectionDigest, SectionPath, UserRecord,
     };
-    use nervix_models::{
-        ClusterNodeName, DomainPace, DomainStartPoint, PlacementPolicy, Statement, Timestamp,
-    };
+    use nervix_models::{ClusterNodeName, DomainPace, DomainStartPoint, Statement, Timestamp};
     use nervix_plexus::client_statement::{ClientStatement, parse_client_statements};
 
     use super::*;
@@ -670,7 +665,6 @@ mod tests {
             record: DomainRecord {
                 domain: domain(name),
                 pace: DomainPace::Unpaced,
-                placement: PlacementPolicy::PreferColocation,
                 status: DomainStatus::Running,
                 start_version: 4,
                 start_point: DomainStartPoint::Resume,
@@ -856,10 +850,6 @@ mod tests {
         assert_eq!(prod.state.status, DomainStatus::Stopped);
         assert_eq!(prod.state.start_version, 4);
         assert_eq!(prod.state.clock, None);
-        assert_eq!(
-            prod.state.config.placement,
-            PlacementPolicy::PreferColocation
-        );
         assert_eq!(prod.models.len(), 2);
         assert_eq!(
             planned.target_domains(),
