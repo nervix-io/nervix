@@ -940,7 +940,7 @@ joins, or searches octets. Convert between the two with the
 | `strpos(text, needle)` | `I64` | Position of the first occurrence of `needle`, `1` for an empty `needle`, or `0` when it does not occur |
 | `translate(text, from_chars, to_chars)` | `STRING` | Replaces each character found in `from_chars` with the character at the same position in `to_chars`, and removes a character that has no counterpart. A character that `from_chars` repeats takes its first position, and characters of `to_chars` past the length of `from_chars` are ignored |
 | `to_hex(value)` | `STRING` | Lowercase hexadecimal digits without a prefix. Integer input only; a negative value is written as its two's complement at the input's width, so an integer literal, which is `I64`, is written at 64 bits |
-| `md5(text)` | `STRING` | The 32 lowercase hexadecimal digits of the MD5 digest of the text's UTF-8 bytes |
+| `md5(text)` | `STRING` | The 32 lowercase hexadecimal digits of the MD5 digest of the text's UTF-8 bytes; a non-cryptographic checksum |
 
 `lower`, `upper`, and `initcap` use Unicode case mappings, which never depend on the node's locale.
 A mapping can change a value's length: `upper('Grüßen')` is `GRÜSSEN`. A literal, a field, and a
@@ -1089,6 +1089,8 @@ bytes_to_utf8, base64 or hex functions`.
 An empty input encodes and decodes to an empty output. `md5` reads `STRING` text and returns
 hexadecimal text, while `sha256` reads `BYTES` and returns raw bytes: hash text with
 `sha256(bytes_from_utf8(input.text))` and write the digest with `hex_encode`.
+Nervix obtains SHA-256 from AWS-LC through its cryptography boundary. `md5` is only a
+non-cryptographic checksum; use `sha256` where collision resistance matters.
 
 `xxh3_64` hashes the input octets in their given order and returns the algorithm's unsigned 64-bit
 number. The value is independent of host byte order and stays the same across nodes and restarts.

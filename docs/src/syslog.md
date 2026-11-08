@@ -9,7 +9,7 @@ Nervix separates the syslog message format from syslog network transport:
   messages
 - a `SYSLOG CLIENT` declares a UDP, TCP, or TLS socket endpoint
 - a `SYSLOG LISTENER` ingestor receives transport frames and passes each frame to its declared codec
-- a `TO SYSLOG` emitter sends codec output with the selected syslog transport framing
+- a `SYSLOG COLLECTOR` emitter sends codec output with the selected syslog transport framing
 
 The pieces are intentionally independent. A `KAFKA TOPIC` ingestor can decode a syslog payload
 with a codec that uses the `SYSLOG` wire schema, and a `SYSLOG LISTENER` ingestor can pass its
@@ -380,15 +380,27 @@ closes on its own, as [TCP](#tcp) describes.
 
 ## Emitter
 
-The syslog emitter requires a codec and supports only `NO ACK`:
+The `SYSLOG COLLECTOR` emitter requires a codec and supports only `MODE NO ACK`, with an explicit
+retry policy:
 
-```plexus,ignore
-TO SYSLOG <client>
-  MODE NO ACK RETRY POLICY BACKOFF <duration> MAX <duration>
-  ENCODE USING <codec>
+```plexus
+CREATE SYSLOG COLLECTOR EMITTER syslog_forward
+  FROM syslog_events
+  TO syslog_target
+  MODE NO ACK RETRY POLICY BACKOFF 1s MAX 30s
+  ENCODE USING syslog_codec
+  INHERIT ALL
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
 
-Header invocations are not supported. Every emitter route still requires its normal flush policy,
+Here `syslog_events` is an existing relay, `syslog_target` is a collector's `SYSLOG CLIENT`, and
+`syslog_codec` is an encode-capable codec for the relay's schema. The codec may use any supported
+wire format; the transport does not require the predefined `SYSLOG` wire schema. The statement
+that binds the client refuses listener-only keys, as [Client](#client) describes.
+
+Header invocations are not supported. Every emitter still requires its normal flush policy,
 message error policy, and general error policy. Branch identity collapses only after successful
 external emission.
 
@@ -445,7 +457,8 @@ payload values.
 | Ingested message | `max_message_size`, default 131,072 bytes |
 | UDP datagram intake | 65,535 bytes, further limited by `max_message_size`; a datagram above it is dropped and counted |
 | UDP payload emission | 65,507 bytes |
-| Octet-counting prefix | At most 10 digits |
+| Octet-counted emission | At most 9,999,999,999 payload bytes; the prefix adds at most 10 decimal digits and one space |
+| Non-transparent TCP emission | A payload contains no LF; framing appends one LF |
 | Concurrent TCP/TLS connections | Unbounded count; each holds at most `max_message_size` bytes, plus one octet count and its space, of what it has read but not yet queued |
 | TCP/TLS intake queue | 64 frames shared by a listener's connections; a full queue holds the connections back |
 | TLS handshake of an accepted connection | `connect_timeout_ms`, default 30 seconds |

@@ -216,6 +216,7 @@ to discard a record.
 | NATS STREAM | `ACK SEQUENTIAL`; `ACK PARALLEL MAX <n>` | JetStream `PubAck` for each record |
 | Redis Pub/Sub | `NO ACK` | Server acceptance of `PUBLISH`; the subscriber count is not a delivery guarantee |
 | ZeroMQ | `NO ACK` | Socket acceptance |
+| Syslog COLLECTOR | `NO ACK` | The local socket accepts and flushes the complete frame; no remote delivery acknowledgment |
 | SQS | `ACK` | Successful per-record or per-entry service response |
 | Sentry | `ACK` | A `2xx` answer to the event's one-event envelope |
 | OTEL | `ACK` | Successful OTLP Export response; `partial_success` is acknowledged with a warning |
@@ -869,12 +870,18 @@ counting what it writes around the payload:
 | NATS | The `max_payload` the server announced | The message headers |
 | Pulsar | The `maxMessageSize` the broker announced when the producer's connection opened | The message metadata: the properties, the partition key and the producer's own fields |
 | SQS | 1 MiB | Message attribute names, types and values, and the FIFO message group |
+| Syslog COLLECTOR | UDP: at most 65,507 payload bytes; octet-counted TCP/TLS: at most 9,999,999,999 payload bytes; non-transparent TCP: no LF in the payload | UDP adds no transport framing; octet counting adds the decimal payload length and one space (at most 11 bytes); non-transparent framing appends one LF |
 
 A batch message that does not fit is never written. Every member follows `ON MESSAGE ERROR` with
 code `external`, operation `publish` and one shared reference, and the message names the size and
 the limit, such as `mqtt rejected record: MQTT PUBLISH packet of 1200090 bytes exceeds the broker's
 maximum packet size of 1048576 bytes`. The messages around it are still written. Declare a
 `MAX SIZE` that leaves room for the metadata to keep batches from reaching the limit.
+
+The Syslog limits apply to the complete encoded payload, including a codec's batch container.
+Transport framing is added afterwards and does not count toward `MAX SIZE`. A payload containing LF
+under non-transparent framing follows the same `ON MESSAGE ERROR` path, with a reason naming the LF
+refusal. The generated [SYSLOG COLLECTOR reference](#syslog) states the shared frame limits.
 
 A Pulsar broker announces its `maxMessageSize` on every connection, so a producer that reconnects
 to another broker checks against the new one's. A Pulsar topic can also set a smaller
@@ -2421,6 +2428,9 @@ octet-counting by default and may select non-transparent framing; TLS always use
 Success is local socket acceptance and flush, not remote delivery confirmation. The emitter requires
 a codec and rejects header writes. See [Syslog](syslog.md) for client configuration, framing,
 message errors, retry behavior, and limits.
+The statement that binds the collector's client refuses listener-only keys, including
+`max_message_size`, `idle_timeout_ms` and `tls_client_ca_file`; configure its write deadline with
+`timeout_ms`. See the [Syslog client key table](syslog.md#client) for the shared keys and TLS files.
 
 With `BATCH`, a `SYSLOG` codec encodes one RFC 5424 frame whose `MSG` is a JSON array of the
 members' complete RFC 5424 messages. Members must share every header field except timestamp; the
@@ -4289,6 +4299,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | MQTT | QoS 1 or 2 retry after an ambiguous handshake; any mode after a lost upstream ACK or attached sibling failure | QoS 0 can lose a record after client acceptance; later delivery follows the configured broker and session guarantees | None |
 | Redis Pub/Sub | Retry after a `PUBLISH` whose answer missed the driver's 500 ms or was lost with its connection, which Redis may already have delivered; retry after Redis accepts `PUBLISH` but the Nervix ACK is lost, or after attached sibling failure | Any failure after detached relay acceptance; subscribers that are absent or disconnected miss the message | None |
 | ZeroMQ | Retry after socket send acceptance followed by lost ACK or attached sibling failure | Any failure after detached relay acceptance; socket send does not establish durable receiver storage | None |
+| Syslog COLLECTOR | Retry after a connection or write failure, including a partial frame write or timeout; lost upstream ACK or attached sibling failure can repeat an accepted frame | Local socket acceptance and flush do not establish remote receipt or durable storage; UDP can lose datagrams | None |
 | Sentry | Retry after an ambiguous HTTP result, which sends the same envelope and `event_id` again; lost ACK; or attached sibling failure | Any failure after detached relay acceptance; an accepted event can still be subject to Sentry service policy | None |
 | OTEL | Retry after an ambiguous Export result, which resends the same request bytes; lost ACK; or attached sibling failure | Any failure after detached relay acceptance; `partial_success` acknowledges the whole request, so receiver-rejected records in that response are lost | None |
 | HTTP | Retry after a lost response, failed connection, or timeout following an endpoint that applied the request; a lost ACK or attached sibling failure | Any failure after detached relay acceptance; a `2xx` delivers on its headers, so an endpoint that later fails its own processing loses the record | None; the endpoint can deduplicate by a stable key the emitter writes with `write_header` |

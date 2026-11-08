@@ -2,6 +2,12 @@
 
 *Plexus, the Nervix graph definition language.*
 
+Secure random values come from `nervix-crypto`. Its pinned AWS-LC generator returns complete
+random bytes or aborts if sufficient entropy cannot be obtained; it has no recoverable entropy
+failure to classify as a record, authentication or transport rejection. No default value replaces
+an unavailable random draw. Digest computation and the deterministic transport-entropy callback
+retain their infallible contracts.
+
 The allowance engine returns `Admission` decisions separately from input and conversion errors.
 `WaitUntil`, `NeverAdmissible` and `KeyBudgetExhausted` are ordinary outcomes, not decode failures
 or dropped payloads. `QuotaError` identifies invalid rates, bursts, costs, TTLs and horizon ranges;

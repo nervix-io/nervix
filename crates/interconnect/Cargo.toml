@@ -49,11 +49,9 @@ nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }
 percent-encoding = { workspace = true }
-rand_core = { workspace = true }
 rkyv = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
-sha2 = { workspace = true }
 shuttle = { workspace = true, optional = true }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
@@ -72,6 +70,7 @@ arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
 blake3 = { workspace = true }
 bolero = { workspace = true }
+faster-hex = { workspace = true }
 nervix-arbitrary = { workspace = true }
 nervix-model-harness = { workspace = true }
 rcgen = { workspace = true }

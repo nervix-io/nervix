@@ -61,7 +61,8 @@ one production behavior, which is what every node uses:
   by, as described in [Peer Identity And Authentication](#peer-identity-and-authentication).
   Production bundles use the system clock.
 - **Identity entropy.** The process epoch and relay grant identifiers are drawn from the transport's
-  configured entropy, which in production is the operating system's secure random source.
+  configured entropy, which in production takes AWS-LC's secure random values through
+  `nervix-crypto`. A simulation supplies its deterministic callback through the same seam.
 - **Deadlines.** Every transport deadline is an instant of the boundary's clock,
   `nervix_primitives::time`, whose timers are Tokio's, so it follows the clock of the runtime it
   runs on: connection setup, request and progress timeouts, reconnect backoff, relay grant

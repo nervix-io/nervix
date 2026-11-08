@@ -816,7 +816,9 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
 - For syslog, read the dedicated `Common` → `Syslog` documentation entry. Reference the predefined
   singleton wire schema with a `SYSLOG CODEC` head, keep the format independent of the UDP/TCP/TLS
   client transport, and use only the documented `SYSLOG LISTENER INGESTOR ... MODE NO ACK` ingestor
-  and `NO ACK` emitter forms.
+  and `SYSLOG COLLECTOR EMITTER ... MODE NO ACK` forms. Read its `Client`, `Quiesce` and `Emitter`
+  sections before choosing direction-specific keys, promising retention across a suspension, or
+  sizing a frame; a successful collector write confirms local socket acceptance and flush.
 - For a Sentry emitter, reference a `SENTRY CLIENT` containing the project DSN and a positive
   `timeout_ms`, and use a codec that emits one Sentry event JSON object per record. Do not add header
   writes to the Sentry route.
