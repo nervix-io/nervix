@@ -3938,3 +3938,13 @@ ordinary outcomes.
 A membership-quota refusal is carried in the leader's typed admission verdict for that node run.
 The joining node's existing supervision reports it and stops the refused newcomer. Licensing never
 removes a committed member, and a returning member does not consume another quota slot.
+
+## Startup Execution Capacity
+
+[Execution Capabilities](node-settings.md#execution-capabilities) resolves local overrides against
+one CPU and memory observation. Scalar refusals name the setting before detection. Contextual
+`ExecutionConfigError` causes identify CPU over-allocation, an operation its class cannot hold or
+an executor total above memory. `PreflightError::MemoryBelowBudgets` additionally counts both
+client node-credit capacities. Receive-limit and native-runtime relationship errors retain their
+typed causes beneath the startup context; they never turn a refused allocation into a decode or
+authentication failure. A runtime stack or blocking-thread refusal happens before node listeners.

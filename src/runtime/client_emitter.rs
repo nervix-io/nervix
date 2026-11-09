@@ -25,8 +25,7 @@ use ahash::HashMap;
 use bytes::Bytes;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    AckWindow, CLIENT_CONSUMER_NODE_BYTES, DomainName, EmitterName, ModelKind, RelayName,
-    SchemaField, Timestamp,
+    AckWindow, DomainName, EmitterName, ModelKind, RelayName, SchemaField, Timestamp,
 };
 use nervix_primitives::{
     sync::{
@@ -48,30 +47,46 @@ const RETAINED_RESULTS: usize = 2048;
 /// A reservation for Arrow bytes still awaiting application processing.
 #[derive(Clone)]
 pub(crate) struct ClientEmitterBudget {
-    used: Arc<AtomicU64>,
-    granted: Arc<AtomicU64>,
-    changed: Arc<Notify>,
+    inner: Arc<ClientEmitterBudgetInner>,
+}
+
+struct ClientEmitterBudgetInner {
+    used: AtomicU64,
+    granted: AtomicU64,
+    changed: Notify,
+    capacity: u64,
 }
 
 impl Default for ClientEmitterBudget {
     fn default() -> Self {
-        Self {
-            used: Arc::new(AtomicU64::new(0)),
-            granted: Arc::new(AtomicU64::new(0)),
-            changed: Arc::new(Notify::new()),
-        }
+        Self::new(super::ClientEndpointSettings::default().consumer_node_bytes)
     }
 }
 
 impl ClientEmitterBudget {
+    pub(crate) fn new(capacity: nervix_models::Setting<super::ClientConsumerNodeBytes>) -> Self {
+        Self {
+            inner: Arc::new(ClientEmitterBudgetInner {
+                used: AtomicU64::new(0),
+                granted: AtomicU64::new(0),
+                changed: Notify::new(),
+                capacity: capacity.value().as_u64(),
+            }),
+        }
+    }
+
+    pub(crate) fn capacity(&self) -> u64 {
+        self.inner.capacity
+    }
+
     pub(crate) fn try_grant(&self, bytes: NonZeroU64) -> Option<ClientEmitterGrant> {
-        let mut current = self.granted.load(Ordering::Acquire);
+        let mut current = self.inner.granted.load(Ordering::Acquire);
         loop {
             let next = current.checked_add(bytes.get())?;
-            if next > CLIENT_CONSUMER_NODE_BYTES {
+            if next > self.capacity() {
                 return None;
             }
-            match self.granted.compare_exchange_weak(
+            match self.inner.granted.compare_exchange_weak(
                 current,
                 next,
                 Ordering::AcqRel,
@@ -89,20 +104,20 @@ impl ClientEmitterBudget {
     }
 
     pub(crate) async fn reserve(&self, bytes: NonZeroU64) -> Option<ClientEmitterReservation> {
-        if bytes.get() > CLIENT_CONSUMER_NODE_BYTES {
+        if bytes.get() > self.capacity() {
             return None;
         }
         loop {
-            let notified = self.changed.notified();
+            let notified = self.inner.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            let mut current = self.used.load(Ordering::Acquire);
+            let mut current = self.inner.used.load(Ordering::Acquire);
             loop {
                 let next = current.checked_add(bytes.get())?;
-                if next > CLIENT_CONSUMER_NODE_BYTES {
+                if next > self.capacity() {
                     break;
                 }
-                match self.used.compare_exchange_weak(
+                match self.inner.used.compare_exchange_weak(
                     current,
                     next,
                     Ordering::AcqRel,
@@ -123,7 +138,7 @@ impl ClientEmitterBudget {
 
     #[cfg(test)]
     pub(crate) fn used(&self) -> u64 {
-        self.used.load(Ordering::Acquire)
+        self.inner.used.load(Ordering::Acquire)
     }
 }
 
@@ -135,6 +150,7 @@ pub(crate) struct ClientEmitterGrant {
 impl Drop for ClientEmitterGrant {
     fn drop(&mut self) {
         self.budget
+            .inner
             .granted
             .fetch_sub(self.bytes.get(), Ordering::AcqRel);
     }
@@ -148,9 +164,10 @@ pub(crate) struct ClientEmitterReservation {
 impl Drop for ClientEmitterReservation {
     fn drop(&mut self) {
         self.budget
+            .inner
             .used
             .fetch_sub(self.bytes.get(), Ordering::AcqRel);
-        self.budget.changed.notify_waiters();
+        self.budget.inner.changed.notify_waiters();
     }
 }
 
@@ -1087,7 +1104,7 @@ mod tests {
                 .await,
             Err(ClientEmitterRefusal::InvalidWindow)
         ));
-        let full = NonZeroU64::new(CLIENT_CONSUMER_NODE_BYTES).assured("node credit is nonzero");
+        let full = NonZeroU64::new(budget.capacity()).assured("node credit is nonzero");
         let grant = budget
             .try_grant(full)
             .expect("full node budget is available");

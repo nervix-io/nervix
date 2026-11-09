@@ -69,9 +69,9 @@ The receiver's local capacity options are:
 
 | Option | Environment variable | Default |
 | --- | --- | --- |
-| `--interconnect-relay-batch-bytes` | `NERVIX_INTERCONNECT_RELAY_BATCH_BYTES` | Executor encoded relay limit, 32 MiB |
-| `--interconnect-relay-decoded-bytes` | `NERVIX_INTERCONNECT_RELAY_DECODED_BYTES` | Executor decoded relay limit, 32 MiB |
-| `--interconnect-bulk-chunk-bytes` | `NERVIX_INTERCONNECT_BULK_CHUNK_BYTES` | Executor bulk chunk limit, 64 KiB |
+| `--interconnect-relay-batch-bytes` | `NERVIX_INTERCONNECT_RELAY_BATCH_BYTES` | Resolved executor encoded relay limit |
+| `--interconnect-relay-decoded-bytes` | `NERVIX_INTERCONNECT_RELAY_DECODED_BYTES` | Resolved executor decoded relay limit |
+| `--interconnect-bulk-chunk-bytes` | `NERVIX_INTERCONNECT_BULK_CHUNK_BYTES` | Resolved executor bulk chunk limit |
 | `--interconnect-bulk-receive-window` | `NERVIX_INTERCONNECT_BULK_RECEIVE_WINDOW` | 1 MiB per bulk stream |
 
 All are positive. The first three must fit the supplied executor's corresponding operation limit.
@@ -186,17 +186,15 @@ Before it binds a listener or opens a store, a node checks the environment it is
 It refuses to start at the first check that fails, exiting with status `1` and
 `the startup preflight refused this node` above the cause:
 
-1. It builds its executor from the execution limits, checked against one another, so budgets that
-   cannot hold the operations the limits admit refuse the start.
+1. It validates explicit execution and receive bounds before detection. The native process resolves
+   CPU capacity once before constructing its runtime; in-process starts resolve it during preflight.
 2. It resolves its memory limit: `--memory-limit` when given, otherwise the smallest memory limit
    of its control group and the groups above it, in the unified hierarchy or the version 1 memory
-   hierarchy, or its physical memory when no group limit is smaller. A platform that reports
-   neither leaves the limit unknown, and the memory checks do not run. A known limit must hold all
-   of the executor's memory budgets together, 2,723 MiB by default, and the
-   `--memory-high-watermark` when one is set.
-   This includes independent pools for decoded materialized snapshots and optional source
-   retention. Each derives its capacity from the relay budget, 192 MiB by default, with no
-   separate setting.
+   hierarchy, or its physical memory when no group limit is smaller. It derives the execution
+   settings, client byte credit, omitted receive limits and memory-pressure watermarks from these
+   capacities. Every memory pool counts once, including independent active state reads and retained
+   state-read cache. Their total plus producer and consumer node credit must fit known memory.
+   A failed detector leaves capacity unknown and uses the declared capacity-independent defaults.
 3. It creates its database directory and its temporary directory when they are absent, proves each
    writable with a probe file it removes again, and measures the total size of the volume each
    lives on.
@@ -212,7 +210,7 @@ Each refusal names the setting or directory it judged, with the values involved:
 
 | Check | Refusal |
 | --- | --- |
-| Memory budgets | `memory-limit (1GiB) cannot hold the node's memory budgets of 2.66GiB`, or `the detected memory limit of 2GiB cannot hold the node's memory budgets of 2.66GiB` |
+| Memory budgets | `the execution memory budgets of 101.25MiB exceed node memory 32MiB` |
 | Memory watermark | `memory-high-watermark (4GiB) exceeds memory-limit (3GiB)` |
 | Directories | `the database directory <path> cannot be created`, `the temporary directory <path> is not writable` |
 | Volumes | `the capacity of the volume holding the database directory <path> cannot be read` |
@@ -246,6 +244,78 @@ A returning node obtains construction-time cluster parameters from the live clus
 published state and verifies them against the log as it catches up. Its stale local log is
 not the initial policy authority. [Cluster Interconnect](interconnect.md) owns publication,
 authentication, wire forms and discovery.
+
+## Execution Capabilities
+
+Execution options are node capabilities resolved at startup. Every flag has its `NERVIX_`
+environment twin, formed by uppercasing its name and replacing hyphens with underscores.
+Omitted values derive; an explicit value, including one equal to a usual default, stays explicit.
+
+The five CPU classes keep independent admission. Control and credentials each default to one
+worker. Data, extension and bulk divide the remaining CPU count as evenly as possible, in that
+order, after honoring explicit requests. Each retains at least one place on small nodes, so the
+CPU admission total is at most the larger of CPU count and five. These are admission capacities;
+they do not promise an idle physical core. A stuck extension cannot take a data or control place.
+Consensus storage defaults to one worker; filesystem and connector storage each default to two.
+
+For each class, `--execution-<class>-workers` and `--execution-<class>-pending-jobs` override its
+workers and queue. Class names are `control-cpu`, `credentials-cpu`, `data-cpu`, `extension-cpu`,
+`bulk-cpu`, `consensus-storage`, `filesystem-storage`, and `connector-storage`. A queue defaults
+to 64 pending jobs per worker, capped at 1,024 per class. Counts must be positive and representable
+by the admission primitive; explicit CPU over-allocation is refused.
+
+Each pool has `--execution-<pool>-memory-bytes`. With known memory, defaults are:
+
+| Pool | Memory fraction | Minimum working set |
+| --- | --- | --- |
+| `management` | 1/128 | 64 KiB |
+| `commands` | 1/32 | 24 MiB |
+| `relay` | 1/16 | Enough for its two admitted operations |
+| `state-read` | Resolved relay capacity | Enough for its two admitted operations |
+| `state-read-cache` | Resolved relay capacity | Enough for its two admitted operations |
+| `bulk` | 1/32 | 32 MiB |
+| `bulk-window` | 1/64 | 16 MiB |
+| `restore-metadata` | 1/8 | Positive |
+| `credentials` | 1/256 | 19 MiB |
+
+Derived pools are capped at the 32-bit byte-permit representation. Explicit values are never
+silently reduced. With unknown memory, defaults are respectively 8, 24, 192, 192, 192, 32, 16,
+2,048 and 19 MiB. Credentials keeps room for mounted NATS files; PBKDF2's operation charge stays
+64 bytes and its creation policy remains the committed `PASSWORD_ITERATIONS` parameter.
+
+`--execution-relay-encoded-bytes` and `--execution-relay-decoded-bytes` default to one sixth of the
+relay pool, capped at 32 MiB each; `--execution-relay-scratch-bytes` defaults to one twelfth,
+capped at 16 MiB. All are positive. Validation requires two complete operations to fit relay,
+active read and cache pools independently. `--execution-resident-replication-batches` defaults
+to at most four, retaining command-budget room for an answer. `--execution-bulk-chunk-bytes`
+defaults to one 512th of bulk memory, capped at 64 KiB. Existing operation working-set checks
+still apply. Peer receive limits derive from these final limits before transport construction.
+
+`--client-producer-node-bytes` and `--client-consumer-node-bytes` each default to 1/32 of node
+memory, holding at least the default 32 MiB session window, or 128 MiB with unknown memory.
+They reserve node admission independently; committed per-session limits keep their own policy.
+The full startup total counts both capacities as well as all nine executor pools. A 1 GiB node
+uses 427 MiB of executor ceilings plus 64 MiB of node client credit, 491 MiB in total. These are
+ceilings, not eagerly allocated buffers; graph state, engines and thread stacks need additional
+headroom. Explicit totals that exceed known memory refuse startup.
+
+The native process uses `--runtime-worker-threads` (default: resolved CPU count, or one),
+`--runtime-max-blocking-threads` (at least all executor workers, retaining a default floor of 512
+for registered external and standard I/O work), and `--runtime-thread-stack-size` (8 MiB).
+Runtime workers cannot exceed the CPU claim. Blocking capacity must hold every executor worker;
+the combined thread count and its stack-size product must be addressable. Stack size must be positive, addressable and
+no larger than known memory. Keeping the stack and external-work allowance preserves existing
+engine and driver requirements; executor CPU admission supplies the compute bound.
+
+With known memory, omitted high and low watermarks default to 7/8 and 3/4 of memory. An explicit
+pair keeps its exact values, including deliberately early pause thresholds. A pair must be supplied
+together, low below high, and high must fit known memory. Watermarks govern observed process use;
+they do not reserve another copy of the admission ceilings.
+
+`DESCRIBE CLUSTER` appends the answering node's local workers, queues, memory capacities, client
+credit and operation limits. Its per-node capability records continue to report committed CPU,
+memory and peer receive bounds. Executor snapshots and observability metrics expose the actual
+worker, queue and memory capacities; see [Metrics And Observability](metrics-and-observability.md#interconnection-metrics).
 
 ## Prerequisites At Join
 
@@ -402,13 +472,14 @@ describes, defaults included.
 | `--drain-timeout`, `--shutdown-timeout` | node capability | shutdown |
 | `--resource-max-archive-bytes`, `--resource-max-extracted-bytes`, `--resource-max-file-count` | cluster parameter | resources |
 | `--otel-trace-sample-ratio` | node capability | trace export |
-| `--memory-limit` | node capability | capacity |
+| `--cpu-count`, `--memory-limit` | node capability | capacity |
+| `--execution-*`, `--runtime-worker-threads`, `--runtime-max-blocking-threads`, `--runtime-thread-stack-size` | node capability | execution |
+| `--client-producer-node-bytes`, `--client-consumer-node-bytes` | node capability | client admission |
 
 Cluster-parameter options are optional seeds for the first bootstrap. An explicit command-line
 or environment value, including a value equal to the default, is refused on every later start.
-The help text names the definition's default without supplying an implicit seed option. The
-memory watermarks have no default: without
-them the node runs no memory-pressure supervisor. `--memory-limit` and
+The help text names the definition's default without supplying an implicit seed option. With known memory, omitted memory watermarks derive as described below. With unknown memory and
+no explicit pair, the node runs no memory-pressure supervisor. `--memory-limit` and
 `--restore-staging-max-bytes` have no default value either: without them the node detects its
 memory limit and derives its restore-staging quota from its database volume, as
 [The Startup Preflight](#the-startup-preflight) describes.
@@ -626,7 +697,7 @@ The executor's connector-storage capacity is `Setting<ConnectorStorageWorkers>` 
 nonzero, and both an explicit local claim and the default are checked against the primitive's
 maximum permit representation before pool construction. Startup resolves it through the local
 executor configuration, and the executor snapshot and worker metrics expose the running value.
-The existing execution-settings adoption owns detection and capability-record publication.
+The execution settings resolve it with the detected node capacities before construction.
 Filesystem and consensus retain independent admission while a connector call holds its worker.
 
 The interconnect's bulk receive window is `Setting<BulkReceiveWindow>` with class
@@ -664,7 +735,8 @@ byte quantities, check that every settings option is named by its definition and
 environment twin, that help lists each area under its own heading, that an empty command line runs
 every definition's default, and that each relationship refuses the node with its owner's typed
 error. The registered `node-settings-command-line` Bolero property generates valid settings for
-every group, relationships held, and requires them to read back unchanged after rendering as
+every group, scalar and pre-detection relationships held, and optional capability requests, and
+requires them to read back unchanged without losing omission after rendering as
 options, along with every duration and byte quantity. Public scenarios start a real
 `nervix-server` process with a drain timeout above its shutdown timeout or a Raft heartbeat below
 one millisecond and observe the refusal naming the settings, and restart a node of a one-node and a
