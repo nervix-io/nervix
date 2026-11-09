@@ -100,7 +100,8 @@ impl InterconnectDuplexRequest for OpenClientProducerLink {
     const NAME: &'static str = "client_producer_link";
     const CLASS: PoolClass = PoolClass::Relay;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Shared;
-    const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+    const SETUP_DEADLINE: nervix_interconnect::RequestDeadline =
+        nervix_interconnect::RequestDeadline::Setup;
 }
 
 /// What a serving node sends over its link, each naming the producer it concerns by its key.

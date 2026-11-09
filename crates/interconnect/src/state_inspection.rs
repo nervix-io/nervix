@@ -10,8 +10,6 @@
     nervix::layer(engine, reason = "owns the boundary declared above")
 )]
 
-use std::time::Duration;
-
 use nervix_models::{
     BranchKeyFingerprint, ClusterNodeIdentity, DomainName, RelayName, SchemaFingerprint,
     StateInspectionBranchSelection, StateInspectionCounts, StateInspectionOrigin,
@@ -39,10 +37,7 @@ impl InterconnectStreamRequest for ReadMaterializedStatePage {
     const NAME: &'static str = "read_materialized_state_page";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    #[inline]
-    fn default_timeout() -> Duration {
-        <nervix_models::StateInspectionReadTimeout as nervix_models::SettingDefinition>::default_value(&())
-    }
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Request;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]

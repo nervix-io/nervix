@@ -635,6 +635,7 @@ async fn native_session_uses_ordered_fixture_addresses_and_original_host() {
     .assured("the fixture resolver configuration can be written");
     std::fs::write(&hosts_file, "").assured("the fixture hosts file can be written");
     let dns = DnsResolver::load(DnsConfiguration {
+        settings: nervix_dns::DnsSettings::default(),
         resolver_configuration,
         hosts_file,
         name_servers: NameServers::Explicit(vec![authority.address()]),
@@ -671,6 +672,7 @@ async fn native_session_connection_deadline_cancels_a_silent_dns_lookup() {
     .assured("the fixture resolver configuration can be written");
     std::fs::write(&hosts_file, "").assured("the fixture hosts file can be written");
     let dns = DnsResolver::load(DnsConfiguration {
+        settings: nervix_dns::DnsSettings::default(),
         resolver_configuration,
         hosts_file,
         name_servers: NameServers::Explicit(vec![authority.address()]),
@@ -723,6 +725,7 @@ async fn native_session_connection_error_preserves_the_typed_dns_failure() {
     .assured("the fixture resolver configuration can be written");
     std::fs::write(&hosts_file, "").assured("the fixture hosts file can be written");
     let dns = DnsResolver::load(DnsConfiguration {
+        settings: nervix_dns::DnsSettings::default(),
         resolver_configuration,
         hosts_file,
         name_servers: NameServers::Explicit(vec![authority.address()]),

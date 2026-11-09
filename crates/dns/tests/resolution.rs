@@ -15,9 +15,7 @@ use std::{
 };
 
 use meticulous::ResultExt as _;
-use nervix_dns::{
-    DnsConfiguration, DnsLookupFailure, DnsResolver, MAX_CONCURRENT_LOOKUPS, NameServers,
-};
+use nervix_dns::{DnsConfiguration, DnsLookupFailure, DnsResolver, NameServers};
 use nervix_primitives::time::Instant;
 use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
 use tempfile::TempDir;
@@ -82,6 +80,7 @@ impl Fixture {
             .assured("the resolver configuration can be written");
         std::fs::write(&hosts_file, hosts).assured("the hosts file can be written");
         let configuration = DnsConfiguration {
+            settings: nervix_dns::DnsSettings::default(),
             resolver_configuration,
             hosts_file,
             name_servers: NameServers::Explicit(vec![name_server]),
@@ -349,8 +348,15 @@ async fn the_host_configuration_bounds_retries_below_the_budget() {
 #[nervix_primitives::test]
 async fn lookups_beyond_the_concurrency_bound_wait_and_cancellation_frees_their_slots() {
     let fixture = Fixture::start("options timeout:30 attempts:1\n", "").await;
-    let mut holders = Vec::with_capacity(MAX_CONCURRENT_LOOKUPS);
-    for index in 0..MAX_CONCURRENT_LOOKUPS {
+    let mut holders = Vec::with_capacity(
+        *nervix_dns::DnsSettings::default()
+            .concurrent_lookups
+            .value(),
+    );
+    for index in 0..*nervix_dns::DnsSettings::default()
+        .concurrent_lookups
+        .value()
+    {
         let name = format!("hold-{index}.nervix.test");
         fixture.authority.set(&name, DnsAnswer::Silent);
         let resolver = fixture.resolver.clone();
@@ -361,7 +367,10 @@ async fn lookups_beyond_the_concurrency_bound_wait_and_cancellation_frees_their_
         }));
     }
     let deadline = Instant::now() + CHANGE_DEADLINE;
-    for index in 0..MAX_CONCURRENT_LOOKUPS {
+    for index in 0..*nervix_dns::DnsSettings::default()
+        .concurrent_lookups
+        .value()
+    {
         let name = format!("hold-{index}.nervix.test");
         while fixture.authority.questions_for(&name) == 0 {
             assert!(Instant::now() < deadline, "{name} was never asked");

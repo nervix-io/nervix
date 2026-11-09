@@ -67,6 +67,8 @@ impl Arbitrary<'_> {
         } else {
             None
         };
+        let reconnect_jitter_permille =
+            u16::try_from(self.entropy.up_to(1000)).verified("generated permille fits u16");
         let mut positive = || {
             NonZeroU64::new(self.entropy.boundary_biased(1..=u64::MAX))
                 .assured("the generated count is positive")
@@ -77,9 +79,155 @@ impl Arbitrary<'_> {
             bulk_chunk_bytes: positive(),
             bulk_window_bytes: positive(),
         };
+        let interconnect = nervix_models::InterconnectCapabilities {
+            reconnect_jitter_permille,
+            max_peers: positive(),
+            max_connections: positive(),
+            concurrent_handshakes: positive(),
+            incoming_queue_capacity: positive(),
+            request_quota: positive(),
+            completion_quota: positive(),
+            health_probes: positive(),
+            relay_watermarks: positive(),
+            stream_window_bytes: u32::try_from(self.entropy.up_to(u64::from(u32::MAX)))
+                .verified("the generated value fits u32"),
+            connection_window_bytes: u32::try_from(self.entropy.up_to(u64::from(u32::MAX)))
+                .verified("the generated value fits u32"),
+            connection_setup_timeout: std::time::Duration::new(
+                self.entropy.any_u64(),
+                u32::try_from(self.entropy.up_to(u64::from(u32::MAX)))
+                    .verified("the generated value fits u32")
+                    % 1_000_000_000,
+            ),
+            request_timeout: std::time::Duration::new(
+                self.entropy.any_u64(),
+                u32::try_from(self.entropy.up_to(u64::from(u32::MAX)))
+                    .verified("the generated value fits u32")
+                    % 1_000_000_000,
+            ),
+            progress_timeout: std::time::Duration::new(
+                self.entropy.any_u64(),
+                u32::try_from(self.entropy.up_to(u64::from(u32::MAX)))
+                    .verified("the generated value fits u32")
+                    % 1_000_000_000,
+            ),
+            reconnect_backoff: std::time::Duration::new(
+                self.entropy.any_u64(),
+                u32::try_from(self.entropy.up_to(u64::from(u32::MAX)))
+                    .verified("the generated value fits u32")
+                    % 1_000_000_000,
+            ),
+            max_reconnect_backoff: std::time::Duration::new(
+                self.entropy.any_u64(),
+                u32::try_from(self.entropy.up_to(u64::from(u32::MAX)))
+                    .verified("the generated value fits u32")
+                    % 1_000_000_000,
+            ),
+        };
+        let database = nervix_models::DatabaseCapabilities {
+            cache_bytes: self.entropy.any_u64(),
+            journal_bytes: self.entropy.any_u64(),
+            workers: NonZeroU64::new(self.entropy.boundary_biased(1..=u64::MAX))
+                .assured("generated workers are positive"),
+        };
+        let consensus_database = nervix_models::DatabaseCapabilities {
+            cache_bytes: self.entropy.any_u64(),
+            journal_bytes: self.entropy.any_u64(),
+            workers: NonZeroU64::new(self.entropy.boundary_biased(1..=u64::MAX))
+                .assured("generated workers are positive"),
+        };
+        let dns = nervix_models::DnsCapabilities {
+            cache_entries: self.entropy.any_u64(),
+            positive_max_ttl: std::time::Duration::new(
+                self.entropy.any_u64(),
+                u32::try_from(self.entropy.up_to(999_999_999))
+                    .verified("generated subsecond nanos fit u32"),
+            ),
+            negative_max_ttl: std::time::Duration::new(
+                self.entropy.any_u64(),
+                u32::try_from(self.entropy.up_to(999_999_999))
+                    .verified("generated subsecond nanos fit u32"),
+            ),
+            hook_lookup_budget: std::time::Duration::new(
+                self.entropy.any_u64(),
+                u32::try_from(self.entropy.up_to(999_999_999))
+                    .verified("generated subsecond nanos fit u32"),
+            ),
+            address_families: self.entropy.pick([
+                nervix_models::DnsAddressFamilies::DualStack,
+                nervix_models::DnsAddressFamilies::Ipv4,
+                nervix_models::DnsAddressFamilies::Ipv6,
+            ]),
+            trust_negative_answers: self.entropy.flag(),
+            concurrent_lookups: NonZeroU64::new(self.entropy.boundary_biased(1..=u64::MAX))
+                .assured("generated concurrency is positive"),
+        };
+        let consensus = nervix_models::ConsensusCapabilities {
+            event_capacity: self.entropy.any_u64(),
+            append_batch_entries: self.entropy.any_u64(),
+            outstanding_append_batches: self.entropy.any_u64(),
+            outstanding_append_bytes: self.entropy.any_u64(),
+            append_idle_bound: std::time::Duration::new(
+                self.entropy.any_u64(),
+                u32::try_from(self.entropy.up_to(999_999_999))
+                    .verified("generated subsecond nanos fit u32"),
+            ),
+            snapshot_transfer_timeout: std::time::Duration::new(
+                self.entropy.any_u64(),
+                u32::try_from(self.entropy.up_to(999_999_999))
+                    .verified("generated subsecond nanos fit u32"),
+            ),
+            membership_mutation_timeout: std::time::Duration::new(
+                self.entropy.any_u64(),
+                u32::try_from(self.entropy.up_to(999_999_999))
+                    .verified("generated subsecond nanos fit u32"),
+            ),
+            retention_interval: std::time::Duration::new(
+                self.entropy.any_u64(),
+                u32::try_from(self.entropy.up_to(999_999_999))
+                    .verified("generated subsecond nanos fit u32"),
+            ),
+            retention_admission_timeout: std::time::Duration::new(
+                self.entropy.any_u64(),
+                u32::try_from(self.entropy.up_to(999_999_999))
+                    .verified("generated subsecond nanos fit u32"),
+            ),
+            retention_admission_poll: std::time::Duration::new(
+                self.entropy.any_u64(),
+                u32::try_from(self.entropy.up_to(999_999_999))
+                    .verified("generated subsecond nanos fit u32"),
+            ),
+            purge_batch_entries: self.entropy.any_u64(),
+            api_channel_capacity: self.entropy.any_u64(),
+            notification_channel_capacity: self.entropy.any_u64(),
+            state_machine_channel_capacity: self.entropy.any_u64(),
+            api_batch_capacity: self.entropy.any_u64(),
+            snapshot_chunk_bytes: self.entropy.any_u64(),
+            replication_backoff: std::time::Duration::new(
+                self.entropy.any_u64(),
+                u32::try_from(self.entropy.up_to(999_999_999))
+                    .verified("generated subsecond nanos fit u32"),
+            ),
+            replication_backoff_maximum: std::time::Duration::new(
+                self.entropy.any_u64(),
+                u32::try_from(self.entropy.up_to(999_999_999))
+                    .verified("generated subsecond nanos fit u32"),
+            ),
+            membership_step_down_delay: std::time::Duration::new(
+                self.entropy.any_u64(),
+                u32::try_from(self.entropy.up_to(999_999_999))
+                    .verified("generated subsecond nanos fit u32"),
+            ),
+            replication_lag_threshold: self.entropy.any_u64(),
+        };
         nervix_models::NodeCapabilityRecord {
             identity: self.node_identity(),
             capabilities: nervix_models::NodeCapabilities {
+                interconnect,
+                dns,
+                node_database: database,
+                consensus_database,
+                consensus,
                 cpu_count: cpu,
                 memory_bytes: memory,
                 receive,

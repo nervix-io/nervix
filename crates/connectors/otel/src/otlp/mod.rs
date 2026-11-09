@@ -2639,6 +2639,7 @@ mod tests {
         .assured("the fixture resolver configuration can be written");
         std::fs::write(&hosts_file, "").assured("the fixture hosts file can be written");
         let dns = nervix_dns::DnsResolver::load(DnsConfiguration {
+            settings: nervix_dns::DnsSettings::default(),
             resolver_configuration,
             hosts_file,
             name_servers: NameServers::Explicit(vec![authority.address()]),

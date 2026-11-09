@@ -781,6 +781,26 @@ pub(crate) fn uniform_capabilities(
     nodes: &[ClusterNodeName],
 ) -> BTreeMap<ClusterNodeName, NodeCapabilities> {
     let capabilities = NodeCapabilities {
+        interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
+        dns: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
+            .node_capability_record()
+            .capabilities
+            .dns,
+        node_database: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
+            .node_capability_record()
+            .capabilities
+            .node_database,
+        consensus_database: nervix_arbitrary::Arbitrary::new(
+            &[],
+            nervix_arbitrary::Domain::Vocabulary,
+        )
+        .node_capability_record()
+        .capabilities
+        .consensus_database,
+        consensus: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
+            .node_capability_record()
+            .capabilities
+            .consensus,
         cpu_count: Some(std::num::NonZeroU64::MIN),
         memory_bytes: Some(std::num::NonZeroU64::MIN),
         receive: nervix_interconnect::PeerReceiveSettings::default().bounds(),

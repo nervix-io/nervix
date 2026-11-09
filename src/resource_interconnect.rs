@@ -15,8 +15,6 @@
     )
 )]
 
-use std::time::Duration;
-
 use nervix_interconnect::{
     InterconnectRequest, InterconnectStreamRequest, PoolClass, RequestSubquota,
 };
@@ -57,10 +55,8 @@ impl InterconnectStreamRequest for FetchResourceArchive {
     const NAME: &'static str = "fetch_resource_archive";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Resource;
-    #[inline]
-    fn default_timeout() -> Duration {
-        Duration::from_secs(30)
-    }
+    const DEADLINE: nervix_interconnect::RequestDeadline =
+        nervix_interconnect::RequestDeadline::Snapshot;
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -73,5 +69,6 @@ impl InterconnectRequest for PublishResourceReplica {
 
     const NAME: &'static str = "publish_resource_replica";
     const CLASS: PoolClass = PoolClass::Commands;
-    const TIMEOUT: Duration = Duration::from_secs(5);
+    const DEADLINE: nervix_interconnect::RequestDeadline =
+        nervix_interconnect::RequestDeadline::Setup;
 }

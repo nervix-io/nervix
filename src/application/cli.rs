@@ -14,8 +14,12 @@ use super::*;
 mod capacity;
 mod cluster_parameters;
 mod consensus;
+mod consensus_operations;
+mod database;
 #[cfg(feature = "deloxide")]
 mod diagnostics;
+mod dns;
+mod interconnect;
 mod membership;
 mod memory_pressure;
 mod node;

@@ -58,6 +58,8 @@ impl fmt::Display for StagingDirectory {
 /// judged, with the values involved.
 #[derive(Debug, Error)]
 pub enum PreflightError {
+    #[error("consensus capacity cannot hold the configured execution limits")]
+    ConsensusCapacity,
     #[error("the executor's memory budgets cannot hold the operations its limits admit")]
     ExecutionLimits,
     #[error("the preflight's filesystem work could not be admitted")]
@@ -139,6 +141,10 @@ impl Preflight<'_> {
     ) -> Result<PreflightOutcome, Report<PreflightError>> {
         let config = ExecutionConfig::default();
         let executor = Executor::new(config).change_context(PreflightError::ExecutionLimits)?;
+        self.settings
+            .consensus_operations
+            .validate_execution(executor.limits())
+            .change_context(PreflightError::ConsensusCapacity)?;
         let budgets = config
             .budgets
             .total()
@@ -153,12 +159,41 @@ impl Preflight<'_> {
         .await?;
         let memory = self.settings.capacity.effective_memory_limit(detected);
         let capabilities = nervix_models::NodeCapabilities {
+            interconnect: self.settings.interconnect.capabilities(),
+            dns: self.settings.dns.capabilities(),
+            node_database: self
+                .settings
+                .node_database
+                .capabilities(self.settings.capacity.effective_cpu_count(detected_cpu)),
+            consensus_database: self
+                .settings
+                .consensus_database
+                .capabilities(self.settings.capacity.effective_cpu_count(detected_cpu)),
+            consensus: self.settings.consensus_operations.capabilities(
+                *self
+                    .settings
+                    .raft_retention
+                    .snapshot_entry_threshold
+                    .value(),
+                executor.limits(),
+            ),
             cpu_count: self.settings.capacity.effective_cpu_count(detected_cpu),
             memory_bytes: memory
                 .limit()
                 .and_then(|limit| std::num::NonZeroU64::new(limit.as_u64())),
             receive: self.settings.peer_receive.bounds(),
         };
+        let mut budget_bytes = budgets.as_u64();
+        for cache_bytes in [
+            capabilities.node_database.cache_bytes,
+            capabilities.consensus_database.cache_bytes,
+        ] {
+            budget_bytes = match budget_bytes.checked_add(cache_bytes) {
+                Some(total) => total,
+                None => return Err(Report::new(PreflightError::UnaddressableBudgets)),
+            };
+        }
+        let budgets = ByteUnit::Byte(budget_bytes);
         if let Some(limit) = memory.limit() {
             if limit < budgets {
                 return Err(Report::new(PreflightError::MemoryBelowBudgets {
@@ -197,7 +232,9 @@ impl Preflight<'_> {
             }
         }
 
-        let dns = DnsResolver::load(self.dns.clone())
+        let mut dns_configuration = self.dns.clone();
+        dns_configuration.settings = self.settings.dns;
+        let dns = DnsResolver::load(dns_configuration)
             .instrument(tracing::info_span!("load_dns_configuration"))
             .await
             .change_context(PreflightError::Resolver)?;

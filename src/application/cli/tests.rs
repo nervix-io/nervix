@@ -20,7 +20,11 @@ use crate::application::{
 };
 
 /// The headings of the settings areas, in the order help lists them.
-const SETTINGS_HEADINGS: [&str; 9] = [
+const SETTINGS_HEADINGS: [&str; 13] = [
+    "Databases",
+    "Consensus capacities",
+    "DNS",
+    "Interconnect",
     "Consensus",
     "Membership",
     "Scheduling",
@@ -33,7 +37,48 @@ const SETTINGS_HEADINGS: [&str; 9] = [
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 37] = [
+const SETTING_NAMES: [&str; 78] = [
+    "database-cache-bytes",
+    "database-journal-bytes",
+    "database-workers",
+    "raft-database-cache-bytes",
+    "raft-database-journal-bytes",
+    "raft-database-workers",
+    "raft-event-capacity",
+    "raft-append-batch-entries",
+    "raft-outstanding-append-batches",
+    "raft-outstanding-append-bytes",
+    "raft-append-idle-bound",
+    "raft-snapshot-transfer-timeout",
+    "raft-membership-mutation-timeout",
+    "raft-retention-interval",
+    "raft-retention-admission-timeout",
+    "raft-purge-batch-entries",
+    "raft-api-channel-capacity",
+    "raft-notification-channel-capacity",
+    "raft-state-machine-channel-capacity",
+    "raft-api-batch-capacity",
+    "raft-replication-backoff",
+    "raft-replication-backoff-maximum",
+    "raft-membership-step-down-delay",
+    "dns-cache-entries",
+    "dns-positive-max-ttl",
+    "dns-negative-max-ttl",
+    "dns-hook-lookup-budget",
+    "dns-address-family-policy",
+    "dns-trust-negative-answers",
+    "interconnect-reconnect-jitter-permille",
+    "interconnect-max-peers",
+    "interconnect-concurrent-handshakes",
+    "interconnect-incoming-queue-capacity",
+    "interconnect-request-quota",
+    "interconnect-stream-receive-window",
+    "interconnect-connection-receive-window",
+    "interconnect-connection-setup-timeout",
+    "interconnect-request-timeout",
+    "interconnect-progress-timeout",
+    "interconnect-reconnect-backoff",
+    "interconnect-max-reconnect-backoff",
     "raft-heartbeat-interval",
     "raft-snapshot-entry-threshold",
     "raft-snapshot-byte-threshold",
@@ -297,6 +342,54 @@ fn help_lists_each_settings_area_under_its_own_heading() {
 
     assert!(positions.is_sorted(), "{help}");
     assert!(identity < positions[0], "{help}");
+}
+
+#[test]
+fn infrastructure_overrides_preserve_derived_inputs_and_refuse_invalid_bounds() {
+    let settings = NodeSettings::default()
+        .with_overrides(&[
+            override_of("interconnect-max-peers", "16"),
+            override_of("interconnect-request-quota", "4"),
+            override_of("interconnect-request-timeout", "20s"),
+            override_of("database-workers", "2"),
+            override_of("dns-address-family-policy", "ipv4"),
+            override_of("dns-trust-negative-answers", "false"),
+            override_of("raft-append-idle-bound", "3s"),
+        ])
+        .assured("consistent local infrastructure bounds");
+    let rendered = settings.with_overrides(&[]).assured("settings read back");
+    assert_eq!(rendered, settings);
+    assert_eq!(settings.interconnect.request_quota(), 4);
+    assert_eq!(*settings.dns.concurrent_lookups.value(), 16);
+    assert_eq!(*settings.node_database.workers.value(), Some(2));
+    assert_eq!(*settings.consensus_database.workers.value(), None);
+    assert_eq!(
+        NodeSettings::default().interconnect.values().request_quota,
+        None
+    );
+
+    for (name, value) in [
+        ("interconnect-max-peers", "0"),
+        ("interconnect-request-quota", "0"),
+        ("interconnect-request-quota", "1025"),
+        ("interconnect-request-timeout", "0s"),
+        ("interconnect-stream-receive-window", "2GiB"),
+        ("interconnect-reconnect-jitter-permille", "1001"),
+        ("database-journal-bytes", "1MiB"),
+        ("raft-database-workers", "0"),
+        ("dns-cache-entries", "0"),
+        ("dns-hook-lookup-budget", "0s"),
+        ("raft-outstanding-append-batches", "0"),
+        ("raft-retention-interval", "0s"),
+        ("raft-replication-backoff-maximum", "100ms"),
+    ] {
+        assert!(
+            NodeSettings::default()
+                .with_overrides(&[override_of(name, value)])
+                .is_err(),
+            "{name}={value} must be refused before startup"
+        );
+    }
 }
 
 #[test]

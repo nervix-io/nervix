@@ -645,6 +645,9 @@ pub(in crate::application) async fn build_test_service_inner(
     let interconnect = test_interconnect("test", &expected_leader).await;
     let executor = nervix_execution::Executor::default();
     let settings = ConsensusSettings {
+        operations: nervix_consensus::RaftOperationSettings::default(),
+        database: nervix_models::DatabaseSettings::<nervix_models::ConsensusDatabase>::default()
+            .capabilities(None),
         cluster_name: "test".to_string(),
         node_id: expected_leader.clone(),
         interconnect_advertise_addr: interconnect.local_addr().into(),
@@ -728,6 +731,32 @@ pub(in crate::application) async fn build_test_service_inner(
         .announce_node_capabilities(nervix_models::NodeCapabilityRecord {
             identity: cluster.local_node_identity().await,
             capabilities: nervix_models::NodeCapabilities {
+                interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
+                dns: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
+                    .node_capability_record()
+                    .capabilities
+                    .dns,
+                node_database: nervix_arbitrary::Arbitrary::new(
+                    &[],
+                    nervix_arbitrary::Domain::Vocabulary,
+                )
+                .node_capability_record()
+                .capabilities
+                .node_database,
+                consensus_database: nervix_arbitrary::Arbitrary::new(
+                    &[],
+                    nervix_arbitrary::Domain::Vocabulary,
+                )
+                .node_capability_record()
+                .capabilities
+                .consensus_database,
+                consensus: nervix_arbitrary::Arbitrary::new(
+                    &[],
+                    nervix_arbitrary::Domain::Vocabulary,
+                )
+                .node_capability_record()
+                .capabilities
+                .consensus,
                 cpu_count: Some(std::num::NonZeroU64::MIN),
                 memory_bytes: Some(std::num::NonZeroU64::MIN),
                 receive: interconnect.local_receive_bounds(),

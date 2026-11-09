@@ -74,6 +74,29 @@ async fn receive_bound_refusal_creates_no_attempt_and_a_revised_claim_is_adopted
     let mut record = nervix_models::NodeCapabilityRecord {
         identity: ClusterNodeIdentity::new(pair.node_b.clone(), ClusterNodeIncarnation::new(1)),
         capabilities: nervix_models::NodeCapabilities {
+            interconnect: crate::TransportSettings::default().capabilities(),
+            dns: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
+                .node_capability_record()
+                .capabilities
+                .dns,
+            node_database: nervix_arbitrary::Arbitrary::new(
+                &[],
+                nervix_arbitrary::Domain::Vocabulary,
+            )
+            .node_capability_record()
+            .capabilities
+            .node_database,
+            consensus_database: nervix_arbitrary::Arbitrary::new(
+                &[],
+                nervix_arbitrary::Domain::Vocabulary,
+            )
+            .node_capability_record()
+            .capabilities
+            .consensus_database,
+            consensus: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
+                .node_capability_record()
+                .capabilities
+                .consensus,
             cpu_count: None,
             memory_bytes: None,
             receive: receive.bounds(),

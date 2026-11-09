@@ -39,7 +39,7 @@ pub(super) const REMOTE_RELAY_INSTANTIATION_WAIT: Duration = Duration::from_secs
 
 pub(super) const REMOTE_RELAY_INSTANTIATION_POLL: Duration = Duration::from_millis(25);
 
-pub(super) const REMOTE_ACK_ALIVE_INTERVAL: Duration = Duration::from_millis(100);
+pub(super) const REMOTE_ACK_ALIVE_INTERVAL: Duration = nervix_models::HOST_RELAY_ALIVE_INTERVAL;
 
 /// Silence bound for a forwarded record ACK after admission. The next report starts
 /// `REMOTE_ACK_ALIVE_INTERVAL` after delivery or giving up at `DISPATCH_TIMEOUT`; two exhausted
@@ -74,7 +74,7 @@ const _: () = {
     );
 };
 
-pub(super) const REMOTE_RELAY_TOTAL_TIMEOUT: Duration = Duration::from_secs(300);
+pub(super) const REMOTE_RELAY_TOTAL_TIMEOUT: Duration = nervix_models::HOST_RELAY_ADMISSION_BOUND;
 
 enum FailedRelayAdmissionResolution {
     Admitted,
@@ -484,6 +484,10 @@ impl RemoteDispatcher {
 
     pub(super) fn clear_pending_relay_admission(&self, registration: &RemoteAckRegistration) {
         self.registry.clear_ack(registration.ack_id);
+    }
+
+    pub(super) fn request_deadline<M: nervix_interconnect::InterconnectRequest>(&self) -> Duration {
+        self.interconnect.request_deadline::<M>()
     }
 
     pub(super) async fn request_with_timeout<M>(

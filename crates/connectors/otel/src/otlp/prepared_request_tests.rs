@@ -699,6 +699,7 @@ async fn a_prepared_grpc_export_reaches_its_receiver_after_a_negative_dns_answer
     .assured("the fixture resolver configuration can be written");
     std::fs::write(&hosts_file, "").assured("the fixture hosts file can be written");
     let dns = nervix_dns::DnsResolver::load(DnsConfiguration {
+        settings: nervix_dns::DnsSettings::default(),
         resolver_configuration,
         hosts_file,
         name_servers: NameServers::Explicit(vec![authority.address()]),

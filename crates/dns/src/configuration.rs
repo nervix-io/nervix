@@ -43,16 +43,11 @@ pub const SYSTEM_RESOLVER_CONFIGURATION: &str = "/etc/resolv.conf";
 /// The host's hosts file.
 pub const SYSTEM_HOSTS_FILE: &str = "/etc/hosts";
 
-/// Cached answers, counted per name and record type. A policy input: room for every peer of a full
-/// cluster topology in both address families across a long search list, with space to spare.
-const CACHE_ENTRIES: u64 = 4_096;
-/// The longest an address answer is reused, whatever TTL its record carries. A policy input that
-/// bounds how long a node dials an address its name no longer has.
-const POSITIVE_MAX_TTL: Duration = Duration::from_secs(60 * 60);
-/// The longest a missing name or an empty answer is reused. A policy input that bounds how long a
-/// name that has just been published stays unresolvable.
-const NEGATIVE_MAX_TTL: Duration = Duration::from_secs(30);
 /// The port a `nameserver` line of the resolver configuration names implicitly.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "RFC 1035 assigns DNS's standard service port 53")
+)]
 const DNS_PORT: u16 = 53;
 /// The search-list entry the `resolv.conf` grammar uses to say the list is empty.
 const EMPTY_SEARCH_LIST: &str = "--";
@@ -67,6 +62,7 @@ pub struct DnsConfiguration {
     pub hosts_file: PathBuf,
     /// Which name servers the resolver asks.
     pub name_servers: NameServers,
+    pub settings: crate::DnsSettings,
 }
 
 /// Which name servers a resolver asks.
@@ -102,6 +98,7 @@ pub(crate) struct LoadedConfiguration {
     pub(crate) resolver: ResolverConfig,
     pub(crate) options: ResolverOpts,
     pub(crate) hosts: HostsTable,
+    pub(crate) settings: crate::DnsSettings,
 }
 
 impl DnsConfiguration {
@@ -111,21 +108,26 @@ impl DnsConfiguration {
             resolver_configuration: PathBuf::from(SYSTEM_RESOLVER_CONFIGURATION),
             hosts_file: PathBuf::from(SYSTEM_HOSTS_FILE),
             name_servers: NameServers::ResolverConfiguration,
+            settings: crate::DnsSettings::default(),
         }
     }
 
     /// Read both files. Blocking file I/O: callers run it on the blocking pool.
     pub(crate) fn read(self) -> Result<LoadedConfiguration, Report<DnsConfigurationError>> {
         let file = ResolverConfigurationFile::read(&self.resolver_configuration)?;
-        let name_servers = file.name_servers(&self.name_servers)?;
+        let name_servers = file.name_servers(
+            &self.name_servers,
+            *self.settings.trust_negative_answers.value(),
+        )?;
         let search = file.search_list()?;
         let resolver = ResolverConfig::from_parts(None, search, name_servers);
-        let options = file.options();
+        let options = file.options(&self.settings);
         let hosts = HostsTable::read(&self.hosts_file)?;
         Ok(LoadedConfiguration {
             resolver,
             options,
             hosts,
+            settings: self.settings,
         })
     }
 }
@@ -165,13 +167,14 @@ impl ResolverConfigurationFile {
     fn name_servers(
         &self,
         selection: &NameServers,
+        trust_negative: bool,
     ) -> Result<Vec<NameServerConfig>, Report<DnsConfigurationError>> {
         let mut servers = Vec::new();
         match selection {
             NameServers::ResolverConfiguration => {
                 for scoped in &self.parsed.nameservers {
                     let ip = IpAddr::from(scoped);
-                    servers.push(name_server(SocketAddr::new(ip, DNS_PORT)));
+                    servers.push(name_server(SocketAddr::new(ip, DNS_PORT), trust_negative));
                 }
                 if servers.is_empty() {
                     return Err(Report::new(DnsConfigurationError::NoNameServers {
@@ -181,7 +184,7 @@ impl ResolverConfigurationFile {
             }
             NameServers::Explicit(addresses) => {
                 for address in addresses {
-                    servers.push(name_server(*address));
+                    servers.push(name_server(*address, trust_negative));
                 }
                 if servers.is_empty() {
                     return Err(Report::new(DnsConfigurationError::EmptyNameServerList));
@@ -225,7 +228,7 @@ impl ResolverConfigurationFile {
     /// Hickory's options: the file's `ndots`, `timeout`, `attempts` and `edns0`, under this crate's
     /// cache, TTL and address-family policy. Hosts-file lookups belong to [`HostsTable`], so the
     /// resolver itself never reads one.
-    fn options(&self) -> ResolverOpts {
+    fn options(&self, settings: &crate::DnsSettings) -> ResolverOpts {
         let mut options = ResolverOpts::default();
         options.ndots = self.parsed.ndots.arch_into();
         options.timeout = Duration::from_secs(u64::from(self.parsed.timeout));
@@ -236,23 +239,27 @@ impl ResolverConfigurationFile {
             None => 0,
         };
         options.edns0 = self.parsed.edns0;
-        options.ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
-        options.cache_size = CACHE_ENTRIES;
-        options.positive_max_ttl = Some(POSITIVE_MAX_TTL);
-        options.negative_max_ttl = Some(NEGATIVE_MAX_TTL);
+        options.ip_strategy = match settings.address_family_policy.value() {
+            crate::AddressFamilies::DualStack => LookupIpStrategy::Ipv4AndIpv6,
+            crate::AddressFamilies::Ipv4 => LookupIpStrategy::Ipv4Only,
+            crate::AddressFamilies::Ipv6 => LookupIpStrategy::Ipv6Only,
+        };
+        options.cache_size = *settings.cache_entries.value();
+        options.positive_max_ttl = Some(*settings.positive_max_ttl.value());
+        options.negative_max_ttl = Some(*settings.negative_max_ttl.value());
         options.use_hosts_file = ResolveHosts::Never;
         options
     }
 }
 
 /// The name server at `address`, asked over UDP and, for a truncated answer, over TCP. A negative
-/// answer from it is trusted rather than asked of the next server.
-fn name_server(address: SocketAddr) -> NameServerConfig {
+/// answer from it is trusted only when the node's declared resolver policy requests it.
+fn name_server(address: SocketAddr, trust_negative: bool) -> NameServerConfig {
     let mut udp = ConnectionConfig::udp();
     udp.port = address.port();
     let mut tcp = ConnectionConfig::tcp();
     tcp.port = address.port();
-    NameServerConfig::new(address.ip(), true, vec![udp, tcp])
+    NameServerConfig::new(address.ip(), trust_negative, vec![udp, tcp])
 }
 
 #[cfg(test)]
@@ -277,6 +284,7 @@ mod tests {
         name_servers: NameServers,
     ) -> DnsConfiguration {
         DnsConfiguration {
+            settings: crate::DnsSettings::default(),
             resolver_configuration: resolver.path().to_path_buf(),
             hosts_file: hosts.path().to_path_buf(),
             name_servers,
@@ -355,6 +363,7 @@ mod tests {
         let hosts = file("");
         let directory = tempfile::tempdir().assured("a temporary directory can be created");
         let report = read_error(DnsConfiguration {
+            settings: crate::DnsSettings::default(),
             resolver_configuration: directory.path().join("missing.conf"),
             hosts_file: hosts.path().to_path_buf(),
             name_servers: NameServers::ResolverConfiguration,
@@ -370,6 +379,7 @@ mod tests {
         let resolver = file("nameserver 192.0.2.1\n");
         let directory = tempfile::tempdir().assured("a temporary directory can be created");
         let report = read_error(DnsConfiguration {
+            settings: crate::DnsSettings::default(),
             resolver_configuration: resolver.path().to_path_buf(),
             hosts_file: directory.path().join("missing-hosts"),
             name_servers: NameServers::ResolverConfiguration,
@@ -396,6 +406,43 @@ mod tests {
     }
 
     #[test]
+    fn declared_local_policy_reaches_the_resolver_builder() {
+        let resolver = file("nameserver 192.0.2.1\n");
+        let hosts = file("");
+        let mut configuration =
+            configuration(&resolver, &hosts, NameServers::ResolverConfiguration);
+        configuration.settings = crate::DnsSettings::resolve(
+            crate::DnsSettingValues {
+                cache_entries: Some(12),
+                positive_max_ttl: Some(Duration::from_secs(6)),
+                negative_max_ttl: Some(Duration::from_secs(2)),
+                hook_lookup_budget: Some(Duration::from_secs(7)),
+                address_family_policy: Some(crate::AddressFamilies::Ipv4),
+                trust_negative_answers: Some(false),
+            },
+            3,
+        )
+        .assured("a bounded local resolver policy");
+        let loaded = configuration.read().assured("the configuration is valid");
+        assert_eq!(loaded.options.cache_size, 12);
+        assert_eq!(
+            loaded.options.positive_max_ttl,
+            Some(Duration::from_secs(6))
+        );
+        assert_eq!(
+            loaded.options.negative_max_ttl,
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(loaded.options.ip_strategy, LookupIpStrategy::Ipv4Only);
+        assert!(!loaded.resolver.name_servers()[0].trust_negative_responses);
+        assert_eq!(*loaded.settings.concurrent_lookups.value(), 3);
+        assert_eq!(
+            *loaded.settings.hook_lookup_budget.value(),
+            Duration::from_secs(7)
+        );
+    }
+
+    #[test]
     fn options_follow_the_file_under_the_crate_policy() {
         let resolver = file("nameserver 192.0.2.1\noptions ndots:3 timeout:2 attempts:4 edns0\n");
         let hosts = file("");
@@ -408,9 +455,16 @@ mod tests {
         assert_eq!(options.attempts, 3);
         assert!(options.edns0);
         assert_eq!(options.ip_strategy, LookupIpStrategy::Ipv4AndIpv6);
-        assert_eq!(options.cache_size, CACHE_ENTRIES);
-        assert_eq!(options.positive_max_ttl, Some(POSITIVE_MAX_TTL));
-        assert_eq!(options.negative_max_ttl, Some(NEGATIVE_MAX_TTL));
+        let settings = crate::DnsSettings::default();
+        assert_eq!(options.cache_size, *settings.cache_entries.value());
+        assert_eq!(
+            options.positive_max_ttl,
+            Some(*settings.positive_max_ttl.value())
+        );
+        assert_eq!(
+            options.negative_max_ttl,
+            Some(*settings.negative_max_ttl.value())
+        );
         assert_eq!(options.use_hosts_file, ResolveHosts::Never);
     }
 

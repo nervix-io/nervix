@@ -82,6 +82,7 @@ tests = [
   "transport::isolation::stalled_peer_cannot_consume_unrelated_capacity_or_leak_reservations",
   "transport::multiple_peers_keep_remote_failure_classes_and_reject_invalid_authentication",
   "transport::network_disruption_respects_deadlines_and_repairs_authenticated_service",
+  "transport::infrastructure::declared_windows_and_rpc_deadlines_survive_latency_loss_and_repair",
   "transport::prerequisites::a_joiner_beyond_the_heartbeat_bound_is_refused_once_a_partition_heals",
   "transport::parameters::a_live_parameter_publication_gates_catch_up_across_a_partition",
   "transport::prerequisites::a_recorded_endpoint_another_cluster_now_serves_is_a_stale_route",

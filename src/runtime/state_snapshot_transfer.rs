@@ -21,8 +21,6 @@
     )
 )]
 
-use std::time::Duration;
-
 use nervix_interconnect::{
     InterconnectRequest, InterconnectStreamRequest, PoolClass, RemoteOperationFailure,
     RequestSubquota, StatePlacementEnvelope,
@@ -41,7 +39,8 @@ impl InterconnectRequest for DescribeStateSnapshot {
 
     const NAME: &'static str = "describe_state_snapshot";
     const CLASS: PoolClass = PoolClass::Commands;
-    const TIMEOUT: Duration = Duration::from_secs(5);
+    const DEADLINE: nervix_interconnect::RequestDeadline =
+        nervix_interconnect::RequestDeadline::Setup;
 }
 
 /// What the owner sealed when the request succeeded.
@@ -77,8 +76,6 @@ impl InterconnectStreamRequest for FetchStateSnapshot {
     const NAME: &'static str = "fetch_state_snapshot";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    #[inline]
-    fn default_timeout() -> Duration {
-        Duration::from_secs(30)
-    }
+    const DEADLINE: nervix_interconnect::RequestDeadline =
+        nervix_interconnect::RequestDeadline::Snapshot;
 }

@@ -683,6 +683,7 @@ mod tests {
             .expect("the resolver configuration can be written");
         std::fs::write(&hosts_file, "").expect("the hosts file can be written");
         let dns = DnsResolver::load(nervix_dns::DnsConfiguration {
+            settings: nervix_dns::DnsSettings::default(),
             resolver_configuration,
             hosts_file,
             name_servers: nervix_dns::NameServers::Explicit(vec![std::net::SocketAddr::from((

@@ -70,6 +70,7 @@ impl Fixture {
         std::fs::write(&hosts_file, format!("{localhost} localhost\n"))
             .assured("the hosts file can be written");
         let dns = DnsResolver::load(DnsConfiguration {
+            settings: nervix_dns::DnsSettings::default(),
             resolver_configuration,
             hosts_file,
             name_servers: NameServers::Explicit(vec![authority.address()]),

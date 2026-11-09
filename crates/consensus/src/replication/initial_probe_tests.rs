@@ -102,6 +102,7 @@ async fn probe_peer(probe_response: wire::AppendEntriesResponseRecord) -> ProbeP
     std::fs::write(&configuration, "nameserver 127.0.0.1\n").assured("test resolver configuration");
     std::fs::write(&hosts, "127.0.0.1 localhost\n").assured("test hosts file");
     let dns = DnsResolver::load(DnsConfiguration {
+        settings: nervix_dns::DnsSettings::default(),
         resolver_configuration: configuration,
         hosts_file: hosts,
         name_servers: NameServers::Explicit(vec![
@@ -212,6 +213,7 @@ async fn probe_peer(probe_response: wire::AppendEntriesResponseRecord) -> ProbeP
         })
         .assured("test append handler registers");
     let client = NetworkFactory {
+        operations: crate::RaftOperationSettings::default(),
         local_node_id: leader,
         interconnect: leader_transport,
         executor,

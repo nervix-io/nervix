@@ -151,7 +151,7 @@ cannot hold it:
 - **Memory.** The node's memory limit is `--memory-limit` (`NERVIX_MEMORY_LIMIT`) when given, and
   otherwise the smallest memory limit of its control group and the groups above it, or its
   physical memory when no group limit is smaller. It must hold every execution budget at once: the
-  675 MiB of transient budgets above and the 2 GiB grant for restore metadata, 2,723 MiB in all,
+  675 MiB of transient budgets above and the 2 GiB grant for restore metadata, 2,787 MiB in all including the two 32 MiB database caches,
   and a `--memory-high-watermark` when one is set. A container limited to 2 GiB therefore cannot
   start a node. Size the limit above the budgets by the process memory a running graph holds, which
   the memory-pressure watermarks govern.
@@ -267,3 +267,8 @@ metric families and cardinality policy, see
 [Metrics And Observability](metrics-and-observability.md).
 
 An inferencer with `STATE` retains one immutable native F32 generation per concrete branch. Snapshot publication shares that generation by pointer; sealing copies values only at a checkpoint boundary on a charged bulk CPU worker. The declared state, shape vectors and derived rkyv framing must fit one configured snapshot section. `CREATE` refuses a larger declaration before storage; runtime preparation repeats the bound check. Encoding and restoration charge their bounded temporary buffers separately from the branch's native state.
+
+Transport, DNS and consensus local capacities are described in
+[Node Settings](node-settings.md#transport-resolver-and-database-capacities). The startup memory
+check includes both configured database caches alongside the execution budgets. Database workers
+derive from the resolved CPU count, capped at four per database unless explicitly overridden.

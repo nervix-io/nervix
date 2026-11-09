@@ -244,6 +244,7 @@ impl TryFrom<NodeArgs> for NodeIdentity {
             NameServers::Explicit(args.dns_name_servers)
         };
         let dns = DnsConfiguration {
+            settings: nervix_dns::DnsSettings::default(),
             resolver_configuration: args.dns_resolver_config,
             hosts_file: args.dns_hosts_file,
             name_servers,

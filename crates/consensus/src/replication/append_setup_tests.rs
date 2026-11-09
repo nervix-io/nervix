@@ -64,6 +64,7 @@ async fn client_with_departed_target() -> NetworkClient<()> {
         .expect("test resolver configuration");
     std::fs::write(&hosts_file, "127.0.0.1 localhost\n").expect("test hosts file");
     let dns = DnsResolver::load(DnsConfiguration {
+        settings: nervix_dns::DnsSettings::default(),
         resolver_configuration,
         hosts_file,
         name_servers: NameServers::Explicit(vec![
@@ -90,6 +91,7 @@ async fn client_with_departed_target() -> NetworkClient<()> {
     .expect("test transport binds");
     transport.replace_live_nodes(&BTreeSet::from([local.clone()]));
     NetworkFactory {
+        operations: crate::RaftOperationSettings::default(),
         local_node_id: local,
         interconnect: transport,
         executor,

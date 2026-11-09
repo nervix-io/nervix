@@ -36,6 +36,7 @@ pub struct NodeSettings {
     pub parameter_seeds: nervix_models::ClusterParameterSeedValues,
     pub raft: RaftTimings,
     pub raft_retention: RaftRetentionSettings,
+    pub consensus_operations: nervix_consensus::RaftOperationSettings,
     pub membership: MembershipSettings,
     pub scheduling: SchedulingSettings,
     pub runtime: RuntimeSettings,
@@ -46,6 +47,10 @@ pub struct NodeSettings {
     pub resources: ResourceSettings,
     pub capacity: CapacitySettings,
     pub peer_receive: nervix_interconnect::PeerReceiveSettings,
+    pub interconnect: nervix_interconnect::TransportSettings,
+    pub dns: nervix_dns::DnsSettings,
+    pub node_database: nervix_models::DatabaseSettings<nervix_models::NodeDatabase>,
+    pub consensus_database: nervix_models::DatabaseSettings<nervix_models::ConsensusDatabase>,
 }
 
 impl NodeSettings {

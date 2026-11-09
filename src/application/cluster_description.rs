@@ -93,6 +93,8 @@ impl ClusterDescription {
                 lines.push(format!("node: {node_id} (departed)"));
                 lines.push(format!("  incarnation: {}", record.identity.incarnation()));
                 lines.push(capability_line(record));
+                lines.push(interconnect_line(record));
+                lines.extend(infrastructure_lines(record));
             }
         }
         let effective = self
@@ -150,13 +152,28 @@ impl ClusterDescription {
         lines.push(format!("  incarnation: {}", node.incarnation));
         match self.capabilities.get(node_id) {
             Some(record) if record.identity.incarnation() == node.incarnation => {
-                lines.push(capability_line(record))
+                lines.push(capability_line(record));
+                lines.push(interconnect_line(record));
+                lines.extend(infrastructure_lines(record));
             }
             Some(record) => lines.push(format!(
                 "  capabilities: awaiting this incarnation; retained {}",
                 record.identity
             )),
             None => lines.push("  capabilities: awaiting committed claim".to_string()),
+        }
+        if let Some(parameters) = node
+            .parameters
+            .and_then(|publication| publication.running())
+        {
+            let liveness =
+                nervix_interconnect::InterconnectLiveness::from_parameters(&parameters.values);
+            lines.push(format!(
+                "  interconnect liveness: ping-interval={} ping-timeout={} probe-timeout={}",
+                timing_text(liveness.ping_interval()),
+                timing_text(liveness.ping_timeout()),
+                timing_text(liveness.probe_timeout())
+            ));
         }
         let Some(record) = &node.prerequisites else {
             lines.push("  prerequisites: not published".to_string());
@@ -203,6 +220,129 @@ fn bounds_line(bounds: PeerReceiveBounds) -> String {
         bounds.relay_decoded_bytes,
         bounds.bulk_chunk_bytes,
         bounds.bulk_window_bytes
+    )
+}
+
+fn infrastructure_lines(record: &NodeCapabilityRecord) -> Vec<String> {
+    let claim = record.capabilities;
+    let dns = claim.dns;
+    let mut lines = vec![format!(
+        "  dns: cache-entries={} positive-max-ttl={} negative-max-ttl={} hook-budget={} \
+         families={} trust-negative={} concurrent-lookups={}",
+        dns.cache_entries,
+        timing_text(dns.positive_max_ttl),
+        timing_text(dns.negative_max_ttl),
+        timing_text(dns.hook_lookup_budget),
+        dns.address_families,
+        dns.trust_negative_answers,
+        dns.concurrent_lookups
+    )];
+    for (name, database) in [
+        ("database", claim.node_database),
+        ("raft database", claim.consensus_database),
+    ] {
+        lines.push(format!(
+            "  {name}: cache-bytes={} journal-bytes={} workers={}",
+            database.cache_bytes, database.journal_bytes, database.workers
+        ));
+    }
+    let consensus = claim.consensus;
+    lines.push(format!(
+        "  consensus events: capacity={}",
+        consensus.event_capacity
+    ));
+    lines.push(format!(
+        "  consensus: {}",
+        [
+            format!("append-batch-entries={}", consensus.append_batch_entries),
+            format!(
+                "outstanding-append-batches={}",
+                consensus.outstanding_append_batches
+            ),
+            format!(
+                "outstanding-append-bytes={}",
+                consensus.outstanding_append_bytes
+            ),
+            format!(
+                "append-idle-bound={}",
+                timing_text(consensus.append_idle_bound)
+            ),
+            format!(
+                "snapshot-transfer-timeout={}",
+                timing_text(consensus.snapshot_transfer_timeout)
+            ),
+            format!(
+                "membership-mutation-timeout={}",
+                timing_text(consensus.membership_mutation_timeout)
+            ),
+            format!(
+                "retention-interval={}",
+                timing_text(consensus.retention_interval)
+            ),
+            format!(
+                "retention-admission-timeout={}",
+                timing_text(consensus.retention_admission_timeout)
+            ),
+            format!(
+                "retention-admission-poll={}",
+                timing_text(consensus.retention_admission_poll)
+            ),
+            format!("purge-batch-entries={}", consensus.purge_batch_entries),
+            format!("api-channel-capacity={}", consensus.api_channel_capacity),
+            format!(
+                "notification-channel-capacity={}",
+                consensus.notification_channel_capacity
+            ),
+            format!(
+                "state-machine-channel-capacity={}",
+                consensus.state_machine_channel_capacity
+            ),
+            format!("api-batch-capacity={}", consensus.api_batch_capacity),
+            format!("snapshot-chunk-bytes={}", consensus.snapshot_chunk_bytes),
+            format!(
+                "replication-backoff={}",
+                timing_text(consensus.replication_backoff)
+            ),
+            format!(
+                "replication-backoff-maximum={}",
+                timing_text(consensus.replication_backoff_maximum)
+            ),
+            format!(
+                "membership-step-down-delay={}",
+                timing_text(consensus.membership_step_down_delay)
+            ),
+            format!(
+                "replication-lag-threshold={}",
+                consensus.replication_lag_threshold
+            ),
+        ]
+        .join(" ")
+    ));
+    lines
+}
+
+fn interconnect_line(record: &NodeCapabilityRecord) -> String {
+    let capacity = record.capabilities.interconnect;
+    format!(
+        "  interconnect: max-peers={} request-quota={} health-probes={} max-connections={} \
+         handshakes={} queue={} completion={} watermarks={} stream-window={} connection-window={} \
+         setup={} request={} progress={} backoff={} max-backoff={} jitter-permille={}",
+        capacity.max_peers,
+        capacity.request_quota,
+        capacity.health_probes,
+        capacity.max_connections,
+        capacity.concurrent_handshakes,
+        capacity.incoming_queue_capacity,
+        capacity.completion_quota,
+        capacity.relay_watermarks,
+        capacity.stream_window_bytes,
+        capacity.connection_window_bytes,
+        timing_text(capacity.connection_setup_timeout),
+        timing_text(capacity.request_timeout),
+        timing_text(capacity.progress_timeout),
+        timing_text(capacity.reconnect_backoff),
+        timing_text(capacity.max_reconnect_backoff),
+        capacity.reconnect_jitter_permille
     )
 }
 
@@ -344,6 +484,35 @@ mod tests {
                     ClusterNodeIncarnation::new(incarnation),
                 ),
                 capabilities: NodeCapabilities {
+                    interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
+                    dns: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_capability_record()
+                    .capabilities
+                    .dns,
+                    node_database: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_capability_record()
+                    .capabilities
+                    .node_database,
+                    consensus_database: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_capability_record()
+                    .capabilities
+                    .consensus_database,
+                    consensus: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_capability_record()
+                    .capabilities
+                    .consensus,
                     cpu_count: None,
                     memory_bytes: NonZeroU64::new(8 << 30),
                     receive,

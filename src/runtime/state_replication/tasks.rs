@@ -783,11 +783,11 @@ impl Runtime {
                 initial_sync_pending = false;
                 let after_lsm = state.current_lsm.current();
                 match runtime
-                    .request_state_sync_with_timeout(
+                    .request_state_sync_with_deadline(
                         &primary_node,
                         &state.placement,
                         Some(after_lsm),
-                        nervix_interconnect::StateSyncRequest::TIMEOUT,
+                        <nervix_interconnect::StateSyncRequest as nervix_interconnect::InterconnectRequest>::DEADLINE,
                     )
                     .await
                 {

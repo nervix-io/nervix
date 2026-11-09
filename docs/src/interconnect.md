@@ -2473,10 +2473,40 @@ and obey the ordinary Bulk chunk bound. No operator payload crosses the intercon
 or row maps; the coordinator uses the shared Arrow-to-Row writer at the session reporting boundary.
 
 The configured inspection deadline controls stream admission/setup via
-`request_stream_with_timeout`; ordinary `request_stream` obtains its request type's default
-from the pure `InterconnectStreamRequest::default_timeout()` getter. Static request deadlines keep
-their existing values; the inspection getter reads `StateInspectionReadTimeout`'s definition,
-so that definition owns the sole default and configured callers retain the same override path.
+`request_stream_with_timeout`; ordinary `request_stream` resolves its request type's
+`InterconnectStreamRequest::DEADLINE` against the local transport request budget. Inspection uses
+the ordinary request ratio, ten seconds at the declared default. Configured inspection callers
+retain their explicit elapsed-time override, while other typed RPCs preserve their declared
+relative budgets.
 The complete frontend inspection also has that elapsed-time bound. Failed or cancelled reads retain
 no historical cursor or page cache. The existing materialized dependency/generator snapshot request
 and its grouping, confirmation, integrity and admission behavior remain unchanged.
+
+## Declared Transport Policy
+
+[Node Settings](node-settings.md#transport-resolver-and-database-capacities) lists the transport
+capacity and deadline options, derived request reserves and the committed per-node view.
+The application root constructs transport options from those validated declarations. Bulk
+receive windows retain their independent memory backing and their receiver-specific bounds.
+
+After the authenticated binding reply, the outbound stream partition reads h2's negotiated
+maximum send-stream count. It caps local capacity to that limit by shrinking shared slots while
+retaining each traffic reserve. A limit unable to hold all reserves and shared traffic produces
+the typed `Http2StreamCapacity` capacity refusal. Negotiation runs before publication with exclusive
+ownership of the partition, reusing its existing semaphores. Leasing and draining count that
+actual capacity, preserving the existing drain fence. h2 remains the owner of peer SETTINGS,
+per-stream and connection credit, readiness, frame splitting and later flow-control updates;
+Nervix does not maintain another HTTP/2 credit algorithm.
+
+The wire routes, reset limits and control-envelope ceilings remain part of the current wire
+contract. A socket submission carries at most one 16 KiB initial HTTP/2 DATA frame, explicitly
+selected on both builders. Larger configured receive windows permit more frames in flight.
+Reconnect jitter varies a delay downward within the declared fraction, never above its ceiling.
+Its default of zero consumes no random draws and preserves the current retry schedule.
+
+Liveness uses the running committed unavailability policy. Existing connections receive an
+update through the primitive watch channel; an outstanding ping stays outstanding while its
+remaining deadline changes. Relay retention and sweeping derive from the host's admission bound,
+and grant, cancellation and progress-send budgets derive from the configured request/progress
+budgets. Admission lifetime, row acknowledgements, cancellation choice and watermark ordering
+retain their existing owners and guarantees.

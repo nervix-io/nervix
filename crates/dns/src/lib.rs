@@ -23,7 +23,7 @@
 //! # Bounds
 //!
 //! Every lookup runs within the budget its caller gives it, so name resolution never outlasts the
-//! connection or request deadline it belongs to. At most [`MAX_CONCURRENT_LOOKUPS`] DNS lookups run
+//! connection or request deadline it belongs to. At most the declared peer capacity DNS lookups run
 //! at once; a lookup beyond that waits for a slot inside its own budget. Answers are cached for
 //! their DNS TTL, bounded above by one hour for addresses and thirty seconds for a name that does not
 //! exist or has no address, in a cache of 4,096 entries. An expired answer is looked up again on the
@@ -34,7 +34,7 @@
 //!
 //! A client library that resolves hosts itself is handed the resolver through its own DNS hook:
 //! Reqwest 0.13 and 0.12, `hyper-util`'s `HttpConnector`, and Smithy's HTTP client. A hook cannot
-//! see the deadline of the request it resolves for, so its lookups get [`HOOK_LOOKUP_BUDGET`], and
+//! see the deadline of the request it resolves for, so its lookups get the declared hook budget, and
 //! the library's own request or connection deadline cancels a lookup sooner. A failed lookup reaches
 //! the library as a [`DnsLookupReport`], which keeps the lookup's whole report through the hook's
 //! standard-error bound; the library keeps it among the causes of its own connection error, and
@@ -73,26 +73,17 @@ mod hosts;
 mod hyper;
 mod lookup;
 mod reqwest;
+mod settings;
 mod smithy;
-
 pub use configuration::{
     DnsConfiguration, DnsConfigurationError, NameServers, SYSTEM_HOSTS_FILE,
     SYSTEM_RESOLVER_CONFIGURATION,
 };
 pub use dial::{AddressAttempt, LookupShare, OperationBudget};
 pub use lookup::{DnsLookupError, DnsLookupFailure, DnsLookupReport};
+pub use settings::*;
 
 use crate::{configuration::LoadedConfiguration, hosts::HostsTable};
-
-/// The most DNS lookups one resolver has in flight at once. A policy input: enough for every peer
-/// of a full cluster topology to reconnect at the same time, small enough that a silent name server
-/// cannot collect an unbounded number of waiting lookups.
-pub const MAX_CONCURRENT_LOOKUPS: usize = 64;
-
-/// The budget of every lookup a client library's DNS hook asks for. A policy input: the library's
-/// own request or connection deadline cancels the lookup sooner, and this bound keeps a client
-/// without one from waiting indefinitely on a silent name server.
-pub const HOOK_LOOKUP_BUDGET: Duration = Duration::from_secs(30);
 
 /// One node's resolver. Clones share the configuration, the hosts file, the answer cache, and the
 /// concurrency bound; the resolver's background tasks end when the last clone is dropped.
@@ -105,9 +96,15 @@ struct ResolverState {
     dns: TokioResolver,
     hosts: HostsTable,
     lookups: Semaphore,
+    hook_budget: Duration,
 }
 
 impl DnsResolver {
+    /// The configured deadline for client-library hooks without an operation budget.
+    pub fn hook_budget(&self) -> Duration {
+        self.inner.hook_budget
+    }
+
     /// Read `configuration` and construct the resolver it describes.
     ///
     /// The configuration and hosts files are read once, on the blocking pool, so a slow filesystem
@@ -127,6 +124,7 @@ impl DnsResolver {
             resolver,
             options,
             hosts,
+            settings,
         } = loaded;
         let mut builder =
             TokioResolver::builder_with_config(resolver, TokioRuntimeProvider::default());
@@ -138,7 +136,8 @@ impl DnsResolver {
             inner: Arc::new(ResolverState {
                 dns,
                 hosts,
-                lookups: Semaphore::new(MAX_CONCURRENT_LOOKUPS),
+                lookups: Semaphore::new(*settings.concurrent_lookups.value()),
+                hook_budget: *settings.hook_lookup_budget.value(),
             }),
         })
     }
@@ -162,7 +161,7 @@ impl DnsResolver {
     }
 
     /// Every address `host` resolves to now, for a client library's DNS hook, which applies the
-    /// port itself. The lookup gets [`HOOK_LOOKUP_BUDGET`].
+    /// port itself. The lookup gets the declared hook budget.
     ///
     /// A hook hands its library the report's [`DnsLookupError`] itself rather than the report: the
     /// library needs an error it can keep as a cause, and a caller finds that typed failure again
@@ -171,7 +170,7 @@ impl DnsResolver {
         &self,
         host: &str,
     ) -> Result<IndexSet<IpAddr>, Report<DnsLookupError>> {
-        self.resolve_addresses(host, HOOK_LOOKUP_BUDGET).await
+        self.resolve_addresses(host, self.inner.hook_budget).await
     }
 
     async fn resolve_addresses(

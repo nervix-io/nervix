@@ -33,7 +33,7 @@ impl InterconnectRequest for Ping {
     type Response = ();
 
     const NAME: &'static str = "test_ping";
-    const TIMEOUT: Duration = Duration::from_secs(1);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Control;
 }
 
 const DISTINCT_NAMES: [&str; 6] = [
@@ -49,7 +49,7 @@ const CONTESTED_REGISTRATIONS: usize = 2;
 
 fn request_state() -> Arc<RequestState> {
     Arc::new(RequestState::new(
-        1,
+        &crate::TransportOptions::default(),
         Arc::new(TransportObservations::default()),
     ))
 }

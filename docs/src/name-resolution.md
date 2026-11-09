@@ -744,3 +744,18 @@ keeps its owner and resolver. Replacing a broken transport resolves again under 
 while retained queue URLs, TLS material, pending confirmations and staged commits are not rebuilt.
 RabbitMQ still passively verifies its known destination during recovery under the same connect
 budget, preserving the refusal to write to a queue or exchange that no longer exists.
+
+## Resolver Capacity Settings
+
+The node's declared DNS policy selects cache capacity, positive and negative TTL ceilings,
+DNS address families, negative-answer trust and the client-hook budget. Their server options,
+validation and restart procedure are listed in
+[Node Settings](node-settings.md#transport-resolver-and-database-capacities).
+Concurrent DNS lookups derive from the declared interconnect peer count, 64 by default; waiting
+for a lookup slot still spends the caller's existing operation budget. Hook adapters, including
+Redis, read the budget from their supplied resolver. Literal addresses and hosts-file answers
+retain their resolution order independently of the DNS query-family selection.
+
+The committed incarnation-bound capability record reports the policy loaded for each node.
+A changed file or override takes effect with the next node run; it does not silently replace a
+resolver that existing clients retain.

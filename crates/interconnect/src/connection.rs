@@ -69,9 +69,9 @@ use self::{
 };
 use super::{
     BootstrapExpectation, ControlEnvelope, CoordinationIdentityAllocationError, Envelope,
-    JoinProgress, JoinTerms, PeerTarget, PoolClass, RELAY_GRANT_LIFETIME, ReceivedEnvelope,
-    RelayAdmissionDecision, RelayAdmissionStatus, RelayDelivery, RelayGrantRefusal, RelayPayload,
-    RequestSubquota, TlsConfigBundle, TransportError, TransportIdentity, TransportOptions, wire,
+    JoinProgress, JoinTerms, PeerTarget, PoolClass, ReceivedEnvelope, RelayAdmissionDecision,
+    RelayAdmissionStatus, RelayDelivery, RelayGrantRefusal, RelayPayload, RequestSubquota,
+    TlsConfigBundle, TransportError, TransportIdentity, TransportOptions, wire,
 };
 use crate::{
     identity::CertificateIdentity,
@@ -119,31 +119,104 @@ pub use stream::IncomingByteStream;
 pub(crate) use stream::OutboundByteStreamRequest;
 use stream_slots::{StreamSlotQuotas, configure_client_builder, configure_server_builder};
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "this path selects a message of the current interconnect wire contract"
+    )
+)]
 const CONNECT_PATH: &str = "/v1/connect";
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "this path selects a message of the current interconnect wire contract"
+    )
+)]
 const CONTROL_PATH: &str = "/v1/control";
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "this path selects a message of the current interconnect wire contract"
+    )
+)]
 const STREAM_PATH: &str = "/v1/stream";
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "this path selects a message of the current interconnect wire contract"
+    )
+)]
 const DUPLEX_PATH: &str = "/v1/duplex";
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "this path selects a message of the current interconnect wire contract"
+    )
+)]
 const ACK_PATH: &str = "/v1/ack";
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "this path selects a message of the current interconnect wire contract"
+    )
+)]
 const RELAY_GRANT_PATH: &str = "/v1/relay-grants";
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "this path selects a message of the current interconnect wire contract"
+    )
+)]
 const RELAY_CANCEL_PATH: &str = "/v1/relay-admissions/cancel";
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "this path selects a message of the current interconnect wire contract"
+    )
+)]
 const RELAY_STATUS_PATH: &str = "/v1/relay-admissions/status";
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "this path selects a message of the current interconnect wire contract"
+    )
+)]
 const RELAY_PATH_PREFIX: &str = "/v1/relay/";
-const RELAY_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
-const RELAY_PROGRESS_SEND_TIMEOUT: Duration = Duration::from_secs(1);
-const RELAY_CANCELLATION_RETRY_WINDOW: Duration = Duration::from_secs(30);
-/// How long a receiver retains a relay channel's watermark after it was last recorded or consulted,
-/// unless its peer's watermark budget needs the position first. A sender rotates a channel it
-/// leaves idle well within this, so a channel it resumes still finds its watermark.
-pub const RELAY_CHANNEL_RETENTION: Duration = Duration::from_secs(600);
-const RELAY_CHANNEL_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the current relay/ack response envelope has a one-mebibyte wire ceiling"
+    )
+)]
 const RESPONSE_LIMIT: u64 = 1024 * 1024;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "RFC 9113 section 4.2 defines the 16384-byte initial DATA frame; Nervix uses one \
+                  such frame per socket submission"
+    )
+)]
 const BODY_CHUNK_BYTES: usize = 16 * 1024;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the current HTTP/2 peer contract permits at most 128 pending/local reset \
+                  streams to bound rapid-reset work"
+    )
+)]
 const RESET_LIMIT: usize = 128;
-/// A blackholed established TCP session otherwise stays in the pool until the kernel abandons its
-/// retransmissions, which can outlast the cluster's partition-heal convergence deadline.
-const HTTP2_PING_INTERVAL: Duration = Duration::from_secs(15);
-const HTTP2_PING_TIMEOUT: Duration = Duration::from_secs(10);
-
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct ConnectionSlotKey {
     node_id: ClusterNodeName,
@@ -829,6 +902,7 @@ pub(crate) struct TransportStateInner {
     peer_receive: crate::PeerReceiveSettings,
     executor: Executor,
     options: TransportOptions,
+    liveness: watch::Sender<crate::InterconnectLiveness>,
     cluster_id: String,
     node_id: ClusterNodeName,
     advertised_host: String,
@@ -969,10 +1043,7 @@ impl TransportState {
                         ),
                 )),
                 handshake_permits: StdArc::new(Semaphore::new(options.max_concurrent_handshakes)),
-                requests: super::RequestState::new(
-                    options.incoming_queue_capacity,
-                    Arc::clone(&observations),
-                ),
+                requests: super::RequestState::new(&options, Arc::clone(&observations)),
                 relay_owners: ArcSwap::from_pointee(RelayOwnersPublication::default()),
                 relay_items: StdArc::new(Semaphore::new(options.incoming_queue_capacity)),
                 terminal_outcomes: StdArc::new(Semaphore::new(options.incoming_queue_capacity)),
@@ -980,6 +1051,7 @@ impl TransportState {
                 force_close: CancellationToken::new(),
                 tasks: TaskTracker::new(),
                 observations: Arc::clone(&observations),
+                liveness: watch::channel(crate::InterconnectLiveness::default()).0,
                 options,
                 incoming_tx,
             }),
@@ -1005,6 +1077,10 @@ impl TransportState {
 
     pub(crate) fn resolver(&self) -> &PeerResolver {
         &self.resolver
+    }
+
+    pub(crate) fn request_timeout(&self) -> Duration {
+        self.options.request_timeout
     }
 
     pub(crate) fn connection_setup_timeout(&self) -> Duration {
@@ -1068,7 +1144,7 @@ impl TransportState {
                 increment(connections[outbound][class.index()], 1);
             leased_streams[class.index()] = increment(
                 leased_streams[class.index()],
-                entry.value().stream_slots.leased(class),
+                entry.value().stream_slots.leased(),
             );
         }
         let inbound = ConnectionDirection::Inbound.index();
@@ -1343,7 +1419,7 @@ impl TransportState {
             nervix_primitives::select! {
                 _ = slot_cancel.cancelled() => break,
                 _ = self.admission_closed.cancelled() => break,
-                _ = sleep(backoff) => {}
+                _ = sleep(self.options.retry_delay(backoff)) => {}
             }
             backoff = backoff
                 .checked_mul(2)
@@ -1355,22 +1431,61 @@ impl TransportState {
 
     /// End a blackholed HTTP/2 connection without waiting for the kernel's TCP retransmission
     /// timeout. Both ends monitor it, so a stale inbound class slot also releases its capacity.
-    async fn monitor_http2_connection(mut ping_pong: PingPong) {
+    async fn monitor_http2_connection(
+        mut ping_pong: PingPong,
+        mut policy: watch::Receiver<crate::InterconnectLiveness>,
+    ) {
         loop {
             nervix_primitives::task::consume_budget().await;
-            sleep(HTTP2_PING_INTERVAL).await;
-            match timeout(HTTP2_PING_TIMEOUT, ping_pong.ping(Ping::opaque())).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => {
-                    debug!(?error, "interconnect HTTP/2 ping failed");
-                    break;
+            let interval = policy.borrow_and_update().ping_interval();
+            nervix_primitives::select! {
+                _ = sleep(interval) => {},
+                changed = policy.changed() => {
+                    if changed.is_err() { return; }
+                    continue;
                 }
-                Err(_) => {
-                    debug!("interconnect HTTP/2 ping timed out");
-                    break;
+            }
+            // Keep the same in-flight ping when a live update changes its deadline. Cancelling
+            // the timeout wrapper must not create a second outstanding HTTP/2 ping.
+            let ping = ping_pong.ping(Ping::opaque());
+            tokio::pin!(ping);
+            let started = Instant::now();
+            loop {
+                let budget = policy.borrow_and_update().ping_timeout();
+                let elapsed = started.elapsed();
+                let remaining = match budget.checked_sub(elapsed) {
+                    Some(remaining) => remaining,
+                    None => {
+                        debug!("interconnect HTTP/2 ping timed out after policy change");
+                        return;
+                    }
+                };
+                nervix_primitives::select! {
+                    result = timeout(remaining, &mut ping) => {
+                        match result {
+                            Ok(Ok(_)) => break,
+                            Ok(Err(error)) => { debug!(?error, "interconnect HTTP/2 ping failed"); return; }
+                            Err(_) => { debug!("interconnect HTTP/2 ping timed out"); return; }
+                        }
+                    }
+                    changed = policy.changed() => { if changed.is_err() { return; } }
                 }
             }
         }
+    }
+
+    pub(crate) fn install_liveness(&self, policy: crate::InterconnectLiveness) {
+        self.liveness.send_if_modified(|current| {
+            if *current == policy {
+                return false;
+            }
+            *current = policy;
+            true
+        });
+    }
+
+    pub(crate) fn liveness(&self) -> crate::InterconnectLiveness {
+        *self.liveness.borrow()
     }
 
     async fn acquire_connection_permits(
@@ -1523,6 +1638,7 @@ impl TransportState {
             let driver_cancel = cancel.clone();
             let driver_closed = closed.clone();
             let force_close = self.force_close.clone();
+            let liveness = self.liveness.subscribe();
             self.tasks.spawn(async move {
                 nervix_primitives::select! {
                     result = connection => {
@@ -1530,7 +1646,7 @@ impl TransportState {
                             debug!(?error, "outbound HTTP/2 connection closed");
                         }
                     }
-                    () = Self::monitor_http2_connection(ping_pong) => {}
+                    () = Self::monitor_http2_connection(ping_pong, liveness) => {}
                     _ = driver_cancel.cancelled() => {}
                     _ = force_close.cancelled() => {}
                     _ = sleep_until(certificate_expires_at) => {}
@@ -1538,7 +1654,7 @@ impl TransportState {
                 driver_closed.cancel();
             });
             let driver_setup_guard = CancelOnDrop::new(cancel.clone());
-            let connection = StdArc::new(ClientConnection {
+            let mut connection = StdArc::new(ClientConnection {
                 key: key.clone(),
                 peer_addr,
                 request_host: key.endpoint.url_host(),
@@ -1590,6 +1706,11 @@ impl TransportState {
             .await?
             .into_value();
             let accepted = Self::accepted_answer(&key.node_id, &local_prerequisites, answer)?;
+            let peer_streams = connection.sender.current_max_send_streams();
+            StdArc::get_mut(&mut connection)
+                .verified("the binding connection has not been published or cloned")
+                .stream_slots
+                .negotiate(key.class, peer_streams)?;
             let connection = StdArc::new(ClientConnection {
                 key: connection.key.clone(),
                 peer_addr: connection.peer_addr,
@@ -2206,7 +2327,7 @@ impl TransportState {
         let ping_pong = connection
             .ping_pong()
             .assured("a newly bound HTTP/2 connection has not lent out its ping handle");
-        let health_probe = Self::monitor_http2_connection(ping_pong);
+        let health_probe = Self::monitor_http2_connection(ping_pong, self.liveness.subscribe());
         tokio::pin!(health_probe);
         let connection_force_close = CancellationToken::new();
         let _connection_force_close_guard = CancelOnDrop::new(connection_force_close.clone());

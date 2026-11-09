@@ -904,6 +904,7 @@ async fn emitter_resolving_through(
     .assured("the temporary directory is writable");
     std::fs::write(&hosts_file, hosts).assured("the temporary directory is writable");
     let dns = DnsResolver::load(nervix_dns::DnsConfiguration {
+        settings: nervix_dns::DnsSettings::default(),
         resolver_configuration,
         hosts_file,
         name_servers: nervix_dns::NameServers::Explicit(vec![server]),

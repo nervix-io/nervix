@@ -50,6 +50,8 @@ use super::{
 };
 
 mod backup;
+#[path = "transport/infrastructure.rs"]
+mod infrastructure;
 mod isolation;
 mod prerequisites;
 mod relay;
@@ -172,7 +174,8 @@ impl InterconnectRequest for BatchRequest {
     type Response = BatchResponse;
 
     const NAME: &'static str = "simulation_arrow_batch";
-    const TIMEOUT: Duration = Duration::from_secs(10);
+    const DEADLINE: nervix_interconnect::RequestDeadline =
+        nervix_interconnect::RequestDeadline::Request;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -189,7 +192,8 @@ impl InterconnectRequest for LivenessRequest {
     const NAME: &'static str = "simulation_liveness";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
-    const TIMEOUT: Duration = Duration::from_secs(1);
+    const DEADLINE: nervix_interconnect::RequestDeadline =
+        nervix_interconnect::RequestDeadline::Control;
 }
 
 #[derive(Clone, Copy, Debug, Archive, Serialize, Deserialize)]
@@ -221,7 +225,8 @@ impl InterconnectRequest for RemoteFailureProbe {
 
     const NAME: &'static str = "simulation_remote_failure_class";
     const CLASS: PoolClass = PoolClass::Management;
-    const TIMEOUT: Duration = Duration::from_secs(10);
+    const DEADLINE: nervix_interconnect::RequestDeadline =
+        nervix_interconnect::RequestDeadline::Request;
 }
 
 /// The admission `registrar` hands out under `ack_id`. Fixtures choose their acknowledgement

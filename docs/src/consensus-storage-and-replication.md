@@ -518,8 +518,8 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_payload_identity_capability_tls_inference_reset_logs`, `raft_payload_identity_capability_tls_inference_reset_meta`, `raft_payload_identity_capability_tls_inference_reset_state`, and
-`raft_payload_identity_capability_tls_inference_reset_snapshots`. Opening it validates the complete keyspace namespace before reading
+`raft_infrastructure_capabilities_identity_tls_inference_logs`, `raft_infrastructure_capabilities_identity_tls_inference_meta`, `raft_infrastructure_capabilities_identity_tls_inference_state`, and
+`raft_infrastructure_capabilities_identity_tls_inference_snapshots`. Opening it validates the complete keyspace namespace before reading
 any records. The committed cluster-parameter record stores ordered typed TLS cipher suites and
 key-exchange groups; recovery validates their complete pair before returning that record.
 This namespace identifies the current Model shape, including the separate JSON
@@ -784,3 +784,25 @@ keyed lookup and no user scan. Recovery validates that the count covers both the
 creation policy and every recovered user before publishing the state. Snapshot metadata and
 user records preserve the complete values. The namespace and state-encoding checks above fence
 this shape before rkyv reads any user record or log entry.
+
+## Declared Engine And Database Capacities
+
+[Node Settings](node-settings.md#consensus-capacities) lists the local consensus capacity and
+pacing options. The composition root supplies them to storage, the append network factory,
+retention and membership operations. The node and dedicated consensus database each receive
+explicit cache, journal and worker options through their existing bounded storage-executor job.
+Automatic journal persistence, full synchronization of every acknowledged Raft append, storage
+ordering, independent databases and orderly shutdown remain unchanged.
+
+The maintained OpenRaft configuration explicitly selects active queue capacities, API/append
+batch bounds, retry backoff, purge size, pre-vote, tick/heartbeat/election operation, leadership
+restoration, removed-member step-down and snapshot policy. Its snapshot chunk bound follows the
+same executor bulk chunk owner as Nervix's transfer path. The library's retained deprecated
+chunk-sender field is not used by Nervix. Replication lag follows twice the snapshot entry threshold
+and remains greater than it. A whole snapshot transfer keeps one configured deadline.
+
+The current capability record includes transport, resolver, database and consensus projections.
+Its larger announcement is boxed within its one command variant, keeping the existing 256-byte
+inline Raft payload guard for all commands. No other Raft command gains a boxing allocation.
+The current keyspace names and interconnect fingerprint identify this representation. A database
+from another shape must be recreated; there is no alternate reader or migration path.
