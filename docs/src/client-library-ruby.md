@@ -84,7 +84,7 @@ An outcome also carries the subscription and schema a command opened, its backup
 report, and a typed `upload_failure` for a refused `UPLOAD RESOURCE`. Attributes absent from that
 outcome are `nil`. Upload identity is fixed by the execution; recovery must send the same archive.
 
-## Inspect Materialized State
+### Inspect Materialized State
 
 `outcome.state_inspection` returns an independently retained inspection, or `nil` when the
 command returned no inspection. Check `rejection` against `InspectionRejection` before using

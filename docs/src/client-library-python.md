@@ -120,7 +120,7 @@ for a different one.
 {{#include ../../tests/client_conformance/python/suite/cluster/test_execute.py:upload_conflict}}
 ```
 
-## Inspect Materialized State
+### Inspect Materialized State
 
 `outcome.state_inspection` returns an independently retained inspection, or `None` when the
 command returned no inspection. Check `rejection` against `InspectionRejection` before using

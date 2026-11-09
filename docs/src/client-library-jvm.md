@@ -76,7 +76,7 @@ Other dispositions include leadership or transaction changes, an unknown outcome
 conflict or expiry, and a stale preview. Follow the
 [command completion contract](command-completion.md) for their recovery rules.
 
-## Inspect Materialized State
+### Inspect Materialized State
 
 `Outcome.stateInspection()` returns an independently retained inspection, or `null` when the
 command returned no inspection. Check `rejection()` against `InspectionRejection` before using
