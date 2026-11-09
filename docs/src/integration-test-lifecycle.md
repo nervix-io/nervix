@@ -394,6 +394,12 @@ Both recipes use absolute feature patterns to keep discovery out of generated bu
 The single-feature recipe repeats its literal alternative so the walker starts in that feature's
 parent directory and selects only that file.
 
+`just test-ingestor-read-metrics`, `just test-endpoint-request-metrics` and
+`just test-emitter-outcomes` use the same absolute-pattern boundary. The first two select their
+single feature; the last selects the runtime features and their `@emitter_outcomes` cases. Relative
+CLI patterns make the maintained walker search the whole working directory, including generated
+build artifacts, before selecting a feature.
+
 The emitter assembly outline observes the emitter's public received-message total before each
 switch between its two source relays. It waits for all three initial A rows before posting B, and
 both B rows before returning to A. An endpoint's `NO ACK` response confirms intake admission;

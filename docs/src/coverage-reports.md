@@ -301,9 +301,10 @@ union](#the-full-workspace-union) keeps when it combines them. `just coverage-sh
 [filter]`, `just coverage-loom <output> [filter]` and `just coverage-turmoil <output>` copy a
 successfully completed canonical report to the requested path while retaining its attempt evidence.
 Replay uses the unchanged exact-check commands and the failure directory under the matching mode
-build directory. The benchmark bodies run instrumented, so their Criterion test mode shows that each
-body executes and measures nothing. The collector itself, including real instrumented runs of a
-fixture crate and its refusal of every incomplete collection, is tested with:
+build directory. The benchmark bodies run instrumented, so the smoke selection shows that each
+body executes and measures nothing. The emitter fixture's dependency-graph check runs during
+`bench-smoke` preparation, outside instrumentation. The collector itself, including real
+instrumented runs of a fixture crate and its refusal of every incomplete collection, is tested with:
 
 ```bash
 just test-native-coverage

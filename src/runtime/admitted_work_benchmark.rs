@@ -1,6 +1,6 @@
 //! Opaque drivers for measuring data-plane work the node admits through its bounded executor:
-//! preparing a branched entrypoint input, and encoding an emitter's rows through a codec
-//! transformation.
+//! preparing a branched entrypoint input, encoding an emitter's rows through a codec
+//! transformation, and flushing those rows through the production emitter host.
 //!
 //! Layer: test harness.
 //! - **Owns.** Opaque benchmark drivers and their initialized runtime contexts.
@@ -177,6 +177,13 @@ pub struct TransformedEncodingBenchmark {
 impl TransformedEncodingBenchmark {
     /// A batch of `rows` rows of one tenant, encoded with an identity transformation.
     pub fn new(rows: usize) -> Self {
+        Self::with_runtime(rows, benchmark_runtime)
+    }
+
+    fn with_runtime(
+        rows: usize,
+        build_runtime: impl FnOnce() -> nervix_primitives::runtime::Runtime,
+    ) -> Self {
         let schema = benchmark_schema();
         let transformations = CodecJaqTransformations {
             on_ingestion: None,
@@ -226,7 +233,7 @@ impl TransformedEncodingBenchmark {
         let emitter = identifier::<EmitterName>("admitted_work_emitter");
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
         Self {
-            runtime: benchmark_runtime(),
+            runtime: build_runtime(),
             context: EmitterConnectorContext {
                 routing: node_runtime
                     .stage_domain_routing(&domain, DomainRoutingSnapshot::default())
@@ -277,6 +284,90 @@ impl TransformedEncodingBenchmark {
         match encoded {
             Ok(payloads) => payloads.len(),
             Err(_) => panic!("the benchmark rows encode through the identity program"),
+        }
+    }
+}
+
+/// One retained emitter and buffer, with all rows confirmed by the scripted record boundary.
+/// Construction and handle registration stay outside the measured flush.
+pub struct EmitterFlushBenchmark {
+    work: TransformedEncodingBenchmark,
+    connector: super::emitter_publishing::EmitterConnectorState,
+    buffer: super::emitter_buffer::EmitterBatchBuffer,
+    faults: crate::ConfiguredFaultInjection,
+    backoff: super::RuntimeReconnectBackoff,
+    _shutdown: nervix_primitives::sync::watch::Sender<bool>,
+    shutdown_rx: nervix_primitives::sync::watch::Receiver<bool>,
+    _stop: nervix_primitives::sync::watch::Sender<Option<nervix_primitives::time::Instant>>,
+    stop_rx: nervix_primitives::sync::watch::Receiver<Option<nervix_primitives::time::Instant>>,
+}
+
+impl EmitterFlushBenchmark {
+    /// A batch of `rows` rows using the existing identity-transformation encoding fixture.
+    pub fn new(rows: usize) -> Self {
+        let work = TransformedEncodingBenchmark::with_runtime(rows, || {
+            nervix_primitives::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_time()
+                .build()
+                .assured("the flush host runs on a two-worker runtime with timers")
+        });
+        let driver = nervix_connector_fake::FakeEmitter::<nervix_connector_fake::Records>::new(
+            nervix_connector_fake::PublishScript::Repeat(
+                nervix_connector_fake::PublishAnswer::ConfirmAll,
+            ),
+        );
+        let connector = super::emitter_publishing::EmitterConnectorState::opened(Box::new(
+            super::emitter_encoding::EncodedRecordEmitter {
+                connector: Box::new(driver),
+                codec: nervix_primitives::sync::Arc::clone(&work.codec),
+                batch: None,
+            },
+        ));
+        let buffer = super::emitter_buffer::EmitterBatchBuffer::new(
+            &work.context,
+            &nervix_models::FlushPolicy::Each {
+                interval: "1s".to_string(),
+                max_batch_size: "1B".to_string(),
+            },
+            nervix_primitives::sync::Arc::new(
+                super::emitter_buffer::EmitterBufferedMessages::default(),
+            ),
+        );
+        let (shutdown, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
+        let (stop, stop_rx) = nervix_primitives::sync::watch::channel(None);
+        Self {
+            work,
+            connector,
+            buffer,
+            faults: crate::ConfiguredFaultInjection::default(),
+            backoff: super::RuntimeReconnectBackoff::default(),
+            _shutdown: shutdown,
+            shutdown_rx,
+            _stop: stop,
+            stop_rx,
+        }
+    }
+
+    /// Buffer, encode and publish one batch through the same owner that flushes a running emitter.
+    /// The returned delivered-row count is the benchmark's complete publication oracle.
+    pub fn flush(&mut self) -> u64 {
+        let mut control = super::emitter_publishing::EmitterPublishControl {
+            fault_injection: &self.faults,
+            shutdown_rx: &mut self.shutdown_rx,
+            stop_rx: &mut self.stop_rx,
+            backoff: &mut self.backoff,
+        };
+        let result = self.work.runtime.block_on(self.connector.publish_batch(
+            &self.work.context,
+            &mut control,
+            &mut self.buffer,
+            self.work.batch.clone(),
+        ));
+        match result {
+            Ok(Some(report)) => report.messages,
+            Ok(None) => panic!("every benchmark batch exceeds its one-byte flush boundary"),
+            Err(failure) => panic!("the benchmark flush failed: {:#}", failure.error()),
         }
     }
 }

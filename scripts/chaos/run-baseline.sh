@@ -43,6 +43,9 @@ Options:
                          from its duration plus 600 through 21600, by default its duration plus the
                          larger of its duration and 1200, at most 21600.
   --outage-seconds N     Minimum held crash outage, 5..120 (default: ${outage_seconds}).
+  --connector-metrics   Qualify zero registration and progress across a three-node
+                        ingestor-owner-crash or emitter-owner-crash. Prepare its parser
+                        first with just prepare-chaos-metrics.
   pause-resume uses configured 10s/12s Raft election and 15s node detection
   thresholds, with 1s short and 75s failover-length pauses.
   --case CASE            partition-recovery case: all, follower, asymmetric, leader,
@@ -109,6 +112,8 @@ run_id=""
 overall_timeout=900
 outage_seconds=8
 outage_option_set=false
+connector_metrics=false
+connector_metrics_python="${CHAOS_METRICS_PYTHON:-${script_dir}/../../target/chaos-metrics/bin/python}"
 partition_case=all
 partition_seconds=45
 partition_option_set=false
@@ -237,6 +242,10 @@ while [[ "$#" -gt 0 ]]; do
             esac
             mixed_option_set=true
             shift 2
+            ;;
+        --connector-metrics)
+            connector_metrics=true
+            shift
             ;;
         --outage-seconds)
             [[ "$#" -ge 2 ]] || setup_error '--outage-seconds requires a value'
@@ -437,6 +446,18 @@ case "${scenario}" in
 esac
 [[ "${node_count}" == "1" || "${node_count}" == "3" ]] \
     || setup_error '--nodes must be 1 or 3'
+if [[ "${connector_metrics}" == true ]]; then
+    [[ "${node_count}" == 3 && "${record_count}" =~ ^[0-9]+$ && "${record_count}" -ge 3 ]] \
+        || setup_error '--connector-metrics requires three nodes and at least three records'
+    case "${scenario}" in
+        ingestor-owner-crash | emitter-owner-crash) ;;
+        *) setup_error '--connector-metrics requires an ingestor-owner-crash or emitter-owner-crash' ;;
+    esac
+    [[ -x "${connector_metrics_python}" ]] \
+        || setup_error 'prepare the Prometheus parser first with just prepare-chaos-metrics'
+    timeout --kill-after=5s 20s "${connector_metrics_python}" -c 'from importlib.metadata import version; assert version("prometheus-client") == "0.26.0"' \
+        || setup_error 'the prepared Prometheus parser must be version 0.26.0'
+fi
 # The restart, recovery, stateful, endpoints, lifetimes, domain-time, mixed-instability, backup
 # fault and restore scenarios share their traffic, findings and exit handling.
 if [[ "${scenario}" == ingestor-instances-owner-crash ]]; then
@@ -810,6 +831,7 @@ jq -n \
     --arg image "${image_ref}" \
     --arg scenario "${scenario}" \
     --arg started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --argjson connector_metrics "${connector_metrics}" \
     --argjson nodes "${node_count}" \
     --argjson records "${record_count}" \
     --argjson timeout_seconds "${overall_timeout}" \
@@ -824,6 +846,7 @@ jq -n \
       requested_image: $image,
       tool_images: {},
       scenario: $scenario,
+      connector_metrics: $connector_metrics,
       topology_nodes: $nodes,
       fixture_record_limit: $records,
       timeout_seconds: $timeout_seconds,
@@ -1517,6 +1540,9 @@ finish() {
         else
             reproducer="$(printf 'just chaos run %q --image %q --nodes %q --records %q --outage-seconds %q' \
                 "${scenario}" "${reproducer_image}" "${node_count}" "${record_count}" "${outage_seconds}")"
+        fi
+        if [[ "${connector_metrics}" == true ]]; then
+            reproducer+=' --connector-metrics'
         fi
         local evidence_path
         local evidence_paths=()
@@ -2304,6 +2330,13 @@ else
     # shellcheck disable=SC2016
     update_manifest '.verifier_self_check = {executed_by: "run", duration_seconds: $duration}' \
         --argjson duration "$((SECONDS - verifier_started))"
+fi
+
+if [[ "${connector_metrics}" == true ]]; then
+    phase "connector metric verifier controls"
+    run_bounded 60 env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${script_dir}/../.." \
+        "${connector_metrics_python}" -m unittest scripts.chaos.tests.test_connector_metrics \
+        >"${artifact_dir}/results/connector-metrics-self-test.txt" 2>&1
 fi
 
 phase "TLS generation"
