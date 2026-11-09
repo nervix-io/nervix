@@ -45,9 +45,9 @@ const STREAM_CHUNK_BYTES: usize = 16 * 1024;
 /// Twice the default bulk receive window, so an unread stream stops at its window with as much
 /// again left to send.
 const STREAM_BYTES: u64 = 2 * 1024 * 1024;
-/// The current serialized grant for this fixture's names, its unit, empty row metadata and one
-/// registrar.
-const HELD_RELAY_METADATA_BYTES: u64 = 144;
+/// The current serialized grant for this fixture's names, unit, decoded-size claim, empty row
+/// metadata and one registrar.
+const HELD_RELAY_METADATA_BYTES: u64 = 152;
 /// How long one more shared management request waits for a stream on the saturated connection.
 const SLOT_WAIT: Duration = Duration::from_millis(250);
 /// The interval between reads inside a condition wait: one simulation tick.
@@ -638,7 +638,9 @@ impl PeerHost {
         assert_eq!(observation.leased(PoolClass::Bulk), self.streams.len());
         let streams = u64::try_from(self.streams.len()).assured("fixture stream counts are small");
         let windows = TransportOptions::default()
-            .bulk_receive_window
+            .peer_receive
+            .unwrap_or_default()
+            .bulk_window_bytes
             .value()
             .as_u64()
             .checked_mul(streams)
@@ -751,6 +753,7 @@ impl PeerHost {
             .try_charge_owned(MemoryClass::Relay, arrow_batch())
             .assured("the Arrow fixture fits the relay memory budget");
         RelayPayload {
+            decoded_bytes: 0,
             delivery,
             kind: RelayPayloadKind::Routed,
             domain: DomainName::parse("simulated").assured("fixture domain is valid"),
@@ -1198,7 +1201,12 @@ impl HubHost {
     /// and memory, and the healthy peer's stream is unaffected throughout.
     async fn stall_bulk_flow_control(&mut self) {
         let options = TransportOptions::default();
-        let window = options.bulk_receive_window.value().as_u64();
+        let window = options
+            .peer_receive
+            .unwrap_or_default()
+            .bulk_window_bytes
+            .value()
+            .as_u64();
         assert!(
             window < STREAM_BYTES,
             "the fixture stream outlasts one bulk receive window"

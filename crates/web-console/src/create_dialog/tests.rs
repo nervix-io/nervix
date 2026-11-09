@@ -33,11 +33,6 @@ use super::{
     select_choice, selected_choice,
 };
 
-/// The submission sink of every dialog render test that never submits. `CreateDialog` takes its
-/// submit callback as a generic parameter, so each distinct closure would compile, and name in
-/// debug information, one more complete copy of the dialog's view tree; these tests share one.
-pub(super) fn ignore_submission(_submission: CreateSubmission, _attempt: u64, _revision: u64) {}
-
 fn domain(name: &str) -> DomainName {
     DomainName::parse(name).assured("the test domain names are valid")
 }
@@ -1154,7 +1149,7 @@ fn creation_components_render_each_typed_draft_and_accessible_status() {
                     .connection_state(connection_state)
                     .session_generation(generation)
                     .request_tx(request_tx)
-                    .submit(ignore_submission)
+                    .submit(super::ignore_test_submission)
                     .build(),
             );
             any_spawner::Executor::poll_local();

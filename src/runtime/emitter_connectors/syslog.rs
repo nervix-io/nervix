@@ -33,6 +33,7 @@ impl EmitterConnectorStarter {
             batch,
             SyslogCollectorEmitter::open(
                 SyslogCollectorEmitterConfig {
+                    tls_policy: context.runtime.outward_tls().clone(),
                     config: connector.client.config.entries.clone(),
                     dns: context.dns()?,
                 },

@@ -688,13 +688,40 @@ impl RelayProcessorTemplate {
                     let prepared = prepared
                         .as_ref()
                         .ok_or_else(|| Report::new(ProcessorTemplateError::InferencerSession))?;
+                    let context = || ProcessorTemplateError::ReplicatedState {
+                        kind: self.kind,
+                        processor: self.processor.clone(),
+                        branch: BranchScope::from(key),
+                    };
+                    let placement = runtime
+                        .state_placement_for_unit(
+                            domain,
+                            RuntimeStateKind::Inferencer,
+                            self.kind,
+                            &self.processor,
+                            unit,
+                            key.clone(),
+                        )
+                        .change_context_lazy(context)?;
+                    let replicated_state = runtime
+                        .replicated_inferencer_state(placement, &prepared.state)
+                        .await
+                        .change_context_lazy(context)?;
+                    let session = Box::new(replicated_state.restore_session(prepared, incarnation));
+                    let snapshot_bytes = prepared
+                        .state
+                        .snapshot_bytes()
+                        .change_context_lazy(context)?;
                     RelayProcessorOperationNode::StatefulInferencer {
                         output_routes: Self::instantiate_outputs(output_routes),
                         resource: resource.clone(),
                         resource_version: *resource_version,
                         file: file.clone(),
                         compiled_input_program: compiled_input_program.clone(),
-                        session: Box::new(prepared.instantiate()),
+                        session,
+                        replicated_state,
+                        incarnation,
+                        snapshot_bytes,
                         prepared: prepared.clone(),
                     }
                 }

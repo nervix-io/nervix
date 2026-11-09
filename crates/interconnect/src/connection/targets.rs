@@ -16,8 +16,59 @@
 use nervix_recovery::Reported as _;
 
 use super::*;
+use crate::Transport;
+
+impl Transport {
+    /// The claims this node's retained outbound pools currently use, for cold inspection.
+    pub fn peer_capability_records(
+        &self,
+    ) -> BTreeMap<ClusterNodeName, nervix_models::NodeCapabilityRecord> {
+        self.inner
+            .targets
+            .load()
+            .iter()
+            .filter_map(|(node, target)| {
+                target
+                    .pool
+                    .capabilities
+                    .record()
+                    .map(|record| (node.clone(), record))
+            })
+            .collect()
+    }
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "copies immutable receiver bounds without a lookup or lock"
+        )
+    )]
+    pub fn local_receive_bounds(&self) -> nervix_models::PeerReceiveBounds {
+        self.inner.local_receive_bounds()
+    }
+    /// Publish committed claims without replacing a pool, a connection or a stream-release waiter.
+    pub fn publish_peer_capabilities(
+        &self,
+        records: &BTreeMap<ClusterNodeName, nervix_models::NodeCapabilityRecord>,
+    ) {
+        let targets = self.inner.targets.load();
+        for (node, target) in targets.iter() {
+            target.pool.capabilities.publish(records.get(node));
+        }
+    }
+}
 
 impl TransportState {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "projects immutable receiver settings without shared access"
+        )
+    )]
+    pub(crate) fn local_receive_bounds(&self) -> nervix_models::PeerReceiveBounds {
+        self.peer_receive.bounds()
+    }
     pub(crate) fn replace_outbound_targets(
         &self,
         endpoints: &BTreeMap<ClusterNodeName, NodeEndpoint>,

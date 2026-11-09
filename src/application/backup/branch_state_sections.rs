@@ -1,9 +1,9 @@
-//! Bounded archive conversion of captured deduplicator keyspaces and windows.
+//! Selecting captured branch state for bounded archive conversion.
 //!
 //! Layer: control plane.
 //! - **Owns.** Converting each active branch's keyspace or window into its archive descriptor and
 //!   bounded Arrow groups under the shapes its models give it, staging each section before
-//!   converting the next.
+//!   converting the next, and dispatching inferencer tensors to their dedicated archive owner.
 //! - **Depends on.** Captured runtime branch states, the decision layer's archive shapes, the
 //!   bounded executor and archive-owned contracts.
 //! - **Must not know.** Native checkpoint encodings, consensus activation or client framing.
@@ -80,6 +80,11 @@ impl SessionServiceImpl {
             }
             let schema = node.schema_fingerprint;
             let sections = match captured.state {
+                CapturedBranchStateKind::Inferencer(_)
+                | CapturedBranchStateKind::StoredInferencer(_) => {
+                    self.stage_inferencer_sections(captured, node, request)
+                        .await?
+                }
                 CapturedBranchStateKind::Deduplicator(_)
                 | CapturedBranchStateKind::StoredDeduplicator(_) => {
                     self.stage_deduplicator_sections(captured, schema, &schemas, request)

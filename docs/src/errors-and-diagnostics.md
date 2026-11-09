@@ -870,6 +870,11 @@ error the route's policy receives.
 [Failure and observation](./connector-contract.md#failure-and-observation) owns the contract, and
 the paragraphs below record what each integration keeps beneath it.
 
+Resolving an event counter during connector construction returns `UndeclaredConnectorEvent` if
+the entity declares no such event. The typed event identity stays beneath the connector's open
+context; this refuses construction and answers for no record. Successfully recording a declared
+event changes no publish, intake or acknowledgement outcome.
+
 An Iceberg object-store failure retains its OpenDAL cause beneath the external Iceberg error.
 When the storage client sets `timeout_ms`, that error also names the configured millisecond bound
 as configuration context. The host reports the failed commit and its declared reconnect backoff; one
@@ -3231,6 +3236,14 @@ digest-mismatched current chunk set or a conflicting publication inventory. `Res
 `InvalidStorageFormat` requires recreation of the node state directory when the required current
 format marker is missing or invalid. The unit-keyed checkpoint format uses a distinct marker, so
 state written under an earlier key shape fails at open rather than disappearing from a read.
+
+Inferencer checkpoint failures retain `SnapshotError` beneath
+`RuntimePersistenceError::InferencerSnapshot`. An unrecognized signature, invalid tensor layout or
+undecodable frame asks for the stored state to be recreated. Frame and declared-state bounds report
+the required bytes and the configured snapshot section limit; `CREATE INFERENCER` names the refused
+inferencer. Archive lengths are checked before owned tensor allocation. Executor admission and
+cancellation remain their own typed storage outcomes rather than a judgment that tensor data is
+invalid. Checkpoint diagnostics never include tensor values.
 
 `RestoreStagingQuota` carries the node's unpublished checkpoint limit, current usage and incoming
 checkpoint footprint; `RestoreStagingSize` rejects an unrepresentable accounting sum. A quota

@@ -40,9 +40,11 @@ impl SyslogListenerIngestorStartPlan {
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .change_context_lazy(|| ingestor.initialize_failure())?;
-        let connector = SyslogListenerIngestorPlan::new(resolved.entries, |configured| {
-            runtime.syslog_ingestor_bind_addr(configured)
-        })
+        let connector = SyslogListenerIngestorPlan::new(
+            resolved.entries,
+            |configured| runtime.syslog_ingestor_bind_addr(configured),
+            runtime.outward_tls().clone(),
+        )
         .change_context_lazy(|| ingestor.initialize_failure())?;
         #[cfg(feature = "testing")]
         let connector =

@@ -36,7 +36,8 @@ opening its first cluster session:
 `Session.connect` opens and maintains a session, following leader redirects and restoring its
 subscriptions and endpoints after a lost connection. Credentials are optional only when the
 listener permits anonymous access. For a TLS listener use `https://`, and pass its certificate
-authority as PEM bytes if your system does not trust it.
+authority as PEM bytes. The client loads no system roots, so every TLS connection needs that
+explicit authority.
 
 ```ruby
 {{#include ../../tests/client_conformance/ruby/suite/cluster/commands_test.rb:connect}}
@@ -83,6 +84,26 @@ command.
 An outcome also carries the subscription and schema a command opened, its backup or restore
 report, and a typed `upload_failure` for a refused `UPLOAD RESOURCE`. Attributes absent from that
 outcome are `nil`. Upload identity is fixed by the execution; recovery must send the same archive.
+
+### Inspect Materialized State
+
+`outcome.state_inspection` returns an independently retained inspection, or `nil` when the
+command returned no inspection. Check `rejection` against `InspectionRejection` before using
+page fields. A refusal has no counts or units; a successful empty page has zero counts.
+`json` preserves the complete typed envelope.
+
+Complete `counts` cover the selected cut. Units carry their own counts, owner, ordered
+replicas, captured origin, `InspectionUnitKind` and `index`. `InspectionStage` distinguishes live and stored
+state. Sections expose schemas, omitted rows and positional watermark columns. Resume the opaque
+`continuation` with `AFTER` and the same selection; `STALE_CONTINUATION` requires a new read.
+
+Each `InspectionFrame` retains one verified Row frame and schema. Its `frame` is a read-only `IO::Buffer`. It and its derived slices keep the native frame alive after parent objects are closed or collected.
+These are exact session Row/Cell bytes, including types, nulls and redaction; they are not Arrow IPC.
+
+```ruby
+{{#include ../../tests/client_conformance/ruby/suite/cluster/inspection_test.rb:inspection}}
+```
+
 
 ## Complete A Statement
 
@@ -378,7 +399,7 @@ The gem exchanges canonical Arrow IPC streams as binary strings or `IO::Buffer`.
 ## What The Library Does Not Expose
 
 The gem exposes sessions, Plexus execution and resource uploads, completion, subscriptions, clocks,
-client endpoints, backup and restore. It does not expose typed transaction inspection, structured
+client endpoints, typed state inspection, backup and restore. It does not expose typed transaction inspection, structured
 choice lookups, the leadership view, typed server notices, custom upload identities or upload
 progress, or offline `DESCRIBE BACKUP`. Transaction statements still run through `execute`.
 

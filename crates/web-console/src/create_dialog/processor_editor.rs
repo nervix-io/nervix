@@ -69,7 +69,7 @@ pub(super) fn ProcessorEditor(
         | ProcessorFamily::Reorderer
         | ProcessorFamily::Reingestor => None,
     };
-    let editor = view! {
+    view! {
         <label class="create-field"><span>{family.name_label()}</span>
             <input node_ref=name_input class="create-name" type="text" autocomplete="off"
                 prop:value=move || draft.get().name
@@ -97,9 +97,6 @@ pub(super) fn ProcessorEditor(
         {stage}
         <ProcessorStateEditor family=family signals=signals request_tx=request_tx session_generation=session_generation />
         <ProcessorRouteEditor family=family signals=signals request_tx=request_tx session_generation=session_generation />
-    };
-    // Erased at the editor boundary: the dialog shows this editor in one arm per processor family,
-    // and each arm's type would otherwise spell this editor's complete nested view into the
-    // dialog's debug names.
-    editor.into_any()
+    }
+    .into_any()
 }

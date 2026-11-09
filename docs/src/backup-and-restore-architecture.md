@@ -74,6 +74,13 @@ window rows travel as Arrow IPC under the user's own schemas beside an rkyv desc
 JSON in an archive. [Archive Format](./backup-and-restore.md#archive-format) lists every section and
 record.
 
+The manifest records the source cluster's configured `cluster_id` and permanent `cluster_uid` for
+display. The UID is a version-4 UUID in manifest record version `4`. The archive carries no cluster
+private key, identity record or licensing state. A restore is a clone: it retains the target's own
+identity, including when the source cluster still runs. Recovery of a licensed installation
+requires an administrative transfer to the rebuilt cluster. Consensus snapshots preserve identity
+independently of this archive format.
+
 ### Records Mirror The Contract
 
 Archive records embed vocabulary types, such as names, timestamps, typed scalar values, branch keys
@@ -104,7 +111,7 @@ selection, adoption and seed release. Restore retains the pending cut, so a dela
 resume it after the lifecycle advances. Count redistribution prepares the newest canonical
 generation and each actual owner's progress on every target primary and replica.
 
-The current archive uses format major `6`. Its domain record is version `2` and carries the
+The current archive uses format major `8` and manifest record version `4`. Its domain record is version `2` and carries the
 domain pace and lifecycle; named placement rules are canonical Models in the model document. Each unit-bearing record owns an eight-byte primitive
 rank with four-byte alignment. Rank zero is `Single`, ranks one through `2^32` select the full
 32-bit partition range, and subsequent ranks select instance indices from zero. Every rank is a
@@ -125,13 +132,14 @@ A reader verifies an archive as a stream, without seeking:
 
 1. The first header must be the regular `manifest.rkyv` entry within the 64 MiB record limit;
    anything else is refused before the manifest is read.
-2. The manifest must hold archive format major version `6`, valid domain names, no duplicate path,
+2. The manifest must hold archive format major version `8`, valid domain names, no duplicate path,
    and a known record kind for every record section.
 3. Every following entry must be the next section the manifest names, with that exact length,
    within its content kind's bound, and with that digest once its bytes are drained. A missing,
    extra, misplaced or non-regular entry is refused.
 4. A record that owns other sections comes before them: a resource version record before its upload,
-   a WASM descriptor before its guest save, and a materialized, deduplicator or window descriptor
+   a WASM descriptor before its guest save, an inferencer descriptor before its tensor values,
+   and a materialized, deduplicator or window descriptor
    before its groups. Within a descriptor's groups, and between the two sections of one group, the
    order is free. Each record must sit at the path its own contents name.
 5. Once the stream ends, every domain must hold its domain record and models, every descriptor every
@@ -151,7 +159,7 @@ authentication, as the [cryptography register](cryptography.md#classification-re
 The archive supports exactly one shape of each record: its current kind and version. There is no
 migration, dual read or older-version path. Configuration records refuse the archive when their
 header differs: the manifest, users, domain and resource version records are required to restore
-anything. The seven state record kinds are optional: a state record whose header names a different
+anything. The eight state record kinds are optional: a state record whose header names a different
 state kind than the manifest declares, or a version the reader does not support, is skipped with
 its owned sections, and the restore reports a warning naming it so that entity starts without that
 checkpoint. Any other defect in a state record, and an unknown kind tag in the manifest itself,
@@ -334,6 +342,9 @@ window its retained rows when they changed. A WASM branch publishes nothing and 
 asked to save: the checkpoint that completed its last callback already holds its guest state on the
 owner and on every replica it named, so the cut archives that save as the state store holds it.
 Saving the guest again would hold the frozen domain while the new save reached those replicas.
+A live capture requests publication only from inferencer primaries, including their current branch
+lifecycles, so newly active branches do not depend on the periodic snapshot interval. Intake keeps
+running and those branch publications need not describe one quiesced moment.
 Capture then runs as one storage job:
 
 1. A quiesced capture closes the domain's capture fence.
@@ -343,11 +354,11 @@ Capture then runs as one storage job:
 3. One database snapshot lists the domain's checkpoints by placement and stored size without reading
    their payloads; WASM guest saves are already durable in it. Everything the capture reads later
    comes from this snapshot, however late it is read.
-4. A branch lifecycle is read only when a WASM, deduplicator or window branch of its entity needs a
+4. A branch lifecycle is read only when a WASM, deduplicator, window or inferencer branch of its entity needs a
    typed key, one lifecycle at a time, and only the needed keys are kept. A branch its lifecycle no
    longer holds was evicted and contributes nothing, even when its checkpoint remains for local
    reappearance.
-5. A running or paused domain contributes the deduplicator keyspaces and windows its branch tasks
+5. A running or paused domain contributes the deduplicator keyspaces, windows and inference tensors its branch tasks
    published, each superseding its stored checkpoint, and the fresh materialized relay generations
    it captures under each relay's assignment barrier. A stopped domain contributes stored
    checkpoints only, materialized relays included.
@@ -355,6 +366,7 @@ Capture then runs as one storage job:
 
 | State | How it becomes sections |
 | --- | --- |
+| Inferencer tensors | Current inference routes provide immutable published generations. The cut freezes one generation per active lifecycle key, superseding its stored checkpoint. Quiesced and live captures request the scheduled primary's branch checkpoint, publishing its current session and lifecycle without running the model; live capture keeps intake running and retains crash-consistent semantics. Stopped cuts read the selected native checkpoint under bounded admission. Capture projects shapes and streams exact F32 bits into `state.bin`; its descriptor records the same publication revision and incarnation with the staged length/digest. The archive exposes no native snapshot frame. |
 | WASM guest save | The save stays in the cut's snapshot until its scheduled generation has been checked, so a superseded save is never opened. The storage job records a segmented header's bounded size, and staging admission uses that size without a database read on an async worker. Saves are opened one at a time: the inline checkpoint conversion is charged to `restore_metadata`, and the raw bytes stream into a quota-owned staged section under a fixed 192 KiB bulk working charge, so neither another save nor an encoded guest section is held whole during the write. One read supplies the bytes and the descriptor's revision, and the staged writer seals the section's actual length and digest. |
 | Kafka offsets and branch lifecycle | The checkpoint is read once into an aligned allocation charged to `restore_metadata`, its entries convert one at a time, and the record streams through a 64 KiB bulk buffer into a staged file that seals its exact length and digest. Serializer scratch of one resolver per entry is charged beside it. Each section reserves the 64 MiB record limit of node staging while it is written. |
 | Materialized relay | Shared Arrow row views, typed branch keys, per-row watermarks, revision, ownership fence and branch generation, taken under the relay's assignment barrier with at most 8 MiB of row metadata charged first. Capture reads the entries current at the cut, including updates since the periodic snapshot, and never waits for that interval; a live capture takes the same complete generation under the barrier. An empty relay contributes an explicit empty generation. A stopped relay is read from its stored checkpoint view, one bounded group at a time, retaining the original Arrow bytes. |
@@ -510,7 +522,7 @@ section only declares.
 ### Converting Archived State
 
 Archived state reaches each node's native checkpoint encoding through bounded conversions.
-Materialized relays, deduplicator keyspaces and windows convert in planning, a dry run included,
+Materialized relays, deduplicator keyspaces, windows and inferencer tensors validate in planning, a dry run included,
 and again in installation; branch lifecycle and Kafka offsets convert when installation stages
 them:
 
@@ -534,6 +546,14 @@ them:
   streams from the resident keyspace into a quota-owned file through a 64 KiB buffered writer under the
   fixed 2 MiB bulk grant, one entry at a time, in exactly the encoding the runtime writes for the same
   keys.
+- **Inferencer tensors.** Planning checks the scheduled unit, schema/model fingerprints, declaration
+  shapes, exact length/digest, typed branch fingerprint and lifecycle incarnation. The restored
+  branching checks the descriptor's key and names the branch in a refusal. The same conversion
+  runs again during installation. One admitted storage job reads only the verified archive slice
+  through a cancellable 64 KiB reader and wraps its identical ordered F32 bits in the current native
+  snapshot frame. No ONNX invocation, cast or shape normalization occurs. Twice the model's
+  snapshot footprint plus 128 KiB covers decoded tensors, encoded output and both fixed reader/writer buffers. The result streams through the
+  existing authority-fenced installer to the scheduled owner and replicas.
 - **Windows.** Each archived group's input rows, then its argument columns, decode under the window's
   input and argument schemas and are sealed into quota-owned pieces as soon as each is admitted, so a
   conversion holds one archived section and its decoded batch at a time and never the whole window.
@@ -880,7 +900,7 @@ new clock origin. An unpaced domain needs no mapping.
 Without `RESUME`, the domain stays stopped. A later `START` advances its start generation, which
 clears materialized relay state, because a materialized placement's identity mixes in the start
 generation, and continues the restored WASM state, ingestor positions, branch lifecycle, deduplicator
-keys and windows, whose identities do not. To begin a new clock at the archived logical frontier, an
+keys, windows and inferencer tensors, whose identities do not. To begin a new clock at the archived logical frontier, an
 operator leaves the domain stopped and uses `START AT` with a time rate explicitly.
 
 As the domain starts:
@@ -899,6 +919,8 @@ As the domain starts:
 - A window branch task re-admits the archived rows in admission order, which rebuilds every aggregate
   structure, sketches included, and then restores each linear histogram's pending delayed removals.
   A branch whose incarnation differs from its restored lifecycle's starts its window empty.
+- An inferencer branch restores every tensor under its pinned model fingerprint and exact
+  incarnation; omitted state starts from the declared `INITIAL` tensors.
 - A WASM branch restores the guest save its generation names, and the guest validates the bytes.
 
 Archived Kafka positions follow acknowledged records, and a window acknowledges a row only when it
@@ -918,7 +940,9 @@ Models restored elsewhere address the same state, and a restore installs a secti
 fingerprint the archive recorded; the archive records a Kafka ingestor's schema fingerprint beside
 its offsets, and the restore checks it before installing them. A materialized placement's
 fingerprint also mixes in the domain's start generation, and a WASM placement names the guest-state
-generation its schedule assigns. The archive descriptors and section paths retain the unit, so
+generation its schedule assigns. Inferencer placements additionally carry the decision layer's
+pinned model fingerprint; the archive descriptor retains that identity and the branch incarnation.
+The archive descriptors and section paths retain the unit, so
 two units of one entity stage and install separate checkpoints. Restore accepts a state section
 only when its unit exists in the restored schedule and sends it to that unit's assigned nodes.
 
@@ -1246,3 +1270,17 @@ Restore preserves those values without re-deriving a password. Importing users r
 consensus verification-work count in the same publication, so restored costs and local users
 share one uniform authentication workload. Header or cost validation failures occur before
 installation, and diagnostics never include salt, digest or password values.
+
+### Inference Archive Verification
+
+`tests/features/cluster/inferencer_backup.feature` exercises two interleaved branch sums on one
+and three nodes with a ten-minute periodic snapshot interval. Quiesced/live/stopped capture,
+`RESUME`, normal `START`, either `WITHOUT STATE` option, branch-name refusals, remote installation
+on an owner and replica before startup, and complete stopped re-export equality use the public
+CLI and authenticated checkpoint probes. `backup-inferencer-values` and its malformed pair cover
+full descriptor values, scalar and multidimensional shapes, special float bits and raw boundaries.
+The registered inference cut Shuttle check races acknowledged rows, forced publication and frozen
+capture. Deloxide workload records register the state-store installation and publication paths in all
+four selections; pointer publication, native tensors, async admission and transport waits are
+outside its detector. The [stateful inference qualification](https://app.clickup.com/t/86bcyakvx)
+owns chaos qualification.

@@ -176,6 +176,13 @@ memory limit, its budgets, the size of its volumes and the restore-staging quota
 
 ## Sizing Knobs
 
+CPU and memory claims also weight independent placement units. Set `--cpu-count` or `--memory-limit`
+only when the operating system's detected capacity is not the intended claim. Inspect the committed
+values with `DESCRIBE CLUSTER`; peers and placement adopt the new incarnation's record after a
+restart. [Node Settings](node-settings.md#committed-node-capabilities) lists the receive-bound
+options, and [Placement](placement.md#capacity-at-the-load-tier) defines their scoring counterpart.
+The claim does not itself resize executor pools or memory budgets.
+
 - Branch `TTL` trades branch reuse against how long idle branch-local tasks, buffers, and state
   remain live. Shorter TTL releases idle branches sooner. Idle time is measured from a branch's
   last accepted input, and a physical maintenance scan releases expired branches, so peak branch
@@ -258,3 +265,5 @@ history.
 For runtime ownership and snapshot boundaries, see [Data Plane](data-plane.md). For the current
 metric families and cardinality policy, see
 [Metrics And Observability](metrics-and-observability.md).
+
+An inferencer with `STATE` retains one immutable native F32 generation per concrete branch. Snapshot publication shares that generation by pointer; sealing copies values only at a checkpoint boundary on a charged bulk CPU worker. The declared state, shape vectors and derived rkyv framing must fit one configured snapshot section. `CREATE` refuses a larger declaration before storage; runtime preparation repeats the bound check. Encoding and restoration charge their bounded temporary buffers separately from the branch's native state.

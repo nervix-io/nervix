@@ -1,3 +1,10 @@
+//! Relay rows, contiguous selections, metadata and acknowledgement shares.
+//!
+//! Layer: data plane.
+//! - **Owns.** Batch row membership and aligned sidecars through slicing and routing.
+//! - **Depends on.** Typed runtime schemas, Arrow columns and acknowledgement owners.
+//! - **Must not know.** Models, placement policy, connectors or persistence.
+
 pub(in crate::runtime) type RelayDispatchResult = Result<(), Box<RelayRecordBatch>>;
 
 use arch_into::ArchInto as _;
@@ -136,6 +143,28 @@ pub(super) struct UnkeyedRelayBatchParts {
 }
 
 impl RelayRecordBatch {
+    /// A contiguous suffix/prefix preserves row sidecars and the same acknowledgement obligations.
+    pub(super) fn slice(
+        &self,
+        offset: usize,
+        length: usize,
+    ) -> Result<Self, Report<RelayRecordBatchError>> {
+        let batch = self.batch.slice(offset, length).change_context(
+            RelayRecordBatchError::RuntimeSchema {
+                operation: RelayRecordBatchOperation::SelectRows,
+            },
+        )?;
+        let end = offset
+            .checked_add(length)
+            .verified("the Arrow slice checked these bounds");
+        Ok(Self {
+            key: self.key.clone(),
+            keys: self.keys[offset..end].to_vec(),
+            batch: Arc::new(batch),
+            metadata: self.metadata.slice(offset, length),
+            acks: self.acks[offset..end].to_vec(),
+        })
+    }
     /// The Arrow rows the batch carries.
     pub(crate) fn record_batch(&self) -> &arrow_array::RecordBatch {
         self.batch.batch()

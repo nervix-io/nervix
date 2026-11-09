@@ -338,6 +338,9 @@ pub(super) enum RelayProcessorOperationNode {
         compiled_input_program: Box<CompiledProgramWithMaterializedInterest>,
         prepared: Arc<PreparedStatefulInference>,
         session: Box<StatefulInferenceSession>,
+        replicated_state: Arc<super::ReplicatedInferencerState>,
+        incarnation: u64,
+        snapshot_bytes: u64,
     },
     WasmProcessor {
         output_routes: RelayProcessorOutputsNode,

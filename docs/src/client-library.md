@@ -9,8 +9,12 @@ Protocol](./client-session-protocol.md) explains the protocol behavior it relies
 
 For a complete graph, data-handle lifetimes, credit and failure decisions, read
 [Client Ingestors And Emitters](./client-io-architecture.md). A Python program uses the same client
-through the [Python Client Library](./client-library-python.md); a Ruby program uses the
-[Ruby Client Library](./client-library-ruby.md). Their guides own the host-specific APIs.
+through the [Python Client Library](./client-library-python.md), a Ruby program the
+[Ruby Client Library](./client-library-ruby.md), a Java program the
+[JVM Client Library](./client-library-jvm.md), and a C or C++ program the
+[C And C++ Client Library](./client-library-c.md). Their guides own the host-specific APIs;
+[Client Host Bindings](./client-host-bindings.md) owns their shared runtime, lifetimes, failure
+mapping and data exchange. Each native binding calls that runtime over this Rust client.
 
 Capabilities:
 
@@ -39,7 +43,7 @@ Capabilities:
 
 Suggestion pages report `Ready`, `MissingContext`, `StaleContext`, or `LookupFailed`. Every
 candidate carries a UTF-8 byte text edit against the full input and a continuation requests the
-next bounded page. The shared C binding exposes the same result through `nx_session_suggest`,
+next bounded page. The C ABI exposes the same result through `nx_session_suggest`,
 `nx_suggestions_at`, and `nx_suggestions_continuation`; its header is
 `crates/client-ffi/include/nervix_client.h`. The [Python Client Library](client-library-python.md)
 returns it from `Session.suggest`.
@@ -516,7 +520,7 @@ producer closes it without waiting.
 ## Emitter Consumers
 
 `Client::subscribe_emitter(domain, emitter, expected_fields, limits)` opens a competing consumer
-of a native `TO CLIENT` emitter on the current session. The field list is exact, including order,
+of a `CLIENT CONSUMER EMITTER` on the current session. The field list is exact, including order,
 optionality and sensitivity. The open reserves its requested credit before it succeeds. The
 returned `EmitterConsumer::description()` reports the schema, emitter ACK window, timeout and
 retry pacing, maximum batch rows and bytes, and granted credit. A refusal is
@@ -571,7 +575,7 @@ asking for another batch, so abandoning a wait never strands an attempt until it
 
 The [Paced Simulation Drivers](paced-simulation-drivers.md) are complete programs that combine a
 followed domain clock, a producer and competing consumers on one session, in Rust and through the
-shared C binding: they start their consumers before they await an attached outcome, pace their
+native Python package: they start their consumers before they await an attached outcome, pace their
 `TIMESTAMP AT` values by the attached clock's projections, and make their effects idempotent across
 redeliveries and deliberate replays. They explicitly reopen changed endpoint contracts within a
 START generation, validate the same expected fields and credit requests again, and keep unknown
@@ -590,7 +594,7 @@ holds the transaction id, the domain the transaction is bound to, its `Transacti
 transaction handle:
 
 ```rust
-client.execute("CREATE DOMAIN production;").await?;
+client.execute("CREATE UNPACED DOMAIN production;").await?;
 client.set_domain(Some(DomainName::parse("production")?)).await;
 
 let begun = client.execute("BEGIN;").await?;
@@ -709,8 +713,10 @@ and `frame.batch()` using each section's schema. `counts` describe the complete 
 `continuation` resumes bounded pages. Typed cells preserve sensitivity, integer widths, float bits,
 datetime nanoseconds and bytes. `state.to_json()` and `state.display_text()` render the same value.
 
-The shared binding exposes `Outcome::state_inspection()` as an independently owned `Inspection`.
+The shared host runtime exposes `Outcome::state_inspection()` as an independently owned `Inspection`.
 It retains the envelope, lossless JSON, counts, section schemas and verified frame backing. C and
 C++ hosts read it through `nx_inspection`, which the
 [C and C++ Client Library](client-library-c.md#read-materialized-state) describes with a tested
 example.
+The Python, Ruby and JVM outcome APIs do not currently project this envelope; see
+[Client Host Bindings](client-host-bindings.md#guarantees-and-limits) for the current host surface.

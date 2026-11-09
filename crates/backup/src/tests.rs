@@ -396,6 +396,7 @@ fn manifest_of(scope: ArchiveScope, sections: Vec<SectionEntry>) -> BackupManife
         producer_version: "0.1.0-dev".to_string(),
         language_version: "0.1.0-dev".to_string(),
         cluster_id: "nervix-test".to_string(),
+        cluster_uid: uuid::Builder::from_random_bytes([0x17; 16]).into_uuid(),
         captured_at: Timestamp::from_unix_nanos(1_790_000_000_123_456_789),
         scope,
         resources: BackupResources::Included,

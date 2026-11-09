@@ -3,8 +3,8 @@
 //! Layer: control plane.
 //!
 //! - **Owns.** The process-local linearizable catch-up proof and ordering of coherent runtime-state
-//!   installation and activation after that proof.
-//! - **Depends on.** Consensus observation, Tokio synchronization, and process shutdown.
+//!   installation and activation after that proof and this run's committed capacity claim.
+//! - **Depends on.** Consensus observation, execution primitive synchronization and shutdown.
 //! - **Must not know.** Runtime graph internals, connector implementations, or scheduling policy.
 
 #![cfg_attr(
@@ -35,6 +35,7 @@ pub(in crate::application) const RUNTIME_STATE_RETRY_INTERVAL: Duration =
 
 /// The process-start barrier and runtime-installation sequencer shared by every installation path.
 pub(in crate::application) struct RuntimeAdmission {
+    identity: nervix_models::ClusterNodeIdentity,
     committed_log_index: OnceLock<u64>,
     attempt: Mutex<()>,
     installation: Mutex<()>,
@@ -44,8 +45,9 @@ pub(in crate::application) struct RuntimeAdmission {
 }
 
 impl RuntimeAdmission {
-    pub(in crate::application) fn new() -> Self {
+    pub(in crate::application) fn new(identity: nervix_models::ClusterNodeIdentity) -> Self {
         Self {
+            identity,
             committed_log_index: OnceLock::new(),
             attempt: Mutex::new(()),
             installation: Mutex::new(()),
@@ -113,6 +115,19 @@ impl RuntimeAdmission {
     ) -> Option<ConsensusRuntimeState> {
         if shutdown.is_cancelled() {
             return None;
+        }
+        while self.committed_log_index.get().is_none() {
+            if consensus
+                .node_capability(self.identity.node_id())
+                .is_some_and(|record| record.identity == self.identity)
+            {
+                break;
+            }
+            nervix_primitives::select! {
+                biased;
+                _ = shutdown.cancelled() => return None,
+                _ = nervix_primitives::time::sleep(RUNTIME_STATE_RETRY_INTERVAL) => {},
+            }
         }
         if self.committed_log_index.get().is_some() {
             return Some(consensus.current_runtime_state().await);
@@ -184,7 +199,10 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn stale_state_keeps_the_last_applied_schedule_as_the_next_predecessor() {
-        let admission = RuntimeAdmission::new();
+        let admission = RuntimeAdmission::new(nervix_models::ClusterNodeIdentity::new(
+            ClusterNodeName::parse("node-1").expect("fixture node"),
+            nervix_models::ClusterNodeIncarnation::new(1),
+        ));
         let runtime = Runtime::new();
         let local = ClusterNodeName::parse("node-1").assured("the fixture node name is valid");
         let current = ConsensusRuntimeState {

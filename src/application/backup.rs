@@ -29,6 +29,7 @@ pub(in crate::application) mod cut_progress;
 pub(in crate::application) mod cut_reach;
 #[cfg(test)]
 mod failure_tests;
+mod inferencer_state_sections;
 pub(in crate::application) mod interconnect;
 mod materialized_sections;
 mod native_metadata_sections;
@@ -112,6 +113,8 @@ pub(in crate::application) struct CapturedSectionStage {
 /// hashes and payload data, and a diagnostic names only where the failure is.
 #[derive(Debug, Error)]
 pub(in crate::application) enum BackupError {
+    #[error("the cluster has not installed its permanent identity")]
+    NoClusterIdentity,
     #[error("the cluster has applied no configuration to back up yet")]
     NoConfiguration,
     #[error("no active domain selected")]
@@ -441,6 +444,12 @@ impl SessionServiceImpl {
             producer_version: env!("CARGO_PKG_VERSION").to_string(),
             language_version: PLEXUS_LANGUAGE_VERSION.to_string(),
             cluster_id: self.inner.cluster.cluster_id().await,
+            cluster_uid: self
+                .inner
+                .consensus
+                .cluster_identity()
+                .ok_or_else(|| Report::new(BackupError::NoClusterIdentity))?
+                .cluster_uid,
             captured_at,
             scope: planned_scope.scope.clone(),
             resources: backup.resources,
@@ -480,8 +489,9 @@ impl SessionServiceImpl {
     }
 
     /// Reads one domain while its mutation lease prevents a concurrent configuration change.
-    /// A stopped domain has no intake to quiesce; a live cut reads the current checkpoint without
-    /// touching its lifecycle. The quiesced path resumes before archive transfer begins.
+    /// A stopped domain has no intake to quiesce; a live cut keeps intake running while its owners
+    /// publish inference state and read current checkpoints. The quiesced path resumes before
+    /// archive transfer begins.
     async fn capture_backup_domain(
         &self,
         execution: &CommandExecution,

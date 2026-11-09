@@ -144,11 +144,26 @@ impl MembershipRecord {
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the bounded command stays inline; boxing every normal Raft record would add an \
+              allocation and change its archived representation"
+)]
 enum EntryPayloadRecord {
     Blank,
     Normal(ConsensusCommand),
     Membership(MembershipRecord),
 }
+
+// Enforce the actual inline footprint instead of the generic variant-size heuristic.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "compile-time upper bound on the owned Raft payload's inline representation"
+    )
+)]
+const _: () = assert!(std::mem::size_of::<EntryPayloadRecord>() <= 256);
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct EntryRecord {

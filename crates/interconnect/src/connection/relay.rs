@@ -207,6 +207,13 @@ impl TransportState {
         let relay = self
             .lease(node_id, PoolClass::Relay, RequestSubquota::Shared, deadline)
             .await?;
+        if let Some(bounds) = relay.released.pool.capabilities.receive_bounds()
+            && (u64::try_from(payload.batch_ipc.len()).assured("body length fits u64")
+                > bounds.relay_batch_bytes.get()
+                || payload.decoded_bytes > bounds.relay_decoded_bytes.get())
+        {
+            return Err(Report::new(TransportError::RelayBoundsRefused(bounds)));
+        }
         let grant = RelayGrantRequest {
             sender_epoch: self.process_epoch,
             delivery: payload.delivery,
@@ -296,6 +303,14 @@ impl TransportState {
             return Err(Report::new(TransportError::RelayIndeterminate));
         }
         let grant_id = match grant.disposition {
+            RelayGrantDisposition::Resize(bounds) => {
+                relay_owner.retire_outbound(&outbound_key);
+                self.observations.relay_grant_refused(
+                    ConnectionDirection::Outbound,
+                    RelayGrantRefusal::ReceiveBounds,
+                );
+                return Err(Report::new(TransportError::RelayBoundsRefused(bounds)));
+            }
             RelayGrantDisposition::SendBody { grant_id } => grant_id,
             RelayGrantDisposition::BodyReceived => return Ok(()),
             RelayGrantDisposition::Admitted => {
@@ -591,11 +606,6 @@ impl TransportState {
                 .refuse_relay_grant(respond, RelayGrantRefusal::SenderEpoch)
                 .await;
         }
-        if grant.body_bytes > self.executor.limits().relay_encoded_bytes.as_u64() {
-            return self
-                .refuse_relay_grant(respond, RelayGrantRefusal::BodyTooLarge)
-                .await;
-        }
         let Some(admission) = grant.metadata.admission.as_ref() else {
             return self
                 .refuse_relay_grant(respond, RelayGrantRefusal::MissingAdmission)
@@ -656,6 +666,18 @@ impl TransportState {
                     .refuse_relay_grant(respond, RelayGrantRefusal::OutOfOrder)
                     .await;
             }
+        }
+        let bounds = self.peer_receive.bounds();
+        if grant.body_bytes > bounds.relay_batch_bytes.get()
+            || grant.metadata.decoded_bytes > bounds.relay_decoded_bytes.get()
+        {
+            self.observations.relay_grant_refused(
+                ConnectionDirection::Inbound,
+                RelayGrantRefusal::ReceiveBounds,
+            );
+            return self
+                .send_relay_grant_response(respond, RelayGrantDisposition::Resize(bounds))
+                .await;
         }
         let operation_bytes = grant
             .body_bytes

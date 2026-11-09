@@ -285,6 +285,7 @@ mod tests {
         let (lane, mut payloads) = InterconnectRelayPayloadLane::new();
         let peer_node_id = ClusterNodeName::parse("node-2").expect("valid node name");
         let routed = RelayPayload {
+            decoded_bytes: 0,
             delivery: nervix_interconnect::RelayDelivery {
                 channel_incarnation: [1; 16],
                 sequence: 0,

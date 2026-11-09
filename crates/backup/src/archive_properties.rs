@@ -93,6 +93,7 @@ impl Case {
             for state in &domain.state {
                 match state {
                     State::Wasm { descriptor, .. } => assert_record(descriptor),
+                    State::Inferencer { descriptor, .. } => assert_record(descriptor),
                     State::Kafka(record) => assert_record(record),
                     State::Lifecycle(record) => assert_record(record),
                     State::Materialized(value) => {
@@ -189,6 +190,21 @@ impl Case {
             let mut state = Vec::new();
             for original_state in &original.state {
                 state.push(match original_state {
+                    State::Inferencer { descriptor, .. } => DescribedRuntimeState::Inferencer {
+                        descriptor: descriptor.clone(),
+                        record: location(SectionPath::inferencer_descriptor(
+                            &descriptor.domain,
+                            &descriptor.entity,
+                            descriptor.unit,
+                            descriptor.branch_fingerprint.as_ref(),
+                        )),
+                        values: location(SectionPath::inferencer_tensor_values(
+                            &descriptor.domain,
+                            &descriptor.entity,
+                            descriptor.unit,
+                            descriptor.branch_fingerprint.as_ref(),
+                        )),
+                    },
                     State::Wasm { descriptor, .. } => DescribedRuntimeState::Wasm {
                         descriptor: descriptor.clone(),
                         record: location(SectionPath::wasm_state_descriptor(

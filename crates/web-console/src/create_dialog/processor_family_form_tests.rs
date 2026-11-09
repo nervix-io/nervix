@@ -44,7 +44,7 @@ fn render(signals: CreateSignals) -> String {
             .connection_state(RwSignal::new(super::super::ConsoleConnectionState::Waiting))
             .session_generation(RwSignal::new(1))
             .request_tx(RwSignal::new(None))
-            .submit(super::tests::ignore_submission)
+            .submit(super::ignore_test_submission)
             .build(),
     );
     any_spawner::Executor::poll_local();

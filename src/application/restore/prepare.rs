@@ -592,6 +592,20 @@ impl SessionServiceImpl {
                 entity: entity.clone(),
             };
             match archived {
+                DescribedRuntimeState::Inferencer {
+                    descriptor, values, ..
+                } => {
+                    super::inferencer::prepare_inferencer_checkpoint(
+                        &self.inner.runtime,
+                        archive,
+                        descriptor,
+                        values,
+                        schedule,
+                        &lifecycles,
+                    )
+                    .await
+                    .change_context_lazy(|| refusal(&descriptor.entity))?;
+                }
                 DescribedRuntimeState::Deduplicator {
                     descriptor, groups, ..
                 } => {

@@ -123,6 +123,7 @@ pub(super) fn ChoiceGroup(
             </Show>
         </fieldset>
     }
+    .into_any()
 }
 
 /// Whether `value` is the selection `control` currently holds. A value of another kind than the

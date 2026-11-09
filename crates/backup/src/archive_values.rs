@@ -67,6 +67,10 @@ pub(super) struct Resource {
 }
 
 pub(super) enum State {
+    Inferencer {
+        descriptor: crate::InferencerStateDescriptor,
+        bytes: Vec<u8>,
+    },
     Wasm {
         descriptor: WasmStateDescriptor,
         bytes: Vec<u8>,
@@ -81,6 +85,27 @@ pub(super) enum State {
 impl State {
     pub fn sections(&self, output: &mut Vec<Section>) {
         match self {
+            Self::Inferencer { descriptor, bytes } => {
+                output.push(Section::record(
+                    SectionPath::inferencer_descriptor(
+                        &descriptor.domain,
+                        &descriptor.entity,
+                        descriptor.unit,
+                        descriptor.branch_fingerprint.as_ref(),
+                    ),
+                    descriptor,
+                ));
+                output.push(Section::new(
+                    SectionPath::inferencer_tensor_values(
+                        &descriptor.domain,
+                        &descriptor.entity,
+                        descriptor.unit,
+                        descriptor.branch_fingerprint.as_ref(),
+                    ),
+                    SectionContent::InferencerTensorValues,
+                    bytes.clone(),
+                ));
+            }
             Self::Materialized(value) => value.sections(output),
             Self::Deduplicator(value) => value.sections(output),
             Self::Window(value) => value.sections(output),
@@ -491,6 +516,9 @@ impl<'a> Values<'a> {
                         bytes: self.payload(),
                     });
                 }
+                let (mut descriptor, bytes) = crate::inferencer_properties::generated(self);
+                descriptor.domain = domain.clone();
+                state.push(State::Inferencer { descriptor, bytes });
                 state.push(State::Kafka(self.offsets(domain.clone())));
                 for shape in 0..3 {
                     state.push(State::Materialized(self.materialized(&domain, shape)));
@@ -521,6 +549,10 @@ impl<'a> Values<'a> {
             producer_version: self.0.string(),
             language_version: nervix_models::PLEXUS_LANGUAGE_VERSION.into(),
             cluster_id: self.0.string(),
+            cluster_uid: uuid::Builder::from_random_bytes(std::array::from_fn(|_| {
+                self.0.entropy().byte()
+            }))
+            .into_uuid(),
             captured_at: self.timestamp(),
             scope,
             resources,

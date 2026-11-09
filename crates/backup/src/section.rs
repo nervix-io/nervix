@@ -61,6 +61,8 @@ pub enum RecordKind {
     DeduplicatorStateDescriptor = 10,
     #[strum(serialize = "window state descriptor")]
     WindowStateDescriptor = 11,
+    #[strum(serialize = "inferencer state descriptor")]
+    InferencerStateDescriptor = 12,
 }
 
 impl RecordKind {
@@ -78,6 +80,7 @@ impl RecordKind {
             Self::MaterializedIdentities => 9,
             Self::DeduplicatorStateDescriptor => 10,
             Self::WindowStateDescriptor => 11,
+            Self::InferencerStateDescriptor => 12,
         }
     }
 }

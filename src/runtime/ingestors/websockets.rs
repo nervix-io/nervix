@@ -68,6 +68,7 @@ impl WebsocketsConnectionIngestorStartPlan {
             headers,
             signaling_protocol,
             dns.clone(),
+            runtime.outward_tls().clone(),
         )
         .change_context_lazy(|| ingestor.initialize_failure())?;
         BrokerIngestorStart {

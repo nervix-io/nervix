@@ -38,6 +38,7 @@ impl EmitterConnectorStarter {
                 projection,
                 ClickHouseTableEmitter::open(
                     ClickHouseTableEmitterConfig {
+                        tls_policy: context.runtime.outward_tls().clone(),
                         config: connector.client.config.entries.clone(),
                         table: connector.table.clone(),
                         dns: context.dns()?,

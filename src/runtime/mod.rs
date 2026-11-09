@@ -259,7 +259,10 @@ mod forced_recovery_decision;
 mod generator;
 mod http_request_fields;
 mod inferencer;
+mod inferencer_archive;
 mod inferencer_output;
+mod inferencer_state;
+pub(crate) use inferencer_archive::CapturedInferencer;
 mod ingest_group;
 mod ingest_metadata;
 mod ingest_task_handles;
@@ -316,6 +319,7 @@ pub mod relay_interaction_benchmark;
 mod relay_memory_hold;
 mod relay_processor_node;
 mod relay_send_attempts;
+mod relay_slicing;
 mod relay_subscription;
 mod relay_transit;
 mod remote_ack_owner;
@@ -497,6 +501,7 @@ use http_request_fields::{
     HttpRequestFields, HttpRequestInput, HttpRequestSchemas, SourceRecords,
 };
 use inferencer_output::flush_branch_inferencer_output;
+use inferencer_state::ReplicatedInferencerState;
 pub(in crate::runtime) use ingest_group::INGEST_GROUP_MAX_ROWS;
 use ingest_group::{
     BatchPayload, BoundIngestor, BoundIngestorInput, BranchedEntrypointInput, ClientBatchDispatch,

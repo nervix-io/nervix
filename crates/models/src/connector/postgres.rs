@@ -322,6 +322,7 @@ const POSTGRES_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl EmitterDeclaration for PostgresTableEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::Postgres),
         body: EmitterBodyForm::Values,

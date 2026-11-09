@@ -4,7 +4,7 @@ Every node setting has one class, a typed owner, one default, a derivation when 
 and a validation boundary. Values that depend on an external system belong to that connector's
 declaration in Plexus, the Nervix graph definition language.
 
-The vocabulary provides `SettingDefinition`, three sealed class markers and `Setting<D>`.
+The vocabulary provides `SettingDefinition`, three sealed classes and `Setting<D>`.
 The source ratchet counts numeric policy outside that boundary. Every option `nervix-server`
 accepts is either a declared setting in its owner's group or part of the node's identity,
 addresses and paths, which are not settings; [The Server's Settings](#the-servers-settings) lists
@@ -15,7 +15,7 @@ running service. A node publishes, carries and verifies its prerequisites as
 [Prerequisites At Join](#prerequisites-at-join) describes, and its
 [startup preflight](#the-startup-preflight) detects its memory and measures its volumes. Cluster
 parameters have one committed Raft record, seeded at the first bootstrap and changed through
-`ALTER CLUSTER SET`. Capability records are not announced yet; those remain local claims.
+`ALTER CLUSTER SET`. Every admitted node announces its resolved capability record through Raft.
 
 Runtime admission and failed committed-runtime installation share the existing half-second retry
 cadence owned by `RuntimeAdmission`. This remains an internal policy constant pending settings
@@ -49,6 +49,68 @@ admission, placement or the work a peer can send; they cannot relax cluster guar
 without a committed capability record receives no placements. If an advertised bound changes,
 a peer can refuse an operation with a typed answer so the sender slices it again while retaining
 the row acknowledgement accounting.
+
+## Committed Node Capabilities
+
+`--cpu-count` (`NERVIX_CPU_COUNT`) overrides the process's cgroup-aware available parallelism.
+`--memory-limit` (`NERVIX_MEMORY_LIMIT`) overrides the existing cgroup/physical-memory detector.
+Both overrides must be positive. A failed host query remains `unknown`; memory preflight and the
+committed claim use the same resolved measurement. The startup log includes these resolved values
+and the receive bounds. Worker pools, budgets and watermarks retain their own setting owners.
+
+After membership admission, each node submits one incarnation-bound `NodeCapabilityRecord` to the
+current leader. Raft commits it under the node name. Repeating an identical announcement is a
+no-op; a newer incarnation replaces the record, and an earlier or differently configured identical
+incarnation is refused. Departure retains the last claim; `DROP NODE` removes it and fences that
+incarnation. A restarted node waits for its own current claim before activating stored assignments.
+Capability records are absent from the join handshake and gossip.
+
+The receiver's local capacity options are:
+
+| Option | Environment variable | Default |
+| --- | --- | --- |
+| `--interconnect-relay-batch-bytes` | `NERVIX_INTERCONNECT_RELAY_BATCH_BYTES` | Executor encoded relay limit, 32 MiB |
+| `--interconnect-relay-decoded-bytes` | `NERVIX_INTERCONNECT_RELAY_DECODED_BYTES` | Executor decoded relay limit, 32 MiB |
+| `--interconnect-bulk-chunk-bytes` | `NERVIX_INTERCONNECT_BULK_CHUNK_BYTES` | Executor bulk chunk limit, 64 KiB |
+| `--interconnect-bulk-receive-window` | `NERVIX_INTERCONNECT_BULK_RECEIVE_WINDOW` | 1 MiB per bulk stream |
+
+All are positive. The first three must fit the supplied executor's corresponding operation limit.
+The bulk window must fit HTTP/2's connection limit for every stream and have its dedicated memory
+budget behind it before listening. These options govern inter-node delivery independently of
+public client admission. Change a claim by restarting the node with new overrides.
+
+`DESCRIBE CLUSTER` shows each live incarnation's committed CPU count, memory bytes and four receive
+bounds, pending claims, and retained departed records. Its `cluster-effective receive bounds` are
+the componentwise minimum of matching live committed claims. Individual sends use their receiver's
+claim, so one smaller peer does not shrink traffic between larger peers. The interconnect chapter
+owns refusal, re-slicing, bootstrap transfer and flow-control behavior; the placement chapter owns
+the capacity score and its precedence.
+
+`adopted peer receive bounds` lists the claims this answering node's outbound pools currently use.
+The independent capability controller refreshes them on the existing half-second runtime retry
+cadence, including when another domain's leader reconciliation is busy. This separates committed
+capacity from its local adoption without a second configuration authority.
+
+## Permanent Cluster Identity
+
+The first leader commits a permanent UUID and signing key for the cluster. `DESCRIBE CLUSTER;`
+prints their public identity immediately after the leader line:
+
+```text
+leader: node-1
+cluster uid: 72f3a93e-64f0-40a5-b95d-790c8a738fee
+cluster key: <key thumbprint>
+cluster created: 2026-11-08T12:00:00Z
+```
+
+The key value is its RFC 7638 SHA-256 thumbprint in canonical base64url. Every node reports the same
+UUID, key and creation instant after it applies the record. Restart, leadership transfer and
+membership changes preserve them. The private key is never included in this description.
+
+`--cluster-id` remains the operator's display name and interconnect/gossip prerequisite. The
+indented `cluster identity` prerequisite names that configured value; the unindented `cluster uid`
+names the permanent generated identity. [Backup And Restore](backup-and-restore.md#what-a-restore-recreates)
+explains why a fresh cluster restored from an archive keeps its own UUID and key.
 
 ## The Prerequisite List Is Closed
 
@@ -299,6 +361,7 @@ describes, defaults included.
 | `--raft-snapshot-entry-threshold`, `--raft-snapshot-byte-threshold`, `--raft-covered-log-entries-retained`, `--raft-covered-log-bytes-retained`, `--raft-retained-log-cap` | node capability | Raft retention |
 | `--node-unavailability-timeout` | cluster parameter | membership |
 | `--replica-count` | cluster parameter | scheduling |
+| `--tls-cipher-suites`, `--tls-key-exchange-groups` | cluster parameter | outward TLS algorithm policy |
 | `--password-iterations` | cluster parameter | password creation policy |
 | `--state-snapshot-interval` | cluster parameter | runtime |
 | `--domain-drain-timeout`, `--entity-gate-deadline` | cluster parameter | cluster policy |
@@ -463,6 +526,18 @@ owner that captures settings at construction over its existing storage. The curr
 no OpenRaft construction setting: heartbeat and election timing remain prerequisites. Committed
 and running revisions are published together, and delayed observations cannot move them backward.
 
+
+Outward TLS algorithms are ordered-list cluster parameters. Both bootstrap defaults are `fips`:
+`--tls-cipher-suites` (`NERVIX_TLS_CIPHER_SUITES`) and `--tls-key-exchange-groups`
+(`NERVIX_TLS_KEY_EXCHANGE_GROUPS`) take comma-separated exact names or aliases. After bootstrap use
+`ALTER CLUSTER SET TLS_CIPHER_SUITES = ('fips'), TLS_KEY_EXCHANGE_GROUPS = ('fips');`.
+Aliases resolve in place and duplicate algorithms keep their first position. The complete resolved
+pair validates at commit and is installed live for new handshakes; established connections keep
+their negotiation. `DESCRIBE CLUSTER` and the settings log show resolved committed/running lists.
+The [cryptography chapter](cryptography.md#algorithm-policy) owns membership, exact spellings,
+validation and the inventory of TLS stacks the policy governs. Protocol versions and signature
+schemes have no additional cluster parameter.
+
 ## Fixed Values And The Source Ratchet
 
 A wire format, RFC, persisted layout, ABI or invariant can fix a value. Its exact constant
@@ -526,9 +601,10 @@ The existing execution-settings adoption owns detection and capability-record pu
 Filesystem and consensus retain independent admission while a connector call holds its worker.
 
 The interconnect's bulk receive window is `Setting<BulkReceiveWindow>` with class
-`NodeCapabilities` inside `TransportOptions`. Its one default is 1 MiB, the HTTP/2 window each
-stream of a bulk connection grants its sender, and like the transport's other windows no
-command-line option sets it. The value must be
+`NodeCapabilities` inside `PeerReceiveSettings`, resolved against the supplied executor before
+transport construction. Its one default is 1 MiB, the HTTP/2 window each
+stream of a bulk connection grants its sender. `--interconnect-bulk-receive-window` overrides it.
+The value must be
 nonzero, and the connection window derived from it, one window for each of the four bulk streams,
 must fit the 2^31-1 bytes HTTP/2 can advertise; the definition checks both. A transport refuses to
 bind when the executor's `bulk_window` memory budget cannot back one window. The fixed constant

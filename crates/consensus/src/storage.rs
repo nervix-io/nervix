@@ -95,10 +95,11 @@ const KEY_INSTALLING: &[u8] = b"installing";
 const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
-const KEYSPACE_LOGS: &str = "raft_credential_pause_logs";
-const KEYSPACE_META: &str = "raft_credential_pause_meta";
-const KEYSPACE_STATE_MACHINE: &str = "raft_credential_pause_state";
-const KEYSPACE_SNAPSHOT: &str = "raft_credential_pause_snapshots";
+const KEYSPACE_LOGS: &str = "raft_identity_capability_tls_inference_reset_logs";
+const KEYSPACE_META: &str = "raft_identity_capability_tls_inference_reset_meta";
+const KEYSPACE_STATE_MACHINE: &str = "raft_identity_capability_tls_inference_reset_state";
+const KEYSPACE_SNAPSHOT: &str = "raft_identity_capability_tls_inference_reset_snapshots";
+const KEY_CLUSTER_IDENTITY: &[u8] = b"K";
 /// Working memory reserved for ordinary metadata and log storage relative to its operation unit.
 const STORAGE_RESERVATION_MULTIPLIER: u64 = 4;
 
@@ -230,12 +231,13 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    ClusterState = 17,
+    ClusterState = 22,
 }
 
 #[derive(Debug)]
 struct StateMetadata {
     encoding: StateEncoding,
+    cluster_identity: Option<uuid::Uuid>,
     last_applied_log_id: Option<LogIdOf>,
     last_membership: Arc<StoredMembershipOf>,
     runtime_revision: u64,
@@ -247,6 +249,7 @@ struct StateMetadata {
 #[derive(Debug, Archive, Serialize, Deserialize)]
 struct StateMetadataRecord {
     encoding: StateEncoding,
+    cluster_identity: Option<[u8; 16]>,
     last_applied_log_id: Option<LogIdRecord>,
     last_membership: StoredMembershipRecord,
     runtime_revision: u64,
@@ -259,6 +262,7 @@ impl From<&StateMetadata> for StateMetadataRecord {
     fn from(value: &StateMetadata) -> Self {
         Self {
             encoding: value.encoding.clone(),
+            cluster_identity: value.cluster_identity.map(uuid::Uuid::into_bytes),
             last_applied_log_id: value.last_applied_log_id.clone().map(Into::into),
             last_membership: StoredMembershipRecord::from(value.last_membership.as_ref()),
             runtime_revision: value.runtime_revision,
@@ -275,6 +279,7 @@ impl TryFrom<StateMetadataRecord> for StateMetadata {
     fn try_from(value: StateMetadataRecord) -> Result<Self, Self::Error> {
         Ok(Self {
             encoding: value.encoding,
+            cluster_identity: value.cluster_identity.map(uuid::Uuid::from_bytes),
             last_applied_log_id: value.last_applied_log_id.map(Into::into),
             last_membership: Arc::new(
                 StoredMembershipOf::try_from(value.last_membership)
@@ -293,6 +298,10 @@ impl From<&StateMachineData> for StateMetadata {
     fn from(state: &StateMachineData) -> Self {
         Self {
             encoding: StateEncoding::ClusterState,
+            cluster_identity: state
+                .cluster_identity
+                .as_ref()
+                .map(|identity| identity.cluster_uid()),
             last_applied_log_id: state.last_applied_log_id.clone(),
             last_membership: state.last_membership.clone(),
             runtime_revision: state.runtime_revision,
@@ -327,6 +336,7 @@ impl StateMachineData {
     fn load(sm: &Keyspace, metadata: StateMetadata) -> io::Result<Self> {
         let StateMetadata {
             encoding: StateEncoding::ClusterState,
+            cluster_identity: expected_identity,
             last_applied_log_id,
             last_membership,
             runtime_revision,
@@ -334,7 +344,16 @@ impl StateMachineData {
             password_work,
             command_retry_fence,
         } = metadata;
+        let identity: Option<crate::ClusterIdentityRecord> = read_key(sm, KEY_CLUSTER_IDENTITY)?;
+        if identity
+            .as_ref()
+            .map(crate::ClusterIdentityRecord::cluster_uid)
+            != expected_identity
+        {
+            return Err(io::Error::other(StorageFailure::InvalidState));
+        }
         let state = Self {
+            cluster_identity: identity.map(Arc::new),
             last_applied_log_id,
             last_membership,
             runtime_revision,
@@ -354,6 +373,7 @@ impl StateMachineData {
             },
             cordoned_node_ids: Records::load(b'n', sm)?,
             node_admission_fences: Records::load(b'f', sm)?,
+            node_capabilities: Records::load(b'C', sm)?,
             domain_mutations: Records::load(b'x', sm)?,
             domain_restore_installations: Records::load(b'I', sm)?,
             transactions: Records::load(b't', sm)?,
@@ -401,6 +421,7 @@ impl StateMachineData {
     /// How many keyed records this revision stores, besides its metadata.
     fn stored_records(&self) -> Option<usize> {
         let families = [
+            usize::from(self.cluster_identity.is_some()),
             self.schedule.domains.len(),
             self.domains.len(),
             self.domain_clock_authorities.len(),
@@ -408,6 +429,7 @@ impl StateMachineData {
             self.resources.stored_records()?,
             self.cordoned_node_ids.len(),
             self.node_admission_fences.len(),
+            self.node_capabilities.len(),
             self.domain_mutations.len(),
             self.domain_restore_installations.len(),
             self.transactions.len(),
@@ -479,6 +501,12 @@ impl StateMachineData {
         batch: &mut DurableBatch<'_>,
         sm: &Keyspace,
     ) -> io::Result<()> {
+        match (&self.cluster_identity, &preceding.cluster_identity) {
+            (Some(current), Some(previous)) if Arc::ptr_eq(current, previous) => {}
+            (Some(current), _) => batch.insert(sm, KEY_CLUSTER_IDENTITY, current.as_ref())?,
+            (None, Some(_)) => batch.remove(sm, KEY_CLUSTER_IDENTITY)?,
+            (None, None) => {}
+        }
         self.schedule
             .domains
             .write_changes(&preceding.schedule.domains, b's', batch, sm)?;
@@ -514,6 +542,8 @@ impl StateMachineData {
         )?;
         self.domain_mutations
             .write_changes(&preceding.domain_mutations, b'x', batch, sm)?;
+        self.node_capabilities
+            .write_changes(&preceding.node_capabilities, b'C', batch, sm)?;
         self.domain_restore_installations.write_changes(
             &preceding.domain_restore_installations,
             b'I',

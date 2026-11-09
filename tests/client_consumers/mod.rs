@@ -31,6 +31,84 @@ use super::{
 
 const OPEN_WAIT: Duration = Duration::from_secs(30);
 
+#[then(
+    expr = "consumer {string} receives {int} interleaved rows with {int}-byte ids exactly once \
+            and acknowledges them"
+)]
+async fn then_consumer_receives_interleaved_rows(
+    world: &mut ScenarioWorld,
+    consumer: String,
+    expected: usize,
+    id_bytes: usize,
+) {
+    let ScenarioConsumer::Native(client) = world
+        .consumers
+        .open
+        .get(&consumer)
+        .expect("the native consumer is open")
+    else {
+        panic!("this check uses the native consumer");
+    };
+    let deadline = Instant::now() + OPEN_WAIT;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut branches = BTreeMap::new();
+    while seen.len() < expected {
+        let delivery = nervix_primitives::time::timeout_at(deadline, client.next_batch())
+            .await
+            .expect("all output arrives before its deadline")
+            .expect("consumer read succeeds")
+            .expect("consumer remains open");
+        let batch = delivery.record_batch().expect("valid Arrow output");
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("id is STRING");
+        let amounts = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("amount is I64");
+        let tenants = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("tenant is STRING");
+        for row in 0..batch.num_rows() {
+            let amount = usize::try_from(amounts.value(row)).expect("nonnegative row identity");
+            assert!(
+                amount < expected && seen.insert(amount),
+                "no missing, extra or duplicated input row"
+            );
+            let tenant = if amount % 2 == 0 { "acme" } else { "globex" };
+            let prefix = format!("row-{amount:04}-");
+            let padding = id_bytes
+                .checked_sub(prefix.len())
+                .expect("id holds its identity");
+            assert_eq!(ids.value(row), format!("{prefix}{}", "x".repeat(padding)));
+            assert_eq!(tenants.value(row), tenant);
+            let fingerprint = delivery
+                .branch_fingerprint
+                .expect("concrete branch identity");
+            if let Some(prior) = branches.insert(tenant, fingerprint) {
+                assert_eq!(prior, fingerprint);
+            }
+        }
+        assert_eq!(
+            delivery.ack().await.expect("application acknowledgement"),
+            EmitterSettlement::Confirmed
+        );
+    }
+    assert_eq!(branches.len(), 2);
+    assert_ne!(branches["acme"], branches["globex"]);
+    let remaining =
+        nervix_primitives::time::timeout(Duration::from_millis(200), client.next_batch()).await;
+    assert!(
+        remaining.is_err(),
+        "no duplicate output follows the complete row set"
+    );
+}
+
 #[derive(Default)]
 pub(crate) struct ScenarioConsumers {
     open: BTreeMap<String, ScenarioConsumer>,

@@ -4,6 +4,7 @@
 //! - **Depends on.** The production registration and one embedded Ruby interpreter.
 //! - **Must not know.** Server internals or a copied host state machine.
 
+mod inspection;
 mod server;
 
 use magnus::{RClass, prelude::*};
@@ -16,6 +17,7 @@ fn ruby_boundary_preserves_kinds_values_views_and_interruptible_waits() {
     // thread, every Ruby value ends before the cleanup guard, and no library worker calls Ruby.
     let ruby = unsafe { magnus::embed::init() };
     crate::register(&ruby).assured("the native binding registers in a fresh interpreter");
+    inspection::check(&ruby).assured("inspection views preserve their metadata and native owners");
     let cases = [
         (FailureKind::InvalidArgument, "InvalidArgumentError"),
         (FailureKind::Connect, "ConnectError"),

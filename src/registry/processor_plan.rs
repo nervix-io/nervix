@@ -151,6 +151,18 @@ pub(crate) struct InferencerStatePlan {
 }
 
 impl InferencerStatePlan {
+    pub(crate) fn snapshot_bytes(
+        &self,
+    ) -> error_stack::Result<u64, crate::inferencer_state_snapshot::SnapshotError> {
+        crate::inferencer_state_snapshot::footprint(self.bindings.iter().map(|binding| {
+            (
+                u64::try_from(binding.schema.dimensions.len())
+                    .verified("a fixed tensor rank fits u64"),
+                u64::try_from(binding.elements).verified("a fixed tensor count fits u64"),
+            )
+        }))
+    }
+
     fn from_validated(bindings: &[nervix_models::InferencerStateBinding]) -> Option<Self> {
         if bindings.is_empty() {
             return None;

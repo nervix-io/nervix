@@ -103,6 +103,12 @@ codes!(upload_failure(host::UploadFailure) {
     InvalidStream=1,ResourceNotDeclared=2,SizeMismatch=3,QuotaExceeded=4,
     InstallationFailed=5,IdentityConflict=6,
 });
+codes!(inspection_rejection(host::InspectionRejection) {
+    UnknownEntity=1,NotMaterialized=2,InvalidSelection=3,InvalidLimit=4,StaleContinuation=5,
+    OwnerUnavailable=6,NotReady=7,Deadline=8,ReplyTooLarge=9,
+});
+codes!(inspection_stage(host::InspectionStage) {Live=1,Stored=2});
+codes!(inspection_unit_kind(host::InspectionUnitKind) {Single=1,Partition=2,Instance=3});
 codes!(event_kind(host::EventKind) {
     Rows=1,DeliveryLost=2,RowsSkipped=3,Ended=4,Interrupted=5,ConsumerOverflow=6,RestorationFailed=7,
 });

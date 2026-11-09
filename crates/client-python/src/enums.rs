@@ -46,6 +46,29 @@ macro_rules! host_enum {
     };
 }
 
+host_enum! { InspectionRejection from InspectionRejection {
+    UnknownEntity = 1 as "UNKNOWN_ENTITY",
+    NotMaterialized = 2 as "NOT_MATERIALIZED",
+    InvalidSelection = 3 as "INVALID_SELECTION",
+    InvalidLimit = 4 as "INVALID_LIMIT",
+    StaleContinuation = 5 as "STALE_CONTINUATION",
+    OwnerUnavailable = 6 as "OWNER_UNAVAILABLE",
+    NotReady = 7 as "NOT_READY",
+    Deadline = 8 as "DEADLINE",
+    ReplyTooLarge = 9 as "REPLY_TOO_LARGE",
+} }
+
+host_enum! { InspectionStage from InspectionStage {
+    Live = 1 as "LIVE",
+    Stored = 2 as "STORED",
+} }
+
+host_enum! { InspectionUnitKind from InspectionUnitKind {
+    Single = 1 as "SINGLE",
+    Partition = 2 as "PARTITION",
+    Instance = 3 as "INSTANCE",
+} }
+
 host_enum! {
     /// The kind of a failure, which names the exception class it raises.
     FailureKind from FailureKind {
@@ -358,6 +381,9 @@ impl From<Tls> for TlsRequirement {
 
 /// Adds every enumeration to the module.
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<InspectionRejection>()?;
+    module.add_class::<InspectionStage>()?;
+    module.add_class::<InspectionUnitKind>()?;
     module.add_class::<FailureKind>()?;
     module.add_class::<Disposition>()?;
     module.add_class::<UploadFailure>()?;

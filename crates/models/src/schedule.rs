@@ -282,6 +282,7 @@ pub enum OwnershipStateComponent {
     MaterializedRelay,
     WasmProcessor,
     WindowProcessor,
+    Inferencer,
 }
 
 impl OwnershipStateComponent {
@@ -295,7 +296,8 @@ impl OwnershipStateComponent {
             | Self::KafkaOffsets
             | Self::MaterializedRelay
             | Self::WasmProcessor
-            | Self::WindowProcessor => true,
+            | Self::WindowProcessor
+            | Self::Inferencer => true,
         }
     }
 }
@@ -954,6 +956,11 @@ impl ScheduledNode {
                 components.push(OwnershipStateComponent::WindowProcessor);
             }
             _ => {}
+        }
+        if let Model::Inferencer(model) = self.config.as_ref()
+            && !model.state.is_empty()
+        {
+            components.push(OwnershipStateComponent::Inferencer);
         }
         components.sort();
         components

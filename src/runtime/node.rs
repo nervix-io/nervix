@@ -216,6 +216,7 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) snapshot_staging: SnapshotStaging,
     pub(in crate::runtime) construction_parameters:
         nervix_primitives::sync::blocking::OnceLock<nervix_models::ClusterParameterRecord>,
+    pub(in crate::runtime) outward_tls: nervix_tls::OutwardTlsPolicy,
     pub(in crate::runtime) cluster_parameters: ArcSwap<nervix_models::ClusterParameterValues>,
     pub(in crate::runtime) state_replication_poll_interval: Duration,
     pub(in crate::runtime) temp_dir: PathBuf,

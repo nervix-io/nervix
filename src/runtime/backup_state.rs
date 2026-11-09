@@ -10,7 +10,7 @@
 //!   streaming selected saves one at a time, selecting stored materialized readers for stopped
 //!   domains or fresh shared Arrow rows
 //!   under the assignment barrier for running and paused domains, and taking each active
-//!   deduplicator and window branch from the generation its branch task published or, without
+//!   deduplicator, window and inferencer branch from the generation its branch task published or, without
 //!   one, from its checkpoint.
 //! - **Depends on.** Branch-local state, the runtime state store, the bounded executor's memory
 //!   classes, and typed placement envelopes.
@@ -281,7 +281,7 @@ impl NativeKafkaCheckpoint {
     }
 }
 
-/// One active branch's deduplicator keyspace or window at the cut.
+/// One active branch's deduplicator keyspace, window or inference tensors at the cut.
 pub(crate) struct CapturedBranchState {
     pub(crate) placement: StatePlacementEnvelope,
     pub(crate) branch_fingerprint: Option<BranchKeyFingerprint>,
@@ -291,8 +291,10 @@ pub(crate) struct CapturedBranchState {
 pub(crate) enum CapturedBranchStateKind {
     Deduplicator(CapturedDeduplicatorKeyspace),
     Window(CapturedWindow),
+    Inferencer(super::CapturedInferencer),
     StoredDeduplicator(StoredBranchCheckpoint),
     StoredWindow(StoredBranchCheckpoint),
+    StoredInferencer(StoredBranchCheckpoint),
 }
 
 /// A branch-local state's entity and branch, which names it once in a cut.
@@ -399,12 +401,13 @@ pub enum BackupStateCaptureError {
 }
 
 impl Runtime {
-    /// Ask every locally owned branch supervisor for its current lifecycle before a quiesced
-    /// backup reads the state store. A branch may have appeared since its periodic snapshot, so
+    /// Ask selected locally owned branch supervisors for their current state and lifecycle before
+    /// a backup reads the state store. A branch may have appeared since its periodic snapshot, so
     /// reading the published map alone can omit it from an otherwise complete cut.
     pub(crate) async fn checkpoint_backup_branch_lifecycles(
         &self,
         domain: &DomainName,
+        primaries: &ahash::HashSet<NodeUnitRef>,
     ) -> OwnershipHandoffResult<()> {
         let local_node_id = {
             let dispatcher = self.inner.remote_dispatcher.load();
@@ -432,6 +435,7 @@ impl Runtime {
                     .into_iter()
                     .map(|unit| NodeUnitRef::new(entity.clone(), unit))
             })
+            .filter(|member| primaries.contains(member))
             .collect::<Vec<_>>();
         drop(execution);
 
@@ -543,9 +547,9 @@ impl Runtime {
             let staging = match checkpoint.placement.state.kind() {
                 RuntimeStateKind::WasmProcessor => Some(RestoreStagingKind::Guest),
                 RuntimeStateKind::MaterializedRelay => Some(RestoreStagingKind::Materialized),
-                RuntimeStateKind::Deduplicator | RuntimeStateKind::WindowProcessor => {
-                    Some(RestoreStagingKind::BranchState)
-                }
+                RuntimeStateKind::Deduplicator
+                | RuntimeStateKind::WindowProcessor
+                | RuntimeStateKind::Inferencer => Some(RestoreStagingKind::BranchState),
                 RuntimeStateKind::BranchAggregated
                 | RuntimeStateKind::Correlator
                 | RuntimeStateKind::KafkaOffset
@@ -705,6 +709,7 @@ impl Runtime {
                 RuntimeStateKind::MaterializedRelay,
                 RuntimeStateKind::Deduplicator,
                 RuntimeStateKind::WindowProcessor,
+                RuntimeStateKind::Inferencer,
             ],
             DomainStatus::Running | DomainStatus::Paused => &[
                 RuntimeStateKind::WasmProcessor,
@@ -712,6 +717,7 @@ impl Runtime {
                 RuntimeStateKind::BranchLru,
                 RuntimeStateKind::Deduplicator,
                 RuntimeStateKind::WindowProcessor,
+                RuntimeStateKind::Inferencer,
             ],
         };
         let listed = store
@@ -769,7 +775,9 @@ impl Runtime {
             let kind = checkpoint.placement.state.kind();
             let publishes = matches!(
                 kind,
-                RuntimeStateKind::Deduplicator | RuntimeStateKind::WindowProcessor
+                RuntimeStateKind::Deduplicator
+                    | RuntimeStateKind::WindowProcessor
+                    | RuntimeStateKind::Inferencer
             );
             // A stored keyspace or window that a published generation supersedes is never read.
             if publishes
@@ -782,6 +790,15 @@ impl Runtime {
             };
             let branch_fingerprint = placement.branch_key.as_ref().map(BranchKey::fingerprint);
             match kind {
+                RuntimeStateKind::Inferencer => {
+                    branch_states.push(CapturedBranchState {
+                        placement: placement.to_remote(),
+                        branch_fingerprint,
+                        state: CapturedBranchStateKind::StoredInferencer(
+                            StoredBranchCheckpoint::new(checkpoint)?,
+                        ),
+                    });
+                }
                 RuntimeStateKind::KafkaOffset | RuntimeStateKind::BranchLru => {
                     let stored_bytes = checkpoint.stored_bytes().change_context_lazy(|| {
                         BackupStateCaptureError::StateSize {
@@ -981,10 +998,17 @@ impl Runtime {
                 identities.push(identity);
             }
         }
+        for state in self.inner.state_replication_routing.inferencers() {
+            if let Some(identity) =
+                self.names_published_branch_state(domain, primaries, &state.placement)
+            {
+                identities.push(identity);
+            }
+        }
         identities
     }
 
-    /// The generation each deduplicator and window branch task of `domain` on this node published
+    /// The generation each deduplicator, window and inferencer branch task of `domain` on this node published
     /// last, for every branch the captured lifecycles in `keys` hold. A quiesced cut asked those
     /// tasks to publish before it closed, so each generation holds every change before the cut.
     fn capture_published_branch_states(
@@ -1032,6 +1056,23 @@ impl Runtime {
                     .as_ref()
                     .map(BranchKey::fingerprint),
                 state: CapturedBranchStateKind::Window(window),
+            });
+        }
+        for state in self.inner.state_replication_routing.inferencers() {
+            if !self.captures_published_branch_state(domain, primaries, &state.placement, keys) {
+                continue;
+            }
+            let Some(inferencer) = super::CapturedInferencer::published(&state) else {
+                continue;
+            };
+            captured.push(CapturedBranchState {
+                placement: state.placement.to_remote(),
+                branch_fingerprint: state
+                    .placement
+                    .branch_key
+                    .as_ref()
+                    .map(BranchKey::fingerprint),
+                state: CapturedBranchStateKind::Inferencer(inferencer),
             });
         }
         captured
@@ -1259,6 +1300,7 @@ mod tests {
             nervix_models::DomainNodeRef::node_in(domain.clone(), kind, entity.clone()),
             super::super::ScheduledStateAssignment {
                 identity: super::super::ScheduledStateIdentity {
+                    inferencer_model: None,
                     schema_fingerprint: SchemaFingerprint::from_digest([4; 32]),
                     wasm_state_generations: Some(nervix_models::WasmStateGenerations::first()),
                 },
@@ -1520,6 +1562,7 @@ mod tests {
             nervix_models::DomainNodeRef::node_in(domain.clone(), kind, entity.clone()),
             super::super::ScheduledStateAssignment {
                 identity: super::super::ScheduledStateIdentity {
+                    inferencer_model: None,
                     schema_fingerprint: SchemaFingerprint::from_digest([4; 32]),
                     wasm_state_generations: None,
                 },

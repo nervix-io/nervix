@@ -75,11 +75,18 @@ the queue/default-exchange and named-exchange choices, `MANDATORY`, persistence,
 `PROPERTIES` types and envelope alterations. Do not promise consumer completion from a publisher
 confirm or message durability from routing alone.
 
+For connector-specific event counts, including Redis publishes with no subscribers, read
+[Connector-declared events](../../../docs/src/metrics-and-observability.md#connector-declared-events)
+and the entity's generated capability reference before interpreting delivery.
+
 For applications submitting Plexus, use [Client Libraries](../../../docs/src/client-libraries.md)
 to select the host guide; Java and JVM programs follow [JVM Client Library](../../../docs/src/client-library-jvm.md),
 Ruby applications follow [Ruby Client Library](../../../docs/src/client-library-ruby.md),
 and C and C++ programs follow [C And C++ Client Library](../../../docs/src/client-library-c.md).
 Read its execution, clock and endpoint sections before choosing application-side lifecycle handling.
+For typed state inspection in Python, Ruby or JVM applications, read that host guide's
+`Inspect Materialized State` section for page/refusal metadata, opaque continuation and retained
+schema/frame lifetimes before suggesting application code.
 
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
@@ -101,10 +108,17 @@ commits, read [Signing In](../../../docs/src/client-tools-web-console.md#signing
 Read [Layout](../../../docs/src/client-tools-web-console.md#layout) before interpreting footer totals.
 Listener certificates are node provisioning, configured outside Plexus statements.
 For TLS algorithm choices, read [Cryptography](../../../docs/src/cryptography.md#algorithm-policy):
-the interconnect uses its fixed provider, while native sessions and connectors use the outward
-provider and each connector's declared trust and identity keys.
+use ordered string lists with `ALTER CLUSTER SET TLS_CIPHER_SUITES = ('fips'),
+TLS_KEY_EXCHANGE_GROUPS = ('fips');`. Read that chapter before choosing exact names or aliases,
+changing both lists, or promising which connector handshakes are governed. The interconnect keeps
+its fixed provider; existing connections retain their negotiation and connector trust/identity
+remain with their declared client keys.
 For backend validation claims, follow that chapter's P-256 signing and backend-status guidance;
 selecting an approved algorithm does not establish a validated deployment.
+For cluster continuity and public identity inspection, read
+[Node Settings → Permanent Cluster Identity](../../../docs/src/node-settings.md#permanent-cluster-identity).
+For source UUID inspection and restore behavior, read
+[Backup And Restore](../../../docs/src/backup-and-restore.md#what-a-restore-recreates).
 For authentication refusals and retry behavior, follow
 [Authentication](../../../docs/src/client-session-protocol.md#authentication); a response delay
 does not establish that a user exists.
@@ -154,7 +168,9 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   WASM fuel and linear-memory budgets, correlation, materialized state, lookup, generation, or
   repartitioning.
 - For inference with model-carried state, read `Runtime Nodes` → `Inferencer` → `State tensors`
-  before choosing port bindings, initialization, branch isolation or recovery guarantees.
+  and `Shutdown And Recovery` → `What Survives` before choosing port bindings, initialization,
+  branch isolation or recovery guarantees. Check the snapshot-section bound and branch retention;
+  distinguish a completed graceful stop from recovery of the last periodic snapshot.
 - Placement: latency-critical or heavy corridors, colocation enforcement, rule precedence, and
   whether ordinary scheduler heuristics should remain neutral.
 - Operations: batching/flush, error routes, credentials/TLS resources, observability, session
@@ -245,13 +261,15 @@ Build configuration in dependency order:
 8. Commit the graph, inspect it, and start the active domain only when prerequisites exist.
 
 For backup recovery, `RESTORE ... FROM '<file>' RESUME` (CLI `--resume`) installs compatible
-materialized relay rows, deduplicator keys and windows on owners and replicas, then makes the domain
-running at its archived start generation and latest start point. Paced recovery retains the
+materialized relay rows, deduplicator keys, windows and inferencer tensors on owners and replicas,
+then makes the domain running at its archived start generation and latest start point. Paced recovery retains the
 wall/logical mapping and time rate verbatim and projects downtime under a newly selected clock
 authority. The default restore leaves the domain stopped; a normal `START` advances the generation
 and clears materialized state while preserving compatible WASM state, source offsets, branch
-lifecycle, deduplicator keys and windows. `RESUME` precedes the user policy and `DRY RUN`; the dry
-run reports the planned status and generation. Read
+lifecycle, deduplicator keys, windows and inferencer tensors. For model-carried state and either
+`WITHOUT STATE` option, read `Backup And Restore` → `Archive Sections` and `Runtime Nodes` →
+`Inferencer` → `State tensors` before promising recovery. `RESUME` precedes the user policy and
+`DRY RUN`; the dry run reports the planned status and generation. Read
 [Backup And Restore](https://docs.nervix.io/backup-and-restore.html) for format and memory limits.
 
 Keep an uncertain restore's original execution reference, statement and archive across attempts;
@@ -281,6 +299,10 @@ metadata and streamed checkpoint I/O, following the backup guidance in `referenc
 Size node memory for every execution pool, including active snapshots and optional retained materialized-source reads;
 the default startup requirement is 2,723 MiB. Read [Node Settings](https://docs.nervix.io/node-settings.html)
 for the complete prerequisite checks.
+For detected CPU/memory claims, capability rolls, peer receive bounds and placement weighting, read
+[Node Settings](../../../docs/src/node-settings.md#committed-node-capabilities) and
+[Placement](../../../docs/src/placement.md#capacity-at-the-load-tier). Verify the committed
+incarnation with `DESCRIBE CLUSTER` before attributing a distribution to an override.
 Use `SHOW TRANSACTIONS;` when transaction state or a retained outcome needs
 verification. Use `DESCRIBE TRANSACTION [ '<id>' ] [ OPERATION <n> ] [ FORMAT TEXT | JSON ];` to
 explain what an open, committing, or retained transaction requires and changes before or after
@@ -828,7 +850,8 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   the policy discards state for none of those under either value. Only an owner loss whose forced
   recovery cannot prepare the new owner recreates guest state without the guest's verdict.
 - To intentionally replace an existing WASM processor's guest state, use
-  `RESET WASM PROCESSOR <processor> STATE IN DOMAIN <domain> FOR UNBRANCHED|ALL BRANCHES|BRANCH VALUES { <field> = <literal>, ... };`.
+  `RESET WASM PROCESSOR <processor> STATE FOR UNBRANCHED|ALL BRANCHES|BRANCH VALUES { <field> = <literal>, ... };`.
+  It acts on the session's active domain, so `USE` that domain first.
   Choose the explicit scope that matches its declared branch, and supply every branch-key field
   with an exact typed literal for one selected branch. The processor must be running and the
   selected branch must already exist. This command loses the selected computation state; a fresh

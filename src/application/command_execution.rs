@@ -1369,9 +1369,9 @@ mod tests {
     #[cfg(feature = "testing")]
     use nervix_consensus::{ConsensusTestProbe, StorageBoundary};
     use nervix_models::{
-        CreateStatement, CreateUser, ImpactPlanningBasis, TransactionLifecycle,
-        TransactionOperationAdmission, TransactionOperationNumber, TransactionPosition,
-        TransactionPreviewIdentity,
+        CreateStatement, CreateUser, ImpactPlanningBasis, ResetWasmState, StateBranchSelection,
+        TransactionLifecycle, TransactionOperationAdmission, TransactionOperationNumber,
+        TransactionPosition, TransactionPreviewIdentity, WasmProcessorName,
     };
     use nervix_recovery::Discarded as _;
 
@@ -1481,6 +1481,41 @@ mod tests {
             .assured("backup semantics encode")
             .assured("the backup is persistent")
             .digest
+    }
+
+    fn reset_request(selected_domain: &DomainName) -> PersistentCommandRequest {
+        let statement = Statement::ResetWasmState(ResetWasmState {
+            processor: WasmProcessorName::parse("counter")
+                .assured("the test processor name is an identifier-shaped literal"),
+            scope: StateBranchSelection::AllBranches,
+        });
+        let source = statement
+            .to_canonical_plexus()
+            .assured("an all-branches reset has a canonical rendering");
+        let operation = SessionCommandOperation::Execute(PendingSessionCommand {
+            request_reference: CommandExecutionReference::parse("reset.request")
+                .assured("the test reference is valid"),
+            expected_transaction_position: None,
+            source,
+            statement: ClientStatement::Server(statement),
+            domain: Some(selected_domain.clone()),
+        });
+        PersistentCommandRequest::from_operations(&[operation], Some(selected_domain))
+            .assured("reset semantics encode")
+            .assured("a reset is persistent")
+    }
+
+    /// A reset names no domain, so the session's active domain alone tells two resets of
+    /// same-named processors apart: a reused reference from another domain is another request.
+    #[test]
+    fn reset_request_identity_binds_the_active_domain() {
+        let tenant = DomainName::parse("tenant").assured("the selected domain is valid");
+        let expected = reset_request(&domain());
+        assert_eq!(expected.domain, Some(domain()));
+        assert_eq!(reset_request(&domain()).digest, expected.digest);
+        let other = reset_request(&tenant);
+        assert_eq!(other.domain, Some(tenant));
+        assert_ne!(other.digest, expected.digest);
     }
 
     #[test]
