@@ -1595,3 +1595,196 @@ fn codec_and_signaling_choice_queries_follow_format_and_resource_dependencies() 
         assert_eq!(ChoiceControl::CodecVersion.form(), CreateKind::Codec);
     });
 }
+
+#[test]
+fn deduplicator_and_reorderer_forms_edit_ordered_keys_after_their_node_branch() {
+    use super::ingestor_route_draft::{FlushDraft, InheritDraft, MessageErrorDraft};
+
+    /// One keyed processor form and what it must show and submit.
+    struct KeyedForm {
+        kind: CreateKind,
+        prerequisite: &'static str,
+        unnamed: &'static str,
+        heading: &'static str,
+        branch_label: &'static str,
+        statement: &'static str,
+        keys: &'static str,
+    }
+
+    super::super::initialize_test_executor();
+    Owner::new().with(|| {
+        let domain = DomainName::parse("orders").assured("valid domain");
+        let signals = CreateSignals::new();
+        let render = || {
+            let dialog = CreateDialog(
+                CreateDialogProps::builder()
+                    .signals(signals)
+                    .active_domain(RwSignal::new(Some(domain.clone())))
+                    .connection_state(RwSignal::new(super::super::ConsoleConnectionState::Waiting))
+                    .session_generation(RwSignal::new(1))
+                    .request_tx(RwSignal::new(None))
+                    .submit(|_, _, _| {})
+                    .build(),
+            );
+            any_spawner::Executor::poll_local();
+            dialog.to_html()
+        };
+
+        assert_eq!(
+            signals
+                .choice_query(ChoiceControl::ProcessorInputRelay)
+                .err(),
+            Some("Open a junction, deduplicator, reorderer or reingestor form first")
+        );
+        assert!(!ChoiceControl::ProcessorBranch.applies_to(CreateKind::Emitter));
+        assert_eq!(CreateKind::Emitter.processor_family(), None);
+        signals.open(
+            CreateKind::Junction,
+            Some(domain.clone()),
+            "global-create-button",
+        );
+        let junction = render();
+        assert!(junction.contains("Junction branch"));
+        assert!(!junction.contains("create-processor-keys"));
+
+        let forms = [
+            KeyedForm {
+                kind: CreateKind::Deduplicator,
+                prerequisite: "Choose the deduplicator branch before its input relays",
+                unnamed: "Choose the named deduplicator branch before its input relays",
+                heading: "Ordered DEDUPLICATE ON expressions",
+                branch_label: "Deduplicator branch",
+                statement: "CREATE DEDUPLICATOR keyed_orders",
+                keys: "DEDUPLICATE ON input.id, lower(input.note)\n  MAX TIME 10m\n  BRANCHED BY \
+                       by_tenant",
+            },
+            KeyedForm {
+                kind: CreateKind::Reorderer,
+                prerequisite: "Choose the reorderer branch before its input relays",
+                unnamed: "Choose the named reorderer branch before its input relays",
+                heading: "Ordered BY expressions",
+                branch_label: "Reorderer branch",
+                statement: "CREATE REORDERER keyed_orders",
+                keys: "BY input.id, lower(input.note)\n  MAX TIME 10m\n  BRANCHED BY by_tenant",
+            },
+        ];
+        for form in forms {
+            let family = form
+                .kind
+                .processor_family()
+                .assured("the keyed kinds are processor kinds");
+            let draft = signals.processor(family);
+            signals.open(form.kind, Some(domain.clone()), "global-create-button");
+            assert!(ChoiceControl::ProcessorBranch.applies_to(form.kind));
+            assert!(!ChoiceControl::EmitterCodec.applies_to(form.kind));
+            assert_eq!(
+                signals
+                    .choice_query(ChoiceControl::ProcessorInputRelay)
+                    .err(),
+                Some(form.prerequisite)
+            );
+
+            draft.update(|state| state.choose_unbranched());
+            assert_eq!(
+                signals
+                    .choice_query(ChoiceControl::ProcessorInputRelay)
+                    .assured("an unbranched processor needs no branch choice")
+                    .target,
+                ChoiceTarget::IngestUnbranchedRelay
+            );
+            assert!(
+                !open_form_controls(signals, form.kind).contains(&ChoiceControl::ProcessorBranch)
+            );
+            draft.update(|state| state.choose_branched());
+            assert_eq!(
+                signals
+                    .choice_query(ChoiceControl::ProcessorInputRelay)
+                    .err(),
+                Some(form.unnamed)
+            );
+            assert!(
+                open_form_controls(signals, form.kind).contains(&ChoiceControl::ProcessorBranch)
+            );
+            let branch = ChoiceValue::Model(node(ModelKind::Branch, "by_tenant"));
+            select_choice(signals, ChoiceControl::ProcessorBranch, branch.clone());
+            let input = signals
+                .choice_query(ChoiceControl::ProcessorInputRelay)
+                .assured("the node branch is selected");
+            assert_eq!(input.target, ChoiceTarget::IngestBranchedRelay);
+            assert_eq!(input.dependencies[1].value, branch);
+            select_choice(
+                signals,
+                ChoiceControl::ProcessorInputRelay,
+                ChoiceValue::Model(node(ModelKind::Relay, "orders")),
+            );
+            let output = signals
+                .choice_query(ChoiceControl::ProcessorRouteRelay)
+                .assured("the first input is selected");
+            assert_eq!(output.target, ChoiceTarget::ProcessorInputBranchRelay);
+            assert_eq!(
+                output.dependencies[1].value,
+                ChoiceValue::Model(node(ModelKind::Relay, "orders"))
+            );
+
+            let rendered = render();
+            for control in [
+                "create-processor-branching",
+                "create-processor-keys",
+                "create-processor-key-list",
+                "create-processor-add-key",
+                "create-processor-key-up",
+                "create-processor-remove-key",
+                "create-processor-key-expression",
+                "create-processor-max-time",
+            ] {
+                assert!(rendered.contains(control), "{control} must render");
+            }
+            assert!(rendered.contains(form.heading));
+            assert!(rendered.contains(form.branch_label));
+
+            draft.update(|state| {
+                state.name = "keyed_orders".to_string();
+                let keyed = state.keyed_mut().assured("a keyed form holds its keys");
+                keyed.expressions = vec!["lower(input.note)".to_string()];
+                keyed.add();
+                *keyed
+                    .active_expression_mut()
+                    .assured("the added expression is active") = "input.id".to_string();
+                keyed.move_active(true);
+                keyed.max_time = "10m".to_string();
+                let route = state.active_route_mut().assured("a route exists");
+                route.select_relay(&node(ModelKind::Relay, "keyed"));
+                route.inherit = InheritDraft::All;
+                route.flush = FlushDraft::Immediate;
+                route.message_error = MessageErrorDraft::Log;
+            });
+            let submission = signals.submission().assured("the keyed draft is complete");
+            assert!(
+                submission.presentation.contains(form.statement),
+                "{}",
+                submission.presentation
+            );
+            assert!(
+                submission.presentation.contains(form.keys),
+                "{}",
+                submission.presentation
+            );
+            let CreateDispatch::Command(command) = submission.dispatch else {
+                panic!("processor creation must use the command dispatcher");
+            };
+            assert_eq!(command.domain, Some(domain.clone()));
+
+            let elsewhere = DomainName::parse("elsewhere").assured("valid domain");
+            signals.change_scope(Some(elsewhere));
+            let changed = draft.get_untracked();
+            let keyed = changed.keyed().assured("a keyed form keeps its keys");
+            assert_eq!(
+                keyed.active_expression().map(String::as_str),
+                Some("input.id")
+            );
+            assert_eq!(keyed.max_time, "10m");
+            assert!(changed.current_first_input().is_none());
+            assert!(signals.submission().is_err());
+        }
+    });
+}

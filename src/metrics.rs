@@ -71,7 +71,7 @@ use connector::ConnectorInteractionMetrics;
 pub(crate) use connector::{
     EmitterAttemptOperation, EmitterAttemptOutcome, EmitterFinishOutcome,
     EmitterInteractionMetrics, EmitterOpenOutcome, EmitterRejectionCode, EmitterRetryCause,
-    EmitterWork, EmitterWorkKind, IngestorInteractionMetrics,
+    EmitterWork, EmitterWorkKind, IngestorInteractionMetrics, TaskFailureBinding,
 };
 pub use interconnection::NodeObservations;
 use interconnection::{InterconnectionCollector, InterconnectionCollectorHandle};

@@ -193,7 +193,10 @@ use crate::{
         WebsocketsIngestorStartPlan, ZeroMqIngestorStartPlan, ZeroMqPullIngestorStartPlan,
     },
     resource::ResourceStore,
-    runtime_ack::{AckCompletion, AckOutcome, AckParkGuard, AckProgress, AckRootTracker, AckSet},
+    runtime_ack::{
+        AckCompletion, AckOutcome, AckParkGuard, AckProgress, AckRootTracker, AckSet,
+        AckWaitOutcome,
+    },
     runtime_schema::{
         CodecError, CompiledCodec, CompiledSchema, JsonDecoder, ProtobufCodecDescriptors,
         ProtobufDescriptorPool, RuntimeProjectionComponent, RuntimeRecordBatch,

@@ -68,10 +68,9 @@ impl<'t> BatchRoots<'t> {
     }
 }
 
-/// One root of a batch whose wait ended: the outcome it ended with and the completion that
-/// observed it.
+/// One root of a batch whose wait ended: how the wait ended and the completion that observed it.
 struct SettledRoot {
-    outcome: AckOutcome,
+    outcome: AckWaitOutcome,
     /// Keeps a root that resolved counted for drains and ownership handoffs until it drops.
     completion: AckCompletion,
 }
@@ -149,21 +148,27 @@ impl IngestorBatchAcknowledgementServices for RuntimeBatchAcknowledgement {
             };
             let settled = next.verified("the loop ends once no root is left to settle");
             match settled.outcome {
-                AckOutcome::Ack => {
+                AckWaitOutcome::Resolved(AckOutcome::Ack) => {
                     if self.settling.is_empty() {
                         self._confirming = Some(settled.completion);
                     }
                 }
-                AckOutcome::NoAck(reason) => {
+                AckWaitOutcome::Resolved(AckOutcome::NoAck(reason)) => {
                     // The ingestor rejects the batch, and the drain waits for that as well.
                     self._confirming = Some(settled.completion);
-                    return IngestorAcknowledgementOutcome::NoAck(reason);
+                    return IngestorAcknowledgementOutcome::Failed { reason };
+                }
+                AckWaitOutcome::TimedOut { silence } => {
+                    // The silent root stays unresolved. The ingestor rejects the batch, and the
+                    // drain waits for that as well.
+                    self._confirming = Some(settled.completion);
+                    return IngestorAcknowledgementOutcome::TimedOut { silence };
                 }
             }
         }
         if let Some(delay) = self.confirmation_delay {
             sleep(delay).await;
         }
-        IngestorAcknowledgementOutcome::Ack
+        IngestorAcknowledgementOutcome::Acknowledged
     }
 }

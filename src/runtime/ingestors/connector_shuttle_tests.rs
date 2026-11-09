@@ -176,9 +176,18 @@ impl IngestorHostServices for ChannelHost {
     fn report_error(&self, message: String) {
         panic!("channel ingestor reported an unexpected error: {message}");
     }
-    fn handle_ack_failure(&self, reason: String) {
-        panic!("unacknowledged channel ingestor reported an ACK failure: {reason}");
+    fn record_acknowledgement(&self, outcome: &IngestorAcknowledgementOutcome) {
+        panic!("an unacknowledged channel ingestor observed an acknowledgement wait: {outcome:?}");
     }
+    fn record_transport_settlement(
+        &self,
+        _operation: IngestorSettlementOperation,
+        _outcome: IngestorSettlementOutcome,
+        _elapsed: Duration,
+    ) {
+    }
+    fn record_resume(&self, _outcome: IngestorResumeOutcome) {}
+    fn record_suspend(&self, _cause: IngestorSuspendCause) {}
     fn record_transport_redeliveries(&self, positions: usize) {
         panic!("a channel ingestor without positions discarded {positions} after a reconnect");
     }
@@ -704,9 +713,22 @@ impl IngestorHostServices for GraphHost {
     fn report_error(&self, message: String) {
         panic!("the check's ingestor reported an unexpected error: {message}");
     }
-    fn handle_ack_failure(&self, reason: String) {
-        panic!("every acknowledgement tree of the check succeeds, but one failed: {reason}");
+    fn record_acknowledgement(&self, outcome: &IngestorAcknowledgementOutcome) {
+        if let IngestorAcknowledgementOutcome::Failed { .. }
+        | IngestorAcknowledgementOutcome::TimedOut { .. } = outcome
+        {
+            panic!("every acknowledgement tree of the check succeeds, but one failed: {outcome:?}");
+        }
     }
+    fn record_transport_settlement(
+        &self,
+        _operation: IngestorSettlementOperation,
+        _outcome: IngestorSettlementOutcome,
+        _elapsed: Duration,
+    ) {
+    }
+    fn record_resume(&self, _outcome: IngestorResumeOutcome) {}
+    fn record_suspend(&self, _cause: IngestorSuspendCause) {}
     fn record_transport_redeliveries(&self, positions: usize) {
         panic!("a replayable check ingestor discarded {positions} positions after a reconnect");
     }
@@ -929,9 +951,22 @@ impl IngestorHostServices for RefusingGraphHost {
     fn report_error(&self, message: String) {
         panic!("the check's ingestor reported an unexpected error: {message}");
     }
-    fn handle_ack_failure(&self, reason: String) {
-        panic!("a consumed payload never fails its batch, but the batch failed: {reason}");
+    fn record_acknowledgement(&self, outcome: &IngestorAcknowledgementOutcome) {
+        if let IngestorAcknowledgementOutcome::Failed { .. }
+        | IngestorAcknowledgementOutcome::TimedOut { .. } = outcome
+        {
+            panic!("a consumed payload never fails its batch, but the batch failed: {outcome:?}");
+        }
     }
+    fn record_transport_settlement(
+        &self,
+        _operation: IngestorSettlementOperation,
+        _outcome: IngestorSettlementOutcome,
+        _elapsed: Duration,
+    ) {
+    }
+    fn record_resume(&self, _outcome: IngestorResumeOutcome) {}
+    fn record_suspend(&self, _cause: IngestorSuspendCause) {}
     fn record_transport_redeliveries(&self, positions: usize) {
         panic!("a replayable check ingestor discarded {positions} positions after a reconnect");
     }

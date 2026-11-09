@@ -102,6 +102,14 @@ Feature: Language-level client suites
       | java    | 1            | http      | VEC<STRING> | ARRAY<I16, 2> |
       | java    | 3            | http      | VEC<STRING> | ARRAY<I16, 2> |
 
+    @client_conformance_toolchain @client_suite_ruby @long_running @slots_1
+    Examples: Ruby over the native gem on TLS and plaintext listeners
+      | runtime | cluster_size | transport | tags_type   | grid_type     |
+      | ruby    | 1            | https     | VEC<STRING> | ARRAY<I16, 2> |
+      | ruby    | 3            | https     | VEC<STRING> | ARRAY<I16, 2> |
+      | ruby    | 1            | http      | VEC<STRING> | ARRAY<I16, 2> |
+      | ruby    | 3            | http      | VEC<STRING> | ARRAY<I16, 2> |
+
     @client_conformance_toolchain @client_suite_c @long_running @slots_1
     Examples: C11 over the shared C binding on TLS and plaintext listeners
       | runtime | cluster_size | transport | tags_type   | grid_type     |
