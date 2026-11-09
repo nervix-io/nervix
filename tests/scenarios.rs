@@ -219,6 +219,7 @@ mod client_foreign_execution;
 mod client_producers;
 mod client_reply_kind;
 mod client_traffic;
+mod cluster_identity;
 mod common;
 mod database_batches;
 #[cfg(feature = "deloxide")]

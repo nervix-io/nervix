@@ -1400,6 +1400,8 @@ pub(super) fn state_machine(arbitrary: &mut Arbitrary<'_>) -> StateMachineData {
     let runtime_revision = arbitrary.entropy().any_u64();
 
     let mut state = StateMachineData {
+        cluster_identity: optional(arbitrary, crate::cluster_identity::tests::identity)
+            .map(Arc::new),
         parameters: Some(arbitrary.cluster_parameter_record()),
         last_applied_log_id,
         last_membership,
@@ -1808,6 +1810,7 @@ fn complete_application_command(arbitrary: &mut Arbitrary<'_>) -> ConsensusComma
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, strum::EnumIter)]
 enum CommandVariant {
     AnnounceNodeCapabilities,
+    InstallClusterIdentity,
     SeedClusterParameters,
     AlterClusterParameters,
     AdmitCommandExecution,
@@ -1857,6 +1860,7 @@ impl CommandVariant {
     fn of(command: &ConsensusCommand) -> Self {
         match command {
             ConsensusCommand::AnnounceNodeCapabilities { .. } => Self::AnnounceNodeCapabilities,
+            ConsensusCommand::InstallClusterIdentity { .. } => Self::InstallClusterIdentity,
             ConsensusCommand::SeedClusterParameters { .. } => Self::SeedClusterParameters,
             ConsensusCommand::AlterClusterParameters { .. } => Self::AlterClusterParameters,
             ConsensusCommand::AdmitCommandExecution { .. } => Self::AdmitCommandExecution,
@@ -1939,6 +1943,9 @@ fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> Consens
     match variant {
         CommandVariant::AnnounceNodeCapabilities => ConsensusCommand::AnnounceNodeCapabilities {
             record: node_capability_record(arbitrary),
+        },
+        CommandVariant::InstallClusterIdentity => ConsensusCommand::InstallClusterIdentity {
+            identity: Box::new(crate::cluster_identity::tests::identity(arbitrary)),
         },
         CommandVariant::SeedClusterParameters => ConsensusCommand::SeedClusterParameters {
             values: arbitrary.cluster_parameter_values(),

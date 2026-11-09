@@ -843,6 +843,10 @@ Choose checks relevant to the configured graph:
   [the membership status contract](https://docs.nervix.io/consensus-storage-and-replication.html#follower-catch-up-and-learner-promotion)
   when deciding whether an observed voter list has converged; a joint configuration's union is
   insufficient.
+- For the public identity that `DESCRIBE CLUSTER;` reports, read
+  [Permanent Cluster Identity](../../../../docs/src/node-settings.md#permanent-cluster-identity).
+  Read [What A Restore Recreates](../../../../docs/src/backup-and-restore.md#what-a-restore-recreates)
+  before using a backup's source UUID to interpret recovery or cloning.
 - `DESCRIBE CLUSTER;` lists the prerequisites every live node brings and the nodes whose Raft
   heartbeat, gossip interval or clock-skew tolerance differs from the leader's. A node refused as it
   joins, or by its startup checks, names the setting and both values; read

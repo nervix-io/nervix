@@ -91,6 +91,27 @@ The independent capability controller refreshes them on the existing half-second
 cadence, including when another domain's leader reconciliation is busy. This separates committed
 capacity from its local adoption without a second configuration authority.
 
+## Permanent Cluster Identity
+
+The first leader commits a permanent UUID and signing key for the cluster. `DESCRIBE CLUSTER;`
+prints their public identity immediately after the leader line:
+
+```text
+leader: node-1
+cluster uid: 72f3a93e-64f0-40a5-b95d-790c8a738fee
+cluster key: <key thumbprint>
+cluster created: 2026-11-08T12:00:00Z
+```
+
+The key value is its RFC 7638 SHA-256 thumbprint in canonical base64url. Every node reports the same
+UUID, key and creation instant after it applies the record. Restart, leadership transfer and
+membership changes preserve them. The private key is never included in this description.
+
+`--cluster-id` remains the operator's display name and interconnect/gossip prerequisite. The
+indented `cluster identity` prerequisite names that configured value; the unindented `cluster uid`
+names the permanent generated identity. [Backup And Restore](backup-and-restore.md#what-a-restore-recreates)
+explains why a fresh cluster restored from an archive keeps its own UUID and key.
+
 ## The Prerequisite List Is Closed
 
 The prerequisites are cluster identity; the trust root; the node-to-node wire contract; the

@@ -97,6 +97,7 @@ use tracing::{debug, error, info, warn};
 mod append_submission_fault;
 #[cfg(test)]
 mod archive_count_tests;
+mod cluster_identity;
 mod cluster_parameters;
 mod command_execution;
 mod node_capabilities;
@@ -105,6 +106,9 @@ pub use append_submission_fault::AppendSubmissionFailure;
 use append_submission_fault::AppendSubmissionFault;
 #[cfg(feature = "testing")]
 use append_submission_fault::AppendSubmissionFaults;
+pub use cluster_identity::{
+    ClusterIdentity, ClusterIdentityError, ClusterIdentityRecord, ClusterSigner,
+};
 pub use cluster_parameters::ClusterParameterPlanningInputs;
 mod connectivity_fault;
 mod domain_mutation;
@@ -413,6 +417,9 @@ pub struct TransactionControlSnapshot {
 pub enum ConsensusCommand {
     AnnounceNodeCapabilities {
         record: NodeCapabilityRecord,
+    },
+    InstallClusterIdentity {
+        identity: Box<ClusterIdentityRecord>,
     },
     SeedClusterParameters {
         values: ClusterParameterValues,
@@ -738,6 +745,7 @@ impl std::fmt::Display for ConsensusCommand {
             Self::AnnounceNodeCapabilities { record } => {
                 write!(f, "announce-node-capabilities:{}", record.identity)
             }
+            Self::InstallClusterIdentity { .. } => f.write_str("install-cluster-identity"),
             Self::SeedClusterParameters { .. } => f.write_str("seed-cluster-parameters"),
             Self::AlterClusterParameters { reference, .. } => {
                 write!(f, "alter-cluster-parameters:{reference}")
@@ -1503,6 +1511,7 @@ impl ReportedAdmissionRefusals {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct StateMachineData {
+    cluster_identity: Option<Arc<ClusterIdentityRecord>>,
     parameters: Option<ClusterParameterRecord>,
     password_work: Option<nervix_models::PasswordCost>,
     last_applied_log_id: Option<LogIdOf>,
@@ -1927,6 +1936,8 @@ pub enum ConsensusError {
     CapabilityAnnouncementPending,
     #[error("the capability announcement does not name its authenticated sender")]
     CapabilitySenderMismatch,
+    #[error("cluster identity operation failed")]
+    ClusterIdentity,
     #[error("consensus storage failed")]
     Storage,
     #[error("consensus storage failed")]
@@ -5767,6 +5778,9 @@ fn apply_consensus_command_at(
     match command {
         ConsensusCommand::AnnounceNodeCapabilities { record } => {
             return node_capabilities::announce(state, record);
+        }
+        ConsensusCommand::InstallClusterIdentity { identity } => {
+            return cluster_identity::install(state, identity);
         }
         ConsensusCommand::SeedClusterParameters { values } => {
             return cluster_parameters::seed(state, *values);

@@ -51,6 +51,7 @@ mod backup_cut;
 #[cfg(test)]
 mod backup_cut_tests;
 mod client_inspection;
+mod cluster_identity;
 mod command_pause_point;
 mod command_reconciliation;
 mod command_reply;
@@ -109,6 +110,7 @@ pub(crate) use application_progress::ApplicationProgressQuery;
 pub use application_progress::ApplicationProgressQueryError;
 pub use backup_cut::BackupCutBoundary;
 use backup_cut::{BackupCutGate, BackupCutGateKey};
+use cluster_identity::BootstrapProposals;
 use command_pause_point::CommandPausePoint;
 use command_reply::CommandReplyScript;
 pub use command_reply::ForeignExecutionObservation;
@@ -431,6 +433,7 @@ struct ConsensusProbeState {
     /// Running nodes register their observer; stopped nodes retain the test probe and its controls.
     probe: Option<ConsensusProbe>,
     test_probe: nervix_consensus::ConsensusTestProbe,
+    cluster_identity_proposals: Option<BootstrapProposals>,
 }
 
 impl std::fmt::Debug for ConsensusProbe {

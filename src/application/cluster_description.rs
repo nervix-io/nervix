@@ -2,10 +2,10 @@
 //!
 //! Layer: control plane.
 //!
-//! - **Owns.** Rendering prerequisites, leader/timing drift, committed live/departed capacity
-//!   claims and effective receive bounds as printable lines.
-//! - **Depends on.** The cluster's gossip view and coherent committed consensus observations.
-//! - **Must not know.** How a node publishes its record, or how two records are judged.
+//! - **Owns.** Rendering the public identity, prerequisites, leader/timing drift, committed
+//!   live/departed capacity claims and effective receive bounds as printable lines.
+//! - **Depends on.** The cluster gossip view and coherent public consensus observations.
+//! - **Must not know.** Private keys, record publication or how two records are judged.
 
 #![cfg_attr(
     nervix_lint,
@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 
-use nervix_consensus::{GossipNode, Observer};
+use nervix_consensus::{ClusterIdentity, GossipNode, Observer};
 use nervix_models::{
     ClusterNodeName, NodeCapabilityRecord, NodePrerequisites, PeerReceiveBounds, Prerequisite,
     timing_text,
@@ -25,8 +25,7 @@ use nervix_models::{
 
 use crate::cluster;
 
-/// The lines `DESCRIBE CLUSTER` answers with: the leader, which nodes' timings differ from the
-/// leader's, and every live node's newest run with the prerequisites it published.
+/// The public identity, leader, timing drift and each live node's published prerequisites.
 pub(in crate::application) async fn describe_cluster(
     cluster: &cluster::ClusterHandle,
     consensus: &Observer,
@@ -43,6 +42,7 @@ pub(in crate::application) async fn describe_cluster(
         None => None,
     };
     let description = ClusterDescription {
+        identity: consensus.cluster_identity(),
         leader,
         leader_record,
         nodes,
@@ -62,6 +62,7 @@ pub(in crate::application) async fn describe_cluster(
 
 /// One view of the cluster, as the lines of `DESCRIBE CLUSTER` render it.
 struct ClusterDescription {
+    identity: Option<ClusterIdentity>,
     leader: Option<ClusterNodeName>,
     leader_record: Option<NodePrerequisites>,
     nodes: BTreeMap<ClusterNodeName, GossipNode>,
@@ -74,6 +75,14 @@ impl ClusterDescription {
         match &self.leader {
             Some(leader) => lines.push(format!("leader: {leader}")),
             None => lines.push("leader: none".to_string()),
+        }
+        if let Some(identity) = &self.identity {
+            lines.push(format!("cluster uid: {}", identity.cluster_uid));
+            lines.push(format!("cluster key: {}", identity.kid));
+            lines.push(format!(
+                "cluster created: {}",
+                identity.created_at.to_rfc3339()
+            ));
         }
         lines.push(format!("timing drift: {}", self.drift_summary()));
         for (node_id, node) in &self.nodes {
@@ -264,6 +273,7 @@ mod tests {
     fn a_node_whose_timing_differs_from_the_leader_is_marked_with_both_values() {
         let description = ClusterDescription {
             capabilities: BTreeMap::new(),
+            identity: None,
             leader: Some(name("node-1")),
             leader_record: Some(record(250)),
             nodes: BTreeMap::from([
@@ -289,6 +299,7 @@ mod tests {
     fn without_a_leader_record_no_drift_is_claimed() {
         let description = ClusterDescription {
             capabilities: BTreeMap::new(),
+            identity: None,
             leader: None,
             leader_record: None,
             nodes: BTreeMap::from([(name("node-1"), node("node-1", 1, Some(record(250))))]),
@@ -306,6 +317,7 @@ mod tests {
     fn matching_timings_report_no_drift() {
         let description = ClusterDescription {
             capabilities: BTreeMap::new(),
+            identity: None,
             leader: Some(name("node-1")),
             leader_record: Some(record(250)),
             nodes: BTreeMap::from([
