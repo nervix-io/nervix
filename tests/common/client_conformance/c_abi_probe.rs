@@ -1082,6 +1082,9 @@ fn eight(bytes: &[u8]) -> [u8; 8] {
 pub(super) fn run(target: &ProbeTarget, emit: &mut Emit<'_>) -> io::Result<()> {
     let session = OpenSession::connect(target)?;
     match &target.exercise {
+        ProbeExercise::StateInspection => Err(io::Error::other(
+            "the native inspection exercise runs through Python, Ruby or the JVM",
+        )),
         ProbeExercise::Subscription {
             relay,
             subscription,

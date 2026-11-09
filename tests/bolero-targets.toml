@@ -702,6 +702,36 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/client-host/src/tests/__fuzz__/tests__inspection__bolero_inspection_views_preserve_complete_envelopes/corpus"
+domain_version = 1
+features = []
+id = "client-host-inspection-views"
+invariant = "The typed host inspection preserves the complete current envelope, JSON, unit kind/index, all section/schema metadata, exact shared verified frame bytes and lifetime, and every distinct refusal without a page."
+manifest = "Cargo.toml"
+max_input_bytes = 32
+package = "nervix-client-host"
+random_iterations = 64
+source = "crates/client-host/src/tests/inspection.rs"
+test = "tests::inspection::bolero_inspection_views_preserve_complete_envelopes"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/client-python/src/__fuzz__/tests__inspection__bolero_inspection_enum_round_trips/corpus"
+domain_version = 1
+features = []
+id = "client-python-inspection-enums"
+invariant = "The new native inspection rejection, stage and unit-kind enum conversions round-trip the complete original variant; separate host-language vocabulary and refusal tests check their canonical names and stable codes."
+manifest = "Cargo.toml"
+max_input_bytes = 8
+package = "nervix-client-python"
+random_iterations = 32
+source = "crates/client-python/src/inspection_tests.rs"
+test = "tests::inspection::bolero_inspection_enum_round_trips"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/branch-instances/src/__fuzz__/membership__tests__bolero_owned_branches_publish_exactly_the_current_owners_membership/corpus"
 domain_version = 1
 features = []

@@ -80,6 +80,9 @@ to select the host guide; Java and JVM programs follow [JVM Client Library](../.
 Ruby applications follow [Ruby Client Library](../../../docs/src/client-library-ruby.md),
 and C and C++ programs follow [C And C++ Client Library](../../../docs/src/client-library-c.md).
 Read its execution, clock and endpoint sections before choosing application-side lifecycle handling.
+For typed state inspection in Python, Ruby or JVM applications, read that host guide's
+`Inspect Materialized State` section for page/refusal metadata, opaque continuation and retained
+schema/frame lifetimes before suggesting application code.
 
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion

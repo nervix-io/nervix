@@ -1195,11 +1195,79 @@ public final class Probe {
         }
     }
 
+    static void runInspection(Session session) throws Exception {
+        Nervix.Inspection inspection;
+        try (var outcome = session.handle.command(
+                "SHOW RELAY events MATERIALIZED STATE FOR UNBRANCHED LIMIT 1 FORMAT JSON;", null)) {
+            inspection = outcome.stateInspection();
+        }
+        require(inspection.domain().equals(System.getenv("NERVIX_PROBE_DOMAIN")), "inspection domain");
+        require(inspection.entityName().equals("events"), "inspection identity");
+        require(inspection.counts().rows() == 0, "empty page counts");
+        require(inspection.rejection() == null, "page is not a refusal");
+        report("INSPECTION page rows=0");
+        Nervix.Inspection refused;
+        try (var outcome = session.handle.command("SHOW RELAY plain MATERIALIZED STATE FORMAT JSON;", null)) {
+            refused = outcome.stateInspection();
+        }
+        require(refused.rejection() == Nervix.InspectionRejection.NOT_MATERIALIZED, "typed refusal");
+        require(refused.counts() == null, "refusal has no page counts");
+        report("INSPECTION refused not_materialized");
+        String query = "SHOW RELAY populated MATERIALIZED STATE FOR ALL BRANCHES LIMIT 1";
+        Nervix.Inspection first;
+        try (var outcome = session.handle.command(query + " FORMAT JSON;", null)) { first = outcome.stateInspection(); }
+        require(first.counts().rows() == 2 && first.counts().branches() == 2 && first.continuation() != null, "complete counts and continuation");
+        var unit = first.units().getFirst();
+        require(unit.kind() == Nervix.InspectionUnitKind.SINGLE && unit.index() == null, "unit identity");
+        require(unit.owner().equals(unit.originNode()) && unit.originIncarnation() != 0 && unit.originFingerprint().length == 32 && unit.originStage() == Nervix.InspectionStage.LIVE, "read origin");
+        var section = unit.sections().getFirst();
+        var schema = section.schema();
+        var fields = schema.fields(Nervix.Part.ROWS);
+        require(schema.branch().equals("by_tenant") && schema.fields(Nervix.Part.BRANCH).getFirst().sensitive(), "branch sensitivity");
+        require(fields.subList(0, 3).stream().map(Nervix.Field::name).toList().equals(List.of("tenant", "secret", "sequence")), "schema order");
+        require(fields.get(0).sensitive() && fields.get(1).sensitive() && fields.get(2).type() == Nervix.FieldType.I64, "field metadata");
+        require(section.omittedRows() == 1 && !section.watermarkLow().equals(section.watermarkHigh()), "section metadata");
+        var frame = section.frames().getFirst();
+        require(frame.rowCount() == 1, "verified frame rows");
+        try (var frameSchema = frame.schema()) { require(frameSchema.branch().equals(schema.branch()), "frame schema"); }
+        var buffer = frame.frame();
+        byte[] expected = new byte[buffer.remaining()]; buffer.duplicate().get(expected);
+        require(buffer.isReadOnly() && expected.length > 0, "verified read-only frame");
+        String token = first.continuation().replace("'", "''");
+        try (var outcome = session.handle.command(query + " AFTER '" + token + "' FORMAT JSON;", null);
+                var second = outcome.stateInspection()) {
+            require(second.continuation() == null && second.counts().rows() == 2, "continuation page");
+            require(!first.json().equals(second.json()) && !first.json().contains("alpha-private") && !first.json().contains("first-private"), "distinct redacted pages");
+            for (var nextUnit : second.units()) {
+                try (nextUnit) {
+                    for (var nextSection : nextUnit.sections()) {
+                        try (nextSection) {
+                            for (var nextFrame : nextSection.frames()) { try (nextFrame) { require(nextFrame.rowCount() == 1, "continuation frame rows"); } }
+                        }
+                    }
+                }
+            }
+        }
+        first.close(); unit.close(); section.close(); frame.close();
+        report("INSPECTION branched rows=2 pages=2");
+        session.close();
+        System.gc();
+        require(!inspection.json().isEmpty(), "retained inspection");
+        require(refused.rejection() == Nervix.InspectionRejection.NOT_MATERIALIZED, "retained refusal");
+        byte[] actual = new byte[buffer.remaining()]; buffer.duplicate().get(actual);
+        require(java.util.Arrays.equals(actual, expected) && schema.fields(Nervix.Part.ROWS).get(2).name().equals("sequence"), "retained frame and schema");
+        schema.close();
+        inspection.close();
+        refused.close();
+        report("INSPECTION retained");
+    }
+
     public static void main(String[] arguments) {
         String domain = System.getenv("NERVIX_PROBE_DOMAIN");
         try (var session = new Session(System.getenv("NERVIX_PROBE_GRPC_URI"), domain,
                 System.getenv("NERVIX_PROBE_USERNAME"), System.getenv("NERVIX_PROBE_PASSWORD")); var outcomes = new Scope()) {
-            if (arguments.length > 0 && arguments[0].equals("upload")) runUpload(session);
+            if (arguments.length > 0 && arguments[0].equals("inspection")) runInspection(session);
+            else if (arguments.length > 0 && arguments[0].equals("upload")) runUpload(session);
             else if (arguments.length > 0 && arguments[0].equals("io")) new Endpoints(session, domain).run();
             else if (arguments.length > 0 && arguments[0].equals("clock")) runClock(session, domain, outcomes);
             else if (arguments.length > 0 && arguments[0].equals("restoration")) runRestoration(session, outcomes);

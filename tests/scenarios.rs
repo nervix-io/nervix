@@ -4885,6 +4885,26 @@ async fn start_client_probe(
     world.client_probe = Some(probe);
 }
 
+#[when(expr = "the {string} client probe inspects typed state on a follower when available")]
+async fn when_native_client_probe_inspects_state(world: &mut ScenarioWorld, runtime: String) {
+    let runtime: ProbeRuntime = runtime
+        .parse()
+        .assured("the step names a known native binding host");
+    let leader = current_leader_node(world).await;
+    // The fixture has one or three nodes; use a follower whenever one exists.
+    let follower = world
+        .cluster()
+        .node_ids()
+        .into_iter()
+        .find(|node| node != &leader);
+    let node_id = match follower {
+        Some(follower) => follower,
+        None => leader,
+    };
+    let target = client_probe_target(world, &node_id, ProbeExercise::StateInspection);
+    start_client_probe(world, runtime, &node_id, target, "INSPECTION retained").await;
+}
+
 #[when(
     expr = "the {string} client probe retries resource {string} from directory {string} on a \
             follower when available"
