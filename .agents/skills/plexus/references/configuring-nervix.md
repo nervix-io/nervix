@@ -27,6 +27,7 @@ Keep detailed grammar in those chapters when reviewing a configuration.
 | --- | --- |
 | Domain timing and lifecycle | `Domains And Time` |
 | Detected or overridden node CPU/memory, committed capability rolls, negotiated peer receive bounds and proportional placement | `Node Settings` → `Committed Node Capabilities`, then `Placement` → `Capacity At The Load Tier` |
+| Detected node properties (architecture, CPU model, GPUs, ONNX Runtime and its CUDA provider), operator tags from `--node-tags`, and the node record `DESCRIBE CLUSTER` prints | `Node Settings` → `The Node Record` |
 | Administrative durability, storage errors, and recovery of uncertain commits | `Control Plane` → `Durability and recovery` |
 | Internal/wire schemas, schema evolution, codecs, JAQ, Protobuf, and type mapping | `Schemas And Codecs` and `Control Plane` |
 | Expressions, operators, casts, built-in functions, window aggregates, and approximate sketches | `Expression Functions` |
@@ -853,7 +854,10 @@ Choose checks relevant to the configured graph:
   Read [What A Restore Recreates](../../../../docs/src/backup-and-restore.md#what-a-restore-recreates)
   before using a backup's source UUID to interpret recovery or cloning.
 - `DESCRIBE CLUSTER;` lists the prerequisites every live node brings and the nodes whose Raft
-  heartbeat, gossip interval or clock-skew tolerance differs from the leader's. A node refused as it
+  heartbeat, gossip interval or clock-skew tolerance differs from the leader's, then each node's
+  committed record: its detected properties and its tags. Read
+  [The Node Record](../../../../docs/src/node-settings.md#the-node-record) for what each property
+  means and how tags are given. A node refused as it
   joins, or by its startup checks, names the setting and both values; read
   [Node Settings](https://docs.nervix.io/node-settings.html) directly for the rules, which is
   outside the curated Plexus index.

@@ -46,11 +46,11 @@ use nervix_interconnect::{HandlerRegistrationError, Transport};
 use nervix_models::{
     AdmissionVerdict, AdmissionVerdicts, ClusterNodeIdentity, ClusterNodeIncarnation,
     ClusterNodeName, ClusterParameterRecord, ClusterParameterValues, ClusterSchedule,
-    CoordinationIdentity, DomainClockAuthority, DomainClockState, DomainName, DomainSchedule,
-    DomainStartPoint, DomainState, DomainStatus, NodeCapabilityRecord, NodeEndpoint,
-    NodePrerequisites, NodeServiceUrl, PrerequisiteMismatch, ResourceId, ResourceName,
-    ResourceNodeStatus, ResourceUpload, ResourceUploadKey, ResourceVersion, ResourceVersionStatus,
-    Statement, TransactionImpactReport, UserName,
+    CommittedNodeRecord, CoordinationIdentity, DomainClockAuthority, DomainClockState, DomainName,
+    DomainSchedule, DomainStartPoint, DomainState, DomainStatus, NodeCapabilityRecord,
+    NodeEndpoint, NodePrerequisites, NodeRecord, NodeServiceUrl, PrerequisiteMismatch, ResourceId,
+    ResourceName, ResourceNodeStatus, ResourceUpload, ResourceUploadKey, ResourceVersion,
+    ResourceVersionStatus, Statement, TransactionImpactReport, UserName,
 };
 use nervix_primitives::{
     sync::{
@@ -308,12 +308,13 @@ pub struct ScheduleTopologyInputs {
     members: PlanningInputSet<ClusterNodeName>,
     voters: PlanningInputSet<ClusterNodeName>,
     cordoned: PlanningInputSet<ClusterNodeName>,
-    capabilities: BTreeMap<ClusterNodeName, NodeCapabilityRecord>,
+    records: BTreeMap<ClusterNodeName, CommittedNodeRecord>,
 }
 
 impl ScheduleTopologyInputs {
-    pub fn capabilities(&self) -> &BTreeMap<ClusterNodeName, NodeCapabilityRecord> {
-        &self.capabilities
+    /// The committed record of every member that has one.
+    pub fn records(&self) -> &BTreeMap<ClusterNodeName, CommittedNodeRecord> {
+        &self.records
     }
     pub fn members(&self) -> &[ClusterNodeName] {
         self.members.as_slice()
@@ -415,8 +416,8 @@ pub struct TransactionControlSnapshot {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum ConsensusCommand {
-    AnnounceNodeCapabilities {
-        record: NodeCapabilityRecord,
+    AnnounceNodeRecord {
+        record: NodeRecord,
     },
     InstallClusterIdentity {
         identity: Box<ClusterIdentityRecord>,
@@ -656,10 +657,10 @@ pub enum ConsensusResponse {
     Error,
 )]
 pub enum ConsensusConflict {
-    #[error("the capability claim's node has not joined the committed membership")]
-    CapabilityNodeNotAdmitted,
-    #[error("the capability claim's incarnation is fenced or already has a different claim")]
-    CapabilityIncarnationFenced,
+    #[error("the node record's node has not joined the committed membership")]
+    NodeRecordNotAdmitted,
+    #[error("the node record's incarnation is fenced or already has a different record")]
+    NodeRecordIncarnationFenced,
     #[error("cluster parameters or models changed while planning ALTER CLUSTER SET")]
     ClusterParameterInputsChanged,
     #[error("cluster parameters have not been seeded")]
@@ -742,8 +743,8 @@ pub struct AppliedLogPosition {
 impl std::fmt::Display for ConsensusCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::AnnounceNodeCapabilities { record } => {
-                write!(f, "announce-node-capabilities:{}", record.identity)
+            Self::AnnounceNodeRecord { record } => {
+                write!(f, "announce-node-record:{}", record.identity())
             }
             Self::InstallClusterIdentity { .. } => f.write_str("install-cluster-identity"),
             Self::SeedClusterParameters { .. } => f.write_str("seed-cluster-parameters"),
@@ -1525,7 +1526,7 @@ struct StateMachineData {
     resources: ResourceRecords,
     cordoned_node_ids: Records<ClusterNodeName, ()>,
     node_admission_fences: Records<ClusterNodeName, ClusterNodeIncarnation>,
-    node_capabilities: Records<ClusterNodeName, NodeCapabilityRecord>,
+    node_records: Records<ClusterNodeName, CommittedNodeRecord>,
     domain_mutations: Records<DomainName, DomainMutationLease>,
     domain_restore_installations: Records<DomainName, restore::DomainRestoreInstallation>,
     transactions: Records<String, ReplicatedTransaction>,
@@ -1574,10 +1575,10 @@ impl StateMachineData {
             .cloned()
             .collect();
         ScheduleTopologyInputs {
-            capabilities: membership
+            records: membership
                 .nodes()
                 .filter_map(|(node, _)| {
-                    self.node_capabilities
+                    self.node_records
                         .get(node)
                         .map(|record| (node.clone(), record.clone()))
                 })
@@ -1932,10 +1933,10 @@ enum SnapshotTransferError {
 
 #[derive(Debug, Error)]
 pub enum ConsensusError {
-    #[error("the current leader has not committed this node's capability announcement")]
-    CapabilityAnnouncementPending,
-    #[error("the capability announcement does not name its authenticated sender")]
-    CapabilitySenderMismatch,
+    #[error("the current leader has not committed this node's record announcement")]
+    NodeRecordAnnouncementPending,
+    #[error("the node record announcement does not name its authenticated sender")]
+    NodeRecordSenderMismatch,
     #[error("cluster identity operation failed")]
     ClusterIdentity,
     #[error("consensus storage failed")]
@@ -2722,7 +2723,7 @@ impl Consensus {
     }
 
     fn register_protocol_handlers(&self) -> Result<(), Report<HandlerRegistrationError>> {
-        self.register_capability_announcement_handler()?;
+        self.register_node_record_announcement_handler()?;
         let receiver = self.protocol_receiver();
         self.inner
             .interconnect
@@ -5747,7 +5748,7 @@ fn validate_domain_planning_inputs(
         return Err(Report::new(DomainPlanningInputConflict::Voters(domain)));
     }
     if current.topology.cordoned != expected.topology.cordoned
-        || current.topology.capabilities != expected.topology.capabilities
+        || current.topology.records != expected.topology.records
     {
         return Err(Report::new(DomainPlanningInputConflict::Eligibility(
             domain,
@@ -5776,7 +5777,7 @@ fn apply_consensus_command_at(
 ) -> AppliedConsensusCommand {
     let mut changes = StateMachineChanges::default();
     match command {
-        ConsensusCommand::AnnounceNodeCapabilities { record } => {
+        ConsensusCommand::AnnounceNodeRecord { record } => {
             return node_records::announce(state, record);
         }
         ConsensusCommand::InstallClusterIdentity { identity } => {
@@ -6275,10 +6276,10 @@ fn apply_consensus_command_at(
             }
         }
         ConsensusCommand::FenceNodeAdmission { identity } => {
-            if let Some(record) = state.node_capabilities.get(identity.node_id())
-                && record.identity.incarnation() <= identity.incarnation()
+            if let Some(committed) = state.node_records.get(identity.node_id())
+                && committed.record.identity().incarnation() <= identity.incarnation()
             {
-                state.node_capabilities.remove(identity.node_id());
+                state.node_records.remove(identity.node_id());
             }
             let replace = match state.node_admission_fences.get(identity.node_id()) {
                 Some(incarnation) => *incarnation < identity.incarnation(),

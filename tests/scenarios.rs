@@ -99,7 +99,8 @@ use nervix_recovery::Discarded as _;
 use nervix_server::{
     FaultInjection, ModelPublicationRefusalKind, SchedulerMode, WasmStateResetRequestError,
     application::{
-        AppError, InternalTransportMode, SettingOverride, ShutdownPhaseOutcome, run_server_process,
+        AppError, InternalTransportMode, NODE_TAGS_OPTION, SettingOverride, ShutdownPhaseOutcome,
+        run_server_process,
     },
     memory_pressure::MemoryPressureConfig,
     runtime::revision_index_inspection::{StoredRevisionIndex, read_stored_revision_index},
@@ -249,6 +250,7 @@ mod nats_authentication;
 mod nats_delivery;
 mod nats_stream_consumers;
 mod node_capabilities;
+mod node_record;
 mod outward_tls_policy;
 mod paced_replication;
 mod paced_simulation;
@@ -10524,10 +10526,10 @@ async fn given_memory_pressure_is_configured(
     world.cluster_config.memory_pressure = Some(config);
 }
 
-/// Names one setting a node starts with, by the option that sets it and the value written as the
-/// command line reads it. It applies over the cluster's own settings from the node's next start,
-/// read and validated exactly as `nervix-server` reads them, so a scenario needs no step per
-/// setting.
+/// Names one setting a node starts with, or the tags it is provisioned with, by the option that
+/// sets it and the value written as the command line reads it. A setting applies over the
+/// cluster's own settings from the node's next start, and tags replace the node's tags, each read
+/// and validated exactly as `nervix-server` reads them, so a scenario needs no step per option.
 #[given(regex = r"^(\S+) starts with (\S+) = (\S+)$")]
 fn given_node_starts_with_setting(
     world: &mut ScenarioWorld,
@@ -10536,6 +10538,15 @@ fn given_node_starts_with_setting(
     value: String,
 ) {
     let node_id = expand_placeholders(world, &node_id);
+    if name == NODE_TAGS_OPTION {
+        match world.cluster.as_mut() {
+            Some(cluster) => cluster.provision_node_tags(&node_id, value),
+            None => {
+                world.cluster_config.node_tags.insert(node_id, value);
+            }
+        }
+        return;
+    }
     let setting = SettingOverride { name, value };
     match world.cluster.as_mut() {
         Some(cluster) => cluster.override_node_setting(&node_id, setting),

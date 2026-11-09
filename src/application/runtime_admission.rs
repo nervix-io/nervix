@@ -118,8 +118,8 @@ impl RuntimeAdmission {
         }
         while self.committed_log_index.get().is_none() {
             if consensus
-                .node_capability(self.identity.node_id())
-                .is_some_and(|record| record.identity == self.identity)
+                .node_record(self.identity.node_id())
+                .is_some_and(|committed| *committed.record.identity() == self.identity)
             {
                 break;
             }

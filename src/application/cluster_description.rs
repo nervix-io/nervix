@@ -3,7 +3,8 @@
 //! Layer: control plane.
 //!
 //! - **Owns.** Rendering the public identity, prerequisites, leader/timing drift, committed
-//!   live/departed capacity claims and effective receive bounds as printable lines.
+//!   live/departed node records (capacity claims, detected properties and tags) and effective
+//!   receive bounds as printable lines.
 //! - **Depends on.** The cluster gossip view and coherent public consensus observations.
 //! - **Must not know.** Private keys, record publication or how two records are judged.
 
@@ -19,8 +20,9 @@ use std::collections::BTreeMap;
 
 use nervix_consensus::{ClusterIdentity, GossipNode, Observer};
 use nervix_models::{
-    ClusterNodeName, NodeCapabilityRecord, NodePrerequisites, PeerReceiveBounds, Prerequisite,
-    timing_text,
+    ClusterNodeName, CommittedNodeRecord, CudaProviderRegistration, Detected, GpuInventory,
+    NodeCapabilityRecord, NodePrerequisites, NodeProperties, NodeTags, OnnxRuntimeDetection,
+    PeerReceiveBounds, Prerequisite, PropertyText, timing_text,
 };
 
 use crate::cluster;
@@ -46,7 +48,7 @@ pub(in crate::application) async fn describe_cluster(
         leader,
         leader_record,
         nodes,
-        capabilities: consensus.node_capabilities(),
+        records: consensus.node_records(),
     };
     let mut lines = description.lines();
     for (peer, record) in interconnect.peer_capability_records() {
@@ -66,7 +68,7 @@ struct ClusterDescription {
     leader: Option<ClusterNodeName>,
     leader_record: Option<NodePrerequisites>,
     nodes: BTreeMap<ClusterNodeName, GossipNode>,
-    capabilities: BTreeMap<ClusterNodeName, NodeCapabilityRecord>,
+    records: BTreeMap<ClusterNodeName, CommittedNodeRecord>,
 }
 
 impl ClusterDescription {
@@ -88,20 +90,24 @@ impl ClusterDescription {
         for (node_id, node) in &self.nodes {
             lines.extend(self.node_lines(node_id, node));
         }
-        for (node_id, record) in &self.capabilities {
+        for (node_id, committed) in &self.records {
             if !self.nodes.contains_key(node_id) {
                 lines.push(format!("node: {node_id} (departed)"));
-                lines.push(format!("  incarnation: {}", record.identity.incarnation()));
-                lines.push(capability_line(record));
+                lines.push(format!(
+                    "  incarnation: {}",
+                    committed.record.identity().incarnation()
+                ));
+                lines.push(capability_line(&committed.record.claim));
+                lines.extend(record_lines(Some(committed)));
             }
         }
         let effective = self
-            .capabilities
+            .records
             .iter()
-            .filter_map(|(name, record)| {
+            .filter_map(|(name, committed)| {
                 let live = self.nodes.get(name)?;
-                if live.incarnation == record.identity.incarnation() {
-                    Some(record.capabilities.peer_receive_bounds())
+                if live.incarnation == committed.record.identity().incarnation() {
+                    Some(committed.record.capabilities().peer_receive_bounds())
                 } else {
                     None
                 }
@@ -148,20 +154,29 @@ impl ClusterDescription {
             lines.push(format!("node: {node_id}"));
         }
         lines.push(format!("  incarnation: {}", node.incarnation));
-        match self.capabilities.get(node_id) {
-            Some(record) if record.identity.incarnation() == node.incarnation => {
-                lines.push(capability_line(record))
+        let committed = self.records.get(node_id);
+        match committed {
+            Some(committed) if committed.record.identity().incarnation() == node.incarnation => {
+                lines.push(capability_line(&committed.record.claim))
             }
-            Some(record) => lines.push(format!(
+            Some(committed) => lines.push(format!(
                 "  capabilities: awaiting this incarnation; retained {}",
-                record.identity
+                committed.record.identity()
             )),
             None => lines.push("  capabilities: awaiting committed claim".to_string()),
         }
+        lines.extend(self.prerequisite_lines(is_leader, node));
+        lines.extend(record_lines(committed));
+        lines
+    }
+
+    /// The prerequisites the node publishes, each marked when it is a timing the leader holds
+    /// differently.
+    fn prerequisite_lines(&self, is_leader: bool, node: &GossipNode) -> Vec<String> {
         let Some(record) = &node.prerequisites else {
-            lines.push("  prerequisites: not published".to_string());
-            return lines;
+            return vec!["  prerequisites: not published".to_string()];
         };
+        let mut lines = Vec::new();
         for described in record.described() {
             let drift = self.timing_drift(is_leader, record, described.prerequisite);
             match drift {
@@ -204,6 +219,118 @@ fn bounds_line(bounds: PeerReceiveBounds) -> String {
         bounds.bulk_chunk_bytes,
         bounds.bulk_window_bytes
     )
+}
+
+/// The committed record's revision and run, its detected properties and its tags, or that the node
+/// has not announced one.
+fn record_lines(committed: Option<&CommittedNodeRecord>) -> Vec<String> {
+    let Some(committed) = committed else {
+        return vec!["  record: not announced".to_string()];
+    };
+    let mut lines = vec![
+        format!(
+            "  record: revision {} (incarnation {})",
+            committed.revision,
+            committed.record.identity().incarnation()
+        ),
+        "  properties:".to_string(),
+    ];
+    lines.extend(property_lines(&committed.record.properties));
+    lines.extend(tag_lines(&committed.record.tags));
+    lines
+}
+
+/// One line per detected property, named as a node selector reads it, an undetected value with its
+/// reason.
+fn property_lines(properties: &NodeProperties) -> Vec<String> {
+    let mut lines = vec![
+        format!("    architecture: {}", properties.architecture),
+        format!(
+            "    cpu.model: {}",
+            detected_line(properties.cpu_model.as_ref())
+        ),
+    ];
+    let gpus = &properties.gpus;
+    match gpus {
+        GpuInventory::Undetected(reason) => {
+            lines.push(format!("    gpu.count: 0 (undetected: {reason})"));
+        }
+        GpuInventory::Devices { .. } | GpuInventory::NoDevice { .. } => {
+            lines.push(format!("    gpu.count: {}", gpus.count()));
+        }
+    }
+    let mut models = Vec::new();
+    for device in gpus.devices() {
+        models.push(detected_line(device.model.as_ref()));
+    }
+    if models.is_empty() {
+        lines.push("    gpu.models: none".to_string());
+    } else {
+        lines.push(format!("    gpu.models: {}", models.join(", ")));
+    }
+    match gpus.smallest_memory_bytes() {
+        Some(bytes) => lines.push(format!("    gpu.memory: {bytes}")),
+        None => lines.push("    gpu.memory: none".to_string()),
+    }
+    lines.push(format!("    gpu.driver: {}", detected_line(gpus.driver())));
+    match &properties.onnx {
+        OnnxRuntimeDetection::Loaded(runtime) => {
+            lines.push(format!(
+                "    onnx.version: {}",
+                detected_line(runtime.version.as_ref())
+            ));
+            let providers = match &runtime.providers {
+                Detected::Value(providers) if providers.as_slice().is_empty() => "none".to_string(),
+                Detected::Value(providers) => {
+                    let mut names = Vec::new();
+                    for provider in providers.as_slice() {
+                        names.push(provider.as_str());
+                    }
+                    names.join(", ")
+                }
+                Detected::Undetected(reason) => format!("undetected ({reason})"),
+            };
+            lines.push(format!("    onnx.providers: {providers}"));
+            match runtime.cuda {
+                CudaProviderRegistration::Registered => {
+                    lines.push("    onnx.cuda: true".to_string());
+                }
+                refusal @ (CudaProviderRegistration::NotInLibrary
+                | CudaProviderRegistration::RegistrationFailed) => {
+                    lines.push(format!("    onnx.cuda: false ({refusal})"));
+                }
+            }
+        }
+        OnnxRuntimeDetection::Undetected(reason) => {
+            lines.push(format!("    onnx.version: undetected ({reason})"));
+            lines.push(format!("    onnx.providers: undetected ({reason})"));
+            lines.push(format!("    onnx.cuda: false (undetected: {reason})"));
+        }
+    }
+    lines.push(format!(
+        "    cuda.available: {}",
+        properties.cuda_available()
+    ));
+    lines
+}
+
+/// One line per tag, `key=value` in key order, or that the node has none.
+fn tag_lines(tags: &NodeTags) -> Vec<String> {
+    if tags.is_empty() {
+        return vec!["  tags: none".to_string()];
+    }
+    let mut lines = vec!["  tags:".to_string()];
+    for (key, value) in tags.iter() {
+        lines.push(format!("    {key}={value}"));
+    }
+    lines
+}
+
+fn detected_line(detected: Detected<&PropertyText>) -> String {
+    match detected {
+        Detected::Value(text) => text.to_string(),
+        Detected::Undetected(reason) => format!("undetected ({reason})"),
+    }
 }
 
 fn capability_line(record: &NodeCapabilityRecord) -> String {
@@ -272,7 +399,7 @@ mod tests {
     #[test]
     fn a_node_whose_timing_differs_from_the_leader_is_marked_with_both_values() {
         let description = ClusterDescription {
-            capabilities: BTreeMap::new(),
+            records: BTreeMap::new(),
             identity: None,
             leader: Some(name("node-1")),
             leader_record: Some(record(250)),
@@ -298,7 +425,7 @@ mod tests {
     #[test]
     fn without_a_leader_record_no_drift_is_claimed() {
         let description = ClusterDescription {
-            capabilities: BTreeMap::new(),
+            records: BTreeMap::new(),
             identity: None,
             leader: None,
             leader_record: None,
@@ -316,7 +443,7 @@ mod tests {
     #[test]
     fn matching_timings_report_no_drift() {
         let description = ClusterDescription {
-            capabilities: BTreeMap::new(),
+            records: BTreeMap::new(),
             identity: None,
             leader: Some(name("node-1")),
             leader_record: Some(record(250)),
@@ -326,6 +453,28 @@ mod tests {
             ]),
         };
         assert_eq!(description.lines()[1], "timing drift: none");
+    }
+
+    fn committed(claim: NodeCapabilityRecord, revision: u64, tags: &str) -> CommittedNodeRecord {
+        use nervix_models::{NodeRecord, UndetectedReason};
+
+        CommittedNodeRecord {
+            revision,
+            record: NodeRecord {
+                claim,
+                properties: NodeProperties {
+                    architecture: PropertyText::new("x86_64").expect("short printable text"),
+                    cpu_model: Detected::Undetected(UndetectedReason::NotReported),
+                    gpus: GpuInventory::Undetected(UndetectedReason::LibraryUnavailable),
+                    onnx: OnnxRuntimeDetection::Undetected(UndetectedReason::LibraryUnavailable),
+                },
+                tags: if tags.is_empty() {
+                    NodeTags::default()
+                } else {
+                    tags.parse().expect("valid tags")
+                },
+            },
+        }
     }
 
     #[test]
@@ -363,9 +512,9 @@ mod tests {
                 (name("node-2"), node("node-2", 2, None)),
                 (name("node-3"), node("node-3", 3, None)),
             ]),
-            capabilities: [first.clone(), second.clone(), stale, departed.clone()]
+            records: [first.clone(), second.clone(), stale, departed.clone()]
                 .into_iter()
-                .map(|record| (record.identity.node_id().clone(), record))
+                .map(|claim| (claim.identity.node_id().clone(), committed(claim, 7, "")))
                 .collect(),
         };
         let lines = description.lines();
@@ -388,5 +537,134 @@ mod tests {
                 |line| line.starts_with("  capabilities: awaiting this incarnation; retained ")
             )
         );
+    }
+
+    #[test]
+    fn each_node_prints_its_record_properties_and_tags_after_its_prerequisites() {
+        use std::num::NonZeroU64;
+
+        use nervix_models::{
+            ClusterNodeIdentity, ExecutionProviders, GpuDevice, GpuDevices, NodeCapabilities,
+            OnnxRuntime, UndetectedReason,
+        };
+
+        let identity = |node: &str, incarnation| {
+            ClusterNodeIdentity::new(name(node), ClusterNodeIncarnation::new(incarnation))
+        };
+        let claim = |node: &str, incarnation| NodeCapabilityRecord {
+            identity: identity(node, incarnation),
+            capabilities: NodeCapabilities {
+                cpu_count: NonZeroU64::new(4),
+                memory_bytes: NonZeroU64::new(8 << 30),
+                receive: nervix_interconnect::PeerReceiveSettings::default().bounds(),
+            },
+        };
+        let text = |text: &str| PropertyText::new(text).expect("short printable text");
+        let mut gpu_node = committed(claim("node-2", 5), 42, "zone=eu,pool=gpu");
+        gpu_node.record.properties = NodeProperties {
+            architecture: text("x86_64"),
+            cpu_model: Detected::Value(text("Test CPU")),
+            gpus: GpuInventory::Devices {
+                devices: GpuDevices::try_from(vec![
+                    GpuDevice {
+                        model: Detected::Value(text("Test GPU")),
+                        memory_bytes: Detected::Value(NonZeroU64::new(16 << 30).expect("positive")),
+                    },
+                    GpuDevice {
+                        model: Detected::Undetected(UndetectedReason::QueryFailed),
+                        memory_bytes: Detected::Value(NonZeroU64::new(8 << 30).expect("positive")),
+                    },
+                ])
+                .expect("two devices"),
+                driver: Detected::Value(text("550.54")),
+            },
+            onnx: OnnxRuntimeDetection::Loaded(OnnxRuntime {
+                version: Detected::Value(text("1.30.0")),
+                providers: Detected::Value(
+                    ExecutionProviders::try_from(vec![
+                        text("CUDAExecutionProvider"),
+                        text("CPUExecutionProvider"),
+                    ])
+                    .expect("two providers"),
+                ),
+                cuda: CudaProviderRegistration::Registered,
+            }),
+        };
+        let description = ClusterDescription {
+            identity: None,
+            leader: Some(name("node-1")),
+            leader_record: Some(record(250)),
+            nodes: BTreeMap::from([
+                (name("node-1"), node("node-1", 1, Some(record(250)))),
+                (name("node-2"), node("node-2", 5, Some(record(250)))),
+                (name("node-3"), node("node-3", 6, None)),
+            ]),
+            records: BTreeMap::from([
+                (name("node-1"), committed(claim("node-1", 1), 3, "")),
+                (name("node-2"), gpu_node),
+            ]),
+        };
+        let lines = description.lines();
+        let block = |node: &str| -> Vec<String> {
+            let header = format!("node: {node}");
+            let start = lines
+                .iter()
+                .position(|line| line.starts_with(&header))
+                .expect("the node has a block");
+            lines[start..]
+                .iter()
+                .skip(1)
+                .take_while(|line| line.starts_with("  "))
+                .cloned()
+                .collect()
+        };
+        let gpu_block = block("node-2");
+        let record_at = gpu_block
+            .iter()
+            .position(|line| line == "  record: revision 42 (incarnation 5)")
+            .expect("the record names its revision and run");
+        let prerequisites_at = gpu_block
+            .iter()
+            .position(|line| line.starts_with("  raft-heartbeat-interval: "))
+            .expect("the prerequisites are printed");
+        assert!(
+            prerequisites_at < record_at,
+            "the record follows the prerequisites"
+        );
+        assert_eq!(
+            gpu_block[record_at..].to_vec(),
+            vec![
+                "  record: revision 42 (incarnation 5)",
+                "  properties:",
+                "    architecture: x86_64",
+                "    cpu.model: Test CPU",
+                "    gpu.count: 2",
+                "    gpu.models: Test GPU, undetected (the library refused the query)",
+                "    gpu.memory: 8589934592",
+                "    gpu.driver: 550.54",
+                "    onnx.version: 1.30.0",
+                "    onnx.providers: CUDAExecutionProvider, CPUExecutionProvider",
+                "    onnx.cuda: true",
+                "    cuda.available: true",
+                "  tags:",
+                "    pool=gpu",
+                "    zone=eu",
+            ]
+        );
+        let cpu_block = block("node-1");
+        assert!(cpu_block.contains(
+            &"    gpu.count: 0 (undetected: the library that reports it did not load)".to_string()
+        ));
+        assert!(
+            cpu_block.contains(
+                &"    onnx.cuda: false (undetected: the library that reports it did not load)"
+                    .to_string()
+            )
+        );
+        assert!(cpu_block.contains(&"    cuda.available: false".to_string()));
+        assert!(cpu_block.contains(&"  tags: none".to_string()));
+        let unannounced = block("node-3");
+        assert!(unannounced.contains(&"  prerequisites: not published".to_string()));
+        assert!(unannounced.contains(&"  record: not announced".to_string()));
     }
 }

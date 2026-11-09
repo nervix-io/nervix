@@ -333,10 +333,10 @@ impl SessionServiceImpl {
             DomainSchedulePlanningSnapshot::eligibility_inputs(&availability, &voters, cordoned);
         let capabilities = inputs
             .topology()
-            .capabilities()
+            .records()
             .iter()
-            .filter(|(_, record)| live_identities.contains(&record.identity))
-            .map(|(node, record)| (node.clone(), record.capabilities))
+            .filter(|(_, committed)| live_identities.contains(committed.record.identity()))
+            .map(|(node, committed)| (node.clone(), *committed.record.capabilities()))
             .collect::<std::collections::BTreeMap<_, _>>();
         let live_node_ids = availability.live_node_ids();
         let placement_candidate_node_ids = availability.placement_candidate_node_ids();

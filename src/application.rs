@@ -51,9 +51,9 @@ use clap_complete::Shell;
 #[cfg(feature = "deloxide")]
 pub use cli::DiagnosticArgs;
 pub use cli::{
-    Args, CapacityArgs, Command, ConsensusArgs, MembershipArgs, MemoryPressureArgs, NodeArgs,
-    ResourceArgs, RuntimeArgs, SchedulingArgs, SettingOverride, SettingsArgs, ShutdownArgs,
-    TracingArgs, TransactionArgs,
+    Args, CapacityArgs, Command, ConsensusArgs, MembershipArgs, MemoryPressureArgs,
+    NODE_TAGS_OPTION, NodeArgs, ResourceArgs, RuntimeArgs, SchedulingArgs, SettingOverride,
+    SettingsArgs, ShutdownArgs, TracingArgs, TransactionArgs,
 };
 use cli_completions::print_completions;
 pub use cli_values::{HumanBytes, HumanDuration, InternalTransportMode, RefusedCliValue};
@@ -179,6 +179,7 @@ mod join_supervision;
 mod leader_redirect;
 mod model_mutation;
 mod model_validation;
+mod node_detection;
 mod node_identity;
 mod node_initialization;
 mod node_records;
@@ -222,6 +223,7 @@ pub use command_execution::{
 };
 use join_supervision::{JoinOutcome, JoinStanding, JoinSupervision};
 use nervix_primitives::sync::Arc;
+pub use node_detection::NodeDetection;
 pub use node_identity::{GrpcTransport, NodeIdentity};
 pub use node_settings::NodeSettings;
 use preflight::{Preflight, PreflightOutcome};
@@ -266,13 +268,16 @@ struct ReachablePeer {
     endpoint: NodeEndpoint,
 }
 
-/// One node: who it is and where it is reached, the settings it runs with, and the shutdown it
-/// stops within.
+/// One node: who it is and where it is reached, the settings it runs with, where its properties
+/// come from, and the shutdown it stops within.
 #[derive(Debug, Clone, TypedBuilder)]
 pub struct Application {
     pub identity: NodeIdentity,
     #[builder(default)]
     pub settings: NodeSettings,
+    /// Detects the node's properties from its host unless the composition root supplies them.
+    #[builder(default)]
+    pub detection: NodeDetection,
     #[builder(default)]
     #[doc(hidden)]
     pub fault_injection: ConfiguredFaultInjection,
@@ -370,6 +375,7 @@ impl Application {
         let drain_timeout = self.settings.shutdown.drain_timeout();
         let cluster_id = self.identity.cluster_id.clone();
         let node_id = self.identity.node_id.clone();
+        let node_tags = self.identity.tags.clone();
         let grpc_advertise_addr = match &self.identity.grpc_transport {
             GrpcTransport::Http => self.identity.grpc_advertise_addr.clone(),
             GrpcTransport::Https { advertise_addr, .. } => advertise_addr.clone(),
@@ -489,6 +495,7 @@ impl Application {
             db_path: &db_path,
             temp_dir: &temp_dir,
             dns: &dns_configuration,
+            detection: &self.detection,
         }
         .run()
         .instrument(tracing::info_span!("startup_preflight", node_id = %node_id))
@@ -498,6 +505,7 @@ impl Application {
             dns,
             memory,
             capabilities,
+            properties,
             restore_staging_max_bytes,
             database_volume,
         } = match preflight {
@@ -880,7 +888,7 @@ impl Application {
             consensus.proposer(),
             cluster.clone(),
             interconnect.clone(),
-            capabilities,
+            node_records::LocalNodeFacts::new(capabilities, properties, node_tags),
             shutdown.clone(),
         ));
         let scheduler_delay_shutdown = shutdown.clone();
@@ -1487,10 +1495,10 @@ impl Application {
                             .filter(|node| {
                                 topology.voters().contains(node)
                                     && !topology.cordoned().contains(node)
-                                    && topology.capabilities().get(node).is_some_and(|record| live_node_incarnations.get(node) == Some(&record.identity.incarnation()))
+                                    && topology.records().get(node).is_some_and(|committed| live_node_incarnations.get(node) == Some(&committed.record.identity().incarnation()))
                             })
                             .collect::<Vec<_>>();
-                        let scheduling_capabilities = topology.capabilities().iter().filter(|(node, record)| live_node_incarnations.get(*node) == Some(&record.identity.incarnation())).map(|(node, record)| (node.clone(), record.capabilities)).collect::<BTreeMap<_, _>>();
+                        let scheduling_capabilities = topology.records().iter().filter(|(node, committed)| live_node_incarnations.get(*node) == Some(&committed.record.identity().incarnation())).map(|(node, committed)| (node.clone(), *committed.record.capabilities())).collect::<BTreeMap<_, _>>();
                         let current_schedule = &automatic_schedule_input.runtime_state().schedule;
                         let live_voter_set = live_voters.iter().cloned().collect::<BTreeSet<_>>();
                         let schedulable_node_set = schedulable_node_ids

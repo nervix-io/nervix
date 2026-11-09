@@ -2,11 +2,12 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** The command-line form of the node's identity, listen and advertised addresses,
-//!   TLS files, name resolution files and storage paths, and their conversion into the node's
-//!   resolved identity, including the addresses derived from others when they are not given.
-//! - **Depends on.** The vocabulary's node names and endpoints, the resolver's configuration and
-//!   the cluster's interconnect address derivation.
+//! - **Owns.** The command-line form of the node's identity, tags, listen and advertised
+//!   addresses, TLS files, name resolution files and storage paths, and their conversion into the
+//!   node's resolved identity, including the addresses derived from others when they are not
+//!   given.
+//! - **Depends on.** The vocabulary's node names, tags and endpoints, the resolver's configuration
+//!   and the cluster's interconnect address derivation.
 //! - **Must not know.** Settings, or what the node runs once it has started.
 
 #![cfg_attr(
@@ -18,7 +19,7 @@ use std::{net::SocketAddr, path::PathBuf};
 
 use error_stack::{Report, ResultExt as _};
 use nervix_dns::{DnsConfiguration, NameServers};
-use nervix_models::{ClusterNodeName, NodeEndpoint};
+use nervix_models::{ClusterNodeName, NodeEndpoint, NodeTags};
 
 use crate::{
     application::{
@@ -29,6 +30,9 @@ use crate::{
     },
     cluster,
 };
+
+/// The option that provisions a node's tags, `--node-tags`.
+pub const NODE_TAGS_OPTION: &str = "node-tags";
 
 #[derive(clap::Args, Debug, Clone, PartialEq)]
 #[command(next_help_heading = "Identity, addresses and paths")]
@@ -75,6 +79,18 @@ pub struct NodeArgs {
     pub cluster_id: String,
     #[arg(long, env = "NERVIX_NODE_ID")]
     pub node_id: ClusterNodeName,
+    /// Read as text and validated when the identity is resolved, so a refused tag ends the process
+    /// as every other option relationship does.
+    #[arg(
+        long = NODE_TAGS_OPTION,
+        env = "NERVIX_NODE_TAGS",
+        value_delimiter = ',',
+        help = "A tag this node carries in its record, as key=value; repeatable or comma-separated. \
+                A key starts with a lower-case letter or a digit and holds lower-case letters, \
+                digits, '.', '_' and '-', at most 63 bytes; a value is 1 to 255 bytes of printable \
+                text without a comma; at most 64 tags, each key once"
+    )]
+    pub node_tags: Vec<String>,
     #[arg(long, env = "NERVIX_GRPC_ADVERTISE_ADDR")]
     pub grpc_advertise_addr: Option<String>,
     #[arg(long, env = "NERVIX_INTERCONNECT_LISTEN_ADDR")]
@@ -277,6 +293,8 @@ impl TryFrom<NodeArgs> for NodeIdentity {
             hosts_file: args.dns_hosts_file,
             name_servers,
         };
+        let tags = NodeTags::from_assignments(args.node_tags.iter().map(String::as_str))
+            .change_context(AppError::InvalidNodeTags)?;
         Ok(Self::builder()
             .addr(addr)
             .grpc_transport(grpc_transport)
@@ -290,6 +308,7 @@ impl TryFrom<NodeArgs> for NodeIdentity {
             .web_console_tls_key(args.web_console_tls_key)
             .cluster_id(args.cluster_id)
             .node_id(args.node_id)
+            .tags(tags)
             .grpc_advertise_addr(grpc_advertise_addr)
             .interconnect_listen_addr(interconnect.listen_addr)
             .interconnect_advertise_addr(interconnect.advertise_addr)

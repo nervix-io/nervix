@@ -2,9 +2,10 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** CPU and memory overrides and detection, and filesystem-volume capacity.
-//! - **Depends on.** The vocabulary's setting classes and the operating system's memory and
-//!   filesystem reports.
+//! - **Owns.** CPU and memory overrides and detection, the CPU model and GPU detection, the node
+//!   detection timeout, and filesystem-volume capacity.
+//! - **Depends on.** The vocabulary's setting classes, the operating system's memory and
+//!   filesystem reports, and the maintained system-information and NVML crates.
 //! - **Must not know.** Command-line parsing, or what the node sizes or refuses with these values.
 
 #![cfg_attr(
@@ -15,7 +16,7 @@
     )
 )]
 
-use std::{fmt, num::NonZeroU64, path::Path};
+use std::{fmt, num::NonZeroU64, path::Path, time::Duration};
 
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -23,8 +24,11 @@ use nervix_models::{NodeCapabilities, Setting, SettingDefinition};
 use thiserror::Error;
 use ubyte::ByteUnit;
 
+mod hardware;
 #[cfg(target_os = "linux")]
 mod linux;
+
+pub use self::hardware::{detect_cpu_model, detect_gpus};
 
 /// Why a memory limit an operator gives cannot be the node's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -33,6 +37,8 @@ pub enum CapacitySettingsError {
     EmptyMemoryLimit,
     #[error("{name} must be greater than zero", name = CpuCount::NAME)]
     EmptyCpuCount,
+    #[error("{name} must be greater than zero", name = NodeDetectionTimeout::NAME)]
+    EmptyDetectionTimeout,
 }
 
 /// The parallel CPU capacity of this process, detected with its control-group quota by default.
@@ -99,22 +105,55 @@ impl SettingDefinition for MemoryLimit {
     }
 }
 
+/// How long the startup preflight waits for this node to detect its properties. A probe that has
+/// not answered by then leaves its properties undetected, and the node starts without it.
+pub struct NodeDetectionTimeout;
+
+impl SettingDefinition for NodeDetectionTimeout {
+    type Class = NodeCapabilities;
+    type Value = Duration;
+    type Context = ();
+    type Error = CapacitySettingsError;
+
+    const NAME: &'static str = "node-detection-timeout";
+    const DERIVATION: Option<&'static str> = None;
+
+    fn default_value(_: &()) -> Duration {
+        Duration::from_secs(30)
+    }
+
+    fn validate(value: &Duration, _: &()) -> Result<(), Report<CapacitySettingsError>> {
+        if value.is_zero() {
+            return Err(Report::new(CapacitySettingsError::EmptyDetectionTimeout));
+        }
+        Ok(())
+    }
+}
+
 /// What this node can carry, as its operator gives it; an absent value is detected at startup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapacitySettings {
     pub memory_limit: Setting<MemoryLimit>,
     pub cpu_count: Setting<CpuCount>,
+    pub detection_timeout: Setting<NodeDetectionTimeout>,
 }
 
 impl CapacitySettings {
     pub fn resolve(
         memory_limit: Option<ByteUnit>,
         cpu_count: Option<u64>,
+        detection_timeout: Option<Duration>,
     ) -> Result<Self, Report<CapacitySettingsError>> {
         Ok(Self {
             memory_limit: Setting::new(memory_limit, &())?,
             cpu_count: Setting::new(cpu_count, &())?,
+            detection_timeout: Setting::resolve(detection_timeout, &())?,
         })
+    }
+
+    /// How long the startup preflight waits for this node's properties.
+    pub fn detection_timeout(&self) -> Duration {
+        *self.detection_timeout.value()
     }
 
     /// The memory limit the operator gave, if any.
@@ -144,7 +183,8 @@ impl CapacitySettings {
 
 impl Default for CapacitySettings {
     fn default() -> Self {
-        Self::resolve(None, None).assured("absent capacity overrides are detected")
+        Self::resolve(None, None, None)
+            .assured("absent capacity overrides are detected and the timeout has its default")
     }
 }
 
@@ -237,9 +277,11 @@ mod tests {
             detected
         );
         assert_eq!(CapacitySettings::default().effective_cpu_count(None), None);
-        let configured = CapacitySettings::resolve(None, Some(4)).expect("positive CPU count");
+        let configured =
+            CapacitySettings::resolve(None, Some(4), None).expect("positive CPU count");
         assert_eq!(configured.effective_cpu_count(detected), NonZeroU64::new(4));
-        let refused = CapacitySettings::resolve(None, Some(0)).expect_err("zero CPUs are refused");
+        let refused =
+            CapacitySettings::resolve(None, Some(0), None).expect_err("zero CPUs are refused");
         assert_eq!(
             refused.current_context(),
             &CapacitySettingsError::EmptyCpuCount
@@ -255,7 +297,7 @@ mod tests {
             CapacitySettings::default().effective_memory_limit(detected),
             NodeMemory::Detected(ByteUnit::Gibibyte(8))
         );
-        let configured = CapacitySettings::resolve(Some(ByteUnit::Gibibyte(2)), None)
+        let configured = CapacitySettings::resolve(Some(ByteUnit::Gibibyte(2)), None, None)
             .expect("two GiB is a limit");
         assert_eq!(
             configured.effective_memory_limit(detected),
@@ -270,12 +312,27 @@ mod tests {
 
     #[test]
     fn a_zero_memory_limit_is_refused_naming_the_setting() {
-        let refused = CapacitySettings::resolve(Some(ByteUnit::Byte(0)), None)
+        let refused = CapacitySettings::resolve(Some(ByteUnit::Byte(0)), None, None)
             .expect_err("no memory is no limit");
         assert_eq!(
             format!("{refused:#}"),
             "memory-limit must be greater than zero"
         );
+    }
+
+    #[test]
+    fn a_zero_detection_timeout_is_refused_naming_the_setting_and_absence_waits_the_default() {
+        let refused = CapacitySettings::resolve(None, None, Some(Duration::ZERO))
+            .expect_err("no time is no deadline");
+        assert_eq!(
+            format!("{refused:#}"),
+            "node-detection-timeout must be greater than zero"
+        );
+        let defaulted = CapacitySettings::resolve(None, None, None).expect("defaults are valid");
+        assert_eq!(defaulted.detection_timeout(), Duration::from_secs(30));
+        let given = CapacitySettings::resolve(None, None, Some(Duration::from_millis(1)))
+            .expect("a positive deadline is valid");
+        assert_eq!(given.detection_timeout(), Duration::from_millis(1));
     }
 
     #[test]

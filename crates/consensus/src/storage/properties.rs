@@ -305,8 +305,8 @@ fn assert_readers_can_rely_on(state: &StateMachineData) {
     for (name, user) in state.users.iter() {
         assert_eq!(&user.name, name);
     }
-    for (node, record) in state.node_capabilities.iter() {
-        assert_eq!(record.identity.node_id(), node);
+    for (node, committed) in state.node_records.iter() {
+        assert_eq!(committed.record.identity().node_id(), node);
     }
     for (id, version) in state.resources.versions.iter() {
         assert_eq!(&version.id, id);

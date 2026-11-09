@@ -50,6 +50,7 @@ mod name_spelling;
 mod names;
 mod node_capabilities;
 mod node_endpoint;
+mod node_record;
 mod node_ref;
 mod password_credential;
 mod placement;
@@ -292,6 +293,13 @@ pub use names::{
 pub use node_capabilities::{NodeCapabilities, NodeCapabilityRecord, PeerReceiveBounds};
 pub use node_endpoint::{
     NodeEndpoint, NodeEndpointParseError, NodeServiceUrl, NodeServiceUrlParseError,
+};
+pub use node_record::{
+    CommittedNodeRecord, CudaProviderRegistration, Detected, ExecutionProviders, GpuDevice,
+    GpuDevices, GpuInventory, MAX_NODE_TAGS, MAX_PROPERTY_LIST_ITEMS, MAX_PROPERTY_TEXT_BYTES,
+    MAX_TAG_KEY_BYTES, MAX_TAG_VALUE_BYTES, NodeProperties, NodeRecord, NodeTag, NodeTagError,
+    NodeTags, OnnxRuntime, OnnxRuntimeDetection, PropertyText, PropertyValueError, TagKey,
+    TagValue, UndetectedReason,
 };
 pub use node_ref::{DomainNodeRef, NodeRef};
 pub use placement::{

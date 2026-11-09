@@ -33,7 +33,7 @@ const SETTINGS_HEADINGS: [&str; 9] = [
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 37] = [
+const SETTING_NAMES: [&str; 38] = [
     "raft-heartbeat-interval",
     "raft-snapshot-entry-threshold",
     "raft-snapshot-byte-threshold",
@@ -71,6 +71,7 @@ const SETTING_NAMES: [&str; 37] = [
     "interconnect-bulk-receive-window",
     "cpu-count",
     "memory-limit",
+    "node-detection-timeout",
 ];
 
 #[test]

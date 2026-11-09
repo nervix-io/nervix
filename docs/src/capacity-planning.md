@@ -172,7 +172,8 @@ cannot hold it:
 A refusal names the setting, the value and the capacity it was compared with, such as
 `resource-max-extracted-bytes (16GiB) exceeds the 5GiB capacity of the volume holding the database
 directory /var/lib/nervix/db`, and a node that passes logs `the startup preflight passed` with its
-memory limit, its budgets, the size of its volumes and the restore-staging quota it resolved.
+memory limit, its budgets, the size of its volumes, the restore-staging quota it resolved and the
+[properties](node-settings.md#detected-properties) it detected.
 
 ## Sizing Knobs
 

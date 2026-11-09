@@ -64,10 +64,10 @@ const QUEUED: usize = 3;
 /// The most consecutive statements one generated commit step applies.
 const STEP_STATEMENTS: usize = 3;
 
-pub(super) fn node_capability_record(
+pub(super) fn committed_node_record(
     arbitrary: &mut Arbitrary<'_>,
-) -> nervix_models::NodeCapabilityRecord {
-    arbitrary.node_capability_record()
+) -> nervix_models::CommittedNodeRecord {
+    arbitrary.committed_node_record()
 }
 
 /// A Raft log position under any term and leader.
@@ -258,16 +258,16 @@ fn schedule_topology_inputs(arbitrary: &mut Arbitrary<'_>) -> ScheduleTopologyIn
         }
     }
     ScheduleTopologyInputs {
-        capabilities: members
+        records: members
             .iter()
             .filter_map(|node| {
                 if arbitrary.entropy().flag() {
-                    let mut record = node_capability_record(arbitrary);
-                    record.identity = nervix_models::ClusterNodeIdentity::new(
+                    let mut committed = committed_node_record(arbitrary);
+                    committed.record.claim.identity = nervix_models::ClusterNodeIdentity::new(
                         node.clone(),
-                        record.identity.incarnation(),
+                        committed.record.identity().incarnation(),
                     );
-                    Some((node.clone(), record))
+                    Some((node.clone(), committed))
                 } else {
                     None
                 }
@@ -1436,10 +1436,10 @@ pub(super) fn state_machine(arbitrary: &mut Arbitrary<'_>) -> StateMachineData {
     state.raise_password_work(cost);
     state.resources = resource_records(arbitrary);
     for _ in 0..arbitrary.entropy().count(RECORDS) {
-        let record = node_capability_record(arbitrary);
+        let committed = committed_node_record(arbitrary);
         state
-            .node_capabilities
-            .insert(record.identity.node_id().clone(), record);
+            .node_records
+            .insert(committed.record.identity().node_id().clone(), committed);
     }
     for _ in 0..arbitrary.entropy().count(RECORDS) {
         let node = arbitrary.rule_name::<ClusterNodeName>();
@@ -1806,7 +1806,7 @@ fn complete_application_command(arbitrary: &mut Arbitrary<'_>) -> ConsensusComma
 /// as any other and a coverage check can name each one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, strum::EnumIter)]
 enum CommandVariant {
-    AnnounceNodeCapabilities,
+    AnnounceNodeRecord,
     InstallClusterIdentity,
     SeedClusterParameters,
     AlterClusterParameters,
@@ -1856,7 +1856,7 @@ impl CommandVariant {
     /// [`command`] is taught to build it.
     fn of(command: &ConsensusCommand) -> Self {
         match command {
-            ConsensusCommand::AnnounceNodeCapabilities { .. } => Self::AnnounceNodeCapabilities,
+            ConsensusCommand::AnnounceNodeRecord { .. } => Self::AnnounceNodeRecord,
             ConsensusCommand::InstallClusterIdentity { .. } => Self::InstallClusterIdentity,
             ConsensusCommand::SeedClusterParameters { .. } => Self::SeedClusterParameters,
             ConsensusCommand::AlterClusterParameters { .. } => Self::AlterClusterParameters,
@@ -1938,8 +1938,8 @@ pub(super) fn command(arbitrary: &mut Arbitrary<'_>) -> ConsensusCommand {
 /// lifecycle step with the reports and plans it carries.
 fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> ConsensusCommand {
     match variant {
-        CommandVariant::AnnounceNodeCapabilities => ConsensusCommand::AnnounceNodeCapabilities {
-            record: node_capability_record(arbitrary),
+        CommandVariant::AnnounceNodeRecord => ConsensusCommand::AnnounceNodeRecord {
+            record: arbitrary.node_record(),
         },
         CommandVariant::InstallClusterIdentity => ConsensusCommand::InstallClusterIdentity {
             identity: Box::new(crate::cluster_identity::tests::identity(arbitrary)),

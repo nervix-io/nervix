@@ -40,6 +40,18 @@ const IDENTITY_CHARACTERS: &[u8] =
 /// The longest command execution reference or resource upload identity, in bytes.
 const IDENTITY_BYTES: u64 = 128;
 
+/// The characters a generated tag key starts with.
+const TAG_KEY_LEADING: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+
+/// The characters a generated tag key holds after its first.
+const TAG_KEY_CHARACTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789._-";
+
+/// Printable characters of one through four bytes, with the separators a tag's command-line
+/// form uses.
+const PRINTABLE_CHARACTERS: [char; 16] = [
+    'a', 'Z', '0', ' ', '.', '-', '_', '=', ',', '/', ':', 'é', '中', '🎉', 'ß', '"',
+];
+
 /// Nanoseconds in one millisecond, the unit a UUIDv7 retry identity records its issue time in.
 const NANOS_PER_MILLISECOND: u64 = 1_000_000;
 
@@ -85,6 +97,187 @@ impl Arbitrary<'_> {
                 receive,
             },
         }
+    }
+
+    /// A current node record: a capacity claim, detected properties of every outcome and tags.
+    pub fn node_record(&mut self) -> nervix_models::NodeRecord {
+        nervix_models::NodeRecord {
+            claim: self.node_capability_record(),
+            properties: self.node_properties(),
+            tags: self.node_tags(),
+        }
+    }
+
+    /// A node record as consensus committed it, at any revision.
+    pub fn committed_node_record(&mut self) -> nervix_models::CommittedNodeRecord {
+        nervix_models::CommittedNodeRecord {
+            revision: self.entropy.any_u64(),
+            record: self.node_record(),
+        }
+    }
+
+    /// Operator tags: none, a few, or as many as a node holds, with keys and values drawn up to
+    /// their byte bounds.
+    pub fn node_tags(&mut self) -> nervix_models::NodeTags {
+        let count = if self.entropy.flag() {
+            self.entropy.count(RECORDS)
+        } else {
+            nervix_models::MAX_NODE_TAGS
+        };
+        let mut tags = std::collections::BTreeMap::new();
+        for _ in 0..count {
+            let key = self.tag_key();
+            let value = self.tag_value(&key);
+            tags.insert(key, value);
+        }
+        nervix_models::NodeTags::try_from(tags)
+            .verified("each generated tag follows the tag rules and their count stays in bound")
+    }
+
+    /// A tag key: a leading lower-case letter or digit, then any of the key alphabet, from one
+    /// byte through the key bound.
+    pub fn tag_key(&mut self) -> nervix_models::TagKey {
+        let max = u64::try_from(nervix_models::MAX_TAG_KEY_BYTES).assured("a small bound fits u64");
+        let length = self.entropy.boundary_biased(1..=max);
+        let mut key = String::new();
+        key.push(self.table_character(TAG_KEY_LEADING));
+        for _ in 1..length {
+            key.push(self.table_character(TAG_KEY_CHARACTERS));
+        }
+        nervix_models::TagKey::parse(&key).verified("the key is drawn from the key alphabet")
+    }
+
+    /// The value of the tag keyed `key`: printable text without a comma, from one byte through
+    /// the value bound.
+    pub fn tag_value(&mut self, key: &nervix_models::TagKey) -> nervix_models::TagValue {
+        let text = self.printable_text(nervix_models::MAX_TAG_VALUE_BYTES, &[',']);
+        nervix_models::TagValue::parse(key, &text)
+            .verified("printable text without a comma within the bound is a tag value")
+    }
+
+    /// Detected properties, each drawn across every detected and undetected outcome.
+    pub fn node_properties(&mut self) -> nervix_models::NodeProperties {
+        nervix_models::NodeProperties {
+            architecture: self.property_text(),
+            cpu_model: self.detected(|arbitrary| arbitrary.property_text()),
+            gpus: self.gpu_inventory(),
+            onnx: self.onnx_runtime_detection(),
+        }
+    }
+
+    fn gpu_inventory(&mut self) -> nervix_models::GpuInventory {
+        match self.entropy.up_to(2) {
+            0 => {
+                let count = self.entropy.boundary_biased(
+                    1..=u64::try_from(nervix_models::MAX_PROPERTY_LIST_ITEMS)
+                        .assured("a small bound fits u64"),
+                );
+                let mut devices = Vec::new();
+                for _ in 0..count {
+                    devices.push(nervix_models::GpuDevice {
+                        model: self.detected(|arbitrary| arbitrary.property_text()),
+                        memory_bytes: self.detected(|arbitrary| arbitrary.positive_u64()),
+                    });
+                }
+                nervix_models::GpuInventory::Devices {
+                    devices: nervix_models::GpuDevices::try_from(devices)
+                        .verified("one through the list bound of devices"),
+                    driver: self.detected(|arbitrary| arbitrary.property_text()),
+                }
+            }
+            1 => nervix_models::GpuInventory::NoDevice {
+                driver: self.detected(|arbitrary| arbitrary.property_text()),
+            },
+            _ => nervix_models::GpuInventory::Undetected(self.undetected_reason()),
+        }
+    }
+
+    fn onnx_runtime_detection(&mut self) -> nervix_models::OnnxRuntimeDetection {
+        if self.entropy.flag() {
+            return nervix_models::OnnxRuntimeDetection::Undetected(self.undetected_reason());
+        }
+        let providers = self.detected(|arbitrary| {
+            let count = arbitrary
+                .entropy
+                .count(nervix_models::MAX_PROPERTY_LIST_ITEMS);
+            let mut providers = Vec::new();
+            for _ in 0..count {
+                providers.push(arbitrary.property_text());
+            }
+            nervix_models::ExecutionProviders::try_from(providers)
+                .verified("at most the list bound of providers")
+        });
+        nervix_models::OnnxRuntimeDetection::Loaded(nervix_models::OnnxRuntime {
+            version: self.detected(|arbitrary| arbitrary.property_text()),
+            providers,
+            cuda: self.entropy.pick([
+                nervix_models::CudaProviderRegistration::Registered,
+                nervix_models::CudaProviderRegistration::NotInLibrary,
+                nervix_models::CudaProviderRegistration::RegistrationFailed,
+            ]),
+        })
+    }
+
+    fn detected<T>(&mut self, value: impl FnOnce(&mut Self) -> T) -> nervix_models::Detected<T> {
+        if self.entropy.flag() {
+            nervix_models::Detected::Value(value(self))
+        } else {
+            nervix_models::Detected::Undetected(self.undetected_reason())
+        }
+    }
+
+    fn undetected_reason(&mut self) -> nervix_models::UndetectedReason {
+        self.entropy.pick([
+            nervix_models::UndetectedReason::NotReported,
+            nervix_models::UndetectedReason::LibraryUnavailable,
+            nervix_models::UndetectedReason::DriverUnavailable,
+            nervix_models::UndetectedReason::QueryFailed,
+            nervix_models::UndetectedReason::DeadlineExpired,
+            nervix_models::UndetectedReason::DetectionFailed,
+            nervix_models::UndetectedReason::ExceedsRecordBound,
+        ])
+    }
+
+    /// Detected property text: printable, from one byte through the property bound.
+    pub fn property_text(&mut self) -> nervix_models::PropertyText {
+        let text = self.printable_text(nervix_models::MAX_PROPERTY_TEXT_BYTES, &[]);
+        nervix_models::PropertyText::new(text)
+            .verified("printable text within the bound is a property value")
+    }
+
+    /// Printable text of one byte through `max` bytes, none of `refused`, mixing ASCII with
+    /// multi-byte characters so a draw can end exactly at the bound or one character short of it.
+    fn printable_text(&mut self, max: usize, refused: &[char]) -> String {
+        let bound = u64::try_from(max).assured("a small bound fits u64");
+        let target = usize::try_from(self.entropy.boundary_biased(1..=bound))
+            .verified("the target is at most the bound, which is a usize");
+        let mut text = String::new();
+        while text.len() < target {
+            let mut character = self.entropy.pick(PRINTABLE_CHARACTERS);
+            if refused.contains(&character) {
+                character = 'x';
+            }
+            let Some(length) = text.len().checked_add(character.len_utf8()) else {
+                break;
+            };
+            if length > target {
+                text.push('x');
+                continue;
+            }
+            text.push(character);
+        }
+        text
+    }
+
+    /// One character of an ASCII table.
+    fn table_character(&mut self, table: &[u8]) -> char {
+        let last = u64::try_from(table.len())
+            .assured("a small table fits in u64")
+            .checked_sub(1)
+            .assured("the table is not empty");
+        let chosen =
+            usize::try_from(self.entropy.up_to(last)).verified("an index below the table length");
+        char::from(table[chosen])
     }
     /// Up to three values, each built by `record`, in the order they were built.
     pub fn records<T>(&mut self, mut record: impl FnMut(&mut Self) -> T) -> Vec<T> {

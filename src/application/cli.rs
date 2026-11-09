@@ -38,7 +38,7 @@ pub use self::{
     consensus::ConsensusArgs,
     membership::MembershipArgs,
     memory_pressure::MemoryPressureArgs,
-    node::NodeArgs,
+    node::{NODE_TAGS_OPTION, NodeArgs},
     resources::ResourceArgs,
     runtime::RuntimeArgs,
     scheduling::SchedulingArgs,

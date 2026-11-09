@@ -211,10 +211,15 @@ class is a compile-time error. [Node Settings](node-settings.md) owns their oper
 carriers, defaults, change procedures and source ratchet.
 
 `NodeCapabilities` also holds resolved optional positive CPU/memory measurements and positive
-`PeerReceiveBounds`. `NodeCapabilityRecord` binds those values to the shared `ClusterNodeIdentity`.
-The committed node-name key must match its identity. Schedule topology and transaction planning
-fences include the captured records; data-plane payload attempts and row admission prefixes remain
-volatile. A peer-pool publication retains the committed claim without replacing its connection
+`PeerReceiveBounds`. `NodeCapabilityRecord` binds those values to the shared `ClusterNodeIdentity`,
+and `NodeRecord` holds that claim beside the run's `NodeProperties` and `NodeTags`. A property the
+node could not detect is `Detected::Undetected` with an `UndetectedReason`, a GPU inventory or ONNX
+Runtime that was not read is its own undetected variant, and a node without GPUs or tags has an
+empty inventory or tag set, never a sentinel. Tag keys, tag values, property text and property lists
+validate their bounds when constructed and when decoded. `CommittedNodeRecord` adds the revision
+that committed the record. The committed node-name key must match its identity. Schedule topology
+and transaction planning fences include the captured records; data-plane payload attempts and row
+admission prefixes remain volatile. A peer-pool publication retains the committed claim without replacing its connection
 slots, and `RelaySliceCursor` advances a contiguous prefix only after confirmed admission.
 
 Redis subscription plans carry a nonzero bounded message capacity and a validated idle deadline.

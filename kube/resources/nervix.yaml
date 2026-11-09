@@ -339,6 +339,9 @@ spec:
                   fieldPath: status.hostIP
             - name: RUST_LOG
               value: info,nervix=info
+            # Tags every node of this example carries in its record; DESCRIBE CLUSTER prints them.
+            - name: NERVIX_NODE_TAGS
+              value: deployment=kube-example
             # The startup preflight refuses resource quotas the 5Gi data volume cannot hold.
             - name: NERVIX_RESOURCE_MAX_ARCHIVE_BYTES
               value: 1GiB

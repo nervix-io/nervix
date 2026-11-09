@@ -367,6 +367,14 @@ test-scenarios *args: tests-deps test-client-python-api-run
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
 
+# Node record cases: tags, detected properties and the record's lifecycle on in-process nodes,
+# and the refused start of one server process.
+test-node-record *args: build-deps build-test-cli
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/node_record.feature {{ quote(args) }}
+
 # Password-policy cases use in-process nodes and the native session client.
 test-password-credentials *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash

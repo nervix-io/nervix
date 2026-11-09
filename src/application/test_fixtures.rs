@@ -725,16 +725,32 @@ pub(in crate::application) async fn build_test_service_inner(
         super::completion::ApplicationProgressState::new(cluster.local_node_identity().await);
     consensus
         .proposer()
-        .announce_node_capabilities(nervix_models::NodeCapabilityRecord {
-            identity: cluster.local_node_identity().await,
-            capabilities: nervix_models::NodeCapabilities {
-                cpu_count: Some(std::num::NonZeroU64::MIN),
-                memory_bytes: Some(std::num::NonZeroU64::MIN),
-                receive: interconnect.local_receive_bounds(),
+        .announce_node_record(nervix_models::NodeRecord {
+            claim: nervix_models::NodeCapabilityRecord {
+                identity: cluster.local_node_identity().await,
+                capabilities: nervix_models::NodeCapabilities {
+                    cpu_count: Some(std::num::NonZeroU64::MIN),
+                    memory_bytes: Some(std::num::NonZeroU64::MIN),
+                    receive: interconnect.local_receive_bounds(),
+                },
             },
+            properties: nervix_models::NodeProperties {
+                architecture: nervix_models::PropertyText::new(std::env::consts::ARCH)
+                    .assured("a target architecture's name is short printable text"),
+                cpu_model: nervix_models::Detected::Undetected(
+                    nervix_models::UndetectedReason::NotReported,
+                ),
+                gpus: nervix_models::GpuInventory::Undetected(
+                    nervix_models::UndetectedReason::LibraryUnavailable,
+                ),
+                onnx: nervix_models::OnnxRuntimeDetection::Undetected(
+                    nervix_models::UndetectedReason::LibraryUnavailable,
+                ),
+            },
+            tags: nervix_models::NodeTags::default(),
         })
         .await
-        .assured("the admitted fixture run commits its capacity claim");
+        .assured("the admitted fixture run commits its node record");
     let service = test_session_service(
         cluster,
         &consensus,

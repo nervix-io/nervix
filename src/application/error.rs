@@ -120,6 +120,8 @@ pub enum AppError {
     InvalidMembershipSettings,
     #[error("invalid capacity settings")]
     InvalidCapacitySettings,
+    #[error("invalid --node-tags")]
+    InvalidNodeTags,
     #[error("invalid peer receive settings")]
     InvalidPeerReceiveSettings,
     #[error("invalid state inspection capabilities")]
