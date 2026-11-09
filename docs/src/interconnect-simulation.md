@@ -899,3 +899,5 @@ including the host isolation case and the boundary's own simulated-host checks, 
 `just test-turmoil-sweep` passed its default 64 seeds twice in fresh processes with identical traces,
 leaving no failure record. Under that shared load the sweep ran past its 25-minute budget during its
 last test, the receiver restart group, which then passed its 64 seeds alone in 2m30s.
+
+The inferencer checkpoint transport scenario (`transport::materialized::inferencer_branch_state_transfers_reconnect_to_the_replacement_owner`, seeds 51 and 53) uses the production authenticated state description and bulk fetch paths. It partitions a multi-chunk fetch, repairs the link, replaces the transport owner, then checks complete distinct bytes for two branches at each revision and their length and digest. Its opaque payload oracle qualifies transport continuity; the native snapshot codec properties separately qualify shapes, incarnations and exact F32 bits.

@@ -136,8 +136,12 @@ tensors before publishing the processor template. Each concrete branch starts wi
 initial generation and exclusively owns its successors. Stateful admission runs the model once per
 row before output-route buffering; native state outputs become the next invocation's inputs without
 an Arrow round trip. Route flushes dispatch already-computed output. The stateless inferencer keeps
-its existing flush-time execution. These tensor generations are volatile and are recreated from
-the prepared initial generation after restart, owner change or eviction.
+its existing flush-time execution. A stateful branch publishes its native tensor generation after
+each admitted batch through the shared periodic branch-state owner. Its placement includes the
+schema fingerprint and the typed fingerprint of its resource, pinned version, file and state
+declarations. Restore selects the newest snapshot for that exact identity and branch incarnation;
+eviction publishes an empty final generation. Node-local binding retains the validated snapshot
+footprint and rejects a declaration exceeding the section bound before allocating INITIAL.
 
 Emitter planning reads the concrete destination's own publishing enum. Broker, MQTT and SQS
 alternatives lower exhaustively into their connector policies; request-only and unconfirmed-only

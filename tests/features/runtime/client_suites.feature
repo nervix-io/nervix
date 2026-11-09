@@ -88,7 +88,7 @@ Feature: Language-level client suites
     When the "<runtime>" client suite runs its cluster tests
     Then within "600s" the client suite passes every registered cluster test
 
-    @client_conformance_toolchain @client_suite_python @long_running @slots_1
+    @client_suite_python @long_running @slots_1
     Examples: CPython over the Python package
       | runtime | cluster_size | transport | tags_type   | grid_type     |
       | python  | 1            | https     | VEC<STRING> | ARRAY<I16, 2> |

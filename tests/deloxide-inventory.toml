@@ -748,6 +748,7 @@ tags = [
   "@node_capability_unfit",
   "@backup_holder_download",
   "@snapshot_receive_admission",
+  "@stateful_inferencer_persistence",
   "@session_shutdown_ending",
   "@client_wire_restoration_end",
   "@session_shutdown_unread",
@@ -4914,6 +4915,19 @@ workloads = [
 [[owner]]
 path = "src/runtime/state_store.rs"
 workloads = [
+  "scenario.inferencer-restart",
+  "stress.inferencer-restart",
+  "scenario.inferencer-stop-start",
+  "stress.inferencer-stop-start",
+  "scenario.inferencer-recreate",
+  "stress.inferencer-recreate",
+  "scenario.inferencer-ttl",
+  "stress.inferencer-ttl",
+  "scenario.inferencer-capacity",
+  "stress.inferencer-capacity",
+  "scenario.inferencer-replica",
+  "stress.inferencer-replica",
+
   "scenario.ingestor-instance-01",
   "stress.ingestor-instance-01",
   "scenario.ingestor-instance-02",
@@ -6361,6 +6375,126 @@ id = "stress.client-restore-reply-validation-restore"
 invariant = "A completed restore with an undecodable or differently correlated reply remains uncertain under its own reference, ends only its originating session and recovers its recorded outcome."
 invocation = "stress-restore-scenarios"
 scenario = "A <client> recovers a completed restore after <reply> on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Inference periodic/final checkpoint persistence, restore, branch retirement and replica installation reach the state store's tracked installation locks. Native tensor operations, pointer publication, async admission and transport waits are outside Deloxide; the carrier Shuttle check and typed transport Turmoil scenario cover their declared boundaries."
+examples = 2
+feature = "tests/features/runtime/inferencer_state.feature"
+id = "scenario.inferencer-restart"
+invariant = "Stateful inferencer snapshots preserve interleaved branch sums across a cluster restart."
+invocation = "scenarios"
+scenario = "Stateful inferencer snapshots preserve interleaved branch sums across a cluster restart"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Inference periodic/final checkpoint persistence, restore, branch retirement and replica installation reach the state store's tracked installation locks. Native tensor operations, pointer publication, async admission and transport waits are outside Deloxide; the carrier Shuttle check and typed transport Turmoil scenario cover their declared boundaries."
+examples = 2
+feature = "tests/features/runtime/inferencer_state.feature"
+id = "stress.inferencer-restart"
+invariant = "Stateful inferencer snapshots preserve interleaved branch sums across a cluster restart."
+invocation = "stress-restore-scenarios"
+scenario = "Stateful inferencer snapshots preserve interleaved branch sums across a cluster restart"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Inference periodic/final checkpoint persistence, restore, branch retirement and replica installation reach the state store's tracked installation locks. Native tensor operations, pointer publication, async admission and transport waits are outside Deloxide; the carrier Shuttle check and typed transport Turmoil scenario cover their declared boundaries."
+examples = 2
+feature = "tests/features/runtime/inferencer_state_lifecycle.feature"
+id = "scenario.inferencer-stop-start"
+invariant = "Stateful inference resumes both interleaved branch sums after STOP and START."
+invocation = "scenarios"
+scenario = "Stateful inference resumes both interleaved branch sums after STOP and START"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Inference periodic/final checkpoint persistence, restore, branch retirement and replica installation reach the state store's tracked installation locks. Native tensor operations, pointer publication, async admission and transport waits are outside Deloxide; the carrier Shuttle check and typed transport Turmoil scenario cover their declared boundaries."
+examples = 2
+feature = "tests/features/runtime/inferencer_state_lifecycle.feature"
+id = "stress.inferencer-stop-start"
+invariant = "Stateful inference resumes both interleaved branch sums after STOP and START."
+invocation = "stress-restore-scenarios"
+scenario = "Stateful inference resumes both interleaved branch sums after STOP and START"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Inference periodic/final checkpoint persistence, restore, branch retirement and replica installation reach the state store's tracked installation locks. Native tensor operations, pointer publication, async admission and transport waits are outside Deloxide; the carrier Shuttle check and typed transport Turmoil scenario cover their declared boundaries."
+examples = 2
+feature = "tests/features/runtime/inferencer_state_lifecycle.feature"
+id = "scenario.inferencer-recreate"
+invariant = "Recreating an inferencer starts both branch sums from INITIAL."
+invocation = "scenarios"
+scenario = "Recreating an inferencer starts both branch sums from INITIAL"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Inference periodic/final checkpoint persistence, restore, branch retirement and replica installation reach the state store's tracked installation locks. Native tensor operations, pointer publication, async admission and transport waits are outside Deloxide; the carrier Shuttle check and typed transport Turmoil scenario cover their declared boundaries."
+examples = 2
+feature = "tests/features/runtime/inferencer_state_lifecycle.feature"
+id = "stress.inferencer-recreate"
+invariant = "Recreating an inferencer starts both branch sums from INITIAL."
+invocation = "stress-restore-scenarios"
+scenario = "Recreating an inferencer starts both branch sums from INITIAL"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Inference periodic/final checkpoint persistence, restore, branch retirement and replica installation reach the state store's tracked installation locks. Native tensor operations, pointer publication, async admission and transport waits are outside Deloxide; the carrier Shuttle check and typed transport Turmoil scenario cover their declared boundaries."
+examples = 2
+feature = "tests/features/runtime/inferencer_state_lifecycle.feature"
+id = "scenario.inferencer-ttl"
+invariant = "TTL eviction starts returning inferencer branches from INITIAL."
+invocation = "scenarios"
+scenario = "TTL eviction starts returning inferencer branches from INITIAL"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Inference periodic/final checkpoint persistence, restore, branch retirement and replica installation reach the state store's tracked installation locks. Native tensor operations, pointer publication, async admission and transport waits are outside Deloxide; the carrier Shuttle check and typed transport Turmoil scenario cover their declared boundaries."
+examples = 2
+feature = "tests/features/runtime/inferencer_state_lifecycle.feature"
+id = "stress.inferencer-ttl"
+invariant = "TTL eviction starts returning inferencer branches from INITIAL."
+invocation = "stress-restore-scenarios"
+scenario = "TTL eviction starts returning inferencer branches from INITIAL"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Inference periodic/final checkpoint persistence, restore, branch retirement and replica installation reach the state store's tracked installation locks. Native tensor operations, pointer publication, async admission and transport waits are outside Deloxide; the carrier Shuttle check and typed transport Turmoil scenario cover their declared boundaries."
+examples = 2
+feature = "tests/features/runtime/inferencer_state_lifecycle.feature"
+id = "scenario.inferencer-capacity"
+invariant = "Capacity eviction cannot restore a previous inferencer lifetime after restart."
+invocation = "scenarios"
+scenario = "Capacity eviction cannot restore a previous inferencer lifetime after restart"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Inference periodic/final checkpoint persistence, restore, branch retirement and replica installation reach the state store's tracked installation locks. Native tensor operations, pointer publication, async admission and transport waits are outside Deloxide; the carrier Shuttle check and typed transport Turmoil scenario cover their declared boundaries."
+examples = 2
+feature = "tests/features/runtime/inferencer_state_lifecycle.feature"
+id = "stress.inferencer-capacity"
+invariant = "Capacity eviction cannot restore a previous inferencer lifetime after restart."
+invocation = "stress-restore-scenarios"
+scenario = "Capacity eviction cannot restore a previous inferencer lifetime after restart"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Inference periodic/final checkpoint persistence, restore, branch retirement and replica installation reach the state store's tracked installation locks. Native tensor operations, pointer publication, async admission and transport waits are outside Deloxide; the carrier Shuttle check and typed transport Turmoil scenario cover their declared boundaries."
+examples = 1
+feature = "tests/features/runtime/inferencer_state_lifecycle.feature"
+id = "scenario.inferencer-replica"
+invariant = "A promoted inference replica continues both branches from at least their confirmed checkpoints."
+invocation = "scenarios"
+scenario = "A promoted inference replica continues both branches from at least their confirmed checkpoints"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Inference periodic/final checkpoint persistence, restore, branch retirement and replica installation reach the state store's tracked installation locks. Native tensor operations, pointer publication, async admission and transport waits are outside Deloxide; the carrier Shuttle check and typed transport Turmoil scenario cover their declared boundaries."
+examples = 1
+feature = "tests/features/runtime/inferencer_state_lifecycle.feature"
+id = "stress.inferencer-replica"
+invariant = "A promoted inference replica continues both branches from at least their confirmed checkpoints."
+invocation = "stress-restore-scenarios"
+scenario = "A promoted inference replica continues both branches from at least their confirmed checkpoints"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]

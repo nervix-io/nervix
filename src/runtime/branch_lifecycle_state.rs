@@ -236,7 +236,8 @@ impl RuntimeStatePlacement {
     /// out by the same schemas as the branch state, and is kept once for the whole entity.
     pub(super) fn branch_lifecycle(&self) -> Option<Self> {
         let schema = match self.state {
-            RuntimeState::Deduplicator { schema }
+            RuntimeState::Inferencer { schema, .. }
+            | RuntimeState::Deduplicator { schema }
             | RuntimeState::WindowProcessor { schema }
             | RuntimeState::WasmProcessor { schema, .. } => schema,
             RuntimeState::BranchAggregated

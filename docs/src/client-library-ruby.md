@@ -36,7 +36,8 @@ opening its first cluster session:
 `Session.connect` opens and maintains a session, following leader redirects and restoring its
 subscriptions and endpoints after a lost connection. Credentials are optional only when the
 listener permits anonymous access. For a TLS listener use `https://`, and pass its certificate
-authority as PEM bytes if your system does not trust it.
+authority as PEM bytes. The client loads no system roots, so every TLS connection needs that
+explicit authority.
 
 ```ruby
 {{#include ../../tests/client_conformance/ruby/suite/cluster/commands_test.rb:connect}}

@@ -549,3 +549,5 @@ owns final disposal. No record, batch or
 acknowledgement path reaches this state; the async mutex is untracked by Deloxide.
 
 The node-capability rolling scenarios arm `FaultInjection::relay_before_grant_pauses` for one domain. The test-only probe records at most 32 accepted relay-piece observations under one short mutex. These lookups and the pause are compiled out of ordinary builds; neither carries product state.
+
+Stateful inferencer checkpoints retain their exact `ReplicatedInferencerState` in the existing immutable state-replication route index. Cold branch construction resolves that index once; admission retains the carrier and publishes native generations by pointer. No concurrent map is added. Assignment identity includes the typed model fingerprint; stale-schema/model purge and entity/domain teardown retire these routes. TTL/capacity eviction persists its empty final generation before retiring its exact unit and branch route.

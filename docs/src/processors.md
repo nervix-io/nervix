@@ -476,14 +476,24 @@ Every output route receives the same generated result, and its `FLUSH` controls 
 invoking the model again. Acknowledgements wait for dispatch. Without `STATE`, inference keeps its
 flush-time execution and supports the existing per-message and batched tensor declarations.
 
-State is held in memory. A restart, owner change or branch eviction starts that branch again from
-`INITIAL`. Use this contract when deciding whether a stateful model suits a workflow that must
-survive those events. `UNBRANCHED` owns one state sequence; `BRANCHED BY` owns one per concrete key.
+Each admitted batch publishes an immutable tensor generation. Nervix persists the newest
+generation on the runtime state snapshot interval and once more during a graceful stop; replicas
+receive the same generation. A restart continues from the newest surviving snapshot for that
+model binding and branch incarnation. Inputs admitted after that snapshot have already been
+acknowledged and are not replayed, so recovery can skip those state updates. A graceful stop
+persists the final generation before the branch ends. `STOP` followed by `START` retains it.
+
+Branch eviction by `TTL` or `MAX INSTANCES` discards the tensors and publishes an empty final
+generation, so a returning key starts from `INITIAL`. Dropping the inferencer removes its stored
+state. The state identity includes the resource, pinned version, file and complete `STATE`
+declarations; changing that identity starts fresh state. `UNBRANCHED` owns one state sequence;
+`BRANCHED BY` owns one per concrete key.
 State ports are internal model inputs and outputs, not fields available to route construction.
 `SHOW CREATE INFERENCER` preserves the state declaration and its initial expression.
 
-The fixed state bytes per branch must fit one configured runtime snapshot section. Nervix checks
-that derived bound while preparing INITIAL before publishing the processor plan. Native row
+The declared state must fit one configured runtime snapshot section, including its shape and
+framing metadata. Nervix checks the derived bound at `CREATE` before storing the inferencer and
+again while preparing INITIAL before publishing the processor plan. Native row
 execution uses the bounded extension workers; mapped input and public output conversion also
 respect the configured relay operation limit. The state is retained once per active branch;
 use the branch's `MAX INSTANCES` to bound the number of live copies.
