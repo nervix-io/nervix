@@ -393,11 +393,14 @@ Other failures print one JSON object with `error.code` and `error.message` on st
 nonzero; a configuration, connection or request failure's message is the whole chain of causes,
 such as `invalid server URL: relative URL without a base`.
 Diagnostic details and unrelated events go to stderr. `FORMAT TEXT` uses normal readable terminal
-output. Transaction inspection is complete; materialized relay inspection is bounded and carries
-an opaque continuation. See [Inspect Materialized State](./relay.md#inspect-materialized-state)
-for selector clauses, typed counts, row limits and stale-token handling. Standalone JSON mode accepts
-`DESCRIBE TRANSACTION`, `DESCRIBE WASM PROCESSOR` and `SHOW RELAY ... MATERIALIZED STATE` with
-`FORMAT JSON`.
+output. Transaction inspection is complete; materialized relay, reorderer and correlator state
+inspections are bounded and carry an opaque continuation. See
+[Inspect Materialized State](./relay.md#inspect-materialized-state) for selector clauses, typed
+counts, row limits and stale-token handling, and
+[Inspect Held Rows](./processors.md#inspect-held-rows) for reorderer and correlator rows.
+Standalone JSON mode accepts `DESCRIBE TRANSACTION`, `DESCRIBE WASM PROCESSOR`,
+`SHOW RELAY ... MATERIALIZED STATE`, `SHOW REORDERER ... STATE` and `SHOW CORRELATOR ... STATE`
+with `FORMAT JSON`.
 After a stale-preview `COMMIT` refusal, run `DESCRIBE TRANSACTION` for the
 attached transaction before retrying the commit so the client fences it to the newly reviewed
 planning basis.

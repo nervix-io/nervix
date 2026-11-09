@@ -16,23 +16,15 @@
 use std::{io::Write, ops::Range};
 
 use arrow_array::{
-    Array, ArrayRef, RecordBatch, TimestampNanosecondArray,
-    builder::{
-        BinaryBuilder, BooleanBuilder, Float32Builder, Float64Builder, Int8Builder, Int16Builder,
-        Int32Builder, Int64Builder, StringBuilder, TimestampNanosecondBuilder, UInt8Builder,
-        UInt16Builder, UInt32Builder, UInt64Builder,
-    },
-    new_null_array,
+    Array, ArrayRef, RecordBatch, TimestampNanosecondArray, builder::TimestampNanosecondBuilder,
 };
-use arrow_schema::{DataType, Schema as ArrowSchema, TimeUnit};
+use arrow_schema::Schema as ArrowSchema;
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_approx_into::ApproxInto as _;
 use nervix_execution::{Cancellation, ChargedBytes, Executor, MemoryClass, Reservation};
 use nervix_expiry_map::ExpiryMap;
 use nervix_models::Timestamp;
 use nervix_primitives::sync::StdArc;
-use ordered_float::OrderedFloat;
 
 use super::{
     DeduplicatorKey, PublishedDeduplicatorKey, ReorderKeyPart, ReplicatedDeduplicatorState,
@@ -274,7 +266,9 @@ impl PublishedKeyspace {
         let mut columns = Vec::with_capacity(schema.fields().len());
         for (column, field) in key_fields.iter().enumerate() {
             let parts = keys.iter().map(|published| &published.key.parts()[column]);
-            columns.push(key_column(column, field.data_type(), parts, keys.len())?);
+            let typed = ReorderKeyPart::typed_column(field.data_type(), parts, keys.len())
+                .change_context(DeduplicatorArchiveError::KeyPart { column })?;
+            columns.push(typed);
         }
         let mut seen_at = TimestampNanosecondBuilder::with_capacity(keys.len());
         for published in keys {
@@ -284,136 +278,6 @@ impl PublishedKeyspace {
         columns.push(seen_at);
         RecordBatch::try_new(StdArc::clone(schema), columns)
             .map_err(|error| Report::new(DeduplicatorArchiveError::Columns).attach_printable(error))
-    }
-}
-
-/// One typed key column of `data_type` holding `parts`, every part the type's own normalization.
-fn key_column<'a>(
-    column: usize,
-    data_type: &DataType,
-    parts: impl Iterator<Item = &'a ReorderKeyPart>,
-    rows: usize,
-) -> error_stack::Result<ArrayRef, DeduplicatorArchiveError> {
-    let mismatch = || Report::new(DeduplicatorArchiveError::KeyPart { column });
-    macro_rules! integers {
-        ($builder:ty, $variant:ident, $integer:ty) => {{
-            let mut builder = <$builder>::with_capacity(rows);
-            for part in parts {
-                match part {
-                    ReorderKeyPart::Null => builder.append_null(),
-                    ReorderKeyPart::$variant(value) => {
-                        let narrowed = <$integer>::try_from(*value).map_err(|_| mismatch())?;
-                        builder.append_value(narrowed);
-                    }
-                    _ => return Err(mismatch()),
-                }
-            }
-            let array: ArrayRef = StdArc::new(builder.finish());
-            Ok(array)
-        }};
-    }
-    match data_type {
-        DataType::UInt8 => integers!(UInt8Builder, UInt64, u8),
-        DataType::UInt16 => integers!(UInt16Builder, UInt64, u16),
-        DataType::UInt32 => integers!(UInt32Builder, UInt64, u32),
-        DataType::UInt64 => integers!(UInt64Builder, UInt64, u64),
-        DataType::Int8 => integers!(Int8Builder, Int64, i8),
-        DataType::Int16 => integers!(Int16Builder, Int64, i16),
-        DataType::Int32 => integers!(Int32Builder, Int64, i32),
-        DataType::Int64 => integers!(Int64Builder, Int64, i64),
-        DataType::Float32 => {
-            let mut builder = Float32Builder::with_capacity(rows);
-            for part in parts {
-                match part {
-                    ReorderKeyPart::Null => builder.append_null(),
-                    ReorderKeyPart::Float64(OrderedFloat(value)) => {
-                        // A single-precision key part was widened exactly, so narrowing it back
-                        // recovers the same value; anything else was never this column's part.
-                        let value = *value;
-                        let narrowed: f32 = value.approx_into();
-                        let widened = f64::from(narrowed);
-                        if widened.to_bits() != value.to_bits()
-                            && !(widened.is_nan() && value.is_nan())
-                        {
-                            return Err(mismatch());
-                        }
-                        builder.append_value(narrowed);
-                    }
-                    _ => return Err(mismatch()),
-                }
-            }
-            let array: ArrayRef = StdArc::new(builder.finish());
-            Ok(array)
-        }
-        DataType::Float64 => {
-            let mut builder = Float64Builder::with_capacity(rows);
-            for part in parts {
-                match part {
-                    ReorderKeyPart::Null => builder.append_null(),
-                    ReorderKeyPart::Float64(OrderedFloat(value)) => builder.append_value(*value),
-                    _ => return Err(mismatch()),
-                }
-            }
-            let array: ArrayRef = StdArc::new(builder.finish());
-            Ok(array)
-        }
-        DataType::Boolean => {
-            let mut builder = BooleanBuilder::with_capacity(rows);
-            for part in parts {
-                match part {
-                    ReorderKeyPart::Null => builder.append_null(),
-                    ReorderKeyPart::Boolean(value) => builder.append_value(*value),
-                    _ => return Err(mismatch()),
-                }
-            }
-            let array: ArrayRef = StdArc::new(builder.finish());
-            Ok(array)
-        }
-        DataType::Utf8 => {
-            let mut builder = StringBuilder::with_capacity(rows, 0);
-            for part in parts {
-                match part {
-                    ReorderKeyPart::Null => builder.append_null(),
-                    ReorderKeyPart::Utf8(value) => builder.append_value(value),
-                    _ => return Err(mismatch()),
-                }
-            }
-            let array: ArrayRef = StdArc::new(builder.finish());
-            Ok(array)
-        }
-        DataType::Binary => {
-            let mut builder = BinaryBuilder::with_capacity(rows, 0);
-            for part in parts {
-                match part {
-                    ReorderKeyPart::Null => builder.append_null(),
-                    ReorderKeyPart::Bytes(value) => builder.append_value(value),
-                    _ => return Err(mismatch()),
-                }
-            }
-            let array: ArrayRef = StdArc::new(builder.finish());
-            Ok(array)
-        }
-        DataType::Timestamp(TimeUnit::Nanosecond, Some(zone)) => {
-            let mut builder = TimestampNanosecondBuilder::with_capacity(rows);
-            for part in parts {
-                match part {
-                    ReorderKeyPart::Null => builder.append_null(),
-                    ReorderKeyPart::Datetime(value) => builder.append_value(*value),
-                    _ => return Err(mismatch()),
-                }
-            }
-            let array: ArrayRef = StdArc::new(builder.finish().with_timezone(zone.clone()));
-            Ok(array)
-        }
-        // Every other type reaches a key as a null part, so only nulls fit its column.
-        other => {
-            for part in parts {
-                if *part != ReorderKeyPart::Null {
-                    return Err(mismatch());
-                }
-            }
-            Ok(new_null_array(other, rows))
-        }
     }
 }
 
@@ -585,10 +449,11 @@ mod tests {
         Int64Array, ListArray, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
         types::Int64Type,
     };
-    use arrow_schema::Field;
+    use arrow_schema::{DataType, Field, TimeUnit};
     use nervix_arbitrary::Entropy;
     use nervix_execution::ExecutionConfig;
     use nonzero_ext::nonzero;
+    use ordered_float::OrderedFloat;
 
     use super::{super::deduplicator::decode_deduplicator_snapshot, *};
 

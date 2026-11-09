@@ -2438,6 +2438,12 @@ impl SessionServiceImpl {
                     .verified("this statement requires a request domain, which was resolved above");
                 self.show_stream_materialized_state(domain, show).await
             }
+            Statement::ShowProcessorState(show) => {
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
+                self.show_processor_state(domain, show).await
+            }
             Statement::ShowUdfs(_) => {
                 let domain = domain
                     .as_ref()

@@ -239,15 +239,21 @@ module RubySuite
       payload = File.join(directory, 'payload.txt')
       File.binwrite(payload, "first archive\n")
       completed("CREATE RESOURCE #{resource};")
+      # ANCHOR: upload
       execution = session.prepare("UPLOAD RESOURCE #{resource} VERSION '#{directory}';")
       uploaded = session.execute(execution, cancel: RubySuite.deadline)
       assert_equal NX::Disposition::COMPLETED, uploaded.disposition, uploaded.message
       assert_nil uploaded.upload_failure
-      assert_equal NX::Disposition::COMPLETED, session.execute(execution, cancel: RubySuite.deadline).disposition
+      # The same execution sends the same archive under the same upload identity, so it completes
+      # again instead of installing a second version.
+      again = session.execute(execution, cancel: RubySuite.deadline)
+      assert_equal NX::Disposition::COMPLETED, again.disposition, again.message
+      assert_nil again.upload_failure
       File.binwrite(payload, "another archive\n")
       refused = session.execute(execution, cancel: RubySuite.deadline)
       assert_equal NX::Disposition::FAILED, refused.disposition
       assert_equal NX::UploadFailure::IDENTITY_CONFLICT, refused.upload_failure
+      # ANCHOR_END: upload
     end
   end
 end
