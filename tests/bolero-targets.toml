@@ -4665,10 +4665,10 @@ test_target = "test:metrics_report_properties"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/licensing-protocol/src/__fuzz__/representation_properties__bolero_protocol_json_roundtrip/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "licensing-protocol-json-roundtrip"
-invariant = "Every current signed decision status, operation, stream ticket, trust document, decision and trust-bundle response, key, condition and problem detail preserves the complete typed value and canonical payload bytes, including Unicode, optional fields and unknown external values."
+invariant = "Every current signed decision status, operation, stream ticket, trust document, proof of life, decision and trust-bundle response, key, condition and problem detail preserves the complete typed value and canonical payload bytes, including Unicode, optional fields and unknown external values."
 manifest = "Cargo.toml"
 max_input_bytes = 256
 package = "nervix-licensing-protocol"

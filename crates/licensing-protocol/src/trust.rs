@@ -16,7 +16,7 @@ use thiserror::Error;
 use crate::{
     document::{Document, DocumentLimits, DocumentType, SignatureSet, UnverifiedDocument},
     documents::{
-        Decision, EmbeddedTrustBundle, RootSet, RootSuccession, SignedTrustDocument,
+        Decision, EmbeddedTrustBundle, ProofOfLife, RootSet, RootSuccession, SignedTrustDocument,
         TrustBundleResponse, TrustDocuments, WorkingKeyAuthorization, WorkingKeyRevocation,
         WorkingKeyUse,
     },
@@ -46,8 +46,12 @@ pub enum TrustError {
     RootEpoch,
     #[error("the root succession must advance exactly one epoch")]
     EpochGap,
-    #[error("the trust document uses an unsupported protocol")]
+    #[error("the root-signed document uses an unsupported protocol")]
     Protocol,
+    #[error("the proof of life is not signed by a root of a trusted epoch")]
+    UnknownRoot,
+    #[error("the proof of life names a root or root epoch other than the root that signed it")]
+    ProofRoot,
     #[error("the authorization's key identity does not match its public key")]
     KeyIdentity,
     #[error("the working-key authorization has an inverted validity window")]
@@ -580,6 +584,48 @@ impl TrustState {
 
     pub fn original_documents(&self) -> &TrustDocuments {
         &self.original
+    }
+
+    /// Verifies a root custodian's proof of life (licensing specification §5.5): a compact JWS of
+    /// the proof-of-life type whose signature verifies under a root of a trusted epoch, whose
+    /// payload names that root, and whose named epoch's root set holds it. A root that a
+    /// succession carries into a later epoch may name either epoch.
+    pub fn verify_proof_of_life(
+        &self,
+        compact: &str,
+        limits: DocumentLimits,
+    ) -> Result<ProofOfLife, Report<TrustError>> {
+        let parsed = UnverifiedDocument::parse(compact, DocumentType::ProofOfLife, limits)
+            .change_context(TrustError::Document)?;
+        // A key identity is its key's own thumbprint, so every epoch holding it holds the same
+        // public key; the first one found verifies the signature.
+        let mut signing_root = None;
+        for roots in self.roots.values() {
+            if let Some(key) = roots.keys.get(parsed.key_id()) {
+                signing_root = Some(key);
+                break;
+            }
+        }
+        let Some(signing_root) = signing_root else {
+            return Err(Report::new(TrustError::UnknownRoot));
+        };
+        let proof: ProofOfLife = parsed
+            .verify(signing_root)
+            .change_context(TrustError::Document)?;
+        if proof.protocol != 1 {
+            return Err(Report::new(TrustError::Protocol));
+        }
+        if &proof.kid != parsed.key_id() {
+            return Err(Report::new(TrustError::ProofRoot));
+        }
+        let named_epoch_holds_the_root = match self.roots.get(&proof.root_epoch) {
+            Some(roots) => roots.keys.contains_key(&proof.kid),
+            None => false,
+        };
+        if !named_epoch_holds_the_root {
+            return Err(Report::new(TrustError::ProofRoot));
+        }
+        Ok(proof)
     }
 
     pub fn verify_decision(
