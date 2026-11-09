@@ -122,10 +122,7 @@ use ownership_handoff::{FORCED_OWNERSHIP_RECOVERY_BUDGET, ForcedOwnershipRecover
 use public_listener::{PublicListener, PublicListenerKind};
 #[cfg(feature = "testing")]
 use scheduling::VOTER_OBSERVATION_GRACE;
-use scheduling::{
-    KafkaPartitionWatcherKey, KafkaPartitionWatcherTask, LEADER_KAFKA_PARTITION_WATCH_INTERVAL,
-    StartupVoterObservations,
-};
+use scheduling::{StartupVoterObservations, run_kafka_partition_watchers};
 use session::grpc::SessionGrpcService;
 pub use session_service::SessionServiceImpl;
 use session_service::{
@@ -2706,34 +2703,7 @@ impl Application {
         let kafka_schedule_service = service.clone();
         let kafka_schedule_shutdown = shutdown.clone();
         background_tasks.push(nervix_primitives::task::spawn(async move {
-            let mut schedule_rx = kafka_schedule_service.inner.consensus.subscribe_schedule();
-            let mut tasks: HashMap<KafkaPartitionWatcherKey, KafkaPartitionWatcherTask> =
-                HashMap::new();
-
-            loop {
-                nervix_primitives::task::consume_budget().await;
-                let schedule = kafka_schedule_service
-                    .inner
-                    .consensus
-                    .current_schedule()
-                    .await;
-                kafka_schedule_service
-                    .reconcile_kafka_partition_watchers(&schedule, &mut tasks)
-                    .await;
-                nervix_primitives::select! {
-                    _ = kafka_schedule_shutdown.cancelled() => break,
-                    changed = schedule_rx.changed() => {
-                        if changed.is_err() {
-                            break;
-                        }
-                    }
-                    _ = sleep(LEADER_KAFKA_PARTITION_WATCH_INTERVAL) => {}
-                }
-            }
-
-            for (_, watcher) in tasks {
-                watcher.task.stop().await;
-            }
+            run_kafka_partition_watchers(kafka_schedule_service, kafka_schedule_shutdown).await;
         }));
 
         let (interconnect_relay_payload_lane, interconnect_relay_payload_rx) =
