@@ -1066,6 +1066,16 @@ test-wire-schema-lists *args: build-web-console wasm-processor-guests download-o
     cargo test --package nervix-scenarios --test scenarios -- \
         --input tests/features/runtime/wire_schema_lists.feature "$@"
 
+# Create window processors and correlators through the web console's visual forms on in-process
+# one- and three-node clusters, with only the in-process server's prerequisites.
+[positional-arguments]
+test-visual-window-correlator *args: build-web-console wasm-processor-guests download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/web-console/visual_create_window_correlator.feature "$@"
+
 # Exercise coordinated WASM guest-state resets through in-process nodes: the RESET statement on the
 # session's active domain, its retries and refusals, and the operator and guest-requested resets.
 [positional-arguments]
@@ -4730,6 +4740,11 @@ test-chaos-output-boundary selection="all":
 # Check when a run adopts the verifier self-check its suite executed instead of executing its own.
 test-chaos-verifier-self-check:
     exec bash scripts/chaos/tests/verifier-self-check-self-test.sh
+
+# End a verifier self-check at its deadline and by its controller while the production rate probe
+# holds its namespace owners, and prove nothing of the check outlives it. Needs Docker.
+test-chaos-verifier-cancellation:
+    exec bash scripts/chaos/tests/verifier-cancellation-self-test.sh
 
 # Preserve the package probe's native refusal and exact retained container lifetime.
 test-chaos-image-package:

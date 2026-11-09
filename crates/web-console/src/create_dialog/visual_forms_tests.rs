@@ -168,7 +168,7 @@ fn junction_and_reingestor_render_ordered_route_and_state_controls() {
         signals.junction.update(|draft| {
             draft.choose_unbranched();
             draft.select_input(&node(ModelKind::Relay, "incoming"));
-            draft.add_input();
+            draft.from.add();
             draft.add_state();
             draft.active_state_mut().assured("state exists").policy =
                 StatePolicyDraft::Default(Vec::new());
@@ -297,7 +297,7 @@ fn processor_choices_follow_branch_schema_and_incoming_state_context() {
             ChoiceControl::ProcessorInputRelay,
             ChoiceValue::Model(node(ModelKind::Relay, "orders")),
         );
-        signals.junction.update(|draft| draft.add_input());
+        signals.junction.update(|draft| draft.from.add());
         let another = signals
             .choice_query(ChoiceControl::ProcessorInputRelay)
             .assured("first input selected");
@@ -1634,7 +1634,7 @@ fn deduplicator_and_reorderer_forms_edit_ordered_keys_after_their_node_branch() 
             signals
                 .choice_query(ChoiceControl::ProcessorInputRelay)
                 .err(),
-            Some("Open a junction, deduplicator, reorderer or reingestor form first")
+            Some("Open a processor form first")
         );
         assert!(!ChoiceControl::ProcessorBranch.applies_to(CreateKind::Emitter));
         assert_eq!(CreateKind::Emitter.processor_family(), None);
