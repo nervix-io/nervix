@@ -349,6 +349,9 @@ in which order. The read counts every held row and its logical Arrow bytes, the 
 charges against `MAX BATCH SIZE`. A continuation names every read branch's lifetime and the events
 it handled, so a page resumed after any branch took another batch, released rows or ended is
 refused as `stale_continuation`. A branch that is stopping refuses the read as `owner_unavailable`.
+A unit that has not yet installed every branch its node held, while it restores them after its
+task starts or takes the unit over, refuses the read as `not_ready` instead of reporting the
+branches it has not restored as empty.
 
 `DESCRIBE REORDERER` reports, for each execution unit, the concrete branches the reorderer runs and
 the rows and bytes they hold, after its placement lines:
@@ -361,7 +364,16 @@ state bytes: 2048
 
 A partitioned reorderer prefixes each line with its partition, as in `partition 3 rows: 1`. A unit
 whose owner cannot be read reports the typed refusal in place of each count, as in
-`rows: unavailable (owner_unavailable)`.
+`rows: unavailable (owner_unavailable)`, and a unit still restoring its branches reports
+`rows: unavailable (not_ready)`. A stopped domain keeps its placement but runs no unit, so a stopped
+reorderer reports every count of every unit as unavailable, and its `SHOW REORDERER ... STATE` is
+refused, both as `owner_unavailable`:
+
+```text
+branches: unavailable (owner_unavailable)
+rows: unavailable (owner_unavailable)
+state bytes: unavailable (owner_unavailable)
+```
 
 ## Window processor
 
