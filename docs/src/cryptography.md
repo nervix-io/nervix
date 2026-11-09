@@ -27,8 +27,8 @@ It owns the scope of:
 - password and key derivation.
 
 The crate owns TLS provider selection, SHA-256 and SHA-512 digests, secure randomness, ECDSA
-P-256/SHA-256 and Ed25519 signing. Password derivation and the unclassified hashes still have the
-counted call sites below.
+P-256/SHA-256 and Ed25519 signing, and PBKDF2-HMAC-SHA-512 password derivation. Unclassified hashes
+still have the counted call sites below.
 The one-shot digests use `aws_lc_rs::digest`. Incremental SHA-256 wraps the maintained native
 `SHA256_CTX` from the same AWS-LC module, keeping its state on the stack; the EVP context used by
 `aws_lc_rs::digest::Context` allocates algorithm state. The direct `aws-lc-sys` pin moves together
@@ -42,7 +42,7 @@ with `aws-lc-rs` and librdkafka, preserving the single-module rule.
 | ECDSA signatures and keys | `nervix_crypto::ecdsa` owns P-256/SHA-256 fixed `r‖s` signing and verification, PKCS#8 v1 key generation/import/export, and uncompressed public-point coordinates. |
 | Backend status | `nervix_crypto::provider::module_mode` reports the linked AWS-LC module's runtime FIPS status as `ModuleMode`, independently of TLS algorithm selection. |
 | Secure randomness | `nervix_crypto::random` obtains bytes and unsigned 64-bit values from AWS-LC's operating-system-seeded generator, for interconnect entropy and password salts. |
-| Password derivation | Argon2, for user passwords. |
+| Password derivation | `nervix_crypto::password` uses AWS-LC PBKDF2-HMAC-SHA-512 and its constant-time verifier. |
 | NATS user authentication | `nervix-crypto` prepares the Ed25519 signing key and signs the nonce with AWS-LC. The NATS connector owns seed and credentials decoding, public-key encoding and the driver callback. |
 | Other digests | BLAKE3, for the non-security content checks, identities, fingerprints, sampling and sketches in the classification register below. |
 
@@ -52,7 +52,7 @@ The boundary's random fill returns only a complete value. AWS-LC's `RAND_bytes` 
 if sufficient entropy cannot be obtained, and otherwise returns success; it provides no partial,
 default or deterministic substitute. The transport still accepts an environment-owned entropy
 callback for deterministic simulation, without changing the production cryptographic generator.
-Password salts retain the password-hash library's recommended length and base64 representation.
+Password credentials carry a 128-bit salt and a 64-byte digest as fixed byte arrays, with a typed algorithm and validated iteration count. No text password-hash format is stored.
 
 The interconnect uses TLS 1.3 with `TLS_AES_256_GCM_SHA384` and
 `TLS_AES_128_GCM_SHA256`, and the `secp256r1`, `secp384r1` and `X25519MLKEM768` key
@@ -154,6 +154,10 @@ links, with that crate's `ssl` feature, so an upgrade of `aws-lc-rs` that moves 
 `aws-lc-sys` moves the fork in the same change. A second `aws-lc-*-sys` crate, or a second version
 of one, is a defect, and [the gate](#the-count) refuses it.
 
+The Credentials memory class has 19 MiB shared by password work and mounted NATS credentials
+files. Each password operation charges its 64-byte verifier buffer; a file charges its complete
+length until the temporary contents are cleared.
+
 ## Classification Register
 
 A site that uses a non-approved hash records its non-security purpose where it is written, and this
@@ -234,7 +238,6 @@ Nervix's own crates bring:
 
 | Crates | Path | Use | Purpose |
 | --- | --- | --- | --- |
-| `argon2`, with `blake2` | `nervix-server` | User password hashing | Security |
 | `md5` | `nervix-vm` | The expression function `md5()` | Non-security checksum |
 | `blake3` | `nervix-server`, `nervix-backup`, `nervix-consensus`, `nervix-models`, `nervix-roto` | Content checks, identities, fingerprints, sampling and sketches recorded above | Non-security |
 
@@ -405,3 +408,26 @@ Runtime checkpoint digests also identify retained Kafka start offers and immutab
 projections. Their purpose is non-security content checking: detecting changed, truncated or
 mismatched transfer bodies inside authenticated node requests. The existing checkpoint digest
 owner computes and verifies them under bounded execution and memory admission.
+
+## Password Credentials
+
+`PASSWORD_ITERATIONS` is a committed cluster parameter: it promises the cost used when a new
+user is created, rather than describing one node's capacity or a prerequisite for joining.
+Its definition supplies the single default, 210,000, and accepts 1 through 1,000,000 iterations.
+`PasswordCost` validates the same bound during construction, JSON decoding and archive decoding,
+before the credentials executor can receive work. `PasswordCredential` has one current profile,
+PBKDF2-HMAC-SHA-512, with the complete salt, digest and cost. Its debug representation excludes
+salt and digest. Passwords themselves are never persisted.
+
+The consensus publication retains the largest admitted verification cost. Creation-policy changes,
+new users and restored users raise it; lowering the creation policy does not lower verification
+work. An authentication captures that count and its optional user from one immutable publication.
+Known, unknown and invalid names perform two native calls with the same total iteration work:
+verification followed by padding, including one padding iteration. Padding protects users created
+at a smaller cost. Command replay compares the exact credential admitted with its CREATE USER,
+without replacing its salt or digest. Credential work keeps its isolated CPU class and reserves
+the 64-byte allocation of the maintained verifier; native HMAC scratch lives on the worker's
+bounded stack. Cancellation is checked before work and between the two authentication operations.
+
+The ordinary build remains preparation for FIPS, not a validated FIPS module. The cryptographic
+profile does not impose a new minimum password length.

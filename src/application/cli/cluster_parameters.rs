@@ -21,6 +21,8 @@ pub struct ClusterParameterArgs {
     pub tls_cipher_suites: Option<nervix_crypto_policy::TlsCipherSuites>,
     #[arg(long = nervix_models::TlsKeyExchangeGroups::NAME, env = "NERVIX_TLS_KEY_EXCHANGE_GROUPS", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::TlsKeyExchangeGroups, "First-bootstrap comma-separated algorithm names or aliases"))]
     pub tls_key_exchange_groups: Option<nervix_crypto_policy::TlsKeyExchangeGroups>,
+    #[arg(long = nervix_models::PasswordIterations::NAME, env = "NERVIX_PASSWORD_ITERATIONS", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::PasswordIterations, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    pub password_iterations: Option<u64>,
     #[arg(long = nervix_models::DomainDrainTimeout::NAME, env = "NERVIX_DOMAIN_DRAIN_TIMEOUT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::DomainDrainTimeout, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
     pub domain_drain_timeout: Option<HumanDuration>,
     #[arg(long = nervix_models::EntityGateDeadline::NAME, env = "NERVIX_ENTITY_GATE_DEADLINE", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::EntityGateDeadline, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
@@ -45,6 +47,7 @@ impl ClusterParameterArgs {
         Self {
             tls_cipher_suites: seeds.tls_cipher_suites,
             tls_key_exchange_groups: seeds.tls_key_exchange_groups,
+            password_iterations: seeds.password_iterations,
             domain_drain_timeout: seeds.domain_drain_timeout.map(HumanDuration),
             entity_gate_deadline: seeds.entity_gate_deadline.map(HumanDuration),
             max_batch_messages: seeds.max_batch_messages,
@@ -69,6 +72,10 @@ impl ClusterParameterArgs {
         command_line.optional(
             nervix_models::TlsKeyExchangeGroups::NAME,
             self.tls_key_exchange_groups,
+        );
+        command_line.optional(
+            nervix_models::PasswordIterations::NAME,
+            self.password_iterations,
         );
         command_line.optional(
             nervix_models::DomainDrainTimeout::NAME,

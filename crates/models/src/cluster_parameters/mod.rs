@@ -24,7 +24,7 @@ use thiserror::Error;
 
 use crate::{Setting, SettingDefinition};
 
-mod archive;
+pub(crate) mod archive;
 mod durations;
 mod limits;
 mod publication;
@@ -323,6 +323,7 @@ parameter_values! {
     client_batch_rows: ClientBatchRows(u64) => Count,
     tls_cipher_suites: TlsCipherSuites(nervix_crypto_policy::TlsCipherSuites) => AlgorithmNames,
     tls_key_exchange_groups: TlsKeyExchangeGroups(nervix_crypto_policy::TlsKeyExchangeGroups) => AlgorithmNames,
+    password_iterations: PasswordIterations(u64) => Count,
 }
 
 impl ClusterParameterKey {

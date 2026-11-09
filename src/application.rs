@@ -1336,6 +1336,7 @@ impl Application {
                                         runtime_for_reconcile.executor(),
                                         default_user_id.clone(),
                                         password,
+                                        nervix_models::PasswordCost::try_from(consensus_for_reconcile.cluster_parameters().assured("reconciliation starts after cluster policy initialization").values.password_iterations()).assured("committed policy validates the password cost"),
                                     )
                                     .await
                                     {

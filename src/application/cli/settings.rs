@@ -33,6 +33,7 @@ impl SettingsArgs {
         nervix_models::ClusterParameterSeedValues {
             tls_cipher_suites: self.cluster_parameters.tls_cipher_suites,
             tls_key_exchange_groups: self.cluster_parameters.tls_key_exchange_groups,
+            password_iterations: self.cluster_parameters.password_iterations,
             node_unavailability_timeout: self
                 .membership
                 .node_unavailability_timeout

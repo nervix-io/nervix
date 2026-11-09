@@ -351,8 +351,7 @@ that fails authentication ends with `UNAUTHENTICATED`. The console upgrade prese
 credentials in an `Authorization: Basic` header or, because a browser cannot set headers on a
 WebSocket, as the `auth` query parameter; a failure answers `401` with a `Basic` challenge and never
 upgrades. `GET /console/auth` checks credentials without opening a session. Passwords are verified
-against Argon2 hashes held in consensus, on the node's credentials worker under a charge of the
-working memory the stored hash's parameters make Argon2 allocate. That class serves only password
+against typed PBKDF2-HMAC-SHA-512 credentials held in consensus, on the node's credentials worker under a 64-byte verification-buffer charge. Stored iteration counts are validated before admission; the committed creation default is 210,000 and the accepted upper bound is 1,000,000. Its isolated CPU class serves only password
 work, so saturated data, extension or bulk work never delays a login, and concurrent attempts wait
 for it in turn. A node whose credentials class cannot take the verification now answers
 `UNAVAILABLE`, or `503` without an upgrade on the console: the
@@ -370,8 +369,7 @@ replaces that bucket before verification finishes, a refused attempt pays the fr
 One name's traffic never evicts another name's outstanding quota.
 
 Every name costs the node the same work. Credentials whose name names no user, or cannot name one,
-have their password hashed on the credentials worker exactly as creating a user hashes one, under
-the same charge, before they are refused. Neither the answer nor when it arrives tells an unknown
+perform the same verification and padding workload as a known name, under the same charge, before they are refused. The immutable user publication carries the largest admitted cost, so changing the creation policy or restoring a credential cannot make an unknown name cheaper than an existing user. Neither the answer nor when it arrives tells an unknown
 user from a wrong password, and a node whose credentials class cannot take that hash now answers
 `UNAVAILABLE` or `503` for an unknown user as it does for a known one. Repeated refusals use the
 same quota and ordering for both. Failure state retains one bucket per name, creates a bucket only

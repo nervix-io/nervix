@@ -119,6 +119,12 @@ impl<'src> OfferedAssignments<'src> {
     fn new() -> Self {
         Self(vec![
             assignment(
+                ClusterParameterKey::PasswordIterations,
+                Identifier::PasswordIterations,
+                u64_value("integer_literal"),
+                ClusterParameterChange::PasswordIterations,
+            ),
+            assignment(
                 ClusterParameterKey::NodeUnavailabilityTimeout,
                 Identifier::NodeUnavailabilityTimeout,
                 duration_value(),

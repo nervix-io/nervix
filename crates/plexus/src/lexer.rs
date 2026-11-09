@@ -96,6 +96,7 @@ pub enum Identifier {
     ClientBatchRows,
     TlsCipherSuites,
     TlsKeyExchangeGroups,
+    PasswordIterations,
     Headers,
     Secret,
     Platform,
