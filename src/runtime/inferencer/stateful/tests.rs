@@ -383,7 +383,7 @@ fn bolero_stateful_tensor_columns_preserve_shape_and_float_bits() {
 async fn native_refusal_keeps_the_previous_generation_and_other_branches_independent() {
     let mut config = ExecutionConfig::default();
     config.workers.extension_cpu = NonZeroUsize::MIN;
-    config.workers.pending_jobs = NonZeroUsize::MIN;
+    config.workers.pending_jobs = nervix_execution::PendingJobCounts::uniform(NonZeroUsize::MIN);
     let executor = Executor::new(config).expect("one extension worker with one queue place");
     let state = InferencerStatePlan {
         bindings: vec![InferencerStatePortPlan {

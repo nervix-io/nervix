@@ -12,6 +12,8 @@
 source "${script_dir}/recovery-scenario.sh"
 # shellcheck source=node-faults.sh
 source "${script_dir}/node-faults.sh"
+# shellcheck source=materialized-profile.sh
+source "${script_dir}/materialized-profile.sh"
 
 # The lifetimes entities, by the kind their RELOCATE statement spells. The ingestors run apart from
 # the state owner, so a fault on the owner leaves their Kafka consumers in place.
@@ -131,14 +133,7 @@ lifetimes_state() {
     local relay="$1"
     local host="$2"
     local output="$3"
-    local previous_host="${cli_host}"
-    local status=0
-    cli_host="${host}"
-    domain_cli_command "SHOW RELAY ${relay} MATERIALIZED STATE;" >"${output}.txt" 2>&1 || status=$?
-    cli_host="${previous_host}"
-    ((status == 0)) || return 1
-    sed -n 's/^key=\({[^}]*}\) payload=\({[^}]*}\) low=.*$/{"key":\1,"payload":\2}/p' "${output}.txt" \
-        | jq -s '.' >"${output}.json"
+    materialized_profile_read "${relay}" "${host}" "${output}"
 }
 
 # True when RELAY, read through HOST, holds exactly the BRANCH=VERSION pairs given, where a VERSION

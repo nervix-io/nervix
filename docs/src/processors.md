@@ -732,6 +732,11 @@ Relays on each side share one declared schema; left and right schemas may differ
 `FILTER WHERE`, `INHERIT`, bare RHS field reads, `input`, and a separate `OUTPUT` block.
 Correlations occur only within one concrete branch.
 
+A record that finds no partner within `MAX TIME` of its arrival leaves the correlation through its
+side's `ON CORRELATION TIMEOUT` action, written left side first: `DROP` discards it, and
+`SEND TO <relay>` forwards it unchanged, in its own branch, to a relay whose schema is compatible
+with that side's schema.
+
 ### Inspect Pending Records
 
 ```plexus

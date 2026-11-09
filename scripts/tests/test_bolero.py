@@ -544,6 +544,7 @@ class InventoryTests(unittest.TestCase):
         }
         for target, version in {
             "benchmark-metrics-report": 1,
+            "node-settings-command-line": 8,
             "ingestor-describe-envelope": 11,
             "plexus-model": 60,
             "plexus-archive-model": 63,
@@ -575,6 +576,7 @@ class InventoryTests(unittest.TestCase):
             "inferencer-state-snapshots-malformed": 1,
             "inferencer-native-snapshot-projection": 1,
             "console-emitter-drafts": 5,
+            "console-processor-drafts": 5,
             "client-requests": 11,
         }.items():
             with self.subTest(target=target):

@@ -1,7 +1,8 @@
 Feature: Interconnection observability
 
   Scenario Outline: Interconnection series are exposed with bounded dimensions
-    Given a <cluster_size> node nervix cluster is started
+    Given <node_id> starts with execution-bulk-window-memory-bytes = 16MiB
+    And a <cluster_size> node nervix cluster is started
     Then node "<node_id>" observability path "/metrics" eventually responds with 200 and contains "nervix_interconnect_connections"
     And node "<node_id>" observability path "/metrics" eventually responds with 200 and contains "nervix_interconnect_streams"
     And node "<node_id>" observability path "/metrics" eventually responds with 200 and contains "nervix_interconnect_pending_operations"
@@ -35,7 +36,8 @@ Feature: Interconnection observability
       | 3            | node-3  |
 
   Scenario: Occupied bulk execution leaves the reserved management budget intact
-    Given a 3 node nervix cluster is started
+    Given node-2 starts with execution-management-memory-bytes = 8MiB
+    And a 3 node nervix cluster is started
     When bulk execution on node "node-2" is occupied
     Then node "node-2" observability metric "nervix_execution_jobs_running" with labels eventually reaches at least 1
       """

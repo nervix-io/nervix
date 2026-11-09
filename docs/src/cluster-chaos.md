@@ -83,7 +83,8 @@ Bolero obligation, and none of those discharges a suite.
 | `scripts/chaos/*-scenario.sh` | Each scenario's faults, observations and verdicts |
 | `node-faults.sh`, `network-faults.sh`, `link-degradation.sh`, `link-ping-helper.sh`, `link-rate-helper.sh` | The fault primitives: process faults through Pumba and Docker, and one netem effect on a container's egress toward chosen addresses; partition plans, rules, effect matrices, preflight and healing; link degradation and its ICMP and transfer probes |
 | `mixed-plan.sh`, `mixed-plan.jq` | Seeded plan generation, plan validation and default coverage |
-| `verify-*.sh` | The external verifiers: ledgers, load pacing, Docker events, and crash, pause, partition, degraded-link, recovery, restart, drain, state, clock, mixed, endpoint, lifetimes and diagnostic evidence |
+| `verify-*.sh` | The external verifiers: ledgers, load pacing, Docker events, and crash, pause, partition, degraded-link, recovery, restart, drain, state, clock, mixed, endpoint, lifetimes, outward TLS and diagnostic evidence |
+| `outward-tls.sh`, `tls-probe.py`, `tls-probe-openssl.cnf` | The three-node leader crash's outward TLS observations, the restricted TLS probe that runs inside the pinned Python image, and the probe's OpenSSL configuration |
 | `continuous-load.sh`, `observe-nodes.sh`, `observe-clock.sh` | The paced producer, the listener observer and the domain-clock observer, each running inside a container |
 | `endpoint-client.py` | The [endpoints](#endpoints) scenario's HTTP and WebSocket client, which runs inside the pinned Python image and writes its ledger of attempts to its log |
 | `binding_client.py`, `binding_evidence.py`, `binding-scenario.sh`, `binding-image.sh`, `install_binding.py` | The binding endpoint scenario's Python-package producer/consumer, its exact effect and settlement verdict, fault coordination, source/wheel identity checks and offline image preparation |
@@ -92,7 +93,7 @@ Bolero obligation, and none of those discharges a suite.
 | `verifier-self-check.sh` | The verifier self-check's bound, the identity of the chaos scripts and the judgement of the record a suite hands its runs |
 | `cleanup.sh` | Removal of one run's labeled resources, with optional evidence capture |
 | `suite.sh`, `suites.json`, `suite-report.jq` | The suites: catalog, shard budgets, runs, verdict records, summaries and suite cleanup |
-| `compose.yaml`, `compose.diagnostic.yaml` | The deployment and its diagnostic overlay |
+| `compose.yaml`, `compose.diagnostic.yaml`, `compose.outward-tls.yaml` | The deployment, its diagnostic overlay and the outward TLS overlay of a three-node leader crash |
 | `compose.fresh-cluster.yaml`, `compose.fresh-cluster.diagnostic.yaml` | The second cluster that a [fresh-cluster restore](#restore-into-a-fresh-cluster) starts, and its diagnostic overlay |
 | `fixtures/` | The Plexus graphs, record generators, the WASM guest and an explicit mixed plan |
 | `tests/` | The runner's self-tests |
@@ -161,7 +162,7 @@ digest:
 | Apache Kafka | 3.9.1 | Multi-architecture index digest | The broker, and topic and consumer-group administration |
 | kcat | 1.7.1 | Its single linux/amd64 manifest, the only one published | The continuous loads, the baseline producer and the topic readers |
 | Alpine | 3.22.6 | Multi-architecture index digest | Listener, readiness and metrics probes, the listener observer, link probes and Docker event markers |
-| Python | 3.13.18 on Alpine 3.24 | Multi-architecture index digest | The [endpoints](#endpoints) scenario's HTTP and WebSocket client, which uses only the standard library |
+| Python | 3.13.18 on Alpine 3.24 | Multi-architecture index digest | The [endpoints](#endpoints) scenario's HTTP and WebSocket client and the three-node [leader crash](#crash-scenarios)'s TLS probe, which use only the standard library |
 | PostgreSQL | 17.11 on Alpine 3.24 | Multi-architecture index digest | The [lifetimes](#lifetimes) scenario's database for its pooled table emitters, with its data on a tmpfs |
 | Pumba | 1.2.1 | Multi-architecture index digest | Every process and network fault |
 | Pumba nettools | The helper published with Pumba 1.2.1 | Multi-architecture index digest | `tc` and `iptables` inside a node's network namespace |
@@ -303,6 +304,7 @@ half of the range. The manifest records the subnet, the dynamic range and the no
 | `load`, `state-load`, `paced-load`, `life-load` | kcat | The continuous loads |
 | `endpoint-binding` | Prepared Python binding image | The [binding endpoints](#binding-endpoints) scenario's package client |
 | `endpoint-load`, `endpoint-websocket` | Python | The [endpoints](#endpoints) scenario's HTTP and WebSocket clients |
+| `tls-probe` | Python | The three-node [leader crash](#crash-scenarios)'s disposable TLS probes of the web console's HTTPS listeners |
 | `postgres` | PostgreSQL | The [lifetimes](#lifetimes) scenario's database, with its data on a tmpfs |
 | `observer` | Alpine | The independent listener observer |
 | `clock-observer` | Nervix | One domain-clock observer per node |
@@ -325,6 +327,9 @@ Every node listens for:
 - the web console on 47420
 - observability on 9090
 - the interconnect on 47395, with the run's TLS material
+
+A three-node `leader-crash` run also serves the web console over HTTPS on 47421, with the node's run
+certificate, for its [outward TLS observations](#crash-scenarios).
 
 Each node also has these container settings:
 
@@ -352,7 +357,8 @@ inspection where a verdict depends on them:
 Each run generates its own certificate authority, RSA 2048 and valid for two days. A subject
 attribute holds at most 64 characters while a run ID may have 96, so the authority's subject names
 a digest of the run ID. Each node certificate names the node's host name and its
-`nervix://cluster/<cluster>/node/<node>` identity. The private keys exist only in the run directory.
+`nervix://cluster/<cluster>/node/<node>` identity, and a three-node `leader-crash` run also presents
+it on the web console's HTTPS listener. The private keys exist only in the run directory.
 The run removes them when it ends, and suite cleanup removes those of any run whose exit trap never
 ran.
 
@@ -416,6 +422,7 @@ The focused checks run parts of the runner on their own:
 | `just test-chaos-network-preflight [CASE]` | The real network-fault preflight and its refusal controls; a case name runs one control with the live installation, effect and healing check |
 | `just test-chaos-rate-probe` | The production link transfer and ICMP probes, with delayed Docker launches and starts, stalled, partial, lost and refused transfers, failed log reads and cleanup, and invalid clocks |
 | `just test-chaos-degraded-evidence` | The degraded-link controller, parser and effect limits at 40 and 400 packets |
+| `just test-chaos-outward-tls` | The [outward TLS verdict](#crash-scenarios) against observations that pass and that contradict the policy: committed lists that name or omit the probed members, a stale, different or unreported running record, a revision that did not advance, a console target that answered against expectation, failed or is missing, an interconnect that admitted the probe or is missing, an unrestricted offer, and malformed descriptions. Also the probe against local servers that admit both members, exclude the suite, exclude the group or present another name's certificate, against a port that refuses the connection, and without its OpenSSL configuration |
 | `just test-chaos-hold-quorum` | The mixed-instability hold check for a degraded link that leaves every voter in a quorum |
 | `just test-chaos-pause-delivery` | A failover-length pause's emitter check on the retained leader and relay-owner pause timelines: the ingestor consumer group's handoff from a paused ingestor owner, read before the relocated consumer joins and after the handoff deadline; a handoff that never comes or comes after the unpause; a stalled emitter; the window that opens at placement when the consumer stayed in place; and emitter progress sampled after the unpause |
 | `just test-chaos-output-boundary [SELECTION]` | The suite preparation and baseline execution budgets and the Kafka end-offset observations, without Docker |
@@ -1381,6 +1388,40 @@ after the fault must be acknowledged. A canary attempted during the outage recor
 acknowledged or uncertain, and its final effect. An acknowledged one whose effect is absent after
 recovery fails the run.
 
+A three-node `leader-crash` run also qualifies the committed [outward TLS
+policy](cryptography.md#algorithm-policy) through its failover. It adds `compose.outward-tls.yaml`:
+every node also serves the web console over HTTPS on 47421 with its run certificate, and
+`tls-probe.py`, in the pinned Python image, offers each node only TLS 1.3 with
+`TLS_CHACHA20_POLY1305_SHA256` and `X25519`, the members the `fips` alias excludes. The probe takes
+its TLS 1.3 cipher suites from `tls-probe-openssl.cnf`, reads its offer back and refuses to judge
+when the offer is anything else. `verify-outward-tls-evidence.sh` judges each observation: a public
+`DESCRIBE CLUSTER`, and one probe of the web console and one of the interconnect, on 47395, of every
+node it names. The interconnect's algorithms are fixed and never follow the outward policy, so every
+observation requires it to refuse the probe with a `handshake_failure` alert, also while the
+committed policy admits both members. The observations are:
+
+1. Before the kill, every node refuses the probe with a `handshake_failure` alert under the
+   bootstrap `fips` policy, within 60 seconds.
+2. From the kill on, the controller commits `TLS_CIPHER_SUITES = ('fips',
+   'TLS13_CHACHA20_POLY1305_SHA256')` and `TLS_KEY_EXCHANGE_GROUPS = ('fips', 'X25519')` through the
+   first survivor. It retries each unacknowledged attempt for up to 90 seconds, in the background,
+   so the statement crosses the election and re-placement without changing their measured times. A
+   change must be acknowledged while the killed leader is still down.
+3. Once delivery resumes, the survivors run the new committed revision and accept the probe, within
+   60 seconds.
+4. After the restart and settlement, every node, the restarted former leader included, runs the
+   same revision and accepts the probe, within 90 seconds. The description is read through an
+   authenticated session to the restarted node, whose stored PBKDF2 credential must verify after the
+   restart.
+5. The `fips` policy is committed again, and every node runs it and refuses the probe, within 60
+   seconds.
+
+Each observation also requires every named node's running record to equal the committed lists at
+the committed revision. The observations stay in `crash/outward-tls/`, and
+`results/outward-tls.json` summarizes the revisions, the nodes whose interconnect refused in each
+observation, the commit attempts and how long after the kill the change was acknowledged. A one-node run and the other crash scenarios start no HTTPS listener
+and make no TLS observation.
+
 `results/crash-progress.json` measures election, placement, outage, listener and settlement times;
 election and placement are `null` where the fault does not require them. The exact ledger accepts
 replay duplicates.
@@ -1684,6 +1725,23 @@ restart experiments on one host. The host, its page cache and its disks survive,
 nothing about host power loss or storage corruption.
 
 ### Stateful
+
+The stateful and lifetimes scenarios read their materialized profiles through
+`SHOW RELAY ... MATERIALIZED STATE FORMAT JSON`. Their shared `materialized-profile` reader
+accepts only a complete page for the requested relay in `chaos_baseline`: every execution unit
+must be present exactly once, section and complete row/branch counts must agree, and no
+continuation or omitted rows may remain. It projects the schema's typed cells into the existing
+key/payload observations, retaining every profile field and both ingestion watermark columns.
+Empty partition units remain part of the completeness check. A complete empty page can establish
+branch absence; missing or unreadable evidence cannot.
+
+Each read keeps the CLI transcript as `.txt`, its public envelope as `.inspection.json`, and the
+verified key/payload rows as `.json`. A malformed or incomplete successful reply ends the
+controller with a reader diagnostic in `.reader-error.txt`, before a profile wait or absence
+predicate can mistake it for product state. A failed CLI attempt remains retryable, restores the
+previous host and discards any prior projected rows at that path. The canonical stateful and
+lifetimes verifier self-tests exercise both production readers with complete single-unit and
+partitioned pages, exact profiles, empty state and unreadable observations.
 
 ```bash
 just chaos run stateful --image nervix:debian
@@ -3112,6 +3170,7 @@ from the fixed source tree onto the same official image, and then requalified on
 | [Backup 07](https://app.clickup.com/t/86bc8dbxv) | Backup cycles with exact deduplicator and window verdicts; quiesced backups under an owner crash, a leader crash, an owner partition and a rolling restart of the download; a restore into a fresh three-node cluster; and soak shards 10 and 11, which run them |
 | [Backup: Qualify restores through a leader crash, a partitioned coordinator, an owner restart and concurrent staging volume](https://app.clickup.com/t/86bckvq84) | Restores held in staging through a leader crash, an isolation of the coordinating leader from its peers and the client, a state owner's crash, and a state owner's crash while a failed restore awaits reclamation; the measured staging volume of three concurrent restores; and their entries in soak shards 10 and 11 |
 | [Typed Ratchet 10](https://app.clickup.com/t/86bc9etg7) | The [endpoints](#endpoints) and [lifetimes](#lifetimes) scenarios, which run the workloads that Typed Ratchet 04, 09, 11 and 12 handed to external qualification, and their smoke shards 2 and 3 and soak shards 12 to 14 |
+| [FIPS Prep 08](https://app.clickup.com/t/86bcwmb4r) | The outward TLS observations of the three-node [leader crash](#crash-scenarios): a policy change committed while the killed leader is down, judged by real handshakes on every node's console and fixed interconnect before the fault, during the outage, after the restart and after the `fips` policy returns |
 
 **Product defects.** The suite found these product defects. Each was fixed through its own task
 and requalified with the scenario that found it:

@@ -145,8 +145,9 @@ current failure gauge in `/metrics` and `DESCRIBE EMITTER`.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
 Roto UDFs, ingestors and emitters for every connector and entity pair, junctions, deduplicators,
-reorderers, reingestors, and session subscriptions; use the same web-console chapter for their typed
-fields, resource versions, program editors, reference lookup, and transaction behavior.
+reorderers, window processors, correlators, reingestors, and session subscriptions; use the same
+web-console chapter for their typed fields, resource versions, program editors, reference lookup,
+and transaction behavior.
 
 For materialized relay inspection, read [Relay → Inspect Materialized State](../../../docs/src/relay.md#inspect-materialized-state)
 for selector, LIMIT/AFTER and FORMAT clause order, typed rows, sensitivity and stale continuations.
@@ -932,3 +933,7 @@ instead of inventing syntax.
 For password creation policy, read [Node Settings → Password Creation Policy](../../../docs/src/node-settings.md#password-creation-policy)
 and [Cryptography → Password Credentials](../../../docs/src/cryptography.md#password-credentials).
 Use the committed cluster setting for creation cost; preserve the documented startup, replay and restore rules.
+
+For node CPU admission, memory ceilings, native runtime threads, client byte credit and derived
+watermarks, read [Node Settings → Execution Capabilities](../../../docs/src/node-settings.md#execution-capabilities)
+before suggesting local overrides or interpreting DESCRIBE CLUSTER capacity lines.

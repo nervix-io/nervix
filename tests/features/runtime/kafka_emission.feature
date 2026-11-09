@@ -521,8 +521,8 @@ Feature: Kafka emission
       {"user_id":2}
       """
     # The broker refuses the first record, which fills the producer queue of one record, until the
-    # emitter stops waiting for it at ACK TIMEOUT. The producer gives that copy up by then, at its
-    # next timeout scan a second later at most, so it holds no copy for the broker's recovery to
+    # emitter stops waiting for it at ACK TIMEOUT. The emitter then gives up the copy its producer
+    # holds before it reports the record unresolved, so no copy is left for the broker's recovery to
     # deliver beside the one the emitter's next attempt sends.
     Then within "60s" DESCRIBE EMITTER "kafka_stale_copy" on the leader node reports a transient error with its next attempt at most "8s" away
     When the mock Kafka broker accepts writes again
@@ -534,6 +534,78 @@ Feature: Kafka emission
       """
       {"user_id":1}
       {"user_id":2}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  # The client sends a refused record again every hundredth of a second, and the broker takes writes
+  # again the moment the emitter stops waiting for the record at ACK TIMEOUT. The emitter gives up
+  # the copy its producer holds before it reports the record unresolved, so the broker stores only
+  # the copy the emitter's next attempt sends.
+  @kafka_emitter_given_up_copy @emitter_outcomes
+  Scenario Outline: A Kafka record its broker refused until ACK TIMEOUT reaches the broker once when the broker takes writes again at that moment
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And a mock Kafka broker serves topic "given_up_{{test_id}}"
+    And the mock Kafka broker refuses every write
+    And mock Kafka topic "given_up_{{test_id}}" is observed
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( seq I64 );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE VHOST edge given-up-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO events
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE KAFKA CLIENT kafka_sink CONFIG {
+        'bootstrap.servers' = '{{mock_kafka_addr}}',
+        'retry.backoff.ms' = '10',
+        'retry.backoff.max.ms' = '10'
+      };
+      CREATE KAFKA TOPIC EMITTER given_up FROM events
+        TO kafka_sink TOPIC 'given_up_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 2s RETRY POLICY BACKOFF 5s MAX 5s
+          ENCODE USING event_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "given-up-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":1}
+      """
+    Then within "60s" DESCRIBE EMITTER "given_up" on the leader node reports a transient error with its next attempt at most "5s" away
+    And the last command output owner is saved as placeholder "confirmation_owner"
+    And node "{{confirmation_owner}}" observability metric "nervix_emitter_confirmation_timeouts_total" with labels eventually reaches at least 1
+      """
+      emitter="given_up"
+      """
+    When the mock Kafka broker accepts writes again
+    Then within "60s" DESCRIBE EMITTER "given_up" on the leader node contains
+      """
+      transient error: -
+      """
+    And within "30s" the observed broker receives exactly these payloads
+      """
+      {"seq":1}
       """
 
     Examples:
@@ -1001,9 +1073,9 @@ Feature: Kafka emission
       | 3            |
 
   # The broker refuses the record until the emitter stops waiting for it at ACK TIMEOUT, and the
-  # producer gives that copy up by its next timeout scan, as the stale-copy scenario above
-  # describes. The host keeps the envelope it evaluated when it admitted the record, so the attempt
-  # after the broker accepts writes again carries the same record time.
+  # emitter gives up the copy its producer holds, as the stale-copy scenario above describes. The
+  # host keeps the envelope it evaluated when it admitted the record, so the attempt after the
+  # broker accepts writes again carries the same record time.
   @kafka_emitter_record_timestamp @emitter_outcomes
   Scenario Outline: A Kafka record its broker refused keeps its TIMESTAMP when the emitter sends it again
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"

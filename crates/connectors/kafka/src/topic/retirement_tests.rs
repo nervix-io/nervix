@@ -32,7 +32,7 @@ pub(crate) fn single_connector_worker() -> Executor {
         workers: WorkerCounts {
             connector_storage: ConnectorStorageWorkers::resolve(Some(NonZeroUsize::MIN))
                 .assured("one worker fits the primitive permit bound"),
-            pending_jobs: NonZeroUsize::MIN,
+            pending_jobs: nervix_execution::PendingJobCounts::uniform(NonZeroUsize::MIN),
             ..WorkerCounts::default()
         },
         ..ExecutionConfig::default()
