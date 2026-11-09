@@ -812,9 +812,8 @@ impl Statement {
             Self::ResetWasmState(reset) => {
                 let scope = reset.scope.to_canonical_plexus()?;
                 Ok(format!(
-                    "RESET WASM PROCESSOR {} STATE IN DOMAIN {} FOR {scope};",
-                    reset.processor.as_str(),
-                    reset.domain.as_str()
+                    "RESET WASM PROCESSOR {} STATE FOR {scope};",
+                    reset.processor.as_str()
                 ))
             }
             Self::UploadResource(upload) => Ok(format!(

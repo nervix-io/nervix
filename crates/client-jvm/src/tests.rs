@@ -12,6 +12,85 @@ use nervix_primitives::sync::blocking::OnceLock;
 
 static VM: OnceLock<JavaVM> = OnceLock::new();
 
+#[path = "../../../tests/common/native_inspection.rs"]
+mod inspection_fixture;
+
+fn inspection_object<'local>(
+    env: &mut Env<'local>,
+    inspection: nervix_client_host::Inspection,
+) -> jni::errors::Result<jni::objects::JObject<'local>> {
+    let handle = crate::handles::Value::Inspection(nervix_primitives::sync::Arc::new(inspection))
+        .into_handle();
+    // The production Handle constructor owns this allocation and its construction-failure cleanup.
+    env.new_object(
+        jni_str!("io/nervix/client/Nervix$Inspection"),
+        jni_sig!("(J)V"),
+        &[JValue::Long(handle)],
+    )
+}
+
+#[test]
+fn inspection_metadata_and_frames_outlive_their_java_parents() {
+    use nervix_client_core::wire::{StateInspectionResult, StateInspectionStage};
+    use nervix_client_host::Inspection;
+    use nervix_models::Unit;
+
+    vm().attach_current_thread(|env| -> jni::errors::Result<()> {
+        let state = inspection_fixture::page(
+            Unit::try_instance(Unit::MAX_INSTANCE_INDEX)
+                .assured("the largest instance index is valid"),
+            StateInspectionStage::Stored,
+            u64::MAX,
+        );
+        let json = env.new_string(state.to_json())?;
+        let StateInspectionResult::Page(page) = &state.result else {
+            panic!("the fixture is a page");
+        };
+        let frame = env.byte_array_from_slice(page.units[0].sections[0].frames[0].bytes())?;
+        let object = inspection_object(env, Inspection::new(state))?;
+        let result = env.call_static_method(
+            jni_str!("io/nervix/client/Properties"),
+            jni_str!("inspectionPage"),
+            jni_sig!("(Lio/nervix/client/Nervix$Inspection;Ljava/lang/String;[BJ)V"),
+            &[
+                JValue::Object(object.as_ref()),
+                JValue::Object(json.as_ref()),
+                JValue::Object(frame.as_ref()),
+                JValue::Long(Unit::MAX_INSTANCE_INDEX.cast_signed()),
+            ],
+        );
+        if result.is_err() {
+            env.exception_describe();
+            env.exception_clear();
+        }
+        result?;
+        for (index, reason) in inspection_fixture::REJECTIONS.into_iter().enumerate() {
+            let state = inspection_fixture::refused(reason);
+            let json = env.new_string(state.to_json())?;
+            let object = inspection_object(env, Inspection::new(state))?;
+            let result = env.call_static_method(
+                jni_str!("io/nervix/client/Properties"),
+                jni_str!("inspectionRefused"),
+                jni_sig!("(Lio/nervix/client/Nervix$Inspection;Ljava/lang/String;I)V"),
+                &[
+                    JValue::Object(object.as_ref()),
+                    JValue::Object(json.as_ref()),
+                    JValue::Int(i32::try_from(index + 1).assured("nine refusal codes fit i32")),
+                ],
+            );
+            if result.is_err() {
+                env.exception_describe();
+                env.exception_clear();
+            }
+            result?;
+        }
+        Ok(())
+    })
+    .assured(
+        "inspection metadata, exact bytes and retained Java views preserve the shared envelope",
+    );
+}
+
 unsafe extern "C" {
     fn atexit(callback: extern "C" fn()) -> std::ffi::c_int;
 }
@@ -65,6 +144,9 @@ fn vm() -> &'static JavaVM {
                 crate::completion::METHODS,
                 crate::endpoints::METHODS,
                 crate::events::METHODS,
+                crate::inspection::METHODS,
+                crate::inspection::UNIT_METHODS,
+                crate::inspection::SECTION_METHODS,
                 crate::sessions::METHODS,
             ] {
                 // SAFETY: Every descriptor comes from native_method!'s checked static export,

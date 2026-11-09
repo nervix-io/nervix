@@ -265,6 +265,23 @@ The C ABI probes and in-process Rust probe remain independent evidence. Rust cov
 the binding and harness, while sanitizers judge host memory and undefined behavior; Deloxide does
 not observe these separate host processes.
 
+## Typed state inspection
+
+Typed inspection parity for Python, Ruby and JVM runs in
+`tests/features/runtime/native_binding_inspection.feature`: one and three nodes per host, empty
+and refused reads, two sensitive branches through `LIMIT 1`/`AFTER`, complete counts, unit/origin
+metadata, schemas and read-only frames retained after the originating session and outcomes end.
+It is part of `just test-client-conformance` and has the focused
+`just test-native-binding-inspection` runner. The host suites register
+`test_inspection_metadata_and_verified_frames_survive_their_parents` (pytest/minitest) and
+`inspectionMetadataAndVerifiedFramesSurviveTheirParents` (JUnit); the corresponding host guides
+include their `inspection` anchors. Native owner tests additionally check u64 boundaries, all
+refusal variants, exact complete JSON/frame bytes and independent schema and slice lifetimes.
+The shared host property `client-host-inspection-views` is registered for 64 cases with 32-byte
+inputs; it does not add a wire format or synchronization owner.
+`client-python-inspection-enums` separately registers the new bidirectional enum conversions
+for 32 cases with 8-byte inputs; deterministic vocabulary checks name every canonical code.
+
 ## Batch buffers
 
 What the binding copies on the way from a host's buffers to the session and back:
