@@ -326,10 +326,13 @@ impl Request {
         document: &UnverifiedDocument,
         key: &PublicKey,
     ) -> Result<Self, Report<RequestVerificationError>> {
-        document.verify::<Self>(key).map_err(|report| {
-            let context = RequestVerificationError::of(report.current_context());
-            report.change_context(context)
-        })
+        match document.verify::<Self>(key) {
+            Ok(request) => Ok(request),
+            Err(report) => {
+                let context = RequestVerificationError::of(report.current_context());
+                Err(report.change_context(context))
+            }
+        }
     }
 }
 
