@@ -1030,6 +1030,10 @@ check-package-lib package *args:
 test-package-lib package *args:
     cargo test --package {{ package }} --lib -- {{ args }}
 
+# Run the command-line client's unit tests, which live in its binary target.
+test-cli-unit *args:
+    cargo test --package nervix-cli --bin nervix-cli -- {{ args }}
+
 # Package-scoped local evidence, using the canonical runners and complete registered owner records.
 # Normal CI keeps the full model inventories. Deloxide/fuzz CI remain disabled by policy.
 test-rate-limit-properties:
