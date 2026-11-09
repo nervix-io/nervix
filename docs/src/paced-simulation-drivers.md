@@ -11,7 +11,8 @@ emitters](emitters.md#client-emitters), all on one session:
 - `nervix-paced-simulation`, in `examples/paced-simulation/rust`, is built on the [Rust Client
   Library](client-library.md).
 - `examples/paced-simulation/python/paced_simulation.py` uses the native `nervix_client` Python
-  package, which drives the Rust client directly and releases the GIL for blocking calls.
+  package, which drives the Rust client directly and releases the GIL for blocking calls; the
+  [Python Client Library](client-library-python.md) explains the package.
 
 Both take the same options, print the same report and write the same ledger and effect store, so
 either one can continue a run the other began. They are complete programs meant to be copied: the

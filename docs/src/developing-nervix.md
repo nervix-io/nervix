@@ -15,8 +15,9 @@ cd nervix
 ## Prerequisites
 
 The [Client Host Bindings](client-host-bindings.md) architecture chapter maps the C ABI, Python
-wheel, Ruby gem and JVM jar to their shared Rust runtime and ownership contracts. The toolchains
-and preparation commands for those native artifacts are listed below.
+wheel, Ruby gem and JVM jar to their shared Rust runtime and ownership contracts, and states the
+contract of their language-level suites and [guides](client-libraries.md). The toolchains and
+preparation commands for those native artifacts and suites are listed below.
 
 Nervix is developed on Linux x86_64, Linux aarch64, and macOS arm64. The `just` recipes fetch an
 ONNX Runtime build for the host and stop on any other.
