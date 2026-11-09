@@ -287,4 +287,13 @@ expect_setup_rejection 'a verdict needs its boundaries' 'the observed boundaries
 expect_setup_rejection 'a verdict needs its ledger' 'a ledger is missing' \
     "${verifier}" late --traffic "${tmp_dir}" --boundaries "${boundaries}" --result "${tmp_dir}/result.json"
 
+script_dir="${chaos_dir}"
+artifact_dir="${tmp_dir}/profile-controls"
+mkdir -p "${artifact_dir}/results"
+# shellcheck source=../lifetimes-scenario.sh
+source "${chaos_dir}/lifetimes-scenario.sh"
+# shellcheck source=materialized-profile-controls.sh
+source "${chaos_dir}/tests/materialized-profile-controls.sh"
+check_materialized_profile_reader lifetimes
+
 printf '%s\n' 'lifetimes self-test passed'
