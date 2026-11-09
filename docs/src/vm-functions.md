@@ -1148,6 +1148,14 @@ and diagnostics.
 Registry validation compiles the same route with the same compiler when the processor is applied.
 It also rejects `BYTES` arguments and checks the sketch budget.
 
+Cold state inspection projects the same argument program through
+`CompiledWindowRoute::argument_inspection_fields` with the input schema's sensitivity and the
+committed UDF signatures. The resulting fields follow flattened demand/argument order, matching
+`argument_snapshot_schema` and its shared `argument_snapshot_column` names. This does not change
+the private execution program or add work to record processing. Storage-kind names exposed by
+window inspection derive from `WindowAggregateStorageKind`; a count accompanies each name without
+exposing accumulator values or sketch contents.
+
 ### Branch Ownership And Accumulation
 
 A window and every accumulator in it are fields of the live window of exactly one concrete branch.

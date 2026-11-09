@@ -783,15 +783,33 @@ pub(super) async fn decode_window_processor_snapshot(
     schemas: WindowSnapshotSchemas<'_>,
     lifetime: WindowSnapshotLifetime,
 ) -> Result<Option<WindowProcessorStateSnapshot>, Report<WindowSnapshotError>> {
-    let invalid = |issue| Report::new(WindowSnapshotError::Invalid { issue });
     let Some(layout) = layout::WindowCheckpointLayout::parse(payload, executor, lifetime, None)?
     else {
         return Ok(None);
     };
+    let decoded = decode_window_processor_layout(payload, executor, schemas, layout).await?;
+    Ok(Some(decoded.snapshot))
+}
+
+/// Retains decoded input and argument admission while an observer holds their Arrow views.
+pub(in crate::runtime) struct AdmittedWindowSnapshot {
+    pub(in crate::runtime) snapshot: WindowProcessorStateSnapshot,
+    _input: RestoredMaterializedSnapshot,
+    _arguments: RestoredMaterializedSnapshot,
+    pub(in crate::runtime) metadata: Option<nervix_execution::Reservation>,
+}
+
+pub(in crate::runtime) async fn decode_window_processor_layout(
+    payload: &[u8],
+    executor: &Executor,
+    schemas: WindowSnapshotSchemas<'_>,
+    layout: layout::WindowCheckpointLayout,
+) -> Result<AdmittedWindowSnapshot, Report<WindowSnapshotError>> {
+    let invalid = |issue| Report::new(WindowSnapshotError::Invalid { issue });
     let header = &layout.header;
     let input = &payload[layout.input.clone()];
     let arguments = &payload[layout.arguments.clone()];
-    let input = RestoredMaterializedSnapshot::open(
+    let mut input = RestoredMaterializedSnapshot::open(
         executor,
         schemas.input,
         SealedSource::borrowed(executor, input),
@@ -801,7 +819,7 @@ pub(super) async fn decode_window_processor_snapshot(
     .change_context(WindowSnapshotError::Decode {
         section: WindowSnapshotSection::Input,
     })?;
-    let arguments = RestoredMaterializedSnapshot::open(
+    let mut arguments = RestoredMaterializedSnapshot::open(
         executor,
         schemas.arguments,
         SealedSource::borrowed(executor, arguments),
@@ -821,7 +839,11 @@ pub(super) async fn decode_window_processor_snapshot(
         return Err(invalid(WindowSnapshotIssue::Generation));
     }
     let mut entries = Vec::with_capacity(input.records.len());
-    for (index, (input, arguments)) in input.records.into_iter().zip(arguments.records).enumerate()
+    for (index, (input, arguments)) in input
+        .records
+        .drain(..)
+        .zip(arguments.records.drain(..))
+        .enumerate()
     {
         nervix_primitives::task::consume_budget().await;
         if arguments.branch.is_some() {
@@ -845,12 +867,18 @@ pub(super) async fn decode_window_processor_snapshot(
     if entries.is_empty() != header.first_sequence.is_none() {
         return Err(invalid(WindowSnapshotIssue::Sequence));
     }
-    Ok(Some(WindowProcessorStateSnapshot {
+    let snapshot = WindowProcessorStateSnapshot {
         entries,
         next_sequence: header.next_sequence,
         incarnation: header.incarnation,
         accumulators: layout.accumulators,
-    }))
+    };
+    Ok(AdmittedWindowSnapshot {
+        snapshot,
+        _input: input,
+        _arguments: arguments,
+        metadata: None,
+    })
 }
 
 impl ReplicatedWindowProcessorState {

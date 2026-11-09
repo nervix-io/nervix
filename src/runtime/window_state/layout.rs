@@ -33,6 +33,61 @@ pub(in crate::runtime) struct AdmittedWindowLayout {
 }
 
 impl WindowCheckpointLayout {
+    /// Validate an owned publication without copying its sealed bytes or parsing on an async worker.
+    pub(in crate::runtime) async fn open_owned<S>(
+        executor: &Executor,
+        source: S,
+        content: fn(&S) -> Option<&[u8]>,
+        lifetime: WindowSnapshotLifetime,
+    ) -> error_stack::Result<(S, Option<AdmittedWindowLayout>), WindowSnapshotError>
+    where
+        S: Send + 'static,
+    {
+        let payload = content(&source).ok_or_else(|| {
+            Report::new(WindowSnapshotError::Invalid {
+                issue: WindowSnapshotIssue::Header,
+            })
+        })?;
+        let native_bytes = u64::try_from(payload.len())
+            .map_err(|_| Report::new(WindowSnapshotError::Admission))?;
+        let working = Self::admit_metadata(executor, native_bytes)?;
+        let inspecting = executor.clone();
+        executor
+            .run_cpu(CpuClass::Bulk, working, move |memory, cancellation| {
+                cancellation
+                    .check()
+                    .change_context(WindowSnapshotError::Execution)?;
+                let payload = content(&source).ok_or_else(|| {
+                    Report::new(WindowSnapshotError::Invalid {
+                        issue: WindowSnapshotIssue::Header,
+                    })
+                })?;
+                let layout = Self::parse(payload, &inspecting, lifetime, Some(cancellation))?;
+                let admitted = layout.map(|layout| AdmittedWindowLayout {
+                    layout,
+                    _memory: memory,
+                });
+                Ok((source, admitted))
+            })
+            .await
+            .change_context(WindowSnapshotError::Execution)?
+    }
+
+    fn admit_metadata(
+        executor: &Executor,
+        native_bytes: u64,
+    ) -> error_stack::Result<nervix_execution::Reservation, WindowSnapshotError> {
+        let metadata_bytes = native_bytes
+            .checked_mul(8)
+            .ok_or_else(|| Report::new(WindowSnapshotError::Admission))?;
+        let working_bytes = metadata_bytes
+            .checked_add(4 * 64 * 1024)
+            .ok_or_else(|| Report::new(WindowSnapshotError::Admission))?;
+        executor
+            .try_reserve(MemoryClass::RestoreMetadata, working_bytes)
+            .change_context(WindowSnapshotError::Admission)
+    }
+
     pub(in crate::runtime) async fn open(
         executor: &Executor,
         view: &MappedArtifact,
@@ -42,15 +97,7 @@ impl WindowCheckpointLayout {
         // existing lifecycle and materialization owner.
         let native_bytes = u64::try_from(view.length())
             .map_err(|_| Report::new(WindowSnapshotError::Admission))?;
-        let metadata_bytes = native_bytes
-            .checked_mul(8)
-            .ok_or_else(|| Report::new(WindowSnapshotError::Admission))?;
-        let working_bytes = metadata_bytes
-            .checked_add(4 * 64 * 1024)
-            .ok_or_else(|| Report::new(WindowSnapshotError::Admission))?;
-        let working = executor
-            .try_reserve(MemoryClass::RestoreMetadata, working_bytes)
-            .change_context(WindowSnapshotError::Admission)?;
+        let working = Self::admit_metadata(executor, native_bytes)?;
         let inspecting = executor.clone();
         view.inspect(working, move |payload, memory, cancellation| {
             let layout = Self::parse(

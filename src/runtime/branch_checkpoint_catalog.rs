@@ -244,6 +244,14 @@ impl Default for BranchCheckpointCatalog {
 }
 
 impl CatalogRegistration {
+    /// The immutable identity of this registered state, for a read cursor's replacement fence.
+    pub(super) fn inspection_identity(&self) -> [u8; 16] {
+        let mut identity = [0; 16];
+        identity[..8].copy_from_slice(&self.catalog.published.load().epoch.to_be_bytes());
+        identity[8..].copy_from_slice(&self.registration.get().to_be_bytes());
+        identity
+    }
+
     /// Record that the branch state published revision `lsm` for its replicas. A revision that is
     /// not newer than the one recorded last changes nothing.
     pub(super) fn record(&self, lsm: u64) {

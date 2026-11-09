@@ -4,7 +4,7 @@
 //! Layer: test harness.
 //! - **Owns.** The descriptor contracts of a received processor page: its returned rows start at
 //!   the read's resume offset and stay within its row limit, its continuation flag and offset agree
-//!   with its complete counts, it names at most two sections and exactly the sections a
+//!   with its complete counts, it names at most three sections and exactly the sections a
 //!   row-returning read expects, and its runs name sections the page carries, return at least one
 //!   row each and add up to the rows its offset advanced. The body contracts: a section returns no
 //!   more rows than it holds and names a body exactly when it returns rows, so a count-only read
@@ -169,6 +169,44 @@ fn a_page_returns_its_rows_per_section_in_runs_that_add_up_to_the_offset_it_adva
 }
 
 #[test]
+fn window_metadata_counts_as_section_rows_without_advancing_the_retained_row_offset() {
+    let mut request = read(1);
+    request.processor.kind = ModelKind::WindowProcessor;
+    let mut window = pending_page();
+    window.offset = 1;
+    window.sections = vec![
+        section(ProcessorStateSection::Rows, 5),
+        section(ProcessorStateSection::Header, 2),
+        section(ProcessorStateSection::Accumulators, 6),
+    ];
+    window.runs = vec![
+        run(ProcessorStateSection::Header, 2),
+        run(ProcessorStateSection::Accumulators, 6),
+        run(ProcessorStateSection::Rows, 1),
+    ];
+    let payload = vec![
+        (ProcessorStateSection::Rows, Vec::new()),
+        (
+            ProcessorStateSection::Header,
+            ProcessorStateSection::Header.metadata_fields(),
+        ),
+        (
+            ProcessorStateSection::Accumulators,
+            ProcessorStateSection::Accumulators.metadata_fields(),
+        ),
+    ];
+    let returned = processor_page_rows(&window, &request, &payload)
+        .expect("one retained row and bounded metadata");
+    assert_eq!(returned, vec![1, 2, 6]);
+    let mut counts_only = window.clone();
+    counts_only.offset = 0;
+    counts_only.runs = vec![run(ProcessorStateSection::Header, 2)];
+    assert_refused(&counts_only, &read(0), &[]);
+    window.offset = 2;
+    assert_refused(&window, &request, &payload);
+}
+
+#[test]
 fn a_page_that_disagrees_with_its_read_or_with_its_own_counts_is_refused() {
     let payload = pending_payload();
 
@@ -190,18 +228,20 @@ fn a_page_that_disagrees_with_its_read_or_with_its_own_counts_is_refused() {
     assert_refused(&beyond, &read(10), &payload);
 
     // It names more sections than any processor holds.
-    let mut three = pending_page();
-    three.sections = vec![
+    let mut excessive = pending_page();
+    excessive.sections = vec![
         section(ProcessorStateSection::Pending, 5),
         section(ProcessorStateSection::Left, 0),
         section(ProcessorStateSection::Right, 0),
+        section(ProcessorStateSection::Keys, 0),
     ];
-    let three_sections: Vec<(ProcessorStateSection, Vec<SchemaField>)> = vec![
+    let excessive_sections: Vec<(ProcessorStateSection, Vec<SchemaField>)> = vec![
         (ProcessorStateSection::Pending, Vec::new()),
         (ProcessorStateSection::Left, Vec::new()),
         (ProcessorStateSection::Right, Vec::new()),
+        (ProcessorStateSection::Keys, Vec::new()),
     ];
-    assert_refused(&three, &read(10), &three_sections);
+    assert_refused(&excessive, &read(10), &excessive_sections);
 
     // A count-only read accepts no returned row, and a row-returning read expects exactly the
     // sections the page names.

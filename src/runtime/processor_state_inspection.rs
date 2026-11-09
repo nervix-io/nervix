@@ -520,19 +520,26 @@ pub(crate) struct ProcessorStatePage {
     /// section and one branch. A section's columns hold its rows in the order its runs list them.
     pub(crate) runs: Vec<ProcessorStateRun>,
     pub(crate) sections: Vec<ProcessorStateSectionColumns>,
+    /// A published-state reader retains admission for its newly built page through projection.
+    pub(crate) memory: Option<ProcessorStatePageMemory>,
 }
 
-/// A processor's state has at most two sections, fixed by its kind: a reorderer's held rows, or a
-/// correlator's left and right pending records.
+/// Keeps the page's allocation admission and decoded publication storage alive through encoding.
+pub(crate) struct ProcessorStatePageMemory {
+    pub(super) _reservation: nervix_execution::Reservation,
+    pub(super) _windows: Vec<super::window_state::AdmittedWindowSnapshot>,
+}
+
+/// Each processor kind fixes its sections. A window's retained rows, header and accumulator
+/// facts give the maximum of three.
 #[cfg_attr(
     nervix_lint,
     nervix::constant(
         fixed,
-        reason = "a reorderer holds one section and a correlator one per side, so a page names at \
-                  most two"
+        reason = "the processor vocabulary fixes at most three sections, for a window"
     )
 )]
-pub(super) const MAX_PROCESSOR_SECTIONS: usize = 2;
+pub(super) const MAX_PROCESSOR_SECTIONS: usize = 3;
 
 /// One section of a unit page: how many rows of it the unit holds, and the returned rows as Arrow
 /// columns, payload first and then the columns the section appends.
@@ -585,6 +592,13 @@ impl Runtime {
         after: Option<(Option<BranchKeyFingerprint>, u64)>,
         bounds: ProcessorStatePageBounds,
     ) -> error_stack::Result<ProcessorStatePage, ProcessorStatePageError> {
+        if let ModelKind::Deduplicator | ModelKind::WindowProcessor = processor.kind {
+            return self
+                .local_published_processor_state_page(
+                    domain, processor, unit, selection, after, bounds,
+                )
+                .await;
+        }
         let commands = {
             let execution = self
                 .inner
@@ -712,6 +726,7 @@ impl Runtime {
             more: offset < counts.rows,
             runs: gathered.runs,
             sections: gathered.sections,
+            memory: None,
         })
     }
 
@@ -749,7 +764,7 @@ impl Runtime {
 }
 
 /// Appends one returned row to the run it continues, or opens the next run.
-fn extend_runs(
+pub(super) fn extend_runs(
     runs: &mut Vec<ProcessorStateRun>,
     section: ProcessorStateSection,
     branch: &Option<BranchKey>,
@@ -905,7 +920,7 @@ fn correlator_sections(
 
 /// Takes the selected rows' payload values column by column from the shared batches they live in.
 /// Only the selected values are copied; the source batches are read, never rebuilt.
-fn payload_columns<'a>(
+pub(super) fn payload_columns<'a>(
     rows: impl Iterator<Item = &'a RuntimeRow>,
 ) -> error_stack::Result<Vec<ArrayRef>, ProcessorStatePageError> {
     let rows = rows.collect::<Vec<_>>();
@@ -936,7 +951,7 @@ fn payload_columns<'a>(
 }
 
 /// A datetime column: nanoseconds in UTC, exactly as a Plexus `DATETIME` is carried.
-fn timestamp_column(values: impl Iterator<Item = Timestamp>) -> ArrayRef {
+pub(super) fn timestamp_column(values: impl Iterator<Item = Timestamp>) -> ArrayRef {
     let column = TimestampNanosecondArray::from_iter_values(values.map(Timestamp::unix_nanos))
         .with_timezone("+00:00");
     StdArc::new(column)

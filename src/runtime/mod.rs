@@ -590,7 +590,7 @@ use processor_state_inspection::{
 };
 pub(crate) use processor_state_inspection::{
     BranchStateReadError, ProcessorStatePageBounds, ProcessorStatePageError,
-    ProcessorStateSectionColumns,
+    ProcessorStatePageMemory, ProcessorStateSectionColumns,
 };
 use processor_template::{
     MaterializedDependencyResolution, ProcessorInputFilterKind, ProcessorTemplateError,
@@ -780,11 +780,13 @@ mod window_accumulator;
 #[cfg(feature = "benchmarks")]
 #[doc(hidden)]
 pub use window_accumulator::benchmark as window_sketch_benchmark;
+mod published_processor_state_inspection;
 mod window_archive;
 #[cfg(test)]
 mod window_checkpoint_cases;
 mod window_processor;
 mod window_state;
+mod window_state_charge;
 
 #[doc(hidden)]
 pub use branch_key::BranchKey;
