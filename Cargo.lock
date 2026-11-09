@@ -7626,6 +7626,7 @@ dependencies = [
  "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "nervix-test-environment",
  "prost 0.13.5",
  "prost-reflect",
