@@ -7,7 +7,13 @@
 
 use std::mem::MaybeUninit;
 
+// The native SHA-256 context runs on the module aws-lc-rs runs on, so a build links one AWS-LC
+// module: the FIPS module when the `fips` feature selects it, the ordinary one otherwise.
+#[cfg(feature = "fips")]
+use aws_lc_fips_sys as native;
 use aws_lc_rs::digest;
+#[cfg(not(feature = "fips"))]
+use aws_lc_sys as native;
 use meticulous::{OptionExt as _, ResultExt as _};
 
 /// Compare equal-width digests in constant time with respect to their contents.
@@ -38,7 +44,7 @@ pub fn sha512(input: &[u8]) -> [u8; 64] {
 pub struct Sha256 {
     // aws-lc-rs's incremental EVP context allocates its algorithm state. The maintained native
     // SHA256_CTX holds that state inline, preserving the fingerprint computation's stack storage.
-    context: aws_lc_sys::SHA256_CTX,
+    context: native::SHA256_CTX,
 }
 
 impl Sha256 {
@@ -47,7 +53,7 @@ impl Sha256 {
         let mut context = MaybeUninit::uninit();
         // SAFETY: SHA256_Init writes the complete context, including its padding, and retains no
         // pointer to it. AWS-LC initializes the structure with memset and always returns one.
-        let initialized = unsafe { aws_lc_sys::SHA256_Init(context.as_mut_ptr()) };
+        let initialized = unsafe { native::SHA256_Init(context.as_mut_ptr()) };
         (initialized == 1)
             .then_some(())
             .assured("AWS-LC SHA256_Init initializes the complete context and returns one");
@@ -59,9 +65,8 @@ impl Sha256 {
     pub fn update(&mut self, input: &[u8]) {
         // SAFETY: the context was initialized by SHA256_Init and is exclusively borrowed. The
         // slice stays readable for the complete call; SHA256_Update retains no input pointer.
-        let updated = unsafe {
-            aws_lc_sys::SHA256_Update(&mut self.context, input.as_ptr().cast(), input.len())
-        };
+        let updated =
+            unsafe { native::SHA256_Update(&mut self.context, input.as_ptr().cast(), input.len()) };
         (updated == 1)
             .then_some(())
             .assured("AWS-LC SHA256_Update returns one for an initialized SHA-256 context");
@@ -72,7 +77,7 @@ impl Sha256 {
         let mut output = [0; 32];
         // SAFETY: SHA256_Final receives an initialized, exclusively owned SHA-256 context and
         // writable storage for all 32 digest bytes. Consuming self prevents further updates.
-        let finalized = unsafe { aws_lc_sys::SHA256_Final(output.as_mut_ptr(), &mut self.context) };
+        let finalized = unsafe { native::SHA256_Final(output.as_mut_ptr(), &mut self.context) };
         (finalized == 1)
             .then_some(())
             .assured("AWS-LC SHA256_Final returns one for an initialized SHA-256 context");
