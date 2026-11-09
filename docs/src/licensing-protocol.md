@@ -181,6 +181,23 @@ facts, lacking-document selection and publication, original-byte signature check
 structures, operation shapes and checked grant arithmetic. Six registered bounded properties cover
 complete representations, resolution, malformed JWS and self-signed requests, trust chains, impact
 and request digests; their budgets and corpora are in the [property register](./property-testing-and-fuzzing.md).
-The cryptographic boundary retains the NIST and cross-build P-256 vectors. These checks do not
-claim a FIPS-qualified deployment. The shared engine has no product endpoint or concurrent state
-machine, so Cucumber and concurrency-model execution belong to its later integration owners.
+The cryptographic boundary retains the NIST and cross-build P-256 vectors.
+
+The cross-build signature vectors of licensing specification §17.6 hold, for every document type,
+one compact JWS that the ordinary AWS-LC build signed and one that the FIPS build signed. Both
+cover the same fixed documents, signed with public test-only keys. Every build verifies both sets
+the way a receiver does: the succession, authorization and revocation through the trust chain from
+an embedded root, the decision through the working key that chain authorizes, the self-signed
+creation request under the cluster key it carries, and the stream ticket under its cluster key.
+Each check compares the decoded document and refuses the vector with one signature byte changed.
+Nervix CI runs them on the ordinary module, so it verifies what the FIPS module signed; the
+licensing service's FIPS lane runs them on the FIPS module at the Nervix revision the service pins,
+so it verifies what the ordinary module signed. AWS-LC's ECDSA signatures are randomized, so each
+build's vectors are produced once and committed: `just signature-vectors ordinary` and
+`just signature-vectors fips` rewrite one build's set, the FIPS one needing Go and CMake, and a
+change to a signed document's shape rewrites both together. `just test-signature-vectors` runs this
+crate's and the boundary's tests, both builds' vectors included, on either build.
+
+These checks do not claim a FIPS-qualified deployment. The shared engine has no product endpoint
+or concurrent state machine, so Cucumber and concurrency-model execution belong to its later
+integration owners.
