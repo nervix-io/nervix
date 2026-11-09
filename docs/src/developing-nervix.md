@@ -14,6 +14,10 @@ cd nervix
 
 ## Prerequisites
 
+The [Client Host Bindings](client-host-bindings.md) architecture chapter maps the C ABI, Python
+wheel, Ruby gem and JVM jar to their shared Rust runtime and ownership contracts. The toolchains
+and preparation commands for those native artifacts are listed below.
+
 Nervix is developed on Linux x86_64, Linux aarch64, and macOS arm64. The `just` recipes fetch an
 ONNX Runtime build for the host and stop on any other.
 
@@ -613,7 +617,7 @@ compares it with the workflows.
 | `shuttle` | Check | The Shuttle checks and their replay check |
 | `loom` | Check | The Loom models and their weakening qualification |
 | `turmoil` | Check | The Turmoil simulation suite and its replay check |
-| `client-conformance` | Check | The cross-language client probes and the host suites' cluster tiers against one- and three-node clusters, and the JVM, Ruby, Python, C and C++ boundary tiers |
+| `client-conformance` | Check | The [host-binding](client-host-bindings.md#qualification-and-observability) and independent-client probes, the host suites' cluster tiers against one- and three-node clusters, and the JVM, Ruby, Python, C and C++ boundary tiers |
 | `bolero-random` | Check, through Bolero | Bolero's randomized properties and corpus replay, which a manual run of the Bolero workflow always runs |
 | `extra-doctests` | Check | Capability doctests |
 | `extra-miri` | Check | Miri over the expiry map |

@@ -4,31 +4,34 @@ This is the executable ledger of [Client Wire 14](https://app.clickup.com/t/86bc
 [Clock Attach 05](https://app.clickup.com/t/86bc8azn1) extended with the domain clock events the
 binding exposes, [Clock Attach 05A](https://app.clickup.com/t/86bc95p44) with the clock an attach
 reports, and [Client I/O 04](https://app.clickup.com/t/86bc8bj89) with the producers and consumers
-of client endpoints. It records which runtimes speak the finalized session protocol, whether each
-does so as an independent native client or through the shared Rust binding, the commands that build
-and run each one, and the contract each probe checks. It does not promise a separately maintained
-production SDK for any language: the probes are qualification clients, and the binding is the
-supported way for Python, JVM, Ruby, C and C++ hosts to reuse the Rust session.
+of client endpoints. Native Bindings adds the pyo3 Python package, magnus Ruby gem and JNI JVM
+library over the shared Rust host runtime; the C ABI serves C and C++ only. This ledger records
+which runtimes implement the session protocol independently or reuse that runtime, how to build
+and run them, and exactly what each probe checks. The native libraries are application interfaces;
+the independent Go and TypeScript probes are qualification clients rather than maintained SDKs.
 
 The [Client Ingestors And Emitters](../docs/src/client-io-architecture.md) architecture chapter
 connects the qualified endpoint operations to graph ownership, ACK/credit boundaries, buffer
 lifetimes, restoration and runnable paced workflows. This ledger owns the qualification scope.
+The authoritative [Client Host Bindings](../docs/src/client-host-bindings.md) chapter owns the
+shared runtime, per-host lifetimes, failure mapping, Arrow exchange and packaging. A change to a
+binding, its shared runtime, a probe or this ledger keeps that chapter current in the same change.
 
 ## Paths
 
 | Runtime | Path | Transport | Probe |
 | --- | --- | --- | --- |
-| C ABI, in process | Shared Rust binding | Native gRPC | `tests/common/client_conformance/c_abi_probe.rs` |
-| C (C11) | Shared Rust binding | Native gRPC | `tests/client_conformance/c/probe.c` |
-| C++ (C++17) | Shared Rust binding, owned through `std::unique_ptr` | Native gRPC | `tests/client_conformance/cpp/probe.cpp` |
-| CPython 3.12+ | Shared Rust binding through the Python package `nervix_client` on pyo3, `crates/client-python` | Native gRPC | `tests/client_conformance/python/probe.py` |
+| C ABI, in process | C ABI over the shared host runtime | Native gRPC | `tests/common/client_conformance/c_abi_probe.rs` |
+| C (C11) | C ABI over the shared host runtime | Native gRPC | `tests/client_conformance/c/probe.c` |
+| C++ (C++17) | C ABI over the shared host runtime, owned through `std::unique_ptr` | Native gRPC | `tests/client_conformance/cpp/probe.cpp` |
+| CPython 3.12+ | Shared Rust host runtime through the pyo3 package `nervix_client`, `crates/client-python` | Native gRPC | `tests/client_conformance/python/probe.py` |
 | Java 21+ | Shared Rust host runtime through the JNI library, `crates/client-jvm` | Native gRPC | `tests/client_conformance/java/Probe.java` |
 | Ruby 3.3+ | Shared Rust host runtime through the magnus gem, `crates/client-ruby` | Native gRPC | `tests/client_conformance/ruby/probe.rb` |
 | Go 1.25+ | Independent native client, `flatc --go` and `google.golang.org/grpc` | Native gRPC | `tests/client_conformance/go/` |
 | Node.js 24 | Independent native client, `flatc --ts` and the built-in `WebSocket` | Binary WebSocket | `tests/client_conformance/node/probe.ts` |
 | Bun 1.4 | The same TypeScript client, unchanged | Binary WebSocket | `tests/client_conformance/node/probe.ts` |
 
-The shared Rust binding is the host session runtime, `crates/client-host`, which C and C++
+The shared owner is the host session runtime, `crates/client-host`, which C and C++
 hosts reach through the C ABI of `crates/client-ffi`, whose contract is
 `crates/client-ffi/include/nervix_client.h`, and CPython hosts through the Python package of
 `crates/client-python`, JVM hosts through the JNI jar of `crates/client-jvm`, and Ruby hosts through the native magnus
