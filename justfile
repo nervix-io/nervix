@@ -2035,9 +2035,12 @@ coverage-native-inspection output="lcov-workspace.info":
 test-native-inspection-python:
     cargo test --package nervix-client-python --lib -- inspection:: --skip bolero_ --nocapture
 
-test-native-binding-inspection *args: tests-deps build-client-python build-client-ruby build-client-jvm
+test-native-binding-inspection *args: tests-deps build-client-python build-client-ruby build-client-jvm-tests
     cargo test --no-run --package nervix-scenarios --test scenarios
-    just test-client-conformance-run '@native_binding_inspection' {{ args }}
+    just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-python-api-run
+    just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-ruby-api-run
+    just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-jvm-api-run
+    just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-conformance-scenarios '@native_binding_inspection' {{ quote(args) }}
 
 # Exercise upload completion, retained retries and typed identity conflicts in every binding host.
 test-client-upload-conflict-conformance: build-web-console wasm-processor-guests download-onnxruntime build-client-conformance
