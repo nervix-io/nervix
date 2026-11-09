@@ -379,8 +379,8 @@ pub use state_branch_selection::{
     ResolvedStateBranchSelection, StateBranchField, StateBranchSelection, StateBranchSelectionError,
 };
 pub use state_inspection::{
-    StateInspectionBranchSelection, StateInspectionCounts, StateInspectionOrigin,
-    StateInspectionPosition, StateInspectionRejection, StateInspectionStage,
+    ProcessorStateSection, StateInspectionBranchSelection, StateInspectionCounts,
+    StateInspectionOrigin, StateInspectionPosition, StateInspectionRejection, StateInspectionStage,
 };
 pub use state_inspection_settings::{
     StateInspectionMaxRows, StateInspectionMaxSections, StateInspectionReadTimeout,
@@ -406,11 +406,12 @@ pub use statement::{
     Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
     RelocationSelection, RelocationUnitSelection, ResolvedBranching, ResolvedCodecWireFormat,
     RetryPolicy, ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowPlacements,
-    ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SignalingProtobufConfig,
-    SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat, StartDomain,
-    StateInspectionPageRequest, Statement, StopDomain, SubscriptionBinding,
-    SubscriptionDeliveryBehavior, SubscriptionLiteral, UncordonNode, UniquelyKindedModel,
-    UploadResource, VhostTlsResource, WireSchemaLookup, default_relay_buffer,
+    ShowProcessorState, ShowRelayMaterializedState, ShowTransactions, ShowUdfs,
+    SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
+    SignalingWireFormat, StartDomain, StateInspectedProcessor, StateInspectionPageRequest,
+    Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral,
+    UncordonNode, UniquelyKindedModel, UploadResource, VhostTlsResource, WireSchemaLookup,
+    default_relay_buffer,
 };
 pub use timestamp::{AtomicTimestamp, Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};

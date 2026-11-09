@@ -68,6 +68,11 @@ where
             .collect()
     }
 
+    /// Every live branch instance with its key, least recently active first.
+    pub fn instances(&self) -> impl Iterator<Item = (&K, &Arc<V>)> {
+        self.entries.iter().map(|(key, entry)| (key, &entry.state))
+    }
+
     pub fn version(&self) -> u64 {
         self.version
     }
@@ -354,6 +359,25 @@ mod tests {
         assert_eq!(
             registry.ordered_keys(),
             vec!["globex".to_string(), "acme".to_string()]
+        );
+    }
+
+    #[test]
+    fn instances_lists_every_live_branch_once_with_its_state_in_activity_order() {
+        let mut registry = BranchInstanceRegistry::<String, usize>::new();
+        registry.get_or_create_with("acme".to_string(), timestamp(1, 0), |_| 1);
+        registry.get_or_create_with("globex".to_string(), timestamp(2, 0), |_| 2);
+        registry.get_or_create_with("initech".to_string(), timestamp(3, 0), |_| 3);
+        registry.touch(&"acme".to_string(), timestamp(4, 0));
+        registry.remove(&"globex".to_string());
+
+        let listed = registry
+            .instances()
+            .map(|(key, state)| (key.clone(), **state))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            listed,
+            vec![("initech".to_string(), 3), ("acme".to_string(), 1)]
         );
     }
 

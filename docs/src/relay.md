@@ -123,6 +123,11 @@ never reappears expires by the branch's TTL in the partition that held it. A mat
 key that may still lie in its old partition reads the old partition when the new one has no row, so
 `REQUIRED SKIP` and defaults apply only to a row that exists in neither.
 
+`SHOW DEDUPLICATOR ... STATE` and `SHOW WINDOW PROCESSOR ... STATE` read what each partition
+publishes. A moving key appears under the partition that held it until its new partition claims it.
+Between the new partition installing the key's state and the old one forgetting its copy, the key
+appears under both.
+
 While keys may still lie in partitions of the previous count, `DESCRIBE BRANCH` names that count and
 how far moving them has come:
 
