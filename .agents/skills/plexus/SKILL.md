@@ -80,7 +80,8 @@ For connector-specific event counts, including Redis publishes with no subscribe
 and the entity's generated capability reference before interpreting delivery.
 
 For applications submitting Plexus, use [Client Libraries](../../../docs/src/client-libraries.md)
-to select the host guide; Java and JVM programs follow [JVM Client Library](../../../docs/src/client-library-jvm.md),
+to select the host guide; Python programs follow [Python Client Library](../../../docs/src/client-library-python.md),
+Java and JVM programs follow [JVM Client Library](../../../docs/src/client-library-jvm.md),
 Ruby applications follow [Ruby Client Library](../../../docs/src/client-library-ruby.md),
 and C and C++ programs follow [C And C++ Client Library](../../../docs/src/client-library-c.md).
 Read its execution, clock and endpoint sections before choosing application-side lifecycle handling.
