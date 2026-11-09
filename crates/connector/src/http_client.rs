@@ -55,6 +55,7 @@ pub struct HttpClientConfig<'a> {
     entries: &'a [nervix_models::ClientConfigEntry],
     label: &'static str,
     dns: &'a DnsResolver,
+    policy: &'a nervix_tls::OutwardTlsPolicy,
 }
 
 /// The one proxy a client declares with its `proxy` key. Every request the client sends travels
@@ -136,11 +137,13 @@ impl<'a> HttpClientConfig<'a> {
         entries: &'a [nervix_models::ClientConfigEntry],
         label: &'static str,
         dns: &'a DnsResolver,
+        policy: &'a nervix_tls::OutwardTlsPolicy,
     ) -> Self {
         Self {
             entries,
             label,
             dns,
+            policy,
         }
     }
 
@@ -184,7 +187,7 @@ impl<'a> HttpClientConfig<'a> {
             builder = builder.timeout(timeout.bound());
         }
 
-        let tls = RustlsClientConfigProvider::new(self.entries)
+        let tls = RustlsClientConfigProvider::new(self.entries, self.policy)
             .build_with_default_roots()
             .change_context(HttpClientConfigError::Tls { label: self.label })?;
         let mut tls = (*tls).clone();
@@ -254,7 +257,7 @@ mod tests {
               close\r\n\r\n",
         ));
         let entries = [entry("timeout_ms", "5000")];
-        let client = HttpClientConfig::new(&entries, "HTTP", &dns)
+        let client = HttpClientConfig::new(&entries, "HTTP", &dns, &Default::default())
             .build()
             .expect("a client with a timeout builds");
         let response = client
@@ -284,7 +287,7 @@ mod tests {
             entry("timeout_ms", "5000"),
             entry("proxy", &format!("http://scenario:p%40ss@{proxy}")),
         ];
-        let client = HttpClientConfig::new(&entries, "HTTP", &dns)
+        let client = HttpClientConfig::new(&entries, "HTTP", &dns, &Default::default())
             .build()
             .expect("a client with a declared proxy builds");
         // Only the proxy can resolve the target's name, so the answer proves the request went
@@ -321,7 +324,7 @@ mod tests {
             "proxy",
             "https://egress%20user:se%3Acret@proxy.internal:3128",
         )];
-        let proxy = HttpClientConfig::new(&declared, "HTTP", &dns)
+        let proxy = HttpClientConfig::new(&declared, "HTTP", &dns, &Default::default())
             .proxy()
             .expect("an https proxy URL is valid")
             .expect("the client declares a proxy");
@@ -343,7 +346,7 @@ mod tests {
         );
 
         let user_only = [entry("proxy", "http://reader@proxy.internal")];
-        let user_only = HttpClientConfig::new(&user_only, "HTTP", &dns)
+        let user_only = HttpClientConfig::new(&user_only, "HTTP", &dns, &Default::default())
             .proxy()
             .expect("a proxy URL with a user is valid")
             .expect("the client declares a proxy");
@@ -359,14 +362,14 @@ mod tests {
         );
 
         let anonymous = [entry("proxy", "http://proxy.internal:3128")];
-        let anonymous = HttpClientConfig::new(&anonymous, "HTTP", &dns)
+        let anonymous = HttpClientConfig::new(&anonymous, "HTTP", &dns, &Default::default())
             .proxy()
             .expect("a proxy URL without credentials is valid")
             .expect("the client declares a proxy");
         assert_eq!(anonymous.authorization(), None);
 
         assert!(
-            HttpClientConfig::new(&[], "HTTP", &dns)
+            HttpClientConfig::new(&[], "HTTP", &dns, &Default::default())
                 .proxy()
                 .expect("no proxy is valid")
                 .is_none()
@@ -377,7 +380,7 @@ mod tests {
             "file:///proxy",
         ] {
             let declared = [entry("proxy", invalid)];
-            let refusal = HttpClientConfig::new(&declared, "HTTP", &dns)
+            let refusal = HttpClientConfig::new(&declared, "HTTP", &dns, &Default::default())
                 .proxy()
                 .expect_err("only an http or https URL with a host names a proxy");
             assert!(matches!(
@@ -400,6 +403,7 @@ mod tests {
             }],
             "HTTP",
             &dns,
+            &Default::default(),
         )
         .build();
         assert!(client.is_ok());
@@ -411,6 +415,7 @@ mod tests {
             }],
             "HTTP",
             &dns,
+            &Default::default(),
         )
         .build()
         .expect_err("invalid timeout");
@@ -425,7 +430,7 @@ mod tests {
         if std::env::var_os(CHILD).is_some() {
             let dns = DnsResolver::load(DnsConfiguration::system()).await?;
             let entries = [entry("timeout_ms", "5000")];
-            HttpClientConfig::new(&entries, "HTTP", &dns)
+            HttpClientConfig::new(&entries, "HTTP", &dns, &Default::default())
                 .build()
                 .expect("the bundled roots suffice when native roots are empty");
             return Ok(());
@@ -476,7 +481,7 @@ mod tests {
         )
         .expect("the malformed CA fixture is writable");
         let entries = [entry("tls_ca_file", &ca.to_string_lossy())];
-        let error = HttpClientConfig::new(&entries, "HTTP", &dns)
+        let error = HttpClientConfig::new(&entries, "HTTP", &dns, &Default::default())
             .build()
             .expect_err("a malformed trust anchor must refuse the client");
         let cause = error
@@ -506,7 +511,7 @@ mod tests {
             key: "tls_ca_file".to_string(),
             value: invalid.clone(),
         }];
-        let ca = HttpClientConfig::new(&ca_entries, "HTTP", &dns)
+        let ca = HttpClientConfig::new(&ca_entries, "HTTP", &dns, &Default::default())
             .build()
             .expect_err("an invalid CA certificate must fail");
         assert!(matches!(
@@ -524,7 +529,7 @@ mod tests {
                 value: invalid,
             },
         ];
-        let identity = HttpClientConfig::new(&identity_entries, "HTTP", &dns)
+        let identity = HttpClientConfig::new(&identity_entries, "HTTP", &dns, &Default::default())
             .build()
             .expect_err("an invalid client identity must fail");
         assert!(matches!(

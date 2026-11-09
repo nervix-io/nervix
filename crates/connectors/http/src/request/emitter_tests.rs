@@ -359,6 +359,7 @@ async fn emitter_with(
         });
     }
     HttpRequestEmitter::prepare_client(HttpRequestEmitterConfig {
+        tls_policy: Default::default(),
         config: declared,
         dns,
     })
@@ -911,6 +912,7 @@ async fn emitter_resolving_through(
     .assured("the test's resolver configuration is valid");
     let timeout_ms = timeout.as_millis().to_string();
     let connector = HttpRequestEmitter::prepare_client(HttpRequestEmitterConfig {
+        tls_policy: Default::default(),
         config: vec![ClientConfigEntry {
             key: "timeout_ms".to_string(),
             value: timeout_ms,
