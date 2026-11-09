@@ -2666,6 +2666,12 @@ fn event_target_checked(event: &ev::Event) -> bool {
     event_target::<web_sys::HtmlInputElement>(event).checked()
 }
 
+/// The submission handler of every test that renders the dialog and ignores what it submits. The
+/// dialog is generic over its handler and each closure written in a test is a type of its own, so
+/// one named function lets all of those tests render a single instantiation of the dialog's views.
+#[cfg(test)]
+fn ignore_test_submission(_submission: CreateSubmission, _attempt: u64, _revision: u64) {}
+
 #[cfg(test)]
 #[cfg_attr(
     nervix_lint,
