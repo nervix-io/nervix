@@ -203,6 +203,16 @@ impl<'bytes> GeneratedSettings<'bytes> {
     }
 
     fn node_settings(&mut self) -> NodeSettings {
+        let tls_cipher_suites = self
+            .entropy
+            .pick(["fips", "default", "TLS13_CHACHA20_POLY1305_SHA256"])
+            .parse()
+            .assured("the generated TLS suites include TLS 1.3");
+        let tls_key_exchange_groups = self
+            .entropy
+            .pick(["fips", "default", "X25519"])
+            .parse()
+            .assured("the generated groups support every retained TLS 1.2 suite");
         let raft = self.raft();
         let raft_retention = self.raft_retention();
         let membership = self.membership();
@@ -260,7 +270,11 @@ impl<'bytes> GeneratedSettings<'bytes> {
         )
         .assured("generated positive bounds fit executor and HTTP/2 limits");
         let mut settings = NodeSettings {
-            parameter_seeds: Default::default(),
+            parameter_seeds: nervix_models::ClusterParameterSeedValues {
+                tls_cipher_suites: Some(tls_cipher_suites),
+                tls_key_exchange_groups: Some(tls_key_exchange_groups),
+                ..Default::default()
+            },
             raft,
             raft_retention,
             membership,

@@ -164,6 +164,7 @@ pub(super) fn ResourceBindingEditor(
             </button>
         </div>
     }
+    .into_any()
 }
 
 #[cfg(test)]

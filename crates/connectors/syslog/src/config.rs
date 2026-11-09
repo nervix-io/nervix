@@ -20,7 +20,7 @@
     )
 )]
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use nervix_connector::{RustlsClientConfigProvider, read_tls_file};
 use nervix_models::{ClientConfigEntry, SyslogListenerTls};
 use nervix_primitives::sync::StdArc;
@@ -30,6 +30,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum SyslogConfigError {
+    #[error("invalid Syslog TLS algorithms")]
+    Algorithms,
     /// The client breaks what its declaration or its side demands, which the frames beneath name.
     #[error("invalid Syslog client configuration")]
     Client,
@@ -44,8 +46,10 @@ pub enum SyslogConfigError {
 /// client identity, which the shared provider reads from the rendered entries.
 pub(crate) fn tls_client_config(
     entries: &[ClientConfigEntry],
+    tls_policy: &nervix_connector::OutwardTlsPolicy,
 ) -> error_stack::Result<StdArc<rustls::ClientConfig>, SyslogConfigError> {
-    let mapping_input = RustlsClientConfigProvider::new(entries).build_with_default_roots();
+    let mapping_input =
+        RustlsClientConfigProvider::new(entries, tls_policy).build_with_default_roots();
     match mapping_input {
         Ok(mapped_value) => Ok(mapped_value),
         Err(error) => Err({
@@ -59,6 +63,7 @@ pub(crate) fn tls_client_config(
 /// `tls_client_ca_file` turns on.
 pub(crate) fn tls_server_config(
     tls: &SyslogListenerTls,
+    policy: &nervix_connector::OutwardTlsPolicy,
 ) -> error_stack::Result<StdArc<ServerConfig>, SyslogConfigError> {
     nervix_crypto::tls::install_default_provider();
     let cert_file = &tls.cert_file;
@@ -118,7 +123,9 @@ pub(crate) fn tls_server_config(
             }),
         }
     }?;
-    let builder = ServerConfig::builder();
+    let builder = ServerConfig::builder_with_provider(policy.provider())
+        .with_safe_default_protocol_versions()
+        .change_context(SyslogConfigError::Algorithms)?;
     let config = {
         let mapping_input = if let Some(ca_file) = tls.client_ca_file.as_ref() {
             let ca_pem = {
@@ -191,7 +198,7 @@ pub(crate) fn tls_server_config(
             }),
         }
     }?;
-    Ok(StdArc::new(config))
+    Ok(StdArc::new(policy.server_config(config)))
 }
 
 #[cfg(test)]
@@ -211,19 +218,22 @@ mod tests {
             key: "tls_ca_file".to_string(),
             value: missing.to_string(),
         }];
-        let error =
-            tls_client_config(&collector).expect_err("a missing collector CA file must fail");
+        let error = tls_client_config(&collector, &Default::default())
+            .expect_err("a missing collector CA file must fail");
         assert!(matches!(
             error.current_context(),
             SyslogConfigError::TlsMaterial { .. }
         ));
         assert!(error.contains::<nervix_connector::ClientConfigError>());
 
-        let error = tls_server_config(&SyslogListenerTls {
-            cert_file: PathBuf::from(missing),
-            key_file: PathBuf::from(missing),
-            client_ca_file: None,
-        })
+        let error = tls_server_config(
+            &SyslogListenerTls {
+                cert_file: PathBuf::from(missing),
+                key_file: PathBuf::from(missing),
+                client_ca_file: None,
+            },
+            &Default::default(),
+        )
         .expect_err("a missing server certificate must fail");
         assert!(matches!(
             error.current_context(),
@@ -235,11 +245,14 @@ mod tests {
         let certificate = root.path().join("certificate.pem");
         std::fs::write(&certificate, b"certificate fixture")
             .expect("the Syslog certificate fixture should be writable");
-        let error = tls_server_config(&SyslogListenerTls {
-            cert_file: certificate,
-            key_file: PathBuf::from(missing),
-            client_ca_file: None,
-        })
+        let error = tls_server_config(
+            &SyslogListenerTls {
+                cert_file: certificate,
+                key_file: PathBuf::from(missing),
+                client_ca_file: None,
+            },
+            &Default::default(),
+        )
         .expect_err("a missing server private key must fail");
         assert!(matches!(
             error.current_context(),
@@ -291,33 +304,41 @@ mod tests {
             key_file: identity.key.clone(),
             client_ca_file: None,
         };
-        tls_server_config(&listener).expect("a generated identity loads without an authority");
+        tls_server_config(&listener, &Default::default())
+            .expect("a generated identity loads without an authority");
         let verifying = SyslogListenerTls {
             client_ca_file: Some(identity.certificate.clone()),
             ..listener
         };
-        tls_server_config(&verifying).expect("a generated identity loads with an authority");
+        tls_server_config(&verifying, &Default::default())
+            .expect("a generated identity loads with an authority");
     }
 
     #[test]
     fn a_listener_refuses_tls_files_that_hold_no_certificate() {
         let identity = IdentityFiles::write();
         let empty = identity.without_certificate();
-        let error = tls_server_config(&SyslogListenerTls {
-            cert_file: empty.clone(),
-            key_file: identity.key.clone(),
-            client_ca_file: None,
-        })
+        let error = tls_server_config(
+            &SyslogListenerTls {
+                cert_file: empty.clone(),
+                key_file: identity.key.clone(),
+                client_ca_file: None,
+            },
+            &Default::default(),
+        )
         .expect_err("a certificate file without a certificate must fail");
         assert!(matches!(
             error.current_context(),
             SyslogConfigError::TlsMaterial { reason } if reason.contains("'tls_cert_file'")
         ));
-        let error = tls_server_config(&SyslogListenerTls {
-            cert_file: identity.certificate.clone(),
-            key_file: identity.key.clone(),
-            client_ca_file: Some(empty),
-        })
+        let error = tls_server_config(
+            &SyslogListenerTls {
+                cert_file: identity.certificate.clone(),
+                key_file: identity.key.clone(),
+                client_ca_file: Some(empty),
+            },
+            &Default::default(),
+        )
         .expect_err("an authority file without a certificate must fail");
         assert!(matches!(
             error.current_context(),

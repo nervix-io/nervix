@@ -21,7 +21,7 @@ pub(super) fn parameter_seed_help(
 ) -> String {
     format!(
         "{description}. First-bootstrap default: {}. Change live policy with ALTER CLUSTER SET",
-        parameter.default_text()
+        parameter.default_cli_text()
     )
 }
 
@@ -31,6 +31,8 @@ impl SettingsArgs {
     /// Preserve the presence of command-line and environment seeds, including explicit defaults.
     pub(super) fn parameter_seeds(&self) -> nervix_models::ClusterParameterSeedValues {
         nervix_models::ClusterParameterSeedValues {
+            tls_cipher_suites: self.cluster_parameters.tls_cipher_suites,
+            tls_key_exchange_groups: self.cluster_parameters.tls_key_exchange_groups,
             password_iterations: self.cluster_parameters.password_iterations,
             node_unavailability_timeout: self
                 .membership

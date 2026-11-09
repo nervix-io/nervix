@@ -42,7 +42,7 @@ use rustls::{
 };
 use rustls_pki_types::pem::{Error as PemError, PemObject};
 use thiserror::Error;
-use tonic::transport::{Identity as TonicIdentity, ServerTlsConfig};
+use tonic::transport::ServerTlsConfig;
 use tracing::{info, warn};
 
 use super::AppError;
@@ -255,6 +255,8 @@ pub(in crate::application) enum TlsMaterialError {
     CertifiedKey { source: rustls::Error },
     #[error("the rustls crypto provider is not installed")]
     CryptoProvider,
+    #[error("the TLS algorithm policy is unusable")]
+    Algorithms { source: rustls::Error },
 }
 
 impl TlsMaterialError {
@@ -297,29 +299,36 @@ pub(in crate::application) enum HttpsListenerError {
     },
     #[error("the fault injector failed the HTTPS listener installation")]
     FaultInjected,
+    #[error("failed to configure HTTPS listener algorithms")]
+    Algorithms,
 }
 
 pub(in crate::application) fn load_web_console_tls_server_config(
     cert_path: &Path,
     key_path: &Path,
+    policy: &nervix_tls::OutwardTlsPolicy,
 ) -> Result<StdArc<ServerConfig>, Report<AppError>> {
     nervix_crypto::tls::install_default_provider();
     let cert_chain = load_certificates_from_pem_file(cert_path, TlsFileKind::Certificate)
         .change_context(AppError::LoadWebConsoleTls)?;
     let private_key =
         load_private_key_from_pem_file(key_path).change_context(AppError::LoadWebConsoleTls)?;
-    let config = ServerConfig::builder()
+    let config = ServerConfig::builder_with_provider(policy.provider())
+        .with_safe_default_protocol_versions()
+        .map_err(|source| Report::new(TlsMaterialError::Algorithms { source }))
+        .change_context(AppError::LoadWebConsoleTls)?
         .with_no_client_auth()
         .with_single_cert(cert_chain, private_key)
         .map_err(|error| {
             Report::new(AppError::LoadWebConsoleTls).attach_printable(error.to_string())
         })?;
-    Ok(StdArc::new(config))
+    Ok(StdArc::new(policy.server_config(config)))
 }
 
 pub(in crate::application) async fn load_grpc_tls_server_config(
     cert_path: &Path,
     key_path: &Path,
+    policy: &nervix_tls::OutwardTlsPolicy,
 ) -> Result<ServerTlsConfig, Report<AppError>> {
     nervix_crypto::tls::install_default_provider();
     let cert_pem = tokio::fs::read(cert_path)
@@ -350,8 +359,16 @@ pub(in crate::application) async fn load_grpc_tls_server_config(
     let private_key = PrivateKeyDer::from_pem_slice(&key_pem)
         .map_err(|source| TlsMaterialError::pem(TlsFileKind::PrivateKey, source))
         .change_context(AppError::LoadGrpcTls)?;
-    certified_key(cert_chain, private_key).change_context(AppError::LoadGrpcTls)?;
-    Ok(ServerTlsConfig::new().identity(TonicIdentity::from_pem(cert_pem, key_pem)))
+    let mut config = ServerConfig::builder_with_provider(policy.provider())
+        .with_safe_default_protocol_versions()
+        .map_err(|source| Report::new(TlsMaterialError::Algorithms { source }))
+        .change_context(AppError::LoadGrpcTls)?
+        .with_no_client_auth()
+        .with_single_cert(cert_chain, private_key)
+        .map_err(|source| Report::new(TlsMaterialError::CertifiedKey { source }))
+        .change_context(AppError::LoadGrpcTls)?;
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    Ok(ServerTlsConfig::new().rustls_server_config(StdArc::new(policy.server_config(config))))
 }
 
 /// Loads the certificate a TLS VHOST presents from one version of its bundle, after proving the
@@ -501,6 +518,7 @@ impl ListenerVhosts {
     async fn server_config(
         &self,
         resource_store: &ResourceStore,
+        policy: &nervix_tls::OutwardTlsPolicy,
     ) -> Result<Option<StdArc<ServerConfig>>, Report<HttpsListenerError>> {
         if self.vhosts.is_empty() {
             return Ok(None);
@@ -530,10 +548,13 @@ impl ListenerVhosts {
                     })?;
             }
         }
-        let config = ServerConfig::builder()
+        let config = ServerConfig::builder_with_provider(policy.provider())
+            .with_safe_default_protocol_versions()
+            .map_err(|source| Report::new(TlsMaterialError::Algorithms { source }))
+            .change_context(HttpsListenerError::Algorithms)?
             .with_no_client_auth()
             .with_cert_resolver(StdArc::new(resolver));
-        Ok(Some(StdArc::new(config)))
+        Ok(Some(StdArc::new(policy.server_config(config))))
     }
 }
 
@@ -570,6 +591,7 @@ struct HttpsListenerCertificatesInner {
     fault_injection: ConfiguredFaultInjection,
     /// Also held by the application, which starts and shuts it down.
     cluster: Arc<ClusterHandle>,
+    outward_tls: nervix_tls::OutwardTlsPolicy,
     /// Read by the HTTPS listener for every connection it accepts.
     #[cfg_attr(
         nervix_lint,
@@ -588,12 +610,14 @@ impl HttpsListenerCertificates {
         resource_store: &StdArc<ResourceStore>,
         fault_injection: &ConfiguredFaultInjection,
         cluster: &Arc<ClusterHandle>,
+        outward_tls: nervix_tls::OutwardTlsPolicy,
     ) -> Self {
         Self {
             inner: Arc::new(HttpsListenerCertificatesInner {
                 resource_store: resource_store.clone(),
                 fault_injection: fault_injection.clone(),
                 cluster: cluster.clone(),
+                outward_tls,
                 server_config: RwLock::new(None),
                 installation: AsyncMutex::new(ListenerInstallation {
                     presented: ListenerVhosts::default(),
@@ -639,7 +663,9 @@ impl HttpsListenerCertificates {
         let server_config = if injected {
             Err(Report::new(HttpsListenerError::FaultInjected))
         } else {
-            desired.server_config(&self.inner.resource_store).await
+            desired
+                .server_config(&self.inner.resource_store, &self.inner.outward_tls)
+                .await
         };
         match server_config {
             Ok(server_config) => {
@@ -720,7 +746,12 @@ mod tests {
     #[nervix_primitives::test]
     async fn grpc_tls_loads_operator_material() {
         let files = test_tls_files("session", &node_named("node-1"));
-        let result = load_grpc_tls_server_config(&files.certificate, &files.private_key).await;
+        let result = load_grpc_tls_server_config(
+            &files.certificate,
+            &files.private_key,
+            &Default::default(),
+        )
+        .await;
         assert!(result.is_ok(), "{result:?}");
     }
 
@@ -743,7 +774,7 @@ mod tests {
         let files = test_tls_files("session", &node_named("node-1"));
         let missing = files.certificate.with_file_name("unavailable.pem");
         assert_grpc_tls_read_failure(
-            load_grpc_tls_server_config(&missing, &files.private_key).await,
+            load_grpc_tls_server_config(&missing, &files.private_key, &Default::default()).await,
             TlsFileKind::Certificate,
         );
     }
@@ -753,7 +784,7 @@ mod tests {
         let files = test_tls_files("session", &node_named("node-1"));
         let missing = files.private_key.with_file_name("unavailable.pem");
         assert_grpc_tls_read_failure(
-            load_grpc_tls_server_config(&files.certificate, &missing).await,
+            load_grpc_tls_server_config(&files.certificate, &missing, &Default::default()).await,
             TlsFileKind::PrivateKey,
         );
     }
@@ -762,7 +793,12 @@ mod tests {
     async fn grpc_tls_requires_a_nonempty_certificate_chain() -> io::Result<()> {
         let files = test_tls_files("session", &node_named("node-1"));
         std::fs::write(&files.certificate, b"")?;
-        let Err(error) = load_grpc_tls_server_config(&files.certificate, &files.private_key).await
+        let Err(error) = load_grpc_tls_server_config(
+            &files.certificate,
+            &files.private_key,
+            &Default::default(),
+        )
+        .await
         else {
             panic!("an empty certificate chain must fail startup");
         };
@@ -781,7 +817,12 @@ mod tests {
         let mut chain = std::fs::read(&files.certificate)?;
         chain.extend_from_slice(b"-----BEGIN CERTIFICATE-----\n@@@\n-----END CERTIFICATE-----\n");
         std::fs::write(&files.certificate, chain)?;
-        let Err(error) = load_grpc_tls_server_config(&files.certificate, &files.private_key).await
+        let Err(error) = load_grpc_tls_server_config(
+            &files.certificate,
+            &files.private_key,
+            &Default::default(),
+        )
+        .await
         else {
             panic!("a malformed certificate after the leaf must fail startup");
         };
@@ -802,7 +843,12 @@ mod tests {
             &files.private_key,
             b"-----BEGIN PRIVATE KEY-----\n@@@\n-----END PRIVATE KEY-----\n",
         )?;
-        let Err(error) = load_grpc_tls_server_config(&files.certificate, &files.private_key).await
+        let Err(error) = load_grpc_tls_server_config(
+            &files.certificate,
+            &files.private_key,
+            &Default::default(),
+        )
+        .await
         else {
             panic!("a malformed private key must fail startup");
         };
@@ -820,7 +866,12 @@ mod tests {
     async fn grpc_tls_requires_a_private_key_pem_item() -> io::Result<()> {
         let files = test_tls_files("session", &node_named("node-1"));
         std::fs::write(&files.private_key, b"")?;
-        let Err(error) = load_grpc_tls_server_config(&files.certificate, &files.private_key).await
+        let Err(error) = load_grpc_tls_server_config(
+            &files.certificate,
+            &files.private_key,
+            &Default::default(),
+        )
+        .await
         else {
             panic!("an empty private key must fail startup");
         };
@@ -837,7 +888,12 @@ mod tests {
     async fn grpc_tls_checks_the_leaf_matches_the_private_key() {
         let files = test_tls_files("session", &node_named("node-1"));
         let other = test_tls_files("session", &node_named("node-2"));
-        let Err(error) = load_grpc_tls_server_config(&files.certificate, &other.private_key).await
+        let Err(error) = load_grpc_tls_server_config(
+            &files.certificate,
+            &other.private_key,
+            &Default::default(),
+        )
+        .await
         else {
             panic!("a key that does not match the leaf must fail startup");
         };

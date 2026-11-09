@@ -35,6 +35,9 @@ use crate::client_config::{ClientTlsPaths, client_identity_pem, client_tls_paths
 
 #[derive(Debug, Error)]
 pub enum TlsClientConfigError {
+    #[error("failed to configure TLS algorithms")]
+    ConfigureAlgorithms,
+
     #[error("failed to read TLS CA certificate '{path}'")]
     ReadCaCertificate { path: std::path::PathBuf },
     #[error("failed to read TLS client identity")]
@@ -130,6 +133,7 @@ impl ServerCertVerifier for RelaxedServerVerifier {
 
 pub struct RustlsClientConfigProvider<'a> {
     entries: &'a [nervix_models::ClientConfigEntry],
+    policy: &'a nervix_tls::OutwardTlsPolicy,
 }
 
 #[derive(Clone, Copy)]
@@ -139,8 +143,11 @@ enum CaPlacement {
 }
 
 impl<'a> RustlsClientConfigProvider<'a> {
-    pub fn new(entries: &'a [nervix_models::ClientConfigEntry]) -> Self {
-        Self { entries }
+    pub fn new(
+        entries: &'a [nervix_models::ClientConfigEntry],
+        policy: &'a nervix_tls::OutwardTlsPolicy,
+    ) -> Self {
+        Self { entries, policy }
     }
 
     pub fn build(
@@ -224,7 +231,9 @@ impl<'a> RustlsClientConfigProvider<'a> {
             }
         }
 
-        let builder = RustlsClientConfig::builder();
+        let builder = RustlsClientConfig::builder_with_provider(self.policy.provider())
+            .with_safe_default_protocol_versions()
+            .change_context(TlsClientConfigError::ConfigureAlgorithms)?;
         let builder = match trust {
             ServerCertificateTrust::NamedAndAnchored => builder.with_root_certificates(roots),
             ServerCertificateTrust::Anchored | ServerCertificateTrust::Unconfirmed => {
@@ -261,7 +270,7 @@ impl<'a> RustlsClientConfigProvider<'a> {
         } else {
             builder.with_no_client_auth()
         };
-        Ok(StdArc::new(client_config))
+        Ok(StdArc::new(self.policy.client_config(client_config)))
     }
 
     /// The trust anchors a connector validates a server against: the bundled public roots, plus
@@ -366,7 +375,7 @@ mod tests {
             if trust_authority {
                 entries.push(entry("tls_ca_file", &self.directory.path().join("ca.pem")));
             }
-            RustlsClientConfigProvider::new(&entries)
+            RustlsClientConfigProvider::new(&entries, &Default::default())
                 .build_with_server_trust(trust)
                 .expect("the fixture's client configuration should build")
         }
@@ -438,10 +447,10 @@ mod tests {
     #[test]
     fn required_client_config_builds_without_client_tls_entries() {
         let entries = Vec::new();
-        RustlsClientConfigProvider::new(&entries)
+        RustlsClientConfigProvider::new(&entries, &Default::default())
             .build_with_default_roots()
             .expect("default-root TLS config should build");
-        RustlsClientConfigProvider::new(&entries)
+        RustlsClientConfigProvider::new(&entries, &Default::default())
             .build_with_replacement_ca()
             .expect("Redis's native-root TLS config should build");
     }
@@ -456,7 +465,7 @@ mod tests {
         )
         .expect("the malformed certificate fixture should be writable");
         let malformed_ca = [entry("tls_ca_file", &malformed_certificate)];
-        let error = RustlsClientConfigProvider::new(&malformed_ca)
+        let error = RustlsClientConfigProvider::new(&malformed_ca, &Default::default())
             .build()
             .expect_err("malformed CA PEM must fail parsing");
         assert!(matches!(
@@ -471,7 +480,7 @@ mod tests {
         )
         .expect("the invalid certificate fixture should be writable");
         let invalid_ca = [entry("tls_ca_file", &invalid_certificate)];
-        let error = RustlsClientConfigProvider::new(&invalid_ca)
+        let error = RustlsClientConfigProvider::new(&invalid_ca, &Default::default())
             .build()
             .expect_err("invalid CA DER must fail trust-store insertion");
         assert!(matches!(
@@ -489,7 +498,7 @@ mod tests {
             entry("tls_cert_file", &empty_certificate),
             entry("tls_key_file", &invalid_key),
         ];
-        let error = RustlsClientConfigProvider::new(&identity)
+        let error = RustlsClientConfigProvider::new(&identity, &Default::default())
             .build()
             .expect_err("invalid private-key PEM must fail parsing");
         assert!(matches!(
@@ -501,7 +510,7 @@ mod tests {
             entry("tls_cert_file", &malformed_certificate),
             entry("tls_key_file", &invalid_key),
         ];
-        let error = RustlsClientConfigProvider::new(&malformed_identity)
+        let error = RustlsClientConfigProvider::new(&malformed_identity, &Default::default())
             .build()
             .expect_err("malformed client certificate PEM must fail parsing");
         assert!(matches!(

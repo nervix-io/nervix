@@ -46,10 +46,12 @@ impl PulsarTopicIngestorStartPlan {
                 &self.client.config,
             )
             .change_context_lazy(|| ingestor.initialize_failure())?;
-        let connector =
-            PulsarTopicIngestorPlan::connect(self.settings(&resolved.entries, ingestor))
-                .await
-                .change_context_lazy(|| ingestor.initialize_failure())?;
+        let connector = PulsarTopicIngestorPlan::connect(
+            self.settings(&resolved.entries, ingestor),
+            runtime.outward_tls(),
+        )
+        .await
+        .change_context_lazy(|| ingestor.initialize_failure())?;
         BrokerIngestorStart {
             connector,
             instances: self.instances,
@@ -107,7 +109,7 @@ impl PulsarTopicIngestorStartPlan {
                 return Ok(());
             }
         }
-        PulsarTopicIngestorPlan::remove_subscription(settings)
+        PulsarTopicIngestorPlan::remove_subscription(settings, runtime.outward_tls())
             .await
             .change_context_lazy(context)
     }

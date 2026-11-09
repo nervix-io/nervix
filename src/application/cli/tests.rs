@@ -195,6 +195,68 @@ fn a_command_line_without_settings_runs_every_definition_default() {
 }
 
 #[test]
+fn tls_algorithm_seeds_resolve_aliases_and_round_trip_as_explicit_selections() {
+    for name in ["tls-cipher-suites", "tls-key-exchange-groups"] {
+        let command = Args::command();
+        let argument = command
+            .get_arguments()
+            .find(|argument| argument.get_long() == Some(name))
+            .assured("the TLS seed has a long option");
+        assert_eq!(
+            argument.get_env().and_then(|value| value.to_str()),
+            Some(format!("NERVIX_{}", name.to_uppercase().replace('-', "_")).as_str())
+        );
+    }
+    let settings = NodeSettings::default()
+        .with_overrides(&[
+            override_of("tls-cipher-suites", "FiPs,TLS13_CHACHA20_POLY1305_SHA256"),
+            override_of("tls-key-exchange-groups", "fips,X25519,X25519"),
+        ])
+        .assured("both explicit TLS selections form a valid policy");
+    let values = nervix_models::ClusterParameterValues::resolve(settings.parameter_seeds)
+        .assured("the CLI retains a valid complete seed pair");
+    assert!(values.tls_cipher_suites().to_string().contains("CHACHA20"));
+    assert!(
+        values
+            .tls_key_exchange_groups()
+            .to_string()
+            .ends_with(",X25519")
+    );
+    assert_eq!(
+        settings
+            .with_overrides(&[])
+            .assured("resolved names read back"),
+        settings
+    );
+}
+
+#[test]
+fn tls_seed_pairs_are_validated_before_the_node_starts() {
+    for overrides in [
+        vec![override_of("tls-key-exchange-groups", "MLKEM768")],
+        vec![override_of(
+            "tls-cipher-suites",
+            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+        )],
+    ] {
+        let refused = NodeSettings::default()
+            .with_overrides(&overrides)
+            .expect_err("the complete TLS seed pair is unusable");
+        assert!(matches!(
+            refused.current_context(),
+            AppError::InvalidClusterParameters
+        ));
+        assert!(refused.contains::<nervix_models::ClusterParameterError>());
+    }
+    for value in ["", "TLS13_NOT_A_SUITE"] {
+        let refused = NodeSettings::default()
+            .with_overrides(&[override_of("tls-cipher-suites", value)])
+            .expect_err("an empty or unknown algorithm selection is refused");
+        assert!(matches!(refused.current_context(), AppError::ReadSettings));
+    }
+}
+
+#[test]
 fn every_settings_option_is_named_by_its_definition_and_read_from_its_environment_twin() {
     let command = Args::command();
     let mut names = BTreeSet::new();

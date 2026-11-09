@@ -429,6 +429,7 @@ impl Application {
         let shutdown_coordinator = self.shutdown.clone();
         let shutdown = shutdown_coordinator.drain_support_token();
         let fault_injection = self.fault_injection.clone();
+        let outward_tls = nervix_tls::OutwardTlsPolicy::default();
         let grpc_tls_server_config = match &self.identity.grpc_transport {
             GrpcTransport::Http => None,
             GrpcTransport::Https {
@@ -436,16 +437,18 @@ impl Application {
                 private_key,
                 ..
             } => {
-                let config = match load_grpc_tls_server_config(certificate, private_key).await {
-                    Ok(config) => config,
-                    Err(error) => {
-                        error!(
-                            error = format!("{error:#}"),
-                            "failed to build grpc tls server config"
-                        );
-                        return Err(error);
-                    }
-                };
+                let config =
+                    match load_grpc_tls_server_config(certificate, private_key, &outward_tls).await
+                    {
+                        Ok(config) => config,
+                        Err(error) => {
+                            error!(
+                                error = format!("{error:#}"),
+                                "failed to build grpc tls server config"
+                            );
+                            return Err(error);
+                        }
+                    };
                 Some(config)
             }
         };
@@ -457,13 +460,14 @@ impl Application {
                 let Some(_) = web_console_https_listen_addr else {
                     return Err(Report::new(AppError::MissingWebConsoleHttpsListenAddress));
                 };
-                let config = match load_web_console_tls_server_config(cert_path, key_path) {
-                    Ok(config) => config,
-                    Err(error) => {
-                        error!(?error, "failed to build web console tls server config");
-                        return Err(error);
-                    }
-                };
+                let config =
+                    match load_web_console_tls_server_config(cert_path, key_path, &outward_tls) {
+                        Ok(config) => config,
+                        Err(error) => {
+                            error!(?error, "failed to build web console tls server config");
+                            return Err(error);
+                        }
+                    };
                 Some(config)
             }
             (Some(_), None) => {
@@ -595,6 +599,7 @@ impl Application {
             let mapping_input = Runtime::with_environment(
                 RuntimeEnvironment {
                     executor,
+                    outward_tls: outward_tls.clone(),
                     dns: Some(dns.clone()),
                     db: Some(db.clone()),
                     restore_staging_max_bytes,
@@ -1022,8 +1027,12 @@ impl Application {
                 }
             }
         }));
-        let certificates =
-            HttpsListenerCertificates::new(&resource_store, &fault_injection, &cluster);
+        let certificates = HttpsListenerCertificates::new(
+            &resource_store,
+            &fault_injection,
+            &cluster,
+            outward_tls.clone(),
+        );
         certificates
             .register_installation_handler(&interconnect)
             .change_context(AppError::RegisterInterconnectRequestHandler)?;

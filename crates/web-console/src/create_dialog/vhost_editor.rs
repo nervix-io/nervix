@@ -85,4 +85,5 @@ pub(super) fn VhostEditor(
                 session_generation=session_generation />
         </Show>
     }
+    .into_any()
 }

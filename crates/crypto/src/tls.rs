@@ -14,6 +14,9 @@ use rustls::{
 };
 use thiserror::Error;
 
+mod policy;
+pub use policy::algorithm_provider;
+
 #[cfg_attr(
     nervix_lint,
     nervix::constant(
@@ -72,6 +75,19 @@ pub fn install_default_provider() {
     outward_tls_provider().rustls().install_default().discarded(
         "rustls retains the provider installed first by the host or a concurrent caller",
     );
+}
+
+static FIPS_CLIENT_PROVIDER: LazyLock<StdArc<CryptoProvider>> = LazyLock::new(|| {
+    StdArc::new(algorithm_provider(
+        nervix_crypto_policy::TlsCipherSuites::default(),
+        nervix_crypto_policy::TlsKeyExchangeGroups::default(),
+    ))
+});
+
+/// The explicit immutable default for native tools and bindings, shared across their channels.
+/// An embedding host's process default does not replace this selection.
+pub fn fips_provider() -> StdArc<CryptoProvider> {
+    StdArc::clone(&FIPS_CLIENT_PROVIDER)
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]

@@ -48,8 +48,13 @@ impl RedisPubSubIngestorStartPlan {
                 ingestor.connector_start_failure(IngestorConnectorStartError::NodeDnsUnavailable)
             );
         };
-        let connector = RedisPubSubIngestorPlan::new(resolved.entries, subscription, dns.clone())
-            .change_context_lazy(|| ingestor.initialize_failure())?;
+        let connector = RedisPubSubIngestorPlan::new(
+            resolved.entries,
+            subscription,
+            dns.clone(),
+            runtime.outward_tls(),
+        )
+        .change_context_lazy(|| ingestor.initialize_failure())?;
         BrokerIngestorStart {
             connector,
             instances: NonZeroU64::MIN,

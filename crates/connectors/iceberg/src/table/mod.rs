@@ -122,6 +122,7 @@ impl IcebergCommitPolicy {
 
 /// What one Iceberg emitter stages and commits through, from its typed emitter plan.
 pub struct IcebergTableEmitterConfig {
+    pub tls_policy: nervix_connector::OutwardTlsPolicy,
     pub backend: IcebergStorageBackend,
     pub dns: DnsResolver,
     pub storage_config: Vec<ClientConfigEntry>,
@@ -503,8 +504,9 @@ impl IcebergClientTlsError {
     fn client_config(
         self,
         config: &[ClientConfigEntry],
+        tls_policy: &nervix_connector::OutwardTlsPolicy,
     ) -> EmitterStartResult<StdArc<rustls::ClientConfig>> {
-        RustlsClientConfigProvider::new(config)
+        RustlsClientConfigProvider::new(config, tls_policy)
             .build_with_default_roots()
             .change_context(self)
             .change_context(EmitterOpenError::InvalidConfiguration { connector: ICEBERG })
@@ -550,6 +552,7 @@ impl IcebergTableEmitter {
         host: EmitterHost,
     ) -> EmitterStartResult<Self> {
         let IcebergTableEmitterConfig {
+            tls_policy,
             backend,
             dns,
             storage_config,
@@ -574,8 +577,10 @@ impl IcebergTableEmitter {
             .iter()
             .map(|(key, value)| (key.to_owned(), value.to_owned()))
             .collect();
-        let catalog_tls = IcebergClientTlsError::Catalog.client_config(&catalog_config)?;
-        let storage_tls = IcebergClientTlsError::ObjectStore.client_config(&storage_config)?;
+        let catalog_tls =
+            IcebergClientTlsError::Catalog.client_config(&catalog_config, &tls_policy)?;
+        let storage_tls =
+            IcebergClientTlsError::ObjectStore.client_config(&storage_config, &tls_policy)?;
         let initialize_catalog = |error: IcebergError| {
             Report::new(EmitterOpenError::Initialize { connector: ICEBERG }).attach_printable(
                 format!("failed to initialize Iceberg catalog '{catalog_name}': {error}"),

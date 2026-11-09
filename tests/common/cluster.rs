@@ -2554,6 +2554,15 @@ impl Cluster {
         LeaderRoutes::new(endpoints)
     }
 
+    /// The concrete HTTPS socket, for independent peers that keep an explicit SNI name.
+    pub(crate) fn https_address(&self, node_id: &str) -> io::Result<SocketAddr> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .ok_or_else(|| io::Error::other(format!("unknown node '{node_id}'")))?;
+        parse_addr(&handle.spec.https_addr())
+    }
+
     pub(crate) fn grpc_uri(&self, node_id: &str) -> io::Result<String> {
         let handle = self
             .nodes
@@ -2626,6 +2635,15 @@ impl Cluster {
             .get(node_id)
             .ok_or_else(|| io::Error::other(format!("unknown node '{node_id}'")))?;
         Ok(handle.spec.web_console_url(handle.config.web_console_mode))
+    }
+
+    /// The authority that issued this fixture node's console listener certificate.
+    pub(crate) fn web_console_ca_pem(&self, node_id: &str) -> io::Result<Vec<u8>> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .ok_or_else(|| io::Error::other(format!("unknown node '{node_id}'")))?;
+        std::fs::read(&handle.spec.interconnect_tls_ca)
     }
 
     pub(crate) fn http_uri(&self, node_id: &str, path: &str) -> io::Result<String> {
