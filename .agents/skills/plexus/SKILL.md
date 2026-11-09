@@ -110,7 +110,7 @@ For authentication refusals and retry behavior, follow
 does not establish that a user exists.
 Read the Ingestors and Emitters chapters for `SHOW INGESTORS`, `SHOW EMITTERS`, and `DESCRIBE`;
 their inspection contracts distinguish effective options from canonical `SHOW CREATE` configuration.
-For ingestor inspection, follow [Ingestor Source Interactions](../../../docs/src/metrics-and-observability.md#ingestor-source-interactions) before interpreting raw counts, filtered graph traffic or poll duration.
+For ingestor inspection, follow [Ingestor Source Interactions](../../../docs/src/metrics-and-observability.md#ingestor-source-interactions) before interpreting raw counts, filtered graph traffic, poll duration or endpoint request outcomes.
 Before reading an acknowledgement failure, a reconnect loop or a stuck ingestor from `DESCRIBE INGESTOR`, follow [Ingestor Acknowledgement And Lifecycle](../../../docs/src/metrics-and-observability.md#ingestor-acknowledgement-and-lifecycle): an expired `ACK TIMEOUT` is counted as `timed_out`, not as a failed tree.
 For batching inspection, read [Emitter payload preparation](../../../docs/src/metrics-and-observability.md#emitter-payload-preparation)
 alongside Emitters: check the effective container and distinguish encoded payload measurements,
@@ -893,3 +893,7 @@ Before returning the configuration, trace every reference to its declaration and
 branch, construction, flush, error, sensitivity, transaction, and external-provisioning contracts.
 If the public docs do not establish a requested capability, say it is not documented as supported
 instead of inventing syntax.
+
+For password creation policy, read [Node Settings → Password Creation Policy](../../../docs/src/node-settings.md#password-creation-policy)
+and [Cryptography → Password Credentials](../../../docs/src/cryptography.md#password-credentials).
+Use the committed cluster setting for creation cost; preserve the documented startup, replay and restore rules.

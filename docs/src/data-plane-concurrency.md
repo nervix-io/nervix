@@ -3610,6 +3610,12 @@ notification, ordering fence or tracked lock. Registry withdrawal follows the ex
 retirement boundary and preserves sibling handles. Poll timing excludes cadence waiting and graph
 intake. The counters do not establish a memory-ordering or delivery guarantee.
 
+An endpoint ingestor's binding retains its unit's request outcome counters from the moment it is
+bound. A request or WebSocket frame increments exactly one retained child per bound ingestor, on
+the request path that already decided its outcome, without resolving labels or reaching the
+registry. The pre-read refusal check decides without counting, so a request is counted once,
+where it is answered.
+
 ### Ingestor Acknowledgement Observations
 
 The broker and paced loops record acknowledgement outcomes, transport acknowledgement and
