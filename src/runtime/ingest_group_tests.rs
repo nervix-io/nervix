@@ -124,7 +124,7 @@ fn accept_decoded_payloads(
 ) -> Result<(), String> {
     let headers = NoIngestHeaders;
     let metadata = (0..acks.len())
-        .map(|_| IngestMetadataRow::headers(&headers))
+        .map(|_| IngestMetadataRow::headers(&headers, &nervix_connector::NoIngestMetadata(0)))
         .collect::<Vec<_>>();
     collector
         .collect(IngestGroupContribution {
@@ -159,8 +159,14 @@ fn two_ingest_rows() -> IngestGroupRows {
         ingest_metadata: ingest_metadata_for_test(
             IngestMetadataProjection::none(),
             &[
-                IngestMetadataRow::headers(&NoIngestHeaders),
-                IngestMetadataRow::headers(&NoIngestHeaders),
+                IngestMetadataRow::headers(
+                    &NoIngestHeaders,
+                    &nervix_connector::NoIngestMetadata(0),
+                ),
+                IngestMetadataRow::headers(
+                    &NoIngestHeaders,
+                    &nervix_connector::NoIngestMetadata(0),
+                ),
             ],
         ),
         acks: vec![AckSet::empty(), AckSet::empty()],
@@ -692,7 +698,10 @@ fn ingest_group_rows_share_the_group_batch_allocation() {
 #[test]
 fn pending_ingest_group_rejects_misaligned_payload_sidecars() {
     let headers = NoIngestHeaders;
-    let metadata = [IngestMetadataRow::headers(&headers)];
+    let metadata = [IngestMetadataRow::headers(
+        &headers,
+        &nervix_connector::NoIngestMetadata(0),
+    )];
     let ingested_at = Timestamp::from_unix_nanos(1);
     let mut pending = PendingIngestGroup::new(IngestMetadataProjection::none(), 1);
 
@@ -763,7 +772,10 @@ fn pending_ingest_group_reports_structural_close_errors() {
     let mut metadata_mismatch = PendingIngestGroup::new(IngestMetadataProjection::none(), 1);
     let mut metadata = IngestMetadataBuilders::new(IngestMetadataProjection::none(), 1);
     metadata
-        .append(&IngestMetadataRow::headers(&NoIngestHeaders))
+        .append(
+            &IngestMetadataRow::headers(&NoIngestHeaders, &nervix_connector::NoIngestMetadata(0)),
+            None,
+        )
         .expect("the headers fixture must append");
     metadata_mismatch.metadata = Some(metadata);
     let metadata_error = expect_failure(
@@ -781,7 +793,10 @@ fn pending_ingest_group_reports_structural_close_errors() {
     let mut decoded_mismatch = PendingIngestGroup::new(IngestMetadataProjection::none(), 1);
     let mut metadata = IngestMetadataBuilders::new(IngestMetadataProjection::none(), 1);
     metadata
-        .append(&IngestMetadataRow::headers(&NoIngestHeaders))
+        .append(
+            &IngestMetadataRow::headers(&NoIngestHeaders, &nervix_connector::NoIngestMetadata(0)),
+            None,
+        )
         .expect("the headers fixture must append");
     decoded_mismatch.metadata = Some(metadata);
     decoded_mismatch.records = Some(grouped_event_schema().batch_builder(1));
@@ -923,7 +938,10 @@ async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
         routes: Vec::new(),
         metadata: IngestMetadataProjection::none(),
     });
-    let metadata = [IngestMetadataRow::headers(&NoIngestHeaders)];
+    let metadata = [IngestMetadataRow::headers(
+        &NoIngestHeaders,
+        &nervix_connector::NoIngestMetadata(0),
+    )];
     let identity_error = expect_failure(
         collector.collect(IngestGroupContribution {
             handles: &IngestTaskHandles::detached(&domain("default")),
@@ -1648,15 +1666,19 @@ async fn a_message_whose_read_metadata_value_its_type_cannot_hold_is_refused_bef
     let projection =
         IngestMetadataProjection::reading(IngestorMetadataDeclaration::new(FIELDS), ["timestamp"])
             .expect("the projection reads a declared field");
-    let refused =
-        RetainedIngestMetadata::from_values(vec![RetainedIngestMetadataValue::Unrepresentable {
+    let refused = RetainedIngestMetadata::from_values(
+        0,
+        vec![RetainedIngestMetadataValue::Unrepresentable {
             ty: IngestorMetadataType::Datetime,
             value: "the AMQP timestamp 946684800000 seconds after the Unix epoch".to_string(),
-        }]);
-    let admitted =
-        RetainedIngestMetadata::from_values(vec![RetainedIngestMetadataValue::Datetime(
+        }],
+    );
+    let admitted = RetainedIngestMetadata::from_values(
+        0,
+        vec![RetainedIngestMetadataValue::Datetime(
             Timestamp::from_unix_nanos(1),
-        )]);
+        )],
+    );
     let metadata_rows = [
         IngestMetadataRow {
             fields: &refused,

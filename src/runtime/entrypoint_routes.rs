@@ -246,10 +246,9 @@ impl ExecutionBuildDeps<'_> {
                     input.clone(),
                     MessageErrorOperation::FilterWhere,
                     self.compile_context(&unbranched),
-                    RuntimeFilterScope::Source {
-                        namespace: "input",
+                    RuntimeFilterScope::Ingestor {
                         allow_header_reads: ingestor.reads_headers(),
-                        allow_metadata: ingestor.reads_headers(),
+                        payload: ingestor.payload_declaration(),
                     },
                 )
                 .map_err(|error| {
@@ -269,6 +268,7 @@ impl ExecutionBuildDeps<'_> {
             let program = bind_ingestor_filter_map_program(
                 &identifier,
                 ingestor.metadata_declaration(),
+                ingestor.payload_declaration(),
                 ingestor.reads_headers(),
                 &route.construction,
                 RuntimeVmSchemaPair {
@@ -312,7 +312,8 @@ impl ExecutionBuildDeps<'_> {
         })
     }
 
-    /// The declared metadata fields `ingestor`'s route programs and its `TIMESTAMP AT` read.
+    /// The declared metadata fields routes and `TIMESTAMP AT` read, plus the payload facts the
+    /// arrival filter and routes read.
     ///
     /// A route program is the only program that binds the `metadata` namespace, and the clause is
     /// the only other reader, so an ingestor reading neither builds no metadata column.
@@ -320,21 +321,33 @@ impl ExecutionBuildDeps<'_> {
         ingestor: &IngestorSpec,
     ) -> Result<Arc<IngestMetadataProjection>, Report<IngestMetadataError>> {
         let mut read = Vec::new();
+        let mut payload_read = Vec::new();
         for route in &ingestor.routes {
             for (namespace, field) in
                 collect_program_field_refs(&route.construction.program().inner)
             {
                 if namespace == INGEST_METADATA_NAMESPACE {
                     read.push(field);
+                } else if namespace == INGEST_PAYLOAD_NAMESPACE {
+                    payload_read.push(field);
+                }
+            }
+        }
+        if let Some(filter) = &ingestor.filter_where {
+            for (namespace, field) in collect_program_field_refs(&filter.program().inner) {
+                if namespace == INGEST_PAYLOAD_NAMESPACE {
+                    payload_read.push(field);
                 }
             }
         }
         if let Some(IngestTimestampSource::AtMetadata(field)) = &ingestor.timestamp_source {
             read.push(field.as_str().to_string());
         }
-        IngestMetadataProjection::reading(
+        IngestMetadataProjection::reading_input(
             ingestor.metadata_declaration(),
             read.iter().map(String::as_str),
+            ingestor.payload_declaration(),
+            payload_read.iter().map(String::as_str),
         )
     }
 

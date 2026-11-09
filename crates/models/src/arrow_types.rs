@@ -4,8 +4,8 @@
 //!
 //! - **Owns.** The one mapping from a schema type to its Arrow data type, from declared fields
 //!   to the canonical Arrow schema a batch of them carries, and from an entity's declared metadata
-//!   fields to the Arrow fields and schema they are carried as.
-//! - **Depends on.** The schema Models, the metadata declarations, and Arrow's schema types.
+//!   and payload fields to the Arrow fields and schema they are carried as.
+//! - **Depends on.** The schema Models, the ingest declarations, and Arrow's schema types.
 //! - **Must not know.** Arrow arrays, how a batch is built, decoded or validated, or who reads it.
 //!
 //! The mapping is part of the data model rather than of any one reader of it: the server compiles
@@ -102,6 +102,28 @@ impl IngestorMetadataDeclaration {
     }
 }
 
+impl crate::IngestorPayloadField {
+    /// Payload facts are exact, required unsigned counts.
+    pub fn arrow_field(self) -> Field {
+        Field::new(
+            self.name(),
+            self.ty().parse_as_type().arrow_data_type(),
+            false,
+        )
+    }
+}
+
+impl crate::IngestorPayloadDeclaration {
+    pub fn arrow_schema(self) -> Schema {
+        Schema::new(
+            self.fields()
+                .iter()
+                .map(|field| field.arrow_field())
+                .collect::<Vec<_>>(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
@@ -110,6 +132,24 @@ mod tests {
 
     use super::*;
     use crate::FieldName;
+
+    #[test]
+    fn payload_schemas_keep_counts_unsigned_and_required() {
+        use crate::IngestorPayloadDeclaration;
+
+        for (declaration, names) in [
+            (IngestorPayloadDeclaration::BYTES, vec!["bytes"]),
+            (IngestorPayloadDeclaration::BATCH, vec!["bytes", "rows"]),
+        ] {
+            let schema = declaration.arrow_schema();
+            assert_eq!(schema.fields().len(), names.len());
+            for (column, name) in schema.fields().iter().zip(names) {
+                assert_eq!(column.name(), name);
+                assert_eq!(column.data_type(), &DataType::UInt64);
+                assert!(!column.is_nullable());
+            }
+        }
+    }
 
     fn field(name: &str, ty: ParseAsType, optional: bool) -> SchemaField {
         SchemaField {
@@ -241,7 +281,8 @@ mod tests {
             Some(vec![
                 ("peer_addr".to_owned(), DataType::Utf8, true),
                 ("transport".to_owned(), DataType::Utf8, true),
-                ("tls_peer".to_owned(), DataType::Utf8, true)
+                ("tls_peer".to_owned(), DataType::Utf8, true),
+                ("remote_ip".to_owned(), DataType::Utf8, true)
             ])
         );
         assert_eq!(

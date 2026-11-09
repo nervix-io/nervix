@@ -79,7 +79,7 @@ impl IngestorMessage for ConfirmingDelivery {
     }
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
-        IngestMetadataRow::headers(self)
+        IngestMetadataRow::headers(self, self)
     }
 }
 
@@ -511,4 +511,11 @@ async fn individual_settlement_keeps_each_drain_guard_until_its_transport_confir
         0
     );
     drop(check.shutdown);
+}
+
+impl nervix_connector::IngestMessageMetadata for ConfirmingDelivery {
+    fn payload_bytes(&self) -> usize {
+        nervix_connector::IngestorMessage::payload(self).len()
+    }
+    fn visit_metadata(&self, _values: &mut dyn nervix_connector::IngestMetadataValues) {}
 }
