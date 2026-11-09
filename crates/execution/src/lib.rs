@@ -8,7 +8,9 @@
 //!   the incremental writer that fails at its budget boundary instead of growing past it. It is
 //!   the only entry point for variable-size encoding, decoding, validation, hashing, compilation,
 //!   program execution, snapshot construction, synchronous filesystem or database work and admitted
-//!   connector control I/O. Operator-supplied code, password hashing and connector driver calls
+//!   connector control I/O. It also declares the caller-driven native runtime profile, validating
+//!   its threads and stacks against the same worker configuration before constructing a runtime.
+//!   Operator-supplied code, password hashing and connector driver calls
 //!   have isolated admission classes: those operations can retain a worker beyond other work's
 //!   latency or cancellation budget.
 //! - **Depends on.** The primitive boundary for its atomics, semaphores and clock and for the
@@ -58,14 +60,32 @@ mod cancellation;
 mod executor;
 mod limits;
 mod memory;
+mod runtime_capacity;
+mod settings;
 mod workers;
+
+pub use runtime_capacity::{
+    RuntimeMaxBlockingThreads, RuntimeThreadError, RuntimeThreadOverrides, RuntimeThreadSettings,
+    RuntimeThreadStackSize, RuntimeWorkerThreads,
+};
+pub use settings::{
+    BulkChunkBytes, BulkCpuPendingJobs, BulkCpuWorkers, BulkMemory, BulkWindowMemory,
+    CommandsMemory, ConnectorStoragePendingJobs, ConsensusStoragePendingJobs,
+    ConsensusStorageWorkers, ControlCpuPendingJobs, ControlCpuWorkers, CredentialsCpuPendingJobs,
+    CredentialsCpuWorkers, CredentialsMemory, DataCpuPendingJobs, DataCpuWorkers,
+    ExecutionOverrides, ExecutionSettings, ExtensionCpuPendingJobs, ExtensionCpuWorkers,
+    FilesystemStoragePendingJobs, FilesystemStorageWorkers, ManagementMemory, PendingJobCounts,
+    RelayDecodedBytes, RelayEncodedBytes, RelayMemory, RelayScratchBytes,
+    ResidentReplicationBatches, RestoreMetadataMemory, StateReadCacheMemory, StateReadMemory,
+    WorkerSettings,
+};
 
 pub use crate::{
     cancellation::{Cancellation, Cancelled},
     executor::{ExecutionFailure, Executor, ExecutorSnapshot},
     limits::{
         ConnectorStorageWorkers, CpuClass, ExecutionConfig, ExecutionConfigError, MemoryBudgets,
-        MemoryClass, OperationLimits, StorageClass, WorkerCounts,
+        MemoryClass, OperationLimits, StorageClass, WorkerClassName, WorkerCounts,
     },
     memory::{
         AdmissionError, BudgetedBuffer, BufferGrowthError, BufferLimitExceeded, ChargedBytes,
@@ -78,3 +98,8 @@ pub use crate::{
 // model. That build runs only the cancellation models.
 #[cfg(all(test, not(feature = "loom")))]
 mod tests;
+
+// These capacity tests construct complete executors outside a model execution. Modeled admission
+// is exercised by the registered production-owner checks.
+#[cfg(all(test, not(any(feature = "loom", feature = "shuttle"))))]
+mod settings_tests;

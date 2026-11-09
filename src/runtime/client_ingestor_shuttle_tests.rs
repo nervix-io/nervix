@@ -20,9 +20,9 @@ use std::{
 
 use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::{
-    AckWindow, CLIENT_PRODUCER_NODE_BYTES, ClientEndpointContract, ClientProcessingFailure,
-    ClientProducerEndReason, ClientProducerLimits, ClientProducerPolicy, ClientSubmissionOutcome,
-    FieldName, IngestQuiesceMode, ParseAsType, SchemaField,
+    AckWindow, ClientEndpointContract, ClientProcessingFailure, ClientProducerEndReason,
+    ClientProducerLimits, ClientProducerPolicy, ClientSubmissionOutcome, FieldName,
+    IngestQuiesceMode, ParseAsType, SchemaField,
 };
 use nervix_primitives::sync::{StdArc, mpsc, oneshot};
 // Real atomics are not Shuttle scheduling points, so each record below changes in the same
@@ -55,7 +55,8 @@ fn submission(id: u64) -> ClientSubmissionId {
 /// Reserves more than half the node budget, holds it across a scheduling point, and returns it.
 async fn reserve_more_than_half(budget: ClientProducerBudget, live: StdArc<AtomicUsize>) {
     let bytes = NonZeroU64::new(
-        CLIENT_PRODUCER_NODE_BYTES
+        budget
+            .capacity()
             .checked_div(2)
             .assured("the divisor is a non-zero literal")
             .checked_add(1)
@@ -74,7 +75,7 @@ async fn reserve_more_than_half(budget: ClientProducerBudget, live: StdArc<Atomi
         "two reservations of more than half the node budget were live at once"
     );
     assert!(
-        budget.reserved() <= CLIENT_PRODUCER_NODE_BYTES,
+        budget.reserved() <= budget.capacity(),
         "the node budget holds more than its bound"
     );
     nervix_primitives::task::yield_now().await;
@@ -84,7 +85,10 @@ async fn reserve_more_than_half(budget: ClientProducerBudget, live: StdArc<Atomi
 
 fn racing_reservations_stay_within_the_node_budget() {
     shuttle::future::block_on(async {
-        let budget = ClientProducerBudget::default();
+        let budget = ClientProducerBudget::new(
+            nervix_models::Setting::new(ubyte::ByteUnit::Byte(17), &None)
+                .assured("the configured credit is positive"),
+        );
         let live = StdArc::new(AtomicUsize::new(0));
         let mut producers = Vec::with_capacity(RACING_PRODUCERS);
         for _ in 0..RACING_PRODUCERS {

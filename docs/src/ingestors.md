@@ -1009,7 +1009,7 @@ may ask for, the session or node has no room left, or the session holds a transa
 | --- | --- |
 | Producers per session | 32 |
 | Outstanding bytes per session | Committed producer cap, 32 MiB by default |
-| Outstanding bytes per node, including batches retained for forwarded producers | 128 MiB |
+| Outstanding bytes per node, including batches retained for forwarded producers | Resolved producer node credit; see [Execution Capabilities](node-settings.md#execution-capabilities) |
 | Batches one producer may ask to have outstanding | 1,024 |
 | Rows per batch | Grant's committed client-row cap, 65,536 by default |
 

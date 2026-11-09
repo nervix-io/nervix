@@ -1986,10 +1986,11 @@ batches continue through the graph with nobody left to answer them, and the batc
 was clearing are dropped unadmitted, releasing their slots of the window. A later producer opens a
 new link.
 
-Each end reserves the producer's granted bytes in its own 128 MiB producer budget: the serving node
+Each end reserves the producer's granted bytes in its own resolved producer node budget: the serving node
 for the batches its session holds, and the owning node again for the batches it retains for another
 node. The link adds no reservation of its own beyond the transport's per-frame charge.
-[Client Session Protocol](./client-session-protocol.md#producers) describes what the client sees.
+[Client Session Protocol](./client-session-protocol.md#producers) describes what the client sees;
+[Execution Capabilities](node-settings.md#execution-capabilities) owns the local capacity derivation.
 
 ## Client Consumer Streams
 
@@ -1997,7 +1998,7 @@ When a session opens a consumer of a `TO CLIENT` emitter executing on another no
 node opens one `client_consumer_stream` duplex stream for that attachment on the relay pool and
 shared subquota. The opening request names the authenticated serving node, domain, emitter, exact
 schema fields and granted credit. The owner checks the peer identity, reserves the grant in its
-own 128 MiB consumer budget and attaches to its local emitter endpoint before replying `Opened`
+own resolved consumer node budget and attaches to its local emitter endpoint before replying `Opened`
 with the endpoint description or `Refused` with a typed cause. The serving node has already
 reserved the same grant against its session and node budgets.
 

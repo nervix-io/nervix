@@ -457,8 +457,8 @@ Producer and consumer reservations are separate and cannot borrow from each othe
 | Attachments | 32 producers and independently 32 consumers per session |
 | Requested outstanding batch count | 1 through 1,024 per handle |
 | Session credit bytes | Committed producer and consumer caps, independently 32 MiB by default; node credit remains a separate bound |
-| Node credit bytes | 128 MiB for each direction; 256 MiB total reserved credit, charged at every serving/owning node retaining forwarded work |
-| Retained emitter IPC | A separate 128 MiB node work budget, including output waiting for a consumer |
+| Node credit bytes | Independently resolved producer/consumer capacities, charged at every serving/owning node retaining forwarded work; [Execution Capabilities](node-settings.md#execution-capabilities) owns defaults and overrides |
+| Retained emitter IPC | Independent work admission with the resolved consumer byte capacity, including output waiting for a consumer |
 | Native batch rows | The producer grant captures the committed client-row cap (65,536 by default); emitter `BATCH` has its own committed count cap |
 | Session frame | 4 MiB by default, including the complete FlatBuffers envelope |
 | Reassembled reply | 64 MiB by default, with each transfer part fitting the frame limit |

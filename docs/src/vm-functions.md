@@ -779,6 +779,8 @@ The VM's entry point alone decides where a program runs:
 | More than 1,024 rows, and no such function | On the node's data workers, admitted through the bounded executor |
 | Any `Inject` instruction whose injector's `FunctionExecutionPolicy` is `Extension` | On the node's extension workers, admitted through the bounded executor, whatever the batch size. Every UDF call does this. |
 
+The node resolves worker, queue and memory capacities once at startup;
+[Execution Capabilities](node-settings.md#execution-capabilities) defines the local bounds.
 A caller hands the entry point the node's `Executor` and awaits the result; it chooses neither
 the class nor the charge. An admitted execution is charged to the relay memory class for the bytes
 the batch's columns hold, the usual order of what the program builds from them, and never more

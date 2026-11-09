@@ -51,27 +51,28 @@ impl CapacityArgs {
     pub(super) fn peer_receive(
         &self,
     ) -> Result<
-        nervix_interconnect::PeerReceiveSettings,
+        nervix_interconnect::PeerReceiveOverrides,
         Report<nervix_interconnect::PeerReceiveSettingsError>,
     > {
-        nervix_interconnect::PeerReceiveSettings::resolve(
-            self.relay_batch_bytes.map(|v| v.0),
-            self.relay_decoded_bytes.map(|v| v.0),
-            self.bulk_chunk_bytes.map(|v| v.0),
-            self.bulk_window_bytes.map(|v| v.0),
-            &nervix_execution::OperationLimits::default(),
-        )
+        let overrides = nervix_interconnect::PeerReceiveOverrides {
+            relay_batch_bytes: self.relay_batch_bytes.map(|v| v.0),
+            relay_decoded_bytes: self.relay_decoded_bytes.map(|v| v.0),
+            bulk_chunk_bytes: self.bulk_chunk_bytes.map(|v| v.0),
+            bulk_window_bytes: self.bulk_window_bytes.map(|v| v.0),
+        };
+        overrides.validate()?;
+        Ok(overrides)
     }
 
     pub(super) fn from_settings(
         settings: &CapacitySettings,
-        receive: &nervix_interconnect::PeerReceiveSettings,
+        receive: &nervix_interconnect::PeerReceiveOverrides,
     ) -> Self {
         Self {
-            relay_batch_bytes: Some(HumanBytes(*receive.relay_batch_bytes.value())),
-            relay_decoded_bytes: Some(HumanBytes(*receive.relay_decoded_bytes.value())),
-            bulk_chunk_bytes: Some(HumanBytes(*receive.bulk_chunk_bytes.value())),
-            bulk_window_bytes: Some(HumanBytes(*receive.bulk_window_bytes.value())),
+            relay_batch_bytes: receive.relay_batch_bytes.map(HumanBytes),
+            relay_decoded_bytes: receive.relay_decoded_bytes.map(HumanBytes),
+            bulk_chunk_bytes: receive.bulk_chunk_bytes.map(HumanBytes),
+            bulk_window_bytes: receive.bulk_window_bytes.map(HumanBytes),
             cpu_count: *settings.cpu_count.value(),
             memory_limit: settings.memory_limit().map(HumanBytes),
         }

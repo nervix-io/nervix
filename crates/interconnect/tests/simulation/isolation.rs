@@ -162,7 +162,9 @@ fn executor(pending_jobs: usize) -> Executor {
                 NonZeroUsize::MIN,
             ))
             .expect("one worker fits the primitive permit bound"),
-            pending_jobs: NonZeroUsize::new(pending_jobs).assured("fixture queues are nonzero"),
+            pending_jobs: nervix_execution::PendingJobCounts::uniform(
+                NonZeroUsize::new(pending_jobs).assured("fixture queues are nonzero"),
+            ),
         },
         ..ExecutionConfig::default()
     })

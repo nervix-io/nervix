@@ -437,6 +437,13 @@ test-password-credentials *args: build-deps build-plexus-format build-test-cli b
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/password_credentials.feature {{ quote(args) }}
 
+# Check the node's capability-derived execution and memory settings through its public surface.
+test-execution-capabilities *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/execution_capabilities.feature {{ quote(args) }}
+
 # Exercise domain pause recovery with ordinary assets and the shared native tool graph.
 test-client-wire-pause-recovery *args: build-deps build-codec-tools
     #!/usr/bin/env bash
@@ -1268,6 +1275,11 @@ test-package-bins package *args:
 # server lib.
 test-execution *args:
     cargo test --package nervix-execution --lib -- {{ args }}
+
+# Check the capacity owner without the server unit binary or another build holding its Cargo lock.
+test-execution-capacity-owners:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/execution-capacity-owners") }} cargo test --package nervix-execution --lib
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/execution-capacity-owners") }} cargo test --package nervix-execution --doc RuntimeThreadSettings
 
 # Run the primitive boundary's conformance checks once per execution mode. Each mode runs the same
 # contract scripts of every family against its own backend and checks that it selected that backend,
@@ -4715,6 +4727,11 @@ coverage-chaos-pause-delivery:
 # Exercise bounded packet sampling and the directed-link effect limits without a product image.
 test-chaos-degraded-evidence:
     exec bash scripts/chaos/tests/degraded-self-test.sh
+
+# Judge the leader crash's outward TLS policy evidence and prove its restricted TLS probe against
+# local servers that admit or exclude the probe's offer.
+test-chaos-outward-tls:
+    exec bash scripts/chaos/tests/outward-tls-self-test.sh
 
 # Pin suite preparation and baseline execution accounting and the production output-boundary
 # observations.

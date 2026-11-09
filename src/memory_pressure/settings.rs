@@ -19,7 +19,7 @@
 use std::{convert::Infallible, time::Duration};
 
 use error_stack::Report;
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{NodeCapabilities, Setting, SettingDefinition};
 use ubyte::ByteUnit;
 
@@ -35,17 +35,23 @@ pub struct MemoryHighWatermark;
 impl SettingDefinition for MemoryHighWatermark {
     type Class = NodeCapabilities;
     type Value = Option<ByteUnit>;
-    type Context = ();
+    type Context = Option<ByteUnit>;
     type Error = Infallible;
 
     const NAME: &'static str = "memory-high-watermark";
-    const DERIVATION: Option<&'static str> = None;
+    const DERIVATION: Option<&'static str> = Some("seven eighths of resolved node memory");
 
-    fn default_value(_: &()) -> Option<ByteUnit> {
-        None
+    fn default_value(memory: &Option<ByteUnit>) -> Option<ByteUnit> {
+        memory.map(|memory| {
+            ByteUnit::Byte(
+                (memory.as_u64() / 8)
+                    .checked_mul(7)
+                    .assured("seven eighths fit the input byte count"),
+            )
+        })
     }
 
-    fn validate(_: &Option<ByteUnit>, _: &()) -> Result<(), Report<Infallible>> {
+    fn validate(_: &Option<ByteUnit>, _: &Option<ByteUnit>) -> Result<(), Report<Infallible>> {
         Ok(())
     }
 }
@@ -62,10 +68,16 @@ impl SettingDefinition for MemoryLowWatermark {
     type Error = MemoryPressureConfigError;
 
     const NAME: &'static str = "memory-low-watermark";
-    const DERIVATION: Option<&'static str> = None;
+    const DERIVATION: Option<&'static str> = Some("six sevenths of the derived high watermark");
 
-    fn default_value(_: &Option<ByteUnit>) -> Option<ByteUnit> {
-        None
+    fn default_value(high: &Option<ByteUnit>) -> Option<ByteUnit> {
+        high.map(|high| {
+            ByteUnit::Byte(
+                (high.as_u64() / 7)
+                    .checked_mul(6)
+                    .assured("six sevenths fit the input byte count"),
+            )
+        })
     }
 
     fn validate(
@@ -148,7 +160,7 @@ impl MemoryPressureSettings {
         check_interval: Option<Duration>,
         resume_jitter: Option<Duration>,
     ) -> Result<Self, Report<MemoryPressureConfigError>> {
-        let high_watermark = Setting::<MemoryHighWatermark>::new(high_watermark, &())
+        let high_watermark = Setting::<MemoryHighWatermark>::new(high_watermark, &None)
             .assured("the high watermark declares no validation of its own");
         let low_watermark = Setting::new(low_watermark, high_watermark.value())?;
         let check_interval = Setting::resolve(check_interval, &())
@@ -160,6 +172,28 @@ impl MemoryPressureSettings {
             low_watermark,
             check_interval,
             resume_jitter,
+        };
+        if let Some(config) = settings.config() {
+            config.validate()?;
+        }
+        Ok(settings)
+    }
+
+    /// Derive an omitted pair after detection; an explicit pair retains its exact thresholds.
+    pub fn for_memory_limit(
+        &self,
+        memory: Option<ByteUnit>,
+    ) -> Result<Self, Report<MemoryPressureConfigError>> {
+        if self.high_watermark.value().is_some() || self.low_watermark.value().is_some() {
+            return Ok(*self);
+        }
+        let high_watermark = Setting::<MemoryHighWatermark>::resolve(None, &memory)
+            .assured("the high watermark's derivation cannot fail");
+        let low_watermark = Setting::<MemoryLowWatermark>::resolve(None, high_watermark.value())?;
+        let settings = Self {
+            high_watermark,
+            low_watermark,
+            ..*self
         };
         if let Some(config) = settings.config() {
             config.validate()?;
@@ -196,6 +230,37 @@ mod tests {
     use ubyte::ByteUnit;
 
     use super::{MemoryPressureConfigError, MemoryPressureSettings};
+
+    #[test]
+    fn an_omitted_pair_derives_from_memory_and_an_explicit_pair_keeps_its_thresholds() {
+        let derived = MemoryPressureSettings::default()
+            .for_memory_limit(Some(ByteUnit::Gibibyte(8)))
+            .expect("derived watermarks are ordered")
+            .config()
+            .expect("known memory enables the supervisor");
+        assert_eq!(derived.high_watermark, ByteUnit::Gibibyte(7));
+        assert_eq!(derived.low_watermark, ByteUnit::Gibibyte(6));
+        let explicit = MemoryPressureSettings::resolve(
+            Some(ByteUnit::Byte(1)),
+            Some(ByteUnit::Byte(0)),
+            None,
+            None,
+        )
+        .expect("an explicit early-pause pair is valid");
+        assert_eq!(
+            explicit
+                .for_memory_limit(Some(ByteUnit::Gibibyte(8)))
+                .expect("the pair stays valid"),
+            explicit
+        );
+        assert_eq!(
+            MemoryPressureSettings::default()
+                .for_memory_limit(None)
+                .expect("unknown memory keeps an absent pair")
+                .config(),
+            None
+        );
+    }
 
     #[test]
     fn without_watermarks_the_node_runs_no_supervisor() {
