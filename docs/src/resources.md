@@ -144,6 +144,14 @@ without guest state. If any node's listener cannot install the new certificate, 
 fails; when none of its usages paused, as when it moves only VHOSTs, every usage keeps its previous
 version.
 
+A stateful inferencer moved to another resource version starts every branch from its declared
+`INITIAL` tensors, even when the replacement version contains the same model file bytes. Its state
+fingerprint names the resource, version, file and complete `STATE` declaration. Applying the new
+schedule removes snapshots of the replaced fingerprint; a later restart restores only state of the
+current binding. Uploading a version, rebinding to the already pinned version, or rejecting an
+incompatible candidate model preserves the existing binding and each branch's tensors. Dropping
+and recreating the inferencer with another `STATE` declaration starts from the new initial values.
+
 A rebinding that leaves a WASM processor on the version it already binds moves nothing and so
 resets nothing. Nervix compiles each candidate module before the batch is published, so a module it
 cannot compile rejects the whole rebinding with every previous binding and its saved guest state
