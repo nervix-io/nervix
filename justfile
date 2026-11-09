@@ -4518,6 +4518,36 @@ test-chaos-suites:
 test-chaos-endpoint-verifiers:
     exec bash scripts/chaos/tests/endpoint-self-test.sh
 
+# Qualify binding submission uncertainty, exact effects and settlement evidence without Docker.
+test-chaos-binding:
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts.chaos.tests.test_binding
+    bash scripts/chaos/tests/binding-image-self-test.sh
+
+# Keep the external binding client's deterministic controls in the ordinary Python report.
+coverage-chaos-binding:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ cargo_target_dir }}/chaos-binding-coverage"
+    PYTHONDONTWRITEBYTECODE=1 uvx --from coverage==7.11.0 coverage run --data-file "{{ cargo_target_dir }}/chaos-binding-coverage/python.coverage" --branch --source=scripts.chaos.binding_client,scripts.chaos.binding_evidence,scripts.chaos.install_binding -m unittest scripts.chaos.tests.test_binding
+    uvx --from coverage==7.11.0 coverage lcov --data-file "{{ cargo_target_dir }}/chaos-binding-coverage/python.coverage" -o "{{ cargo_target_dir }}/chaos-binding-coverage/python.lcov"
+
+# Build the binding tool image from a canonical prepared wheel; a chaos run compiles nothing.
+build-chaos-client-image tag="nervix:chaos-client": build-client-python
+    just cargo_target_dir={{ quote(cargo_target_dir) }} package-chaos-client-image {{ quote(tag) }}
+
+# Package the exact wheel build-client-python prepared, without compiling during an experiment.
+package-chaos-client-image tag="nervix:chaos-client":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    revision="$(git rev-parse HEAD)"
+    if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+        revision="${revision}-dirty"
+    fi
+    docker buildx build -f Dockerfile.debian --target chaos-client-local --load \
+        --build-context chaos-wheels={{ quote(cargo_target_dir + "/client-conformance/wheels") }} \
+        --build-arg "NERVIX_SOURCE_REVISION=${revision}" \
+        --label "org.opencontainers.image.revision=${revision}" --tag {{ quote(tag) }} .
+
 # Retain shell coverage of the endpoint route and WebSocket verifier controls.
 coverage-chaos-endpoint-verifiers:
     #!/usr/bin/env bash
@@ -4953,6 +4983,11 @@ docker-build-debian llvm_version="23" tag="nervix:debian" platform="linux/amd64"
     just docker-build-linux cpu {{ quote(llvm_version) }} \
         {{ quote(tag) }} {{ quote(platform) }} {{ quote(push) }} {{ quote(cache_from) }} {{ quote(cache_to) }} ""
 
+# Publish the wheel and interpreter used by the Python-binding endpoint chaos workload.
+docker-build-chaos-client llvm_version="23" tag="nervix:chaos-client" push="false":
+    just docker-build-linux chaos-client {{ quote(llvm_version) }} \
+        {{ quote(tag) }} linux/amd64 {{ quote(push) }} "" "" ""
+
 # Build Debian trixie -> CUDA 13/cuDNN 9 -> Nervix, reusing CUDA across application builds.
 docker-build-cuda llvm_version="23" tag="nervix:cuda" platform="linux/amd64" push="false" cache_from="" cache_to="":
     just docker-build-linux cuda {{ quote(llvm_version) }} \
@@ -4972,7 +5007,7 @@ docker-build-linux image_target llvm_version tag platform push cache_from cache_
     #!/usr/bin/env bash
     set -euo pipefail
     case {{ quote(image_target) }}:{{ quote(diagnostic_selection) }} in
-        cpu: | cuda: | diagnostic:deloxide | diagnostic:deloxide-order | diagnostic:deloxide-stress) ;;
+        cpu: | cuda: | chaos-client: | diagnostic:deloxide | diagnostic:deloxide-order | diagnostic:deloxide-stress) ;;
         *)
             echo "the {{ image_target }} image cannot be built with diagnostic selection '{{ diagnostic_selection }}'" >&2
             exit 1
@@ -5023,6 +5058,7 @@ docker-build-linux image_target llvm_version tag platform push cache_from cache_
         --build-arg "KACHE_S3_ACCESS_KEY=${KACHE_S3_ACCESS_KEY}" \
         --build-arg "KACHE_S3_SECRET_KEY=${KACHE_S3_SECRET_KEY}" \
         --build-arg NERVIX_DIAGNOSTIC_SELECTION={{ quote(diagnostic_selection) }} \
+        --build-arg "NERVIX_SOURCE_REVISION=${revision}" \
         --label "org.opencontainers.image.revision=${revision}" \
         "${cache_flags[@]}" \
         -t {{ quote(tag) }} \
