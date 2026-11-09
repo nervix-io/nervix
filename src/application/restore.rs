@@ -49,7 +49,7 @@ use nervix_models::{
     ClusterSchedule, CommandExecutionReference, DomainName, ModelKind, NodeRef, Restore,
     RestoreArchive, RestoreLifecycle, RestoreMode, RestoreReport, RestoreScope, RestoreState,
     RestoreStep, RestoreStepOutcome, RestoreStepReport, RestoredDomain, RestoredUsers,
-    SchemaFingerprint, Timestamp, UserName,
+    ScheduledNode, SchemaFingerprint, Timestamp, Unit, UserName,
 };
 use tracing::info;
 
@@ -679,10 +679,7 @@ fn restore_state_warnings(
             let node = schedule
                 .domain(&domain.target)
                 .and_then(|scheduled| scheduled.nodes.get(&NodeRef::new(kind, entity.clone())));
-            let published_schema = match node {
-                Some(node) if node.units.contains_key(&unit) => Some(node.schema_fingerprint),
-                _ => None,
-            };
+            let published_schema = restored_state_schema(node, unit);
             let mut reason = state_skip_reason(schema, published_schema);
             if let DescribedRuntimeState::Window { descriptor, .. } = archived
                 && let Some(window) = domain.branch_state_schemas.window(&descriptor.entity)
@@ -706,6 +703,19 @@ fn restore_state_warnings(
         }
     }
     warnings
+}
+
+/// The schema fingerprint under which the restored schedule installs state archived for `node` in
+/// `unit`: none when it installs no state archived there.
+fn restored_state_schema(node: Option<&ScheduledNode>, unit: Unit) -> Option<SchemaFingerprint> {
+    let node = node?;
+    // A branch's partitions place an archived key's state in the unit the restored count gives the
+    // key, whichever unit archived it, so such state is restored even from a unit the restored
+    // schedule no longer holds.
+    if node.units.contains_key(&unit) || node.partition_branch().is_some() {
+        return Some(node.schema_fingerprint);
+    }
+    None
 }
 
 fn state_skip_reason(
@@ -830,5 +840,59 @@ mod backup_state_warning_tests {
         );
         assert_eq!(state_skip_reason(Some(archived), Some(archived)), None);
         assert_eq!(state_skip_reason(None, Some(published)), None);
+    }
+
+    fn relay(partitions: Option<u16>) -> ScheduledNode {
+        use std::num::{NonZeroU16, NonZeroUsize};
+
+        use meticulous::{OptionExt as _, ResultExt as _};
+        use nervix_models::{
+            BranchName, BranchPartitions, CreateRelay, CreateSchema, Model, RelayBranching,
+            RelayName, ResolvedBranching, SchemaName,
+        };
+
+        let branch = BranchName::parse("by_tenant").assured("the test branch name is valid");
+        let relay = CreateRelay {
+            name: RelayName::parse("events").assured("the test relay name is valid"),
+            schema: SchemaName::parse("event").assured("the test schema name is valid"),
+            buffer: NonZeroUsize::MIN,
+            branching: RelayBranching::branched_by(branch.clone()),
+            materialized_state: None,
+        };
+        let node = ScheduledNode::new(Model::Relay(relay), SchemaFingerprint::from_digest([3; 32]));
+        let Some(count) = partitions else {
+            return node;
+        };
+        let key_schema = CreateSchema {
+            name: SchemaName::parse("tenant_key").assured("the test schema name is valid"),
+            fields: Vec::new(),
+        };
+        let count = BranchPartitions::Direct(
+            NonZeroU16::new(count).assured("the test partition count is positive"),
+        );
+        node.with_resolved_branching(Some(ResolvedBranching::branched(branch, key_schema, count)))
+    }
+
+    #[test]
+    fn state_a_branch_s_partitions_divide_is_restored_from_any_archived_unit() {
+        let partitioned = relay(Some(4));
+        // The restored schedule places no unit 6 of four partitions: the archived state of a key a
+        // shrink had not moved yet still lies there, and the restore places it in the key's unit.
+        assert!(!partitioned.units.contains_key(&Unit::partition(6)));
+        assert_eq!(
+            restored_state_schema(Some(&partitioned), Unit::partition(6)),
+            Some(partitioned.schema_fingerprint)
+        );
+    }
+
+    #[test]
+    fn state_of_a_unit_the_restored_schedule_lacks_is_skipped_when_no_partitions_divide_it() {
+        let undivided = relay(None);
+        assert!(!undivided.units.contains_key(&Unit::partition(6)));
+        assert_eq!(
+            restored_state_schema(Some(&undivided), Unit::partition(6)),
+            None
+        );
+        assert_eq!(restored_state_schema(None, Unit::SINGLE), None);
     }
 }

@@ -1080,3 +1080,116 @@ Feature: Changing a running branch's partition count
       | cluster_size | replica_count | input_type    | output_type   | tensor_type       |
       | 1            | 0             | ARRAY<F32, 2> | ARRAY<F32, 1> | DENSE TENSOR<F32> |
       | 3            | 1             | ARRAY<F32, 2> | ARRAY<F32, 1> | DENSE TENSOR<F32> |
+
+  # beta lies in partition 1 of four and 5 of eight, and eta in partition 0 of both. No record of
+  # beta reaches its new partition before the cut, so the archive holds beta's inference state in
+  # the partition the previous count gave it: under four for a grow, in a holding partition the new
+  # count drops for a shrink.
+  @long_running
+  Scenario Outline: A backup cut before a moved key's inference state is claimed restores the state in the key's partition under the new count
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And the production sticky scheduler is configured
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And node "node-1" has ONNX fixture resource directory "onnx_model"
+    When these Plexus commands are executed through the client on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE inference;
+      UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA features ( tenant STRING, vector <input_type> );
+      CREATE SCHEMA scored ( score <output_type> );
+      CREATE WIRE JSON SCHEMA features_wire MODE STRICT ( tenant string, vector array );
+      CREATE WIRE JSON CODEC features_codec FROM WIRE SCHEMA features_wire TO SCHEMA features;
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 30m PARTITIONS <from>;
+      CREATE RELAY features SCHEMA features BRANCHED BY by_tenant;
+      CREATE RELAY scored SCHEMA scored BRANCHED BY by_tenant;
+      CREATE VHOST edge repartition-infer-backup-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/features';
+      CREATE HTTP ENDPOINT INGESTOR feature_ingestor
+        FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
+        TO features INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INFERENCER running FROM features
+        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx'
+        INPUTS { 'features' <tensor_type>[2] = input.vector }
+        STATE { 'state_in' FROM 'state_out' <tensor_type>[2] INITIAL ZEROS }
+        OUTPUT SCHEMA { 'score' <tensor_type>[1] }
+        BRANCHED BY by_tenant
+        TO scored SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION scores_before TO scored;
+      START;
+      """
+    And http payload is posted to node "node-1" with host "repartition-infer-backup-{{test_id}}.example.com" path "/features"
+      """
+      {"tenant":"beta","vector":[1.0,10.0]}
+      """
+    And http payload is posted to node "node-1" with host "repartition-infer-backup-{{test_id}}.example.com" path "/features"
+      """
+      {"tenant":"eta","vector":[100.0,1000.0]}
+      """
+    Then within "60s" the relay subscription receives exactly one payload for each fragment set
+      """
+      key={"tenant":"beta"} | "score":[11.0]
+      key={"tenant":"eta"} | "score":[1100.0]
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      DELETE SUBSCRIPTION scores_before;
+      ALTER BRANCH by_tenant SET PARTITIONS <to>;
+      """
+    Then within "30s" DESCRIBE BRANCH "by_tenant" on node "node-1" contains
+      """
+      partitions: <to>
+      previous partitions: <from>
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "repartition-inference.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    When the CLI describes backup archive "repartition-inference.nvxb" as json
+    Then the described backup has exactly 2 "inferencer" state sections
+    Given the cluster is replaced by a fresh <cluster_size> node cluster whose nodes are named "restored"
+    And the restore coordinator uses remote placement in a multi-node cluster
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI restores "domain {{domain}} --resume" from "repartition-inference.nvxb" on node "{{leader}}" reporting JSON
+    Then the CLI restore succeeded, restoring domain "{{domain}}" with 1 resource versions and 12 models
+    And the CLI restore reports domain "{{domain}}" as "RUNNING" at start version 1
+    And the CLI restore reports no warnings
+    And within "30s" DESCRIBE BRANCH "by_tenant" on node "{{leader}}" contains
+      """
+      partitions: <to>
+      partition epoch: 1
+      """
+    And within "60s" node "restored-1" accepts http payload for host "repartition-infer-backup-{{test_id}}.example.com" path "/features"
+      """
+      {"tenant":"probe","vector":[0.0,0.0]}
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION scores_after TO scored;
+      """
+    And http payload is posted to node "restored-1" with host "repartition-infer-backup-{{test_id}}.example.com" path "/features"
+      """
+      {"tenant":"beta","vector":[2.0,20.0]}
+      """
+    And http payload is posted to node "restored-1" with host "repartition-infer-backup-{{test_id}}.example.com" path "/features"
+      """
+      {"tenant":"eta","vector":[200.0,2000.0]}
+      """
+    Then within "60s" the relay subscription receives exactly one payload for each fragment set
+      """
+      key={"tenant":"beta"} | "score":[33.0]
+      key={"tenant":"eta"} | "score":[3300.0]
+      """
+
+    Examples:
+      | cluster_size | replica_count | from | to | input_type    | output_type   | tensor_type       |
+      | 1            | 0             | 4    | 8  | ARRAY<F32, 2> | ARRAY<F32, 1> | DENSE TENSOR<F32> |
+      | 3            | 1             | 4    | 8  | ARRAY<F32, 2> | ARRAY<F32, 1> | DENSE TENSOR<F32> |
+      | 1            | 0             | 8    | 4  | ARRAY<F32, 2> | ARRAY<F32, 1> | DENSE TENSOR<F32> |
+      | 3            | 1             | 8    | 4  | ARRAY<F32, 2> | ARRAY<F32, 1> | DENSE TENSOR<F32> |
