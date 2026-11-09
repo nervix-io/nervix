@@ -259,6 +259,7 @@ class InventoryTests(unittest.TestCase):
             "models-external-names",
             "models-external-name-validation",
             "models-connector-declarations",
+            "connector-declared-events",
             "websocket-retained-metadata",
             "ingest-metadata-projection",
             "sqs-system-metadata",

@@ -837,6 +837,21 @@ test_target = "test:connectors"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/models/src/connector/declaration/events/__fuzz__/connector__declaration__events__tests__bolero_declared_events_project_the_complete_current_set/corpus"
+domain_version = 1
+features = []
+id = "connector-declared-events"
+invariant = "Every current ingestor and emitter event declaration projects its complete ordered set to JSON with exactly the closed vocabulary's displayed names."
+manifest = "Cargo.toml"
+max_input_bytes = 32
+package = "nervix-models"
+random_iterations = 128
+source = "crates/models/src/connector/declaration/events/tests.rs"
+test = "connector::declaration::events::tests::bolero_declared_events_project_the_complete_current_set"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/timestamps__bolero_timestamps_round_trip_through_every_representation/corpus"
 domain_version = 3
 features = []

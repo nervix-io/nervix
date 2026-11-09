@@ -267,6 +267,8 @@ impl RedeliveryHost {
     }
 }
 
+impl nervix_connector::ConnectorEventProvider for RedeliveryHost {}
+
 #[async_trait]
 impl IngestorHostServices for RedeliveryHost {
     fn record_read(&self, _outcome: nervix_connector::IngestorReadOutcome) {}

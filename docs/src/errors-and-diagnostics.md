@@ -870,6 +870,11 @@ error the route's policy receives.
 [Failure and observation](./connector-contract.md#failure-and-observation) owns the contract, and
 the paragraphs below record what each integration keeps beneath it.
 
+Resolving an event counter during connector construction returns `UndeclaredConnectorEvent` if
+the entity declares no such event. The typed event identity stays beneath the connector's open
+context; this refuses construction and answers for no record. Successfully recording a declared
+event changes no publish, intake or acknowledgement outcome.
+
 An Iceberg object-store failure retains its OpenDAL cause beneath the external Iceberg error.
 When the storage client sets `timeout_ms`, that error also names the configured millisecond bound
 as configuration context. The host reports the failed commit and its declared reconnect backoff; one

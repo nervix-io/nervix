@@ -1119,6 +1119,25 @@ fn batch_payload<'a>(
     }
 }
 
+impl nervix_connector::ConnectorEventProvider for RuntimeIngestorHost {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "connector construction borrows its exact unit's declared event children"
+        )
+    )]
+    fn event_counter(
+        &self,
+        event: nervix_models::ConnectorEvent,
+    ) -> error_stack::Result<
+        nervix_connector::ConnectorEventCounter,
+        nervix_connector::UndeclaredConnectorEvent,
+    > {
+        self.interactions.events.counter(event)
+    }
+}
+
 #[async_trait]
 impl IngestorHostServices for RuntimeIngestorHost {
     fn record_read(&self, outcome: IngestorReadOutcome) {

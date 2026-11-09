@@ -75,6 +75,8 @@ impl ChannelHost {
     }
 }
 
+impl nervix_connector::ConnectorEventProvider for ChannelHost {}
+
 #[async_trait]
 impl IngestorHostServices for ChannelHost {
     fn record_read(&self, _outcome: nervix_connector::IngestorReadOutcome) {}
@@ -644,6 +646,8 @@ struct GraphHost {
     shutdown: watch::Receiver<bool>,
 }
 
+impl nervix_connector::ConnectorEventProvider for GraphHost {}
+
 #[async_trait]
 impl IngestorHostServices for GraphHost {
     fn record_read(&self, _outcome: nervix_connector::IngestorReadOutcome) {}
@@ -869,6 +873,8 @@ struct RefusingGraphHost {
     progress: StdArc<ConfirmationProgress>,
     shutdown: watch::Receiver<bool>,
 }
+
+impl nervix_connector::ConnectorEventProvider for RefusingGraphHost {}
 
 #[async_trait]
 impl IngestorHostServices for RefusingGraphHost {

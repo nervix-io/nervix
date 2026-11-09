@@ -274,6 +274,8 @@ impl DeclaredPublishing {
 /// documentation and the generated conformance tests read the same declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmitterEntityCapabilities {
+    /// The transport observations its connector may count through the host.
+    pub events: crate::DeclaredEvents,
     /// What the `write_header` calls of an emitter's record become on the message it publishes,
     /// or `None` where its messages carry no transport headers.
     pub headers: Option<HeaderModel>,
@@ -400,6 +402,13 @@ impl EmitterEntityCapabilities {
             });
         }
         capabilities.extend(RuntimeCapability::of_bounds(self.bounds));
+        capabilities.extend(
+            self.events
+                .as_slice()
+                .iter()
+                .copied()
+                .map(RuntimeCapability::Event),
+        );
         capabilities
     }
 }

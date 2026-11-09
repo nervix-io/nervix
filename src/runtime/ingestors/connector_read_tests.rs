@@ -384,6 +384,8 @@ impl RecordingHost {
     }
 }
 
+impl nervix_connector::ConnectorEventProvider for RecordingHost {}
+
 #[async_trait]
 impl IngestorHostServices for RecordingHost {
     fn record_read(&self, _outcome: nervix_connector::IngestorReadOutcome) {}

@@ -36,6 +36,8 @@ impl nervix_connector::EmitterEventReporter for SilentHost {
     fn report_error(&self, _message: String) {}
 }
 
+impl nervix_connector::ConnectorEventProvider for SilentHost {}
+
 impl nervix_connector::EmitterPayloadObserver for SilentHost {
     fn record_prepared_payload(&self, _measurement: nervix_connector::EmitterPayloadMeasurement) {}
     fn record_payload_subdivisions(&self, _subdivisions: u64) {}
