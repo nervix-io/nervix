@@ -17,10 +17,10 @@ use crate::{
 
 /// The archive format major version this crate writes and reads. A reader refuses any other: a
 /// new major is a format this reader cannot interpret.
-pub const ARCHIVE_FORMAT_MAJOR: u16 = 6;
+pub const ARCHIVE_FORMAT_MAJOR: u16 = 7;
 
 /// The manifest record's format version.
-const MANIFEST_VERSION: u16 = 2;
+const MANIFEST_VERSION: u16 = 3;
 
 /// What an archive is and every section it holds, in the order the archive holds them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +98,8 @@ pub enum SectionContent {
     WindowInputRows,
     /// The aggregate argument columns of the same retained window rows.
     WindowArgumentColumns,
+    /// Ordered little-endian F32 bit patterns, with shapes in the inferencer descriptor.
+    InferencerTensorValues,
 }
 
 impl SectionContent {
@@ -108,7 +110,10 @@ impl SectionContent {
                 Some(crate::materialized::MATERIALIZED_IDENTITIES_BYTES)
             }
             Self::Record(_) => Some(crate::section::MAX_RECORD_BYTES),
-            Self::Plexus | Self::ResourceArchive | Self::WasmGuestBlob => None,
+            Self::Plexus
+            | Self::ResourceArchive
+            | Self::WasmGuestBlob
+            | Self::InferencerTensorValues => None,
             Self::MaterializedColumns => Some(crate::materialized::MATERIALIZED_COLUMNS_BYTES),
             Self::DeduplicatorKeys | Self::WindowInputRows | Self::WindowArgumentColumns => {
                 Some(crate::branch_state::BRANCH_STATE_GROUP_BYTES)
@@ -312,6 +317,9 @@ impl BackupManifest {
                 SectionContentWire::DeduplicatorKeys => SectionContent::DeduplicatorKeys,
                 SectionContentWire::WindowInputRows => SectionContent::WindowInputRows,
                 SectionContentWire::WindowArgumentColumns => SectionContent::WindowArgumentColumns,
+                SectionContentWire::InferencerTensorValues => {
+                    SectionContent::InferencerTensorValues
+                }
             };
             sections.push(SectionEntry {
                 path,
@@ -353,6 +361,7 @@ impl From<SectionContent> for SectionContentWire {
             SectionContent::DeduplicatorKeys => Self::DeduplicatorKeys,
             SectionContent::WindowInputRows => Self::WindowInputRows,
             SectionContent::WindowArgumentColumns => Self::WindowArgumentColumns,
+            SectionContent::InferencerTensorValues => Self::InferencerTensorValues,
         }
     }
 }

@@ -49,7 +49,8 @@ impl VerifiedArchive {
         let record = match archived {
             DescribedRuntimeState::BranchLifecycle { record, .. }
             | DescribedRuntimeState::KafkaOffsets { record, .. } => record,
-            DescribedRuntimeState::Wasm { .. }
+            DescribedRuntimeState::Inferencer { .. }
+            | DescribedRuntimeState::Wasm { .. }
             | DescribedRuntimeState::Materialized { .. }
             | DescribedRuntimeState::Deduplicator { .. }
             | DescribedRuntimeState::Window { .. } => {
@@ -110,7 +111,8 @@ impl VerifiedArchive {
                         )
                         .change_context(SnapshotStagingError::Encode)
                     }
-                    DescribedRuntimeState::Wasm { .. }
+                    DescribedRuntimeState::Inferencer { .. }
+                    | DescribedRuntimeState::Wasm { .. }
                     | DescribedRuntimeState::Materialized { .. }
                     | DescribedRuntimeState::Deduplicator { .. }
                     | DescribedRuntimeState::Window { .. } => {

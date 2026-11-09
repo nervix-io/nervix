@@ -435,6 +435,14 @@ test-inferencer-state *args: build-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input 'tests/features/runtime/inferencer_state*.feature' {{ quote(args) }}
 
+# Exercise inferencer archive capture and fresh-cluster installation through the public CLI.
+test-inferencer-backup *args: build-deps build-test-cli
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/debug/nervix-cli") }}
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/cluster/inferencer_backup*.feature") }} {{ quote(args) }}
+
 # Inspect materialized relay pages through the native client and in-process cluster.
 test-state-inspection *args: build-deps build-test-cli
     #!/usr/bin/env bash
@@ -2476,6 +2484,16 @@ test-coverage-backup-packages:
 # whose patch the scenario suite exercises only in part.
 test-coverage-package-lib package *args:
     cargo llvm-cov --no-report --lib --package {{ package }} {{ args }}
+
+# Measure the inferencer archive owners and public backup/restore contract in the ordinary profile.
+test-coverage-inferencer-backup: build-deps (coverage-cli-binary (cargo_target_dir + "/llvm-cov-target"))
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    cargo llvm-cov --no-report --lib --package nervix-backup -- inferencer_properties::
+    cargo llvm-cov --no-report --package nervix-scenarios --test scenarios -- \
+        --input tests/features/cluster/inferencer_backup.feature --concurrency 1 --retry 0
 
 # Extend an existing instrumented profile with focused public regressions after a correction.
 test-coverage-scenario-filter feature filter:

@@ -176,6 +176,7 @@ pub(crate) enum SectionContentWire {
     DeduplicatorKeys,
     WindowInputRows,
     WindowArgumentColumns,
+    InferencerTensorValues,
 }
 
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]

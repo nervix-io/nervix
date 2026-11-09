@@ -146,6 +146,7 @@ checks = [
   "runtime::backup_capture_fence::shuttle_tests::shuttle_backup_cut_includes_pre_cut_branch_publication",
   "runtime::backup_state::branch_state_shuttle_tests::shuttle_a_forced_deduplicator_publication_holds_every_key_acknowledged_before_the_cut",
   "runtime::backup_state::branch_state_shuttle_tests::shuttle_a_forced_window_publication_holds_every_step_acknowledged_before_the_cut",
+  "runtime::inferencer::stateful::tests::shuttle_a_forced_inferencer_publication_holds_every_row_acknowledged_before_the_cut",
   "runtime::inferencer::stateful::tests::shuttle_inferencer_publication_keeps_captured_tensors_stable_through_handoff_freeze",
   "runtime::branch_lifecycle_state::shuttle_tests::shuttle_an_announced_branch_racing_the_replica_round_is_never_missed",
   "runtime::branch_lifecycle_state::shuttle_tests::shuttle_announcements_of_one_branch_keep_the_newest_pending",
