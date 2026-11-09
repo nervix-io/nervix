@@ -153,7 +153,12 @@ them alive on the physical clock: a node that received a record from another nod
 as it holds it, the node delivering a
 record to another node does until that node has admitted it, and an emitter whose publish waits for
 a retry does for the records it holds. A payload whose records report nothing for its `ACK TIMEOUT`
-is delivered again, and its earlier delivery is not cancelled and may still complete.
+is delivered again, and its earlier delivery is not cancelled and may still complete. The ingestor
+reports that as a timeout, not as a failed acknowledgement: its error event names the expired
+`ACK TIMEOUT`, and `nervix_ingestor_ack_outcomes_total` counts it as `timed_out` beside the
+`acknowledged`, `failed` and `shutdown` waits, while a tree the graph failed keeps the reason its
+failing branch gave. See [Ingestor Acknowledgement And
+Lifecycle](metrics-and-observability.md#ingestor-acknowledgement-and-lifecycle).
 
 Endpoint `ACK TIMEOUT` instead bounds the complete response wait on the physical clock; progress
 does not restart it. Expiry reports `processing_failed` with cause `ack_timeout` without undoing
@@ -186,7 +191,10 @@ to its acknowledgement, a `NATS STREAM` for the server's answer to its acknowled
 which neither broker answers. An acknowledgement the transport fails to
 confirm, or a rejection it fails to take back, is an ingestor error that `DESCRIBE INGESTOR` shows as
 the transient error until a later acknowledgement is confirmed, and the messages are delivered
-again. A node that stops gracefully waits for its ingestors' outstanding confirmations before it
+again. `DESCRIBE INGESTOR`'s `source:` section and the matching Prometheus families count each
+transport acknowledgement and rejection with its duration, each resume and suspension of the
+connector, the positions an ingestor stopped before its transport confirmed them, and whether the
+ingestor currently has a transient failure. A node that stops gracefully waits for its ingestors' outstanding confirmations before it
 closes them; see [Shutdown And Recovery](shutdown.md#connector-contracts).
 
 ## Altering Ingestors
