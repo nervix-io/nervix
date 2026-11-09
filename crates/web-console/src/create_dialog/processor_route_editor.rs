@@ -156,6 +156,7 @@ fn ProcessorRouteBranchEditor(
             </Show>
         </Show>
     }
+    .into_any()
 }
 
 /// The active route's output assignments, its WHERE expression and its ordered invocations.
@@ -195,6 +196,7 @@ fn ProcessorRouteConstructionEditor(
         </label>
         <ProcessorInvocationEditor family=family signals=signals />
     }
+    .into_any()
 }
 
 /// The active route's flush policy.
@@ -252,6 +254,7 @@ fn ProcessorRouteFlushEditor(
             </label>
         </Show>
     }
+    .into_any()
 }
 
 /// The active route's message error policy and its error relay assignments.
@@ -300,4 +303,5 @@ fn ProcessorRouteMessageErrorEditor(
             </div>
         </Show>
     }
+    .into_any()
 }
