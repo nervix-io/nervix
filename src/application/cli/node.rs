@@ -133,6 +133,48 @@ pub struct NodeArgs {
     pub temp_dir: PathBuf,
 }
 
+/// Where the node's interconnect listens and the endpoint it advertises to its peers.
+struct InterconnectAddresses {
+    listen_addr: SocketAddr,
+    advertise_addr: NodeEndpoint,
+}
+
+impl InterconnectAddresses {
+    /// The addresses the options give, or those derived from the session's: the interconnect
+    /// listens beside the session address and advertises the port after the session's advertised
+    /// one.
+    fn resolve(
+        listen_addr: Option<&str>,
+        advertise_addr: Option<&str>,
+        session_addr: SocketAddr,
+        session_advertise_addr: &NodeEndpoint,
+    ) -> Result<Self, Report<AppError>> {
+        let listen_addr = match listen_addr {
+            Some(addr) => addr
+                .parse::<SocketAddr>()
+                .change_context(AppError::ParseInterconnectListenAddress)?,
+            None => cluster::derive_peer_addr(session_addr)
+                .ok_or_else(|| Report::new(AppError::DeriveInterconnectAddress))?,
+        };
+        let advertise_addr = match advertise_addr {
+            Some(addr) => addr.parse::<NodeEndpoint>().map_err(|error| {
+                Report::new(AppError::ParseInterconnectAdvertiseAddress).attach_printable(error)
+            })?,
+            None => {
+                let port = session_advertise_addr
+                    .port()
+                    .checked_add(1)
+                    .ok_or_else(|| Report::new(AppError::DeriveInterconnectAddress))?;
+                session_advertise_addr.with_port(port)
+            }
+        };
+        Ok(Self {
+            listen_addr,
+            advertise_addr,
+        })
+    }
+}
+
 impl TryFrom<NodeArgs> for NodeIdentity {
     type Error = Report<AppError>;
 
@@ -217,25 +259,12 @@ impl TryFrom<NodeArgs> for NodeIdentity {
                     .change_context(AppError::ParseWebConsoleHttpsListenAddress)
             })
             .transpose()?;
-        let interconnect_listen_addr = match args.interconnect_listen_addr.as_deref() {
-            Some(addr) => addr
-                .parse::<SocketAddr>()
-                .change_context(AppError::ParseInterconnectListenAddress)?,
-            None => cluster::derive_peer_addr(addr)
-                .ok_or_else(|| Report::new(AppError::DeriveInterconnectAddress))?,
-        };
-        let interconnect_advertise_addr = match args.interconnect_advertise_addr.as_deref() {
-            Some(addr) => addr.parse::<NodeEndpoint>().map_err(|error| {
-                Report::new(AppError::ParseInterconnectAdvertiseAddress).attach_printable(error)
-            })?,
-            None => {
-                let port = grpc_advertise_addr
-                    .port()
-                    .checked_add(1)
-                    .ok_or_else(|| Report::new(AppError::DeriveInterconnectAddress))?;
-                grpc_advertise_addr.with_port(port)
-            }
-        };
+        let interconnect = InterconnectAddresses::resolve(
+            args.interconnect_listen_addr.as_deref(),
+            args.interconnect_advertise_addr.as_deref(),
+            addr,
+            &grpc_advertise_addr,
+        )?;
         // An empty list is how the command line says no server was named, so the resolver
         // configuration's own servers apply.
         let name_servers = if args.dns_name_servers.is_empty() {
@@ -262,8 +291,8 @@ impl TryFrom<NodeArgs> for NodeIdentity {
             .cluster_id(args.cluster_id)
             .node_id(args.node_id)
             .grpc_advertise_addr(grpc_advertise_addr)
-            .interconnect_listen_addr(interconnect_listen_addr)
-            .interconnect_advertise_addr(interconnect_advertise_addr)
+            .interconnect_listen_addr(interconnect.listen_addr)
+            .interconnect_advertise_addr(interconnect.advertise_addr)
             .interconnect_tls_ca(args.interconnect_tls_ca)
             .interconnect_tls_cert(args.interconnect_tls_cert)
             .interconnect_tls_key(args.interconnect_tls_key)
@@ -275,5 +304,107 @@ impl TryFrom<NodeArgs> for NodeIdentity {
             .db_path(PathBuf::from(args.db_path))
             .temp_dir(args.temp_dir)
             .build())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session() -> (SocketAddr, NodeEndpoint) {
+        let addr = "127.0.0.1:47391"
+            .parse::<SocketAddr>()
+            .expect("a literal socket address");
+        (addr, NodeEndpoint::new("node-1.internal", 47391))
+    }
+
+    fn refusal(resolved: Result<InterconnectAddresses, Report<AppError>>) -> Report<AppError> {
+        match resolved {
+            Ok(_) => panic!("the interconnect addresses resolved"),
+            Err(report) => report,
+        }
+    }
+
+    #[test]
+    fn the_interconnect_takes_the_addresses_it_is_given() {
+        let (addr, advertised) = session();
+        let resolved = InterconnectAddresses::resolve(
+            Some("0.0.0.0:7000"),
+            Some("peer.example:7001"),
+            addr,
+            &advertised,
+        )
+        .expect("given addresses resolve");
+        assert_eq!(
+            resolved.listen_addr,
+            "0.0.0.0:7000".parse::<SocketAddr>().expect("a literal")
+        );
+        assert_eq!(
+            resolved.advertise_addr,
+            NodeEndpoint::new("peer.example", 7001)
+        );
+    }
+
+    #[test]
+    fn the_interconnect_listens_and_advertises_the_port_after_the_session_s() {
+        let (addr, advertised) = session();
+        let resolved = InterconnectAddresses::resolve(None, None, addr, &advertised)
+            .expect("derived addresses resolve");
+        assert_eq!(
+            resolved.listen_addr,
+            "127.0.0.1:47392".parse::<SocketAddr>().expect("a literal")
+        );
+        assert_eq!(
+            resolved.advertise_addr,
+            NodeEndpoint::new("node-1.internal", 47392)
+        );
+    }
+
+    #[test]
+    fn each_interconnect_address_that_cannot_be_read_or_derived_is_refused() {
+        let (addr, advertised) = session();
+        assert!(matches!(
+            refusal(InterconnectAddresses::resolve(
+                Some("not an address"),
+                None,
+                addr,
+                &advertised
+            ))
+            .current_context(),
+            AppError::ParseInterconnectListenAddress
+        ));
+        assert!(matches!(
+            refusal(InterconnectAddresses::resolve(
+                None,
+                Some("no port"),
+                addr,
+                &advertised
+            ))
+            .current_context(),
+            AppError::ParseInterconnectAdvertiseAddress
+        ));
+        let last_port = "127.0.0.1:65535"
+            .parse::<SocketAddr>()
+            .expect("a literal socket address");
+        assert!(matches!(
+            refusal(InterconnectAddresses::resolve(
+                None,
+                Some("peer.example:7001"),
+                last_port,
+                &advertised
+            ))
+            .current_context(),
+            AppError::DeriveInterconnectAddress
+        ));
+        assert!(matches!(
+            refusal(InterconnectAddresses::resolve(
+                Some("0.0.0.0:7000"),
+                None,
+                addr,
+                &NodeEndpoint::new("node-1.internal", u16::MAX)
+            ))
+            .current_context(),
+            AppError::DeriveInterconnectAddress
+        ));
     }
 }
