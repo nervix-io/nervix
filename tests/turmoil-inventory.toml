@@ -74,6 +74,7 @@ tests = [
   "simulation_timer_smoke",
   "simulation_wall_bound_is_outside_simulated_time",
   "simulation_wall_bound_reports_where_simulated_time_stopped",
+  "transport::capabilities::a_receiver_roll_refuses_a_stale_claim_and_admits_each_re_sliced_piece_once",
   "transport::backup::backup_inventory_is_bounded_across_a_partition_and_a_held_link",
   "transport::backup::backup_section_fetch_is_fenced_and_recovers_after_partition",
   "transport::backup::restart_during_backup_transfer_discards_the_process_stage",
@@ -93,5 +94,6 @@ tests = [
   "transport::relay::relay_restart_fences_unresolved_delivery_and_accepts_fresh_work",
   "transport::relay::sender_retirement_reclaims_capacity_while_an_admitted_intake_is_retained",
   "transport::materialized::materialized_branch_state_transfers_reconnect_to_the_replacement_owner",
+  "transport::materialized::inferencer_branch_state_transfers_reconnect_to_the_replacement_owner",
   "transport::materialized::materialized_inspection_pages_recover_after_partition_and_lost_stream_chunks",
 ]

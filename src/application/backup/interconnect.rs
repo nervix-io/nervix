@@ -27,7 +27,7 @@ use nervix_interconnect::{
     HandlerRegistrationError, RemoteOperationFailure, RemoteOperationSubject,
     StatePlacementEnvelope, StreamHandlerError, StreamingResponse, Transport,
 };
-use nervix_models::{DomainName, DomainStatus, NodeUnitRef, RestoreStateAuthority};
+use nervix_models::{DomainName, DomainStatus, ModelKind, NodeUnitRef, RestoreStateAuthority};
 use nervix_primitives::{
     sync::{Arc, Mutex as AsyncMutex, watch},
     time::Instant,
@@ -73,6 +73,12 @@ pub(in crate::application) use nervix_interconnect::backup::{
 
 fn section_kind(content: SectionContent) -> Option<CapturedStateSectionKind> {
     match content {
+        SectionContent::Record(RecordKind::InferencerStateDescriptor) => {
+            Some(CapturedStateSectionKind::InferencerDescriptor)
+        }
+        SectionContent::InferencerTensorValues => {
+            Some(CapturedStateSectionKind::InferencerTensorValues)
+        }
         SectionContent::Record(RecordKind::WasmStateDescriptor) => {
             Some(CapturedStateSectionKind::WasmDescriptor)
         }
@@ -107,6 +113,10 @@ fn section_kind(content: SectionContent) -> Option<CapturedStateSectionKind> {
 
 pub(super) fn section_content(kind: CapturedStateSectionKind) -> SectionContent {
     match kind {
+        CapturedStateSectionKind::InferencerDescriptor => {
+            SectionContent::Record(RecordKind::InferencerStateDescriptor)
+        }
+        CapturedStateSectionKind::InferencerTensorValues => SectionContent::InferencerTensorValues,
         CapturedStateSectionKind::WasmDescriptor => {
             SectionContent::Record(RecordKind::WasmStateDescriptor)
         }
@@ -280,10 +290,15 @@ impl SessionServiceImpl {
         progress: &mut CutProgress,
     ) -> Result<CapturedDomainState, Report<RemoteOperationFailure>> {
         let runtime = self.inner.runtime.clone();
-        if quiesced {
+        let checkpoint_primaries = primaries
+            .iter()
+            .filter(|primary| quiesced || primary.node.kind == ModelKind::Inferencer)
+            .cloned()
+            .collect::<ahash::HashSet<_>>();
+        if !checkpoint_primaries.is_empty() {
             progress.enter(CutPhase::LifecycleCheckpoints);
             runtime
-                .checkpoint_backup_branch_lifecycles(domain)
+                .checkpoint_backup_branch_lifecycles(domain, &checkpoint_primaries)
                 .await
                 .change_context_lazy(|| {
                     failure_context(domain, "backup state section operation failed")
@@ -966,6 +981,8 @@ mod tests {
     #[test]
     fn every_captured_state_kind_names_its_archive_content_and_back() {
         let kinds = [
+            CapturedStateSectionKind::InferencerDescriptor,
+            CapturedStateSectionKind::InferencerTensorValues,
             CapturedStateSectionKind::WasmDescriptor,
             CapturedStateSectionKind::KafkaOffsets,
             CapturedStateSectionKind::BranchLifecycle,

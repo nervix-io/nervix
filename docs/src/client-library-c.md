@@ -5,7 +5,7 @@
 The Nervix C ABI runs the [Rust Client Library](client-library.md) in your process. C and C++
 programs use the same session, execution recovery, subscriptions, clocks and client endpoints as
 other Nervix clients. Include `nervix_client.h` and link the shared binding. The
-[Client Implementation Manual](client-implementation-manual.md#using-the-shared-binding) gives
+[Client Implementation Manual](client-implementation-manual.md#using-the-c-abi) gives
 the normative B-1 to B-16 host rules.
 
 Every example below comes from the C11 or C++17 application suite under
@@ -73,6 +73,19 @@ Cancellation ends a wait; it does not roll back a transaction the server already
 suite holds an admitted commit behind an unsettled delivery, cancels its wait, then recovers it
 through the same execution and checks the resulting configuration.
 
+`UPLOAD RESOURCE <name> VERSION '<directory>';` streams a local directory as a new version of a
+resource the domain declares. The session serves it itself, under the upload identity its
+`nx_execution` fixed, so executing the same execution again sends the same archive under the same
+identity and completes without installing a second version. For an upload the cluster refused,
+whose disposition is failed, `nx_outcome_upload_failure` returns true and writes the typed
+`nx_upload_failure`; it returns false for a completed upload and for every other command.
+`NX_UPLOAD_IDENTITY_CONFLICT` means the identity already names another archive: keep the original
+bytes to recover that upload, and prepare the statement again for a different one.
+
+```c
+{{#include ../../tests/client_conformance/c/suite/contract.h:upload}}
+```
+
 ### Read Materialized State
 
 `SHOW RELAY <relay> MATERIALIZED STATE` returns its typed result with the command's outcome.
@@ -123,7 +136,7 @@ B-6). A null data buffer asks the variable-length accessor for its required size
 An interrupted event names a subscription gap: rows between sessions are unavailable. A restoration
 failure carries a typed cause, message and retry wait; an ended event is the end of that generation.
 A consumer overflow also ends delivery of that subscription on the session. Handle every kind under
-[B-7](client-implementation-manual.md#using-the-shared-binding); accessor calls for another event
+[B-7](client-implementation-manual.md#using-the-c-abi); accessor calls for another event
 kind fail with `NX_ERROR_TYPE`.
 
 ```c
@@ -418,6 +431,11 @@ typed column copies and canonical IPC streams. It does not expose the cluster's 
 Raft operations, host retry policy or graph execution state. The shared Rust client owns redirects,
 reconnection and restoration. The host owns its handles, threads and the decision to act on an
 uncertain application effect.
+
+It does not expose these parts of the [Rust client](client-library.md): the typed transaction
+status, transaction attach and transaction inspection; the typed domain list, structured choice
+lookups, server notices and the leadership view; upload progress and upload identities of your
+choosing; and `DESCRIBE BACKUP`, which reads an archive without a server.
 
 ## A Complete Application
 

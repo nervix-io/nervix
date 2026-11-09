@@ -26,11 +26,11 @@ use nervix_models::{
     Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
     RelocationSelection, ResetWasmState, Restore, RestoreLifecycle, RestoreMode, RestoreScope,
     RestoreState, ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowPlacements,
-    ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SqsIngestorEntity, StartDomain,
-    StateBranchField, StateBranchSelection, Statement, StopDomain, SubscriptionBinding,
-    SubscriptionLiteral, SyslogIngestorEntity, TransactionInspectionRequest,
-    TransactionInspectionTarget, TransactionOperationNumber, UncordonNode, UploadResource,
-    WebsocketsIngestorEntity, ZeroMqIngestorEntity,
+    ShowProcessorState, ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SqsIngestorEntity,
+    StartDomain, StateBranchField, StateBranchSelection, StateInspectedProcessor, Statement,
+    StopDomain, SubscriptionBinding, SubscriptionLiteral, SyslogIngestorEntity,
+    TransactionInspectionRequest, TransactionInspectionTarget, TransactionOperationNumber,
+    UncordonNode, UploadResource, WebsocketsIngestorEntity, ZeroMqIngestorEntity,
 };
 use strum::IntoEnumIterator as _;
 
@@ -94,6 +94,13 @@ const RESOURCE_BINDING_KINDS: [ModelKind; 7] = [
     ModelKind::Client,
 ];
 
+/// The clauses a generated state inspection statement takes after its head.
+struct StateInspectionClauses {
+    selection: Option<StateBranchSelection>,
+    page: Option<nervix_models::StateInspectionPageRequest>,
+    format: InspectionFormat,
+}
+
 /// Every variant of [`Statement`], so a property reaches each form as often as any other and a
 /// coverage check can ask for each one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumIter)]
@@ -154,6 +161,7 @@ pub enum StatementVariant {
     ShowEmitters,
     ShowPlacements,
     ShowRelayMaterializedState,
+    ShowProcessorState,
     ShowClusterStatus,
     ShowTransactions,
     DescribeTransaction,
@@ -224,6 +232,7 @@ impl StatementVariant {
             Statement::ShowEmitters(_) => Self::ShowEmitters,
             Statement::ShowPlacements(_) => Self::ShowPlacements,
             Statement::ShowRelayMaterializedState(_) => Self::ShowRelayMaterializedState,
+            Statement::ShowProcessorState(_) => Self::ShowProcessorState,
             Statement::ShowClusterStatus(_) => Self::ShowClusterStatus,
             Statement::ShowTransactions(_) => Self::ShowTransactions,
             Statement::DescribeTransaction(_) => Self::DescribeTransaction,
@@ -273,6 +282,10 @@ impl Arbitrary<'_> {
     /// A bounded cluster transition naming each parameter once, with independently drawn values.
     fn alter_cluster(&mut self) -> nervix_models::AlterCluster {
         let assignments = vec![
+            nervix_models::ClusterParameterChange::PasswordIterations(
+                self.entropy
+                    .boundary_biased(1..=nervix_models::PasswordIterations::MAXIMUM),
+            ),
             nervix_models::ClusterParameterChange::NodeUnavailabilityTimeout(
                 std::time::Duration::from_millis(self.entropy.between(1..=1000)),
             ),
@@ -404,7 +417,6 @@ impl Arbitrary<'_> {
             StatementVariant::ResetWasmState => {
                 let scope = self.state_branch_selection();
                 Statement::ResetWasmState(ResetWasmState {
-                    domain: self.name(),
                     processor: self.name(),
                     scope,
                 })
@@ -716,25 +728,27 @@ impl Arbitrary<'_> {
             StatementVariant::ShowPlacements => Statement::ShowPlacements(ShowPlacements),
             StatementVariant::ShowRelayMaterializedState => {
                 let relay = self.name();
-                let selection = self.entropy.flag().then(|| self.state_branch_selection());
-                let page = if self.entropy.flag() {
-                    Some(nervix_models::StateInspectionPageRequest {
-                        limit: self.positive_u64(),
-                        after: self.entropy.flag().then(|| self.non_empty_string()),
-                    })
-                } else {
-                    None
-                };
-                let format = if self.entropy.flag() {
-                    InspectionFormat::Text
-                } else {
-                    InspectionFormat::Json
-                };
+                let clauses = self.state_inspection_clauses();
                 Statement::ShowRelayMaterializedState(ShowRelayMaterializedState {
                     relay,
-                    selection,
-                    page,
-                    format,
+                    selection: clauses.selection,
+                    page: clauses.page,
+                    format: clauses.format,
+                })
+            }
+            StatementVariant::ShowProcessorState => {
+                let processor = match self.entropy.byte() % 4 {
+                    0 => StateInspectedProcessor::Reorderer(self.name()),
+                    1 => StateInspectedProcessor::Correlator(self.name()),
+                    2 => StateInspectedProcessor::Deduplicator(self.name()),
+                    _ => StateInspectedProcessor::WindowProcessor(self.name()),
+                };
+                let clauses = self.state_inspection_clauses();
+                Statement::ShowProcessorState(ShowProcessorState {
+                    processor,
+                    selection: clauses.selection,
+                    page: clauses.page,
+                    format: clauses.format,
                 })
             }
             StatementVariant::ShowClusterStatus => Statement::ShowClusterStatus(ShowClusterStatus),
@@ -776,6 +790,29 @@ impl Arbitrary<'_> {
             operations.push(operation(self));
         }
         operations
+    }
+
+    /// The clauses every state inspection statement takes after its head, drawn in their order.
+    fn state_inspection_clauses(&mut self) -> StateInspectionClauses {
+        let selection = self.entropy.flag().then(|| self.state_branch_selection());
+        let page = if self.entropy.flag() {
+            Some(nervix_models::StateInspectionPageRequest {
+                limit: self.positive_u64(),
+                after: self.entropy.flag().then(|| self.non_empty_string()),
+            })
+        } else {
+            None
+        };
+        let format = if self.entropy.flag() {
+            InspectionFormat::Text
+        } else {
+            InspectionFormat::Json
+        };
+        StateInspectionClauses {
+            selection,
+            page,
+            format,
+        }
     }
 
     fn state_branch_selection(&mut self) -> StateBranchSelection {

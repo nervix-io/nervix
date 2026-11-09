@@ -35,7 +35,7 @@ pub(super) fn ChoiceGroup(
     #[prop(optional)]
     show_detail: bool,
 ) -> impl IntoView {
-    let ChoiceControlSignals { search, load } = signals.choices.of(control);
+    let ChoiceControlSignals { search, load } = signals.choice_signals(control);
     view! {
         <fieldset class=format!("create-choice-group {class_name}")>
             <legend>{label}</legend>
@@ -123,6 +123,7 @@ pub(super) fn ChoiceGroup(
             </Show>
         </fieldset>
     }
+    .into_any()
 }
 
 /// Whether `value` is the selection `control` currently holds. A value of another kind than the
@@ -290,7 +291,7 @@ pub(super) fn selected_choice(
         }
         (ChoiceControl::ProcessorInputRelay, ChoiceValue::Model(node)) => {
             signals.active_processor().is_some_and(|signal| {
-                signal.get().active_input().is_some_and(|input| {
+                signal.get().from.active().is_some_and(|input| {
                     input
                         .relay
                         .as_ref()
@@ -340,6 +341,12 @@ pub(super) fn selected_choice(
                 })
             })
         }
+        (
+            ChoiceControl::ProcessorRightInputRelay
+            | ChoiceControl::ProcessorLeftTimeoutRelay
+            | ChoiceControl::ProcessorRightTimeoutRelay,
+            value,
+        ) => signals.processor_scope_selected(control, value),
         (ChoiceControl::ProcessorErrorRelay, ChoiceValue::Model(node)) => {
             signals.active_processor().is_some_and(|signal| {
                 signal.get().active_route().is_some_and(|route| {
@@ -623,6 +630,17 @@ pub(super) fn select_choice(signals: CreateSignals, control: ChoiceControl, valu
                 });
             }
         }
+        (
+            ChoiceControl::ProcessorRightInputRelay
+            | ChoiceControl::ProcessorLeftTimeoutRelay
+            | ChoiceControl::ProcessorRightTimeoutRelay
+            | ChoiceControl::ProcessorAggregateField
+            | ChoiceControl::ProcessorCorrelateLeftField
+            | ChoiceControl::ProcessorCorrelateRightField
+            | ChoiceControl::ProcessorRouteLeftField
+            | ChoiceControl::ProcessorRouteRightField,
+            value,
+        ) => signals.select_processor_scope_choice(control, value),
         (ChoiceControl::ProcessorErrorField, ChoiceValue::Field(field)) => {
             if let Some(signal) = signals.active_processor() {
                 signal.update(|draft| {

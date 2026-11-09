@@ -25,8 +25,12 @@ use strum::AsRefStr;
 
 use super::{CounterSeries, RuntimeMetrics, format_number, format_optional, physical_node_label};
 
+mod endpoint_requests;
+pub(crate) use endpoint_requests::{EndpointIntakeOutcome, IngestorEndpointMetrics};
 mod ingestor;
 pub(crate) use ingestor::IngestorInteractionMetrics;
+mod ingestor_acknowledgements;
+pub(crate) use ingestor_acknowledgements::IngestorAcknowledgementMetrics;
 mod ingestor_reads;
 use ingestor_reads::IngestorReadFamilies;
 pub(crate) use ingestor_reads::IngestorReadMetrics;
@@ -36,7 +40,9 @@ mod outcomes;
 pub(crate) use outcomes::{
     EmitterFinishOutcome, EmitterOpenOutcome, EmitterRejectionCode, EmitterRetryCause,
 };
+mod events;
 mod status;
+pub(crate) use status::TaskFailureBinding;
 
 #[cfg(test)]
 mod interaction_metrics;
@@ -114,6 +120,7 @@ pub(super) struct ConnectorInteractionMetrics {
     payloads: payloads::PayloadFamilies,
     reads: IngestorReadFamilies,
     outcomes: outcomes::OutcomeFamilies,
+    events: events::EventFamilies,
 }
 
 impl ConnectorInteractionMetrics {
@@ -155,6 +162,7 @@ impl ConnectorInteractionMetrics {
             payloads: payloads::PayloadFamilies::register(registry),
             reads: IngestorReadFamilies::register(registry),
             outcomes: outcomes::OutcomeFamilies::register(registry),
+            events: events::EventFamilies::register(registry),
         }
     }
 
@@ -197,6 +205,7 @@ impl ConnectorInteractionMetrics {
                         selector: EmitterInteractions::selector(&values),
                         payloads: self.payloads.emitter(&values),
                         outcomes: self.outcomes.emitter(&values),
+                        events: self.events.emitter(&values, kind.capabilities().events),
                         publish: OperationMetrics::register(
                             self,
                             &values,
@@ -287,6 +296,7 @@ struct EmitterInteractions {
     commit: OperationMetrics,
     payloads: payloads::PayloadMetrics,
     outcomes: outcomes::OutcomeMetrics,
+    events: events::EventMetrics,
 }
 
 impl EmitterInteractions {
@@ -314,6 +324,23 @@ impl EmitterInteractions {
 }
 
 impl EmitterInteractionMetrics {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "resolves one declared event during connector construction"
+        )
+    )]
+    pub(crate) fn event_counter(
+        &self,
+        event: nervix_models::ConnectorEvent,
+    ) -> error_stack::Result<
+        nervix_connector::ConnectorEventCounter,
+        nervix_connector::UndeclaredConnectorEvent,
+    > {
+        self.series.events.counter(event)
+    }
+
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -355,6 +382,11 @@ impl EmitterInteractionMetrics {
         self.series
             .outcomes
             .describe_lines(&self.series.selector, &mut lines);
+        self.series.events.describe_lines(
+            events::EMITTER_EVENTS,
+            &self.series.selector,
+            &mut lines,
+        );
         lines
     }
 }

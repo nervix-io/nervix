@@ -135,6 +135,14 @@ fn bolero_protocol_json_roundtrip() {
                 effective_at: now(),
             };
             signed_round_trip(&fixture.roots[0], &succession);
+            let proof_of_life = ProofOfLife {
+                doc: ProofOfLifeKind::ProofOfLife,
+                protocol: 1,
+                issued_at: now(),
+                root_epoch: value,
+                kid: fixture.roots[0].key_id().clone(),
+            };
+            signed_round_trip(&fixture.roots[0], &proof_of_life);
             for mut request in fixture.requests() {
                 let common = request.common_mut();
                 common.display_name = text.clone();
@@ -190,6 +198,22 @@ fn bolero_protocol_json_roundtrip() {
                 decision: fixture.sign(&decision),
                 trust: fixture.documents(),
                 server_time: now(),
+            });
+            let single_root = fixture.roots[2]
+                .sign(&authorization, limits())
+                .assured("bounded current root document");
+            round_trip(&TrustBundleResponse {
+                epochs: fixture.embedded().epochs,
+                successions: vec![SignedTrustDocument::Signatures(
+                    fixture.root_sign(&succession),
+                )],
+                authorizations: vec![
+                    SignedTrustDocument::Signatures(fixture.root_sign(&authorization)),
+                    SignedTrustDocument::Compact(single_root),
+                ],
+                revocations: vec![SignedTrustDocument::Signatures(
+                    fixture.root_sign(&revocation),
+                )],
             });
             round_trip(&fixture.embedded());
             round_trip(&ChallengeRequest {

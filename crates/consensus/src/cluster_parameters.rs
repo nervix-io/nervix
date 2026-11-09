@@ -41,6 +41,10 @@ pub(super) fn seed(
     if state.parameters.is_some() {
         return AppliedConsensusCommand::applied(StateMachineChanges::default());
     }
+    state.raise_password_work(
+        nervix_models::PasswordCost::try_from(values.password_iterations())
+            .assured("the cluster parameter already validates the password cost"),
+    );
     state.parameters = Some(ClusterParameterRecord {
         revision: std::num::NonZeroU64::MIN,
         values,
@@ -97,6 +101,10 @@ pub(super) fn apply(
     };
     *applied = Some(Box::new(record));
     state.command_executions.replace(execution);
+    state.raise_password_work(
+        nervix_models::PasswordCost::try_from(record.values.password_iterations())
+            .assured("the candidate already validates the password cost"),
+    );
     state.parameters = Some(record);
     AppliedConsensusCommand::applied(StateMachineChanges {
         schedule_changed: true,

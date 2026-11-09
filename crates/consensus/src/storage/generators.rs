@@ -64,6 +64,12 @@ const QUEUED: usize = 3;
 /// The most consecutive statements one generated commit step applies.
 const STEP_STATEMENTS: usize = 3;
 
+pub(super) fn node_capability_record(
+    arbitrary: &mut Arbitrary<'_>,
+) -> nervix_models::NodeCapabilityRecord {
+    arbitrary.node_capability_record()
+}
+
 /// A Raft log position under any term and leader.
 pub(super) fn log_id(arbitrary: &mut Arbitrary<'_>) -> LogIdOf {
     let term = arbitrary.entropy().any_u64();
@@ -158,10 +164,10 @@ fn leader_tenure(arbitrary: &mut Arbitrary<'_>) -> LeaderTenure {
 /// A user and the password hash it signs in with.
 fn user_credentials(arbitrary: &mut Arbitrary<'_>) -> UserCredentials {
     let name = arbitrary.rule_name::<UserName>();
-    let password_hash = arbitrary.string();
+    let password_credential = arbitrary.password_credential();
     UserCredentials {
         name,
-        password_hash,
+        password_credential,
     }
 }
 
@@ -252,6 +258,21 @@ fn schedule_topology_inputs(arbitrary: &mut Arbitrary<'_>) -> ScheduleTopologyIn
         }
     }
     ScheduleTopologyInputs {
+        capabilities: members
+            .iter()
+            .filter_map(|node| {
+                if arbitrary.entropy().flag() {
+                    let mut record = node_capability_record(arbitrary);
+                    record.identity = nervix_models::ClusterNodeIdentity::new(
+                        node.clone(),
+                        record.identity.incarnation(),
+                    );
+                    Some((node.clone(), record))
+                } else {
+                    None
+                }
+            })
+            .collect(),
         members: members.into_iter().collect(),
         voters: voters.into_iter().collect(),
         cordoned: cordoned.into_iter().collect(),
@@ -482,18 +503,15 @@ fn applied_results(
     results
 }
 
-/// A reset of any WASM processor of `domain`, as a `RESET WASM PROCESSOR ... STATE` requests it.
-fn wasm_state_reset(arbitrary: &mut Arbitrary<'_>, domain: &DomainName) -> ResetWasmState {
+/// A reset of any WASM processor, as a `RESET WASM PROCESSOR ... STATE` requests it in the domain
+/// of the transaction that keeps it.
+fn wasm_state_reset(arbitrary: &mut Arbitrary<'_>) -> ResetWasmState {
     let statement = arbitrary.statement_of(StatementVariant::ResetWasmState);
     let reset = match statement {
         Statement::ResetWasmState(reset) => Some(reset),
         _ => None,
     };
-    let reset = reset.assured("statement_of builds the statement form it is asked for");
-    ResetWasmState {
-        domain: domain.clone(),
-        ..reset
-    }
+    reset.assured("statement_of builds the statement form it is asked for")
 }
 
 /// The authoritative change a successful step of a transaction of `domain` made, with the inputs
@@ -526,7 +544,7 @@ fn transaction_step_effect(
         },
         _ => TransactionStepEffect::ResetWasmState {
             inputs,
-            reset: Box::new(wasm_state_reset(arbitrary, domain)),
+            reset: Box::new(wasm_state_reset(arbitrary)),
             request: arbitrary.retry_reference(),
             schedule: Box::new(arbitrary.domain_schedule_of(domain.clone())),
         },
@@ -1136,7 +1154,7 @@ fn command_execution_effect(
         4 => CommandExecutionEffect::CreateUser {
             if_not_exists: arbitrary.entropy().flag(),
             name: arbitrary.rule_name(),
-            password_hash: arbitrary.string(),
+            password_credential: arbitrary.password_credential(),
         },
         5 => CommandExecutionEffect::DropNode {
             identity: arbitrary.node_identity(),
@@ -1379,6 +1397,8 @@ pub(super) fn state_machine(arbitrary: &mut Arbitrary<'_>) -> StateMachineData {
     let runtime_revision = arbitrary.entropy().any_u64();
 
     let mut state = StateMachineData {
+        cluster_identity: optional(arbitrary, crate::cluster_identity::tests::identity)
+            .map(Arc::new),
         parameters: Some(arbitrary.cluster_parameter_record()),
         last_applied_log_id,
         last_membership,
@@ -1402,9 +1422,25 @@ pub(super) fn state_machine(arbitrary: &mut Arbitrary<'_>) -> StateMachineData {
     }
     for _ in 0..arbitrary.entropy().count(RECORDS) {
         let user = user_credentials(arbitrary);
+        state.raise_password_work(user.password_credential.cost());
         state.users.insert(user.name.clone(), user);
     }
+    let cost = nervix_models::PasswordCost::try_from(
+        state
+            .parameters
+            .assured("the generator set the parameter record")
+            .values
+            .password_iterations(),
+    )
+    .assured("generated policy has a bounded cost");
+    state.raise_password_work(cost);
     state.resources = resource_records(arbitrary);
+    for _ in 0..arbitrary.entropy().count(RECORDS) {
+        let record = node_capability_record(arbitrary);
+        state
+            .node_capabilities
+            .insert(record.identity.node_id().clone(), record);
+    }
     for _ in 0..arbitrary.entropy().count(RECORDS) {
         let node = arbitrary.rule_name::<ClusterNodeName>();
         state.cordoned_node_ids.insert(node, ());
@@ -1770,6 +1806,8 @@ fn complete_application_command(arbitrary: &mut Arbitrary<'_>) -> ConsensusComma
 /// as any other and a coverage check can name each one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, strum::EnumIter)]
 enum CommandVariant {
+    AnnounceNodeCapabilities,
+    InstallClusterIdentity,
     SeedClusterParameters,
     AlterClusterParameters,
     AdmitCommandExecution,
@@ -1810,6 +1848,7 @@ enum CommandVariant {
     RevertTransaction,
     ExpireTransaction,
     RemoveFinishedTransactions,
+    RecoverOrphanedModelPause,
 }
 
 impl CommandVariant {
@@ -1817,6 +1856,8 @@ impl CommandVariant {
     /// [`command`] is taught to build it.
     fn of(command: &ConsensusCommand) -> Self {
         match command {
+            ConsensusCommand::AnnounceNodeCapabilities { .. } => Self::AnnounceNodeCapabilities,
+            ConsensusCommand::InstallClusterIdentity { .. } => Self::InstallClusterIdentity,
             ConsensusCommand::SeedClusterParameters { .. } => Self::SeedClusterParameters,
             ConsensusCommand::AlterClusterParameters { .. } => Self::AlterClusterParameters,
             ConsensusCommand::AdmitCommandExecution { .. } => Self::AdmitCommandExecution,
@@ -1877,6 +1918,7 @@ impl CommandVariant {
             ConsensusCommand::RevertTransaction { .. } => Self::RevertTransaction,
             ConsensusCommand::ExpireTransaction { .. } => Self::ExpireTransaction,
             ConsensusCommand::RemoveFinishedTransactions { .. } => Self::RemoveFinishedTransactions,
+            ConsensusCommand::RecoverOrphanedModelPause { .. } => Self::RecoverOrphanedModelPause,
         }
     }
 }
@@ -1896,6 +1938,12 @@ pub(super) fn command(arbitrary: &mut Arbitrary<'_>) -> ConsensusCommand {
 /// lifecycle step with the reports and plans it carries.
 fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> ConsensusCommand {
     match variant {
+        CommandVariant::AnnounceNodeCapabilities => ConsensusCommand::AnnounceNodeCapabilities {
+            record: node_capability_record(arbitrary),
+        },
+        CommandVariant::InstallClusterIdentity => ConsensusCommand::InstallClusterIdentity {
+            identity: Box::new(crate::cluster_identity::tests::identity(arbitrary)),
+        },
         CommandVariant::SeedClusterParameters => ConsensusCommand::SeedClusterParameters {
             values: arbitrary.cluster_parameter_values(),
         },
@@ -2000,6 +2048,10 @@ fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> Consens
         CommandVariant::ResumeDomain => ConsensusCommand::ResumeDomain {
             domain_id: arbitrary.rule_name(),
             mutation: optional_lease(arbitrary),
+        },
+        CommandVariant::RecoverOrphanedModelPause => ConsensusCommand::RecoverOrphanedModelPause {
+            domain_id: arbitrary.rule_name(),
+            mutation: Box::new(domain_mutation_lease(arbitrary)),
         },
         CommandVariant::ReconcileDomainClockAuthority => {
             let domain_id = arbitrary.rule_name();

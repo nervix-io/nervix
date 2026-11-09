@@ -90,11 +90,19 @@ async fn a_refusal_against_an_absent_transaction_keeps_its_failure() {
 /// recover the recorded completion rather than accept its stale preflight or commit refusal.
 #[cfg(feature = "testing")]
 #[rstest::rstest]
-#[case::after_lookup(crate::fault_injection::StandaloneTransactionBoundary::Lookup)]
-#[case::after_commit_failure(crate::fault_injection::StandaloneTransactionBoundary::CommitFailure)]
+#[case::after_lookup(crate::fault_injection::StandaloneTransactionBoundary::Lookup, false)]
+#[case::after_commit_failure(
+    crate::fault_injection::StandaloneTransactionBoundary::CommitFailure,
+    false
+)]
+#[case::orphaned_commit_planning(
+    crate::fault_injection::StandaloneTransactionBoundary::Lookup,
+    true
+)]
 #[nervix_primitives::test]
 async fn a_coordinator_recovers_the_command_another_coordinator_committed(
     #[case] boundary: crate::fault_injection::StandaloneTransactionBoundary,
+    #[case] orphan_before_commit: bool,
 ) {
     let fault_injection = crate::FaultInjection::default();
     let TestService {
@@ -109,6 +117,20 @@ async fn a_coordinator_recovers_the_command_another_coordinator_committed(
     let node = service.inner.consensus.local_node_id().clone();
     let domain =
         DomainName::parse("default").assured("the fixture domain name is an accepted literal");
+    if orphan_before_commit {
+        let mut subscriptions = SessionSubscriptions::new();
+        let started = service
+            .test_command(
+                test_command_request("START;", "default"),
+                &mut subscriptions,
+            )
+            .await;
+        assert!(
+            started.succeeded(),
+            "the fixture domain starts: {started:?}"
+        );
+        subscriptions.stop_all().await;
+    }
     fault_injection.pause_standalone_transaction(node.clone(), domain.clone(), boundary);
     if let crate::fault_injection::StandaloneTransactionBoundary::CommitFailure = boundary {
         fault_injection.refuse_next_model_publication(
@@ -154,16 +176,86 @@ async fn a_coordinator_recovers_the_command_another_coordinator_committed(
         .owner()
         .verified("an applying execution retains its owner")
         .clone();
-    let successor = service
-        .execute_standalone_transaction(
-            transaction_id.clone(),
-            reference.clone(),
-            owner,
-            domain.clone(),
-            source,
-            *statement,
-        )
-        .await;
+    let statement = TransactionStatementRequest {
+        request_reference: reference.clone(),
+        expected_position: 0,
+        source,
+        statement: *statement,
+    };
+    let successor = if orphan_before_commit {
+        let command = StandaloneCommand {
+            transaction_id: &transaction_id,
+            owner: &owner,
+            domain: &domain,
+            request: &statement,
+            mutation: execution.domain_mutation(&domain),
+            limits: TransactionQueueLimits {
+                max_statements: 16,
+                max_source_bytes: 4096,
+            },
+        };
+        let queued = service
+            .admit_standalone_statement(&command, None)
+            .await
+            .unwrap_or_else(|result| panic!("the statement queues before the pause: {result:?}"));
+        service
+            .inner
+            .consensus
+            .pause_domain(domain.clone(), command.mutation)
+            .await
+            .assured("the admitted command's lease authorizes its pause");
+        let guard = service
+            .inner
+            .runtime
+            .try_begin_domain_alter(&domain)
+            .verified("no local alteration was active");
+        let refusal =
+            error_stack::Report::new(crate::registry::TransactionPlanningError::DomainPaused {
+                domain: domain.clone(),
+            });
+        assert_eq!(
+            service
+                .recover_standalone_pause(&command, &refusal)
+                .await
+                .unwrap_or_else(|result| panic!(
+                    "an active alteration keeps its refusal: {result:?}"
+                )),
+            super::StandalonePauseRecovery::RetainRefusal
+        );
+        assert_eq!(
+            service
+                .inner
+                .consensus
+                .current_domain(&domain)
+                .await
+                .verified("the fixture domain remains present")
+                .status,
+            nervix_models::DomainStatus::Paused
+        );
+        drop(guard);
+        let committing = service
+            .admit_standalone_commit(&command, queued)
+            .await
+            .unwrap_or_else(|result| {
+                panic!("commit planning recovers the orphaned pause: {result:?}")
+            });
+        assert!(matches!(committing.state, TransactionState::Committing(_)));
+        let finished = service
+            .execute_replicated_commit(&transaction_id)
+            .await
+            .assured("the recovered plan applies through the production coordinator");
+        super::standalone_transaction_result(&finished)
+    } else {
+        service
+            .execute_standalone_transaction(
+                transaction_id.clone(),
+                owner,
+                domain.clone(),
+                statement,
+                execution.domain_mutation(&domain),
+            )
+            .await
+    };
     assert!(
         successor.succeeded(),
         "the second coordinator applies the command: {successor:?}"
@@ -325,6 +417,132 @@ async fn a_command_whose_transaction_is_still_committing_stays_applying_until_it
     std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
 }
 
+/// A confirmed orphaned pause is recovered before preflight; a refused recovery retains the
+/// admitted execution and its lease until the same reference can finish.
+#[cfg(feature = "testing")]
+#[rstest::rstest]
+#[case::confirmed(false)]
+#[case::lease_unconfirmed(true)]
+#[nervix_primitives::test]
+async fn an_orphaned_pause_recovers_under_the_same_command_reference(
+    #[case] refuse_recovery: bool,
+) {
+    use nervix_consensus::{CommandWrite, ConsensusTestProbe};
+
+    let faults = crate::FaultInjection::default();
+    let probe = ConsensusTestProbe::default();
+    let (
+        TestService {
+            service,
+            registry,
+            path,
+        },
+        consensus,
+    ) = crate::application::test_fixtures::build_test_service_inner(
+        true,
+        Some(probe.clone()),
+        crate::runtime::Runtime::with_fault_injection(faults.clone()),
+    )
+    .await;
+    let domain = DomainName::parse("default").assured("the fixture domain is valid");
+    let mut subscriptions = SessionSubscriptions::new();
+    let started = service
+        .test_command(
+            test_command_request("START;", "default"),
+            &mut subscriptions,
+        )
+        .await;
+    assert!(
+        started.succeeded(),
+        "the fixture domain starts: {started:?}"
+    );
+    let domain_before = service.inner.consensus.current_domain(&domain).await;
+    let request = test_command_request("CREATE SCHEMA recovered_pause (key I64);", "default");
+    let reference = request.execution_reference.clone();
+    faults.orphan_next_model_command_pause(domain.clone());
+    if refuse_recovery {
+        probe
+            .refuse_command_write_as_lapsed_lease(reference.clone(), CommandWrite::PauseRecovery)
+            .await;
+    }
+
+    let first = service
+        .test_command(request.clone(), &mut subscriptions)
+        .await;
+    assert!(
+        faults.orphaned_model_command_pause_delivered(&domain),
+        "the command encountered a committed pause"
+    );
+    if refuse_recovery {
+        assert!(
+            probe
+                .command_write_refused_as_lapsed_lease(&reference, CommandWrite::PauseRecovery)
+                .await
+        );
+        assert!(
+            matches!(first.disposition, CommandDisposition::OutcomeUnknown(_)),
+            "an admitted command with unconfirmed recovery stays retryable: {first:?}"
+        );
+        let execution = service
+            .inner
+            .consensus
+            .current_command_execution(&reference)
+            .await
+            .verified("the admitted command retains its identity");
+        assert!(execution.is_applying());
+        assert!(
+            execution.domain_mutation(&domain).is_some(),
+            "the same execution retains its mutation lease"
+        );
+        assert!(
+            service
+                .inner
+                .consensus
+                .current_transaction(&command_transaction_id(&request))
+                .await
+                .is_none(),
+            "a refused recovery opens no transaction"
+        );
+    } else {
+        assert!(
+            first.succeeded(),
+            "the recovered command completes: {first:?}"
+        );
+    }
+    let repeated = service
+        .test_command(request.clone(), &mut subscriptions)
+        .await;
+    assert!(
+        repeated.succeeded(),
+        "the same reference completes: {repeated:?}"
+    );
+    assert_eq!(
+        service.inner.consensus.current_domain(&domain).await,
+        domain_before,
+        "recovery preserves the running domain's lifetime and configuration"
+    );
+    let transaction = service
+        .inner
+        .consensus
+        .current_transaction(&command_transaction_id(&request))
+        .await
+        .verified("the command has one retained internal transaction");
+    assert!(matches!(
+        transaction.finished_outcome(),
+        Some(TransactionOutcome::Committed)
+    ));
+    let replay = service.test_command(request, &mut subscriptions).await;
+    assert_eq!(replay.disposition, repeated.disposition);
+    assert_eq!(replay.message, repeated.message);
+    assert_eq!(replay.diagnostics, repeated.diagnostics);
+    subscriptions.stop_all().await;
+    drop(service);
+    drop(registry);
+    consensus.shutdown().await;
+    drop(consensus);
+    std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
+}
+
 /// One standalone command request in the fixture's `default` domain, applied through the command
 /// transaction its reference names.
 struct FixtureCommand {
@@ -359,6 +577,7 @@ impl FixtureCommand {
             owner: &self.owner,
             domain: &self.domain,
             request: &self.request,
+            mutation: None,
             limits: TransactionQueueLimits {
                 max_statements: 16,
                 max_source_bytes: 4096,

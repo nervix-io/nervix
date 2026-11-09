@@ -215,6 +215,29 @@ violates instead of softening the contract to match today's imports.
 - Connectors adapt external systems at explicit data-plane boundaries and never weaken internal
   schema, branch, error or sensitivity rules.
 
+### Client host bindings
+
+- A host-language binding is a Rust crate on its host's Rust binding library: pyo3 for Python,
+  magnus for Ruby and `jni` for the JVM. Each calls the shared host runtime over the Rust client.
+  The C ABI serves C and C++ only; hand-written ctypes, Fiddle, Foreign Function and Memory or
+  cgo declarations of that surface for another host are a change to reject.
+- Beside its conformance probe, a host binding ships a suite in its host's standard test framework
+  under `tests/client_conformance/<host>/suite` and a guide chapter under the [Client
+  Libraries](docs/src/client-libraries.md) index. The suite has a boundary tier that needs no
+  cluster and a cluster tier on one and three nodes, registers every test in
+  `tests/client-suites-inventory.toml`, and references the binding's whole public surface under
+  `just validate-client-suites`. The guide keeps the section order every guide shares, and every
+  code block in it is an include of an anchored suite test.
+- A public surface change reaches the suite and guide of every host that exposes it in the same
+  change, and a Python surface change updates the typed stub `nervix_client.pyi`. Host how-to
+  lives in its host's guide and never returns to the [Rust Client
+  Library](docs/src/client-library.md) chapter.
+- A new binding or probe ships with its conformance-ledger row, its one- and three-node examples
+  in all three core conformance outlines, its registered Bolero batch property and the
+  `client-conformance` PR label; a new host or binding also ships its suite and guide. [Client
+  Host Bindings](docs/src/client-host-bindings.md) owns the boundary, qualification, suite and
+  guide contract.
+
 ### Connector crates
 
 Every external integration is its own crate under `crates/connectors/` implementing the ingestor
@@ -434,9 +457,14 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
 - [Client Session Protocol](docs/src/client-session-protocol.md), and its normative companion the
   [Client Implementation Manual](docs/src/client-implementation-manual.md) whenever what a client
   implementation must do changes: client protocol code (the session schema and wire crate, the
-  session service and its transports, the Row encoder, the Rust client, the shared binding, and the
-  session handling of the web console and the CLI) and every client-to-node operation.
+  session service and its transports, the Row encoder, the Rust client, the shared host runtime
+  and binding crates, and the session handling of the web console and the CLI) and every
+  client-to-node operation.
   This includes server-notice kinds and their routing through every client and binding.
+- [Client Host Bindings](docs/src/client-host-bindings.md): a binding crate, the shared host
+  runtime, a host probe, a host suite or its inventory, `validate-client-suites`, the shape of a
+  host guide, or the conformance ledger. Every change to one keeps this chapter current in the same
+  change.
 - [Errors And Diagnostics](docs/src/errors-and-diagnostics.md): error types, error or diagnostic
   propagation, failure classification, reporting at a layer or public boundary.
 - [Consensus Storage And Replication](docs/src/consensus-storage-and-replication.md): consensus
@@ -1431,8 +1459,9 @@ text calls CRAP a gate; report integrity is mandatory, and the only complexity v
   accepting the parser's suggestions cannot complete; grammar changes keep it passing, and a new
   finding is a defect, never a baseline entry. `just plexus-completion-walk-deep` relaxes
   deduplication to reach branches the gating budget stops short of.
-- `just test-client-conformance [tags]` runs the cross-language client probes against one- and
-  three-node clusters.
+- `just test-client-conformance [tags]` runs every host suite's boundary tier, then the
+  cross-language client probes and the host suites' cluster tiers against one- and three-node
+  clusters.
 - `just chaos suite smoke|soak --image IMAGE` runs a chaos suite against the one already built image
   it names. Each suite runs against the release image and against the same revision's Deloxide
   diagnostic image, whose runs fail unless the deadlock evidence of every process its nodes started
@@ -1455,8 +1484,8 @@ and restarts a running Check, so set labels before the run you mean to keep.
 
 - Carry the label of each optional check a change affects: `shuttle`, `loom` or `turmoil` for that
   mode, each running in its own job with its replay check or qualification; `client-conformance` for
-  the client protocol, the shared binding or a probe; and, for the optional `extra-tests` job, which
-  runs only the steps its labels select, `extra-compiler` for a compiler rule or fixture,
+  the client protocol, a binding, a probe or a host suite; and, for the optional `extra-tests` job,
+  which runs only the steps its labels select, `extra-compiler` for a compiler rule or fixture,
   `extra-primitives` for a primitive, `extra-completion-walk` for grammar, `extra-connector-matrix`
   for a connector declaration, `extra-runners` for a CI reporter, gate or collector,
   `extra-doctests` for an API with paired doctests, `extra-miri` and `extra-mutation` for the expiry

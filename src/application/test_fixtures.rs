@@ -265,6 +265,7 @@ fn test_session_service(
         &resource_store,
         &ConfiguredFaultInjection::default(),
         &cluster,
+        runtime.outward_tls().clone(),
     );
     let parameters = consensus
         .observer()
@@ -294,7 +295,12 @@ fn test_session_service(
             resource_store,
             https_certificates,
             runtime,
-            runtime_admission: Arc::new(super::runtime_admission::RuntimeAdmission::new()),
+            runtime_admission: Arc::new(super::runtime_admission::RuntimeAdmission::new(
+                nervix_models::ClusterNodeIdentity::new(
+                    consensus.proposer().local_node_id().clone(),
+                    cluster.local_incarnation(),
+                ),
+            )),
             initialization: {
                 let state = Arc::new(super::node_initialization::NodeInitialization::default());
                 state.complete();
@@ -683,7 +689,15 @@ pub(in crate::application) async fn build_test_service_inner(
     );
     consensus
         .proposer()
-        .seed_cluster_parameters(nervix_models::ClusterParameterValues::default())
+        .seed_cluster_parameters(
+            nervix_models::ClusterParameterValues::resolve(
+                nervix_models::ClusterParameterSeedValues {
+                    password_iterations: Some(1),
+                    ..Default::default()
+                },
+            )
+            .assured("the fixture's explicit password cost is within the declared bound"),
+        )
         .await
         .assured("the elected fixture leader commits its initial policy");
     if create_default_domain_flag {
@@ -710,6 +724,18 @@ pub(in crate::application) async fn build_test_service_inner(
     );
     let application_progress =
         super::completion::ApplicationProgressState::new(cluster.local_node_identity().await);
+    consensus
+        .proposer()
+        .announce_node_capabilities(nervix_models::NodeCapabilityRecord {
+            identity: cluster.local_node_identity().await,
+            capabilities: nervix_models::NodeCapabilities {
+                cpu_count: Some(std::num::NonZeroU64::MIN),
+                memory_bytes: Some(std::num::NonZeroU64::MIN),
+                receive: interconnect.local_receive_bounds(),
+            },
+        })
+        .await
+        .assured("the admitted fixture run commits its capacity claim");
     let service = test_session_service(
         cluster,
         &consensus,

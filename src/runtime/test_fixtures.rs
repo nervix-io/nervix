@@ -125,7 +125,7 @@ pub(super) fn ingest_metadata_for_test(
     let mut builders = super::IngestMetadataBuilders::new(projection, rows.len());
     for row in rows {
         builders
-            .append(row)
+            .append(row, None)
             .expect("test metadata row must hand over the values its declaration names");
     }
     builders.finish().expect("test metadata must build")
@@ -495,6 +495,7 @@ pub(super) fn publish_state_identity(
         nervix_models::DomainNodeRef::node_in(domain.clone(), kind, identifier.into()),
         ScheduledStateAssignment {
             identity: super::ScheduledStateIdentity {
+                inferencer_model: None,
                 schema_fingerprint: SchemaFingerprint::from_digest([7; 32]),
                 wasm_state_generations,
             },
@@ -916,6 +917,7 @@ pub(super) fn bind_ingestor_route_for_test(
     bind_ingestor_filter_map_program(
         identifier,
         metadata,
+        nervix_models::IngestorPayloadDeclaration::BYTES,
         allow_header_reads,
         &lowered,
         schemas,
@@ -1404,7 +1406,7 @@ pub(crate) fn single_worker_executor() -> Executor {
             filesystem_storage: one,
             connector_storage: nervix_execution::ConnectorStorageWorkers::resolve(Some(one))
                 .expect("one worker fits the primitive permit bound"),
-            pending_jobs: one,
+            pending_jobs: nervix_execution::PendingJobCounts::uniform(one),
         },
         ..nervix_execution::ExecutionConfig::default()
     })

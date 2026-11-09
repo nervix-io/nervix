@@ -29,7 +29,8 @@ use super::{
     ingestor_route_draft::{
         AssignmentDraft, FlushDraft, InheritDraft, InvocationDraft, MessageErrorDraft,
     },
-    processor_draft::{InputDraft, StateDependencyDraft},
+    processor_draft::StateDependencyDraft,
+    processor_input_draft::InputDraft,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +103,14 @@ impl Default for EmitterDraft {
 }
 
 impl EmitterDraft {
+    /// Whether the chosen entity may run several instances, so the form offers `INSTANCES`.
+    pub(super) fn offers_instances(&self) -> bool {
+        let Some(kind) = self.destination.kind else {
+            return false;
+        };
+        kind.capabilities().instancing.refusal(kind).is_none()
+    }
+
     pub(super) fn choose_kind(&mut self, kind: nervix_models::EmitterEntityKind) {
         if self.destination.kind == Some(kind) {
             return;

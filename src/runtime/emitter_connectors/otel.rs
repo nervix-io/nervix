@@ -47,6 +47,7 @@ impl EmitterConnectorStarter {
                     udfs: context.udfs.as_ref(),
                 })?;
                 let export = OtelExportConfig {
+                    tls_policy: context.runtime.outward_tls().clone(),
                     config: connector.client.config.entries.clone(), dns: context.dns()?,
                     batch: connector.batch, values: connector.values.clone(), attributes: connector.attributes.clone(),
                     resource: connector.resource.clone(), scope: connector.scope.clone(), mapped_schema: projection.mapped_schema().clone(),

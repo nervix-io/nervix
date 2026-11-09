@@ -247,7 +247,7 @@ fn poll_of(user_id: i64) -> IngestorPoll {
         messages: vec![IngestorPollMessage {
             payload: format!(r#"{{"user_id":{user_id}}}"#).into_bytes(),
             headers: RetainedIngestHeaders::none(),
-            metadata: nervix_connector::RetainedIngestMetadata::none(),
+            metadata: nervix_connector::RetainedIngestMetadata::none(0),
         }],
         failures: Vec::new(),
         dropped_header_values: 0,
@@ -337,7 +337,10 @@ async fn an_unacknowledged_batch_waits_for_the_extension_workers_when_its_ingest
         let intake = host
             .intake_unacknowledged(vec![IngestorIntakeMessage {
                 payload: &payload,
-                metadata: IngestMetadataRow::headers(&NoIngestHeaders),
+                metadata: IngestMetadataRow::headers(
+                    &NoIngestHeaders,
+                    &nervix_connector::NoIngestMetadata(0),
+                ),
             }])
             .await;
         (host, intake)
@@ -377,7 +380,10 @@ async fn take_in_unacknowledged(
     let payload = format!(r#"{{"user_id":{user_id}}}"#).into_bytes();
     host.intake_unacknowledged(vec![IngestorIntakeMessage {
         payload: &payload,
-        metadata: IngestMetadataRow::headers(&NoIngestHeaders),
+        metadata: IngestMetadataRow::headers(
+            &NoIngestHeaders,
+            &nervix_connector::NoIngestMetadata(0),
+        ),
     }])
     .await
 }
@@ -735,7 +741,10 @@ async fn take_in_acknowledged(
     let payload = format!(r#"{{"user_id":{user_id}}}"#).into_bytes();
     host.intake_acknowledged(vec![IngestorIntakeMessage {
         payload: &payload,
-        metadata: IngestMetadataRow::headers(&NoIngestHeaders),
+        metadata: IngestMetadataRow::headers(
+            &NoIngestHeaders,
+            &nervix_connector::NoIngestMetadata(0),
+        ),
     }])
     .await
 }
@@ -776,7 +785,7 @@ async fn an_acknowledged_batch_is_refused_for_redelivery_when_the_extension_work
     );
     assert_eq!(
         acknowledgement.wait(Duration::from_secs(10)).await,
-        IngestorAcknowledgementOutcome::Ack
+        IngestorAcknowledgementOutcome::Acknowledged
     );
     fixture.finish().await;
 }
@@ -802,7 +811,7 @@ async fn an_acknowledged_batch_read_while_suspended_dispatches_with_its_acknowle
     );
     assert_eq!(
         acknowledgement.wait(Duration::from_secs(10)).await,
-        IngestorAcknowledgementOutcome::Ack
+        IngestorAcknowledgementOutcome::Acknowledged
     );
     assert_eq!(quiesce.counters(), IngestorQuiesceCounters::default());
     quiesce.release(IngestorQuiesceCause::EntityHold);
@@ -829,7 +838,7 @@ async fn an_acknowledged_batch_stays_outstanding_until_its_ingestor_settles_it()
     );
     assert_eq!(
         acknowledgement.wait(Duration::from_secs(10)).await,
-        IngestorAcknowledgementOutcome::Ack
+        IngestorAcknowledgementOutcome::Acknowledged
     );
     assert_eq!(
         host.ack_root_trackers

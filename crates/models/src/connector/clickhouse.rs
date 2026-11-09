@@ -148,6 +148,7 @@ const CLICKHOUSE_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl EmitterDeclaration for ClickHouseTableEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         instancing: crate::EmitterInstancingCapability::Instances,
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::ClickHouse),

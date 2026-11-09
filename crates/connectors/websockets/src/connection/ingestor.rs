@@ -108,6 +108,7 @@ pub enum WebsocketsConnectionIngestorPlanError {
 
 #[derive(Clone)]
 pub struct WebsocketsConnectionIngestorPlan {
+    tls_policy: nervix_connector::OutwardTlsPolicy,
     endpoint: WebsocketEndpoint,
     dns: DnsResolver,
     entries: Vec<ClientConfigEntry>,
@@ -138,6 +139,7 @@ impl WebsocketsConnectionIngestorPlan {
         headers: WebsocketsUpgradeHeaders,
         signaling_protocol: Option<Arc<CompiledSignalingProtocol>>,
         dns: DnsResolver,
+        tls_policy: nervix_connector::OutwardTlsPolicy,
     ) -> Result<Self, Report<WebsocketsConnectionIngestorPlanError>> {
         let config = WebsocketsClientConfig::parse(&entries)
             .change_context(WebsocketsConnectionIngestorPlanError::Configuration)?;
@@ -154,6 +156,7 @@ impl WebsocketsConnectionIngestorPlan {
         let idle_deadline = connection::WebsocketIdleDeadline::new(&entries, config.idle_timeout())
             .change_context(WebsocketsConnectionIngestorPlanError::Configuration)?;
         Ok(Self {
+            tls_policy,
             endpoint: WebsocketEndpoint {
                 raw: parsed.to_string(),
                 host: host.to_string(),
@@ -225,6 +228,10 @@ impl IngestorMessage for WebsocketsConnectionIngestorMessage {
 /// The value of the metadata `WEBSOCKETS CONNECTION` declares: the text or binary kind of the data
 /// frame.
 impl IngestMessageMetadata for WebsocketsConnectionIngestorMessage {
+    fn payload_bytes(&self) -> usize {
+        nervix_connector::IngestorMessage::payload(self).len()
+    }
+
     fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
         values.string(self.frame.frame_type().as_ref());
     }
@@ -366,7 +373,7 @@ impl IngestorConnector for WebsocketsConnectionIngestor {
 
     async fn open(plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
         let tls_connector = if plan.endpoint.requires_tls {
-            let config = RustlsClientConfigProvider::new(&plan.entries)
+            let config = RustlsClientConfigProvider::new(&plan.entries, &plan.tls_policy)
                 .build_with_default_roots()
                 .change_context(IngestorError::Open {
                     connector: WEBSOCKETS.keyword(),
@@ -654,6 +661,7 @@ mod tests {
             WebsocketsUpgradeHeaders::default(),
             None,
             fixture.resolver,
+            Default::default(),
         )
         .assured("the endpoint and deadline are valid");
         let mut ingestor = WebsocketsConnectionIngestor::open(&plan, 0)
@@ -687,6 +695,7 @@ mod tests {
             WebsocketsUpgradeHeaders::default(),
             None,
             fixture.resolver,
+            Default::default(),
         )
         .err()
         .assured("a zero deadline cannot plan a connection");
@@ -704,6 +713,7 @@ mod tests {
             WebsocketsUpgradeHeaders::default(),
             None,
             fixture.resolver,
+            Default::default(),
         )
         .err()
         .assured("the upgrade never sends user information");
@@ -740,6 +750,7 @@ mod tests {
             WebsocketsUpgradeHeaders::default(),
             None,
             fixture.resolver,
+            Default::default(),
         )
         .assured("a plan reads no file");
         let failure = WebsocketsConnectionIngestor::open(&plan, 0)
@@ -774,8 +785,14 @@ mod tests {
             .iter()
             .map(|(name, value)| (name.as_str().to_string(), value.as_str().to_string()))
             .collect();
-        let plan = WebsocketsConnectionIngestorPlan::new(config, headers, None, fixture.resolver)
-            .assured("the endpoint is valid");
+        let plan = WebsocketsConnectionIngestorPlan::new(
+            config,
+            headers,
+            None,
+            fixture.resolver,
+            Default::default(),
+        )
+        .assured("the endpoint is valid");
         let mut ingestor = WebsocketsConnectionIngestor::open(&plan, 0)
             .await
             .assured("the ingestor opens");
@@ -1128,6 +1145,7 @@ mod tests {
             WebsocketsUpgradeHeaders::default(),
             None,
             fixture.resolver.clone(),
+            Default::default(),
         )
         .assured("the WebSocket endpoint is valid");
         let server = nervix_primitives::task::spawn(async move {
@@ -1250,6 +1268,7 @@ mod tests {
             offering("v2.events, v1.events"),
             None,
             fixture.resolver,
+            Default::default(),
         )
         .assured("the endpoint is valid");
         let mut ingestor = WebsocketsConnectionIngestor::open(&plan, 0)
@@ -1330,6 +1349,7 @@ mod tests {
                 headers,
                 None,
                 fixture.resolver,
+                Default::default(),
             )
             .assured("the endpoint is valid");
             let mut ingestor = WebsocketsConnectionIngestor::open(&plan, 0)
@@ -1394,6 +1414,7 @@ mod tests {
             offering("v1.events"),
             None,
             fixture.resolver.clone(),
+            Default::default(),
         )
         .assured("the WebSocket endpoint is valid");
         let mut ingestor = WebsocketsConnectionIngestor::open(&plan, 0)
@@ -1429,6 +1450,7 @@ mod tests {
             WebsocketsUpgradeHeaders::default(),
             None,
             fixture.resolver.clone(),
+            Default::default(),
         )
         .assured("the literal IPv6 endpoint is valid");
         let server = nervix_primitives::task::spawn(async move {
@@ -1467,6 +1489,7 @@ mod tests {
                 WebsocketsUpgradeHeaders::default(),
                 None,
                 fixture.resolver.clone(),
+                Default::default(),
             )
             .assured("the WebSocket URL is valid");
             assert_eq!(plan.endpoint.port, port);
@@ -1478,6 +1501,7 @@ mod tests {
             WebsocketsUpgradeHeaders::default(),
             None,
             fixture.resolver.clone(),
+            Default::default(),
         )
         .err()
         .assured("HTTP is not a WebSocket endpoint");

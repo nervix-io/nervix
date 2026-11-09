@@ -25,7 +25,7 @@ use nervix_models::{
     DomainClockProgress, DomainName, EmitterName, FieldName, IngestorName, LookupName, ModelKind,
     ModelName, NodeEndpoint, NodePrerequisites, NodeRef, OwnershipStateRecoveryOutcome,
     OwnershipStateReset, PrerequisiteMismatch, RelayName, RemoteAckRegistration,
-    RemoteAckResolution, RemoteRuntimeField, RemoteRuntimeRecordMetadata, ResourceName, Setting,
+    RemoteAckResolution, RemoteRuntimeField, RemoteRuntimeRecordMetadata, ResourceName,
     SubscriptionBinding, Timestamp, Unit, WasmStateResetScope,
 };
 use nervix_primitives::sync::{mpsc, watch};
@@ -35,6 +35,10 @@ use thiserror::Error;
 
 mod authentication;
 pub mod backup;
+mod capability_publication;
+mod relay_slicing;
+#[doc(hidden)]
+pub use relay_slicing::RelaySliceCursor;
 mod connection;
 mod entropy;
 mod identity;
@@ -96,7 +100,10 @@ pub use runtime_state::{
     StatePlacementEnvelope, StateReplicationAck, StateSchema, StateSnapshotEnvelope,
     StateSyncRequest, StateSyncResponse, SyncKafkaOffsets,
 };
-pub use settings::{BulkReceiveWindow, BulkReceiveWindowError};
+pub use settings::{
+    BulkChunkBytes, BulkReceiveWindow, BulkReceiveWindowError, PeerReceiveOverrides,
+    PeerReceiveSettings, PeerReceiveSettingsError, RelayBatchBytes, RelayDecodedBytes,
+};
 pub use wasm_state::{
     CoordinateWasmStateResetRequest, CoordinateWasmStateResetResponse,
     RecoverWasmProcessorStateRequest, RecoverWasmProcessorStateResponse,
@@ -132,6 +139,8 @@ pub(crate) const RKYV_RECORD_OVERHEAD_BYTES: u64 = 4 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct TransportOptions {
+    /// Explicit receiver claims; absence derives each limit from the supplied executor.
+    pub peer_receive: Option<settings::PeerReceiveSettings>,
     pub max_peers: usize,
     pub max_connections: usize,
     pub max_concurrent_handshakes: usize,
@@ -148,7 +157,6 @@ pub struct TransportOptions {
     /// The receive window each stream of a bulk connection grants its sender. A bulk connection
     /// grants all of its streams this window at once, and every stream it leases backs its window
     /// with a `bulk_window` reservation for as long as it is open.
-    pub bulk_receive_window: Setting<BulkReceiveWindow>,
     pub max_header_bytes: u32,
     pub connection_setup_timeout: Duration,
     pub request_timeout: Duration,
@@ -163,6 +171,7 @@ pub struct TransportOptions {
 impl Default for TransportOptions {
     fn default() -> Self {
         Self {
+            peer_receive: None,
             max_peers: DEFAULT_MAX_PEERS,
             max_connections: DEFAULT_MAX_CONNECTIONS,
             max_concurrent_handshakes: DEFAULT_MAX_CONCURRENT_HANDSHAKES,
@@ -170,7 +179,6 @@ impl Default for TransportOptions {
             relay_channel_watermark_capacity: DEFAULT_RELAY_CHANNEL_WATERMARK_CAPACITY,
             initial_stream_window_bytes: DEFAULT_STREAM_WINDOW_BYTES,
             initial_connection_window_bytes: DEFAULT_CONNECTION_WINDOW_BYTES,
-            bulk_receive_window: BulkReceiveWindow::default_window(),
             max_header_bytes: DEFAULT_MAX_HEADER_BYTES,
             connection_setup_timeout: DEFAULT_CONNECTION_SETUP_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
@@ -265,6 +273,8 @@ pub enum Envelope {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RelayPayload {
+    /// Logical decoded bytes measured by the canonical runtime batch owner.
+    pub decoded_bytes: u64,
     pub delivery: RelayDelivery,
     pub kind: RelayPayloadKind,
     pub domain: DomainName,
@@ -347,7 +357,7 @@ pub enum RelayGrantRefusal {
     /// The grant names a sender process epoch other than its authenticated connection's.
     SenderEpoch,
     /// The grant names a body longer than the relay body limit.
-    BodyTooLarge,
+    ReceiveBounds,
     /// The grant carries no admission registration.
     MissingAdmission,
     /// The grant's admission registration names a node other than its authenticated sender.
@@ -376,7 +386,7 @@ impl RelayGrantRefusal {
             Self::TerminalOutcome => 2,
             Self::ChannelBusy => 3,
             Self::SenderEpoch => 4,
-            Self::BodyTooLarge => 5,
+            Self::ReceiveBounds => 5,
             Self::MissingAdmission => 6,
             Self::ForeignRegistrar => 7,
             Self::ContentConflict => 8,
@@ -1297,6 +1307,8 @@ pub enum TransportError {
     RelayGrant(String),
     #[error("the receiver refused the relay grant: {0}")]
     RelayGrantRefused(RelayGrantRefusal),
+    #[error("the peer's receive bounds require a smaller relay batch: {0:?}")]
+    RelayBoundsRefused(nervix_models::PeerReceiveBounds),
     #[error("relay delivery was cancelled before runtime admission")]
     RelayCancelled,
     #[error("relay delivery outcome is indeterminate after a peer process epoch change")]
@@ -1494,6 +1506,8 @@ mod tests;
 
 mod state_inspection;
 pub use state_inspection::{
-    MaterializedStatePageBody, MaterializedStatePageDescriptor, MaterializedStatePageReply,
-    MaterializedStatePageTransfer, ReadMaterializedStatePage,
+    MaterializedStatePageDescriptor, MaterializedStatePageReply, MaterializedStatePageTransfer,
+    ProcessorStatePageDescriptor, ProcessorStatePageReply, ProcessorStateRunTransfer,
+    ProcessorStateSectionTransfer, ReadMaterializedStatePage, ReadProcessorStatePage,
+    StatePageBody,
 };

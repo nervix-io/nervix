@@ -130,12 +130,14 @@ connector crate.
 The contract may name shared vocabulary types, Arrow, the async and error facilities needed by its
 boundary, the node's bounded executor, and configuration helpers for TLS, HTTP clients, service
 URLs, resource mounts, and physical time. It must not name the registry, runtime, relays, branches, schedules, or a driver.
-TLS provider selection belongs to `nervix-crypto`. Shared connector TLS uses its outward process
-default, keeping the full AWS-LC algorithms and a provider installed by an embedding host. SQS
-projects the boundary's typed outward choice into Smithy's AWS-LC mode, retaining the SDK's cipher
-filtering. The interconnect has an independent fixed provider, so its algorithm restrictions do not
-change connector TLS. [Cryptography](cryptography.md#algorithm-policy) owns this policy; connectors
-still own trust roots, identities and protocol negotiation.
+TLS algorithm implementations belong to `nervix-crypto`; the host supplies the node-owned committed
+outward policy to shared-provider construction. Every new handshake captures its current pair,
+while established connections retain their negotiation and the connector retains its driver.
+SDKs that construct their own provider remain inventoried gaps. SQS projects the boundary's typed
+outward choice into Smithy's AWS-LC mode, retaining the SDK's cipher filtering. The interconnect
+has an independent fixed provider. [Cryptography](cryptography.md#algorithm-policy) owns membership
+and the governed-path inventory; connectors still own trust roots, identities and protocol
+negotiation.
 An integration crate may depend on the contract, vocabulary, Arrow, and its own driver stack. It
 must not depend on the server, another integration crate, or runtime collectors. Driver libraries
 belong in that integration's manifest, with test-harness dependencies kept separately. A
@@ -985,13 +987,18 @@ behavior. That change also supplies its generated conformance and runtime scenar
 The declaration describes the product a user can execute; plans for additional connector clauses
 remain in their owning work records until that delivery.
 
+Every ingestor and emitter also declares its `DeclaredEvents`, a closed set of typed
+`ConnectorEvent` identities. The generated matrix and manual regions render those names from the
+declaration, including an empty set. Event names are observations, not Plexus options or driver
+error strings.
+
 The declaration crosses each boundary once, without becoming runtime graph policy:
 
 | Reader | What it takes from the declaration |
 | --- | --- |
-| Plexus grammar and completion | The connector/entity head, locator and option forms, mode bodies, header and metadata names, and valid choices. |
+| Plexus grammar and completion | The connector/entity head, locator and option forms, mode bodies, header, metadata and payload names, and valid choices. |
 | Registry and planner | Reference kinds, exact value and option requirements, legal modes, envelopes and batching; validation produces a typed plan before execution. |
-| Connector host | The validated plan and declared metadata, bounds and waits; the host owns routing, retry, quiesce, flush and acknowledgements. |
+| Connector host | The validated plan and declared metadata, payload facts, bounds and waits; the host owns routing, retry, quiesce, flush and acknowledgements. |
 | Console and inspection | Entity choices, confidential client keys, effective defaults and the canonical or descriptive presentation. |
 | Manuals and checks | The generated capability matrix, conformance tests and scenario inventory described below. |
 
@@ -1576,6 +1583,19 @@ returns; see [Confirmed acknowledgements](#confirmed-acknowledgements).
 A client ingestor's plan is not a connector plan: it carries the input schema, its compiled form, the
 producer policy of window, ACK timeout, and retry backoff, and the endpoint contract digest producers
 attach to. It declares no header model or metadata field and supports only `SUSPEND`.
+
+Every ingestor entity declares its required, non-sensitive `payload` fields beside its metadata.
+All declare `bytes: U64`; `CLIENT PRODUCER` also declares `rows: U64`. The registry validates the
+same declaration that completion, capability exports and the host read. The host obtains byte
+counts from the message owner and sends them through the existing value sink only when a program
+reads them. It creates no second body and no per-row scalar map. Client intake records the IPC
+body's length before decoding and the whole batch's row count before filtering. Retention preserves
+the original byte measure, including the response-body measure shared by a Prometheus poll's
+samples. [Payload Facts](ingestors.md#payload-facts) owns the public transport boundaries.
+
+HTTP and WebSocket endpoint metadata and Syslog listener metadata include the peer IP without its
+port as `remote_ip`. The visitor renders the IP directly into a requested column; an unread IP
+allocates no string. Existing peer-address fields continue to describe the complete socket address.
 
 Each ingestor entity declares its typed metadata fields beside its other capabilities in the
 vocabulary, in order and each with its exact type: `HTTP REQUEST` declares the response status and
@@ -2283,6 +2303,22 @@ ingestor stopped is left unconfirmed; the ingestor instance logs `ingestor insta
 transport confirmed positions it read; the transport presents them again` with the count, and its
 transport's own redelivery contract applies.
 
+A batch acknowledgement's wait returns a typed `IngestorAcknowledgementOutcome`: `Acknowledged`,
+`Failed { reason }` for a tree the graph failed, `TimedOut { silence }` for a tree that reported no
+progress for the ingestor's `ACK TIMEOUT`, or `Shutdown`. The loop hands each outcome to
+`IngestorHost::record_acknowledgement` exactly once, for a batch or for each individually settled
+delivery, before it confirms or rejects the positions; the host counts it and reports a failed or
+timed-out tree as an error event that names which it was. The loop times every `acknowledge` and
+`reject` it asks of the connector, the retried rejection of a replayable ingestor included, and
+records the operation, whether it succeeded and its elapsed time through
+`record_transport_settlement`. It records every resume that completes through `record_resume`
+with its `IngestorResumeOutcome`, every suspension of a ready connector through `record_suspend`
+with its `IngestorSuspendCause`, and the count `record_unconfirmed_stop` reports. A connector that
+needs a resume after a failed read is suspended by that failure, which the loop records as
+`read_failure`. These observations change no settlement, delivery, retry or error policy. [Ingestor
+Acknowledgement And Lifecycle](metrics-and-observability.md#ingestor-acknowledgement-and-lifecycle)
+owns their families and inspection.
+
 ## Emitter boundary
 
 Each committed domain schedule becomes one complete typed execution revision before it reaches the
@@ -2638,9 +2674,22 @@ without waiting, and outside the runtime's cooperative budget. Drivers answer th
 channels, which read as empty once a task has spent its budget even though their answer has
 arrived, so a failure that found more given answers than one budget allows would otherwise leave
 the rest unresolved. A record without an answer, or whose answer failed, stays unresolved and is
-sent again, which is the at-least-once delivery `MODE ACK` promises. The registered Bolero property `connector-confirmation-window` holds the window to a
+sent again, which is the at-least-once delivery `MODE ACK` promises.
+
+A driver can keep trying to deliver a record after the window stopped waiting for it, and so deliver
+its own copy beside the one the host's retry sends. A connector whose driver does ends a failed
+publish another way. It waits for the answers still awaited through `settle_awaited`, which returns
+the failure that would end the publish instead of ending it as `finish` does; it then has its driver
+give up every record the driver still holds, and ends the publish through `fail_once_given_up`. A
+driver answers at once for each record it gives up: with the broker's verdict, where the broker
+answered before the record was given up, and otherwise with the failure of giving it up. The window
+waits for those answers, oldest first, until `ACK TIMEOUT` after the give-up, and then settles the
+publish as `fail` does. A record the broker confirmed before its driver gave it up is therefore
+delivered rather than sent again, and the records left unresolved are ones the driver no longer
+holds. An answer the give-up does not produce within that bound leaves its record unresolved, as
+any missing answer does. The registered Bolero property `connector-confirmation-window` holds the window to a
 reference model of this rule over scripted answers given within, at, past or never by each deadline,
-failed answers and driver failures, and the Shuttle checks of the
+failed answers, driver failures and drivers that give their records up, and the Shuttle checks of the
 [confirmation window](./data-plane-concurrency.md#protocols-and-their-checks) hold its settlement
 while answers arrive concurrently with the publish.
 
@@ -2673,10 +2722,17 @@ producer's `delivery.timeout.ms` to `ACK TIMEOUT`, rounded up to the millisecond
 client's own entry. A Kafka client accepts that librdkafka property under this name alone, so no
 other entry can set it. A
 producer left at librdkafka's five-minute default would keep retrying a record after the publish
-stopped waiting for it, and could deliver that copy beside the one the host's retry sends.
-librdkafka checks message timeouts about once a second, so the producer gives a record up within
-about a second of `ACK TIMEOUT`. An `ACK TIMEOUT` longer than the 2147483647 milliseconds librdkafka
-holds refuses the emitter when it starts. In `MODE NO ACK` the producer taking a record into its queue
+stopped waiting for it, and could deliver that copy beside the one the host's retry sends. The
+bound alone does not prevent that: librdkafka checks message timeouts only about once a second, and
+it still sends a record whose timeout has passed, granting its request a further 100 milliseconds,
+until that check fails the record. A broker that takes writes again within that second would store
+the copy beside the retry's. A confirmed publish that fails therefore gives up every record its
+producer still holds before it ends: it purges what the producer queues or has in flight, without
+waiting inside librdkafka, and ends through `fail_once_given_up`, which settles the report
+librdkafka then gives each purged record. A record the broker took before the purge is confirmed by
+its report and is not sent again; a record already on its way to the broker when the purge runs
+stays ambiguous, like any unanswered record. An `ACK TIMEOUT` longer than the 2147483647
+milliseconds librdkafka holds refuses the emitter when it starts. In `MODE NO ACK` the producer taking a record into its queue
 delivers it, and the client's own delivery bound applies.
 
 The NATS STREAM emitter awaits its `PubAck`s through the window: a `PubAck` confirms a record, a
@@ -3537,6 +3593,15 @@ sequenceDiagram
 
 ## Failure and observation
 
+A connector-specific fact uses the entity's declared event counter. The host registers all its
+event children at zero and exposes `ConnectorEventProvider` through `EmitterHost` and
+`IngestorHost`. Construction resolves a `ConnectorEventCounter` by typed event identity;
+requesting an undeclared event returns a typed refusal. The connector retains that counter and
+records through it without naming a metrics type, rebuilding labels or resolving a registry on
+the recurring path. The host owns counting, wall rates, process-local history and inspection.
+The event itself changes no delivery outcome. [Connector-declared events](metrics-and-observability.md#connector-declared-events)
+defines the public families and the Redis zero-subscriber event.
+
 The ingestor host resolves its interaction counter children once at startup for its exact execution
 unit. The retained group preserves each instance's counters, including decode rejections, without
 resolving labels or looking up a shared registry while recording a payload outcome.
@@ -3546,7 +3611,11 @@ Broker read results and scheduled polls are observed once through the host's typ
 times paced polls; internal buffer replay is not another transport read. Neither observation
 changes delivery, cancellation, acknowledgement, error reporting or retry policy. An actual
 extension-worker unfolding refusal is counted on acknowledged, unacknowledged and endpoint intake;
-waiting for admission is not a refusal. [Ingestor Source Interactions](metrics-and-observability.md#ingestor-source-interactions)
+waiting for admission is not a refusal. The request path records each endpoint request or frame
+once for every ingestor bound to its route, through retained children of that ingestor's unit,
+from the typed outcome that ingestor reached. A route that refuses a request before reading it
+records each ingestor's refusal there, and a request it admits is recorded at dispatch alone.
+[Ingestor Source Interactions](metrics-and-observability.md#ingestor-source-interactions)
 owns the outcome and inspection contracts.
 
 The emitter host observes one publish or due staged-commit attempt through retained metric
@@ -3715,7 +3784,7 @@ drain boundary. This chapter does not redefine those output formats.
 
 1. Declare each entity it serves in the vocabulary: one Model per entity with its
    [declaration](#entity-declarations), which states its modes, quiesce modes, locator, options,
-   body, batching, [bounds](#bounds-and-deadlines), an ingestor's position class and acknowledgement
+   body, batching, connector events, [bounds](#bounds-and-deadlines), an ingestor's position class and acknowledgement
    confirmation as its transport gives them, and every other fact a statement can say about it,
    and a typed name, checked by the entity's own rule, for each external name its statement
    writes. The connector and entity together name the statement's head, such as
@@ -3795,3 +3864,14 @@ WebSocket upgrade headers use the same committed caps at model admission and par
 transitions. Their canonical subprotocol offer counts as one field, and its comma-joined tokens
 contribute to the byte count. Syntax and plan conversion enforce physical HTTP representation
 bounds; they impose no second fixed default on a model admitted under raised cluster caps.
+
+## Live Outward TLS Algorithms
+
+The host supplies a node-owned `OutwardTlsPolicy` to every shared-provider TLS construction path.
+A connector retains its native client, pool, prepared requests and confirmations across an algorithm
+change. The rustls configuration captures the current complete pair for each new connection,
+including a driver-created reconnect; an established connection keeps its snapshot. Policy changes
+do not re-open the connector or alter its retry, quiesce, finish or acknowledgement contract.
+Trust roots, identity and ALPN remain properties of the concrete client configuration.
+[Cryptography](cryptography.md#algorithm-policy) owns the exact governed-path and driver-owned-gap
+inventory.

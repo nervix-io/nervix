@@ -140,6 +140,8 @@ pub enum CapturedStateSectionKind {
     WindowDescriptor,
     WindowInputRows,
     WindowArgumentColumns,
+    InferencerDescriptor,
+    InferencerTensorValues,
 }
 
 impl InterconnectRequest for CaptureInventoryRequest {
@@ -225,8 +227,8 @@ mod wire_properties {
     use meticulous::ResultExt as _;
     use nervix_execution::Executor;
     use nervix_models::{
-        ClusterNodeName, CommandExecutionReference, ModelKind, ModelName, RemoteRuntimeField,
-        RemoteRuntimeValue, SchemaFingerprint, WasmStateGeneration,
+        ClusterNodeName, CommandExecutionReference, InferencerModelFingerprint, ModelKind,
+        ModelName, RemoteRuntimeField, RemoteRuntimeValue, SchemaFingerprint, WasmStateGeneration,
     };
 
     use super::{capture_properties::assert_round_trip, *};
@@ -285,6 +287,10 @@ mod wire_properties {
                         RuntimeState::Deduplicator { schema },
                         RuntimeState::KafkaOffset,
                         RuntimeState::MaterializedRelay { schema },
+                        RuntimeState::Inferencer {
+                            schema,
+                            model: InferencerModelFingerprint::from_digest(case.digest),
+                        },
                         RuntimeState::WasmProcessor {
                             schema,
                             generation: WasmStateGeneration::try_from(case.generation.max(1))
@@ -305,6 +311,7 @@ mod wire_properties {
                             RuntimeState::KafkaOffset => ModelKind::Ingestor,
                             RuntimeState::WasmProcessor { .. } => ModelKind::WasmProcessor,
                             RuntimeState::WindowProcessor { .. } => ModelKind::WindowProcessor,
+                            RuntimeState::Inferencer { .. } => ModelKind::Inferencer,
                         };
                         for branched in [false, true] {
                             let branch_key = branched.then(|| {

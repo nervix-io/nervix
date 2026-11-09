@@ -738,6 +738,10 @@ pub(super) fn compile_finalized_output_filter_program(
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum RuntimeFilterScope {
+    Ingestor {
+        allow_header_reads: bool,
+        payload: nervix_models::IngestorPayloadDeclaration,
+    },
     Source {
         namespace: &'static str,
         allow_header_reads: bool,
@@ -749,6 +753,7 @@ pub(super) enum RuntimeFilterScope {
 impl RuntimeFilterScope {
     pub(super) const fn namespace(self) -> &'static str {
         match self {
+            Self::Ingestor { .. } => "input",
             Self::Source { namespace, .. } => namespace,
             Self::FinalizedOutput => "output",
         }
@@ -756,6 +761,9 @@ impl RuntimeFilterScope {
 
     pub(super) const fn allow_header_reads(self) -> bool {
         match self {
+            Self::Ingestor {
+                allow_header_reads, ..
+            } => allow_header_reads,
             Self::Source {
                 allow_header_reads, ..
             } => allow_header_reads,
@@ -765,6 +773,9 @@ impl RuntimeFilterScope {
 
     pub(super) const fn allow_metadata(self) -> bool {
         match self {
+            Self::Ingestor {
+                allow_header_reads, ..
+            } => allow_header_reads,
             Self::Source { allow_metadata, .. } => allow_metadata,
             Self::FinalizedOutput => false,
         }
@@ -783,13 +794,15 @@ pub(super) fn compile_scoped_filter_program(
         return Ok(None);
     };
     let parsed = match scope {
-        RuntimeFilterScope::Source { .. } => lower_route_construction(
-            &RouteConstruction {
-                where_clause: Some(filter.clone()),
-                ..RouteConstruction::default()
-            },
-            SemanticScopePolicy::read_only("input"),
-        ),
+        RuntimeFilterScope::Source { .. } | RuntimeFilterScope::Ingestor { .. } => {
+            lower_route_construction(
+                &RouteConstruction {
+                    where_clause: Some(filter.clone()),
+                    ..RouteConstruction::default()
+                },
+                SemanticScopePolicy::read_only("input"),
+            )
+        }
         RuntimeFilterScope::FinalizedOutput => {
             lower_finalized_output_filter(filter, input.schema.as_ref())
         }
@@ -824,6 +837,12 @@ pub(super) fn bind_scoped_filter_program(
         VmCompileBinding::writable(scope.namespace(), schema.clone())
             .with_sensitivity(sensitivity.clone()),
     ];
+    if let RuntimeFilterScope::Ingestor { payload, .. } = scope {
+        local_namespaces.insert(INGEST_PAYLOAD_NAMESPACE.to_string());
+        if let Some(binding) = ingestor_payload_binding(payload, parsed) {
+            bindings.push(binding);
+        }
+    }
     if let Some(binding) = context.branch_binding() {
         bindings.push(binding);
     }
@@ -863,7 +882,9 @@ pub(super) fn bind_scoped_filter_program(
         compiled: Arc::new(compiled),
         materialized_interest,
         output_namespace_input: match scope {
-            RuntimeFilterScope::Source { .. } => OutputNamespaceInput::Uninitialized,
+            RuntimeFilterScope::Source { .. } | RuntimeFilterScope::Ingestor { .. } => {
+                OutputNamespaceInput::Uninitialized
+            }
             RuntimeFilterScope::FinalizedOutput => OutputNamespaceInput::Finalized,
         },
         lookup_hash_maps,
@@ -1554,6 +1575,7 @@ pub(super) fn compile_reorderer_program(
 pub(super) fn bind_ingestor_filter_map_program(
     node: &ModelName,
     metadata: IngestorMetadataDeclaration,
+    payload: nervix_models::IngestorPayloadDeclaration,
     allow_header_reads: bool,
     construction: &LoweredConstruction,
     schemas: RuntimeVmSchemaPair,
@@ -1580,6 +1602,9 @@ pub(super) fn bind_ingestor_filter_map_program(
             INGEST_METADATA_NAMESPACE,
             StdArc::new(metadata_schema),
         ));
+    }
+    if let Some(binding) = ingestor_payload_binding(payload, parsed) {
+        bindings.push(binding);
     }
     let (materialized_bindings, materialized_interest) = referenced_materialized_stream_bindings(
         parsed,
@@ -1617,6 +1642,29 @@ pub(super) fn bind_ingestor_filter_map_program(
         output_namespace_input: OutputNamespaceInput::Uninitialized,
         lookup_hash_maps,
         error_sites,
+    })
+}
+
+/// Required payload inputs are bound only when read, so an unread declaration needs no null column.
+fn ingestor_payload_binding(
+    payload: nervix_models::IngestorPayloadDeclaration,
+    parsed: &nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
+) -> Option<VmCompileBinding> {
+    let read = collect_program_field_refs(&parsed.inner)
+        .into_iter()
+        .filter_map(|(namespace, field)| (namespace == INGEST_PAYLOAD_NAMESPACE).then_some(field))
+        .collect::<HashSet<_>>();
+    let fields = payload
+        .fields()
+        .iter()
+        .filter(|field| read.contains(field.name()))
+        .map(|field| field.arrow_field())
+        .collect::<Vec<_>>();
+    (!fields.is_empty()).then(|| {
+        VmCompileBinding::readonly(
+            INGEST_PAYLOAD_NAMESPACE,
+            StdArc::new(arrow_schema::Schema::new(fields)),
+        )
     })
 }
 
@@ -1998,6 +2046,7 @@ mod tests {
                 bind_ingestor_filter_map_program(
                     &identifier,
                     IngestorMetadataDeclaration::NONE,
+                    nervix_models::IngestorPayloadDeclaration::BYTES,
                     true,
                     &lowered,
                     schemas(),

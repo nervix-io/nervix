@@ -37,8 +37,8 @@ counters.
 
 | Producer | Execution and exported evidence |
 | --- | --- |
-| `just test-coverage` (`scenarios-build` and `tests`) | Ordinary workspace unit, binary, benchmark test-mode and harness-liveness tests, including the C/C++ application boundary harness and its shared binding. Packages that own execution modes run separately with ordinary features, so an all-features invocation never combines modes. Exports `lcov-workspace.info` and `coverage-source-root.txt` as `coverage-tests`. |
-| `just test-scenarios-coverage` (`scenarios-build` and the `scenarios` shards) | The public Cucumber suite, including the server it links and its instrumented CLI, report tool, paced Rust driver and shared binding. Each shard exports the same report/root pair for its share of the suite, and the paced Python drivers' `python.lcov` when it ran them, as `coverage-scenarios-<I>`. |
+| `just test-coverage` (`scenarios-build` and `tests`) | Ordinary workspace unit, binary, benchmark test-mode and harness-liveness tests, and every host suite's boundary tier. Python loads the instrumented wheel, JUnit loads the instrumented JNI jar, and the Ruby and C/C++ application harnesses load their prepared native bindings. Packages that own execution modes run separately with ordinary features, so an all-features invocation never combines modes. Exports `lcov-workspace.info` and `coverage-source-root.txt` as `coverage-tests`. |
+| `just test-scenarios-coverage` (`scenarios-build` and the `scenarios` shards) | The public Cucumber suite, including the Python host suite's one-/three-node cluster examples, the server it links and its instrumented CLI, report tool, paced Rust driver and shared binding. Each shard exports the same report/root pair for its share of the suite, and the paced Python drivers' `python.lcov` when it ran them, as `coverage-scenarios-<I>`. |
 | `coverage-native-extras test-typed-ratchet` (`extra-tests`) | Source-contract compiler fixtures, including their paired fixture doctests and loaded procedural macro objects; the `nervix-lint-report` unit tests and its five properties; and the Rust analysis runner's unit/process tests and six representation properties, using the analysis compiler's matching LLVM tools. Product API doctests and modeled fixture checks finish separately without instrumentation. |
 | `coverage-native-extras bench-smoke` (`extra-tests`) | The smoke recipe's benchmark bodies in test mode. Other Cargo benchmark test targets run in `test-coverage`. Instrumented timings are not performance evidence. |
 | `coverage-native-extras test-primitives-ordinary` (`extra-tests`) | The primitive boundary's native ordinary conformance checks. Other conformance modes remain separate. |
@@ -59,6 +59,7 @@ the downloaded artifact:
 | `coverage-release-evidence` | Required revision/check evidence accounting |
 | `coverage-operator-deployment` | Kubernetes deployment identity, public readiness observations, failure cleanup and image-publication gating |
 | `coverage-kache-ci` | The shared compiler cache's remote publication contract and build-runner diagnostic tooling |
+| `coverage-chaos-binding` | The external Python binding client's deterministic outcome, effect, settlement, evidence and offline wheel-installation controls; its counters join the ordinary Python report, while the external product processes remain uninstrumented |
 | `coverage-connector-matrix` | Plexus connector matrix rendering, generated manual regions and declaration drift checks |
 | `coverage-ci-selection` | Exact-source suite and Bolero call selection |
 | `coverage-wasm-bindgen` | The console build's wasm-bindgen CLI selection, installation and verification |
@@ -75,6 +76,15 @@ The restore recipe and prepared-suite runner install that wheel and the Python c
 before scenarios start, preserving the extension's instrumentation. The existing
 `target/paced-simulation/python.lcov` remains an ordinary Python coverage input; Rust
 execution inside the package contributes to the ordinary scenario report.
+
+The host suite installs that same wheel with pytest, pyarrow and polars in
+`target/client-conformance/python`, and alone in `python-bare` for the packaging smoke. Both the
+scenario and unit archive carry the wheel and its coverage object; restoration installs the
+environments before any test starts. The unit archive also carries the instrumented JNI jar,
+JUnit launcher, compiled classes and service metadata that reports each test identity. The
+restored `tests` job runs JUnit and pytest before exporting its ordinary report, beside the
+Cargo-owned Ruby and C/C++ boundary harnesses. These are executions inside the existing producers,
+with no additional merge input. Counters measure Rust binding lines, not host-language lines.
 
 The collector's real toolchain fixtures and Deloxide's real process supervision tests run in
 separate Python interpreters, so each supervisor retains ownership of its own children.

@@ -481,23 +481,42 @@ so a node whose fingerprint differs is refused at join as a wire-contract mismat
 another shape fails as a malformed handshake before its record can be judged. There is no version
 negotiation or alternate decoding path. A wire-contract change therefore requires a coordinated
 cluster stop and start with all nodes on the same version.
+The contract includes `InstallClusterIdentity` and the complete validated identity record in Raft
+commands and snapshots. Its private key travels only over the authenticated interconnect. Public
+identity observation and backup source metadata use their separate public projections.
+The current fingerprint includes the conditional orphaned model-pause recovery command, its exact
+mutation lease, typed recovery reply and typed mutation-fence and restore-installation conflicts.
 The subscription-interest visibility request includes the advertisement version, and its current
 wire fingerprint fences that request shape during connection setup.
 
+The fingerprint also fences typed PBKDF2-HMAC-SHA-512 credentials in consensus commands and the persisted uniform verification-work count in snapshot metadata. Cost validation occurs during decoding before any authentication work is admitted.
+
 The fingerprint covers endpoint kinds whose WebSockets variant alone carries an optional signaling
-reference, both in Models and in queued transaction statements.
+reference, both in Models and in queued transaction statements. It also covers a queued
+`RESET WASM PROCESSOR ... STATE`, which names its processor and scope and takes its domain from its
+transaction.
 It also covers fixed-width 64-bit counts in Models, transaction commands and records,
 and WASM inspection results. These fields use the vocabulary's `CountAsU64` adapter and checked
 native decoding; an unrepresentable count fails decoding. Window processor state has current
 runtime-state kind tag `8`, and its bulk snapshot codec validates the `NVXWIN64` frame signature
 before decoding histogram delayed-removal bucket indices in the same count representation.
 
+Stateful inferencer checkpoints use branch-local runtime-state kind tag `6`. Their placement
+carries both the schema fingerprint and an `InferencerModelFingerprint`; checkpoint descriptions,
+catalog pages, fetches and acknowledgements retain that exact identity. The native frame records
+the revision, branch incarnation, tensor shapes and float bits. The interconnect moves the opaque
+bounded frame through the existing snapshot bulk quota; the inferencer codec validates its shape.
+The current fingerprint also covers materialized inspection page requests and their typed
+descriptors, so checkpoint identity and inspection operations advance as one wire contract.
+
 Emitter statements exchanged through the control plane use explicit `KEY` expressions and
 `PARTITION FROM BRANCH`, and SQS FIFO groups have one expression shape. The current
-`WIRE_CONTRACT` fingerprint identifies that archived Model layout; peers must match it exactly.
-The same fingerprint covers corridor/domain-wide placement coverage, pace-only domain
-configuration, exact partition/instance relocation selections and the current transaction
-operation and commit-step alternatives.
+`WIRE_CONTRACT` fingerprint identifies that archived Model layout, including the typed
+`payload` expression scope, typed materialized relay inspection, ingestor read interactions,
+corridor/domain-wide placement coverage, pace-only domain configuration, exact partition/instance
+relocation selections, ingestor acknowledgement and connector lifecycle observations, and the current
+transaction operation and commit-step alternatives. Peers must
+match it exactly.
 
 Execution-unit identities use an eight-byte rank with four-byte archive alignment. Single and
 partition relay grants retain that bounded footprint when other entities declare external
@@ -559,6 +578,12 @@ HTTP/2 flow control adds another bound. Each stream begins with a 64 KiB receive
 connection begins with a 256 KiB receive window, and request headers are limited to 16 KiB. A
 receiver releases more HTTP/2 credit only as it accepts and accounts for more data. Large streamed
 objects can therefore cross the cluster without either endpoint holding the whole object in memory.
+
+A streamed request carries its receiver's positive chunk bound outside the join handshake. The
+responder intersects it with that peer's committed claim when available and splits writes to that
+chunk limit; the receiver independently rejects a larger frame. This operation bound also permits
+a joining node to receive a consensus snapshot before its own claim commits. HTTP/2's actual
+stream and connection credit continues to govern progress and backpressure.
 
 A bulk connection grants more, on the side that opened it and receives its responses. Each of its
 four streams gets the bulk receive window, 1 MiB by default (the `interconnect-bulk-receive-window`
@@ -846,6 +871,25 @@ unit receives only its partition's batches; a shared consumer retains one bounde
 partitions. A handoff fences the selected unit's delivery while sibling units keep their channels
 and consumers.
 
+The node's committed `PeerReceiveBounds` cap its encoded and decoded relay body independently.
+The sender reads the claim through its already leased peer pool, without another routing-map
+lookup. Publication retains connection slots and stream-release waiters. An absent claim does not
+prevent bootstrap transport; the receiver still enforces its actual local limits.
+
+Before creating an attempt, a receiver answers an oversized new grant with `Resize` and its typed
+bounds. Existing attempts and terminal positions are resolved first. A definitive refusal advances
+no sequence: the sender can re-encode a smaller contiguous row prefix at that unused position.
+Each admitted prefix advances the channel once and transfers only its own row registrations to
+the admission owner. Later refusals shrink only the remaining suffix; they never resend an admitted
+prefix. A single row above the bound has a typed capacity failure. Until an admission attempt takes
+ownership, the held channel gate returns an abandoned unused position, so a failed encode, an
+unsendable row or cancellation during sizing cannot leave a sequence gap for the next batch.
+It never returns an admitted position or a position of a different channel incarnation.
+Ordinary unchanged-bound fanout
+keeps its one shared encoded allocation. If an earlier attempt had an uncertain outcome, the sender
+uses its existing cancellation/reconciliation path instead of treating a later refusal as proof
+that the delivery was unused. These cursors, attempts and acknowledgement prefixes remain in memory.
+
 A delivery proceeds as follows:
 
 1. A delivery that carries record acknowledgements first stores them on the sender, charged to its
@@ -855,7 +899,7 @@ A delivery proceeds as follows:
 2. The sender leases a relay-body stream before requesting receiver capacity. This prevents a
    saturated body pool from holding a remote reservation that it cannot use.
 3. The sender requests a grant over the reserved management admission quota. The request identifies
-   the delivery process, channel, sequence, payload length, branch, relay, and acknowledgement shape.
+   the delivery process, channel, sequence, encoded and logical decoded lengths, branch, relay, and acknowledgement shape.
 4. The receiver verifies the sender process epoch and delivery order. Before issuing a grant, it
    reserves the encoded body, maximum decoded batch and scratch memory, an incoming queue item, and
    capacity for the eventual terminal admission outcome. A grant it cannot issue is answered with a
@@ -1450,7 +1494,12 @@ flight toward its receiver, backed by that stream's window reservation.
 [Resource Versions And Bindings](./resource-versions.md#publication-and-transfer) defines when a
 node fetches a resource archive and how it verifies and records the fetched version.
 
-Backup state capture uses typed drain, capture, inventory, and fetch operations. The leader reads
+Backup state capture uses typed drain, capture, inventory, and fetch operations.
+Inference backup capture uses the inferencer descriptor and tensor-value inventory kinds. Their
+archive paths are typed at assembly; the descriptor precedes its raw values and binds their exact
+length and digest. Restore uses the existing streamed installation inventory and authority for both
+the scheduled owner and replicas, with the inferencer schema and model fingerprints in placement.
+The one wire-contract fingerprint changes with these two capture kinds. The leader reads
 the admitted work of every live node and every node the domain's schedule assigns its work to
 through a management-class drain request, which starts a force-flush generation on a node only
 while that node holds admitted work, and requests a separate confirming force-flush round after
@@ -1559,7 +1608,7 @@ still fail a transfer that does not complete.
 The registered `backup-capture-wire` property checks complete drain, capture, inventory and fetch
 messages through the production payload codec under each request's declared class limit. It covers
 every drain action, all ten counters at zero, their full-width maximum and independent generated
-values, all twelve inventory section kinds, ordered and empty inventories, arbitrary digests,
+values, all fourteen inventory section kinds, ordered and empty inventories, arbitrary digests,
 bounded Unicode paths, and capture/drain/inventory success and refusal responses. The fetch response
 remains an opaque byte stream. `backup-capture-wire-malformed` separately
 checks typed refusal or complete stable re-encoding of damaged and arbitrary message bytes, and
@@ -1935,10 +1984,11 @@ batches continue through the graph with nobody left to answer them, and the batc
 was clearing are dropped unadmitted, releasing their slots of the window. A later producer opens a
 new link.
 
-Each end reserves the producer's granted bytes in its own 128 MiB producer budget: the serving node
+Each end reserves the producer's granted bytes in its own resolved producer node budget: the serving node
 for the batches its session holds, and the owning node again for the batches it retains for another
 node. The link adds no reservation of its own beyond the transport's per-frame charge.
-[Client Session Protocol](./client-session-protocol.md#producers) describes what the client sees.
+[Client Session Protocol](./client-session-protocol.md#producers) describes what the client sees;
+[Execution Capabilities](node-settings.md#execution-capabilities) owns the local capacity derivation.
 
 ## Client Consumer Streams
 
@@ -1946,7 +1996,7 @@ When a session opens a consumer of a `TO CLIENT` emitter executing on another no
 node opens one `client_consumer_stream` duplex stream for that attachment on the relay pool and
 shared subquota. The opening request names the authenticated serving node, domain, emitter, exact
 schema fields and granted credit. The owner checks the peer identity, reserves the grant in its
-own 128 MiB consumer budget and attaches to its local emitter endpoint before replying `Opened`
+own resolved consumer node budget and attaches to its local emitter endpoint before replying `Opened`
 with the endpoint description or `Refused` with a typed cause. The serving node has already
 reserved the same grant against its session and node budgets.
 
@@ -2435,3 +2485,34 @@ so that definition owns the sole default and configured callers retain the same 
 The complete frontend inspection also has that elapsed-time bound. Failed or cancelled reads retain
 no historical cursor or page cache. The existing materialized dependency/generator snapshot request
 and its grouping, confirmation, integrity and admission behavior remain unchanged.
+
+## Processor State Page Operation
+
+`read_processor_state_page` is the process-targeted Bulk stream request, on the Snapshot subquota,
+that reads one execution unit of a stateful processor from the
+unit's owner. It names the domain, the processor's kind and name, the execution unit, the committed
+control revision, the schema fingerprint, the resolved branch selector, the optional branch/offset
+position, the row and byte limits and the exact owner process. The handler verifies the control
+cut, the kind, the schema, the unit owner and the target incarnation, then asks the unit's branch
+tasks for bounded copies, as [Data-Plane
+Concurrency](data-plane-concurrency.md#processor-state-inspection-requests) describes, and gathers
+the returned rows into Arrow columns on the bounded Bulk executor. Deduplicator and window reads
+capture published generations instead of asking branch tasks. Sealed window metadata and columns
+are decoded under bounded admission, with cancellation and storage charges retained through
+encoding. A zero-row request returns only counts for the processor's `DESCRIBE` summary.
+
+The stream frames an eight-byte little-endian descriptor length, a bounded typed rkyv descriptor and
+one native Arrow snapshot section per returned section. The descriptor carries the read origin, the
+complete counts, the returned offset and last branch, the returned rows as runs of one section and
+one branch with the branch's typed key fields, and each section's complete field list, held row
+count and body identity: exact byte length and SHA-256 digest. A descriptor names at most three
+sections, fixed by processor kind: reorderer `pending`; correlator `left` and `right`; deduplicator
+`keys`; or window `rows`, `header` and `accumulators`. Window metadata runs count toward section
+bodies and bytes, while only retained-row runs advance the row offset or consume its limit. The receiver bounds all buffering, verifies every digest before decoding,
+checks each section's payload fields against its own committed schema, decodes each section with
+exactly the declared field list, and checks the run rows, the returned offset and the row counts
+against the descriptor before any row reaches a Row frame. A typed refusal carries no body. No operator payload crosses as Row frames or row maps; the
+coordinator writes Row frames at the session reporting boundary, as for materialized pages.
+The inspection deadline controls stream admission and setup through
+`request_stream_with_timeout`, and the request type's `default_timeout()` reads
+`StateInspectionReadTimeout` like the materialized page operation.

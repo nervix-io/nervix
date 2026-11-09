@@ -415,11 +415,13 @@ const MQTT_TOPIC_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclara
 
 impl IngestorDeclaration for MqttTopicIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::PerPartition,
         // MQTT 5 user properties: a broker keeps their order and repeats from the publisher, and
         // their names compare exactly.
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         metadata: MQTT_TOPIC_METADATA,
+        payload: crate::IngestorPayloadDeclaration::BYTES,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Mqtt),
         // A persistent session's broker delivers again every publish a lost connection did not
@@ -723,6 +725,7 @@ pub struct MqttTopicEmitter {
 
 impl EmitterDeclaration for MqttTopicEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         // An MQTT broker keeps one session per client identifier, and every instance would connect
         // with the emitter's one identifier.
         instancing: crate::EmitterInstancingCapability::Single {

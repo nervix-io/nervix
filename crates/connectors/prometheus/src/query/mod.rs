@@ -44,6 +44,7 @@ use answer::PrometheusQueryResponse;
 const PROMETHEUS: &str = "prometheus";
 
 pub struct PrometheusQueryIngestorPlan {
+    pub tls_policy: nervix_connector::OutwardTlsPolicy,
     pub config: Vec<ClientConfigEntry>,
     pub query: String,
     /// The most bytes of one query response a poll reads.
@@ -107,11 +108,10 @@ impl IngestorConnector for PrometheusQueryIngestor {
                 connector: PROMETHEUS,
             },
         )?;
-        let client = Self::client_from_config(&plan.config, &plan.dns).change_context(
-            IngestorError::Open {
+        let client = Self::client_from_config(&plan.config, &plan.dns, &plan.tls_policy)
+            .change_context(IngestorError::Open {
                 connector: PROMETHEUS,
-            },
-        )?;
+            })?;
         Ok(Self {
             client,
             api_root,
@@ -132,7 +132,7 @@ impl PacedIngestorConnector for PrometheusQueryIngestor {
             .await
             .change_context_lazy(read)?;
         let samples = response.samples().change_context_lazy(read)?;
-        let metadata = Self::poll_metadata(&self.query, scheduled_at);
+        let metadata = Self::poll_metadata(&self.query, scheduled_at, response.body.len());
         let mut messages = Vec::with_capacity(samples.len());
         let mut failures = Vec::new();
         for sample in samples {
@@ -159,17 +159,25 @@ impl PrometheusQueryIngestor {
     fn client_from_config(
         config: &[ClientConfigEntry],
         dns: &DnsResolver,
+        tls_policy: &nervix_connector::OutwardTlsPolicy,
     ) -> Result<HttpClient, Report<HttpClientConfigError>> {
-        HttpClientConfig::new(config, "Prometheus", dns).build()
+        HttpClientConfig::new(config, "Prometheus", dns, tls_policy).build()
     }
 
     /// The values of the fields a query ingestor declares, in their declared order, for one poll:
     /// the same for every sample of it, so its messages share one copy however many there are.
-    fn poll_metadata(query: &str, evaluated_at: Timestamp) -> RetainedIngestMetadata {
-        RetainedIngestMetadata::from_values(vec![
-            RetainedIngestMetadataValue::String(query.to_string()),
-            RetainedIngestMetadataValue::Datetime(evaluated_at),
-        ])
+    fn poll_metadata(
+        query: &str,
+        evaluated_at: Timestamp,
+        payload_bytes: usize,
+    ) -> RetainedIngestMetadata {
+        RetainedIngestMetadata::from_values(
+            payload_bytes,
+            vec![
+                RetainedIngestMetadataValue::String(query.to_string()),
+                RetainedIngestMetadataValue::Datetime(evaluated_at),
+            ],
+        )
     }
 
     /// The response to this ingestor's query evaluated at `evaluated_at`, its body read within
@@ -291,6 +299,7 @@ mod tests {
     -> Result<(), Report<nervix_dns::DnsConfigurationError>> {
         let dns = DnsResolver::load(nervix_dns::DnsConfiguration::system()).await?;
         let plan = |config: Vec<ClientConfigEntry>| PrometheusQueryIngestorPlan {
+            tls_policy: Default::default(),
             config,
             query: "up".to_string(),
             max_body_size: nervix_models::PROMETHEUS_DEFAULT_MAX_BODY_SIZE,
@@ -337,8 +346,9 @@ mod tests {
             key: "timeout_ms".to_string(),
             value: "oops".to_string(),
         }];
-        let error = PrometheusQueryIngestor::client_from_config(&timeout, &dns)
-            .expect_err("invalid Prometheus timeout");
+        let error =
+            PrometheusQueryIngestor::client_from_config(&timeout, &dns, &Default::default())
+                .expect_err("invalid Prometheus timeout");
         assert!(error.to_string().contains("Prometheus timeout_ms"));
         Ok(())
     }

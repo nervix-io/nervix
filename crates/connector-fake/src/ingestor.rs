@@ -105,6 +105,10 @@ impl IngestMessageHeaders for FakeMessage {
 /// The values of the metadata the transport's entity declares, in its order, as the real
 /// connector of that entity hands them over.
 impl IngestMessageMetadata for FakeMessage {
+    fn payload_bytes(&self) -> usize {
+        nervix_connector::IngestorMessage::payload(self).len()
+    }
+
     fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
         match &self.transport {
             MessageTransport::Headers(_) => {}
@@ -177,6 +181,11 @@ pub struct FakeIngestor {
     reading: bool,
     pub resume_required: bool,
     pub resume_results: VecDeque<IngestorResult<IngestorResume>>,
+    /// Reads that fail before reading any input.
+    pub failed_reads_left: usize,
+    /// Whether a failed read or poll loses the transport, so the instance needs a resume.
+    pub failure_loses_transport: bool,
+    transport_lost: bool,
     pub reject_failures_left: usize,
     pub replay_rejected: bool,
     /// Replays each resume leaves pending, as a quiesce released during it would.
@@ -197,6 +206,10 @@ impl IngestorConnector for FakeIngestor {
             Some(result) => result,
             None => Err(Report::new(IngestorError::Open { connector: "fake" })),
         }
+    }
+
+    fn needs_resume(&mut self) -> bool {
+        self.transport_lost
     }
 
     #[cfg_attr(
@@ -223,10 +236,14 @@ impl IngestorConnector for FakeIngestor {
             started.notify_one();
             future::pending::<()>().await;
         }
-        match self.resume_results.pop_front() {
+        let resumed = match self.resume_results.pop_front() {
             Some(result) => result,
             None => Ok(IngestorResume::Ready),
+        };
+        if let Ok(IngestorResume::Ready) = resumed {
+            self.transport_lost = false;
         }
+        resumed
     }
 
     #[cfg_attr(
@@ -288,6 +305,13 @@ impl BrokerIngestorConnector for FakeIngestor {
             let mut observations = self.observations.lock();
             observations.requests.push(request);
             observations.sequence.push("next_batch");
+        }
+        if self.failed_reads_left > 0 {
+            self.failed_reads_left -= 1;
+            if self.failure_loses_transport {
+                self.transport_lost = true;
+            }
+            return Err(Report::new(IngestorError::Read { connector: "fake" }));
         }
         if self.resume_required {
             self.resume_required = false;
@@ -413,6 +437,9 @@ impl FakeIngestor {
             reading: false,
             resume_required: false,
             resume_results: VecDeque::new(),
+            failed_reads_left: 0,
+            failure_loses_transport: false,
+            transport_lost: false,
             reject_failures_left: 0,
             replay_rejected: false,
             replays_pending_after_resume: 0,
@@ -442,6 +469,9 @@ impl PacedIngestorConnector for FakeIngestor {
             shutdown.send_replace(true);
         }
         if let Some(poll) = self.polls.pop_front() {
+            if poll.is_err() && self.failure_loses_transport {
+                self.transport_lost = true;
+            }
             return poll;
         }
         let message = match &mut self.input {

@@ -114,6 +114,8 @@ def mirror(surface, side, row, notes):
             differences.append(field)
     if side == "ingest" and row["metadata"]:
         differences.append("ingest metadata")
+    if side == "ingest" and row["payload"]:
+        differences.append("ingest payload facts")
     if side == "emit" and (row["envelope"] or row["properties"]):
         differences.append("emit envelope/properties")
     compared = ", ".join(differences) or "the same shared declaration fields"
@@ -166,12 +168,14 @@ def entity_rows(row, side, notes):
         headers = absent(notes, row, f"{side}_headers")
     rows = [("Reference", row["reference"]), ("Locator and validation rule", location),
             ("Modes (complete bodies after MODE)", "\n".join(row["modes"])),
-            ("Options in statement order", option_text(row["options"])), ("Headers", headers)]
+            ("Options in statement order", option_text(row["options"])), ("Headers", headers),
+            ("Connector events", ", ".join(f"`{event}`" for event in row["events"]) or "None declared.")]
     if side == "ingest":
         rows.extend([
             ("Instancing", row["instancing"]),
             ("Quiesce (complete bodies after ON QUIESCE)", "\n".join(row["quiesce"])),
             ("Metadata", "\n".join(row["metadata"]) or absent(notes, row, "metadata")),
+            ("Payload facts", "\n".join(row["payload"])),
             ("Every live node", "yes" if row["every_node"] else "no; scheduled owner"),
             ("Position class", row["position"]), ("Acknowledgement confirmation", row["confirmation"]),
         ])

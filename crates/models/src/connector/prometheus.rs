@@ -214,9 +214,11 @@ const PROMETHEUS_QUERY_METADATA: IngestorMetadataDeclaration = IngestorMetadataD
 /// of its own, so a query ingestor reads none.
 impl IngestorDeclaration for PrometheusQueryIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::Single,
         headers: None,
         metadata: PROMETHEUS_QUERY_METADATA,
+        payload: crate::IngestorPayloadDeclaration::BYTES,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Prometheus),
         position_class: PositionClass::None,

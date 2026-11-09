@@ -24,6 +24,27 @@ macro_rules! host_enum {
     };
 }
 
+host_enum! { InspectionRejection from InspectionRejection {
+    UnknownEntity = 1 as "UNKNOWN_ENTITY",
+    NotMaterialized = 2 as "NOT_MATERIALIZED",
+    InvalidSelection = 3 as "INVALID_SELECTION",
+    InvalidLimit = 4 as "INVALID_LIMIT",
+    StaleContinuation = 5 as "STALE_CONTINUATION",
+    OwnerUnavailable = 6 as "OWNER_UNAVAILABLE",
+    NotReady = 7 as "NOT_READY",
+    Deadline = 8 as "DEADLINE",
+    ReplyTooLarge = 9 as "REPLY_TOO_LARGE",
+} }
+host_enum! { InspectionStage from InspectionStage {
+    Live = 1 as "LIVE",
+    Stored = 2 as "STORED",
+} }
+host_enum! { InspectionUnitKind from InspectionUnitKind {
+    Single = 1 as "SINGLE",
+    Partition = 2 as "PARTITION",
+    Instance = 3 as "INSTANCE",
+} }
+
 host_enum! { FailureKind from FailureKind {
 InvalidArgument = 1 as "INVALID_ARGUMENT",
         Connect = 2 as "CONNECT",
@@ -236,6 +257,7 @@ Text = 1 as "TEXT",
 } }
 
 pub(crate) fn register(module: RModule) -> Result<(), Error> {
+    register_inspection(module)?;
     FailureKind::register(module)?;
     Disposition::register(module)?;
     UploadFailure::register(module)?;
@@ -264,5 +286,12 @@ pub(crate) fn register(module: RModule) -> Result<(), Error> {
     let tls = module.define_module("Tls")?;
     tls.const_set("PREFERRED", 1)?;
     tls.const_set("REQUIRED", 2)?;
+    Ok(())
+}
+
+fn register_inspection(module: RModule) -> Result<(), Error> {
+    InspectionRejection::register(module)?;
+    InspectionStage::register(module)?;
+    InspectionUnitKind::register(module)?;
     Ok(())
 }

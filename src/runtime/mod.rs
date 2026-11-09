@@ -193,7 +193,10 @@ use crate::{
         WebsocketsIngestorStartPlan, ZeroMqIngestorStartPlan, ZeroMqPullIngestorStartPlan,
     },
     resource::ResourceStore,
-    runtime_ack::{AckCompletion, AckOutcome, AckParkGuard, AckProgress, AckRootTracker, AckSet},
+    runtime_ack::{
+        AckCompletion, AckOutcome, AckParkGuard, AckProgress, AckRootTracker, AckSet,
+        AckWaitOutcome,
+    },
     runtime_schema::{
         CodecError, CompiledCodec, CompiledSchema, JsonDecoder, ProtobufCodecDescriptors,
         ProtobufDescriptorPool, RuntimeProjectionComponent, RuntimeRecordBatch,
@@ -217,6 +220,11 @@ mod branch_key;
 mod branch_lifecycle_state;
 mod branch_lru_state;
 mod branch_runtime;
+mod client_endpoint_capacity;
+pub use client_endpoint_capacity::{
+    ClientConsumerNodeBytes, ClientEndpointCapacityError, ClientEndpointOverrides,
+    ClientEndpointSettings, ClientProducerNodeBytes,
+};
 mod client_emitter;
 mod client_ingestor;
 mod correlator;
@@ -256,9 +264,14 @@ mod forced_recovery_decision;
 mod generator;
 mod http_request_fields;
 mod inferencer;
+mod inferencer_archive;
 mod inferencer_output;
+mod inferencer_state;
+pub(crate) use inferencer_archive::CapturedInferencer;
 mod ingest_group;
 mod ingest_metadata;
+#[cfg(test)]
+mod ingest_payload_tests;
 mod ingest_task_handles;
 mod ingestion_time;
 mod ingestor_quiesce;
@@ -297,6 +310,7 @@ mod processor_branch_restore;
 mod processor_branch_task;
 mod processor_output;
 mod processor_plan_binding;
+mod processor_state_inspection;
 mod processor_template;
 mod processors;
 mod published_generation;
@@ -313,6 +327,7 @@ pub mod relay_interaction_benchmark;
 mod relay_memory_hold;
 mod relay_processor_node;
 mod relay_send_attempts;
+mod relay_slicing;
 mod relay_subscription;
 mod relay_transit;
 mod remote_ack_owner;
@@ -494,6 +509,7 @@ use http_request_fields::{
     HttpRequestFields, HttpRequestInput, HttpRequestSchemas, SourceRecords,
 };
 use inferencer_output::flush_branch_inferencer_output;
+use inferencer_state::ReplicatedInferencerState;
 pub(in crate::runtime) use ingest_group::INGEST_GROUP_MAX_ROWS;
 use ingest_group::{
     BatchPayload, BoundIngestor, BoundIngestorInput, BranchedEntrypointInput, ClientBatchDispatch,
@@ -502,8 +518,9 @@ use ingest_group::{
     decode_ingested_payload, prepare_branched_entrypoint_input,
 };
 use ingest_metadata::{
-    BRANCH_NAMESPACE, INGEST_METADATA_NAMESPACE, IngestHeaderFunctionInjector,
-    IngestMetadataBuilders, IngestMetadataError, IngestMetadataProjection,
+    BRANCH_NAMESPACE, INGEST_METADATA_NAMESPACE, INGEST_PAYLOAD_NAMESPACE,
+    IngestHeaderFunctionInjector, IngestMetadataBuilders, IngestMetadataError,
+    IngestMetadataProjection,
 };
 pub(in crate::runtime) use ingestor_quiesce::{
     BufferedIngestMetadata, BufferedIngestPayload, IngestorQuiesceCause, IngestorQuiesceControl,
@@ -557,8 +574,8 @@ use planning::{
 };
 use processor_branch_restore::PendingProcessorBranchRestore;
 use processor_branch_task::{
-    PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, PreparedProcessorBranch, ProcessorBranchHandoff,
-    ProcessorBranchLifetime, ProcessorBranchTask, ProcessorBranchTaskError,
+    PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, PreparedProcessorBranch, ProcessorBranchCommand,
+    ProcessorBranchHandoff, ProcessorBranchLifetime, ProcessorBranchTask, ProcessorBranchTaskError,
     ProcessorCheckpointPurpose, ProcessorNodeCommand, ProcessorSnapshotRequest,
     SpawnedSnapshotTask,
 };
@@ -571,6 +588,14 @@ use processor_output::{
     ProcessorOutputBatchScope, ProcessorOutputDispatchContext, ProcessorOutputError,
     dispatch_processor_output, dispatch_processor_outputs, flush_all_processor_outputs,
     flush_due_processor_outputs, pending_output_batches_by_key,
+};
+use processor_state_inspection::{
+    BranchStateCopy, BranchStateRead, HandledEvents, HeldReordererRow, HeldRowsBudget,
+    SelectedStateBranches, answer_branch_state, held_row_bytes,
+};
+pub(crate) use processor_state_inspection::{
+    BranchStateReadError, ProcessorStatePageBounds, ProcessorStatePageError,
+    ProcessorStatePageMemory, ProcessorStateSectionColumns,
 };
 use processor_template::{
     MaterializedDependencyResolution, ProcessorInputFilterKind, ProcessorTemplateError,
@@ -760,11 +785,13 @@ mod window_accumulator;
 #[cfg(feature = "benchmarks")]
 #[doc(hidden)]
 pub use window_accumulator::benchmark as window_sketch_benchmark;
+mod published_processor_state_inspection;
 mod window_archive;
 #[cfg(test)]
 mod window_checkpoint_cases;
 mod window_processor;
 mod window_state;
+mod window_state_charge;
 
 #[doc(hidden)]
 pub use branch_key::BranchKey;

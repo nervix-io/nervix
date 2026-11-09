@@ -11,6 +11,7 @@ fn parameters(input: &[u8; 384]) -> ClusterParameterValues {
     let generated = nervix_arbitrary::Arbitrary::new(input, nervix_arbitrary::Domain::Vocabulary)
         .cluster_parameter_values();
     ClusterParameterValues::resolve(ClusterParameterSeedValues {
+        password_iterations: Some(generated.password_iterations()),
         node_unavailability_timeout: Some(generated.node_unavailability_timeout()),
         domain_drain_timeout: Some(generated.domain_drain_timeout()),
         entity_gate_deadline: Some(generated.entity_gate_deadline()),
@@ -33,6 +34,8 @@ fn parameters(input: &[u8; 384]) -> ClusterParameterValues {
         http_header_bytes: Some(generated.http_header_bytes()),
         http_header_fields: Some(generated.http_header_fields()),
         client_batch_rows: Some(generated.client_batch_rows()),
+        tls_cipher_suites: Some(generated.tls_cipher_suites()),
+        tls_key_exchange_groups: Some(generated.tls_key_exchange_groups()),
     })
     .assured("the shared generator supplies values within every definition's bounds")
 }

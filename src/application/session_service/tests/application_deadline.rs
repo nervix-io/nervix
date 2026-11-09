@@ -21,9 +21,16 @@ use nervix_primitives::sync::CancellationToken;
 use super::super::{ApplicationBound, RuntimeAdmission};
 use crate::runtime::ApplicationWait;
 
+fn runtime_admission() -> RuntimeAdmission {
+    RuntimeAdmission::new(nervix_models::ClusterNodeIdentity::new(
+        nervix_models::ClusterNodeName::parse("node-1").expect("fixture node"),
+        nervix_models::ClusterNodeIncarnation::new(1),
+    ))
+}
+
 #[nervix_primitives::test(start_paused = true)]
 async fn an_elapsed_application_deadline_refuses_an_available_installation_before_a_timer_tick() {
-    let admission = RuntimeAdmission::new();
+    let admission = runtime_admission();
     let shutdown = CancellationToken::new();
     // Put the deadline strictly inside the driver's first millisecond, so its rounded
     // timer cannot already be ready at the runtime's initial clock origin.
@@ -52,7 +59,7 @@ async fn an_elapsed_application_deadline_refuses_an_available_installation_befor
 
 #[nervix_primitives::test(start_paused = true)]
 async fn an_elapsed_application_deadline_refuses_a_held_installation_before_a_timer_tick() {
-    let admission = RuntimeAdmission::new();
+    let admission = runtime_admission();
     let shutdown = CancellationToken::new();
     let held = admission
         .begin_installation(&shutdown)

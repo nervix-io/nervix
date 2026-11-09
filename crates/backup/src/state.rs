@@ -220,7 +220,7 @@ impl ArchiveRecord for BranchLifecycleRecord {
     }
 }
 
-fn parse_domain(path: &str, raw: &str) -> Result<DomainName, Report<ArchiveReadError>> {
+pub(crate) fn parse_domain(path: &str, raw: &str) -> Result<DomainName, Report<ArchiveReadError>> {
     DomainName::parse(raw).map_err(|cause| {
         cause.change_context(ArchiveReadError::InvalidValue {
             path: path.to_string(),
@@ -229,7 +229,7 @@ fn parse_domain(path: &str, raw: &str) -> Result<DomainName, Report<ArchiveReadE
     })
 }
 
-fn parse_entity(path: &str, raw: &str) -> Result<ModelName, Report<ArchiveReadError>> {
+pub(crate) fn parse_entity(path: &str, raw: &str) -> Result<ModelName, Report<ArchiveReadError>> {
     ModelName::parse(raw).map_err(|cause| {
         cause.change_context(ArchiveReadError::InvalidValue {
             path: path.to_string(),

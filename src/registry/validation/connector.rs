@@ -45,7 +45,8 @@ use crate::{
     registry::{
         error::{
             ConnectorDeclarationIssue, ConnectorDurationSetting, EnvelopeValueSite,
-            OtelMappingIssue, OtelMappingSection, OtelMappingSignal, RegistryError,
+            IngestorPayloadReadSite, OtelMappingIssue, OtelMappingSection, OtelMappingSignal,
+            RegistryError,
         },
         validation::{
             branching::relay_declared_branch_schema,
@@ -63,6 +64,10 @@ use crate::{
         },
     },
 };
+
+#[cfg(test)]
+#[path = "connector_payload_tests.rs"]
+mod payload_tests;
 
 pub(in crate::registry) fn validate_ingestor_source(
     domain: &DomainName,
@@ -1633,6 +1638,29 @@ fn refuse_undeclared_metadata_reads(
     Ok(())
 }
 
+fn refuse_undeclared_payload_reads(
+    domain: &DomainName,
+    identifier: &ModelName,
+    input: &IngestorInput,
+    site: IngestorPayloadReadSite,
+    program: &Program,
+) -> Result<(), Report<RegistryError>> {
+    let kind = input.entity_kind();
+    for (namespace, field) in collect_program_field_refs(program) {
+        if namespace == "payload" && kind.capabilities().payload.position(&field).is_none() {
+            return Err(Report::new(RegistryError::UndeclaredIngestorPayload {
+                domain: domain.clone(),
+                ingestor: identifier.clone(),
+                field: FieldName::parse(&field)
+                    .assured("lowered field references carry valid field names"),
+                kind,
+                site,
+            }));
+        }
+    }
+    Ok(())
+}
+
 pub(in crate::registry) fn ensure_ingestor_timestamp_source(
     domain: &DomainName,
     identifier: &ModelName,
@@ -1724,6 +1752,13 @@ pub(in crate::registry) fn validate_ingestor_filter_where_for_internal_schemas(
             reason: format!("FILTER WHERE is invalid: {reason}"),
         })
     })?;
+    refuse_undeclared_payload_reads(
+        domain,
+        identifier,
+        input,
+        IngestorPayloadReadSite::FilterWhere,
+        &parsed.inner,
+    )?;
     if program_uses_header_reads(&parsed.inner) && !input.reads_headers() {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -1748,6 +1783,10 @@ pub(in crate::registry) fn validate_ingestor_filter_where_for_internal_schemas(
             allow_header_reads: true,
             ..CompileOptions::default()
         },
+        &[CompileBinding::readonly(
+            "payload",
+            StdArc::new(input.entity_kind().capabilities().payload.arrow_schema()),
+        )],
     )
 }
 
@@ -1785,6 +1824,13 @@ pub(in crate::registry) fn effective_ingestor_output_filter_map_schema(
         }));
     }
     refuse_undeclared_metadata_reads(domain, identifier, ingestor, output, &parsed.inner)?;
+    refuse_undeclared_payload_reads(
+        domain,
+        identifier,
+        &ingestor.input,
+        IngestorPayloadReadSite::Route(output.relay.clone()),
+        &parsed.inner,
+    )?;
     let original_parsed = parsed.clone();
     let LookupHashMapRewriteResult {
         program: parsed,
@@ -1796,6 +1842,17 @@ pub(in crate::registry) fn effective_ingestor_output_filter_map_schema(
         writable_binding_for_internal_schema("output", output_schema),
     ];
     let declared_metadata = ingestor.input.entity_kind().capabilities().metadata;
+    bindings.push(CompileBinding::readonly(
+        "payload",
+        StdArc::new(
+            ingestor
+                .input
+                .entity_kind()
+                .capabilities()
+                .payload
+                .arrow_schema(),
+        ),
+    ));
     if let Some(metadata_schema) = declared_metadata.arrow_schema() {
         bindings.push(CompileBinding::readonly(
             "metadata",
@@ -1806,6 +1863,7 @@ pub(in crate::registry) fn effective_ingestor_output_filter_map_schema(
         "input".to_string(),
         "output".to_string(),
         "metadata".to_string(),
+        "payload".to_string(),
     ]);
     bindings.extend(referenced_materialized_stream_bindings(
         domain,

@@ -243,10 +243,12 @@ const RABBITMQ_QUEUE_METADATA: IngestorMetadataDeclaration = IngestorMetadataDec
 
 impl IngestorDeclaration for RabbitMqQueueIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::PerPartition,
         // An AMQP field table holds one value per name, in ascending order of name.
         headers: Some(HeaderModel::exact(HeaderLayout::SortedByName)),
         metadata: RABBITMQ_QUEUE_METADATA,
+        payload: crate::IngestorPayloadDeclaration::BYTES,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::RabbitMq),
         position_class: PositionClass::BrokerRedelivered,
@@ -446,6 +448,7 @@ const RABBITMQ_EMITTER_ENVELOPE: &[EnvelopeClauseKind] = &[
 
 impl EmitterDeclaration for RabbitMqQueueEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         instancing: crate::EmitterInstancingCapability::Instances,
         // An AMQP field table holds one value per name, in ascending order of name.
         headers: Some(HeaderModel::exact(HeaderLayout::SortedByName)),
@@ -494,6 +497,7 @@ pub struct RabbitMqExchangeEmitter {
 
 impl EmitterDeclaration for RabbitMqExchangeEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         instancing: crate::EmitterInstancingCapability::Instances,
         // An AMQP field table holds one value per name, in ascending order of name.
         headers: Some(HeaderModel::exact(HeaderLayout::SortedByName)),

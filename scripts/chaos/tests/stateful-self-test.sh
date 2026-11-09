@@ -61,7 +61,7 @@ expect_setup_rejection 'one node supports only restart faults' 'owner-crash requ
     "${chaos_dir}/run-baseline.sh" --scenario stateful --image fixture --nodes 1 --fault owner-crash
 expect_setup_rejection 'one node rejects voter rotations' 'voter-stop requires --nodes 3' \
     "${chaos_dir}/run-baseline.sh" --scenario domain-time --image fixture --nodes 1 --fault voter-stop
-expect_setup_rejection 'other scenarios reject --fault' '--fault applies only to stateful, endpoints, lifetimes, domain-time, backup-fault and restore-fault' \
+expect_setup_rejection 'other scenarios reject --fault' '--fault applies only to stateful, endpoints, binding-endpoints, lifetimes, domain-time, backup-fault and restore-fault' \
     "${chaos_dir}/run-baseline.sh" --scenario baseline --image fixture --fault none
 expect_setup_rejection 'other scenarios reject state partitions' '--state-partitions applies only to stateful' \
     "${chaos_dir}/run-baseline.sh" --scenario baseline --image fixture --state-partitions 4
@@ -578,6 +578,9 @@ artifact_dir="${tmp_dir}/partition-placement"
 mkdir -p "${artifact_dir}/results"
 # shellcheck source=../stateful-scenario.sh
 source "${chaos_dir}/stateful-scenario.sh"
+# shellcheck source=materialized-profile-controls.sh
+source "${chaos_dir}/tests/materialized-profile-controls.sh"
+check_materialized_profile_reader stateful
 [[ "${recovery_graph_models[branch-chaos_state_branch]}" == 'SHOW CREATE BRANCH chaos_state_branch;' ]] \
     || fail 'the stateful branch is absent from the before/after graph comparison'
 printf 'owner: node-1\nreplicas: node-2\n' >"${tmp_dir}/single-description.txt"

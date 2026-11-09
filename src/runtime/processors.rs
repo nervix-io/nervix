@@ -11,10 +11,10 @@ use ahash::HashMap;
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    Assignment, AssignmentTarget, BranchName, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
-    ErrorPolicies, FieldName, InferencerTensorDeclaration, InferencerTensorMapping,
-    MessageErrorOperation, MessageErrorPolicy, ModelKind, ModelName, NodeUnitRef, RelayName,
-    ResourceName, RouteConstruction, StructuredMessageError, Timestamp,
+    Assignment, AssignmentTarget, BranchName, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
+    CorrelatorMatchPolicy, ErrorPolicies, FieldName, InferencerTensorDeclaration,
+    InferencerTensorMapping, MessageErrorOperation, MessageErrorPolicy, ModelKind, ModelName,
+    NodeUnitRef, RelayName, ResourceName, RouteConstruction, StructuredMessageError, Timestamp,
 };
 use nervix_primitives::sync::{Arc, StdArc};
 use nervix_roto::UdfExecutor;
@@ -31,11 +31,12 @@ use ordered_float::OrderedFloat;
 
 use super::{
     BranchBufferDeadline, BranchBufferTimer, BranchBufferTimingResult, BranchRuntime, BranchScope,
-    CompiledDeduplicatorKeyProgram, CompiledProgramWithMaterializedInterest, DeduplicatorKeyspace,
-    DomainClock, DomainExecutionSnapshot, PendingMaterializedBatch, RelayBoundaryServices,
-    RelayMessage, RelayRecordBatch, ReplicatedWasmProcessorState, ReplicatedWindowProcessorState,
-    RuntimeFlushPolicy, RuntimeInputCollectPolicy, RuntimeInputCollector, WasmGuestStateResetFence,
-    WasmLiveInstance, WindowAccumulatorPlan, WindowProcessorState,
+    BranchStateReadError, CompiledDeduplicatorKeyProgram, CompiledProgramWithMaterializedInterest,
+    DeduplicatorKeyspace, DomainClock, DomainExecutionSnapshot, HeldReordererRow, HeldRowsBudget,
+    PendingMaterializedBatch, RelayBoundaryServices, RelayMessage, RelayRecordBatch,
+    ReplicatedWasmProcessorState, ReplicatedWindowProcessorState, RuntimeFlushPolicy,
+    RuntimeInputCollectPolicy, RuntimeInputCollector, WasmGuestStateResetFence, WasmLiveInstance,
+    WindowAccumulatorPlan, WindowProcessorState, held_row_bytes,
     inferencer::{OnnxInferencerSession, PreparedStatefulInference, StatefulInferenceSession},
 };
 use crate::{
@@ -338,6 +339,9 @@ pub(super) enum RelayProcessorOperationNode {
         compiled_input_program: Box<CompiledProgramWithMaterializedInterest>,
         prepared: Arc<PreparedStatefulInference>,
         session: Box<StatefulInferenceSession>,
+        replicated_state: Arc<super::ReplicatedInferencerState>,
+        incarnation: u64,
+        snapshot_bytes: u64,
     },
     WasmProcessor {
         output_routes: RelayProcessorOutputsNode,
@@ -593,6 +597,24 @@ impl RelayProcessorOperationNode {
             | Self::StatefulInferencer { output_routes, .. }
             | Self::WasmProcessor { output_routes, .. } => output_routes,
         }
+    }
+
+    /// Every relay the operation sends records to: each route's relay and, for a correlator, each
+    /// side's `SEND TO` timeout relay, which receives that side's records that time out
+    /// unmatched. The registry plans a timeout relay beside the routes, never as one of them.
+    pub(super) fn sent_relays(&self) -> Vec<&RelayName> {
+        let mut relays = Vec::new();
+        for output in &self.output_routes().routes {
+            relays.push(&output.relay);
+        }
+        if let Self::Correlator { timeout_policy, .. } = self {
+            for action in [&timeout_policy.left, &timeout_policy.right] {
+                if let CorrelationTimeoutAction::SendTo { relay } = action {
+                    relays.push(relay);
+                }
+            }
+        }
+        relays
     }
 
     pub(super) fn output_routes_mut(&mut self) -> &mut RelayProcessorOutputsNode {
@@ -875,6 +897,58 @@ impl ReordererOutputBuffer {
 
     pub(super) fn estimated_bytes(&self) -> u64 {
         self.estimated_bytes
+    }
+
+    /// The rows of every batch this route holds.
+    pub(super) fn held_rows(&self) -> u64 {
+        let mut rows = 0_u64;
+        for pending in &self.pending {
+            let batch_rows = u64::try_from(pending.batch.record_batch().num_rows())
+                .assured("an addressable row count fits u64");
+            rows = rows
+                .checked_add(batch_rows)
+                .assured("rows a node holds in memory are fewer than 2^64");
+        }
+        rows
+    }
+
+    /// Copies the rows this route holds in arrival order, within `budget`: each row after those the
+    /// budget still skips, with its order key, its arrival time and the route's `release_at`. The
+    /// copies are views over the held batches; no value is rebuilt.
+    pub(super) fn copy_held(
+        &self,
+        output: u32,
+        release_at: Timestamp,
+        budget: &mut HeldRowsBudget,
+        copied: &mut Vec<HeldReordererRow>,
+    ) -> error_stack::Result<(), BranchStateReadError> {
+        for pending in &self.pending {
+            if budget.is_full() {
+                break;
+            }
+            let rows = pending.batch.record_batch().num_rows();
+            let skipped = budget.skip(rows);
+            for index in skipped..rows {
+                let Some(order) = pending.row_order.get(index) else {
+                    return Err(Report::new(BranchStateReadError::OrderKey));
+                };
+                let row = pending
+                    .batch
+                    .runtime_row(index)
+                    .change_context(BranchStateReadError::Row)?;
+                if !budget.admit(held_row_bytes(&row)) {
+                    break;
+                }
+                copied.push(HeldReordererRow {
+                    row,
+                    output,
+                    key: order.key.clone(),
+                    received_at: pending.received_at,
+                    release_at,
+                });
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn acks(&self) -> impl Iterator<Item = &AckSet> {

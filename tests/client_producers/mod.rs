@@ -87,7 +87,18 @@ impl ScenarioProducer {
 /// A batch a producer submitted.
 struct ScenarioSubmission {
     producer: String,
+    /// The exact IPC body handed to the transport, before any server-side decoding.
+    bytes: usize,
     state: SubmissionState,
+}
+
+pub(super) fn submitted_bytes(world: &ScenarioWorld, batch: &str) -> usize {
+    world
+        .producers
+        .submissions
+        .get(batch)
+        .assured("the scenario submits its named batch before inspecting its byte count")
+        .bytes
 }
 
 enum SubmissionState {
@@ -844,7 +855,7 @@ enum SubmittedBody {
 
 /// Submits `body` through `producer` under the name `batch`.
 async fn submit(world: &mut ScenarioWorld, producer: String, batch: String, body: SubmittedBody) {
-    let submission = match world.scenario_producer(&producer) {
+    let (submission, bytes) = match world.scenario_producer(&producer) {
         ScenarioProducer::Native(native) => {
             let native = native.clone();
             let body = match body {
@@ -853,6 +864,7 @@ async fn submit(world: &mut ScenarioWorld, producer: String, batch: String, body
                 }),
                 SubmittedBody::Written(body) => ProducerBatch::from_arrow_ipc(body),
             };
+            let bytes = body.len();
             let (identified, id) = watch::channel(None);
             let wait = nervix_primitives::task::spawn(async move {
                 let submitted = native.submit(body).await;
@@ -864,11 +876,14 @@ async fn submit(world: &mut ScenarioWorld, producer: String, batch: String, body
                     at: Instant::now(),
                 })
             });
-            SubmissionState::Native(NativeSubmission {
-                id,
-                wait: Some(AbortOnDropHandle::new(wait)),
-                answered: None,
-            })
+            (
+                SubmissionState::Native(NativeSubmission {
+                    id,
+                    wait: Some(AbortOnDropHandle::new(wait)),
+                    answered: None,
+                }),
+                bytes,
+            )
         }
         ScenarioProducer::Raw { session, id, .. } => {
             let session = session.clone();
@@ -882,6 +897,7 @@ async fn submit(world: &mut ScenarioWorld, producer: String, batch: String, body
                 SubmittedBody::Rows(rows) => arrow_stream(&[rows]),
                 SubmittedBody::Written(body) => body,
             };
+            let bytes = body.len();
             let request = ClientRequest::SubmitBatch(SubmitBatchRequest {
                 producer: producer_id,
                 batch: body,
@@ -890,11 +906,12 @@ async fn submit(world: &mut ScenarioWorld, producer: String, batch: String, body
                 .send(request)
                 .await
                 .unwrap_or_else(|error| panic!("batch '{batch}' could not be sent: {error}"));
-            SubmissionState::Raw { session, request }
+            (SubmissionState::Raw { session, request }, bytes)
         }
     };
     let submission = ScenarioSubmission {
         producer,
+        bytes,
         state: submission,
     };
     assert!(
@@ -920,6 +937,53 @@ async fn when_producer_submits_rows(
         .fields
         .clone();
     let rows = table_batch(&fields, step);
+    submit(world, producer, batch, SubmittedBody::Rows(rows)).await;
+}
+
+#[when(
+    expr = "producer {string} submits {int} interleaved rows with {int}-byte ids as batch {string}"
+)]
+async fn when_producer_submits_interleaved_rows(
+    world: &mut ScenarioWorld,
+    producer: String,
+    count: usize,
+    id_bytes: usize,
+    batch: String,
+) {
+    let fields = world
+        .scenario_producer(&producer)
+        .description()
+        .fields
+        .clone();
+    assert_eq!(
+        fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["id", "amount", "tenant"]
+    );
+    let ids = (0..count)
+        .map(|row| {
+            let prefix = format!("row-{row:04}-");
+            let padding = id_bytes
+                .checked_sub(prefix.len())
+                .expect("id holds its row identity");
+            format!("{prefix}{}", "x".repeat(padding))
+        })
+        .collect::<Vec<_>>();
+    let amounts = (0..count)
+        .map(|row| i64::try_from(row).expect("bounded scenario row count"))
+        .collect::<Vec<_>>();
+    let tenants = (0..count)
+        .map(|row| if row % 2 == 0 { "acme" } else { "globex" })
+        .collect::<Vec<_>>();
+    let columns: Vec<ArrayRef> = vec![
+        StdArc::new(StringArray::from(ids)),
+        StdArc::new(Int64Array::from(amounts)),
+        StdArc::new(StringArray::from(tenants)),
+    ];
+    let rows = RecordBatch::try_new(StdArc::new(SchemaField::arrow_schema(&fields)), columns)
+        .expect("the three columns match the producer schema");
     submit(world, producer, batch, SubmittedBody::Rows(rows)).await;
 }
 

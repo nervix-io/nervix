@@ -341,6 +341,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
 | Headers | Not offered: Native Arrow batches cross an application session; producers submit batches and consumers explicitly acknowledge delivery attempts, with no broker envelope. |
+| Connector events | None declared. |
 | Instancing | single: deliver through one consumer stream |
 | Body | native Arrow output; no codec |
 | BATCH | required |
@@ -425,6 +426,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `METHOD 'POST'` (expression); required<br>`PATH '/events'` (expression); required |
 | Headers | `write_header`; `sorted_by_name`, lowercase names: one value per name, the last one written for it; names in ascending byte order; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
+| Connector events | None declared. |
 | Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | ENCODE USING &lt;codec&gt; \| WITHOUT BODY |
 | BATCH | unavailable: send one request per record |
@@ -1525,6 +1527,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
 | Headers | `write_header`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| Connector events | None declared. |
 | Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
@@ -1533,7 +1536,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | KEY 'record-key'<br>PARTITION FROM BRANCH<br>TIMESTAMP occurred_at |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | PARTITION FROM BRANCH native topic metadata response: driver default, receive.message.max.bytes 100000000; when full, fails the publish for the host to retry<br>records the producer queues under ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, holds back what fills it<br>records the producer queues under NO ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |
-| Network waits | PARTITION FROM BRANCH topic metadata, including connector executor admission: driver default, socket.timeout.ms, 60 s; maximum 300 s<br>a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, delivery.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT`<br>destroying a producer, for its polling thread and the reports of the records its purge failed: driver default, 100 ms poll, then a 500 ms flush |
+| Network waits | PARTITION FROM BRANCH topic metadata, including connector executor admission: driver default, socket.timeout.ms, 60 s; maximum 300 s<br>a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, delivery.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT`<br>a failed publish under ACK, for the reports of the records its purge gave up: `ACK TIMEOUT`<br>destroying a producer, for its polling thread and the reports of the records its purge failed: driver default, 100 ms poll, then a 500 ms flush |
 | Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. MODE ACK sets delivery.timeout.ms from ACK TIMEOUT.<br>message.max.bytes 1000000<br>A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through ON MESSAGE ERROR.<br>A producer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes rust-rdkafka's 100 ms poll or 500 ms flush, and librdkafka then joins its threads, a broker thread still resolving a name included. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
@@ -1565,18 +1568,23 @@ as delivered once the producer takes it, so it is lost, like any other record it
 after that.
 
 `ACK` waits for every record's delivery report through the shared confirmation window. If a publish
-attempt fails, the window first settles the answers already received and returns only unresolved
-members for retry; confirmed records are not sent again by that attempt's retry. An unanswered
-report is still ambiguous: the broker may have accepted the record, so a retry can duplicate it.
+attempt fails, the emitter first makes its producer give up every record it still holds: it purges
+the records the producer queues or has in flight, and waits, for at most `ACK TIMEOUT`, for the
+report librdkafka then gives each of them. The window settles every report received by then and
+returns only unresolved members for retry, so a record the broker confirmed, even just before the
+purge, is not sent again by that attempt's retry. The producer holds no copy of an unresolved
+record by then, so it cannot deliver one beside the copy the retry sends. A record already on its
+way to the broker when the purge ran stays ambiguous, like any unanswered report: the broker may
+have accepted it, so a retry can duplicate it.
 
 Kafka's `acks`, idempotence, batching, linger, and compression remain pass-through client
 configuration. `ACK TIMEOUT` bounds the report wait and is also the producer's own delivery bound:
-the emitter sets the producer's `delivery.timeout.ms` to its
-`ACK TIMEOUT`, rounded up to the millisecond, replacing the client's own `delivery.timeout.ms`, the
-one name a Kafka client accepts for that librdkafka property. The producer therefore gives up a
-record within about a second of
-the emitter doing so, the interval at which librdkafka checks message timeouts, instead of
-delivering it later beside the copy the retry sends. An `ACK TIMEOUT` longer than the 2147483647
+the emitter sets the producer's `delivery.timeout.ms` to its `ACK TIMEOUT`, rounded up to the
+millisecond, replacing the client's own `delivery.timeout.ms`, the one name a Kafka client accepts
+for that librdkafka property, so librdkafka stops retrying a record when the publish stops waiting
+for it. librdkafka checks that bound only about once a second, though, and still sends a record
+whose bound has passed until it does, which is why a failed attempt purges what the producer holds
+instead of leaving the records to that check. An `ACK TIMEOUT` longer than the 2147483647
 milliseconds librdkafka holds refuses the emitter when it starts. `NO ACK` is fire-and-forget after
 local admission: Nervix acknowledges the emitter's `ATTACHED` ACK share when librdkafka accepts the
 record into its producer queue and does not wait for a delivery report. A later broker error,
@@ -1585,8 +1593,9 @@ local queue applies backpressure: Nervix waits for the oldest outstanding delive
 it, and tries to enqueue the same refused record again. The effective confirmation window is
 limited by both `MAX` and the producer queue's record and byte capacities. If no outstanding report
 remains, Nervix waits for the native delivery callback to release its queue place, bounded by
-`ACK TIMEOUT`. An unanswered or failed delivery report still ends the attempt after settling every
-answer already given, and only unresolved records are retried. In `NO ACK`, a temporarily full
+`ACK TIMEOUT`. An unanswered or failed delivery report still ends the attempt, once the producer
+gave up the records it held and every answer given by then was settled, and only unresolved records
+are retried. In `NO ACK`, a temporarily full
 queue is an infrastructure condition paced by the declared retry policy. In either mode, a record
 whose payload exceeds the entire `queue.buffering.max.kbytes` capacity is rejected through
 `ON MESSAGE ERROR`, with its payload size and the capacity in bytes. This queue capacity counts
@@ -1646,6 +1655,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
 | Headers | `write_header`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
+| Connector events | None declared. |
 | Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
@@ -1792,6 +1802,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
 | Headers | `write_header`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
+| Connector events | None declared. |
 | Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
@@ -1835,6 +1846,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `ROUTING KEY input.category` (expression); required |
 | Headers | `write_header`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
+| Connector events | None declared. |
 | Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
@@ -2033,6 +2045,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
 | Headers | Not offered: Redis Pub/Sub carries a channel and a payload, and for a pattern subscription the pattern that matched, but no headers. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. An ingestor subscribes to a quoted channel or channel pattern and an emitter publishes to a quoted channel, each case-preserving. |
+| Connector events | `published_without_subscribers` |
 | Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
@@ -2056,6 +2069,13 @@ from Redis, whose `proto-max-bulk-len` refusal follows the ordinary record-error
 
 Redis Pub/Sub has no subscriber delivery acknowledgment. The awaited `PUBLISH` response confirms
 server acceptance only.
+
+A successful response naming zero receivers still delivers the record and increments the
+declared `published_without_subscribers` event. `DESCRIBE EMITTER` shows that counter and its wall
+rates under `destination:`; `/metrics` exports it as
+`nervix_emitter_connector_events_total{event="published_without_subscribers",…}`. A response naming
+one or more receivers leaves the counter unchanged. This observation changes no acknowledgement,
+retry or subscriber-delivery guarantee. See [Connector-declared events](metrics-and-observability.md#connector-declared-events).
 
 Nervix tells a rejected record from a failed publish by the text of Redis's error reply: a reply
 that contains `Protocol error: invalid bulk length` or `string exceeds maximum allowed size`
@@ -2154,6 +2174,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 0)<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 1 or 2) |
 | Options in statement order | `QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |
 | Headers | `write_header`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| Connector events | None declared. |
 | Instancing | single: publish through one client identifier |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
@@ -2291,6 +2312,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
 | Headers | `write_header`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| Connector events | None declared. |
 | Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
@@ -2367,6 +2389,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `SUBJECT 'orders.created'` (string literal checked by nats_publish_subject); required |
 | Headers | `write_header`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| Connector events | None declared. |
 | Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
@@ -2439,6 +2462,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
 | Headers | Not offered: The PULL listener receives payload frames and the PUSH socket sends them; neither has a broker acknowledgement or header map. |
+| Connector events | None declared. |
 | Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
@@ -2519,7 +2543,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | Not offered: The configured client owns the transport address; no separate external entity name is written in this body. |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
-| Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
+| Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer socket address, IP without its port, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
+| Connector events | None declared. |
 | Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
@@ -2579,6 +2604,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `FIFO GROUP branch.tenant` (expression); optional; omitted when unset<br>`SEND SINGLE` (keyword choice); `SEND BATCH` (keyword choice); required |
 | Headers | `write_header`; `last_wins`, exact names; STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included; a value's exact type decides the type it travels as |
+| Connector events | None declared. |
 | Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
@@ -2709,6 +2735,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `PLATFORM 'python'` (string literal); optional; default other |
 | Headers | Not offered: An event is encoded inside its Sentry envelope; arbitrary per-event HTTP header writes are not supported. |
+| Connector events | None declared. |
 | Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
@@ -2875,6 +2902,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `ATTRIBUTES {'tenant' = 'eu'}` (named expressions); optional; omitted when unset<br>`RESOURCE {'service.name' = 'nervix'}` (named expressions); optional; omitted when unset<br>`SCOPE 'nervix' VERSION '1.0'` (composed clause); optional; omitted when unset |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
+| Connector events | None declared. |
 | Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
 | BATCH | optional |
@@ -2922,6 +2950,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `ATTRIBUTES {'tenant' = 'eu'}` (named expressions); optional; omitted when unset<br>`RESOURCE {'service.name' = 'nervix'}` (named expressions); optional; omitted when unset<br>`SCOPE 'nervix' VERSION '1.0'` (composed clause); optional; omitted when unset |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
+| Connector events | None declared. |
 | Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
 | BATCH | optional |
@@ -2970,6 +2999,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `METRIC 'temperature' UNIT 'Cel' GAUGE` (composed clause); `METRIC 'requests' UNIT '1' SUM MONOTONIC DELTA` (composed clause); `METRIC 'latency' UNIT 'ms' HISTOGRAM CUMULATIVE` (composed clause); required<br>`ATTRIBUTES {'tenant' = 'eu'}` (named expressions); optional; omitted when unset<br>`RESOURCE {'service.name' = 'nervix'}` (named expressions); optional; omitted when unset<br>`SCOPE 'nervix' VERSION '1.0'` (composed clause); optional; omitted when unset |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
+| Connector events | None declared. |
 | Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
 | BATCH | optional |
@@ -3179,6 +3209,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
+| Connector events | None declared. |
 | Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
 | BATCH | required |
@@ -3428,6 +3459,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `ON CONFLICT DO NOTHING` (keyword choice); `ON CONFLICT ('id') DO UPDATE` (composed clause); optional; omitted when unset |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
+| Connector events | None declared. |
 | Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
 | BATCH | required |
@@ -3602,6 +3634,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `ON CONFLICT DO NOTHING` (keyword choice); `ON CONFLICT DO UPDATE` (keyword choice); optional; omitted when unset |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
+| Connector events | None declared. |
 | Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
 | BATCH | required |
@@ -3807,6 +3840,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `ON CONFLICT ('id') DO NOTHING` (keyword choice); `ON CONFLICT ('id') DO UPDATE` (keyword choice); optional; omitted when unset |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
+| Connector events | None declared. |
 | Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
 | BATCH | required |
@@ -3919,6 +3953,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `NAMESPACE 'Analytics.Events'` (string literal); required<br>`LOCATION 's3://warehouse/orders'` (string literal); required<br>`CATALOG catalog` (ICEBERG_REST client); required<br>`COMMIT EACH 10s MAX SIZE 64MiB` (composed clause); required |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
+| Connector events | None declared. |
 | Instancing | single: commit through one table writer |
 | Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
 | BATCH | optional |

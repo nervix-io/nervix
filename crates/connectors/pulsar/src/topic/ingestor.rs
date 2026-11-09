@@ -344,6 +344,7 @@ pub struct PulsarTopicIngestorPlan {
 impl PulsarTopicIngestorPlan {
     pub async fn connect(
         settings: PulsarTopicIngestorSettings<'_>,
+        tls_policy: &nervix_connector::OutwardTlsPolicy,
     ) -> PulsarTopicIngestorResult<Self> {
         let PulsarTopicIngestorSettings {
             config,
@@ -352,7 +353,7 @@ impl PulsarTopicIngestorPlan {
             consumer_name,
             ack_receipts,
         } = settings;
-        let client = PulsarClientConnection::new(config, None)
+        let client = PulsarClientConnection::new(config, None, tls_policy)
             .open()
             .await
             .change_context(PulsarTopicIngestorError::Connect)?;
@@ -517,21 +518,23 @@ impl PulsarTopicIngestorPlan {
     /// and unsubscribing.
     pub async fn remove_subscription(
         settings: PulsarTopicIngestorSettings<'_>,
+        tls_policy: &nervix_connector::OutwardTlsPolicy,
     ) -> PulsarTopicIngestorResult<()> {
         let budget = PulsarConnectionRetryOptions::default().connection_timeout;
-        Self::remove_subscription_within(settings, budget).await
+        Self::remove_subscription_within(settings, budget, tls_policy).await
     }
 
     async fn remove_subscription_within(
         settings: PulsarTopicIngestorSettings<'_>,
         budget: Duration,
+        tls_policy: &nervix_connector::OutwardTlsPolicy,
     ) -> PulsarTopicIngestorResult<()> {
         let removal = PulsarTopicIngestorError::RemoveSubscription {
             subscription: settings.subscription.name.clone(),
             topic: super::qualified_topic(settings.config, settings.topic),
         };
         let removed = timeout(budget, async {
-            let plan = Self::connect(settings).await?;
+            let plan = Self::connect(settings, tls_policy).await?;
             plan.unsubscribe().await
         })
         .await;
@@ -679,6 +682,10 @@ impl TryFrom<PulsarMessage<Vec<u8>>> for PulsarTopicIngestorMessage {
 }
 
 impl IngestMessageMetadata for PulsarTopicIngestorMessage {
+    fn payload_bytes(&self) -> usize {
+        nervix_connector::IngestorMessage::payload(self).len()
+    }
+
     fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
         values.string(&self.position.topic);
         values.rendered(&self.position);

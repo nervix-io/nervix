@@ -18,6 +18,13 @@
 # hold the grammar to both.
 
 [[capability]]
+capability = "EVENT published_without_subscribers"
+entity = "REDIS PUBSUB EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/connector_events.feature", scenario = "Redis publishes without subscribers stay delivered and count their declared event" },
+]
+
+[[capability]]
 capability = "BATCH"
 entity = "CLICKHOUSE TABLE EMITTER"
 scenarios = [
@@ -2162,4 +2169,144 @@ capability = "PARTITION FROM BRANCH"
 entity = "PULSAR TOPIC EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/emitter_destinations.feature", scenario = "A broker destination follows each branch partition modulo its own count on <broker>" },
+]
+
+[[capability]]
+capability = "payload.bytes"
+entity = "CLIENT PRODUCER INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/ingestor_payload.feature", scenario = "A client producer projects its whole batch row count and positive Arrow byte count" },
+]
+
+[[capability]]
+capability = "payload.rows"
+entity = "CLIENT PRODUCER INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/ingestor_payload.feature", scenario = "A client producer projects its whole batch row count and positive Arrow byte count" },
+]
+
+[[capability]]
+capability = "payload.bytes"
+entity = "HTTP ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/ingestor_payload.feature", scenario = "HTTP payload bytes drive the arrival filter and route while peer IP excludes its port" },
+]
+
+[[capability]]
+capability = "metadata.remote_ip"
+entity = "HTTP ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/ingestor_payload_listeners.feature", scenario = "An HTTP endpoint records the IPv6 peer IP" },
+]
+
+[[capability]]
+capability = "payload.bytes"
+entity = "HTTP REQUEST INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "HTTP polling resolves its endpoint with the node DNS fixture" },
+]
+
+[[capability]]
+capability = "payload.bytes"
+entity = "KAFKA TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/ingestor_payload.feature", scenario = "Kafka payload bytes exclude the record key and preserve filtered delivery" },
+]
+
+[[capability]]
+capability = "payload.bytes"
+entity = "MQTT TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_ingestion.feature", scenario = "MQTT instances use the non-duplicating subscription model" },
+]
+
+[[capability]]
+capability = "payload.bytes"
+entity = "NATS STREAM INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_ingestion.feature", scenario = "NATS STREAM ingestor delivers and acknowledges what its durable consumer holds under <delivery>" },
+]
+
+[[capability]]
+capability = "payload.bytes"
+entity = "NATS SUBJECT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_ingestion.feature", scenario = "NATS ingestor delivers JSON payloads to a subscribed relay" },
+]
+
+[[capability]]
+capability = "payload.bytes"
+entity = "PROMETHEUS QUERY INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/prometheus_ingestion.feature", scenario = "Prometheus ingestor follows paced domain logical time and cadence" },
+]
+
+[[capability]]
+capability = "payload.bytes"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_batch.feature", scenario = "Pulsar batch members retain their own sequence ids and complete metadata" },
+]
+
+[[capability]]
+capability = "payload.bytes"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_ingestion.feature", scenario = "RabbitMQ ingestor delivers JSON payloads to a subscribed relay" },
+]
+
+[[capability]]
+capability = "payload.bytes"
+entity = "REDIS PUBSUB INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/redis_ingestion.feature", scenario = "Redis ingestor delivers JSON payloads to a subscribed relay" },
+]
+
+[[capability]]
+capability = "payload.bytes"
+entity = "SQS QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_ingestion.feature", scenario = "SQS ingestor delivers JSON payloads to a subscribed relay" },
+]
+
+[[capability]]
+capability = "metadata.remote_ip"
+entity = "SYSLOG LISTENER INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/ingestor_payload_listeners.feature", scenario = "A Syslog listener records the IPv6 peer IP" },
+]
+
+[[capability]]
+capability = "payload.bytes"
+entity = "SYSLOG LISTENER INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/ingestor_payload_listeners.feature", scenario = "A Syslog listener records the IPv6 peer IP" },
+]
+
+[[capability]]
+capability = "payload.bytes"
+entity = "WEBSOCKETS CONNECTION INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/websocket_client_ingestion.feature", scenario = "Websocket client ingestor connects to a remote endpoint and delivers a JSON payload" },
+]
+
+[[capability]]
+capability = "metadata.remote_ip"
+entity = "WEBSOCKETS ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/ingestor_payload_listeners.feature", scenario = "A WebSocket endpoint records the IPv6 peer IP" },
+]
+
+[[capability]]
+capability = "payload.bytes"
+entity = "WEBSOCKETS ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/ingestor_payload_listeners.feature", scenario = "A WebSocket endpoint records the IPv6 peer IP" },
+]
+
+[[capability]]
+capability = "payload.bytes"
+entity = "ZEROMQ PULL INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/zeromq_ingestion.feature", scenario = "ZeroMQ ingestor delivers JSON payloads to a subscribed relay" },
 ]

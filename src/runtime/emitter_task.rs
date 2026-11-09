@@ -553,6 +553,25 @@ impl EmitterStagingDirectory for EmitterConnectorContext {
     }
 }
 
+impl nervix_connector::ConnectorEventProvider for EmitterConnectorContext {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "connector construction borrows its retained interaction children"
+        )
+    )]
+    fn event_counter(
+        &self,
+        event: nervix_models::ConnectorEvent,
+    ) -> error_stack::Result<
+        nervix_connector::ConnectorEventCounter,
+        nervix_connector::UndeclaredConnectorEvent,
+    > {
+        self.interactions.event_counter(event)
+    }
+}
+
 impl nervix_connector::EmitterPayloadObserver for EmitterConnectorContext {
     #[cfg_attr(
         nervix_lint,

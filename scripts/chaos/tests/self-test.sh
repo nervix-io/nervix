@@ -27,6 +27,7 @@ fi
 
 "${script_dir}/role-wait-self-test.sh"
 "${script_dir}/instance-owners-self-test.sh"
+"${script_dir}/outward-tls-self-test.sh"
 "${script_dir}/pause-delivery-self-test.sh"
 "${script_dir}/hold-quorum-self-test.sh"
 "${script_dir}/output-boundary-self-test.sh"
@@ -36,6 +37,7 @@ fi
 "${script_dir}/observation-helpers-self-test.sh"
 "${script_dir}/backup-fixture-self-test.sh"
 "${script_dir}/verifier-self-check-self-test.sh"
+bash "${script_dir}/binding-image-self-test.sh"
 
 fail() {
     printf 'self-test failed: %s\n' "$*" >&2
@@ -588,7 +590,8 @@ jq -e --arg image "${unpullable_image}" --arg probe "${chaos_probe_image}" '
 [[ -s "${tmp_dir}/artifacts/${unpullable_run_id}/diagnostics/tool-image-pull-kcat.txt" ]] \
     || fail "an unpullable tool image did not keep its pull output"
 
-# A fault scenario also resolves and records its Pumba image, and its finding carries every tool.
+# A fault scenario also resolves and records its Pumba image, and its finding carries every tool. A
+# three-node leader crash also records the Python image of its TLS probe.
 status=0
 crash_setup_run_id="crash-setup-$$-${RANDOM}"
 "${tmp_dir}/probe-tools/chaos.sh" run leader-crash \
@@ -600,11 +603,14 @@ crash_setup_run_id="crash-setup-$$-${RANDOM}"
 [[ "${status}" -eq 2 ]] || fail "a fault scenario with an invalid image returned ${status}, expected setup error 2"
 crash_setup_dir="${tmp_dir}/artifacts/${crash_setup_run_id}"
 pinned_pumba_image_id="$(docker image inspect --format '{{.Id}}' "${chaos_pumba_image}")"
-jq -e --arg pumba "${chaos_pumba_image}" --arg pumba_id "${pinned_pumba_image_id}" '
-    (.tool_images | keys) == ["kafka", "kcat", "probe", "pumba"]
+pinned_python_image_id="$(docker image inspect --format '{{.Id}}' "${chaos_python_image}")"
+jq -e --arg pumba "${chaos_pumba_image}" --arg pumba_id "${pinned_pumba_image_id}" \
+    --arg python "${chaos_python_image}" --arg python_id "${pinned_python_image_id}" '
+    (.tool_images | keys) == ["kafka", "kcat", "probe", "pumba", "python"]
     and .tool_images.pumba == {reference: $pumba, image_id: $pumba_id}
+    and .tool_images.python == {reference: $python, image_id: $python_id}
 ' "${crash_setup_dir}/manifest.json" >/dev/null \
-    || fail "a fault scenario did not record its Pumba image with the other tool images"
+    || fail "a fault scenario did not record its Pumba image and its TLS probe's Python image with the other tool images"
 jq -e --slurpfile manifest "${crash_setup_dir}/manifest.json" '
     .category == "setup" and .phase == "preflight" and .tool_images == $manifest[0].tool_images
 ' "${crash_setup_dir}/results/finding.json" >/dev/null \
@@ -643,6 +649,7 @@ CHAOS_STATE_LOAD_INTERVAL_MS="1000" \
 CHAOS_PACED_LOAD_FILE="${expected}" \
 CHAOS_PACED_LOAD_INTERVAL_MS="250" \
 CHAOS_PYTHON_IMAGE="${chaos_python_image}" \
+CHAOS_BINDING_IMAGE="${test_image_id}" \
 CHAOS_POSTGRES_IMAGE="${chaos_postgres_image}" \
 CHAOS_ENDPOINT_DIR="${tmp_dir}" \
 CHAOS_LIFE_LOAD_FILE="${expected}" \

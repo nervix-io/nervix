@@ -46,6 +46,12 @@ pub enum SuccessionKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ProofOfLifeKind {
+    ProofOfLife,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WorkingKeyUse {
     Decision,
 }
@@ -102,6 +108,27 @@ pub struct RootSuccession {
 
 impl Document for RootSuccession {
     const TYPE: DocumentType = DocumentType::Succession;
+}
+
+/// A root custodian's dated statement that the custodian still holds a root key (licensing
+/// specification §5.5). One root signs it alone, so it never meets a threshold and grants
+/// nothing: it is no trust document, and a trust state refuses it among the documents it builds
+/// from. It proves only that the named root of the named epoch could sign on `issued_at`, so that
+/// a lost key is discovered before a ceremony needs it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProofOfLife {
+    pub doc: ProofOfLifeKind,
+    pub protocol: u8,
+    pub issued_at: DateTime<Utc>,
+    /// The epoch whose root set holds the signing root.
+    pub root_epoch: u64,
+    /// The signing root's key identity.
+    pub kid: KeyId,
+}
+
+impl Document for ProofOfLife {
+    const TYPE: DocumentType = DocumentType::ProofOfLife;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -301,4 +328,29 @@ pub struct DecisionResponse {
     pub decision: String,
     pub trust: TrustDocuments,
     pub server_time: DateTime<Utc>,
+}
+
+/// The trust bundle a licensing service publishes (licensing specification §5.4, §9.4): the root
+/// sets of its trust state and every signed trust document that state verified, each in its exact
+/// original signed form. Only the signed members are authoritative: a receiver verifies them
+/// against its own embedded bundle, never trusts `epochs`, and learns no anchor from them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustBundleResponse {
+    pub epochs: Vec<RootSet>,
+    pub successions: Vec<SignedTrustDocument>,
+    pub authorizations: Vec<SignedTrustDocument>,
+    pub revocations: Vec<SignedTrustDocument>,
+}
+
+impl TrustBundleResponse {
+    /// The signed members, successions first, as the trust documents a receiver verifies against
+    /// its own embedded bundle.
+    pub fn documents(&self) -> TrustDocuments {
+        let mut documents = Vec::new();
+        documents.extend(self.successions.iter().cloned());
+        documents.extend(self.authorizations.iter().cloned());
+        documents.extend(self.revocations.iter().cloned());
+        TrustDocuments { documents }
+    }
 }

@@ -657,13 +657,20 @@ mod tests {
                 }
 
                 let evaluated_at = Timestamp::from_unix_nanos(poll.evaluated_at);
-                let metadata = PrometheusQueryIngestor::poll_metadata(&poll.query, evaluated_at);
+                let metadata = PrometheusQueryIngestor::poll_metadata(
+                    &poll.query,
+                    evaluated_at,
+                    response.body.len(),
+                );
                 assert_eq!(
                     metadata,
-                    RetainedIngestMetadata::from_values(vec![
-                        RetainedIngestMetadataValue::String(poll.query.clone()),
-                        RetainedIngestMetadataValue::Datetime(evaluated_at),
-                    ])
+                    RetainedIngestMetadata::from_values(
+                        response.body.len(),
+                        vec![
+                            RetainedIngestMetadataValue::String(poll.query.clone()),
+                            RetainedIngestMetadataValue::Datetime(evaluated_at),
+                        ]
+                    )
                 );
                 let declared = IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query)
                     .capabilities()

@@ -2,8 +2,7 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The memory-limit setting, its detection from the node's control group and physical
-//!   memory, the capacity of the volume a directory lives on, and the group that holds them.
+//! - **Owns.** CPU and memory overrides and detection, and filesystem-volume capacity.
 //! - **Depends on.** The vocabulary's setting classes and the operating system's memory and
 //!   filesystem reports.
 //! - **Must not know.** Command-line parsing, or what the node sizes or refuses with these values.
@@ -16,7 +15,7 @@
     )
 )]
 
-use std::{fmt, path::Path};
+use std::{fmt, num::NonZeroU64, path::Path};
 
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -32,6 +31,53 @@ mod linux;
 pub enum CapacitySettingsError {
     #[error("{name} must be greater than zero", name = MemoryLimit::NAME)]
     EmptyMemoryLimit,
+    #[error("{name} must be greater than zero", name = CpuCount::NAME)]
+    EmptyCpuCount,
+}
+
+/// Whether a process runtime has already resolved the CPU measurement used by its node.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum CpuDetection {
+    #[default]
+    Pending,
+    Resolved(Option<NonZeroU64>),
+}
+
+/// The parallel CPU capacity of this process, detected with its control-group quota by default.
+pub struct CpuCount;
+
+impl SettingDefinition for CpuCount {
+    type Class = NodeCapabilities;
+    type Value = Option<u64>;
+    type Context = ();
+    type Error = CapacitySettingsError;
+
+    const NAME: &'static str = "cpu-count";
+    const DERIVATION: Option<&'static str> =
+        Some("the process's cgroup-aware available parallelism");
+
+    fn default_value(_: &()) -> Self::Value {
+        None
+    }
+
+    fn validate(value: &Self::Value, _: &()) -> Result<(), Report<Self::Error>> {
+        if *value == Some(0) {
+            return Err(Report::new(CapacitySettingsError::EmptyCpuCount));
+        }
+        Ok(())
+    }
+}
+
+impl CpuCount {
+    /// Queries the operating system through the execution primitive boundary. Failure is unknown.
+    pub fn detect() -> Option<NonZeroU64> {
+        match nervix_primitives::thread::available_parallelism() {
+            Ok(count) => {
+                NonZeroU64::new(u64::try_from(count.get()).assured("host CPU counts fit u64"))
+            }
+            Err(_) => None,
+        }
+    }
 }
 
 /// The memory this node may use. Without a value the node detects it at startup.
@@ -65,18 +111,30 @@ impl SettingDefinition for MemoryLimit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapacitySettings {
     pub memory_limit: Setting<MemoryLimit>,
+    pub cpu_count: Setting<CpuCount>,
 }
 
 impl CapacitySettings {
-    pub fn resolve(memory_limit: Option<ByteUnit>) -> Result<Self, Report<CapacitySettingsError>> {
+    pub fn resolve(
+        memory_limit: Option<ByteUnit>,
+        cpu_count: Option<u64>,
+    ) -> Result<Self, Report<CapacitySettingsError>> {
         Ok(Self {
             memory_limit: Setting::new(memory_limit, &())?,
+            cpu_count: Setting::new(cpu_count, &())?,
         })
     }
 
     /// The memory limit the operator gave, if any.
     pub fn memory_limit(&self) -> Option<ByteUnit> {
         *self.memory_limit.value()
+    }
+
+    pub fn effective_cpu_count(&self, detected: Option<NonZeroU64>) -> Option<NonZeroU64> {
+        match *self.cpu_count.value() {
+            Some(count) => NonZeroU64::new(count),
+            None => detected,
+        }
     }
 
     /// The memory this node may use: the operator's value, or what the operating system reports.
@@ -94,7 +152,7 @@ impl CapacitySettings {
 
 impl Default for CapacitySettings {
     fn default() -> Self {
-        Self::resolve(None).assured("an absent memory limit is detected, which is always valid")
+        Self::resolve(None, None).assured("absent capacity overrides are detected")
     }
 }
 
@@ -180,6 +238,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cpu_overrides_win_and_a_failed_query_remains_unknown() {
+        let detected = NonZeroU64::new(2);
+        assert_eq!(
+            CapacitySettings::default().effective_cpu_count(detected),
+            detected
+        );
+        assert_eq!(CapacitySettings::default().effective_cpu_count(None), None);
+        let configured = CapacitySettings::resolve(None, Some(4)).expect("positive CPU count");
+        assert_eq!(configured.effective_cpu_count(detected), NonZeroU64::new(4));
+        let refused = CapacitySettings::resolve(None, Some(0)).expect_err("zero CPUs are refused");
+        assert_eq!(
+            refused.current_context(),
+            &CapacitySettingsError::EmptyCpuCount
+        );
+    }
+
+    #[test]
     fn an_operator_limit_wins_over_the_detected_one_and_absence_detects() {
         let detected = DetectedMemory {
             limit: Some(ByteUnit::Gibibyte(8)),
@@ -188,8 +263,8 @@ mod tests {
             CapacitySettings::default().effective_memory_limit(detected),
             NodeMemory::Detected(ByteUnit::Gibibyte(8))
         );
-        let configured =
-            CapacitySettings::resolve(Some(ByteUnit::Gibibyte(2))).expect("two GiB is a limit");
+        let configured = CapacitySettings::resolve(Some(ByteUnit::Gibibyte(2)), None)
+            .expect("two GiB is a limit");
         assert_eq!(
             configured.effective_memory_limit(detected),
             NodeMemory::Configured(ByteUnit::Gibibyte(2))
@@ -203,8 +278,8 @@ mod tests {
 
     #[test]
     fn a_zero_memory_limit_is_refused_naming_the_setting() {
-        let refused =
-            CapacitySettings::resolve(Some(ByteUnit::Byte(0))).expect_err("no memory is no limit");
+        let refused = CapacitySettings::resolve(Some(ByteUnit::Byte(0)), None)
+            .expect_err("no memory is no limit");
         assert_eq!(
             format!("{refused:#}"),
             "memory-limit must be greater than zero"

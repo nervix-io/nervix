@@ -3,7 +3,7 @@
 use std::num::{NonZeroU32, NonZeroUsize};
 
 use error_stack::Report;
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_models::{NodeCapabilities, Setting, SettingDefinition};
 use nervix_primitives::sync::Semaphore;
 use thiserror::Error;
@@ -16,9 +16,17 @@ const _: () = assert!(
     "command state storage splits its reservation evenly between payload and journal",
 );
 
-/// The working memory one password hash or verification allocates: Argon2id's default memory cost,
-/// which a node hashes every password with.
-const CREDENTIAL_WORKING_BYTES: ByteUnit = ByteUnit::Mebibyte(19);
+/// AWS-LC's constant-time verifier allocates one buffer for the profile's 512-bit digest.
+/// Native PBKDF2 HMAC scratch is fixed stack state on the already bounded credentials worker.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the PBKDF2-HMAC-SHA-512 credential profile has one 64-byte digest and aws-lc-rs \
+                  verification allocates exactly that output length"
+    )
+)]
+const CREDENTIAL_WORKING_BYTES: ByteUnit = ByteUnit::Byte(64);
 
 /// A bounded share of CPU admission onto the blocking pool in production, or onto the simulated
 /// scheduler in the Turmoil test build.
@@ -151,41 +159,12 @@ pub struct WorkerCounts {
     pub connector_storage: Setting<ConnectorStorageWorkers>,
     /// The number of jobs one class may hold waiting for a worker. Beyond it, admission is refused
     /// with typed backpressure rather than growing an unbounded queue in front of the pool.
-    pub pending_jobs: NonZeroUsize,
+    pub pending_jobs: crate::PendingJobCounts,
 }
 
 impl Default for WorkerCounts {
-    /// One reserved control and consensus worker each, one credentials worker, data, extension and
-    /// bulk concurrency at the greater of one and the available CPU count minus one, and two workers
-    /// for ordinary filesystem work.
     fn default() -> Self {
-        let available = match nervix_primitives::thread::available_parallelism() {
-            Ok(available) => available.get(),
-            Err(_) => 1,
-        };
-        // One CPU is reserved for control and consensus work; a single-CPU node still runs one
-        // data, one extension and one bulk worker, because refusing to run any is not a useful
-        // bound.
-        let data = match available.checked_sub(1) {
-            Some(remaining) => match NonZeroUsize::new(remaining) {
-                Some(data) => data,
-                None => NonZeroUsize::MIN,
-            },
-            None => NonZeroUsize::MIN,
-        };
-        Self {
-            control_cpu: NonZeroUsize::MIN,
-            // A node verifies one password at a time, which is what its credentials budget holds.
-            credentials_cpu: NonZeroUsize::MIN,
-            data_cpu: data,
-            extension_cpu: data,
-            bulk_cpu: data,
-            consensus_storage: NonZeroUsize::MIN,
-            filesystem_storage: NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN),
-            connector_storage: ConnectorStorageWorkers::resolve(None)
-                .assured("two connector workers fit the primitive's permit representation"),
-            pending_jobs: NonZeroUsize::new(1024).unwrap_or(NonZeroUsize::MIN),
-        }
+        crate::settings::default_config().workers
     }
 }
 
@@ -232,10 +211,13 @@ pub struct MemoryBudgets {
     pub management: ByteUnit,
     pub commands: ByteUnit,
     pub relay: ByteUnit,
+    pub state_read: ByteUnit,
+    pub state_read_cache: ByteUnit,
     pub bulk: ByteUnit,
     /// The receive windows of the bulk streams a node has open at once.
     pub bulk_window: ByteUnit,
     pub restore_metadata: ByteUnit,
+    /// Shared capacity for password operations and mounted credentials files.
     pub credentials: ByteUnit,
 }
 
@@ -248,6 +230,8 @@ impl MemoryBudgets {
             management,
             commands,
             relay,
+            state_read,
+            state_read_cache,
             bulk,
             bulk_window,
             restore_metadata,
@@ -258,9 +242,8 @@ impl MemoryBudgets {
             management,
             commands,
             relay,
-            // Active state reads and optional retention each have their own relay-sized pool.
-            relay,
-            relay,
+            state_read,
+            state_read_cache,
             bulk,
             bulk_window,
             restore_metadata,
@@ -273,22 +256,8 @@ impl MemoryBudgets {
 }
 
 impl Default for MemoryBudgets {
-    /// 675 MiB of execution buffers and materialized reads plus 2 GiB of restore metadata:
-    /// 8 MiB reserved for management, 24 MiB for commands and replication,
-    /// 192 MiB each for relay work, active state reads and optional retention, 32 MiB for bulk buffers,
-    /// 16 MiB for the receive windows of bulk
-    /// streams, sixteen of the default 1 MiB windows, and 19 MiB for the one password hash a node
-    /// computes at a time.
     fn default() -> Self {
-        Self {
-            management: ByteUnit::Mebibyte(8),
-            commands: ByteUnit::Mebibyte(24),
-            relay: ByteUnit::Mebibyte(192),
-            bulk: ByteUnit::Mebibyte(32),
-            bulk_window: ByteUnit::Mebibyte(16),
-            restore_metadata: ByteUnit::Gibibyte(2),
-            credentials: CREDENTIAL_WORKING_BYTES,
-        }
+        crate::settings::default_config().budgets
     }
 }
 
@@ -386,11 +355,17 @@ impl OperationLimits {
 }
 
 /// The settings a node's executor is built from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExecutionConfig {
     pub workers: WorkerCounts,
     pub budgets: MemoryBudgets,
     pub limits: OperationLimits,
+}
+
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        crate::settings::default_config()
+    }
 }
 
 /// The same settings after they have been checked against each other, with every byte budget
@@ -405,6 +380,8 @@ pub(crate) struct ValidatedBudgets {
     pub(crate) management: u32,
     pub(crate) commands: u32,
     pub(crate) relay: u32,
+    pub(crate) state_read: u32,
+    pub(crate) state_read_cache: u32,
     pub(crate) bulk: u32,
     pub(crate) bulk_window: u32,
     pub(crate) restore_metadata: u32,
@@ -415,6 +392,17 @@ pub(crate) struct ValidatedBudgets {
 /// contradiction by waiting forever for a budget that cannot hold it.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ExecutionConfigError {
+    #[error("the execution memory budgets of {budgets} exceed node memory {memory}")]
+    MemoryBudgetExceeded { budgets: ByteUnit, memory: ByteUnit },
+    #[error("CPU count {cpus} cannot be represented on this host")]
+    CpuCountTooLarge { cpus: u64 },
+    #[error("the execution worker counts do not add up to an addressable total")]
+    UnaddressableWorkers,
+    #[error(
+        "the {workers} CPU admission places exceed CPU count {cpus}; each of the five independent \
+         classes needs at least one place"
+    )]
+    CpuBudgetExceeded { workers: usize, cpus: u64 },
     #[error("the {class} worker count {workers} exceeds the primitive's {maximum} permits")]
     WorkerCountTooLarge {
         class: &'static str,
@@ -541,6 +529,18 @@ impl ExecutionConfig {
                 relay: permits(
                     MemoryClass::Relay.as_str(),
                     self.budgets.relay,
+                    "pair of relay operations",
+                    relay_required,
+                )?,
+                state_read: permits(
+                    MemoryClass::StateRead.as_str(),
+                    self.budgets.state_read,
+                    "pair of relay operations",
+                    relay_required,
+                )?,
+                state_read_cache: permits(
+                    MemoryClass::StateReadCache.as_str(),
+                    self.budgets.state_read_cache,
                     "pair of relay operations",
                     relay_required,
                 )?,

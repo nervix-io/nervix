@@ -217,11 +217,13 @@ const REDIS_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl IngestorDeclaration for RedisPubSubIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::Single,
         // Redis Pub/Sub carries the channel, the pattern that matched it and the payload, without
         // transport headers.
         headers: None,
         metadata: REDIS_PUBSUB_METADATA,
+        payload: crate::IngestorPayloadDeclaration::BYTES,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Redis),
         position_class: PositionClass::None,
@@ -339,6 +341,7 @@ pub struct RedisPubSubEmitter {
 
 impl EmitterDeclaration for RedisPubSubEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        events: crate::DeclaredEvents::new(&[crate::ConnectorEvent::PublishedWithoutSubscribers]),
         instancing: crate::EmitterInstancingCapability::Instances,
         // PUBLISH accepts a channel and payload, without transport headers or an envelope.
         headers: None,

@@ -4,6 +4,7 @@ Feature: Materialized backup and archived lifecycle resumption
   Scenario: Remote materialized generators reuse each complete generation and observe its replacement
     Given runtime replication is configured with replica count 0 and snapshot interval "10m"
     And the production sticky scheduler is configured
+    And node-2 starts with execution-state-read-memory-bytes = 192MiB
     And a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
     When a materialized restore workload with 1 relays is created
@@ -57,6 +58,7 @@ Feature: Materialized backup and archived lifecycle resumption
   Scenario: A relocated materialized generator releases refused snapshot reads and resumes after bulk contention
     Given runtime replication is configured with replica count 0 and snapshot interval "10m"
     And the production sticky scheduler is configured
+    And node-3 starts with execution-bulk-memory-bytes = 32MiB
     And a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
     When a materialized restore workload with 1 relays is created

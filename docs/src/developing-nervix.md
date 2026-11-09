@@ -14,6 +14,11 @@ cd nervix
 
 ## Prerequisites
 
+The [Client Host Bindings](client-host-bindings.md) architecture chapter maps the C ABI, Python
+wheel, Ruby gem and JVM jar to their shared Rust runtime and ownership contracts, and states the
+contract of their language-level suites and [guides](client-libraries.md). The toolchains and
+preparation commands for those native artifacts and suites are listed below.
+
 Nervix is developed on Linux x86_64, Linux aarch64, and macOS arm64. The `just` recipes fetch an
 ONNX Runtime build for the host and stop on any other.
 
@@ -192,7 +197,7 @@ NERVIX_INIT_DEFAULT_USER_PASSWORD='nervix' just server
 
 Fresh clusters require an initial password for the `default` user. Set
 `NERVIX_INIT_DEFAULT_USER_PASSWORD` or pass `--init-default-user-password <password>` on the first
-startup. The leader stores the `default` user's Argon2 password hash in the strongly consistent
+startup. The leader stores the `default` user's typed PBKDF2-HMAC-SHA-512 credential in the strongly consistent
 control plane only when that user does not already exist. After the default user has been created,
 remove the environment variable or flag from normal startup. Later users can be created through Plexus:
 
@@ -565,6 +570,16 @@ a test job keeps its archive, and a rerun of `scenarios-build` replaces both. Th
 test executables without their debug information, most of a test executable's bytes, as
 [Scenario Shards](integration-test-lifecycle.md#scenario-shards) describes.
 
+Every host suite's boundary tier runs in the ordinary `tests` job. The build prepares the Python
+wheel, instrumented JNI jar and JUnit launcher/classes/reporter, native Ruby gem and C/C++ programs
+before packing; the restored job installs the Python environments and compiles nothing. C/C++
+boundary runs include AddressSanitizer and UndefinedBehaviorSanitizer. The ordinary scenario shards
+also run the Python host suite's one-/three-node cluster examples from their existing wheel.
+JVM, Ruby and C/C++ cluster examples stay in `client-conformance`: those runtimes and prepared host
+artifacts are absent from the ordinary scenario archive. The local host-cluster recipes and the
+full conformance runner require their boundary tiers, including packaging smoke, to pass before
+starting scenarios. The ordinary Python scenario runners apply the same gate.
+
 A transfer reports every ten seconds how much it moved and how fast, how many parts are done,
 moving, waiting to retry or queued, and which moving part is the slowest, so the step's log shows a
 transfer that crawls as well as one that stopped. A connection that does not open within 20 s, one
@@ -613,12 +628,12 @@ compares it with the workflows.
 | `shuttle` | Check | The Shuttle checks and their replay check |
 | `loom` | Check | The Loom models and their weakening qualification |
 | `turmoil` | Check | The Turmoil simulation suite and its replay check |
-| `client-conformance` | Check | The cross-language client probes and the host suites' cluster tiers against one- and three-node clusters, and the JVM, Ruby, Python, C and C++ boundary tiers |
+| `client-conformance` | Check | The [host-binding](client-host-bindings.md#qualification-and-observability) and independent-client probes and every host suite's cluster tier against one- and three-node clusters, gated by the prepared boundary tiers and packaging smoke. Boundary tiers and Python cluster examples also run in ordinary CI. |
 | `bolero-random` | Check, through Bolero | Bolero's randomized properties and corpus replay, which a manual run of the Bolero workflow always runs |
 | `extra-doctests` | Check | Capability doctests |
 | `extra-miri` | Check | Miri over the expiry map |
 | `extra-mutation` | Check | Mutation tests of the expiry map |
-| `extra-runners` | Check | Python coverage of the reporters, gates and collectors: patch coverage, the ordinary merge, the CRAP report, the full union, the paced simulation policy, the release gate, the deployment controller, the kache contract, the connector matrix renderer, the test selection, the wasm-bindgen tool, the native collector, the client suite readers with the unit-test archive, and the primitive source validator |
+| `extra-runners` | Check | Python coverage of the reporters, gates and collectors: patch coverage, the ordinary merge, the CRAP report, the full union, the paced simulation policy, the release gate, the deployment controller, the kache contract, the connector matrix renderer, the test selection, the wasm-bindgen tool, the external binding chaos controls, the native collector, the client suite readers with the unit-test archive, and the primitive source validator |
 | `extra-compiler` | Check | Source contracts, compiler diagnostics, the Rust runner/gate/audit owners, paired API doctests, compiler cache qualification and the Python coverage of the ratchet's callers |
 | `extra-bench-smoke` | Check | Benchmark smoke tests |
 | `extra-primitives` | Check | Primitive boundary conformance in ordinary, Shuttle, Loom and Turmoil modes, plus ordinary documentation and browser checks. `coverage-full` then requires those collections |
@@ -1086,8 +1101,8 @@ suites run selections of those scenarios, each as its own `just chaos run` comma
 
 ```bash
 just chaos suite list
-just chaos suite smoke --image ghcr.io/nervix-io/nervix@sha256:<digest>
-just chaos suite soak --image ghcr.io/nervix-io/nervix@sha256:<digest>
+just chaos suite smoke --image ghcr.io/nervix-io/nervix@sha256:<digest> --binding-image ghcr.io/nervix-io/nervix@sha256:<binding-digest>
+just chaos suite soak --image ghcr.io/nervix-io/nervix@sha256:<digest> --binding-image ghcr.io/nervix-io/nervix@sha256:<binding-digest>
 ```
 
 The smoke suite runs a baseline, a leader crash with its restart and a partition with its recovery;
@@ -1106,7 +1121,7 @@ release-mode diagnostic server of this checkout on an available image:
 
 ```bash
 just build-chaos-diagnostic-image nervix:diagnostic-local ghcr.io/nervix-io/nervix:debian-latest deloxide-order
-just chaos suite smoke --image nervix:diagnostic-local --image-kind deloxide-order
+just chaos suite smoke --image nervix:diagnostic-local --binding-image nervix:chaos-client --image-kind deloxide-order
 ```
 
 [External Cluster Chaos](./cluster-chaos.md) describes the runner, every scenario and its verdicts,
@@ -1230,3 +1245,13 @@ builds and PDF dependencies; its preparation step and pre-build diagnostics repo
 Every pull request's `checks` job runs
 `just test-docs`, the script tests and docs worker tests that `just book` runs first, so a pull
 request without the label still checks the book's structure and its tooling.
+
+### Credential Storage Release Note
+
+This revision requires the current `raft_payload_identity_capability_tls_inference_reset_instances_*` consensus namespace and
+`ClusterState` encoding 23. A stored state with a different namespace or encoding fails with
+`invalid consensus record storage; recreate the node's stored state` before user records or log
+entries are decoded. Recreate the node's stored state; no credential conversion is performed.
+User backup records require version 2 and contain the complete typed credential. A users record
+with another version is refused by its record header before decoding. Backups without a users
+section retain their existing contract. Protect archives as secrets.

@@ -728,6 +728,7 @@ fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_batching_an
             "metadata.timestamp",
             "metadata.timestamp_type",
             "metadata.tombstone",
+            "payload.bytes",
         ]
     );
     assert_eq!(

@@ -18,7 +18,10 @@ use nervix_models::{
 
 use crate::{
     lexer::{Identifier, Token, Word},
-    parser_support::{ParseError, byte_size_lit, duration_lit, kw, kw_phrase3, tok, u64_value},
+    parser_support::{
+        ParseError, byte_size_lit, duration_lit, kw, kw_phrase3, string_lit_with_values, tok,
+        u64_value,
+    },
 };
 
 fn duration_value<'src>()
@@ -35,6 +38,16 @@ fn byte_value<'src>() -> impl Parser<'src, &'src [Token], u64, extra::Err<ParseE
         Ok(bytes) => Ok(bytes.as_u64()),
         Err(error) => Err(Rich::custom(span, error.to_string())),
     })
+}
+
+fn algorithm_names<'src>(
+    names: impl IntoIterator<Item = &'static str>,
+) -> impl Parser<'src, &'src [Token], Vec<String>, extra::Err<ParseError<'src>>> + Clone {
+    string_lit_with_values(names)
+        .separated_by(tok(Token::Comma))
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .delimited_by(tok(Token::LParen), tok(Token::RParen))
 }
 
 /// The parser of one whole assignment, `<KEY> = <value>`, read into the change it proposes.
@@ -105,6 +118,12 @@ impl<'src> OfferedAssignments<'src> {
     /// Every parameter's assignment, in the literal family the parameter accepts.
     fn new() -> Self {
         Self(vec![
+            assignment(
+                ClusterParameterKey::PasswordIterations,
+                Identifier::PasswordIterations,
+                u64_value("integer_literal"),
+                ClusterParameterChange::PasswordIterations,
+            ),
             assignment(
                 ClusterParameterKey::NodeUnavailabilityTimeout,
                 Identifier::NodeUnavailabilityTimeout,
@@ -236,6 +255,26 @@ impl<'src> OfferedAssignments<'src> {
                 Identifier::ClientBatchRows,
                 u64_value("integer_literal"),
                 ClusterParameterChange::ClientBatchRows,
+            ),
+            assignment(
+                ClusterParameterKey::TlsCipherSuites,
+                Identifier::TlsCipherSuites,
+                algorithm_names(nervix_models::TlsCipherSuites::names()).try_map(|names, span| {
+                    nervix_models::TlsCipherSuites::parse_names(names)
+                        .map_err(|error| Rich::custom(span, format!("{error:#}")))
+                }),
+                ClusterParameterChange::TlsCipherSuites,
+            ),
+            assignment(
+                ClusterParameterKey::TlsKeyExchangeGroups,
+                Identifier::TlsKeyExchangeGroups,
+                algorithm_names(nervix_models::TlsKeyExchangeGroups::names()).try_map(
+                    |names, span| {
+                        nervix_models::TlsKeyExchangeGroups::parse_names(names)
+                            .map_err(|error| Rich::custom(span, format!("{error:#}")))
+                    },
+                ),
+                ClusterParameterChange::TlsKeyExchangeGroups,
             ),
         ])
     }

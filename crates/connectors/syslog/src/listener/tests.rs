@@ -667,6 +667,7 @@ async fn a_failed_accept_keeps_an_established_connection_and_rebinds() {
             },
         ],
         |_| bind_addr,
+        Default::default(),
     )
     .expect("the TCP plan is valid");
     let mut ingestor = SyslogListenerIngestor::open(&plan, 0)
@@ -831,14 +832,21 @@ fn shuttle_a_decoded_frame_racing_suspension_is_handed_off_once() {
             assert_eq!(second.payload, b"second");
             for frame in [first, second] {
                 use nervix_connector::{
-                    RetainedIngestMetadata, RetainedIngestMetadataValue as Value,
+                    IngestMessageMetadata as _, RetainedIngestMetadata,
+                    RetainedIngestMetadataValue as Value,
                 };
+                let payload_bytes = frame.payload.len();
+                let message = SyslogListenerIngestorMessage::new(frame.payload, frame.peer);
+                let retained = RetainedIngestMetadata::capture(&message);
+                drop(message);
+                assert_eq!(retained.payload_bytes(), payload_bytes);
                 assert_eq!(
-                    RetainedIngestMetadata::capture(&frame.peer).values(),
+                    retained.values(),
                     [
                         Value::String(peer_addr.to_string()),
                         Value::String("tcp".to_string()),
                         Value::Absent,
+                        Value::String(peer_addr.ip().to_string()),
                     ]
                 );
             }
@@ -1136,7 +1144,8 @@ async fn an_oversized_datagram_is_dropped_and_the_next_one_received() {
 #[test]
 fn a_message_hands_over_every_declared_field_and_names_its_peer_position() {
     use nervix_connector::{
-        IngestTransportPosition, RetainedIngestMetadata, RetainedIngestMetadataValue as Value,
+        IngestMessageMetadata as _, IngestTransportPosition, RetainedIngestMetadata,
+        RetainedIngestMetadataValue as Value,
     };
     use nervix_models::{IngestorEntityKind, SyslogIngestorEntity};
 
@@ -1145,12 +1154,14 @@ fn a_message_hands_over_every_declared_field_and_names_its_peer_position() {
     let metadata = message.metadata();
 
     let retained = RetainedIngestMetadata::capture(metadata.fields);
+    assert_eq!(retained.payload_bytes(), message.payload().len());
     assert_eq!(
         retained.values(),
         [
             Value::String("192.0.2.7:5514".to_string()),
             Value::String("udp".to_string()),
-            Value::Absent
+            Value::Absent,
+            Value::String("192.0.2.7".to_string()),
         ]
     );
     let declared = IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener)

@@ -27,9 +27,7 @@ pub struct Prerequisites;
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct ClusterParameters;
 
-/// What one node can carry, without changing cluster acceptance or promises.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct NodeCapabilities;
+use crate::NodeCapabilities;
 
 impl sealed::Class for Prerequisites {}
 impl sealed::Class for ClusterParameters {}

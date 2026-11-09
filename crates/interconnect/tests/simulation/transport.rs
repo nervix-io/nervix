@@ -54,6 +54,8 @@ mod isolation;
 mod prerequisites;
 mod relay;
 
+#[path = "capabilities.rs"]
+mod capabilities;
 #[path = "materialized.rs"]
 mod materialized;
 #[path = "parameters.rs"]
@@ -538,6 +540,7 @@ fn exchange_typed_arrow_batch(run: ScenarioRun) -> Result<(), SimulationError> {
                         .try_charge_owned(MemoryClass::Relay, arrow_batch())
                         .assured("the Arrow fixture fits the relay memory budget");
                     let relay = RelayPayload {
+                        decoded_bytes: 0,
                         delivery: RelayDelivery {
                             channel_incarnation: [49; 16],
                             sequence: 0,

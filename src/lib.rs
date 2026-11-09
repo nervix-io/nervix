@@ -33,8 +33,8 @@
 
 #[cfg(all(feature = "testing", not(debug_assertions)))]
 compile_error!(
-    "the `testing` feature lowers Argon2 password hashing parameters and must not be compiled \
-     with release-like profiles"
+    "the `testing` feature enables test fault injection and must not be compiled with \
+     release-like profiles"
 );
 
 pub mod application;
@@ -50,6 +50,7 @@ mod emitter_execution_plan;
 mod emitter_start_plan;
 #[cfg(feature = "testing")]
 mod fault_injection;
+mod inferencer_state_snapshot;
 pub mod memory_pressure;
 pub mod metrics;
 pub(crate) mod registry;

@@ -176,7 +176,7 @@ fn single_worker_executor() -> Executor {
             filesystem_storage: one,
             connector_storage: nervix_execution::ConnectorStorageWorkers::resolve(Some(one))
                 .expect("one worker fits the primitive permit bound"),
-            pending_jobs: one,
+            pending_jobs: nervix_execution::PendingJobCounts::uniform(one),
         },
         ..ExecutionConfig::default()
     })

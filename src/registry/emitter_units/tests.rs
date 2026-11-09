@@ -112,8 +112,13 @@ fn an_emitter_without_instances_and_one_over_a_single_partition_run_as_their_sin
         .node(ModelKind::Emitter, &named::<ModelName>("sink"))
         .expect("the emitter is active");
     assert_eq!(node.emitter_units, Some(EmitterUnits::Single));
-    let schedule =
-        one_partition.schedule_for_domain(&domain(), &[named::<ClusterNodeName>("node-1")], 0);
+    let nodes = [named::<ClusterNodeName>("node-1")];
+    let schedule = one_partition.schedule_for_domain(
+        &domain(),
+        &nodes,
+        0,
+        &crate::registry::uniform_capabilities(&nodes),
+    );
     assert_eq!(
         schedule.nodes[&emitter_ref()]
             .units
@@ -181,7 +186,13 @@ fn a_counted_emitter_over_an_unpartitioned_input_serves_it_from_its_first_instan
         [Unit::SINGLE]
     );
     assert_eq!(correspondence.partners(false, instance(1)).count(), 0);
-    let schedule = graph.schedule_for_domain(&domain(), &[named("node-1"), named("node-2")], 0);
+    let nodes = [named::<ClusterNodeName>("node-1"), named("node-2")];
+    let schedule = graph.schedule_for_domain(
+        &domain(),
+        &nodes,
+        0,
+        &crate::registry::uniform_capabilities(&nodes),
+    );
     assert_eq!(
         schedule.nodes[&emitter_ref()]
             .units
@@ -198,10 +209,16 @@ fn counted_instances_prefer_the_owner_of_a_partition_they_serve() {
         partitioned_relay("events", 4).into(),
         EmitterInstances::Count(nonzero!(2u64)),
     );
+    let nodes = [
+        named::<ClusterNodeName>("node-1"),
+        named("node-2"),
+        named("node-3"),
+    ];
     let schedule = graph.schedule_for_domain(
         &domain(),
-        &[named("node-1"), named("node-2"), named("node-3")],
+        &nodes,
         0,
+        &crate::registry::uniform_capabilities(&nodes),
     );
     let relay = &schedule.nodes[&relay_ref("events")];
     let emitter = &schedule.nodes[&emitter_ref()];
@@ -278,10 +295,16 @@ fn per_partition_groups_bind_each_instance_to_its_partition_of_every_input() {
             .collect()
         );
     }
+    let nodes = [
+        named::<ClusterNodeName>("node-1"),
+        named("node-2"),
+        named("node-3"),
+    ];
     let schedule = graph.schedule_for_domain(
         &domain(),
-        &[named("node-1"), named("node-2"), named("node-3")],
+        &nodes,
         1,
+        &crate::registry::uniform_capabilities(&nodes),
     );
     for index in 0..4 {
         let owner = &schedule.nodes[&emitter_ref()]

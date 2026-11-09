@@ -688,13 +688,40 @@ impl RelayProcessorTemplate {
                     let prepared = prepared
                         .as_ref()
                         .ok_or_else(|| Report::new(ProcessorTemplateError::InferencerSession))?;
+                    let context = || ProcessorTemplateError::ReplicatedState {
+                        kind: self.kind,
+                        processor: self.processor.clone(),
+                        branch: BranchScope::from(key),
+                    };
+                    let placement = runtime
+                        .state_placement_for_unit(
+                            domain,
+                            RuntimeStateKind::Inferencer,
+                            self.kind,
+                            &self.processor,
+                            unit,
+                            key.clone(),
+                        )
+                        .change_context_lazy(context)?;
+                    let replicated_state = runtime
+                        .replicated_inferencer_state(placement, &prepared.state)
+                        .await
+                        .change_context_lazy(context)?;
+                    let session = Box::new(replicated_state.restore_session(prepared, incarnation));
+                    let snapshot_bytes = prepared
+                        .state
+                        .snapshot_bytes()
+                        .change_context_lazy(context)?;
                     RelayProcessorOperationNode::StatefulInferencer {
                         output_routes: Self::instantiate_outputs(output_routes),
                         resource: resource.clone(),
                         resource_version: *resource_version,
                         file: file.clone(),
                         compiled_input_program: compiled_input_program.clone(),
-                        session: Box::new(prepared.instantiate()),
+                        session,
+                        replicated_state,
+                        incarnation,
+                        snapshot_bytes,
                         prepared: prepared.clone(),
                     }
                 }
@@ -940,28 +967,29 @@ impl BranchInstanceTemplate {
                 (identifier.clone(), inputs)
             })
             .collect();
+        // A processor's sent series cover every relay it sends to, a correlator's timeout relays
+        // included, so dispatching a timed-out record finds its series like a route's batch does.
         let processor_outputs = processors
             .iter()
             .map(|(identifier, processor)| {
                 let outputs = processor
                     .operation
-                    .output_routes()
-                    .routes
-                    .iter()
-                    .map(|output| {
+                    .sent_relays()
+                    .into_iter()
+                    .map(|relay| {
                         let metrics = runtime.inner.metrics.resolve_node_batch_metrics(
                             NodeBatchMetricsSpec {
                                 unit: self.owner.unit,
                                 domain,
                                 kind: processor.kind,
                                 node: &processor.processor,
-                                relay: &output.relay,
+                                relay,
                                 physical_node_id,
                                 direction: "sent",
                                 branch,
                             },
                         );
-                        (output.relay.clone(), metrics)
+                        (relay.clone(), metrics)
                     })
                     .collect();
                 (identifier.clone(), outputs)

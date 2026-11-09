@@ -78,7 +78,7 @@ pub(super) enum ProcessorBranchLifetime {
 /// What a processor's branches publish when they are asked to checkpoint, decided by who asks.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum ProcessorCheckpointPurpose {
-    /// A quiesced backup cut reads the state store next. A branch publishes the state its periodic
+    /// A backup capture reads the state store next. A branch publishes the state its periodic
     /// snapshot may not hold yet. A WASM branch publishes nothing: the checkpoint that completed
     /// its last callback already holds the guest state on its owner and its replicas, and saving
     /// the guest again would wait for those replicas inside the cut.
@@ -92,6 +92,11 @@ pub(super) enum ProcessorBranchCommand {
     Checkpoint {
         purpose: ProcessorCheckpointPurpose,
         response: oneshot::Sender<OwnershipHandoffResult<()>>,
+    },
+    /// An operator inspection of the rows the branch holds, answered between two batches.
+    Inspect {
+        read: BranchStateRead,
+        response: oneshot::Sender<error_stack::Result<BranchStateCopy, BranchStateReadError>>,
     },
     Stop(ProcessorBranchStopMode),
 }
@@ -127,8 +132,8 @@ pub(super) struct ProcessorSnapshotTask {
     pub(super) requests: Option<mpsc::Receiver<ProcessorSnapshotRequest>>,
 }
 
-/// What spawning a processor's snapshot task produced. Only deduplicators and window processors
-/// answer snapshot requests, so a processor without them still reports the task it spawned.
+/// What spawning a processor's snapshot task produced. Stateful inferencers, deduplicators and
+/// window processors answer snapshot requests; other processors still report their spawned task.
 pub(super) struct SpawnedSnapshotTask {
     pub(super) task: Option<JoinHandle<()>>,
     pub(super) requests: Option<mpsc::Receiver<ProcessorSnapshotRequest>>,
@@ -161,6 +166,11 @@ pub(super) enum ProcessorNodeCommand {
     ApplyWasmStateReset {
         reset: nervix_models::WasmStateReset,
         response: oneshot::Sender<error_stack::Result<(), WasmStateResetRuntimeError>>,
+    },
+    /// Names the branch tasks an operator inspection reads, without waiting for any of them.
+    SelectStateBranches {
+        selection: nervix_models::StateInspectionBranchSelection,
+        response: oneshot::Sender<error_stack::Result<SelectedStateBranches, BranchStateReadError>>,
     },
 }
 
@@ -548,6 +558,15 @@ pub(super) async fn run_processor_node_runtime(
                         )))
                         .means_peer_left("WASM state reset schedule application requester");
                 }
+                ProcessorNodeCommand::SelectStateBranches {
+                    selection,
+                    response,
+                } => SelectedStateBranches::answer(
+                    response,
+                    &instances,
+                    selection,
+                    pending_restore.is_some(),
+                ),
                 ProcessorNodeCommand::Checkpoint { purpose, response } => {
                     let result = nervix_primitives::expect_lint!(
                         nervix::lifecycle_call,
@@ -1555,6 +1574,7 @@ async fn run_processor_branch_task(
     quiesce_gauges.observe(&branch, &processor);
     let stop_mode;
     let mut handoff_execution_snapshot = None;
+    let mut events = HandledEvents::default();
     loop {
         nervix_primitives::task::consume_budget().await;
         let freeze = ownership_freeze.observe();
@@ -1591,6 +1611,7 @@ async fn run_processor_branch_task(
                     .next_deadline()
                     .is_some_and(|deadline| deadline <= now))
         {
+            events.record();
             branch.tick(&execution_snapshot).await;
             quiesce_gauges.observe(&branch, &processor);
             continue;
@@ -1641,6 +1662,10 @@ async fn run_processor_branch_task(
                             .send(result)
                             .means_peer_left("processor branch checkpoint requester");
                     }
+                    Some(ProcessorBranchCommand::Inspect { read, response }) => {
+                        let held = branch.copy_processor_held_rows(&processor, read, now);
+                        answer_branch_state(response, incarnation, events, held);
+                    }
                     Some(ProcessorBranchCommand::Stop(mode)) => {
                         if let ProcessorBranchStopMode::Handoff(_) = &mode {
                             let execution_snapshot = match domain_clock.snapshot() {
@@ -1687,6 +1712,7 @@ async fn run_processor_branch_task(
             received = input.recv(), if !ownership_frozen => {
                 match received {
                     Some(ProcessorBranchInput { relay, batch, work }) => {
+                        events.record();
                         branch
                             .execute_processor_input(&processor, &relay, batch)
                             .await;
@@ -1705,6 +1731,7 @@ async fn run_processor_branch_task(
                     _ = sleep(runtime_handle.inner.state_replication_poll_interval) => {}
                 }
             }, if has_pending_materialized && !ownership_frozen => {
+                events.record();
                 materialized_wait.register_again();
                 branch
                     .retry_processor_pending_materialized(&processor)
@@ -1729,6 +1756,7 @@ async fn run_processor_branch_task(
                         break;
                     }
                 };
+                events.record();
                 // A generation releases everything the branch can release now, including parked
                 // messages whose materialized dependency arrived after they were parked.
                 if branch.processor_has_pending_materialized(&processor) {
@@ -1812,7 +1840,16 @@ async fn run_processor_branch_task(
     }
     stop_processor_snapshot_task(&mut branch, &processor, &mut snapshot).await;
     match stop_mode {
-        Some(ProcessorBranchStopMode::Evict) => {}
+        Some(ProcessorBranchStopMode::Evict) => {
+            if let Some(node) = branch.processors.get(&processor) {
+                nervix_primitives::expect_lint!(
+                    nervix::lifecycle_call,
+                    "the evicted branch and its final writer have ended before exact route \
+                     retirement",
+                    node.retire_evicted_inferencer_state(&branch.runtime)
+                );
+            }
+        }
         Some(ProcessorBranchStopMode::Handoff(response)) => {
             let restored_at = finalization_snapshot
                 .verified("a handoff stop always finalizes with the snapshot its command captured")

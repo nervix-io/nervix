@@ -132,9 +132,11 @@ impl IngestorDeclaration for ClientProducerIngestor {
     /// A submitted batch carries no transport headers, so its rows expose an empty header list
     /// that no program may read.
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::Single,
         headers: None,
         metadata: IngestorMetadataDeclaration::NONE,
+        payload: crate::IngestorPayloadDeclaration::BATCH,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Schema,
         position_class: PositionClass::None,
@@ -273,6 +275,7 @@ pub struct ClientConsumerEmitter {
 
 impl EmitterDeclaration for ClientConsumerEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         // Application sessions consume the rows through the emitter's one consumer stream.
         instancing: crate::EmitterInstancingCapability::Single {
             reason: crate::SingleEmitterReason::OneConsumerStream,

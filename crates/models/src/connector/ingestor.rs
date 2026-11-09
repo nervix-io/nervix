@@ -549,6 +549,8 @@ pub enum AcknowledgementConfirmation {
 /// documentation and the generated conformance tests read the same declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IngestorEntityCapabilities {
+    /// The transport observations its connector may count through the host.
+    pub events: crate::DeclaredEvents,
     /// The instancing forms its intake can honor.
     pub instancing: IngestorInstancingCapability,
     /// How its messages carry the transport headers that `read_header` and `read_headers` read,
@@ -556,6 +558,8 @@ pub struct IngestorEntityCapabilities {
     pub headers: Option<HeaderModel>,
     /// The typed `metadata` namespace its messages expose to the ingestor's programs.
     pub metadata: IngestorMetadataDeclaration,
+    /// The required facts of its original transport payload or submitted batch.
+    pub payload: crate::IngestorPayloadDeclaration,
     /// Whether it executes on every live cluster node rather than on one scheduled owner.
     pub executes_on_every_cluster_node: bool,
     /// What its body names to read from.
@@ -623,7 +627,19 @@ impl IngestorEntityCapabilities {
                 field: field.name(),
             });
         }
+        for field in self.payload.fields() {
+            capabilities.push(RuntimeCapability::Payload {
+                field: field.name(),
+            });
+        }
         capabilities.extend(RuntimeCapability::of_bounds(self.bounds));
+        capabilities.extend(
+            self.events
+                .as_slice()
+                .iter()
+                .copied()
+                .map(RuntimeCapability::Event),
+        );
         capabilities
     }
 

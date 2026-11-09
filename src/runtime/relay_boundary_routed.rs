@@ -29,6 +29,7 @@ use super::*;
 /// and every destination carries a handle to that one allocation. Only the target relay and the
 /// acknowledgement obligations differ between destinations.
 pub(in crate::runtime) struct RoutedDelivery<'a> {
+    pub(in crate::runtime) decoded_bytes: u64,
     pub(in crate::runtime) delivery: RelayDelivery,
     pub(in crate::runtime) domain: &'a DomainName,
     /// The unit of the relay whose owner routes the batch.
@@ -49,6 +50,7 @@ pub(in crate::runtime) struct RoutedDelivery<'a> {
 )]
 pub(in crate::runtime) fn routed_payload(delivery: RoutedDelivery<'_>) -> RelayPayload {
     RelayPayload {
+        decoded_bytes: delivery.decoded_bytes,
         delivery: delivery.delivery,
         kind: RelayPayloadKind::Routed,
         domain: delivery.domain.clone(),

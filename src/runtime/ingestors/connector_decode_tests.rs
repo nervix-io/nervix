@@ -35,7 +35,10 @@ const REJECTION: &str =
 fn message(payload: &[u8]) -> IngestorIntakeMessage<'_> {
     IngestorIntakeMessage {
         payload,
-        metadata: IngestMetadataRow::headers(&NoIngestHeaders),
+        metadata: IngestMetadataRow::headers(
+            &NoIngestHeaders,
+            &nervix_connector::NoIngestMetadata(0),
+        ),
     }
 }
 
@@ -108,7 +111,7 @@ async fn an_acknowledged_batch_consumes_a_payload_its_codec_refuses_and_delivers
     );
     assert_eq!(
         acknowledgement.wait(Duration::from_secs(10)).await,
-        IngestorAcknowledgementOutcome::Ack,
+        IngestorAcknowledgementOutcome::Acknowledged,
         "the batch is acknowledged with its refused payload"
     );
     assert_rejected(&fixture, &report, 1);
@@ -133,7 +136,7 @@ async fn an_acknowledged_batch_its_codec_refuses_whole_is_acknowledged() {
     let second = next_error(&mut errors).await;
     assert_eq!(
         acknowledgement.wait(Duration::from_secs(10)).await,
-        IngestorAcknowledgementOutcome::Ack
+        IngestorAcknowledgementOutcome::Acknowledged
     );
     assert!(first.starts_with(REJECTION), "{first}");
     assert_rejected(&fixture, &second, 2);
@@ -216,7 +219,7 @@ async fn a_poll_its_codec_refuses_whole_enters_nothing() {
                 messages: vec![IngestorPollMessage {
                     payload: REFUSED.to_vec(),
                     headers: RetainedIngestHeaders::none(),
-                    metadata: nervix_connector::RetainedIngestMetadata::none(),
+                    metadata: nervix_connector::RetainedIngestMetadata::none(0),
                 }],
                 failures: Vec::new(),
                 dropped_header_values: 0,
@@ -252,12 +255,12 @@ async fn a_poll_consumes_a_message_its_codec_refuses_and_delivers_the_rest() {
                     IngestorPollMessage {
                         payload: REFUSED.to_vec(),
                         headers: RetainedIngestHeaders::none(),
-                        metadata: nervix_connector::RetainedIngestMetadata::none(),
+                        metadata: nervix_connector::RetainedIngestMetadata::none(0),
                     },
                     IngestorPollMessage {
                         payload: br#"{"user_id":9}"#.to_vec(),
                         headers: RetainedIngestHeaders::none(),
-                        metadata: nervix_connector::RetainedIngestMetadata::none(),
+                        metadata: nervix_connector::RetainedIngestMetadata::none(0),
                     },
                 ],
                 failures: Vec::new(),

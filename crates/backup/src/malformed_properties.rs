@@ -25,10 +25,7 @@ use crate::{
     archive_values::{Case, Section, Values},
     read_archive_contents,
     section::{RECORD_HEADER_BYTES, RECORD_MAGIC, encode_record},
-    wire::{
-        BranchLifecycleWire, DomainWire, KafkaOffsetsWire, ManifestWire, ResourceVersionWire,
-        UsersWire,
-    },
+    wire::{BranchLifecycleWire, DomainWire, KafkaOffsetsWire, ManifestWire, ResourceVersionWire},
 };
 
 pub(super) fn assert_decode_frees_allocations<F, T>(decode: F)
@@ -74,6 +71,9 @@ fn validate_kind(kind: RecordKind, bytes: &[u8]) -> Result<(), Report<ArchiveRea
         RecordKind::MaterializedIdentities => validate::<MaterializedIdentitiesRecord>(bytes),
         RecordKind::DeduplicatorStateDescriptor => validate::<DeduplicatorStateDescriptor>(bytes),
         RecordKind::WindowStateDescriptor => validate::<WindowStateDescriptor>(bytes),
+        RecordKind::InferencerStateDescriptor => {
+            validate::<crate::InferencerStateDescriptor>(bytes)
+        }
     }
 }
 
@@ -90,6 +90,7 @@ fn current_version(kind: RecordKind) -> u16 {
         RecordKind::MaterializedIdentities => MaterializedIdentitiesRecord::VERSION,
         RecordKind::DeduplicatorStateDescriptor => DeduplicatorStateDescriptor::VERSION,
         RecordKind::WindowStateDescriptor => WindowStateDescriptor::VERSION,
+        RecordKind::InferencerStateDescriptor => crate::InferencerStateDescriptor::VERSION,
     }
 }
 
@@ -162,17 +163,6 @@ impl Case {
             .assured("the current wire encodes"),
             "resource version",
         );
-        let users = UsersWire {
-            users: vec![crate::wire::UserWire {
-                name: "synthetic".into(),
-                password_hash: String::new(),
-            }],
-        };
-        rejects_field::<UsersRecord>(
-            encode_record(UsersRecord::KIND, UsersRecord::VERSION, &users)
-                .assured("the current wire encodes"),
-            "password hash",
-        );
         for state in &original.state {
             match state {
                 crate::archive_values::State::Kafka(offsets) => {
@@ -232,7 +222,8 @@ impl Case {
                         "branch incarnation",
                     );
                 }
-                crate::archive_values::State::Wasm { .. } => {}
+                crate::archive_values::State::Wasm { .. }
+                | crate::archive_values::State::Inferencer { .. } => {}
                 crate::archive_values::State::Materialized(value) => value.assert_invalid_fields(),
                 crate::archive_values::State::Deduplicator(value) => value.assert_invalid_fields(),
                 crate::archive_values::State::Window(value) => value.assert_invalid_fields(),

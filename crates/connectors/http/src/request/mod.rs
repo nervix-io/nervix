@@ -54,6 +54,7 @@ use self::transport::{ClientTransport, RedirectAnswer, Redirects};
 const HTTP: &str = "http";
 
 pub struct HttpRequestIngestorPlan {
+    pub tls_policy: nervix_connector::OutwardTlsPolicy,
     pub config: Vec<ClientConfigEntry>,
     pub dns: DnsResolver,
     pub method: String,
@@ -115,7 +116,7 @@ impl IngestorConnector for HttpRequestIngestor {
             .change_context(IngestorError::Open { connector: HTTP })?;
         let transport = ClientTransport::declared(&plan.config, "HTTP")
             .change_context(IngestorError::Open { connector: HTTP })?;
-        let client = HttpClientConfig::new(&plan.config, "HTTP", &plan.dns)
+        let client = HttpClientConfig::new(&plan.config, "HTTP", &plan.dns, &plan.tls_policy)
             .build()
             .change_context(IngestorError::Open { connector: HTTP })?;
         Ok(Self {
@@ -157,11 +158,12 @@ impl PacedIngestorConnector for HttpRequestIngestor {
         let payload = Self::bounded_body(response, self.max_body_size)
             .await
             .change_context(IngestorError::Read { connector: HTTP })?;
+        let metadata = Self::poll_metadata(status, scheduled_at, payload.len());
         Ok(IngestorPoll {
             messages: vec![IngestorPollMessage {
                 payload,
                 headers,
-                metadata: Self::poll_metadata(status, scheduled_at),
+                metadata,
             }],
             failures: Vec::new(),
             dropped_header_values,
@@ -187,11 +189,18 @@ impl HttpRequestIngestor {
 
     /// The metadata HTTP REQUEST declares for one answered poll, in its order: the response status,
     /// then the poll's scheduled instant.
-    fn poll_metadata(status: u16, scheduled_at: Timestamp) -> RetainedIngestMetadata {
-        RetainedIngestMetadata::from_values(vec![
-            RetainedIngestMetadataValue::U16(status),
-            RetainedIngestMetadataValue::Datetime(scheduled_at),
-        ])
+    fn poll_metadata(
+        status: u16,
+        scheduled_at: Timestamp,
+        payload_bytes: usize,
+    ) -> RetainedIngestMetadata {
+        RetainedIngestMetadata::from_values(
+            payload_bytes,
+            vec![
+                RetainedIngestMetadataValue::U16(status),
+                RetainedIngestMetadataValue::Datetime(scheduled_at),
+            ],
+        )
     }
 
     /// The fields every poll sends. A client secret takes its value from the resolved `config`,
@@ -467,7 +476,11 @@ mod tests {
         use nervix_models::{HttpIngestorEntity, IngestorEntityKind};
 
         let scheduled_at = Timestamp::from_unix_nanos(1_234_567_890);
-        let metadata = HttpRequestIngestor::poll_metadata(206, scheduled_at);
+        let metadata = HttpRequestIngestor::poll_metadata(206, scheduled_at, 29);
+        assert_eq!(
+            nervix_connector::IngestMessageMetadata::payload_bytes(&metadata),
+            29
+        );
 
         assert_eq!(
             metadata.values(),
@@ -564,6 +577,7 @@ mod tests {
             },
         ];
         let plan = HttpRequestIngestorPlan {
+            tls_policy: Default::default(),
             config,
             dns: DnsResolver::load(nervix_dns::DnsConfiguration::system())
                 .await

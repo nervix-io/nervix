@@ -54,6 +54,38 @@ const UUID_RANDOM_A: u64 = 0x0fff;
 const UUID_RANDOM_B: u64 = 0x3fff_ffff_ffff_ffff;
 
 impl Arbitrary<'_> {
+    /// A current incarnation-bound capacity claim, including unknown host measurements.
+    pub fn node_capability_record(&mut self) -> nervix_models::NodeCapabilityRecord {
+        use std::num::NonZeroU64;
+        let cpu = if self.entropy.flag() {
+            NonZeroU64::new(self.entropy.boundary_biased(1..=u64::MAX))
+        } else {
+            None
+        };
+        let memory = if self.entropy.flag() {
+            NonZeroU64::new(self.entropy.boundary_biased(1..=u64::MAX))
+        } else {
+            None
+        };
+        let mut positive = || {
+            NonZeroU64::new(self.entropy.boundary_biased(1..=u64::MAX))
+                .assured("the generated count is positive")
+        };
+        let receive = nervix_models::PeerReceiveBounds {
+            relay_batch_bytes: positive(),
+            relay_decoded_bytes: positive(),
+            bulk_chunk_bytes: positive(),
+            bulk_window_bytes: positive(),
+        };
+        nervix_models::NodeCapabilityRecord {
+            identity: self.node_identity(),
+            capabilities: nervix_models::NodeCapabilities {
+                cpu_count: cpu,
+                memory_bytes: memory,
+                receive,
+            },
+        }
+    }
     /// Up to three values, each built by `record`, in the order they were built.
     pub fn records<T>(&mut self, mut record: impl FnMut(&mut Self) -> T) -> Vec<T> {
         let count = self.entropy.count(RECORDS);
@@ -364,6 +396,7 @@ impl Arbitrary<'_> {
             OwnershipStateComponent::MaterializedRelay,
             OwnershipStateComponent::WasmProcessor,
             OwnershipStateComponent::WindowProcessor,
+            OwnershipStateComponent::Inferencer,
         ]);
         let cause = self.entropy.pick([
             OwnershipStateResetCause::MissingCheckpoint,

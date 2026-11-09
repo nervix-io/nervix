@@ -103,6 +103,7 @@ const STREAM_READ_CHUNK: usize = 8_192;
 
 #[derive(Clone)]
 pub struct SyslogListenerIngestorPlan {
+    tls_policy: nervix_connector::OutwardTlsPolicy,
     client: SyslogListenerClient,
     bind_addr: SocketAddr,
     listener_faults: ConfiguredListenerFaults,
@@ -113,12 +114,14 @@ impl SyslogListenerIngestorPlan {
     pub fn new(
         entries: Vec<ClientConfigEntry>,
         bind_addr: impl FnOnce(SocketAddr) -> SocketAddr,
+        tls_policy: nervix_connector::OutwardTlsPolicy,
     ) -> error_stack::Result<Self, SyslogConfigError> {
         let client =
             SyslogListenerClient::read(&entries).change_context(SyslogConfigError::Client)?;
         let connections = ConnectionDeadlines::read(&entries)?;
         let bind_addr = bind_addr(client.bind);
         Ok(Self {
+            tls_policy,
             client,
             bind_addr,
             listener_faults: ConfiguredListenerFaults::default(),
@@ -194,12 +197,22 @@ impl IngestorMessage for SyslogListenerIngestorMessage {
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
         IngestMetadataRow {
-            fields: &self.peer,
+            fields: self,
             headers: IngestRowHeaders::NONE,
             position: Some(IngestTransportPosition::Syslog {
                 peer: self.peer.address(),
             }),
         }
+    }
+}
+
+impl nervix_connector::IngestMessageMetadata for SyslogListenerIngestorMessage {
+    fn payload_bytes(&self) -> usize {
+        self.payload.len()
+    }
+
+    fn visit_metadata(&self, values: &mut dyn nervix_connector::IngestMetadataValues) {
+        self.peer.visit_metadata(values);
     }
 }
 
@@ -325,7 +338,7 @@ impl IngestorConnector for SyslogListenerIngestor {
     async fn open(plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
         let tls_acceptor = match &plan.client.transport {
             SyslogListenerTransport::Tls(tls) => {
-                let config = tls_server_config(tls)
+                let config = tls_server_config(tls, &plan.tls_policy)
                     .change_context(IngestorError::Open { connector: SYSLOG })?;
                 Some(TlsAcceptor::from(config))
             }

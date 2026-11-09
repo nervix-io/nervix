@@ -109,7 +109,7 @@ fn endpoint_dispatch_response(
     };
     let status = match reply.outcome {
         EndpointRequestOutcome::Completed => StatusCode::OK,
-        EndpointRequestOutcome::Refused => StatusCode::BAD_REQUEST,
+        EndpointRequestOutcome::Refused(_) => StatusCode::BAD_REQUEST,
         EndpointRequestOutcome::NotAdmitted(_)
         | EndpointRequestOutcome::ProcessingFailed(_)
         | EndpointRequestOutcome::Interrupted => StatusCode::SERVICE_UNAVAILABLE,
@@ -191,6 +191,7 @@ impl EndpointWebsocketConnection {
         shutdown: &CancellationToken,
     ) -> EndpointDispatchOutcome {
         let metadata = WebsocketsEndpointFrameMetadata {
+            payload_bytes: frame.payload().len(),
             frame_type: frame.frame_type(),
             remote_addr: self.remote_addr,
             path: &self.path,
@@ -490,6 +491,7 @@ async fn dispatch_http_request(
             request.uri().query(),
             remote_addr,
             &host,
+            body.len(),
         );
         let row = IngestMetadataRow {
             fields: &metadata,

@@ -115,6 +115,7 @@ pub(crate) struct ManifestWire {
     pub(crate) producer_version: String,
     pub(crate) language_version: String,
     pub(crate) cluster_id: String,
+    pub(crate) cluster_uid: [u8; 16],
     pub(crate) captured_at_unix_nanos: i64,
     pub(crate) scope: ScopeWire,
     pub(crate) resources: ResourcesWire,
@@ -176,6 +177,7 @@ pub(crate) enum SectionContentWire {
     DeduplicatorKeys,
     WindowInputRows,
     WindowArgumentColumns,
+    InferencerTensorValues,
 }
 
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
@@ -186,7 +188,7 @@ pub(crate) struct UsersWire {
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
 pub(crate) struct UserWire {
     pub(crate) name: String,
-    pub(crate) password_hash: String,
+    pub(crate) password_credential: nervix_models::PasswordCredential,
 }
 
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]

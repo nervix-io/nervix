@@ -3,7 +3,8 @@
 //! Layer: edges.
 //!
 //! - **Owns.** Browser-local route construction, branch keys, flush and message error selections,
-//!   shared by processor and emitter forms, and conversion to current semantic Models.
+//!   shared by processor and emitter forms, the set-only shape of window and correlator routes,
+//!   and conversion to current semantic Models.
 //! - **Depends on.** Typed route Models, expression parsing, and selected browser references.
 //! - **Must not know.** Relay execution, registry state, or connector acknowledgements.
 
@@ -474,6 +475,10 @@ impl MessageErrorDraft {
                         .ok_or_else(|| Report::new(IngestRouteDraftError::ErrorRelayChanged))?,
                     None => return Err(Report::new(IngestRouteDraftError::ErrorRelay)),
                 };
+                // `SEND TO` constructs its error record with `SET` alone, so it needs one.
+                if assignments.is_empty() {
+                    return Err(Report::new(IngestRouteDraftError::ErrorAssignments));
+                }
                 let mut built = Vec::new();
                 for assignment in assignments {
                     built.push(assignment.build()?);
@@ -485,6 +490,14 @@ impl MessageErrorDraft {
             }
         }
     }
+}
+
+/// When a set-only route emits: on the flush policy it declares, as a correlator route does, or
+/// on its window's `WIDTH` and `STEP`, as a window route does instead of declaring a flush.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SetOnlyEmission {
+    Flushed,
+    WindowCadence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -556,28 +569,70 @@ impl IngestRouteDraft {
         self.build_with_branch(branch)
     }
 
-    fn build_with_branch(
+    /// A set-only route of a window or correlator, which node-wide branching keeps on its input's
+    /// branch. Such a route constructs every output field with `SET` and may filter with `WHERE`,
+    /// so it reads neither an inheritance nor invocations.
+    pub(super) fn build_set_only(
         &self,
-        branch: Option<OutputBranch>,
+        emission: SetOnlyEmission,
     ) -> error_stack::Result<ProcessorOutput, IngestRouteDraftError> {
-        let relay = match &self.relay {
-            Some(relay) => relay
-                .current_name()
-                .ok_or_else(|| Report::new(IngestRouteDraftError::RelayChanged))?,
-            None => return Err(Report::new(IngestRouteDraftError::Relay)),
-        };
+        let relay = self.current_route_relay()?;
+        if self.assignments.is_empty() {
+            return Err(Report::new(IngestRouteDraftError::SetAssignments));
+        }
         let mut assignments = Vec::new();
         for assignment in &self.assignments {
             assignments.push(assignment.build()?);
         }
-        let where_clause = if self.where_clause.trim().is_empty() {
-            None
-        } else {
-            Some(
-                parse_expression(self.where_clause.trim())
-                    .change_context(IngestRouteDraftError::WhereClause)?,
-            )
+        let where_clause = self.build_where_clause()?;
+        let flush_policy = match emission {
+            SetOnlyEmission::Flushed => Some(self.flush.build()?),
+            SetOnlyEmission::WindowCadence => None,
         };
+        Ok(ProcessorOutput {
+            relay: relay.clone(),
+            construction: RouteConstruction {
+                inherit: None,
+                assignments,
+                where_clause,
+                invocations: Vec::new(),
+            },
+            branch: None,
+            flush_policy,
+            message_error_policy: self.message_error.build()?,
+        })
+    }
+
+    fn current_route_relay(&self) -> error_stack::Result<&RelayName, IngestRouteDraftError> {
+        match &self.relay {
+            Some(relay) => relay
+                .current_name()
+                .ok_or_else(|| Report::new(IngestRouteDraftError::RelayChanged)),
+            None => Err(Report::new(IngestRouteDraftError::Relay)),
+        }
+    }
+
+    fn build_where_clause(
+        &self,
+    ) -> error_stack::Result<Option<nervix_models::Expression>, IngestRouteDraftError> {
+        if self.where_clause.trim().is_empty() {
+            return Ok(None);
+        }
+        let where_clause = parse_expression(self.where_clause.trim())
+            .change_context(IngestRouteDraftError::WhereClause)?;
+        Ok(Some(where_clause))
+    }
+
+    fn build_with_branch(
+        &self,
+        branch: Option<OutputBranch>,
+    ) -> error_stack::Result<ProcessorOutput, IngestRouteDraftError> {
+        let relay = self.current_route_relay()?;
+        let mut assignments = Vec::new();
+        for assignment in &self.assignments {
+            assignments.push(assignment.build()?);
+        }
+        let where_clause = self.build_where_clause()?;
         let mut invocations = Vec::new();
         for invocation in &self.invocations {
             invocations.push(invocation.build()?);
@@ -605,6 +660,8 @@ pub(super) enum IngestRouteDraftError {
     RelayChanged,
     #[error("Choose a route inheritance mode")]
     Inheritance,
+    #[error("Add at least one SET assignment: a set-only route constructs every output field")]
+    SetAssignments,
     #[error("Choose at least one field for the selected inheritance mode")]
     InheritedFields,
     #[error("Choose a destination field")]
@@ -637,6 +694,8 @@ pub(super) enum IngestRouteDraftError {
     ErrorRelay,
     #[error("The selected error relay belongs to a changed context; select it again")]
     ErrorRelayChanged,
+    #[error("Add at least one assignment to the error record the SEND TO relay receives")]
+    ErrorAssignments,
 }
 
 #[cfg(test)]
@@ -645,15 +704,15 @@ pub(super) enum IngestRouteDraftError {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use meticulous::ResultExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
         BinaryOperator, BranchName, Expression, FieldName, FieldReference, FieldScope, FlushPolicy,
         Literal, MessageErrorPolicy, ModelKind, ModelName, NodeRef, OutputBranch,
     };
 
     use super::{
-        AssignmentDraft, FlushDraft, IngestRouteDraft, InheritDraft, InvocationDraft,
-        MessageErrorDraft, RouteBranchDraft,
+        AssignmentDraft, FlushDraft, IngestRouteDraft, IngestRouteDraftError, InheritDraft,
+        InvocationDraft, MessageErrorDraft, RouteBranchDraft, SetOnlyEmission,
     };
 
     fn node(kind: ModelKind, name: &str) -> NodeRef {
@@ -753,6 +812,88 @@ mod tests {
             })
         );
         assert_eq!(construction.invocations[0].arguments, [string(r"e\\f")]);
+    }
+
+    #[test]
+    fn set_only_routes_require_set_and_read_a_flush_only_when_they_declare_one() {
+        let refusal = |route: &IngestRouteDraft, emission| {
+            route
+                .build_set_only(emission)
+                .err()
+                .assured("the set-only route is incomplete")
+                .current_context()
+                .clone()
+        };
+        let mut route = IngestRouteDraft::default();
+        route.select_relay(&node(ModelKind::Relay, "out"));
+        route.message_error = MessageErrorDraft::Log;
+        for emission in [SetOnlyEmission::WindowCadence, SetOnlyEmission::Flushed] {
+            assert_eq!(
+                refusal(&route, emission),
+                IngestRouteDraftError::SetAssignments
+            );
+        }
+        route.add_assignment(FieldName::parse("samples").assured("valid field"));
+        route.assignments[0].expression = "count(input.value) + 1".into();
+        route.where_clause = "output.samples > 1".into();
+
+        // A window route emits on its cadence: it reads no flush, inheritance or invocations.
+        let window = route
+            .build_set_only(SetOnlyEmission::WindowCadence)
+            .assured("a window route needs no flush");
+        assert_eq!(window.relay.as_str(), "out");
+        assert_eq!(window.flush_policy, None);
+        assert_eq!(window.branch, None);
+        assert_eq!(window.construction.inherit, None);
+        assert!(window.construction.invocations.is_empty());
+        assert_eq!(window.construction.assignments.len(), 1);
+        assert!(window.construction.where_clause.is_some());
+        assert_eq!(window.message_error_policy, MessageErrorPolicy::Log);
+
+        assert_eq!(
+            refusal(&route, SetOnlyEmission::Flushed),
+            IngestRouteDraftError::Flush
+        );
+        route.flush = FlushDraft::Immediate;
+        assert_eq!(
+            route
+                .build_set_only(SetOnlyEmission::Flushed)
+                .assured("a flushed route declares its flush")
+                .flush_policy,
+            Some(FlushPolicy::Immediate)
+        );
+        route.invalidate_references();
+        assert_eq!(
+            refusal(&route, SetOnlyEmission::Flushed),
+            IngestRouteDraftError::RelayChanged
+        );
+    }
+
+    #[test]
+    fn an_error_relay_needs_an_assignment_to_construct_its_record() {
+        let mut policy = MessageErrorDraft::SendTo {
+            relay: None,
+            assignments: Vec::new(),
+        };
+        policy.select_relay(&node(ModelKind::Relay, "errors"));
+        assert_eq!(
+            policy
+                .build()
+                .err()
+                .assured("an error record needs an assignment")
+                .current_context(),
+            &IngestRouteDraftError::ErrorAssignments
+        );
+        if let MessageErrorDraft::SendTo { assignments, .. } = &mut policy {
+            assignments.push(AssignmentDraft::selected(
+                FieldName::parse("reason").assured("valid field"),
+            ));
+            assignments[0].expression = "error.message".into();
+        }
+        assert!(matches!(
+            policy.build().assured("the error record is constructed"),
+            MessageErrorPolicy::Dlq { ref assignments, .. } if assignments.len() == 1
+        ));
     }
 
     #[test]

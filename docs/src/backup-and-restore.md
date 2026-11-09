@@ -90,8 +90,8 @@ runs can be left out. Send the backup again once the node is back, or once failo
 placements; with replicas, failover promotes one as soon as the failed cut has released its lease.
 
 The cut captures every kind of runtime state the archive holds: WASM guest saves, Kafka ingestor
-offsets, branch lifecycle, fresh materialized relay generations, deduplicator keyspaces and the rows
-every window retains. Each owner stages its share one checkpoint at a time, so state larger than the
+offsets, branch lifecycle, fresh materialized relay generations, deduplicator keyspaces, the rows
+every window retains and each inferencer branch's published tensors. Each owner stages its share one checkpoint at a time, so state larger than the
 node's bulk memory budget is archived within it. [The Quiesced
 Cut](./backup-and-restore-architecture.md#the-quiesced-cut) and [Capture On The
 Owners](./backup-and-restore-architecture.md#capture-on-the-owners) describe each step.
@@ -277,7 +277,8 @@ DESCRIBE BACKUP './cluster.nvxb' FORMAT JSON;
 
 `DESCRIBE BACKUP` runs in `nervix-cli` against a file on its own machine and contacts no server. It
 reads the whole archive and verifies every section's length and digest before it prints anything.
-The description names the archive format, the Nervix and Plexus releases that wrote it, the cluster,
+The description names the archive format, the Nervix and Plexus releases that wrote it, the source
+cluster's configured name and permanent UUID,
 the capture time, the scope, whether resource bytes are included, and the users of a cluster
 archive. For each domain it names the revision and Raft log entry the domain was read at, its
 status, pace and start count, its latest start point, the clock mapping and logical frontier when
@@ -291,15 +292,18 @@ groups. `FORMAT JSON` also lists every Kafka position by topic and partition. De
 are listed by branch fingerprint with their key count, groups, revision and schema fingerprint.
 Window processor state is listed by branch fingerprint with its retained rows, groups, branch
 incarnation, next admission sequence, pending delayed histogram removals, revision, schema
-fingerprint and window model digest. The inspection does not print branch-key field values or
+fingerprint and window model digest. Inferencer state lists the unit, branch fingerprint, model
+and schema fingerprints, incarnation, revision, tensor shapes and raw section length/digest in
+both text and JSON. The inspection does not print branch-key field values or
 deduplicator keys.
 
 ```text
 backup: ./cluster.nvxb
-format: 3
+format: 8
 producer_version: 0.1.0
 language_version: 0.1.0
 cluster: nervix-3f1c
+cluster uid: 72f3a93e-64f0-40a5-b95d-790c8a738fee
 captured_at: 2026-09-27 12:00:00 UTC
 scope: cluster
 resources: included
@@ -339,8 +343,8 @@ RESTORE DOMAIN payments FROM './payments.nvxb' WITHOUT SOURCE OFFSETS;
   copied beside its original in the same cluster.
 - `ON EXISTING USER` decides what a cluster restore does with an archived user the cluster already
   has. `FAIL`, the default, refuses the restore before it changes anything. `SKIP` keeps the
-  existing user and its password. `REPLACE` gives the existing user the archived password hash.
-  Every other archived user is created with its archived password hash, so its original password
+  existing user and its password. `REPLACE` gives the existing user the archived credential.
+  Every other archived user is created with its archived credential, so its original password
   authenticates.
 - `DRY RUN` receives and verifies the archive and plans the whole restore, and changes nothing.
 - `RESUME` makes each restored domain running after its complete state set is published on every
@@ -355,7 +359,7 @@ RESTORE DOMAIN payments FROM './payments.nvxb' WITHOUT SOURCE OFFSETS;
   reports no such warnings, because they are derived from the schedule an applied restore
   publishes.
 - Every other archived branch key must be a key of the branching its restored entity declares:
-  each branch lifecycle entry, the branch each WASM, deduplicator and window descriptor names, and
+  each branch lifecycle entry, the branch each WASM, deduplicator, window and inferencer descriptor names, and
   the branch of each materialized record identity. See
   [Archived Branch Keys](#archived-branch-keys).
 - A window whose restored window processor is not the archived window model, or whose branch
@@ -380,7 +384,13 @@ sent alone: not in a batch with other statements and not while a transaction is 
 
 ### What A Restore Recreates
 
-- **Users.** Each archived user, with its password hash exactly as the archive holds it.
+A restore retains the target cluster's permanent identity and signing key. The source `cluster_uid`
+in the manifest is display metadata: text inspection prints `cluster uid`, and JSON inspection
+prints `cluster_uid`. Archives carry no cluster private key, identity record or licensing state.
+Restoring into a fresh cluster is a clone with that cluster's own UUID and key. Recovering a
+licensed installation requires an administrative transfer to the rebuilt cluster.
+
+- **Users.** Each archived user, with its complete credential exactly as the archive holds it.
 - **Domains.** Each restored domain is initially created stopped, with its archived pace,
   start generation and latest start point. Named placement rules are restored with the Models.
   Complete publication releases its installation
@@ -440,7 +450,7 @@ cannot resume and is refused before admission. An unpaced resume needs no clock 
 
 A normal `START` after a default stopped restore, or after `STOP`, advances the start generation
 and clears materialized state. It preserves compatible WASM state, ingestor positions, branch
-lifecycle, deduplicator keys and windows. To establish a new clock at the saved logical frontier
+lifecycle, deduplicator keys, windows and inferencer tensors. To establish a new clock at the saved logical frontier
 instead, leave the domain stopped and use `START AT '<frontier>' TIME RATE <rate>` explicitly.
 
 ### Archived Branch Keys
@@ -458,7 +468,7 @@ order, the order the archive reader requires. No value is converted to fit, and 
 belong is never staged, so no installed checkpoint names a branch the restored entity's branch
 routing could not reach.
 
-Planning checks every branch lifecycle entry and the branch of every WASM, deduplicator and window
+Planning checks every branch lifecycle entry and the branch of every WASM, deduplicator, window and inferencer
 descriptor whose entity the planned schedule holds under the archived schema fingerprint. A section
 skipped because its entity is absent or holds another schema fingerprint is not checked, while a
 window skipped only for its window model or branch incarnation still is. The conversion of a materialized relay checks the branch of each
@@ -813,6 +823,8 @@ arrives.
 | `domains/<domain>/resources/<resource>/<version>/archive.tar` | The version's original upload | Published versions, unless `WITHOUT RESOURCES` |
 | `domains/<domain>/state/wasm_processor/<processor>/<unit>/<branch>/descriptor.rkyv` | Typed WASM checkpoint identity, schema fingerprint, generation and revision | Saved WASM branches unless `WITHOUT STATE` |
 | `domains/<domain>/state/wasm_processor/<processor>/<unit>/<branch>/guest.bin` | Raw guest save bytes | With each WASM descriptor |
+| `domains/<domain>/state/inferencer/<processor>/<unit>/<branch>/descriptor.rkyv` | Inferencer identity, schema and model fingerprints, typed branch key and fingerprint, incarnation, revision, shapes, raw byte length and digest | Every captured inferencer branch unless `WITHOUT STATE` |
+| `domains/<domain>/state/inferencer/<processor>/<unit>/<branch>/state.bin` | Ordered little-endian F32 tensor bit patterns | With each inferencer descriptor |
 | `domains/<domain>/state/kafka_offset/<ingestor>/<unit>/offsets.rkyv` | Ingestor schema fingerprint and next offsets by topic and partition | Published Kafka domain offsets unless `WITHOUT STATE` |
 | `domains/<domain>/state/branch_lifecycle/<kind>/<processor>/<unit>/branches.rkyv` | Typed branch keys, incarnations and LRU order | Published branch lifecycle unless `WITHOUT STATE` |
 | `domains/<domain>/state/materialized_relay/<relay>/<unit>/descriptor.rkyv` | Domain/relay identity, raw schema fingerprint, revision, fence, branch generation, row and group counts | Every captured materialized relay unless `WITHOUT STATE` |
@@ -824,11 +836,19 @@ arrives.
 | `domains/<domain>/state/window_processor/<processor>/<unit>/<branch>/groups/<group>/input.arrow` | The retained input rows as Arrow IPC of the window's input relay schema | Every nonempty window group |
 | `domains/<domain>/state/window_processor/<processor>/<unit>/<branch>/groups/<group>/arguments.arrow` | Each retained row's aggregate argument values, one nullable column per argument in demand order, row-aligned with the input rows | With each window input group |
 
+Inferencer `state.bin` concatenates tensors in `STATE` declaration order and each tensor's values
+in row-major order. Each value is its four little-endian IEEE-754 F32 bits. Shapes remain in the
+descriptor; scalar shape `[]` holds one value. Positive axes and checked products must agree with
+the exact section length. Signed zero, infinities and NaN payloads are preserved without model
+execution or numeric normalization. Restore refuses a different model/schema fingerprint, shape,
+branch key or incarnation before installing state. `WITHOUT STATE` on either side omits restored
+tensors, so new branches use `INITIAL`; both `RESUME` and a normal `START` preserve installed tensors.
+
 The `<unit>` path portion is `single`, `partition/<number>`, or `instance/<number>`. The record descriptor carries the same typed unit; sections of separate units of one entity have distinct paths and restore destinations.
 
 Materialized group coordinates are zero-based decimal numbers padded to ten digits. A descriptor
 with zero rows has zero groups. A record comes before the sections it owns: a resource version
-before its upload, a WASM descriptor before its guest save, and a descriptor before its groups.
+before its upload, a WASM descriptor before its guest save, an inferencer descriptor before `state.bin`, and a descriptor before its groups.
 Within a descriptor, groups may appear in any order, and so may the two sections of one group. The
 archive reader verifies both sections of every group, and rejects missing, duplicate or
 inconsistent current groups.
@@ -854,8 +874,8 @@ its format version, each a little-endian 16-bit integer. The rest is an
 
 | Kind | Tag | Format version | Holds |
 | --- | --- | --- | --- |
-| Manifest | 1 | 2 | Archive format major version, producer and Plexus releases, cluster id, capture time, scope, whether resource bytes are included, each domain's revision, Raft log entry and cut kind, with a quiesced cut's engagement and release times and quiesce counters, and each section's path, content kind, length and BLAKE3 digest |
-| Users | 2 | 1 | Every user's name and password hash as a PHC string |
+| Manifest | 1 | 4 | Archive format major version, producer and Plexus releases, cluster id and source cluster UID, capture time, scope, whether resource bytes are included, each domain's revision, Raft log entry and cut kind, with a quiesced cut's engagement and release times and quiesce counters, and each section's path, content kind, length and BLAKE3 digest |
+| Users | 2 | 2 | Every user's name and typed PBKDF2-HMAC-SHA-512 credential: validated iterations, 128-bit salt and 64-byte digest |
 | Domain | 3 | 2 | Pace, lifecycle status, start count, the point the latest start began from, the committed clock mapping, the logical instant the clock had reached, and each declared resource with its next version number |
 | Resource version | 4 | 1 | The version's domain, resource and number, its upload state, and for a published version its checksums, file count, sizes, creation time and creating node |
 | WASM guest state descriptor | 5 | 4 | The scheduled unit, saved branch key, schema fingerprint, guest state generation and checkpoint revision |
@@ -865,8 +885,9 @@ its format version, each a little-endian 16-bit integer. The rest is an
 | Materialized record identities | 9 | 4 | The scheduled unit and ordered row identities: an unbranched identity or typed branch fields, and low/high ingestion watermarks |
 | Deduplicator keyspace descriptor | 10 | 4 | Domain and deduplicator names, scheduled unit, schema fingerprint, branch fingerprint and typed branch fields, revision, key count and group count |
 | Window state descriptor | 11 | 4 | Domain and window processor names, scheduled unit, schema fingerprint, window model digest, branch fingerprint and typed branch fields, revision, branch incarnation, first and next admission sequence, each retained row's low/high ingestion watermarks, group count, and each aggregate's structure: rebuilt from the retained rows, or a linear histogram with its delayed removals as expiry time and bucket |
+| Inferencer state descriptor | 12 | 1 | Domain and inferencer names, scheduled unit, schema and pinned model fingerprints, typed branch key and fingerprint, nonzero branch incarnation, revision, ordered shapes and the exact raw section byte length and BLAKE3 digest |
 
-The archive format major version is `6`. An archive with another major version fails before any
+The archive format major version is `8`. An archive with another major version fails before any
 state section can be skipped or installed; capture a new archive in the current instance-unit format. A reader refuses invalid record magic, an unsupported
 manifest or required configuration record, an unknown record kind in the manifest, a first entry
 other than the manifest, and any section whose place, length or digest differs from what the
@@ -901,6 +922,7 @@ that compare restored and re-exported state.
 | Restore archive retention | Until the restore's outcome is recorded, or the retry validity of the execution reference ends |
 | State section staging on an owner | Charged to the same node staging quota until fetched, or for at most 600 seconds; a Kafka offset or branch lifecycle section reserves the 64 MiB record limit while it is written |
 | One owner's capture inventory | One management reply of at most 64 KiB per owner and domain |
+| Inferencer tensors | One branch at a time, bounded by the declared snapshot-section footprint: live publications retain immutable native tensors; stored checkpoints decode under twice that bound, retain one bound and reuse that charge while staging. Capture reserves twice the footprint plus 192 KiB for projection and buffered staging. Restore streams the raw archive slice through a 64 KiB reader, wrapping identical bits in the native frame under twice the footprint plus 128 KiB. |
 | WASM guest save capture | One selected save at a time: `restore_metadata` reserves three times its stored checkpoint size for the inline Fjall value and decoded reader; three fixed 64 KiB bulk buffers cover segmented reads, transfer and staging. A save up to the 64 MiB guest limit can exceed the 32 MiB default bulk budget. |
 | Kafka offset or branch lifecycle section capture | One checkpoint at a time per owner: `restore_metadata` holds twice the stored checkpoint plus 64 KiB for the whole section, beside serializer scratch of one resolver per entry; a 64 KiB bulk buffer streams the record |
 | One Kafka offset or branch lifecycle section | The 64 MiB record limit |

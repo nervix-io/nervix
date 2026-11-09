@@ -38,6 +38,7 @@ const PROPERTIES: &[PropertyDeclaration] = &[
 
 fn declared() -> EmitterEntityCapabilities {
     EmitterEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         instancing: crate::EmitterInstancingCapability::Instances,
         envelope: CLAUSES,
         properties: PROPERTIES,

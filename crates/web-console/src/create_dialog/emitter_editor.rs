@@ -19,6 +19,7 @@ use super::{
     ChoiceControl, ChoiceGroup, CreateSignals, RequestSender,
     emitter_construction_editor::EmitterConstructionEditor,
     emitter_destination_editor::EmitterDestinationEditor,
+    emitter_draft::EmitterDraft,
     emitter_policy_editor::{EmitterPolicyEditor, EmitterPublicationEditor},
     emitter_rows::{EmitterText, OrderButtons},
     emitter_state_editor::EmitterStateEditor,
@@ -38,6 +39,24 @@ pub(super) fn EmitterEditor(
             prop:value=move || signals.emitter.get().name disabled=pending
             on:input=move |event| { let name = event_target_value(&event); signals.emitter.update(|draft| draft.name = name); signals.edit(); } /></label>
         <EmitterDestinationEditor signals=signals request_tx=request_tx session_generation=session_generation />
+        <EmitterInputEditor signals=signals request_tx=request_tx session_generation=session_generation />
+        <EmitterPublicationEditor signals=signals />
+        <EmitterStateEditor signals=signals request_tx=request_tx session_generation=session_generation />
+        <EmitterConstructionEditor signals=signals request_tx=request_tx session_generation=session_generation />
+        <EmitterPolicyEditor signals=signals request_tx=request_tx session_generation=session_generation />
+    }
+    .into_any()
+}
+
+/// The emitter's ordered input relays, their attachment and their collection.
+#[component]
+fn EmitterInputEditor(
+    signals: CreateSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    session_generation: RwSignal<u64>,
+) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    view! {
         <section class="create-emitter-inputs"><h3>"Ordered input relays"</h3>
             <p>"Inputs share one payload schema and may have different branches. Materialized and error relays must fit every input."</p>
             <For each={move || (0..signals.emitter.get().inputs.len()).collect::<Vec<_>>()} key=|index| *index children=move |index| view! {
@@ -56,7 +75,7 @@ pub(super) fn EmitterEditor(
             <EmitterText label="Input WHERE expression (optional)" class_name="create-emitter-input-where" signals=signals multiline=true
                 read=|draft| match draft.inputs.get(draft.active_input) { Some(input) => input.where_clause.clone(), None => String::new() }
                 write=|draft, value| { if let Some(input) = draft.inputs.get_mut(draft.active_input) { input.where_clause = value; } } />
-            <Show when=move || signals.emitter.with(|draft| draft.destination.kind.is_some_and(|kind| kind.capabilities().instancing.refusal(kind).is_none())) fallback=|| ()>
+            <Show when=move || signals.emitter.with(EmitterDraft::offers_instances) fallback=|| ()>
                 <EmitterText label="INSTANCES (a count or PER PARTITION; empty runs one instance)" class_name="create-emitter-instances" signals=signals
                     read=|draft| draft.instances.clone()
                     write=|draft, value| draft.instances = value />
@@ -78,9 +97,6 @@ pub(super) fn EmitterEditor(
                     write=|draft, value| { if let Some(collect) = &mut draft.collect { collect.max_batch_size = if value.is_empty() { None } else { Some(value) }; } } />
             </Show>
         </section>
-        <EmitterPublicationEditor signals=signals />
-        <EmitterStateEditor signals=signals request_tx=request_tx session_generation=session_generation />
-        <EmitterConstructionEditor signals=signals request_tx=request_tx session_generation=session_generation />
-        <EmitterPolicyEditor signals=signals request_tx=request_tx session_generation=session_generation />
     }
+    .into_any()
 }

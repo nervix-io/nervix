@@ -126,7 +126,7 @@ impl IngestorMessage for BrokerDelivery {
     }
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
-        IngestMetadataRow::headers(self)
+        IngestMetadataRow::headers(self, self)
     }
 }
 
@@ -242,7 +242,7 @@ struct ConfirmedAcknowledgement;
 #[async_trait]
 impl IngestorBatchAcknowledgementServices for ConfirmedAcknowledgement {
     async fn wait(&mut self, _timeout: Duration) -> IngestorAcknowledgementOutcome {
-        IngestorAcknowledgementOutcome::Ack
+        IngestorAcknowledgementOutcome::Acknowledged
     }
 }
 
@@ -266,6 +266,8 @@ impl RedeliveryHost {
         }
     }
 }
+
+impl nervix_connector::ConnectorEventProvider for RedeliveryHost {}
 
 #[async_trait]
 impl IngestorHostServices for RedeliveryHost {
@@ -324,9 +326,22 @@ impl IngestorHostServices for RedeliveryHost {
     fn clear_transient_error(&self) {}
     // A lost connection fails acknowledgements and rejections, which the loop reports.
     fn report_error(&self, _message: String) {}
-    fn handle_ack_failure(&self, reason: String) {
-        panic!("every acknowledgement tree of the check succeeds, but one failed: {reason}");
+    fn record_acknowledgement(&self, outcome: &IngestorAcknowledgementOutcome) {
+        if let IngestorAcknowledgementOutcome::Failed { .. }
+        | IngestorAcknowledgementOutcome::TimedOut { .. } = outcome
+        {
+            panic!("every acknowledgement tree of the check succeeds, but one failed: {outcome:?}");
+        }
     }
+    fn record_transport_settlement(
+        &self,
+        _operation: IngestorSettlementOperation,
+        _outcome: IngestorSettlementOutcome,
+        _elapsed: Duration,
+    ) {
+    }
+    fn record_resume(&self, _outcome: IngestorResumeOutcome) {}
+    fn record_suspend(&self, _cause: IngestorSuspendCause) {}
     fn record_transport_redeliveries(&self, positions: usize) {
         let mut broker = self.broker.lock();
         broker.counted_redeliveries = broker
@@ -541,4 +556,11 @@ fn a_broker_ingestor_without_a_retry_policy_reopens_on_the_reconnect_cadence() {
         PositionClass::Replayable,
     );
     assert_eq!(acknowledged.retry, declared);
+}
+
+impl nervix_connector::IngestMessageMetadata for BrokerDelivery {
+    fn payload_bytes(&self) -> usize {
+        nervix_connector::IngestorMessage::payload(self).len()
+    }
+    fn visit_metadata(&self, _values: &mut dyn nervix_connector::IngestMetadataValues) {}
 }

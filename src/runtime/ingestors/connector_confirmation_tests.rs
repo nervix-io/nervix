@@ -79,7 +79,7 @@ impl IngestorMessage for ConfirmingDelivery {
     }
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
-        IngestMetadataRow::headers(self)
+        IngestMetadataRow::headers(self, self)
     }
 }
 
@@ -203,6 +203,8 @@ struct ConfirmingHost {
     record: Arc<Mutex<ConfirmationRecord>>,
 }
 
+impl nervix_connector::ConnectorEventProvider for ConfirmingHost {}
+
 #[async_trait]
 impl IngestorHostServices for ConfirmingHost {
     fn record_read(&self, _outcome: nervix_connector::IngestorReadOutcome) {}
@@ -275,9 +277,22 @@ impl IngestorHostServices for ConfirmingHost {
     }
     // A transport that fails an acknowledgement reports it, which the checks read as a status.
     fn report_error(&self, _message: String) {}
-    fn handle_ack_failure(&self, reason: String) {
-        panic!("every acknowledgement tree of the check succeeds, but one failed: {reason}");
+    fn record_acknowledgement(&self, outcome: &IngestorAcknowledgementOutcome) {
+        if let IngestorAcknowledgementOutcome::Failed { .. }
+        | IngestorAcknowledgementOutcome::TimedOut { .. } = outcome
+        {
+            panic!("every acknowledgement tree of the check succeeds, but one failed: {outcome:?}");
+        }
     }
+    fn record_transport_settlement(
+        &self,
+        _operation: IngestorSettlementOperation,
+        _outcome: IngestorSettlementOutcome,
+        _elapsed: Duration,
+    ) {
+    }
+    fn record_resume(&self, _outcome: IngestorResumeOutcome) {}
+    fn record_suspend(&self, _cause: IngestorSuspendCause) {}
     fn record_transport_redeliveries(&self, positions: usize) {
         panic!("a replayable check ingestor discarded {positions} positions after a reconnect");
     }
@@ -496,4 +511,11 @@ async fn individual_settlement_keeps_each_drain_guard_until_its_transport_confir
         0
     );
     drop(check.shutdown);
+}
+
+impl nervix_connector::IngestMessageMetadata for ConfirmingDelivery {
+    fn payload_bytes(&self) -> usize {
+        nervix_connector::IngestorMessage::payload(self).len()
+    }
+    fn visit_metadata(&self, _values: &mut dyn nervix_connector::IngestMetadataValues) {}
 }

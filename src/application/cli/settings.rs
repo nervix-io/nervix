@@ -21,7 +21,7 @@ pub(super) fn parameter_seed_help(
 ) -> String {
     format!(
         "{description}. First-bootstrap default: {}. Change live policy with ALTER CLUSTER SET",
-        parameter.default_text()
+        parameter.default_cli_text()
     )
 }
 
@@ -31,6 +31,9 @@ impl SettingsArgs {
     /// Preserve the presence of command-line and environment seeds, including explicit defaults.
     pub(super) fn parameter_seeds(&self) -> nervix_models::ClusterParameterSeedValues {
         nervix_models::ClusterParameterSeedValues {
+            tls_cipher_suites: self.cluster_parameters.tls_cipher_suites,
+            tls_key_exchange_groups: self.cluster_parameters.tls_key_exchange_groups,
+            password_iterations: self.cluster_parameters.password_iterations,
             node_unavailability_timeout: self
                 .membership
                 .node_unavailability_timeout
@@ -109,9 +112,10 @@ use clap::Parser as _;
 use error_stack::{Report, ResultExt as _};
 
 use super::{
-    capacity::CapacityArgs, consensus::ConsensusArgs, membership::MembershipArgs,
-    memory_pressure::MemoryPressureArgs, resources::ResourceArgs, runtime::RuntimeArgs,
-    scheduling::SchedulingArgs, shutdown::ShutdownArgs, transactions::TransactionArgs,
+    capacity::CapacityArgs, consensus::ConsensusArgs, execution::ExecutionArgs,
+    membership::MembershipArgs, memory_pressure::MemoryPressureArgs, resources::ResourceArgs,
+    runtime::RuntimeArgs, scheduling::SchedulingArgs, shutdown::ShutdownArgs,
+    transactions::TransactionArgs,
 };
 use crate::application::{error::AppError, node_settings::NodeSettings};
 
@@ -137,6 +141,8 @@ pub struct SettingsArgs {
     pub resources: ResourceArgs,
     #[command(flatten)]
     pub capacity: CapacityArgs,
+    #[command(flatten)]
+    pub execution: ExecutionArgs,
 }
 
 impl TryFrom<SettingsArgs> for NodeSettings {
@@ -145,6 +151,14 @@ impl TryFrom<SettingsArgs> for NodeSettings {
     /// Converts every area's options once, validating each value, and each relationship between
     /// values, before the node does any I/O.
     fn try_from(args: SettingsArgs) -> Result<Self, Self::Error> {
+        args.execution
+            .overrides()
+            .validate()
+            .change_context(AppError::InvalidExecutionSettings)?;
+        let runtime_threads = args.execution.runtime_threads();
+        runtime_threads
+            .validate()
+            .change_context(AppError::InvalidRuntimeCapacity)?;
         let parameter_seeds = args.parameter_seeds();
         nervix_models::ClusterParameterValues::resolve(parameter_seeds)
             .change_context(AppError::InvalidClusterParameters)?;
@@ -168,6 +182,10 @@ impl TryFrom<SettingsArgs> for NodeSettings {
             .capacity
             .settings()
             .change_context(AppError::InvalidCapacitySettings)?;
+        let peer_receive = args
+            .capacity
+            .peer_receive()
+            .change_context(AppError::InvalidPeerReceiveSettings)?;
         Ok(Self {
             parameter_seeds,
             raft,
@@ -184,6 +202,13 @@ impl TryFrom<SettingsArgs> for NodeSettings {
             shutdown,
             resources: args.resources.settings(),
             capacity,
+            peer_receive,
+            execution: args.execution.overrides(),
+            runtime_threads,
+            client_endpoints: args
+                .execution
+                .client_endpoints()
+                .change_context(AppError::InvalidClientEndpointCapacity)?,
         })
     }
 }
@@ -205,7 +230,12 @@ impl From<&NodeSettings> for SettingsArgs {
             memory_pressure: MemoryPressureArgs::from_settings(&settings.memory_pressure),
             shutdown: ShutdownArgs::from_settings(&settings.shutdown),
             resources: ResourceArgs::from_settings(&settings.resources),
-            capacity: CapacityArgs::from_settings(&settings.capacity),
+            capacity: CapacityArgs::from_settings(&settings.capacity, &settings.peer_receive),
+            execution: ExecutionArgs::from_overrides(
+                &settings.execution,
+                &settings.client_endpoints,
+                &settings.runtime_threads,
+            ),
         }
     }
 }
@@ -224,6 +254,7 @@ impl SettingsArgs {
         self.shutdown.render(&mut command_line);
         self.resources.render(&mut command_line);
         self.capacity.render(&mut command_line);
+        self.execution.render(&mut command_line);
         command_line.arguments
     }
 }

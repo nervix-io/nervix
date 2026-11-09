@@ -9,13 +9,15 @@ value, publish batches through producers, upload resources, and download backups
 the system behaves this way. This manual does not repeat those reasons, and the chapter does not
 repeat these rules.
 
-The Rust client, `nervix-client-core`, is the reference implementation. The shared binding exposes
-it through the C ABI of `nervix-client-ffi` to C and C++ hosts, the native Ruby gem `nervix-client` to Ruby hosts, the Python package
-`nervix_client` to CPython hosts, and the JNI library `nervix-client-jvm` to JVM hosts. A host
+The Rust client, `nervix-client-core`, is the reference implementation. The shared host runtime
+exposes it through the C ABI of `nervix-client-ffi` to C and C++ hosts, the native Ruby gem
+`nervix-client` to Ruby hosts, the Python package `nervix_client` to CPython hosts, and the JNI
+library `nervix-client-jvm` to JVM hosts. A host
 that uses a binding inherits every rule below from it except its host-specific rules in
-[Using The Shared Binding](#using-the-shared-binding), [Using The Python Package](#using-the-python-package),
-and [Using The JVM Library](#using-the-jvm-library). An implementation that speaks the protocol
-itself, as the Go and TypeScript conformance clients do, follows all of it.
+[Using The C ABI](#using-the-c-abi), [Using The Python Package](#using-the-python-package),
+[Using The Ruby Gem](#using-the-ruby-gem), and [Using The JVM Library](#using-the-jvm-library).
+An implementation that speaks the protocol itself, as the Go and TypeScript conformance clients
+do, follows all of it.
 
 The Rust reference implementation's execution modes and native/browser capability boundaries are
 specified in [Execution Primitives](./execution-primitives.md). Those repository build and
@@ -148,6 +150,12 @@ archive; see [Restore Streams](#restore-streams).
   authority and verify the TLS certificate against that hostname on every connection, including
   redirects and reconnects. DNS and address attempts MUST fit within the client's connection
   deadline.
+- **T-2a.** Native client-core, the CLI and native bindings use the cryptography boundary's explicit
+  `fips` cipher/group set by default. A cluster's outward policy governs its listeners and shared
+  connector TLS, not a client's offers; an embedding host's process provider does not replace that
+  native default. Trust roots, certificate identity, hostname verification, ALPN and deadlines
+  retain their independent contracts. Read [Algorithm Policy](cryptography.md#algorithm-policy)
+  for membership and the boundary between algorithm selection and a validated deployment.
 - **T-3.** A WebSocket client MUST connect to `/console/ws` on the leader's console endpoint, using
   `ws` for an `http` endpoint and `wss` for an `https` one, and MUST send binary messages only. It
   MUST treat a close with code `1003`, `1007`, `1008`, or `1009` as a defect in what it sent.
@@ -860,10 +868,14 @@ statuses and operator-facing output.
   failed outcome with `Recovered` origin or a restore report remains definitive, with every partial
   step retained.
 
-## Using The Shared Binding
+## Using The C ABI
 
 A host of the C ABI, `nervix-client-ffi`, follows the contract in
-`crates/client-ffi/include/nervix_client.h` and these rules. The
+`crates/client-ffi/include/nervix_client.h` and these C/C++ ownership rules.
+[Client Host Bindings](client-host-bindings.md) owns the shared runtime, call cancellation,
+failure projection, Arrow exchange and native host lifetimes. Python, Ruby and JVM applications
+use their own bindings, whose requirements follow below; they do not declare the C surface or
+manage C handles. The
 [C and C++ Client Library](client-library-c.md) explains them with anchored application-suite
 examples, including explicit C cleanup and C++ custom-deleter ownership:
 
@@ -1029,6 +1041,9 @@ classes and enums. The C retain/release and borrowed-pointer rules become these 
 - **J-5.** Use endpoint `end(Cancel)` to wait for server closure and `close()` to release ownership. The
   library implements no Java retry, correlation, acknowledgement or restoration state machine.
 
+The [JVM Client Library](client-library-jvm.md) shows these rules with examples from the library's
+JUnit suite.
+
 ## Using The Python Package
 
 A CPython host imports `nervix_client`, the package `crates/client-python` builds on pyo3. It
@@ -1065,6 +1080,9 @@ it. A CPython host follows these rules instead:
   else with `InvalidArgumentError` before it sends a batch. A rows event's Arrow export marks every
   sensitive field nullable and reads a withheld value as a null; a host MUST read `states` to tell a
   withheld value from a null.
+
+The [Python Client Library](client-library-python.md) shows these rules with examples from the
+package's pytest suite.
 
 ## Required State Machines
 
@@ -1156,11 +1174,15 @@ stateDiagram-v2
 The rules above are exercised by these tests. The Cucumber scenarios run through
 `just test-scenarios --input <feature>`, the unit tests through `just test-package-lib <package>`,
 the wire and corpus tests through `just test-client-wire`, and the cross-language probes through
-`just test-client-conformance`. The C11 and C++17 application suites under
-`tests/client_conformance/{c,cpp}/suite` add named B-1 through B-16 tests beside the probes;
-`tests/client-suites-inventory.toml` registers every function. Their boundary tiers run in ordinary
-and ASan/UBSan programs, and their cluster tiers run over HTTP and HTTPS on one and three nodes.
-The [C and C++ guide](client-library-c.md) includes their checked source.
+`just test-client-conformance`. Beside its probe, each host binding's language-level suite under
+`tests/client_conformance/<host>/suite` holds the host rules in that host's own test framework:
+pytest for N-1 to N-5, JUnit 5 for J-1 to J-5, minitest for the Ruby gem's R-1 to R-5, and C11
+and C++17 programs with named B-1 through B-16 tests, whose boundary tiers also run under
+AddressSanitizer and UndefinedBehaviorSanitizer. `tests/client-suites-inventory.toml` registers
+every suite test, `just validate-client-suites` holds each suite to its binding's whole public
+surface, and every host guide includes its suite's checked source. [Host Suites And
+Guides](client-host-bindings.md#host-suites-and-guides) states their tiers and what they prove
+beside the probes and the representation properties.
 
 | Rules | Executable evidence |
 | --- | --- |
@@ -1190,7 +1212,7 @@ The [C and C++ guide](client-library-c.md) includes their checked source.
 | K-1 to K-5 | `A domain clock attachment reply precedes its frames, a detach reply follows them, and a transaction refuses both` in `session_protocol.feature`; the state, tick, and client pacing outlines in `domain_clock_attachment.feature`; the owner-loss case in `domain_clock_contract.feature`; `The CLI follows a domain clock across a cluster restart` in `cli_session.feature`; `A <runtime> client reads the running domain clock it attached to before its ticks and keeps its generations apart` in `client_conformance.feature` for every binding host; `an_attach_answers_once_its_node_has_installed_the_committed_domains`, `an_ended_exchange_interrupts_its_attachments_until_a_new_exchange_attaches_them`, `an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_clock`, `a_refused_clock_restoration_is_repeated_on_the_same_session`, `a_clock_restoration_answered_already_attached_follows_the_new_session`, `a_clock_restoration_that_reaches_no_server_is_tried_again_by_the_next_read`, `an_attachment_moved_before_its_old_session_ends_keeps_the_tick_it_reported`, `a_detach_sent_while_a_refused_restoration_waits_releases_the_clock_for_good`, `a_detach_the_old_session_answers_during_a_reconnect_stays_released_on_the_new_session`, `a_restoration_left_unanswered_past_the_request_timeout_wakes_the_waiting_reader`, `a_detach_refused_during_a_reconnect_leaves_the_clock_restored_on_the_new_session`, `a_clock_attached_while_a_reconnect_opens_its_exchange_is_attached_again_on_it`, `an_attachment_moved_while_its_exchange_holds_it_keeps_the_tick_of_an_unchanged_clock`, `a_detach_waits_for_the_attaches_decided_before_it_and_holds_off_later_ones`, `ticks_coalesce_per_domain_and_follow_their_generations_state`, the Shuttle check `shuttle_a_detach_racing_a_restoration_leaves_no_attachment_of_its_clock`, and the `server_domain_clock_ticked.nxsm` and `server_domain_clock_attach_refused.nxsm` conformance frames |
 | P-1 to P-8 | Every scenario of `client_ingestors.feature` and of `client_ingestor_process_faults.feature`, including the socket loss, full restart, relocation, and forwarding node death cases retaining one producer; `a_lost_exchange_leaves_sent_batches_unknown_and_restores_the_producer`, `a_batch_waiting_for_admission_when_the_session_ends_is_definitely_unsent`, `a_new_domain_generation_requires_a_new_producer_open`, and `closing_a_producer_during_restoration_releases_its_late_open` in `nervix-client-core`; `every_open_refusal_round_trips`, `every_submission_outcome_round_trips`, `producer_events_round_trip_and_name_no_request`, and `the_largest_submitted_batch_fits_a_frame_and_one_byte_more_does_not` in `nervix-client-wire`; the `client_open_ingestor.nxcm`, `client_submit_batch.nxcm`, `server_ingestor_opened.nxsm`, `server_submission_*.nxsm`, and `server_producer_*.nxsm` conformance frames |
 | E-1 to E-6 (emitter consumers) | The saturated producer and concurrent consumer and clock restart, generation change, and emitter relocation cases in `client_emitters.feature`; `a_consumer_reports_a_gap_then_reads_through_a_fresh_attachment`, `an_ended_consumer_attachment_reopens_when_its_contract_is_unchanged`, `a_changed_consumer_contract_or_generation_requires_a_new_open`, `temporary_consumer_capacity_refusal_retries_the_same_desired_contract`, `a_delivery_from_a_lost_exchange_cannot_ack_a_replacement`, `a_settlement_sent_before_the_session_lost_its_answer_is_unknown`, `a_read_whose_caller_stopped_waiting_is_taken_over_by_the_next_read`, `a_close_whose_caller_stopped_waiting_still_releases_the_attachment`, and `closing_during_restoration_releases_the_late_attachment` in `nervix-client-core`; `consumer_replies_round_trip_with_retained_arrow_body` and the `server_emitter_opened.nxsm` conformance frame in `nervix-client-wire` |
-| U-1 to U-6 | `An upload stream the protocol does not allow is refused with a typed failure and admits nothing` in `session_protocol.feature`; in `resource_describe.feature`, `An incomplete upload does not admit content or consume its identity`, `Upload retry reports one assigned version`, `An upload whose installing call loses its reply reports its one assigned version`, `Upload retry after leader change reports the assigned version`, `A leader resumes an upload whose publication it refused from its own installed copy`, and `An uncertain upload completes once across installation and leader change`; `A <runtime> client distinguishes an upload identity conflict from its completed retry` in `client_conformance.feature` and the `upload_*.nxum` and `upload_*.nxur` corpus frames; in `cli_session.feature`, `An uncertain CLI upload is recovered by repeating it under its upload identity` and `The CLI REPL refuses an upload inside a transaction and recovers an uncertain upload by running it again`; `a_lost_upload_reply_retries_with_the_same_identity_and_archive`, `an_upload_redirect_keeps_its_identity_and_archive`, `malformed_upload_replies_are_rejected_by_their_correlations`, `a_handle_sends_the_identities_an_earlier_run_reported`, `a_cancelled_upload_the_server_received_is_uncertain_under_its_identity` and `an_upload_is_refused_while_the_session_holds_a_transaction` |
+| U-1 to U-6 | `An upload stream the protocol does not allow is refused with a typed failure and admits nothing` in `session_protocol.feature`; in `resource_describe.feature`, `An incomplete upload does not admit content or consume its identity`, `Upload retry reports one assigned version`, `An upload whose installing call loses its reply reports its one assigned version`, `Upload retry after leader change reports the assigned version`, `A leader resumes an upload whose publication it refused from its own installed copy`, and `An uncertain upload completes once across installation and leader change`; `A <runtime> client distinguishes an upload identity conflict from its completed retry` in `client_conformance.feature` and the `upload_*.nxum` and `upload_*.nxur` corpus frames; the host suites' cluster-tier upload tests, Python's `test_an_upload_completes_again_under_its_identity_and_refuses_another_archive`, the JVM suite's `anUploadCompletesAgainUnderItsIdentityAndRefusesAnotherArchive`, Ruby's `test_upload_identity_conflicts_are_typed_outcome_fields` and the C11 and C++17 suites' `test_b1_an_upload_completes_again_under_its_identity_and_refuses_another_archive`, each on one and three nodes; in `cli_session.feature`, `An uncertain CLI upload is recovered by repeating it under its upload identity` and `The CLI REPL refuses an upload inside a transaction and recovers an uncertain upload by running it again`; `a_lost_upload_reply_retries_with_the_same_identity_and_archive`, `an_upload_redirect_keeps_its_identity_and_archive`, `malformed_upload_replies_are_rejected_by_their_correlations`, `a_handle_sends_the_identities_an_earlier_run_reported`, `a_cancelled_upload_the_server_received_is_uncertain_under_its_identity` and `an_upload_is_refused_while_the_session_holds_a_transaction` |
 | A-1 to A-6 | Every scenario of `backup.feature`, including `A client that loses its download fetches the archive again until a download collects it`, `An archive is refused once its execution reference's retry validity ends`, and `Downloads of another user's backup, or under a reference without an archive, are refused`; the console's `A console backup downloads a verified archive whose manifest lists the backed-up domains`, `A console backup download interrupted by a page reload resumes after the reload`, `A console backup download interrupted by a page reload resumes after leadership moved under the backup`, `The REPL's backup keeps one console session and its leader redirect when the session's connection is lost`, `The REPL and the backup controls keep one console session when leadership moves after the redirect` and `The REPL's backup keeps one console session when leadership moved after the redirect and the session's connection is lost` in `backup_restore.feature`; `every_download_frame_round_trips` and `a_download_request_with_an_invalid_reference_is_refused` in `nervix-client-wire`; the `backup_download_*` conformance frames |
 | A-7, A-8 | Every scenario of `backup_wait.feature`, including `A bounded native wait recovers the original multi-domain backup`, `A bounded CLI wait recovers the same multi-domain backup to another file`, `A backup execution can be recovered to another local destination`, `An expired reference refuses CLI recovery without starting another backup`, and `A leader change between domain cuts preserves multi-domain backup recovery`; `A native backup waits through an outage longer than its retry budget` in `client_wire_failures.feature`; `backup_waits_beyond_ordinary_request_and_retry_deadlines`, `backup_reconnects_with_the_same_reference_within_its_wait_budget`, `backup_redirected_to_an_unreachable_leader_recovers_within_its_wait_budget`, and `backup_wait_expiry_preserves_the_reference_for_explicit_recovery` in `nervix-client-core` |
 | B-1 to B-7 | The binding tests of `nervix-client-ffi`, such as `retained_references_keep_the_frame_until_the_last_one_is_released`, `string_and_bytes_columns_are_copied_with_offsets_and_borrowed_per_cell`, `every_event_kind_reports_its_subscription_and_count`, `every_end_reason_and_restoration_cause_has_its_header_value`, and `a_host_creates_triggers_and_frees_tokens_through_the_c_abi`; `a_token_bounds_a_call_by_cancellation_and_by_deadline` in `nervix-client-host`; the C, C++, Java, and Ruby cases of `client_conformance.feature`; the C11 and C++17 application suites' named `test_b*` cases for these rules, with both programs' public header references checked by Clang |
@@ -1200,7 +1222,7 @@ The [C and C++ guide](client-library-c.md) includes their checked source.
 | B-12 to B-16 | `A <runtime> client publishes typed batches through a client ingestor and acknowledges their output through a client emitter` in `client_conformance.feature` for the C ABI in process, C, C++, Java, and Ruby; `a_producer_reports_its_description_and_takes_every_outcome_class`, `a_refused_open_names_its_refusal_and_a_host_argument_is_checked_first`, `a_consumer_reads_and_settles_a_delivery_and_a_lost_confirmation_is_uncertain`, `a_reconnect_interrupts_a_consumer_expires_its_deliveries_and_restores_only_open_handles`, `every_kind_of_column_reads_back_from_the_batch_and_from_its_stream`, `a_builder_refuses_what_a_column_cannot_hold`, and `bolero_host_columns_round_trip_through_builder_and_stream` in `nervix-client-ffi`; the C11 and C++17 application suites' named `test_b*` cases for these rules, with both programs' public header references checked by Clang |
 | N-1 to N-5 | The three outlines of `client_conformance.feature` for CPython over the Python package, on one and three nodes, whose probe also checks a retained frame view, a wait cancelled from another thread and Arrow data pyarrow builds and reads; the package's pytest suite, `tests/client_conformance/python/suite`, whose boundary tier `just test-client-python-api` runs and whose cluster tier is `A <runtime> client's suite passes its cluster tests over <transport> on <cluster_size> nodes` in `client_suites.feature`, with `with` blocks, collection-driven lifetimes, threads, typed exceptions and Arrow exchange with pyarrow and polars; `a_wait_releases_the_gil_and_another_python_thread_cancels_it`, `every_failure_kind_raises_its_exception`, `a_frame_view_keeps_its_event_alive`, `an_ended_restoration_and_a_refused_one_say_why`, `a_producer_outlives_its_session`, `a_with_block_releases_its_object_and_a_view_outlives_the_release` and `a_pycapsule_round_trip_keeps_every_column_kind_at_its_bounds` in `nervix-client-python`; `bolero_host_columns_round_trip_through_the_arrow_c_data_interface` and `bolero_typed_field_descriptions_round_trip` in `nervix-client-host` |
 | J-1 to J-5 | The inventoried JUnit 5 suite in `tests/client_conformance/java/suite` and the [JVM guide](client-library-jvm.md), with the `@client_suite_java` one-/three-node outlines; Java 21's three conformance probe outlines; `BoundaryTests` checks columns, Cleaner release and cancellation from another Java thread; `nervix-client-jvm` embeds the JVM to check every host failure kind, restoration messages/waits, and registered complete JNI field/column properties. The Java row probe checks native Cleaner release and derived-buffer retention after its session closes. |
-| R-1 to R-5 | The inventoried minitest suite in `tests/client_conformance/ruby/suite` and the [Ruby guide](client-library-ruby.md), with the `@client_suite_ruby` TLS/plaintext one-/three-node outlines; `just test-client-ruby-api` checks the prepared gem without a cluster. The suite covers retained String/IO::Buffer data and slices, collection, GVL release and cancellation, native metadata, typed failures and endpoint recovery. The existing embedded Ruby tests retain the sibling-token interrupt, field-snapshot and native representation evidence; the Ruby conformance probe remains independent. |
+| R-1 to R-5 (Ruby gem) | The inventoried minitest suite in `tests/client_conformance/ruby/suite` and the [Ruby guide](client-library-ruby.md), with the `@client_suite_ruby` TLS/plaintext one-/three-node outlines; `just test-client-ruby-api` checks the prepared gem without a cluster. The suite covers retained String/IO::Buffer data and slices, collection, GVL release and cancellation, native metadata, typed failures and endpoint recovery. The existing embedded Ruby tests retain the sibling-token interrupt, field-snapshot and native representation evidence; the Ruby conformance probe remains independent. |
 | W-1 to W-5, B-10 | `A <client> recovers a completed restore after <reply> on <cluster_size> nodes` in `client_restore_reply_validation.feature` (native client and CLI, both invalid replies, one and three nodes), the `restore_reply` owner tests in `nervix-client-core` (typed uncertainty, exact-session interruption, replacement preservation, local failures and known refusals); every scenario of `restore.feature`, including `An interrupted restore upload is sent again under its execution reference`, `A restore repeated under its execution reference joins it or returns its recorded outcome`, and `A leader change while a restore applies resumes it on the new leader`; the console's restore scenarios in `backup_restore.feature`, including `A console restore whose reply was lost after it applied stays unknown when a later attempt cannot read the archive`; the console's restore driver tests in `nervix-web-console`, including `a_restore_whose_reply_was_lost_stays_unknown_when_the_next_attempt_cannot_read_the_archive` and `a_restore_whose_reply_was_lost_stays_unknown_when_the_leader_refuses_a_later_stream`; `Ctrl-C during a CLI RESTORE leaves it to recover under its execution reference` in `cli_session.feature`; `a_restore_start_round_trips`, `every_restore_chunk_round_trips_and_an_empty_one_is_refused`, and `every_restore_reply_round_trips` in `nervix-client-wire`; `a_foreign_restore_reply_ends_its_session_and_reports_its_own_reference_uncertain` in `nervix-client-core`; the `restore_*` conformance frames; `a_restore_outcome_reports_its_steps` in `nervix-client-ffi`; `test_b10_restore_streams_the_archive_and_reports_its_steps` in both native application suites and the [C and C++ guide](client-library-c.md#back-up-and-restore) |
 | W-3, W-5 (console) | `an_unreadable_restore_reply_naming_another_execution_leaves_its_own_outcome_unknown`, `an_unreadable_restore_reply_leaves_its_outcome_unknown`, and `an_unreadable_restore_reply_answering_another_request_leaves_its_outcome_unknown` in `nervix-web-console`; `A restore reply naming another execution leaves the restore outcome unknown` in `unreadable_replies.feature`, on one and three nodes |
 | W-4, W-5 (console attempt history) | `an_unrecorded_request_failure_cannot_settle_an_earlier_possibly_admitted_restore`, `an_initial_unrecorded_request_failure_is_definitive`, and `a_recorded_or_report_bearing_failure_settles_an_earlier_possibly_admitted_restore` in `nervix-web-console`; `A console restore whose completed reply was lost stays unknown after an unrecorded request failure` in `backup_restore.feature`, on one and three nodes, followed by complete recorded-outcome recovery with the original start and archive |
@@ -1222,8 +1244,10 @@ language-level suite is the other instrument: it holds one package to the behavi
 documents, in that host's own test framework, and every code block of the guide is one of its
 tests. A host suite can ask its scenario for the declared subscription-opening refusal through
 the request/confirmation exchange in [Client Suites](integration-test-lifecycle.md#client-suites).
-Python's `test_a_refused_subscription_restoration_reports_its_cause_and_recovers` and the C and
-C++ suites' `test_b7_refused_subscription_restoration_reports_its_cause_and_recovers` observe the
+Python's `test_a_refused_subscription_restoration_reports_its_cause_and_recovers`, the JVM suite's
+`aRefusedSubscriptionRestorationReportsItsCauseAndRecovers`, Ruby's
+`test_refused_restoration_is_observable_and_the_subscription_recovers` and the C and C++ suites'
+`test_b7_refused_subscription_restoration_reports_its_cause_and_recovers` observe the
 interruption, unavailable restoration with its message and retry wait, and later row delivery
 through the live cluster. The Python package's suite is `tests/client_conformance/python/suite`,
 with the [Python Client Library](client-library-python.md) guide; the JVM suite is
@@ -1232,7 +1256,10 @@ the Ruby minitest suite is `tests/client_conformance/ruby/suite`, with the
 [Ruby Client Library](client-library-ruby.md) guide;
 and the C11 and C++17 programs under `tests/client_conformance/{c,cpp}/suite` supply the
 [C and C++ guide](client-library-c.md), including explicit cleanup and typed RAII ownership.
-`tests/client-suites-inventory.toml` registers every suite test. The Go and TypeScript probes
+`tests/client-suites-inventory.toml` registers every suite test. Every host boundary tier runs in
+ordinary CI, and the Python cluster tier runs in ordinary scenario shards. The `client-conformance` lane additionally runs
+every host's cluster tier; its boundary and packaging checks pass before it starts the scenarios.
+The Go and TypeScript probes
 each keep one request in flight. They use a harness-supplied UUIDv7 reference for the leader-only
 schema creation that proves redirect handling, and a separate reference for each later read or
 deliberately malformed request.
@@ -1355,6 +1382,15 @@ work. A durable command sent then can return `OutcomeUnknown(NotYetAuthoritative
 exact retry of an execution that completed before restart. Keep the same execution reference and
 continue recovery; this response establishes neither success nor failure of that execution.
 
+### Password Credential Work
+
+Password authentication continues to use the existing Basic credentials and session identity.
+The server verifies bounded PBKDF2-HMAC-SHA-512 credentials through its isolated credentials
+worker. A successful Exchange or WebSocket establishes the user once for that session; commands
+and events reuse that identity. HTTP authentication probes deliberately verify the credentials
+they present. An unjudged attempt remains retryable through UNAVAILABLE or HTTP 503; a wrong
+password remains refused. Clients never receive a stored credential, salt or digest.
+
 ## Reading Typed Materialized State
 
 Clients MUST retain `CommandOutcome.state` independently of the command message and preserve its
@@ -1368,7 +1404,20 @@ bound. A retained frame MUST keep its backing bytes alive after its containing o
 Clients MUST preserve full integer widths, float bits, datetime values, bytes, nested lists, null
 and redaction. Watermark column identities are their declared positions, never guessed names.
 
-Resume the opaque continuation with the same domain, relay and selector. On `StaleContinuation`,
+Resume the opaque continuation with the same domain, inspected entity and selector. On `StaleContinuation`,
 start a new read; do not combine it with rows from the abandoned sequence. Complete counts describe
-the whole selected cut. An empty page has no row sections or continuation. See
+the whole selected cut. An empty materialized page has no row sections or continuation. Processor
+reads use the same envelope: a window page with no retained inputs can still carry `header` and
+`accumulators` sections. Clients preserve these metadata frames without counting them toward the
+retained-row limit or continuation offset. See [Runtime Nodes](./processors.md#inspect-retained-window-state)
+for section meanings and
 [Materialized State Inspection Envelope](./client-session-protocol.md#materialized-state-inspection-envelope).
+
+The native Python, Ruby and JVM bindings expose this envelope through
+`Outcome.state_inspection` (Python property and Ruby method) and `Outcome.stateInspection()`
+(JVM). Their inspection, unit and section views retain the shared host `Inspection`; each frame
+retains only its verified Row bytes and schema. A Python memoryview, Ruby `IO::Buffer`, or JVM
+direct `ByteBuffer` and its derived slices MUST keep that frame alive independently of every
+parent object or closed handle. The JSON view is the existing envelope's lossless serializer,
+never a reconstruction from display text. Native enums preserve the distinct refusal, stage and
+unit-kind values. The host guides' `Inspect Materialized State` sections are executable examples.

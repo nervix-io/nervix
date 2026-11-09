@@ -8,6 +8,10 @@
     nervix_lint,
     nervix::layer(edge, reason = "public client language adapter")
 )]
+// Erasing a form section to `AnyView` makes the compiler lay out the future that resolves it, and
+// that future nests as deeply as the section's view tree; the processor sections exceed the
+// default limit of 128.
+#![recursion_limit = "256"]
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry},
@@ -12565,14 +12569,24 @@ mod tests {
             ChoiceControl::ProcessorInputRelay
             | ChoiceControl::ProcessorRouteRelay
             | ChoiceControl::ProcessorStateRelay
-            | ChoiceControl::ProcessorErrorRelay => nervix_client_wire::ChoiceTarget::Relay,
+            | ChoiceControl::ProcessorErrorRelay
+            | ChoiceControl::ProcessorRightInputRelay
+            | ChoiceControl::ProcessorLeftTimeoutRelay
+            | ChoiceControl::ProcessorRightTimeoutRelay => nervix_client_wire::ChoiceTarget::Relay,
             ChoiceControl::ProcessorBranch | ChoiceControl::ProcessorRouteBranch => {
                 nervix_client_wire::ChoiceTarget::Branch
             }
             ChoiceControl::ProcessorStateField
             | ChoiceControl::ProcessorInputField
             | ChoiceControl::ProcessorOutputField
-            | ChoiceControl::ProcessorErrorField => nervix_client_wire::ChoiceTarget::RelayField,
+            | ChoiceControl::ProcessorErrorField
+            | ChoiceControl::ProcessorAggregateField
+            | ChoiceControl::ProcessorCorrelateLeftField
+            | ChoiceControl::ProcessorCorrelateRightField
+            | ChoiceControl::ProcessorRouteLeftField
+            | ChoiceControl::ProcessorRouteRightField => {
+                nervix_client_wire::ChoiceTarget::RelayField
+            }
             ChoiceControl::ProcessorBranchField => nervix_client_wire::ChoiceTarget::BranchField,
             ChoiceControl::EmitterReference => {
                 nervix_client_wire::ChoiceTarget::EmitterHttpRequestReference

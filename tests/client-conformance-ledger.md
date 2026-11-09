@@ -4,31 +4,38 @@ This is the executable ledger of [Client Wire 14](https://app.clickup.com/t/86bc
 [Clock Attach 05](https://app.clickup.com/t/86bc8azn1) extended with the domain clock events the
 binding exposes, [Clock Attach 05A](https://app.clickup.com/t/86bc95p44) with the clock an attach
 reports, and [Client I/O 04](https://app.clickup.com/t/86bc8bj89) with the producers and consumers
-of client endpoints. It records which runtimes speak the finalized session protocol, whether each
-does so as an independent native client or through the shared Rust binding, the commands that build
-and run each one, and the contract each probe checks. It does not promise a separately maintained
-production SDK for any language: the probes are qualification clients, and the binding is the
-supported way for Python, JVM, Ruby, C and C++ hosts to reuse the Rust session.
+of client endpoints. Native Bindings adds the pyo3 Python package, magnus Ruby gem and JNI JVM
+library over the shared Rust host runtime; the C ABI serves C and C++ only.
+[Client Suites](https://app.clickup.com/t/86bcz5ctu) gives every binding host a language-level
+suite and a guide. This ledger records which runtimes implement the session protocol
+independently or reuse that runtime, how to build and run them, and exactly what each probe and
+each host suite checks. The native libraries are application interfaces, each with a guide under
+the [Client Libraries](../docs/src/client-libraries.md) index; the independent Go and TypeScript
+probes are qualification clients rather than maintained SDKs.
 
 The [Client Ingestors And Emitters](../docs/src/client-io-architecture.md) architecture chapter
 connects the qualified endpoint operations to graph ownership, ACK/credit boundaries, buffer
 lifetimes, restoration and runnable paced workflows. This ledger owns the qualification scope.
+The authoritative [Client Host Bindings](../docs/src/client-host-bindings.md) chapter owns the
+shared runtime, per-host lifetimes, failure mapping, Arrow exchange, packaging, and the contract of
+the host suites and guides. A change to a binding, its shared runtime, a probe, a host suite or
+this ledger keeps that chapter current in the same change.
 
 ## Paths
 
 | Runtime | Path | Transport | Probe |
 | --- | --- | --- | --- |
-| C ABI, in process | Shared Rust binding | Native gRPC | `tests/common/client_conformance/c_abi_probe.rs` |
-| C (C11) | Shared Rust binding | Native gRPC | `tests/client_conformance/c/probe.c` |
-| C++ (C++17) | Shared Rust binding, owned through `std::unique_ptr` | Native gRPC | `tests/client_conformance/cpp/probe.cpp` |
-| CPython 3.12+ | Shared Rust binding through the Python package `nervix_client` on pyo3, `crates/client-python` | Native gRPC | `tests/client_conformance/python/probe.py` |
+| C ABI, in process | C ABI over the shared host runtime | Native gRPC | `tests/common/client_conformance/c_abi_probe.rs` |
+| C (C11) | C ABI over the shared host runtime | Native gRPC | `tests/client_conformance/c/probe.c` |
+| C++ (C++17) | C ABI over the shared host runtime, owned through `std::unique_ptr` | Native gRPC | `tests/client_conformance/cpp/probe.cpp` |
+| CPython 3.12+ | Shared Rust host runtime through the pyo3 package `nervix_client`, `crates/client-python` | Native gRPC | `tests/client_conformance/python/probe.py` |
 | Java 21+ | Shared Rust host runtime through the JNI library, `crates/client-jvm` | Native gRPC | `tests/client_conformance/java/Probe.java` |
 | Ruby 3.3+ | Shared Rust host runtime through the magnus gem, `crates/client-ruby` | Native gRPC | `tests/client_conformance/ruby/probe.rb` |
 | Go 1.25+ | Independent native client, `flatc --go` and `google.golang.org/grpc` | Native gRPC | `tests/client_conformance/go/` |
 | Node.js 24 | Independent native client, `flatc --ts` and the built-in `WebSocket` | Binary WebSocket | `tests/client_conformance/node/probe.ts` |
 | Bun 1.4 | The same TypeScript client, unchanged | Binary WebSocket | `tests/client_conformance/node/probe.ts` |
 
-The shared Rust binding is the host session runtime, `crates/client-host`, which C and C++
+The shared owner is the host session runtime, `crates/client-host`, which C and C++
 hosts reach through the C ABI of `crates/client-ffi`, whose contract is
 `crates/client-ffi/include/nervix_client.h`, and CPython hosts through the Python package of
 `crates/client-python`, JVM hosts through the JNI jar of `crates/client-jvm`, and Ruby hosts through the native magnus
@@ -227,7 +234,9 @@ code block an include of an anchored test.
 The cluster runner can request a testing-build action on stdout and await its numbered confirmation
 on stdin, through the exchange [Client Suites](../docs/src/integration-test-lifecycle.md#client-suites)
 specifies. Python's registered
-`test_a_refused_subscription_restoration_reports_its_cause_and_recovers`, and the C/C++ case
+`test_a_refused_subscription_restoration_reports_its_cause_and_recovers`, the JVM suite's
+`aRefusedSubscriptionRestorationReportsItsCauseAndRecovers`, Ruby's
+`test_refused_restoration_is_observable_and_the_subscription_recovers`, and the C/C++ case
 `test_b7_refused_subscription_restoration_reports_its_cause_and_recovers`, cut their session relay,
 ask the scenario to arm every node's next subscription-opening refusal, restore the relay, read
 `INTERRUPTED` and `RESTORATION_FAILED` with `UNAVAILABLE`, a message and a positive retry wait,
@@ -237,14 +246,27 @@ clock-attachment refusal action or public domain-removal statement; clock restor
 domain-removed end values remain covered by the binding owner tests rather than a claimed live
 host-suite observation.
 
+Python's `test_an_upload_completes_again_under_its_identity_and_refuses_another_archive`, the JVM
+suite's `anUploadCompletesAgainUnderItsIdentityAndRefusesAnotherArchive`, Ruby's
+`test_upload_identity_conflicts_are_typed_outcome_fields` and the C/C++ case
+`test_b1_an_upload_completes_again_under_its_identity_and_refuses_another_archive` create a
+resource, upload a local directory as its version through the host's execute call, execute the
+same prepared execution again and see it complete without a second version, then change the
+archive and read `IDENTITY_CONFLICT` from the typed upload failure of the failed outcome.
+
 | Host | Build | Boundary tier | Cluster tier | Covers | Runs in | Guide |
 | --- | --- | --- | --- | --- | --- | --- |
-| CPython 3.12+ | `just build-client-python`: the wheel with pytest, pyarrow, polars and mypy in `target/client-conformance/python`, and alone in `target/client-conformance/python-bare` | `just test-client-python-api`, which `just test` runs | `just test-client-python-cluster`, or the `@client_suite_python` rows of `just test-client-conformance` | Connection over TLS with seeds and timeouts, execution and recovery by the same execution, completion, subscriptions and their events, domain clocks across generations and a lost session, producers and every outcome class, consumers and every settlement, backup and restore, `with` blocks and collection-driven lifetimes, threads, typed exceptions, Arrow exchange with pyarrow and polars, and the wheel's packaging | The `client-conformance` job, for a pull request labeled `client-conformance` | [Python Client Library](../docs/src/client-library-python.md) |
-| JVM / Java 21+ | `just build-client-jvm-tests`: the self-loading jar, pinned/digest-verified JUnit 5 console launcher and compiled suite | `just test-client-jvm-api` with `-Xcheck:jni` and exact inventory accounting | `just test-client-jvm-cluster`, or the `@client_suite_java` rows of `just test-client-conformance` | TLS/authentication/seeds/timeouts, execution identity recovery, completion, typed subscriptions, clock generations and reconnection, producers and credit/outcomes, consumer settlements and recovery, backup/restore, Cleaner/close/buffer lifetimes, concurrent calls and cancellation, records/enums and the exception hierarchy | The `client-conformance` job; boundary, embedded-JNI and existing Java probe checks retained | [JVM Client Library](../docs/src/client-library-jvm.md) |
-| CRuby 3.3+ | `just build-client-ruby`: the native gem, extracted loader and fresh `GEM_HOME` install | `just test-client-ruby-api`; the Rust `host_suite` test runs the prepared minitest boundary tier in ordinary tests | `just test-client-ruby-cluster`, or the `@client_suite_ruby` rows of `just test-client-conformance` | TLS/authentication/seeds/timeouts, execution recovery, completion, subscriptions and restoration refusal, clocks, endpoint metadata/credit/outcomes/settlements/recovery, backup/restore, blocks and ensure, collection and retained slices, GVL release, typed errors and exact scalar/nested IPC | The `client-conformance` job and ordinary boundary tests, with exact inventory accounting | [Ruby Client Library](../docs/src/client-library-ruby.md) |
-
-| C11 | `just build-client-c-suites`: the shared binding, C11/C++17 programs and ASan/UBSan variants | `just test-client-c-api`, also the ordinary Cargo native integration target | `just test-client-c-cluster`, or `@client_suite_c` | Every B-1 to B-16 by named case: explicit releases, retained bytes and cross-thread lifetimes, embedded NULs, bulk columns, cancellation and deadlines, completion, typed materialized state inspection, clocks, backup/restore, all producer outcomes and consumer settlements, gaps and reopen | Ordinary workspace tests and `client-conformance` | [C and C++ Client Library](../docs/src/client-library-c.md) |
+| CPython 3.12+ | `just build-client-python`: the wheel with pytest, pyarrow, polars and mypy in `target/client-conformance/python`, and alone in `target/client-conformance/python-bare` | `just test-client-python-api`, which `just test` runs | `just test-client-python-cluster`, or the `@client_suite_python` rows of `just test-client-conformance` | Connection over TLS with seeds and timeouts, execution and recovery by the same execution, resource uploads and their typed identity conflict, completion, subscriptions and their events, domain clocks across generations and a lost session, producers and every outcome class, consumers and every settlement, backup and restore, `with` blocks and collection-driven lifetimes, threads, typed exceptions, Arrow exchange with pyarrow and polars, and the wheel's packaging | Ordinary `tests` boundary tier and ordinary scenario-shard cluster tier; also `client-conformance` | [Python Client Library](../docs/src/client-library-python.md) |
+| JVM / Java 21+ | `just build-client-jvm-tests`: the self-loading jar, pinned/digest-verified JUnit 5 console launcher and compiled suite | `just test-client-jvm-api` with `-Xcheck:jni` and exact inventory accounting | `just test-client-jvm-cluster`, or the `@client_suite_java` rows of `just test-client-conformance` | TLS/authentication/seeds/timeouts, execution identity recovery, resource uploads and their typed identity conflict, completion, typed subscriptions and restoration refusal, clock generations and reconnection, producers and credit/outcomes, consumer settlements and recovery, backup/restore, Cleaner/close/buffer lifetimes, concurrent calls and cancellation, records/enums and the exception hierarchy | Ordinary `tests` boundary tier and embedded JNI properties; cluster tier and independent probe in `client-conformance` | [JVM Client Library](../docs/src/client-library-jvm.md) |
+| CRuby 3.3+ | `just build-client-ruby`: the native gem, extracted loader and fresh `GEM_HOME` install | `just test-client-ruby-api`; the Rust `host_suite` test runs the prepared minitest boundary tier in ordinary tests | `just test-client-ruby-cluster`, or the `@client_suite_ruby` rows of `just test-client-conformance` | TLS/authentication/seeds/timeouts, execution recovery, resource uploads and their typed identity conflict, completion, subscriptions and restoration refusal, clocks, endpoint metadata/credit/outcomes/settlements/recovery, backup/restore, blocks and ensure, collection and retained slices, GVL release, typed errors and exact scalar/nested IPC | The `client-conformance` job and ordinary boundary tests, with exact inventory accounting | [Ruby Client Library](../docs/src/client-library-ruby.md) |
+| C11 | `just build-client-c-suites`: the shared binding, C11/C++17 programs and ASan/UBSan variants | `just test-client-c-api`, also the ordinary Cargo native integration target | `just test-client-c-cluster`, or `@client_suite_c` | Every B-1 to B-16 by named case: explicit releases, retained bytes and cross-thread lifetimes, embedded NULs, bulk columns, cancellation and deadlines, resource uploads and their typed identity conflict, completion, typed materialized state inspection, clocks, backup/restore, all producer outcomes and consumer settlements, gaps and reopen | Ordinary workspace tests and `client-conformance` | [C and C++ Client Library](../docs/src/client-library-c.md) |
 | C++17 | The same build with the C++17 compiler and its own native executable | `just test-client-cpp-api`, also the ordinary Cargo native integration target | `just test-client-c-cluster`, or `@client_suite_cpp` | The C ABI cases compiled and run independently as C++17, plus typed custom-deleter `std::unique_ptr` owners, exception unwinding and a retained batch moved across a thread | Ordinary workspace tests and `client-conformance` | [C and C++ Client Library](../docs/src/client-library-c.md) |
+
+Every boundary tier runs in the ordinary `tests` job from archived artifacts. The Python cluster
+examples join ordinary scenario shards, which already carry its wheel. JVM, Ruby, C and C++ cluster
+examples stay under `client-conformance`, whose toolchains and prepared artifacts they need. Local
+host-cluster recipes and the full prepared conformance runner check the boundary tiers, including
+packaging smoke, before starting scenarios. Ordinary Python scenario runners keep that gate too.
 
 The native boundary tiers run both ordinary and ASan/UBSan programs; cluster tiers run their
 sanitized programs over HTTP and HTTPS on one and three nodes. Both programs restore SIGPIPE's
@@ -254,6 +276,23 @@ bounded to 512 entries per test and teardown joins every owned host thread befor
 The C ABI probes and in-process Rust probe remain independent evidence. Rust coverage observes
 the binding and harness, while sanitizers judge host memory and undefined behavior; Deloxide does
 not observe these separate host processes.
+
+## Typed state inspection
+
+Typed inspection parity for Python, Ruby and JVM runs in
+`tests/features/runtime/native_binding_inspection.feature`: one and three nodes per host, empty
+and refused reads, two sensitive branches through `LIMIT 1`/`AFTER`, complete counts, unit/origin
+metadata, schemas and read-only frames retained after the originating session and outcomes end.
+It is part of `just test-client-conformance` and has the focused
+`just test-native-binding-inspection` runner. The host suites register
+`test_inspection_metadata_and_verified_frames_survive_their_parents` (pytest/minitest) and
+`inspectionMetadataAndVerifiedFramesSurviveTheirParents` (JUnit); the corresponding host guides
+include their `inspection` anchors. Native owner tests additionally check u64 boundaries, all
+refusal variants, exact complete JSON/frame bytes and independent schema and slice lifetimes.
+The shared host property `client-host-inspection-views` is registered for 64 cases with 32-byte
+inputs; it does not add a wire format or synchronization owner.
+`client-python-inspection-enums` separately registers the new bidirectional enum conversions
+for 32 cases with 8-byte inputs; deterministic vocabulary checks name every canonical code.
 
 ## Batch buffers
 
@@ -336,9 +375,10 @@ for the outstanding-outcome deadline or a producer close that cannot drain that 
   not cut a session between the server applying a settlement and its answer. The binding's unit
   test `a_consumer_reads_and_settles_a_delivery_and_a_lost_confirmation_is_uncertain` does, and the
   settlement reports `NX_ERROR_UNCERTAIN`.
-- The probes connect over plaintext. TLS selection is the Rust client's and is not reimplemented by
-  the binding; the Python suite's cluster tier connects over TLS with the fixture certificate
-  authority.
+- The probes connect over plaintext, except the C binding's connection-policy outline, which
+  reaches an HTTPS seed. TLS selection is the Rust client's and is not reimplemented by a binding;
+  every host suite's cluster tier connects over TLS with the fixture certificate authority, and
+  the JVM, Ruby, C and C++ tiers also over plaintext.
 - C and C++ consume the binding. No independent C or C++ reader is maintained.
 - Only the Rust client restores subscriptions and domain clock attachments after reconnection. The
   Go and TypeScript clients show that the protocol is implementable, not that they recover; a

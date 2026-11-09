@@ -13,6 +13,16 @@ use nervix_models::{ClusterParameterSeedValues, ClusterParameterValues};
 use super::{Arbitrary, Entropy};
 
 impl Arbitrary<'_> {
+    pub fn password_credential(&mut self) -> nervix_models::PasswordCredential {
+        let iterations = self
+            .entropy
+            .boundary_biased(1..=nervix_models::PasswordIterations::MAXIMUM);
+        let salt = std::array::from_fn(|_| self.entropy.byte());
+        let digest = std::array::from_fn(|_| self.entropy.byte());
+        nervix_models::PasswordCredential::from_parts(iterations, salt, digest)
+            .assured("generated password costs are within the declared bound")
+    }
+
     pub fn cluster_parameter_record(&mut self) -> nervix_models::ClusterParameterRecord {
         let revision = std::num::NonZeroU64::new(self.entropy.any_u64().max(1))
             .assured("generated revisions are positive");
@@ -24,7 +34,28 @@ impl Arbitrary<'_> {
 
     pub fn cluster_parameter_values(&mut self) -> ClusterParameterValues {
         let entropy = &mut self.entropy;
+        let suite_names: &[&str] = entropy.pick([
+            &["fips"][..],
+            &["default"][..],
+            &["TLS13_CHACHA20_POLY1305_SHA256", "TLS13_AES_128_GCM_SHA256"][..],
+            &["TLS13_AES_128_GCM_SHA256", "fips"][..],
+        ]);
+        let group_names: &[&str] = entropy.pick([
+            &["fips"][..],
+            &["default"][..],
+            &["X25519", "fips"][..],
+            &["X25519MLKEM768", "secp256r1"][..],
+        ]);
+        let tls_cipher_suites =
+            nervix_models::TlsCipherSuites::parse_names(suite_names.iter().copied())
+                .assured("the declared selection includes a TLS 1.3 suite");
+        let tls_key_exchange_groups =
+            nervix_models::TlsKeyExchangeGroups::parse_names(group_names.iter().copied())
+                .assured("the declared selection includes a TLS 1.2-capable group");
         ClusterParameterValues::resolve(ClusterParameterSeedValues {
+            password_iterations: Some(
+                entropy.boundary_biased(1..=nervix_models::PasswordIterations::MAXIMUM),
+            ),
             node_unavailability_timeout: Some(parameter_duration(entropy)),
             domain_drain_timeout: Some(parameter_duration(entropy)),
             entity_gate_deadline: Some(parameter_duration(entropy)),
@@ -49,6 +80,8 @@ impl Arbitrary<'_> {
                 entropy.boundary_biased(1..=nervix_models::HttpHeaderFields::MAXIMUM),
             ),
             client_batch_rows: Some(entropy.boundary_biased(1..=u64::from(u32::MAX))),
+            tls_cipher_suites: Some(tls_cipher_suites),
+            tls_key_exchange_groups: Some(tls_key_exchange_groups),
         })
         .assured("the generator constructs every parameter within its declared current bounds")
     }

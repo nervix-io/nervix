@@ -422,12 +422,80 @@ pub enum IngestorIntakeError {
 
 pub type IngestorIntakeResult<T> = Result<T, Report<IngestorIntakeError>>;
 
-/// The terminal result of one host-owned acknowledgement tree.
+/// How one host-owned acknowledgement wait ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IngestorAcknowledgementOutcome {
-    Ack,
-    NoAck(String),
+    /// The graph acknowledged every message of the batch.
+    Acknowledged,
+    /// The graph failed an acknowledgement tree of the batch. `reason` is what the tree's failing
+    /// share gave, which the host reports in its event.
+    Failed { reason: String },
+    /// An acknowledgement tree of the batch reported no progress for `silence`, the ingestor's
+    /// `ACK TIMEOUT`. The expiry ended the wait without resolving the tree.
+    TimedOut { silence: Duration },
+    /// The host stopped before every tree of the batch resolved.
     Shutdown,
+}
+
+/// A transport operation that settles positions an ingestor read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr, strum::EnumIter)]
+#[strum(serialize_all = "snake_case")]
+pub enum IngestorSettlementOperation {
+    /// [`BrokerIngestorConnector::acknowledge`].
+    Acknowledge,
+    /// [`BrokerIngestorConnector::reject`].
+    Reject,
+}
+
+/// Whether one transport settlement succeeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr, strum::EnumIter)]
+#[strum(serialize_all = "snake_case")]
+pub enum IngestorSettlementOutcome {
+    Succeeded,
+    Failed,
+}
+
+impl<T> From<&IngestorResult<T>> for IngestorSettlementOutcome {
+    fn from(settled: &IngestorResult<T>) -> Self {
+        match settled {
+            Ok(_) => Self::Succeeded,
+            Err(_) => Self::Failed,
+        }
+    }
+}
+
+/// What one completed resume of an ingestor's connector answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr, strum::EnumIter)]
+#[strum(serialize_all = "snake_case")]
+pub enum IngestorResumeOutcome {
+    /// The connector is ready to read.
+    Ready,
+    /// The connector waits for an external assignment before it reads.
+    Waiting,
+    /// The resume failed.
+    Failed,
+}
+
+impl From<&IngestorResult<IngestorResume>> for IngestorResumeOutcome {
+    fn from(resumed: &IngestorResult<IngestorResume>) -> Self {
+        match resumed {
+            Ok(IngestorResume::Ready) => Self::Ready,
+            Ok(IngestorResume::Waiting { .. }) => Self::Waiting,
+            Err(_) => Self::Failed,
+        }
+    }
+}
+
+/// Why the host suspended an ingestor's ready connector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr, strum::EnumIter)]
+#[strum(serialize_all = "snake_case")]
+pub enum IngestorSuspendCause {
+    /// A quiesce suspended the ingestor's intake.
+    Quiesce,
+    /// A read failed and left the connector needing a resume.
+    ReadFailure,
+    /// A rejection failed, so the transport is reopened before the same positions are read again.
+    Rejection,
 }
 
 /// The host implementation behind an opaque batch acknowledgement.
@@ -478,7 +546,7 @@ impl IngestorBatchAcknowledgement {
                   acknowledgements"
     )
 )]
-pub trait IngestorHostServices: Send + 'static {
+pub trait IngestorHostServices: crate::ConnectorEventProvider + Send + 'static {
     /// Observes one completed broker read or host-interrupted read, without changing its outcome.
     fn record_read(&self, outcome: IngestorReadOutcome);
     /// Counts raw transport payloads before decoding or graph admission, never internal replay.
@@ -508,7 +576,20 @@ pub trait IngestorHostServices: Send + 'static {
     fn record_transient_error(&self, reason: String, retry_after: Duration);
     fn clear_transient_error(&self);
     fn report_error(&self, message: String);
-    fn handle_ack_failure(&self, reason: String);
+    /// Observes how one acknowledgement wait ended, before the loop confirms or rejects its
+    /// positions, and reports a failed or timed-out tree as an event that names which it was.
+    fn record_acknowledgement(&self, outcome: &IngestorAcknowledgementOutcome);
+    /// Observes one completed transport acknowledgement or rejection and how long it took.
+    fn record_transport_settlement(
+        &self,
+        operation: IngestorSettlementOperation,
+        outcome: IngestorSettlementOutcome,
+        elapsed: Duration,
+    );
+    /// Observes one completed resume of the ingestor's connector.
+    fn record_resume(&self, outcome: IngestorResumeOutcome);
+    /// Observes one suspension of the ingestor's ready connector.
+    fn record_suspend(&self, cause: IngestorSuspendCause);
     /// Counts positions the host discarded after a reconnect because the broker redelivers them.
     fn record_transport_redeliveries(&self, positions: usize);
     /// Counts payloads the ingestor dropped because they exceed the size bound of its client.
@@ -534,6 +615,18 @@ pub enum IngestorReadOutcome {
 }
 
 impl IngestorHost {
+    /// Resolves one declared observation at connector construction.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(lifecycle, reason = "resolves a declared event once before intake")
+    )]
+    pub fn event_counter(
+        &self,
+        event: nervix_models::ConnectorEvent,
+    ) -> error_stack::Result<crate::ConnectorEventCounter, crate::UndeclaredConnectorEvent> {
+        self.services.event_counter(event)
+    }
+
     pub fn record_read(&self, outcome: IngestorReadOutcome) {
         self.services.record_read(outcome);
     }
@@ -609,8 +702,26 @@ impl IngestorHost {
         self.services.report_error(message);
     }
 
-    pub fn handle_ack_failure(&self, reason: String) {
-        self.services.handle_ack_failure(reason);
+    pub fn record_acknowledgement(&self, outcome: &IngestorAcknowledgementOutcome) {
+        self.services.record_acknowledgement(outcome);
+    }
+
+    pub fn record_transport_settlement(
+        &self,
+        operation: IngestorSettlementOperation,
+        outcome: IngestorSettlementOutcome,
+        elapsed: Duration,
+    ) {
+        self.services
+            .record_transport_settlement(operation, outcome, elapsed);
+    }
+
+    pub fn record_resume(&self, outcome: IngestorResumeOutcome) {
+        self.services.record_resume(outcome);
+    }
+
+    pub fn record_suspend(&self, cause: IngestorSuspendCause) {
+        self.services.record_suspend(cause);
     }
 
     pub fn record_transport_redeliveries(&self, positions: usize) {

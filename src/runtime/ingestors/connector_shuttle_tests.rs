@@ -75,6 +75,8 @@ impl ChannelHost {
     }
 }
 
+impl nervix_connector::ConnectorEventProvider for ChannelHost {}
+
 #[async_trait]
 impl IngestorHostServices for ChannelHost {
     fn record_read(&self, _outcome: nervix_connector::IngestorReadOutcome) {}
@@ -176,9 +178,18 @@ impl IngestorHostServices for ChannelHost {
     fn report_error(&self, message: String) {
         panic!("channel ingestor reported an unexpected error: {message}");
     }
-    fn handle_ack_failure(&self, reason: String) {
-        panic!("unacknowledged channel ingestor reported an ACK failure: {reason}");
+    fn record_acknowledgement(&self, outcome: &IngestorAcknowledgementOutcome) {
+        panic!("an unacknowledged channel ingestor observed an acknowledgement wait: {outcome:?}");
     }
+    fn record_transport_settlement(
+        &self,
+        _operation: IngestorSettlementOperation,
+        _outcome: IngestorSettlementOutcome,
+        _elapsed: Duration,
+    ) {
+    }
+    fn record_resume(&self, _outcome: IngestorResumeOutcome) {}
+    fn record_suspend(&self, _cause: IngestorSuspendCause) {}
     fn record_transport_redeliveries(&self, positions: usize) {
         panic!("a channel ingestor without positions discarded {positions} after a reconnect");
     }
@@ -205,7 +216,10 @@ impl PacedIngestorHostServices for ChannelHost {
             nervix_primitives::task::consume_budget().await;
             messages.push(IngestorIntakeMessage {
                 payload: &message.payload,
-                metadata: IngestMetadataRow::headers(&message.headers),
+                metadata: IngestMetadataRow::headers(
+                    &message.headers,
+                    &nervix_connector::NoIngestMetadata(0),
+                ),
             });
         }
         if messages.is_empty() {
@@ -635,6 +649,8 @@ struct GraphHost {
     shutdown: watch::Receiver<bool>,
 }
 
+impl nervix_connector::ConnectorEventProvider for GraphHost {}
+
 #[async_trait]
 impl IngestorHostServices for GraphHost {
     fn record_read(&self, _outcome: nervix_connector::IngestorReadOutcome) {}
@@ -704,9 +720,22 @@ impl IngestorHostServices for GraphHost {
     fn report_error(&self, message: String) {
         panic!("the check's ingestor reported an unexpected error: {message}");
     }
-    fn handle_ack_failure(&self, reason: String) {
-        panic!("every acknowledgement tree of the check succeeds, but one failed: {reason}");
+    fn record_acknowledgement(&self, outcome: &IngestorAcknowledgementOutcome) {
+        if let IngestorAcknowledgementOutcome::Failed { .. }
+        | IngestorAcknowledgementOutcome::TimedOut { .. } = outcome
+        {
+            panic!("every acknowledgement tree of the check succeeds, but one failed: {outcome:?}");
+        }
     }
+    fn record_transport_settlement(
+        &self,
+        _operation: IngestorSettlementOperation,
+        _outcome: IngestorSettlementOutcome,
+        _elapsed: Duration,
+    ) {
+    }
+    fn record_resume(&self, _outcome: IngestorResumeOutcome) {}
+    fn record_suspend(&self, _cause: IngestorSuspendCause) {}
     fn record_transport_redeliveries(&self, positions: usize) {
         panic!("a replayable check ingestor discarded {positions} positions after a reconnect");
     }
@@ -848,6 +877,8 @@ struct RefusingGraphHost {
     shutdown: watch::Receiver<bool>,
 }
 
+impl nervix_connector::ConnectorEventProvider for RefusingGraphHost {}
+
 #[async_trait]
 impl IngestorHostServices for RefusingGraphHost {
     fn record_read(&self, _outcome: nervix_connector::IngestorReadOutcome) {}
@@ -929,9 +960,22 @@ impl IngestorHostServices for RefusingGraphHost {
     fn report_error(&self, message: String) {
         panic!("the check's ingestor reported an unexpected error: {message}");
     }
-    fn handle_ack_failure(&self, reason: String) {
-        panic!("a consumed payload never fails its batch, but the batch failed: {reason}");
+    fn record_acknowledgement(&self, outcome: &IngestorAcknowledgementOutcome) {
+        if let IngestorAcknowledgementOutcome::Failed { .. }
+        | IngestorAcknowledgementOutcome::TimedOut { .. } = outcome
+        {
+            panic!("a consumed payload never fails its batch, but the batch failed: {outcome:?}");
+        }
     }
+    fn record_transport_settlement(
+        &self,
+        _operation: IngestorSettlementOperation,
+        _outcome: IngestorSettlementOutcome,
+        _elapsed: Duration,
+    ) {
+    }
+    fn record_resume(&self, _outcome: IngestorResumeOutcome) {}
+    fn record_suspend(&self, _cause: IngestorSuspendCause) {}
     fn record_transport_redeliveries(&self, positions: usize) {
         panic!("a replayable check ingestor discarded {positions} positions after a reconnect");
     }

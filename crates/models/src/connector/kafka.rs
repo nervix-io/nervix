@@ -362,6 +362,10 @@ const KAFKA_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Clause("ACK TIMEOUT"),
         },
         DeclaredWait {
+            wait: "a failed publish under ACK, for the reports of the records its purge gave up",
+            bound: WaitBound::Clause("ACK TIMEOUT"),
+        },
+        DeclaredWait {
             wait: "destroying a producer, for its polling thread and the reports of the records \
                    its purge failed",
             bound: WaitBound::Driver("100 ms poll, then a 500 ms flush"),
@@ -393,10 +397,12 @@ const KAFKA_TOPIC_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclar
 
 impl IngestorDeclaration for KafkaTopicIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::PerPartition,
         // A Kafka record carries its headers as a list, in the order written, repeats included.
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         metadata: KAFKA_TOPIC_METADATA,
+        payload: crate::IngestorPayloadDeclaration::BYTES,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Kafka),
         position_class: PositionClass::Replayable,
@@ -612,6 +618,7 @@ pub struct KafkaTopicEmitter {
 
 impl EmitterDeclaration for KafkaTopicEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         instancing: crate::EmitterInstancingCapability::Instances,
         // A Kafka record carries its headers as a list, in the order written, repeats included.
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),

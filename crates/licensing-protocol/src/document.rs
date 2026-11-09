@@ -10,7 +10,10 @@ use std::num::NonZeroUsize;
 use error_stack::{Report, ResultExt as _};
 use nervix_bounded_write::{BoundedWrite, BoundedWriter};
 use nervix_crypto::jws;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{
+    Deserialize, Serialize,
+    de::{DeserializeOwned, IgnoredAny},
+};
 use thiserror::Error;
 
 use crate::keys::{KeyId, PublicKey};
@@ -40,6 +43,7 @@ document_types! {
     WorkingKey => "nervix.licensing.trust.working-key",
     Revocation => "nervix.licensing.trust.revocation",
     Succession => "nervix.licensing.trust.succession",
+    ProofOfLife => "nervix.licensing.trust.proof-of-life",
 }
 
 pub trait Document: Serialize + DeserializeOwned {
@@ -56,8 +60,10 @@ pub enum DocumentError {
     Header,
     #[error("the signing key identity does not match the protected header")]
     KeyIdentity,
-    #[error("the document signature or payload is invalid")]
+    #[error("the document signature is invalid")]
     Verification,
+    #[error("the signed payload is not the expected document")]
+    Payload,
     #[error("failed to encode the document")]
     Encoding,
     #[error("failed to prepare the signing key")]
@@ -151,17 +157,47 @@ impl UnverifiedDocument {
         &self.header.kid
     }
 
+    /// The decoded payload segment, before any signature verified it. Only a self-signed request
+    /// reads it unverified, for the one key that must then verify it.
+    pub(crate) fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
     pub(crate) fn same_payload(&self, other: &Self) -> bool {
         // jose-b64 requires canonical unpadded base64url, so equal decoded bytes have exactly
         // equal payload segments. It retains the protected JSON separately, without rewriting it.
         self.payload == other.payload
     }
 
+    /// Verifies the signature over the received signing input, then decodes the payload as `T`.
     pub(crate) fn verify<T: Document>(&self, key: &PublicKey) -> Result<T, Report<DocumentError>> {
         if key.key_id().change_context(DocumentError::KeyIdentity)? != self.header.kid {
             return Err(Report::new(DocumentError::KeyIdentity));
         }
-        jws::verify(&self.compact, &key.jwk()).change_context(DocumentError::Verification)
+        // The maintained verifier checks the signature over the exact received signing input before
+        // it decodes anything. Decoding it as IgnoredAny there keeps that step free of the
+        // document's own shape, so a payload that is not a `T` is reported apart from a signature
+        // that does not verify.
+        if let Err(report) = jws::verify::<IgnoredAny>(&self.compact, &key.jwk()) {
+            let failure = Self::verification_failure(&report);
+            return Err(report.change_context(failure));
+        }
+        serde_json::from_slice(&self.payload).change_context(DocumentError::Payload)
+    }
+
+    /// The maintained verifier also reads the payload as a JSON object of claims after the
+    /// signature verified. A payload that fails that read, with a valid signature, is a payload
+    /// failure, not a signature failure.
+    fn verification_failure(report: &Report<jws::JwsError>) -> DocumentError {
+        let Some(source) = report.downcast_ref::<jws::LibraryError>() else {
+            return DocumentError::Verification;
+        };
+        match source.kind() {
+            jws::LibraryErrorKind::Json(_) | jws::LibraryErrorKind::Utf8(_) => {
+                DocumentError::Payload
+            }
+            _ => DocumentError::Verification,
+        }
     }
 }
 

@@ -18,6 +18,9 @@ written in.
 | [C Client Library](client-library-c.md) | C11 | the `nervix-client-ffi` shared library and `nervix_client.h` | a C program with explicit ownership and typed Arrow columns |
 | [C++ Client Library](client-library-c.md) | C++17 | the same C ABI, with application-owned custom deleters | a C++ program using RAII and canonical Arrow IPC |
 
+The JVM, Python, Ruby and C and C++ libraries are built from the Nervix repository today; none is
+published to a package registry.
+
 ## What Every Library Shares
 
 - **One client.** Every library runs the Rust client, `nervix-client-core`, in your process: the
@@ -30,7 +33,29 @@ written in.
   the command twice.
 - **One protocol.** Every library speaks the [Client Session Protocol](client-session-protocol.md),
   and the [Client Implementation Manual](client-implementation-manual.md) states the rules a host must
-  follow as normative B- and N-rules; each library chapter links the rules where they apply.
-- **Tested examples.** Every code block of a host language's chapter, such as the Python one, is a
-  test of that host's own suite, which runs against a real cluster, so a documented example that
-  stops working fails a test.
+  follow as normative host rules: B- for the C ABI, N- for Python, R- for Ruby and J- for the JVM.
+  Each library chapter links the rules where they apply.
+- **One shape.** The JVM, Python, Ruby and C and C++ chapters have the same sections in the same
+  order, from Install and Connect through Errors, threads and lifetimes to What The Library Does
+  Not Expose and A Complete Application, so a developer who knows one finds each answer at the same
+  place in the next.
+- **Tested examples.** Every code block of those chapters is a test of that library's own suite,
+  written in its language and test framework. Some run without a cluster and the rest against
+  one- and three-node clusters, so a documented example that stops working fails a test.
+
+## How The Libraries Differ
+
+Each library follows its own language's conventions for threads, ownership, Arrow data and types:
+
+| Library | Threads | Lifetimes | Arrow | Typing |
+| --- | --- | --- | --- | --- |
+| Rust | Async: the application awaits each call on its own Tokio runtime | Rust ownership | `RecordBatch` exchange behind the optional `arrow` feature | Rust types |
+| JVM | Blocking calls hold no Java monitor while they wait; several threads share a session, and another thread can trigger a call's `Cancel` | `AutoCloseable` handles with try-with-resources and a Cleaner fallback; a read-only direct buffer keeps its owner alive | Canonical Arrow IPC bytes and direct buffers, and bulk Java arrays; Arrow Java is optional | Java 21 classes, records and enums; unsigned 64-bit values keep their bits in a `long` |
+| Python | Blocking calls release the GIL; any thread may call, and another thread can trigger a call's `Cancel` | Python owns every object; `with` blocks release sessions, endpoints and deliveries, and a `memoryview` keeps its owner alive | The Arrow PyCapsule interface exchanges batches and rows with pyarrow and polars | The wheel ships a typed stub and a `py.typed` marker for mypy and pyright |
+| Ruby | Blocking calls release the GVL; a Ruby thread interrupt ends only its own call | The collector releases native objects; block forms and `ensure` close them, and a read-only `IO::Buffer` keeps its owner alive | Canonical Arrow IPC as binary strings or `IO::Buffer`, and typed or bulk column reads; no Arrow gem | Dynamic, without type signatures |
+| C and C++ | Blocking calls from any thread except one driving a Tokio runtime; a field list or builder is used by one thread at a time | The caller releases every owned handle once with its matching function; C++ holds them in `std::unique_ptr` with custom deleters | Bulk typed column buffers and canonical Arrow IPC; no Arrow C Data interface | The declarations of `nervix_client.h`; strings are a pointer and a length |
+
+Only the Rust library exposes the typed transaction status, transaction attach and inspection, the
+typed domain list, structured choice lookups, server notices, the leadership view, upload progress
+and upload identities of your choosing. Each other chapter's What The Library Does Not Expose
+section says what that library leaves out.

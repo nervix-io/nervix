@@ -46,11 +46,10 @@ use futures_util::{future::BoxFuture, stream::FuturesUnordered};
 use indexmap::IndexMap;
 use nervix_connector::physical_time::actual_utc_now;
 use nervix_models::{
-    CLIENT_PRODUCER_NODE_BYTES, ClientAttachmentId, ClientEndpointContract,
-    ClientOutcomeUncertainty, ClientProcessingFailure, ClientProducerAdmission,
-    ClientProducerDescription, ClientProducerEndReason, ClientProducerGrant, ClientProducerLimits,
-    ClientProducerPolicy, ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
-    SchemaField,
+    ClientAttachmentId, ClientEndpointContract, ClientOutcomeUncertainty, ClientProcessingFailure,
+    ClientProducerAdmission, ClientProducerDescription, ClientProducerEndReason,
+    ClientProducerGrant, ClientProducerLimits, ClientProducerPolicy, ClientProducerRefusal,
+    ClientSubmissionOutcome, ClientSubmissionRefusal, SchemaField,
 };
 use nervix_primitives::sync::atomic::AtomicU64;
 
@@ -83,27 +82,44 @@ impl ClientSubmissionId {
 /// This is a handle: every clone reserves from the same node budget.
 #[derive(Debug, Clone)]
 pub(crate) struct ClientProducerBudget {
-    reserved: Arc<AtomicU64>,
+    inner: Arc<ClientProducerBudgetInner>,
+}
+
+#[derive(Debug)]
+struct ClientProducerBudgetInner {
+    reserved: AtomicU64,
+    capacity: u64,
 }
 
 impl Default for ClientProducerBudget {
     fn default() -> Self {
-        Self {
-            reserved: Arc::new(AtomicU64::new(0)),
-        }
+        Self::new(super::ClientEndpointSettings::default().producer_node_bytes)
     }
 }
 
 impl ClientProducerBudget {
+    pub(crate) fn new(capacity: nervix_models::Setting<super::ClientProducerNodeBytes>) -> Self {
+        Self {
+            inner: Arc::new(ClientProducerBudgetInner {
+                reserved: AtomicU64::new(0),
+                capacity: capacity.value().as_u64(),
+            }),
+        }
+    }
+
+    pub(crate) fn capacity(&self) -> u64 {
+        self.inner.capacity
+    }
+
     /// Reserves `bytes` of the node's budget, or `None` when that would exceed it.
     pub(crate) fn try_reserve(&self, bytes: NonZeroU64) -> Option<ClientProducerReservation> {
-        let mut current = self.reserved.load(Ordering::Acquire);
+        let mut current = self.inner.reserved.load(Ordering::Acquire);
         loop {
             let next = current.checked_add(bytes.get())?;
-            if next > CLIENT_PRODUCER_NODE_BYTES {
+            if next > self.capacity() {
                 return None;
             }
-            match self.reserved.compare_exchange_weak(
+            match self.inner.reserved.compare_exchange_weak(
                 current,
                 next,
                 Ordering::AcqRel,
@@ -123,7 +139,7 @@ impl ClientProducerBudget {
     /// The bytes every live reservation holds together.
     #[cfg(test)]
     pub(crate) fn reserved(&self) -> u64 {
-        self.reserved.load(Ordering::Acquire)
+        self.inner.reserved.load(Ordering::Acquire)
     }
 }
 
@@ -138,6 +154,7 @@ impl Drop for ClientProducerReservation {
     fn drop(&mut self) {
         let previous = self
             .budget
+            .inner
             .reserved
             .fetch_sub(self.bytes.get(), Ordering::AcqRel);
         previous.checked_sub(self.bytes.get()).verified(
@@ -1860,6 +1877,7 @@ impl WorkerMailbox {
 impl ClientIntake {
     /// Validates one batch and dispatches it into the graph under a new ACK root.
     async fn admit(&self, job: AdmissionJob) -> AdmissionResult {
+        let payload_bytes = job.body.len();
         let limits = ClientBatchLimits {
             max_bytes: job.max_batch_bytes,
             max_rows: NonZeroUsize::new(job.max_batch_rows.get().arch_into())
@@ -1906,6 +1924,7 @@ impl ClientIntake {
                 branched_senders: &self.branched_senders,
                 metrics: &self.metrics,
                 batch,
+                payload_bytes,
                 acks: root.attached(),
                 ingested_at: actual_utc_now(),
             })

@@ -17,6 +17,7 @@ use nervix_models::DomainName;
 use crate::{
     branch_state::{DeduplicatorStateDescriptor, WindowStateDescriptor},
     error::ArchiveReadError,
+    inferencer::InferencerStateDescriptor,
     manifest::{
         ArchiveScope, BackupManifest, DomainCapture, SectionContent, SectionDigest, SectionEntry,
     },
@@ -70,9 +71,14 @@ pub enum SkippedStateReason {
     UnsupportedVersion { found: u16, supported: u16 },
 }
 
-/// One verified runtime-state section or WASM descriptor and its guest blob.
+/// One verified runtime state, including the raw sections its descriptor owns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DescribedRuntimeState {
+    Inferencer {
+        descriptor: InferencerStateDescriptor,
+        record: DescribedSection,
+        values: DescribedSection,
+    },
     Wasm {
         descriptor: WasmStateDescriptor,
         record: DescribedSection,
@@ -232,6 +238,7 @@ struct Describer {
     /// Where the archive of each resource version already read belongs.
     archive_paths: BTreeMap<SectionPath, VersionSlot>,
     wasm_blob_paths: BTreeMap<SectionPath, (DomainName, usize)>,
+    inferencer_value_paths: BTreeMap<SectionPath, (DomainName, usize)>,
     skipped_wasm_blobs: BTreeSet<SectionPath>,
     materialized_paths: BTreeMap<SectionPath, (DomainName, usize)>,
     /// Where each deduplicator and window descriptor read so far belongs, by descriptor path.
@@ -252,6 +259,11 @@ struct AssembledDomain {
 }
 
 enum AssembledRuntimeState {
+    Inferencer {
+        descriptor: InferencerStateDescriptor,
+        record: DescribedSection,
+        values: Option<DescribedSection>,
+    },
     Wasm {
         descriptor: WasmStateDescriptor,
         record: DescribedSection,
@@ -362,6 +374,11 @@ impl SectionVisitor for Describer {
             return Ok(());
         }
         match entry.content {
+            SectionContent::Record(RecordKind::InferencerStateDescriptor) => {
+                let decoded = self.inferencer_descriptor(entry, content);
+                self.state_record_or_skip(entry, decoded)
+            }
+            SectionContent::InferencerTensorValues => self.inferencer_values(entry, content),
             SectionContent::Record(RecordKind::Users) => self.users(entry, content),
             SectionContent::Record(RecordKind::Domain) => self.domain_record(entry, content),
             SectionContent::Record(RecordKind::ResourceVersion) => {
@@ -412,6 +429,90 @@ impl SectionVisitor for Describer {
 }
 
 impl Describer {
+    fn inferencer_descriptor(
+        &mut self,
+        entry: &SectionEntry,
+        content: &mut SectionReader<'_>,
+    ) -> Result<(), Report<ArchiveReadError>> {
+        let bytes = content.read_all(entry, MAX_RECORD_BYTES)?;
+        let descriptor = InferencerStateDescriptor::decode(entry.path.as_str(), &bytes)?;
+        if entry.path
+            != SectionPath::inferencer_descriptor(
+                &descriptor.domain,
+                &descriptor.entity,
+                descriptor.unit,
+                descriptor.branch_fingerprint.as_ref(),
+            )
+        {
+            return Err(misplaced(entry));
+        }
+        let domain = self
+            .domains
+            .get_mut(&descriptor.domain)
+            .ok_or_else(|| misplaced(entry))?;
+        let path = SectionPath::inferencer_tensor_values(
+            &descriptor.domain,
+            &descriptor.entity,
+            descriptor.unit,
+            descriptor.branch_fingerprint.as_ref(),
+        );
+        if self
+            .inferencer_value_paths
+            .insert(path, (descriptor.domain.clone(), domain.state.len()))
+            .is_some()
+        {
+            return Err(misplaced(entry));
+        }
+        domain.state.push(AssembledRuntimeState::Inferencer {
+            descriptor,
+            record: DescribedSection::read_at(entry, content),
+            values: None,
+        });
+        Ok(())
+    }
+
+    fn inferencer_values(
+        &mut self,
+        entry: &SectionEntry,
+        content: &SectionReader<'_>,
+    ) -> Result<(), Report<ArchiveReadError>> {
+        let (domain, index) = self
+            .inferencer_value_paths
+            .get(&entry.path)
+            .ok_or_else(|| misplaced(entry))?;
+        let domain = self
+            .domains
+            .get_mut(domain)
+            .ok_or_else(|| misplaced(entry))?;
+        let state = domain
+            .state
+            .get_mut(*index)
+            .ok_or_else(|| misplaced(entry))?;
+        let AssembledRuntimeState::Inferencer {
+            descriptor, values, ..
+        } = state
+        else {
+            return Err(misplaced(entry));
+        };
+        if values.is_some() {
+            return Err(misplaced(entry));
+        }
+        if descriptor.byte_length != entry.length {
+            return Err(Report::new(ArchiveReadError::LengthMismatch {
+                path: entry.path.to_string(),
+                declared: descriptor.byte_length,
+                actual: entry.length,
+            }));
+        }
+        if descriptor.digest != entry.digest {
+            return Err(Report::new(ArchiveReadError::DigestMismatch {
+                path: entry.path.to_string(),
+            }));
+        }
+        *values = Some(DescribedSection::read_at(entry, content));
+        Ok(())
+    }
+
     fn state_record_or_skip(
         &mut self,
         entry: &SectionEntry,
@@ -476,7 +577,9 @@ impl Describer {
         if matches!(
             entry.content,
             SectionContent::Record(
-                RecordKind::DeduplicatorStateDescriptor | RecordKind::WindowStateDescriptor
+                RecordKind::DeduplicatorStateDescriptor
+                    | RecordKind::WindowStateDescriptor
+                    | RecordKind::InferencerStateDescriptor
             )
         ) {
             let prefix = entry
@@ -1091,6 +1194,17 @@ impl Describer {
                             descriptor,
                             record,
                             guest,
+                        }),
+                        AssembledRuntimeState::Inferencer {
+                            descriptor,
+                            record,
+                            values,
+                        } => Ok(DescribedRuntimeState::Inferencer {
+                            descriptor,
+                            record,
+                            values: values.ok_or_else(|| {
+                                incomplete(&capture.domain, "inferencer tensor values")
+                            })?,
                         }),
                         AssembledRuntimeState::Wasm { guest: None, .. } => {
                             Err(incomplete(&capture.domain, "WASM guest blob"))

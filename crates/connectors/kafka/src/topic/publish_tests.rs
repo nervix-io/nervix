@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     AckConfirmation, BrokerPublishingMode, EmitterBoundedExecution, EmitterConnector as _,
     EmitterEventReporter, EmitterFinish, EmitterFinishError, EmitterGeneralErrorHandler,
@@ -71,6 +71,15 @@ pub(super) const FAST_RECONNECT: [(&str, &str); 2] = [
     ("reconnect.backoff.max.ms", "100"),
 ];
 
+/// A producer that sends a record its broker refused again a hundredth of a second later, every
+/// time, so it would still be sending a copy it holds while its broker takes writes again.
+const FAST_PRODUCE_RETRIES: [(&str, &str); 2] =
+    [("retry.backoff.ms", "10"), ("retry.backoff.max.ms", "10")];
+
+/// How many produce requests a refusing mock broker answers with `NOT_ENOUGH_REPLICAS` at most:
+/// far more than a [`FAST_PRODUCE_RETRIES`] producer sends within a test's `ACK TIMEOUT`.
+const REFUSED_PRODUCE_REQUESTS: usize = 10_000;
+
 /// A payload larger than a [`ONE_KIB_QUEUE`] producer queue holds, so the producer can never take
 /// it into that queue, and larger than a [`THOUSAND_BYTE_MESSAGES`] message.
 const OVERSIZED_PAYLOAD_BYTES: usize = 2048;
@@ -101,6 +110,8 @@ impl nervix_connector::EmitterReadiness for SilentHost {
 impl EmitterEventReporter for SilentHost {
     fn report_error(&self, _message: String) {}
 }
+
+impl nervix_connector::ConnectorEventProvider for SilentHost {}
 
 impl nervix_connector::EmitterPayloadObserver for SilentHost {
     fn record_prepared_payload(&self, _measurement: nervix_connector::EmitterPayloadMeasurement) {}
@@ -308,6 +319,19 @@ fn timed_record(index: usize, written: &str) -> EmitterRecord {
 struct ReadBack {
     payload: Vec<u8>,
     time: KafkaTimestamp,
+}
+
+/// How many records partition 0 of the test topic stores, read from its watermarks.
+fn stored_records(cluster: &MockCluster<'static, DefaultProducerContext>) -> i64 {
+    let consumer: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", cluster.bootstrap_servers())
+        .create()
+        .assured("librdkafka accepts the watermark reader's configuration");
+    let (low, high) = consumer
+        .fetch_watermarks(TOPIC, 0, Duration::from_secs(30))
+        .assured("the mock broker serves the test topic's watermarks");
+    high.checked_sub(low)
+        .assured("a partition's high watermark is never below its low watermark")
 }
 
 /// The first `count` records of the test topic, read back in partition order by a consumer of
@@ -705,7 +729,7 @@ async fn a_record_the_producer_refuses_for_its_own_size_is_rejected_and_the_publ
 }
 
 #[nervix_primitives::test]
-async fn the_producer_gives_up_a_record_the_publish_stopped_waiting_for() {
+async fn a_publish_that_stopped_waiting_returns_once_its_producer_holds_no_copy() {
     let cluster = cluster(1, 1);
     cluster
         .broker_down(1)
@@ -724,18 +748,101 @@ async fn the_producer_gives_up_a_record_the_publish_stopped_waiting_for() {
         parts.infrastructure_error.is_some(),
         "an unanswered record ends the publish once ACK TIMEOUT passes"
     );
+    // The host's retry sends the record again, so the producer holds no copy of it by the time the
+    // publish reports it unresolved: none is left for the broker's return to deliver beside the
+    // retry's.
+    assert_eq!(
+        emitter.retained_records(),
+        0,
+        "the producer still holds the record the publish gave up on"
+    );
+}
 
-    // The host's retry sends the record again. The producer gives the first copy up at the same
-    // ACK TIMEOUT, librdkafka's next timeout scan included, rather than holding it for the broker's
-    // return and delivering it beside the retry's copy.
+#[nervix_primitives::test]
+async fn a_parallel_publish_that_stops_waiting_as_it_finishes_holds_no_copy_once_it_returns() {
+    let cluster = cluster(1, 1);
+    cluster
+        .broker_down(1)
+        .expect("the mock cluster takes broker 1 down");
+    // A window of four takes both records without waiting, so their answers are awaited only as the
+    // publish finishes.
+    let mut emitter = emitter(&cluster, &[], confirmed(4, Duration::from_millis(300))).await;
+
+    let outcome = emitter
+        .publish(vec![
+            record(0, PARTITION_ZERO_KEYS[0], small_payload(0)),
+            record(1, PARTITION_ZERO_KEYS[1], small_payload(1)),
+        ])
+        .await;
+
+    let parts = outcome.into_parts();
+    assert!(parts.delivered.is_empty());
+    assert!(parts.rejected.is_empty());
+    assert!(
+        parts.infrastructure_error.is_some(),
+        "an unanswered record ends the publish as it finishes once ACK TIMEOUT passes"
+    );
+    assert_eq!(
+        emitter.retained_records(),
+        0,
+        "the producer still holds a record the finishing publish gave up on"
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_record_its_broker_refused_until_the_publish_gave_up_reaches_the_broker_once() {
+    let cluster = cluster(1, 1);
+    cluster.request_errors(
+        RDKafkaApiKey::Produce,
+        &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_NOT_ENOUGH_REPLICAS; REFUSED_PRODUCE_REQUESTS],
+    );
+    let mut emitter = emitter(
+        &cluster,
+        &FAST_PRODUCE_RETRIES,
+        confirmed(1, Duration::from_millis(500)),
+    )
+    .await;
+
+    let refused = emitter
+        .publish(vec![record(0, PARTITION_ZERO_KEYS[0], small_payload(0))])
+        .await
+        .into_parts();
+    assert!(refused.delivered.is_empty());
+    assert!(refused.rejected.is_empty());
+    assert!(
+        refused.infrastructure_error.is_some(),
+        "a record its broker refuses until ACK TIMEOUT ends the publish unresolved"
+    );
+
+    // The broker takes writes again as soon as the publish gave the record up, while a producer
+    // still holding a copy would send it again within a hundredth of a second.
+    cluster.clear_request_errors(RDKafkaApiKey::Produce);
+    let retried = emitter
+        .publish(vec![record(0, PARTITION_ZERO_KEYS[0], small_payload(0))])
+        .await
+        .into_parts();
+    assert_eq!(
+        retried.delivered,
+        vec![EmitterRecordId::new(0)],
+        "the host's retry delivers the record once its broker takes writes again"
+    );
+    assert!(retried.infrastructure_error.is_none());
+
+    // Every copy the producer took is now either stored or given up for good.
     let deadline = Instant::now() + Duration::from_secs(30);
     while emitter.retained_records() > 0 {
         assert!(
             Instant::now() < deadline,
-            "the producer still holds the record the publish gave up on"
+            "the producer gives up or delivers every copy it took"
         );
         sleep(Duration::from_millis(50)).await;
     }
+    assert_eq!(
+        stored_records(&cluster),
+        1,
+        "the broker stores the record once: the retry's copy, and no copy the refused attempt \
+         left with the producer"
+    );
 }
 
 #[nervix_primitives::test]

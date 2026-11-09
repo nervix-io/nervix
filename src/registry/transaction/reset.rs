@@ -40,12 +40,6 @@ impl Registry {
         request: &CommandExecutionReference,
         attribution: &ImpactAttribution,
     ) -> error_stack::Result<PlannedWasmReset, TransactionPlanningError> {
-        if &reset.domain != domain {
-            return Err(Report::new(TransactionPlanningError::ResetDomainMismatch {
-                domain: domain.clone(),
-                requested: reset.domain.clone(),
-            }));
-        }
         if status != DomainStatus::Running {
             return Err(Report::new(
                 TransactionPlanningError::ResetProcessorNotRunning {

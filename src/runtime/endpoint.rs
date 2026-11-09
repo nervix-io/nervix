@@ -3,10 +3,10 @@
 //! Layer: data plane.
 //! - **Owns.** Resolving a request's host and path to the endpoint routes and the ingestors bound
 //!   to them, the metadata a request or a WebSocket frame hands those ingestors, request admission,
-//!   the endpoint buffer, rejection with a retry delay, per-request dispatch, and response
-//!   disposition.
-//! - **Depends on.** The request intakes endpoint ingestors bind, Arrow decoding and actual-UTC
-//!   observation.
+//!   the endpoint buffer, rejection with a retry delay, per-request dispatch, response disposition,
+//!   and the outcome each bound ingestor counts a request under.
+//! - **Depends on.** The request intakes endpoint ingestors bind, their retained request counters,
+//!   Arrow decoding and actual-UTC observation.
 //! - **Must not know.** When a route is bound or unbound, which the endpoint ingestor owns; Plexus
 //!   parsing, placement policy or consensus storage.
 
@@ -23,7 +23,11 @@ use nervix_connector::{
 use nervix_connector_websockets::CompiledSignalingProtocol;
 use nervix_models::WebsocketsFrameType;
 
-use super::*;
+use super::{
+    endpoint_acknowledgement::{EndpointAdmissionRefusal, EndpointInputRefusal},
+    *,
+};
+use crate::metrics::{EndpointIntakeOutcome, IngestorEndpointMetrics};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct HttpRouteKey {
@@ -65,6 +69,70 @@ pub(crate) struct EndpointIngestBinding {
     /// are not UTF-8, which it does not read.
     pub(super) header_values_dropped: prometheus::IntCounter,
     pub(super) unfolding_refused: prometheus::IntCounter,
+    /// Counts every request and WebSocket frame this ingestor answers once, under its outcome.
+    pub(super) requests: IngestorEndpointMetrics,
+}
+
+impl EndpointIngestBinding {
+    /// Why this ingestor cannot take a request now, before the request's body is read, or `None`
+    /// when it can. Nothing is counted: the request is counted once, where it is answered.
+    fn refusal(&self) -> Option<EndpointBindingRefusal> {
+        if let Err(retry_after) = self.quiesce.endpoint_availability() {
+            return Some(EndpointBindingRefusal::Quiesced { retry_after });
+        }
+        if !self.request.has_capacity() {
+            return Some(EndpointBindingRefusal::WindowFull);
+        }
+        None
+    }
+}
+
+/// Why one ingestor bound to a route cannot take a request before the request's body is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EndpointBindingRefusal {
+    /// Its quiesce refuses new intake, naming the delay its sender may retry after where it
+    /// declares one.
+    Quiesced { retry_after: Option<Duration> },
+    /// Every slot of its response window is taken.
+    WindowFull,
+}
+
+impl EndpointBindingRefusal {
+    /// The refusal an acknowledged ingestor answers the request with.
+    fn admission_refusal(self) -> EndpointAdmissionRefusal {
+        match self {
+            Self::Quiesced { .. } => EndpointAdmissionRefusal::Suspended,
+            Self::WindowFull => EndpointAdmissionRefusal::WindowFull,
+        }
+    }
+
+    /// The delay an unacknowledged ingestor's refusal names for a retry.
+    fn retry_after(self) -> Option<Duration> {
+        match self {
+            Self::Quiesced { retry_after } => retry_after,
+            Self::WindowFull => None,
+        }
+    }
+
+    /// The outcome the ingestor counts the refused request under.
+    fn counted(self) -> EndpointIntakeOutcome {
+        match self {
+            Self::Quiesced { .. } => EndpointIntakeOutcome::Refused,
+            Self::WindowFull => EndpointIntakeOutcome::Busy,
+        }
+    }
+}
+
+/// One ingestor bound to a route that refuses a request before reading it.
+enum RefusedBinding {
+    /// The ingestor's intake ended after the route was resolved, so nothing of it remains to count
+    /// the request.
+    Ended,
+    /// The running ingestor `binding` refused the request.
+    Running {
+        binding: StdArc<EndpointIngestBinding>,
+        refusal: EndpointBindingRefusal,
+    },
 }
 
 /// The metadata an `HTTP ENDPOINT` ingestor declares, as one admitted request carries it.
@@ -77,6 +145,7 @@ pub(crate) struct HttpEndpointRequestMetadata<'a> {
     query: Option<&'a str>,
     remote_addr: SocketAddr,
     host: Cow<'a, str>,
+    payload_bytes: usize,
 }
 
 impl<'a> HttpEndpointRequestMetadata<'a> {
@@ -88,6 +157,7 @@ impl<'a> HttpEndpointRequestMetadata<'a> {
         query: Option<&'a str>,
         remote_addr: SocketAddr,
         host: &'a str,
+        payload_bytes: usize,
     ) -> Self {
         Self {
             method,
@@ -95,11 +165,16 @@ impl<'a> HttpEndpointRequestMetadata<'a> {
             query,
             remote_addr,
             host: normalize_http_host(host),
+            payload_bytes,
         }
     }
 }
 
 impl IngestMessageMetadata for HttpEndpointRequestMetadata<'_> {
+    fn payload_bytes(&self) -> usize {
+        self.payload_bytes
+    }
+
     fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
         values.string(self.method);
         values.string(self.path);
@@ -109,6 +184,7 @@ impl IngestMessageMetadata for HttpEndpointRequestMetadata<'_> {
         }
         values.rendered(&self.remote_addr);
         values.string(&self.host);
+        values.rendered(&self.remote_addr.ip());
     }
 }
 
@@ -120,13 +196,19 @@ pub(crate) struct WebsocketsEndpointFrameMetadata<'a> {
     pub(crate) frame_type: WebsocketsFrameType,
     pub(crate) remote_addr: SocketAddr,
     pub(crate) path: &'a str,
+    pub(crate) payload_bytes: usize,
 }
 
 impl IngestMessageMetadata for WebsocketsEndpointFrameMetadata<'_> {
+    fn payload_bytes(&self) -> usize {
+        self.payload_bytes
+    }
+
     fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
         values.string(self.frame_type.as_ref());
         values.rendered(&self.remote_addr);
         values.string(self.path);
+        values.rendered(&self.remote_addr.ip());
     }
 }
 
@@ -172,13 +254,58 @@ impl EndpointDispatchOutcome {
     }
 }
 
-/// What became of one payload a binding dispatched.
-enum EndpointBindingDispatch {
-    /// The binding took the payload: it dispatched it, or reported why its codec rejected it.
-    Taken,
+/// What one `MODE NO ACK` ingestor made of one request or WebSocket frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EndpointNoAckIntake {
+    /// It dispatched the payload into its graph.
+    Dispatched,
+    /// Its dispatch into the graph failed after its codec decoded the payload, which it reported.
+    DispatchFailed,
+    /// Its codec refused the payload, which it consumed as a decode rejection.
+    DecodeRejected,
+    /// Its endpoint buffer retained the payload until it resumes.
+    Buffered,
     /// The node's bounded execution could not take the payload's unfolding now. Nothing judged
     /// the payload, so its sender is told to send it again.
     NotAdmitted,
+    /// Its quiesce refused the payload, naming the delay its sender may retry after where it
+    /// declares one.
+    Refused { retry_after: Option<Duration> },
+}
+
+impl EndpointNoAckIntake {
+    /// The ingestor's share of the route's answer: a payload it took is accepted, even one it could
+    /// not dispatch or decode, because sending it again would only repeat that.
+    fn admission(self) -> EndpointAdmission {
+        match self {
+            Self::Dispatched | Self::DispatchFailed | Self::DecodeRejected | Self::Buffered => {
+                EndpointAdmission {
+                    accepted: 1,
+                    ..EndpointAdmission::default()
+                }
+            }
+            Self::NotAdmitted => EndpointAdmission {
+                rejected: 1,
+                ..EndpointAdmission::default()
+            },
+            Self::Refused { retry_after } => EndpointAdmission {
+                rejected: 1,
+                retry_after,
+                ..EndpointAdmission::default()
+            },
+        }
+    }
+
+    /// The outcome the ingestor counts the payload under.
+    fn counted(self) -> EndpointIntakeOutcome {
+        match self {
+            Self::Dispatched | Self::Buffered => EndpointIntakeOutcome::Accepted,
+            Self::DispatchFailed => EndpointIntakeOutcome::ProcessingFailed,
+            Self::DecodeRejected => EndpointIntakeOutcome::DecodeRejected,
+            Self::NotAdmitted => EndpointIntakeOutcome::NotAdmitted,
+            Self::Refused { .. } => EndpointIntakeOutcome::Refused,
+        }
+    }
 }
 
 pub(crate) type ResolvedEndpointRoute = Arc<EndpointIntakeRoute<EndpointIngestBinding>>;
@@ -218,53 +345,52 @@ impl Runtime {
 impl EndpointIntakeRoute<EndpointIngestBinding> {
     /// Refuses unavailable intake before HTTP reads a body or upgrades a WebSocket. Actual
     /// dispatch still acquires its own permit, so racing requests cannot exceed the window.
+    ///
+    /// A request any ingestor can take is dispatched, and each ingestor counts its outcome there.
+    /// Only a request every ingestor refuses is counted here, once for each running ingestor.
     pub(crate) fn refusal(&self) -> Option<EndpointDispatchOutcome> {
-        let mut outcome = EndpointAdmission::default();
-        let mut acknowledgement = None;
-        let mut retry_after = Vec::new();
+        // Allocated only once a binding refuses, so a request that is admitted allocates nothing.
+        let mut refused = Vec::new();
         for lifetime in self.bindings() {
             let lease = lifetime.intake();
-            let Some(binding) = lease.as_deref() else {
-                outcome.rejected = outcome
-                    .rejected
-                    .checked_add(1)
-                    .assured("endpoint bindings have in-memory owners");
-                retry_after.push(None);
+            let Some(binding) = &*lease else {
+                refused.push(RefusedBinding::Ended);
                 continue;
             };
-            let availability = binding.quiesce.endpoint_admission();
-            if availability.is_ok() && binding.request.has_capacity() {
-                outcome.accepted = outcome
-                    .accepted
-                    .checked_add(1)
-                    .assured("endpoint bindings have in-memory owners");
-                continue;
-            }
+            // An ingestor that can take the request leaves the route without a refusal, so
+            // dispatch decides, and counts, every ingestor's outcome.
+            let refusal = binding.refusal()?;
+            refused.push(RefusedBinding::Running {
+                binding: binding.clone(),
+                refusal,
+            });
+        }
+        let mut outcome = EndpointAdmission::default();
+        let mut acknowledgement = None;
+        let mut retry_after = Vec::with_capacity(refused.len());
+        for binding in refused {
             outcome.rejected = outcome
                 .rejected
                 .checked_add(1)
                 .assured("endpoint bindings have in-memory owners");
-            let mut delay = match availability {
-                Ok(()) => None,
-                Err(delay) => delay,
+            let RefusedBinding::Running { binding, refusal } = binding else {
+                retry_after.push(None);
+                continue;
             };
+            if let EndpointBindingRefusal::Quiesced { .. } = refusal {
+                binding.quiesce.record_rejected(1);
+            }
+            binding.requests.record(refusal.counted());
+            let mut delay = refusal.retry_after();
             if let EndpointRequestPolicy::Ack(window) = &binding.request {
-                let refusal = if availability.is_err() {
-                    nervix_models::ClientSubmissionRefusal::Suspended
-                } else {
-                    nervix_models::ClientSubmissionRefusal::Busy
-                };
                 let reply = EndpointRequestReply {
-                    outcome: EndpointRequestOutcome::NotAdmitted(refusal),
+                    outcome: EndpointRequestOutcome::NotAdmitted(refusal.admission_refusal()),
                     retry_after: window.retry_after,
                 };
                 acknowledgement.get_or_insert(reply);
                 delay = Some(window.retry_after);
             }
             retry_after.push(delay);
-        }
-        if outcome.accepted > 0 {
-            return None;
         }
         if !retry_after.is_empty() && retry_after.iter().all(Option::is_some) {
             outcome.retry_after = retry_after.into_iter().flatten().max();
@@ -390,6 +516,7 @@ impl Runtime {
         protocol: &str,
     ) -> EndpointDispatchOutcome {
         let lease = lifetime.intake();
+        // An intake that ended after the route was resolved leaves nothing to count the request.
         let Some(binding) = lease.as_deref() else {
             return EndpointDispatchOutcome::NoAck(EndpointAdmission {
                 rejected: 1,
@@ -398,9 +525,7 @@ impl Runtime {
         };
         if let EndpointRequestPolicy::Ack(window) = &binding.request {
             let outcome = if binding.quiesce.endpoint_admission().is_err() {
-                EndpointRequestOutcome::NotAdmitted(
-                    nervix_models::ClientSubmissionRefusal::Suspended,
-                )
+                EndpointRequestOutcome::NotAdmitted(EndpointAdmissionRefusal::Suspended)
             } else {
                 window
                     .run_until(
@@ -418,6 +543,7 @@ impl Runtime {
                     )
                     .await
             };
+            binding.requests.record(outcome.counted());
             return EndpointDispatchOutcome::Ack(EndpointRequestReply {
                 outcome,
                 retry_after: window.retry_after,
@@ -430,37 +556,19 @@ impl Runtime {
             BufferedIngestMetadata::retain(&metadata),
             actual_utc_now(),
         );
-        let admission = match binding.quiesce.intake(payload, true) {
+        let intake = match binding.quiesce.intake(payload, true) {
             IngestorQuiesceIntake::Dispatch(payload) => {
-                match self
-                    .dispatch_endpoint_binding(binding, payload, protocol)
+                self.dispatch_endpoint_binding(binding, payload, protocol)
                     .await
-                {
-                    EndpointBindingDispatch::Taken => EndpointAdmission {
-                        accepted: 1,
-                        ..EndpointAdmission::default()
-                    },
-                    EndpointBindingDispatch::NotAdmitted => EndpointAdmission {
-                        rejected: 1,
-                        ..EndpointAdmission::default()
-                    },
-                }
             }
-            IngestorQuiesceIntake::Buffered => EndpointAdmission {
-                accepted: 1,
-                ..EndpointAdmission::default()
-            },
-            IngestorQuiesceIntake::Dropped => EndpointAdmission {
-                rejected: 1,
-                ..EndpointAdmission::default()
-            },
-            IngestorQuiesceIntake::Rejected { retry_after } => EndpointAdmission {
-                rejected: 1,
-                retry_after,
-                ..EndpointAdmission::default()
-            },
+            IngestorQuiesceIntake::Buffered => EndpointNoAckIntake::Buffered,
+            IngestorQuiesceIntake::Dropped => EndpointNoAckIntake::Refused { retry_after: None },
+            IngestorQuiesceIntake::Rejected { retry_after } => {
+                EndpointNoAckIntake::Refused { retry_after }
+            }
         };
-        EndpointDispatchOutcome::NoAck(admission)
+        binding.requests.record(intake.counted());
+        EndpointDispatchOutcome::NoAck(intake.admission())
     }
 }
 
@@ -490,6 +598,7 @@ impl Runtime {
         {
             Ok(()) => {}
             Err(PayloadDecodeFailure::NotAdmitted(report)) => {
+                binding.unfolding_refused.inc();
                 debug!(
                     domain = binding.domain.as_str(), ingestor = binding.ingestor.as_str(),
                     error = %format_args!("{report:#}"), protocol,
@@ -497,7 +606,7 @@ impl Runtime {
                 );
                 root.ack_success();
                 return EndpointRequestOutcome::NotAdmitted(
-                    nervix_models::ClientSubmissionRefusal::Busy,
+                    EndpointAdmissionRefusal::UnfoldingRefused,
                 );
             }
             Err(PayloadDecodeFailure::Codec(report)) => {
@@ -510,7 +619,7 @@ impl Runtime {
                     &binding.ingestor,
                     rejection,
                 );
-                return EndpointRequestOutcome::Refused;
+                return EndpointRequestOutcome::Refused(EndpointInputRefusal::Codec);
             }
         }
         let routed_ack = if binding.branched_senders.is_empty() {
@@ -553,7 +662,7 @@ impl Runtime {
             );
         }
         if collector.input_refused() {
-            return EndpointRequestOutcome::Refused;
+            return EndpointRequestOutcome::Refused(EndpointInputRefusal::Route);
         }
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -574,7 +683,7 @@ impl Runtime {
         binding: &EndpointIngestBinding,
         payload: BufferedIngestPayload,
         protocol: &str,
-    ) -> EndpointBindingDispatch {
+    ) -> EndpointNoAckIntake {
         // One request is one group, so its builders are sized for the single payload this binding
         // decodes; a payload that unfolds into several messages grows them.
         let mut collector = IngestRouteCollector::new(
@@ -632,7 +741,9 @@ impl Runtime {
                         protocol,
                         "failed to dispatch endpoint message"
                     );
+                    return EndpointNoAckIntake::DispatchFailed;
                 }
+                EndpointNoAckIntake::Dispatched
             }
             Err(PayloadDecodeFailure::NotAdmitted(error)) => {
                 binding.unfolding_refused.inc();
@@ -643,7 +754,7 @@ impl Runtime {
                     protocol,
                     "the node could not take an endpoint message now"
                 );
-                return EndpointBindingDispatch::NotAdmitted;
+                EndpointNoAckIntake::NotAdmitted
             }
             Err(PayloadDecodeFailure::Codec(report)) => {
                 // Sending the body again would only repeat the refusal, so the endpoint accepts it
@@ -660,9 +771,9 @@ impl Runtime {
                     &binding.ingestor,
                     rejection,
                 );
+                EndpointNoAckIntake::DecodeRejected
             }
         }
-        EndpointBindingDispatch::Taken
     }
 }
 
@@ -673,6 +784,61 @@ impl Runtime {
 )]
 mod tests {
     use super::*;
+
+    /// Every verdict of an unacknowledged ingestor answers the request as the route did before it
+    /// was counted, and is counted under exactly one outcome.
+    #[test]
+    fn every_unacknowledged_verdict_is_answered_and_counted_once() {
+        let accepted = EndpointAdmission {
+            accepted: 1,
+            ..EndpointAdmission::default()
+        };
+        for (verdict, counted) in [
+            (
+                EndpointNoAckIntake::Dispatched,
+                EndpointIntakeOutcome::Accepted,
+            ),
+            (
+                EndpointNoAckIntake::Buffered,
+                EndpointIntakeOutcome::Accepted,
+            ),
+            (
+                EndpointNoAckIntake::DispatchFailed,
+                EndpointIntakeOutcome::ProcessingFailed,
+            ),
+            (
+                EndpointNoAckIntake::DecodeRejected,
+                EndpointIntakeOutcome::DecodeRejected,
+            ),
+        ] {
+            assert_eq!(verdict.admission(), accepted, "{verdict:?}");
+            assert_eq!(verdict.counted(), counted, "{verdict:?}");
+        }
+        assert_eq!(
+            EndpointNoAckIntake::NotAdmitted.admission(),
+            EndpointAdmission {
+                rejected: 1,
+                ..EndpointAdmission::default()
+            }
+        );
+        assert_eq!(
+            EndpointNoAckIntake::NotAdmitted.counted(),
+            EndpointIntakeOutcome::NotAdmitted
+        );
+        let retry_after = Some(Duration::from_secs(3));
+        for delay in [retry_after, None] {
+            let refused = EndpointNoAckIntake::Refused { retry_after: delay };
+            assert_eq!(
+                refused.admission(),
+                EndpointAdmission {
+                    rejected: 1,
+                    retry_after: delay,
+                    ..EndpointAdmission::default()
+                }
+            );
+            assert_eq!(refused.counted(), EndpointIntakeOutcome::Refused);
+        }
+    }
 
     #[test]
     fn normalize_http_host_strips_port_and_normalizes_case() {

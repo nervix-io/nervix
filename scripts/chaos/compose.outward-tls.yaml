@@ -1,0 +1,42 @@
+# The outward TLS overlay of a three-node leader-crash run. Every node also serves the web console
+# over HTTPS on 47421 with its run certificate, so the outward TLS policy that the run commits during
+# the failover is judged by real handshakes, and `tls-probe` runs tls-probe.py in the pinned Python
+# image. The probe offers only TLS 1.3, TLS_CHACHA20_POLY1305_SHA256 and X25519, the members the
+# `fips` policy alias excludes, and verifies each node's certificate against the run's authority.
+# Each call names its port: 47421 for the console, 47395 for the interconnect.
+x-console-https: &console-https
+  NERVIX_WEB_CONSOLE_HTTPS_LISTEN_ADDR: 0.0.0.0:47421
+  NERVIX_WEB_CONSOLE_TLS_CERT: /etc/nervix/interconnect/node.pem
+  NERVIX_WEB_CONSOLE_TLS_KEY: /etc/nervix/interconnect/node-key.pem
+
+services:
+  nervix-1:
+    environment: *console-https
+
+  nervix-2:
+    environment: *console-https
+
+  nervix-3:
+    environment: *console-https
+
+  tls-probe:
+    image: ${CHAOS_PYTHON_IMAGE:?CHAOS_PYTHON_IMAGE is required}
+    profiles:
+      - outward-tls
+    entrypoint:
+      - python3
+      - -I
+      - /opt/chaos/tls-probe.py
+      - --ca
+      - /opt/chaos/ca.pem
+    environment:
+      OPENSSL_CONF: /opt/chaos/tls-probe-openssl.cnf
+    labels:
+      io.nervix.chaos.run: ${CHAOS_RUN_ID:?CHAOS_RUN_ID is required}
+      io.nervix.chaos.role: observer
+    volumes:
+      - ${CHAOS_SCRIPT_DIR:?CHAOS_SCRIPT_DIR is required}/tls-probe.py:/opt/chaos/tls-probe.py:ro
+      - ${CHAOS_SCRIPT_DIR:?CHAOS_SCRIPT_DIR is required}/tls-probe-openssl.cnf:/opt/chaos/tls-probe-openssl.cnf:ro
+      - ${CHAOS_TLS_DIR:?CHAOS_TLS_DIR is required}/ca.pem:/opt/chaos/ca.pem:ro
+    networks:
+      - chaos

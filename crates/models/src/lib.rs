@@ -42,16 +42,20 @@ mod emitter_instances;
 mod execution_unit;
 mod expression;
 mod http_request;
+mod inferencer_model_fingerprint;
 mod ingestor_input;
 mod json_path;
 mod message_error;
 mod model_index;
 mod name_spelling;
 mod names;
+mod node_capabilities;
 mod node_endpoint;
 mod node_ref;
+mod password_credential;
 mod placement;
 mod prerequisites;
+pub use password_credential::{PasswordCost, PasswordCredential};
 mod processor;
 mod quiesce;
 mod rebind_resource;
@@ -88,14 +92,14 @@ pub use canonical::{
     ingestor_input_body_to_plexus, string_literal,
 };
 pub use client_consumer::{
-    CLIENT_CONSUMER_NODE_BYTES, ClientConsumerLimits, DEFAULT_CLIENT_CONSUMER_SESSION_BYTES,
-    MAX_CLIENT_CONSUMER_BATCHES, MAX_CLIENT_CONSUMERS_PER_SESSION,
+    ClientConsumerLimits, DEFAULT_CLIENT_CONSUMER_SESSION_BYTES, MAX_CLIENT_CONSUMER_BATCHES,
+    MAX_CLIENT_CONSUMERS_PER_SESSION,
 };
 pub use client_producer::{
-    CLIENT_PRODUCER_NODE_BYTES, ClientAttachmentId, ClientBatchDefect, ClientEndpointContract,
-    ClientOutcomeUncertainty, ClientProcessingFailure, ClientProducerAdmission,
-    ClientProducerDescription, ClientProducerEndReason, ClientProducerGrant, ClientProducerLimits,
-    ClientProducerPolicy, ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
+    ClientAttachmentId, ClientBatchDefect, ClientEndpointContract, ClientOutcomeUncertainty,
+    ClientProcessingFailure, ClientProducerAdmission, ClientProducerDescription,
+    ClientProducerEndReason, ClientProducerGrant, ClientProducerLimits, ClientProducerPolicy,
+    ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
     DEFAULT_CLIENT_BATCH_ROWS, DEFAULT_CLIENT_PRODUCER_SESSION_BYTES, MAX_CLIENT_PRODUCER_BATCHES,
     MAX_CLIENT_PRODUCERS_PER_SESSION,
 };
@@ -120,26 +124,26 @@ pub use connector::{
     ClientDeclaration, ClientEmitter, ClientEmitterChange, ClientEmitterEntity, ClientEmitterMode,
     ClientIngestMode, ClientIngestorAlteration, ClientIngestorEntity, ClientPoolBounds,
     ClientPoolBoundsError, ClientPooling, ClientProducerIngestor, ClientProducerIngestorChange,
-    ClientResourceMount, ConfiguredClientRef, ConnectorKind, CreateClientAzureBlob,
+    ClientResourceMount, ConfiguredClientRef, ConnectorEvent, ConnectorKind, CreateClientAzureBlob,
     CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
     CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
     CreateClientOtel, CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar,
     CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
     CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq, DEFAULT_CONNECT_TIMEOUT,
-    DeadlineKey, DeclaredBounds, DeclaredBuffer, DeclaredDelivery, DeclaredPublishing,
-    DeclaredQuiesce, DeclaredValueMapping, DeclaredWait, DriverUrl, EmitterBodyForm, EmitterChange,
-    EmitterClientReference, EmitterDeclaration, EmitterEntity, EmitterEntityBody,
-    EmitterEntityCapabilities, EmitterEntityChange, EmitterEntityKind, EmitterEntityMetadata,
-    EmitterEntityModel, EmitterModeChange, EmitterPayloadFormat, EmitterPublication,
-    EmitterReference, EmitterReferenceKind, EmitterValueMapping, EmitterValueMappings,
-    EndpointIngestMode, EnvelopeClauseForm, EnvelopeClauseKind, EnvelopeValueType, ExternalName,
-    ExternalNameDeclaration, ExternalNameError, GcsConfigEntry, HTTP_CLIENT_SECRET_KEY_PREFIX,
-    HTTP_DEFAULT_MAX_BODY_SIZE, HeaderLayout, HeaderModel, HeaderNames, HeaderPair,
-    HeaderPairsError, HeaderValueType, HeaderValues, HostPort, HostPortError, HttpConfigEntry,
-    HttpEmitter, HttpEmitterChange, HttpEmitterEntity, HttpEndpointIngestor,
-    HttpEndpointIngestorChange, HttpIngestor, HttpIngestorEntity, HttpRequestEmitter,
-    HttpRequestEmitterChange, HttpRequestEmitterMode, HttpRequestHeader, HttpRequestHeaderValue,
-    HttpRequestHeadersError, HttpRequestIngestMode, HttpRequestIngestor,
+    DeadlineKey, DeclaredBounds, DeclaredBuffer, DeclaredDelivery, DeclaredEvents,
+    DeclaredPublishing, DeclaredQuiesce, DeclaredValueMapping, DeclaredWait, DriverUrl,
+    EmitterBodyForm, EmitterChange, EmitterClientReference, EmitterDeclaration, EmitterEntity,
+    EmitterEntityBody, EmitterEntityCapabilities, EmitterEntityChange, EmitterEntityKind,
+    EmitterEntityMetadata, EmitterEntityModel, EmitterModeChange, EmitterPayloadFormat,
+    EmitterPublication, EmitterReference, EmitterReferenceKind, EmitterValueMapping,
+    EmitterValueMappings, EndpointIngestMode, EnvelopeClauseForm, EnvelopeClauseKind,
+    EnvelopeValueType, ExternalName, ExternalNameDeclaration, ExternalNameError, GcsConfigEntry,
+    HTTP_CLIENT_SECRET_KEY_PREFIX, HTTP_DEFAULT_MAX_BODY_SIZE, HeaderLayout, HeaderModel,
+    HeaderNames, HeaderPair, HeaderPairsError, HeaderValueType, HeaderValues, HostPort,
+    HostPortError, HttpConfigEntry, HttpEmitter, HttpEmitterChange, HttpEmitterEntity,
+    HttpEndpointIngestor, HttpEndpointIngestorChange, HttpIngestor, HttpIngestorEntity,
+    HttpRequestEmitter, HttpRequestEmitterChange, HttpRequestEmitterMode, HttpRequestHeader,
+    HttpRequestHeaderValue, HttpRequestHeadersError, HttpRequestIngestMode, HttpRequestIngestor,
     HttpRequestIngestorAlteration, HttpRequestIngestorChange, HttpRequestPublishingMode,
     IcebergCatalog, IcebergCatalogProperties, IcebergEmitter, IcebergEmitterChange,
     IcebergEmitterEntity, IcebergFileIoEntry, IcebergLocationError, IcebergNamespace,
@@ -151,11 +155,11 @@ pub use connector::{
     IngestorEntity, IngestorEntityBody, IngestorEntityCapabilities, IngestorEntityChange,
     IngestorEntityKind, IngestorEntityMetadata, IngestorEntityModel, IngestorInstances,
     IngestorInstancingCapability, IngestorMetadataDeclaration, IngestorMetadataField,
-    IngestorMetadataType, IngestorReference, IngestorReferenceKind, KafkaConfigEntry,
-    KafkaConsumerGroupName, KafkaEmitter, KafkaEmitterChange, KafkaEmitterEntity, KafkaIngestMode,
-    KafkaIngestor, KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicEmitter,
-    KafkaTopicEmitterChange, KafkaTopicEmitterMode, KafkaTopicIngestor,
-    KafkaTopicIngestorAlteration, KafkaTopicIngestorChange, KafkaTopicName,
+    IngestorMetadataType, IngestorPayloadDeclaration, IngestorPayloadField, IngestorReference,
+    IngestorReferenceKind, KafkaConfigEntry, KafkaConsumerGroupName, KafkaEmitter,
+    KafkaEmitterChange, KafkaEmitterEntity, KafkaIngestMode, KafkaIngestor, KafkaIngestorEntity,
+    KafkaOffsetMode, KafkaTopicEmitter, KafkaTopicEmitterChange, KafkaTopicEmitterMode,
+    KafkaTopicIngestor, KafkaTopicIngestorAlteration, KafkaTopicIngestorChange, KafkaTopicName,
     KafkaTopicPublishingMode, LiteralHeaderWrite, LocatorDeclaration, LocatorName,
     MONGODB_MAX_DOCUMENT_BYTES, MONGODB_NAMESPACE_MAX_BYTES, MQTT_MAXIMUM_PACKET_BYTES,
     MQTT_SHARED_SUBSCRIPTION_LEVEL, MQTT_SOURCE_READ_AHEAD_HEADROOM, MYSQL_MAX_PLACEHOLDERS,
@@ -273,6 +277,7 @@ pub use http_request::{
     HttpApplicationHeaders, HttpBodyMode, HttpHeaderLimits, HttpHeaderName, HttpHeaderValue,
     HttpMethod, HttpOrigin, HttpRequestFieldError, HttpTarget,
 };
+pub use inferencer_model_fingerprint::InferencerModelFingerprint;
 pub use ingestor_input::{IngestorInput, TransportIngestorInput};
 pub use json_path::{JsonPath, JsonPathError, JsonPathStep};
 pub use message_error::{
@@ -288,6 +293,7 @@ pub use names::{
     SubscriptionName, UdfName, UserName, VhostName, WasmProcessorName, WindowProcessorName,
     WireSchemaName,
 };
+pub use node_capabilities::{NodeCapabilities, NodeCapabilityRecord, PeerReceiveBounds};
 pub use node_endpoint::{
     NodeEndpoint, NodeEndpointParseError, NodeServiceUrl, NodeServiceUrlParseError,
 };
@@ -370,15 +376,13 @@ pub use schema::{
     WireSchemaField, WireSchemaStrictness,
 };
 pub use schema_fingerprint::SchemaFingerprint;
-pub use settings::{
-    ClusterParameters, NodeCapabilities, Prerequisites, Setting, SettingClass, SettingDefinition,
-};
+pub use settings::{ClusterParameters, Prerequisites, Setting, SettingClass, SettingDefinition};
 pub use state_branch_selection::{
     ResolvedStateBranchSelection, StateBranchField, StateBranchSelection, StateBranchSelectionError,
 };
 pub use state_inspection::{
-    StateInspectionBranchSelection, StateInspectionCounts, StateInspectionOrigin,
-    StateInspectionPosition, StateInspectionRejection, StateInspectionStage,
+    ProcessorStateSection, StateInspectionBranchSelection, StateInspectionCounts,
+    StateInspectionOrigin, StateInspectionPosition, StateInspectionRejection, StateInspectionStage,
 };
 pub use state_inspection_settings::{
     StateInspectionMaxRows, StateInspectionMaxSections, StateInspectionReadTimeout,
@@ -404,11 +408,12 @@ pub use statement::{
     Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
     RelocationSelection, RelocationUnitSelection, ResolvedBranching, ResolvedCodecWireFormat,
     RetryPolicy, ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowPlacements,
-    ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SignalingProtobufConfig,
-    SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat, StartDomain,
-    StateInspectionPageRequest, Statement, StopDomain, SubscriptionBinding,
-    SubscriptionDeliveryBehavior, SubscriptionLiteral, UncordonNode, UniquelyKindedModel,
-    UploadResource, VhostTlsResource, WireSchemaLookup, default_relay_buffer,
+    ShowProcessorState, ShowRelayMaterializedState, ShowTransactions, ShowUdfs,
+    SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
+    SignalingWireFormat, StartDomain, StateInspectedProcessor, StateInspectionPageRequest,
+    Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral,
+    UncordonNode, UniquelyKindedModel, UploadResource, VhostTlsResource, WireSchemaLookup,
+    default_relay_buffer,
 };
 pub use timestamp::{AtomicTimestamp, Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};

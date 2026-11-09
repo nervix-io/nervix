@@ -393,12 +393,15 @@ The host builds a program's input with `project_vm_input_batch` in `src/runtime/
 - **Carrier columns.** Each is an Arc clone of the carrier batch's column, checked for its exact
   type. No buffer is copied.
 - **Built columns.** Branch key fields, broadcast materialized-state values, lookup results, and
-  selected ingest metadata are built as new columns. `SharedVmInputColumns` builds each of them
+  selected ingest metadata and payload facts are built as new columns. `SharedVmInputColumns` builds each of them
   once per dispatched batch and shares it among every output route that reads it.
 - **Missing nullable inputs.** These are typed Arrow null columns with the carrier's row count.
   This includes unread metadata fields such as a Kafka record's binary key. Absence does not pass
   through scalar `RuntimeValue` construction, so an unread `BYTES` declaration needs no scalar
   byte representation and does not visit the message's metadata.
+- **Payload inputs.** An ingestor binds only the payload fields its program reads, using the
+  entity's required `U64` declaration. A group's projection shares the original byte or batch-row
+  count through filtering and every route; an unread required payload field needs no null column.
 - **Uninitialized outputs.** These stay `TypedArray::Uninitialized` until finalization
   materializes them.
 
@@ -776,6 +779,8 @@ The VM's entry point alone decides where a program runs:
 | More than 1,024 rows, and no such function | On the node's data workers, admitted through the bounded executor |
 | Any `Inject` instruction whose injector's `FunctionExecutionPolicy` is `Extension` | On the node's extension workers, admitted through the bounded executor, whatever the batch size. Every UDF call does this. |
 
+The node resolves worker, queue and memory capacities once at startup;
+[Execution Capabilities](node-settings.md#execution-capabilities) defines the local bounds.
 A caller hands the entry point the node's `Executor` and awaits the result; it chooses neither
 the class nor the charge. An admitted execution is charged to the relay memory class for the bytes
 the batch's columns hold, the usual order of what the program builds from them, and never more
@@ -1144,6 +1149,14 @@ and diagnostics.
 
 Registry validation compiles the same route with the same compiler when the processor is applied.
 It also rejects `BYTES` arguments and checks the sketch budget.
+
+Cold state inspection projects the same argument program through
+`CompiledWindowRoute::argument_inspection_fields` with the input schema's sensitivity and the
+committed UDF signatures. The resulting fields follow flattened demand/argument order, matching
+`argument_snapshot_schema` and its shared `argument_snapshot_column` names. This does not change
+the private execution program or add work to record processing. Storage-kind names exposed by
+window inspection derive from `WindowAggregateStorageKind`; a count accompanies each name without
+exposing accumulator values or sketch contents.
 
 ### Branch Ownership And Accumulation
 

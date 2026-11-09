@@ -92,6 +92,15 @@ impl<'a> ExpressionCompletion<'a> {
             Some(
                 [
                     Token::Word(Word::KnownWord {
+                        iden: Keyword::Payload,
+                        ..
+                    }),
+                    Token::Dot,
+                ],
+            ) => self.payload_fields(),
+            Some(
+                [
+                    Token::Word(Word::KnownWord {
                         iden: Keyword::Input,
                         ..
                     }),
@@ -119,6 +128,18 @@ impl<'a> ExpressionCompletion<'a> {
         vec![CompletionExpectation::Semantic(
             SemanticReference::RelayField(relay),
         )]
+    }
+
+    fn payload_fields(&self) -> Vec<CompletionExpectation> {
+        let Some(kind) = self.ingestor else {
+            return Vec::new();
+        };
+        kind.capabilities()
+            .payload
+            .fields()
+            .iter()
+            .map(|field| CompletionExpectation::Literal(field.name().to_string()))
+            .collect()
     }
 
     fn metadata_fields(

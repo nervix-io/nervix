@@ -325,6 +325,34 @@ impl RelayProcessorNode {
         }
     }
 
+    pub(super) fn evict_inferencer_state(&mut self) {
+        if let RelayProcessorOperationNode::StatefulInferencer {
+            replicated_state, ..
+        } = &self.operation
+        {
+            replicated_state.publish(None);
+        }
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "retirement follows the exact branch task and its final checkpoint ending"
+        )
+    )]
+    pub(super) fn retire_evicted_inferencer_state(&self, runtime: &Runtime) {
+        if let RelayProcessorOperationNode::StatefulInferencer {
+            replicated_state, ..
+        } = &self.operation
+        {
+            runtime
+                .inner
+                .state_replication_routing
+                .retire_inferencer(replicated_state);
+        }
+    }
+
     async fn filter_input_batch_with_kind(
         &mut self,
         branch: &mut BranchRuntime,
@@ -1336,6 +1364,9 @@ impl RelayProcessorNode {
                     compiled_input_program,
                     prepared,
                     session,
+                    replicated_state,
+                    incarnation,
+                    snapshot_bytes,
                 } => {
                     stateful_inferencer::admit_stateful_inferencer(
                         stateful_inferencer::StatefulAdmissionContext {
@@ -1349,6 +1380,9 @@ impl RelayProcessorNode {
                             program: compiled_input_program,
                             prepared,
                             session,
+                            replicated_state,
+                            incarnation: *incarnation,
+                            snapshot_bytes: *snapshot_bytes,
                             materialized_values: &materialized_values,
                             execution_now,
                         },
@@ -2095,6 +2129,16 @@ impl RelayProcessorNode {
         purpose: ProcessorCheckpointPurpose,
     ) -> OwnershipHandoffResult<()> {
         match &mut self.operation {
+            RelayProcessorOperationNode::StatefulInferencer {
+                session,
+                replicated_state,
+                incarnation,
+                snapshot_bytes,
+                ..
+            } => {
+                replicated_state.publish_session(session, *incarnation, *snapshot_bytes);
+                Ok(())
+            }
             RelayProcessorOperationNode::Deduplicator { keyspace, .. } => {
                 keyspace.publish();
                 Ok(())
@@ -2148,11 +2192,13 @@ impl RelayProcessorNode {
             RelayProcessorOperationNode::WindowProcessor {
                 replicated_state, ..
             } => PublishedBranchState::WindowProcessor(replicated_state.clone()),
+            RelayProcessorOperationNode::StatefulInferencer {
+                replicated_state, ..
+            } => PublishedBranchState::Inferencer(replicated_state.clone()),
             RelayProcessorOperationNode::Junction { .. }
             | RelayProcessorOperationNode::Reorderer { .. }
             | RelayProcessorOperationNode::Correlator { .. }
             | RelayProcessorOperationNode::Inferencer { .. }
-            | RelayProcessorOperationNode::StatefulInferencer { .. }
             | RelayProcessorOperationNode::WasmProcessor { .. } => {
                 return SpawnedSnapshotTask {
                     task: None,
@@ -2572,8 +2618,12 @@ mod tests {
         assert_eq!(second_completion.wait().await, AckOutcome::NoAck(message));
     }
 
-    #[nervix_primitives::test]
-    async fn a_correlator_timeout_its_branch_cannot_deliver_fails_as_an_internal_error() {
+    /// A correlator shaped as the registry plans one: its timeout relays are not among its
+    /// routes, which name only the relays its matched records are constructed for.
+    fn correlator_with_timeout_relays(
+        processor: &mut RelayProcessorTemplate,
+        timeout_policy: CorrelationTimeoutPolicy,
+    ) {
         let value_schema = test_schema(&[("value", ParseAsType::I64)]);
         let where_program = compile_correlator_where_program(
             &named("node"),
@@ -2585,27 +2635,63 @@ mod tests {
             None,
         )
         .assured("the fixture's CORRELATE WHERE compiles");
-        let mut node = OneProcessorBranch::new(|processor| {
-            processor.kind = ModelKind::Correlator;
-            // A correlator's timeout relay is one of its output routes, as the registry plans it.
-            processor.operation = RelayProcessorOperationTemplate::Correlator {
-                output_routes: RelayProcessorOutputsTemplate {
-                    routes: vec![pass_through_route("expired")],
+        processor.kind = ModelKind::Correlator;
+        processor.operation = RelayProcessorOperationTemplate::Correlator {
+            output_routes: RelayProcessorOutputsTemplate {
+                routes: vec![pass_through_route("paired")],
+            },
+            left_relays: vec![named("incoming")],
+            right_relays: vec![named("right_profiles")],
+            correlate_where: expression("left.value = right.value"),
+            match_policy: CorrelatorMatchPolicy::Latest,
+            max_time: Duration::ZERO,
+            timeout_policy,
+            compiled_where_program: Some(where_program),
+            compiled_output_programs: vec![None],
+        };
+    }
+
+    #[nervix_primitives::test]
+    async fn a_correlator_branch_resolves_sent_metrics_for_its_timeout_relays_beside_its_routes() {
+        let node = OneProcessorBranch::new(|processor| {
+            correlator_with_timeout_relays(
+                processor,
+                CorrelationTimeoutPolicy {
+                    left: CorrelationTimeoutAction::SendTo {
+                        relay: named("expired"),
+                    },
+                    right: CorrelationTimeoutAction::SendTo {
+                        relay: named("unclaimed"),
+                    },
                 },
-                left_relays: vec![named("incoming")],
-                right_relays: vec![named("right_profiles")],
-                correlate_where: expression("left.value = right.value"),
-                match_policy: CorrelatorMatchPolicy::Latest,
-                max_time: Duration::ZERO,
-                timeout_policy: CorrelationTimeoutPolicy {
+            );
+        })
+        .await;
+
+        let outputs = node
+            .branch
+            .metrics
+            .processor_outputs
+            .get(&named::<ModelName>("node"))
+            .assured("the branch resolves output metrics for its one processor");
+        let mut relays = outputs.keys().map(RelayName::as_str).collect::<Vec<_>>();
+        relays.sort_unstable();
+        assert_eq!(relays, ["expired", "paired", "unclaimed"]);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_correlator_timeout_its_branch_cannot_deliver_fails_as_an_internal_error() {
+        let value_schema = test_schema(&[("value", ParseAsType::I64)]);
+        let mut node = OneProcessorBranch::new(|processor| {
+            correlator_with_timeout_relays(
+                processor,
+                CorrelationTimeoutPolicy {
                     left: CorrelationTimeoutAction::SendTo {
                         relay: named("expired"),
                     },
                     right: CorrelationTimeoutAction::Drop,
                 },
-                compiled_where_program: Some(where_program),
-                compiled_output_programs: Vec::new(),
-            };
+            );
         })
         .await;
         node.route_schemas(vec![("expired", value_schema)]);
