@@ -2171,6 +2171,24 @@ DashMap accesses and browser timers are untracked by Deloxide. The browser retry
 task owner; deterministic owner tests and public one- and three-node scenarios check its ordering,
 backoff and retained session attachments.
 
+The orphaned-pause fixture's `OrphanedDomainPauses` owner retains one test-only entry per domain. An
+admitted model command claims it before preflight, releases the map guard before proposing the pause
+under its mutation lease, and records delivery only after consensus confirms the pause. An
+unconfirmed test proposal rearms the entry and fails the fixture request, so its delivery assertion
+distinguishes that failure from the pause-recovery regression. The public scenario reads the
+retained delivery observation; its injector's drop disposes the map. These accesses are outside
+ordinary builds and recurring data-plane paths, and DashMap internals and the asynchronous consensus
+wait remain untracked by Deloxide.
+
+Conditional orphaned-pause recovery observes `active_domain_alters` once on a typed paused-domain
+refusal, after the command's durable progress recheck. It releases the map observation before
+awaiting consensus and acquires no alteration guard. Consensus serializes the exact mutation-fence,
+restore-gate and same-domain transaction checks with the status change. The registered consensus
+Shuttle checks drive this production applied owner against transaction adoption, unfenced reconcile
+and a replacement lease. They explore these application orderings; they do not model a network or
+reference-count ordering. Deloxide can observe blocking acquisition in the surrounding lifecycle
+path but cannot prove the asynchronous proposal or DashMap protocol.
+
 ### Complete analysis and qualification
 
 The isolated tooling workspace uses `nightly-2026-09-17`; product builds use stable. The twelve
@@ -3591,6 +3609,21 @@ passes every gathered message into its existing intake path. Observation introdu
 notification, ordering fence or tracked lock. Registry withdrawal follows the existing exact-unit
 retirement boundary and preserves sibling handles. Poll timing excludes cadence waiting and graph
 intake. The counters do not establish a memory-ordering or delivery guarantee.
+
+### Ingestor Acknowledgement Observations
+
+The broker and paced loops record acknowledgement outcomes, transport acknowledgement and
+rejection outcomes with their durations, resumes, suspensions and unconfirmed stops through the
+same exact-unit children the read observations retain, registered with them and withdrawn with
+them; no recurring path resolves labels or reaches the registry. Typing the acknowledgement wait's
+outcome changes no ACK-tree transition: an expired `ACK TIMEOUT` still ends only the wait, and the
+silent root, its completion and the batch's confirmation hold are kept exactly as before, so drains
+and ownership handoffs wait as they did. The transient-failure gauge reuses the emitter's
+task-bound failure projection: each ingestor host binds a closure over its unit's existing status
+publication when it starts, a scrape loads the current binding, and dropping the host withdraws
+only its own binding by pointer identity, so an ending predecessor never clears its replacement.
+These observations add no wait, notification, ordering fence or tracked lock, and establish no
+memory-ordering or delivery guarantee.
 
 ## Materialized Inspection Capture
 

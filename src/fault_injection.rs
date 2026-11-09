@@ -73,6 +73,7 @@ mod live_view_gap_tests;
 mod materialized_fetch_hold;
 mod materialized_reads;
 mod model_publication;
+mod orphaned_domain_pause;
 mod pause;
 mod relay_memory;
 mod relay_partition_fanout;
@@ -182,6 +183,7 @@ pub struct FaultInjection {
 
 #[derive(Debug)]
 struct FaultInjectionState {
+    orphaned_domain_pauses: orphaned_domain_pause::OrphanedDomainPauses,
     /// One bounded command-reply script per scenario domain, absent from ordinary builds.
     command_reply_scripts: DashMap<DomainName, CommandReplyScript, RandomState>,
     emitter_faults: DashMap<String, EmitterFaultMode, RandomState>,
@@ -526,6 +528,7 @@ impl Default for FaultInjection {
         let (startup_observation_end, _) = watch::channel(StartupObservationEnd::Unarmed);
         Self {
             inner: Arc::new(FaultInjectionState {
+                orphaned_domain_pauses: orphaned_domain_pause::OrphanedDomainPauses::default(),
                 command_reply_scripts: DashMap::default(),
                 emitter_faults: DashMap::default(),
                 observed_emitter_opens: DashMap::default(),

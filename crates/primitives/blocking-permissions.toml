@@ -208,6 +208,13 @@ path = "crates/consensus/src/restore.rs"
 reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
 
 [[permission]]
+bound = "Each Shuttle case starts at most two finite participants and joins both before returning; exploration uses the registered runner bounds."
+items = ["thread::spawn"]
+owner = "Conditional orphaned domain pause recovery checks."
+path = "crates/consensus/src/domain_pause_recovery/tests.rs"
+reason = "Model participants exercise the production applied mutation through the selected scheduler outside a node executor."
+
+[[permission]]
 bound = "The recorder serially handles one delivery at a time, with at most one watchdog. It waits at most ten seconds; successful potential recording cancels and joins it, and timeout or a terminal finding exits the process."
 items = ["thread::Builder"]
 owner = "The diagnostic run recording-deadline watchdog."

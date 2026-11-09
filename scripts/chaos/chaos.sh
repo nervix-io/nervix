@@ -25,6 +25,7 @@ Usage:
   just chaos run cluster-restart --image IMAGE [--nodes 1|3] [--outage-seconds N] [--records N]
   just chaos run stateful --image IMAGE [--nodes 1|3] [--fault FAULT] [--outage-seconds N]
   just chaos run endpoints --image IMAGE [--nodes 1|3] [--fault FAULT] [--outage-seconds N]
+  just chaos run binding-endpoints --image IMAGE --binding-image IMAGE [--nodes 1|3] [--fault FAULT]
   just chaos run lifetimes --image IMAGE [--nodes 1|3] [--fault FAULT] [--outage-seconds N]
   just chaos run domain-time --image IMAGE [--nodes 1|3] [--fault FAULT] [--outage-seconds N]
   just chaos run mixed-instability --image IMAGE [--seed N] [--duration 30m] [--policy POLICY]
@@ -33,7 +34,7 @@ Usage:
       [--verifier-self-check RECORD] [--keep]
   just chaos suite list
   just chaos suite smoke|soak --image IMAGE [--image-kind KIND] [--image-revision REVISION] [--shard N]
-      [--entry ID]... [--artifacts DIR] [--suite-id ID]
+      [--binding-image IMAGE] [--entry ID]... [--artifacts DIR] [--suite-id ID]
   just chaos suite shards SUITE
   just chaos suite cleanup [--wait SECONDS] SUITE_DIRECTORY
   just chaos suite report [--expect-shards N] SUITE_JSON...
@@ -110,6 +111,10 @@ endpoints  HTTP intake under MODE ACK through every node's listener into two dom
            replacement of its source, then one fault while intake continues
            faults: none (default), owner-crash, owner-partition, cluster-restart
            topologies: one-node (--nodes 1: none, cluster-restart), three-node (--nodes 3, default)
+binding-endpoints  Typed Python-package producer/consumer through node faults
+                   requires --binding-image of the product source revision
+                   faults: none, owner-crash, owner-stop, cluster-restart
+                   topologies: one or three nodes; one node supports none and cluster-restart
 lifetimes  Interleaved branches through a junction that waits for materialized state, a generator, a
            window of sketches and an LRU-bounded relay; materialized rows replaced by higher, lower and
            equal timestamps; an expiring branch expired and recreated; buffered route output
@@ -173,7 +178,7 @@ case "${command_name}" in
             stale-follower | former-owner-restart | cluster-restart)
                 exec "${script_dir}/run-recovery.sh" --scenario "${scenario}" "$@"
                 ;;
-            stateful | endpoints | lifetimes | domain-time | mixed-instability | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume)
+            stateful | endpoints | binding-endpoints | lifetimes | domain-time | mixed-instability | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume)
                 exec "${script_dir}/run-baseline.sh" --scenario "${scenario}" "$@"
                 ;;
             *)

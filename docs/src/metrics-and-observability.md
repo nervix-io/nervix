@@ -129,6 +129,23 @@ Nervix records these raw metric families:
 - `nervix_ingestor_poll_duration_seconds`: elapsed wall seconds around paced polls, including
   failed or interrupted polls. Broker reads have no duration observation because their wait is idle
   time, rather than the cost of a scheduled operation.
+- `nervix_ingestor_ack_outcomes_total`: acknowledgement waits an ingestor settled, by `outcome`:
+  `acknowledged`, `failed` for a tree the graph failed, `timed_out` for an `ACK TIMEOUT` that
+  expired, and `shutdown` for a wait its stop ended; see
+  [Ingestor Acknowledgement And Lifecycle](#ingestor-acknowledgement-and-lifecycle)
+- `nervix_ingestor_transport_acknowledgements_total`: acknowledgements and rejections of read
+  positions the ingestor's transport answered, by `operation` (`acknowledge` or `reject`) and
+  `outcome` (`succeeded` or `failed`)
+- `nervix_ingestor_transport_acknowledgement_duration_seconds`: elapsed wall seconds of each of
+  those transport operations, by `operation`, such as a Kafka commit or an SQS deletion
+- `nervix_ingestor_resumes_total`: completed resumes of an ingestor's connector, by `outcome`:
+  `ready`, `waiting` for an external assignment, or `failed`
+- `nervix_ingestor_suspends_total`: suspensions of an ingestor's connector, by `cause`: `quiesce`,
+  `read_failure` or `rejection`
+- `nervix_ingestor_unconfirmed_stop_positions_total`: positions an ingestor read but stopped before
+  its transport confirmed them, which its transport presents again
+- `nervix_ingestor_transient_failure`: `1` while the ingestor's current task has a published
+  transient failure, `0` otherwise and once the task ends
 - `nervix_ingestor_unfolding_refused_total`: raw payloads refused because extension-worker
   admission had no place, including acknowledged intake and endpoint requests. A retained payload
   waiting for a place is not a refusal. See [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).
@@ -195,11 +212,14 @@ The ingestor families `nervix_ingestor_unfolding_refused_total`,
 `nervix_ingestor_oversized_payloads_total`, `nervix_ingestor_header_values_dropped_total`
 and `nervix_ingestor_read_ahead_dropped_payloads_total`
 use `domain`, `ingestor`, `physical_node_id`, `instance`, `connector` and `entity` labels.
-The same label set applies to the four quiesce families and the read/poll families; reads add
-`outcome`. Connector and entity values come from the vocabulary, such as `KAFKA` and `TOPIC`.
-Buffer families are gauges; dropped, rejected, refused, redelivered, decode-rejection, oversized
-and invalid-header families are monotonic counters. They are process-local: quiesce buffers do not
-migrate during termination or failover.
+The same label set applies to the four quiesce families, the read/poll families and the
+acknowledgement and lifecycle families. Reads, acknowledgement outcomes and resumes add `outcome`,
+suspensions add `cause`, transport acknowledgements add `operation` and `outcome`, and their
+duration adds `operation`. Connector and entity values come from the vocabulary, such as `KAFKA`
+and `TOPIC`. Buffer families and the transient-failure family are gauges; dropped, rejected,
+refused, redelivered, decode-rejection, oversized, invalid-header, acknowledgement, resume,
+suspension and unconfirmed-stop families are monotonic counters. They are process-local: quiesce
+buffers do not migrate during termination or failover.
 
 Quiesce, refusal, redelivery, decode-rejection, oversized and invalid-header children are registered when the
 ingestor starts, and `DESCRIBE INGESTOR` registers the redelivery, decode-rejection and oversized
@@ -812,3 +832,37 @@ All bounded children start at zero. Read recording touches retained atomic child
 resolution or registry access. Counters are process-local observations, not durable delivery
 positions; a completed read does not imply that decoding, filtering or graph execution accepted its
 payload. Retirement withdraws only the exact unit's series and leaves siblings intact.
+
+### Ingestor Acknowledgement And Lifecycle
+
+These host observations carry the same six identity labels as the read families. Every bounded
+child exists at zero when the unit is registered. Counters retain their process-local history
+across task restarts of the same unit; the failure gauge describes the current task. `DESCRIBE
+INGESTOR` lists every family in `source:` after the read lines, with its full selector and `total`,
+`count` and `sum_seconds` for the duration histogram, or `value` for the gauge.
+
+| Family | Additional labels | Meaning |
+| --- | --- | --- |
+| `nervix_ingestor_ack_outcomes_total` | `outcome="acknowledged\|failed\|timed_out\|shutdown"` | One per acknowledgement wait the ingestor settled: a batch under batch settlement, or each delivery a RabbitMQ `ACK PARALLEL` ingestor settles individually. `failed` is a tree the graph failed, such as an emitter that refused a record; `timed_out` is a tree that reported no progress for the ingestor's `ACK TIMEOUT`; `shutdown` is a wait that the ingestor's stop ended. |
+| `nervix_ingestor_transport_acknowledgements_total` | `operation="acknowledge\|reject"`, `outcome="succeeded\|failed"` | Every acknowledgement or rejection of read positions the ingestor's transport completed, including a rejection the host retries after resuming. |
+| `nervix_ingestor_transport_acknowledgement_duration_seconds` | `operation="acknowledge\|reject"` | Elapsed wall seconds of each of those transport operations, such as a Kafka consumer-group commit or an SQS deletion, failed operations included. It uses the connector duration buckets of [Connector Interactions](#connector-interactions). |
+| `nervix_ingestor_resumes_total` | `outcome="ready\|waiting\|failed"` | Every resume of the ingestor's connector that completed: ready to read, waiting for an external assignment, or failed. A resume a stop or a quiesce change ended before it completed is not counted. |
+| `nervix_ingestor_suspends_total` | `cause="quiesce\|read_failure\|rejection"` | Every suspension of a ready connector: by a quiesce that suspends intake, by a read that failed and left the connector needing a resume, or because a rejection failed and the transport must be reopened before the same positions are read again. A connector asking for a resume without a failed read, such as after a Kafka domain-offset reassignment, counts only its resume. |
+| `nervix_ingestor_unconfirmed_stop_positions_total` | None | Positions the ingestor read whose acknowledgement trees had not all resolved when it stopped. Their transport presents them again by its own redelivery contract. |
+| `nervix_ingestor_transient_failure` | None | `1` while the current task has a published transient failure, which `DESCRIBE INGESTOR` shows as its transient error, otherwise `0`. Ending the task resets the observation to `0`; an ending predecessor cannot clear its replacement. |
+
+Broker ingestors record every family. Paced ingestors acknowledge nothing on a transport, so they
+record resumes, suspensions and the transient failure. An endpoint answers its sender and a client
+producer its batch's outcome instead, so their acknowledgement, transport, lifecycle and stop
+counters stay at zero; client producers keep the outcomes of [Client Ingestors](#client-ingestors).
+
+An ACK timeout is not a failed tree. The tree that went silent is not resolved by the timeout: the
+ingestor rejects the batch, its transport presents the positions again, and the earlier delivery
+may still complete. The ingestor's error event names the expired `ACK TIMEOUT` as a timeout, and a
+failed tree's event keeps the reason its failing branch gave. Transport durations start when the
+ingestor asks its transport to acknowledge or reject and end when the transport answered, as far as
+its [acknowledgement confirmation](./connector-contract.md#confirmed-acknowledgements) reaches, so
+they exclude the graph wait. A broker ingestor's transient failure clears once its transport
+confirms an acknowledgement again; a paced ingestor's clears once a poll or resume succeeds.
+Recording touches retained atomic children, with no label resolution or registry access, and
+changes no delivery, retry or error policy.

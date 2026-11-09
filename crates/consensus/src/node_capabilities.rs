@@ -56,7 +56,7 @@ impl Consensus {
                     Ok(response) => match response.data {
                         ConsensusResponse::Applied => CapabilityAnnouncementReply::Committed,
                         ConsensusResponse::Conflict(conflict) => CapabilityAnnouncementReply::Refused(conflict),
-                        ConsensusResponse::Transaction(_) => unreachable!("capability publication never mutates a transaction"),
+                        ConsensusResponse::Transaction(_) | ConsensusResponse::OrphanedPauseRecovery(_) => unreachable!("capability publication returns only its own applied or conflict response"),
                     },
                     Err(error) => {
                         debug!(error = %format_args!("{error:#}"), "node capability publication will retry against the current leader");

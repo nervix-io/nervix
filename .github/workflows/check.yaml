@@ -1707,7 +1707,7 @@ jobs:
         run: just test-client-jvm
 
       - name: Test the native Ruby boundary and bounded representations
-        run: just test-client-ruby
+        run: just test-client-ruby-run
 
       # The Python package's suite on its boundary tier, from the environment the build prepared.
       - name: Python package boundary tier
@@ -1999,6 +1999,10 @@ jobs:
         if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-wasm-bindgen
 
+      - name: External Python binding chaos controls
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
+        run: just coverage-chaos-binding
+
       # The collector that the steps below run their checks through, including its refusal of
       # every incomplete collection.
       - name: Native coverage collector
@@ -2162,6 +2166,7 @@ jobs:
             target/connector-matrix/python.lcov
             target/ci-selection/python.lcov
             target/wasm-bindgen-coverage/python.lcov
+            target/chaos-binding-coverage/python.lcov
             target/client-suites/python.lcov
             target/coverage-source-root.txt
             target/typed-ratchet/cache-qualification/**/qualification.json

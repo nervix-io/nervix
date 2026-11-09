@@ -108,6 +108,7 @@ use append_submission_fault::AppendSubmissionFaults;
 pub use cluster_parameters::ClusterParameterPlanningInputs;
 mod connectivity_fault;
 mod domain_mutation;
+mod domain_pause_recovery;
 mod durable_batch;
 mod leadership;
 mod lease_refusal;
@@ -134,7 +135,10 @@ pub use command_execution::{
     CommandExecutionTransactionStatus, CommandExecutionTransactionTarget, DiagnosticSpan,
     RecordedBackupArchive,
 };
-pub use domain_mutation::{DomainMutationLease, DomainMutationOwner, DomainMutationRecoveryFence};
+pub use domain_mutation::{
+    DomainMutationError, DomainMutationLease, DomainMutationOwner, DomainMutationRecoveryFence,
+};
+pub use domain_pause_recovery::OrphanedPauseRecovery;
 pub use leadership::LeadershipObservation;
 #[cfg(any(test, feature = "testing"))]
 pub use lease_refusal::CommandWrite;
@@ -166,7 +170,7 @@ mod transaction_retention;
 #[cfg(test)]
 mod transaction_retention_tests;
 use connectivity_fault::ConnectivityFault;
-use domain_mutation::{DomainMutationAdmission, DomainMutationError};
+use domain_mutation::DomainMutationAdmission;
 #[cfg(any(test, feature = "testing"))]
 pub use storage_fault::{StorageBoundary, StorageFault, StoragePause};
 use transaction_report::TransactionReportRecords;
@@ -613,6 +617,12 @@ pub enum ConsensusCommand {
     RemoveFinishedTransactions {
         finished_before: nervix_models::Timestamp,
     },
+    /// Recovers a pause only while this exact command lease still owns the domain and no
+    /// committing transaction has adopted it. Ordinary transaction/backup resume is separate.
+    RecoverOrphanedModelPause {
+        domain_id: DomainName,
+        mutation: Box<DomainMutationLease>,
+    },
 }
 
 #[derive(
@@ -622,6 +632,7 @@ pub enum ConsensusResponse {
     Applied,
     Conflict(ConsensusConflict),
     Transaction(Box<TransactionMutationResponse>),
+    OrphanedPauseRecovery(OrphanedPauseRecovery),
 }
 
 /// Why the replicated state machine refused a proposed change.
@@ -663,6 +674,12 @@ pub enum ConsensusConflict {
     ExecutionReferenceConflict {
         reference: nervix_models::CommandExecutionReference,
         kind: CommandExecutionRequestConflict,
+    },
+    #[error("{cause}")]
+    DomainMutation { cause: Box<DomainMutationError> },
+    #[error("{cause}")]
+    RestoreInstallation {
+        cause: Box<RestoreStateInstallationError>,
     },
 }
 
@@ -773,6 +790,9 @@ impl std::fmt::Display for ConsensusCommand {
             Self::PauseDomain { domain_id, .. } => write!(f, "pause-domain:{}", domain_id.as_str()),
             Self::ResumeDomain { domain_id, .. } => {
                 write!(f, "resume-domain:{}", domain_id.as_str())
+            }
+            Self::RecoverOrphanedModelPause { domain_id, .. } => {
+                write!(f, "recover-orphaned-model-pause:{}", domain_id.as_str())
             }
             Self::ReconcileDomainClockAuthority { domain_id, .. } => {
                 write!(f, "reconcile-domain-clock-authority:{}", domain_id.as_str())
@@ -890,6 +910,9 @@ impl std::fmt::Display for ConsensusResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Applied => f.write_str("ok"),
+            Self::OrphanedPauseRecovery(recovery) => {
+                write!(f, "orphaned-pause-recovery:{recovery:?}")
+            }
             Self::Conflict(reason) => write!(f, "conflict:{reason}"),
             Self::Transaction(response) => match &response.result {
                 Ok(transaction) => write!(f, "transaction:{}", transaction.id),
@@ -3502,7 +3525,7 @@ impl Proposer {
             ConsensusResponse::Conflict(reason) => {
                 Err(Report::new(ConsensusError::Conflict(reason)))
             }
-            ConsensusResponse::Transaction(_) => {
+            ConsensusResponse::Transaction(_) | ConsensusResponse::OrphanedPauseRecovery(_) => {
                 Err(Report::new(ConsensusError::UnexpectedResponse))
             }
         }
@@ -3534,7 +3557,7 @@ impl Proposer {
             ConsensusResponse::Conflict(reason) => {
                 Err(Report::new(ConsensusError::Conflict(reason)))
             }
-            ConsensusResponse::Transaction(_) => {
+            ConsensusResponse::Transaction(_) | ConsensusResponse::OrphanedPauseRecovery(_) => {
                 Err(Report::new(ConsensusError::UnexpectedResponse))
             }
         }
@@ -3564,7 +3587,7 @@ impl Proposer {
             ConsensusResponse::Conflict(reason) => {
                 Err(Report::new(ConsensusError::Conflict(reason)))
             }
-            ConsensusResponse::Transaction(_) => {
+            ConsensusResponse::Transaction(_) | ConsensusResponse::OrphanedPauseRecovery(_) => {
                 Err(Report::new(ConsensusError::UnexpectedResponse))
             }
         }
@@ -3594,7 +3617,7 @@ impl Proposer {
             ConsensusResponse::Conflict(reason) => {
                 Err(Report::new(ConsensusError::Conflict(reason)))
             }
-            ConsensusResponse::Transaction(_) => {
+            ConsensusResponse::Transaction(_) | ConsensusResponse::OrphanedPauseRecovery(_) => {
                 Err(Report::new(ConsensusError::UnexpectedResponse))
             }
         }
@@ -3626,7 +3649,7 @@ impl Proposer {
             ConsensusResponse::Conflict(reason) => {
                 Err(Report::new(ConsensusError::Conflict(reason)))
             }
-            ConsensusResponse::Transaction(_) => {
+            ConsensusResponse::Transaction(_) | ConsensusResponse::OrphanedPauseRecovery(_) => {
                 Err(Report::new(ConsensusError::UnexpectedResponse))
             }
         }
@@ -3669,7 +3692,7 @@ impl Proposer {
             ConsensusResponse::Conflict(reason) => {
                 Err(Report::new(ConsensusError::Conflict(reason)))
             }
-            ConsensusResponse::Transaction(_) => {
+            ConsensusResponse::Transaction(_) | ConsensusResponse::OrphanedPauseRecovery(_) => {
                 Err(Report::new(ConsensusError::UnexpectedResponse))
             }
         }
@@ -3919,7 +3942,7 @@ impl Proposer {
             ConsensusResponse::Conflict(reason) => {
                 Err(Report::new(ConsensusError::Conflict(reason)))
             }
-            ConsensusResponse::Transaction(_) => {
+            ConsensusResponse::Transaction(_) | ConsensusResponse::OrphanedPauseRecovery(_) => {
                 Err(Report::new(ConsensusError::UnexpectedResponse))
             }
         }
@@ -4051,7 +4074,7 @@ impl Proposer {
             ConsensusResponse::Conflict(reason) => {
                 Err(Report::new(ConsensusError::Conflict(reason)))
             }
-            ConsensusResponse::Transaction(_) => {
+            ConsensusResponse::Transaction(_) | ConsensusResponse::OrphanedPauseRecovery(_) => {
                 Err(Report::new(ConsensusError::UnexpectedResponse))
             }
         }
@@ -4112,7 +4135,7 @@ impl Proposer {
             ConsensusResponse::Conflict(reason) => {
                 Err(Report::new(ConsensusError::Conflict(reason)))
             }
-            ConsensusResponse::Transaction(_) => {
+            ConsensusResponse::Transaction(_) | ConsensusResponse::OrphanedPauseRecovery(_) => {
                 Err(Report::new(ConsensusError::UnexpectedResponse))
             }
         }
@@ -6019,6 +6042,10 @@ fn apply_consensus_command_at(
                 changes.domains_changed = true;
             }
         }
+        ConsensusCommand::RecoverOrphanedModelPause {
+            domain_id,
+            mutation,
+        } => return state.recover_orphaned_model_pause(domain_id, mutation),
         ConsensusCommand::ReconcileDomainClockAuthority {
             domain_id,
             expected_start_version,

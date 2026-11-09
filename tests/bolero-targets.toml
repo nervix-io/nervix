@@ -4469,6 +4469,21 @@ test_target = "bin:nervix-web-console"
 
 [[target]]
 case_timeout_seconds = 30
+corpus = "crates/web-console/src/create_dialog/__fuzz__/create_dialog__processor_model_tests__bolero_processor_drafts_preserve_every_complete_model/corpus"
+domain_version = 1
+features = []
+id = "console-processor-drafts"
+invariant = "Every complete junction, deduplicator, reorderer and reingestor Model filled into its browser draft builds back to the complete original and canonical Plexus, including ordered inputs, predicates, collection, node branch, DEDUPLICATE ON and BY order, exact MAX TIME text, materialized dependencies and every route's construction, branch, flush and error policy."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-web-console"
+random_iterations = 128
+source = "crates/web-console/src/create_dialog/processor_model_tests.rs"
+test = "create_dialog::processor_model_tests::bolero_processor_drafts_preserve_every_complete_model"
+test_target = "bin:nervix-web-console"
+
+[[target]]
+case_timeout_seconds = 30
 corpus = "crates/client-ruby/tests/__fuzz__/bolero_columns_round_trip_through_ruby/corpus"
 domain_version = 1
 features = ["ruby-tests"]

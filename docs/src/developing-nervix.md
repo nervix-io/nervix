@@ -75,6 +75,21 @@ representation properties. All-features workspace tests enable `ruby-tests` too,
 restored unit jobs provision the same Ruby version. `ruby/setup-ruby` provides CI's interpreter,
 headers and shared library. No buffer or generated gem is written into the source tree.
 
+The minitest suite in `tests/client_conformance/ruby/suite` uses Ruby's bundled minitest and Prism,
+without another gem download. `just test-client-ruby-api` prepares the gem and runs its boundary
+tier through the native `host_suite` test; that test also runs in ordinary workspace unit jobs.
+`just test-client-ruby-cluster` runs the one- and three-node TLS/plaintext cluster rows.
+Packaging prepares a fresh `GEM_HOME` beside the extracted gem, and each tier loads that installed
+archive first. The coverage build prepares both forms from its instrumented extension and carries
+them in the unit-test archive. `NERVIX_CLIENT_RUBY_TEST_ARTIFACTS` selects those prepared artifacts;
+no test invokes a compiler or package manager. `just test-client-ruby-api-run` runs the prepared
+boundary tier directly. `just validate-client-suites` compares native magnus registrations with
+Prism-parsed constant and typed-receiver references, inventories every minitest identity and
+checks the [Ruby guide](client-library-ruby.md)'s anchored includes. `just test-client-ruby-suite-reader`
+checks registration, receiver, inventory, guide and actual minitest reporter controls.
+The conformance job calls `just test-client-ruby-run` after its artifact build, preserving the
+embedded tests and boundary tier without packaging that same gem twice.
+
 The Python package builds with maturin, which `just build-client-python` runs as
 `uvx --from maturin==1.16.0 maturin`, into an abi3 wheel for CPython 3.12 and later under
 `target/client-conformance/wheels`, with its typed stub `crates/client-python/nervix_client.pyi`
@@ -603,7 +618,7 @@ compares it with the workflows.
 | `extra-doctests` | Check | Capability doctests |
 | `extra-miri` | Check | Miri over the expiry map |
 | `extra-mutation` | Check | Mutation tests of the expiry map |
-| `extra-runners` | Check | Python coverage of the reporters, gates and collectors: patch coverage, the ordinary merge, the CRAP report, the full union, the paced simulation policy, the release gate, the deployment controller, the kache contract, the connector matrix renderer, the test selection, the wasm-bindgen tool, the native collector, the client suite readers with the unit-test archive, and the primitive source validator |
+| `extra-runners` | Check | Python coverage of the reporters, gates and collectors: patch coverage, the ordinary merge, the CRAP report, the full union, the paced simulation policy, the release gate, the deployment controller, the kache contract, the connector matrix renderer, the test selection, the wasm-bindgen tool, the external binding chaos controls, the native collector, the client suite readers with the unit-test archive, and the primitive source validator |
 | `extra-compiler` | Check | Source contracts, compiler diagnostics, the Rust runner/gate/audit owners, paired API doctests, compiler cache qualification and the Python coverage of the ratchet's callers |
 | `extra-bench-smoke` | Check | Benchmark smoke tests |
 | `extra-primitives` | Check | Primitive boundary conformance in ordinary, Shuttle, Loom and Turmoil modes, plus ordinary documentation and browser checks. `coverage-full` then requires those collections |
@@ -1071,8 +1086,8 @@ suites run selections of those scenarios, each as its own `just chaos run` comma
 
 ```bash
 just chaos suite list
-just chaos suite smoke --image ghcr.io/nervix-io/nervix@sha256:<digest>
-just chaos suite soak --image ghcr.io/nervix-io/nervix@sha256:<digest>
+just chaos suite smoke --image ghcr.io/nervix-io/nervix@sha256:<digest> --binding-image ghcr.io/nervix-io/nervix@sha256:<binding-digest>
+just chaos suite soak --image ghcr.io/nervix-io/nervix@sha256:<digest> --binding-image ghcr.io/nervix-io/nervix@sha256:<binding-digest>
 ```
 
 The smoke suite runs a baseline, a leader crash with its restart and a partition with its recovery;
@@ -1091,7 +1106,7 @@ release-mode diagnostic server of this checkout on an available image:
 
 ```bash
 just build-chaos-diagnostic-image nervix:diagnostic-local ghcr.io/nervix-io/nervix:debian-latest deloxide-order
-just chaos suite smoke --image nervix:diagnostic-local --image-kind deloxide-order
+just chaos suite smoke --image nervix:diagnostic-local --binding-image nervix:chaos-client --image-kind deloxide-order
 ```
 
 [External Cluster Chaos](./cluster-chaos.md) describes the runner, every scenario and its verdicts,
