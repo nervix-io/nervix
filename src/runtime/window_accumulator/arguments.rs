@@ -755,7 +755,7 @@ impl WindowArgumentColumns {
         for demand in &self.demands {
             for column in demand.iter() {
                 fields.push(ArrowField::new(
-                    format!("argument_{}", fields.len()),
+                    nervix_vm::window::argument_snapshot_column(fields.len()),
                     column.array.data_type().clone(),
                     true,
                 ));

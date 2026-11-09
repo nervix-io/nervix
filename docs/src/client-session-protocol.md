@@ -1142,9 +1142,11 @@ The node a session is on serves completion and choice lookups, listing and selec
 subscriptions, domain clock attachments, producers, and the reads its locally applied state can
 answer: `SHOW CLUSTER STATUS`, `DESCRIBE CLUSTER`, `SHOW TRANSACTIONS`, `SHOW CREATE`, `SHOW UDFS`,
 `SHOW INGESTORS`, `SHOW EMITTERS`, `SHOW PLACEMENTS`,
-`SHOW RELAY MATERIALIZED STATE`, `LOOKUP`, and the `DESCRIBE` statements of domains, resources,
-endpoints, lookups, placements, UDFs, relocations, relays, ingestors, junctions, deduplicators,
-reingestors, correlators, reorderers, window processors, WASM processors, and emitters. Every other
+`SHOW RELAY MATERIALIZED STATE`, `SHOW REORDERER STATE`, `SHOW CORRELATOR STATE`,
+`SHOW DEDUPLICATOR STATE`, `SHOW WINDOW PROCESSOR STATE`, `LOOKUP`, and
+the `DESCRIBE` statements of domains, resources, endpoints, lookups, placements, UDFs, relocations,
+relays, ingestors, junctions, deduplicators, reingestors, correlators, reorderers, window
+processors, WASM processors, and emitters. Every other
 statement needs the leader, and so do every transaction request, transaction attach and inspection,
 and uploads. A follower answers them with `LeaderRedirect` before anything is admitted, and the
 client reconnects to the leader and repeats the request. Because persistent commands and
@@ -2583,6 +2585,12 @@ process-bound read origin, complete counts and named sections. A section carries
 `RowSchema`, bounded `NXRB` RowBatch frames, omitted-row count and optional positional watermark
 indices. Watermarks are distinct, non-sensitive datetime columns. Frames conform to their section
 schema, keep branch keys and redaction, and share the verified outer reply's backing bytes.
+
+Stateful processor reads use the same envelope. Deduplicators publish `keys`; windows publish
+retained `rows` plus per-branch `header` and `accumulators` sections. Window metadata consumes
+reply bytes and sections, while complete row counts, `LIMIT` and continuation offsets refer only
+to retained inputs. Metadata can therefore be present when no input is retained. The
+[processor inspection sections](./processors.md#inspect-retained-window-state) define their fields.
 
 The shared host runtime keeps this envelope in `Inspection`. Python, Ruby and JVM applications
 read its typed metadata and lossless JSON through their native binding, using the host guides'

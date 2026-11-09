@@ -1153,6 +1153,11 @@ measure-web-console-debug-strings target_dir=(cargo_target_dir + "/web-console-d
 coverage-connector package output *args:
     cargo llvm-cov --no-clean --package {{ package }} --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
+# Measure the shared licensing protocol's unit tests and properties, for a patch confined to it,
+# through the configured compiler cache.
+coverage-licensing-protocol output *args:
+    cargo llvm-cov --no-clean --package nervix-licensing-protocol --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+
 # Collect focused unit coverage for the cryptography boundary and its TLS/signing consumers.
 coverage-crypto output *args:
     cargo llvm-cov --no-clean --package nervix-crypto --package nervix-interconnect --package nervix-connector --package nervix-connector-nats --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
@@ -4707,6 +4712,11 @@ coverage-chaos-pause-delivery:
 # Exercise bounded packet sampling and the directed-link effect limits without a product image.
 test-chaos-degraded-evidence:
     exec bash scripts/chaos/tests/degraded-self-test.sh
+
+# Judge the leader crash's outward TLS policy evidence and prove its restricted TLS probe against
+# local servers that admit or exclude the probe's offer.
+test-chaos-outward-tls:
+    exec bash scripts/chaos/tests/outward-tls-self-test.sh
 
 # Pin suite preparation and baseline execution accounting and the production output-boundary
 # observations.

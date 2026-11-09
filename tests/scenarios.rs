@@ -258,6 +258,7 @@ mod paced_simulation;
 mod password_credentials;
 mod postgres_fixtures;
 mod process_cluster;
+mod processor_state_inspection;
 mod pulsar_delivery;
 mod pulsar_emission;
 mod pulsar_metadata;
@@ -582,6 +583,8 @@ struct ScenarioWorld {
     /// than its message.
     last_client_outcome: Option<ClientCommandOutcome>,
     inspection_observations: materialized_state_inspection::Observations,
+    /// The continuation a reorderer or correlator state page saved for a later resume.
+    processor_state_observations: processor_state_inspection::Observations,
     /// The exact source of the last request a named client submitted, which the spans of that
     /// request's diagnostics index.
     last_client_request: Option<String>,
