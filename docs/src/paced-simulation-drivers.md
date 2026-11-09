@@ -102,6 +102,8 @@ just paced-simulation --server http://127.0.0.1:47391 --username default \
 `cargo run --release --package nervix-paced-simulation -- <options>`.
 
 The Python driver imports `nervix_client` and needs CPython 3.12 or later.
+It uses the pyo3 package over the shared Rust host runtime; [Client Host
+Bindings](client-host-bindings.md) owns its thread, cancellation and retained-buffer contracts.
 `just paced-simulation-python` builds a release wheel, installs it into the generated environment
 at `target/paced-simulation/python`, and runs the driver with that interpreter:
 

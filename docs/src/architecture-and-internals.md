@@ -29,8 +29,10 @@ Use it for:
   the inventory of cryptography outside AWS-LC and the count that holds it
   down](./cryptography.md)
 - [client-to-node communication: the FlatBuffers session protocol, request correlation and
-  dispositions, exact recovery, redirect and reconnection, Row subscriptions, uploads, and the
-  shared client binding](./client-session-protocol.md)
+  dispositions, exact recovery, redirect and reconnection, Row subscriptions and
+  uploads](./client-session-protocol.md)
+- [client host bindings: the shared runtime, threads, cancellation, host lifetimes, failures,
+  Arrow exchange, packaging and qualification](./client-host-bindings.md)
 - [transaction impact planning, scoped quiescence, inspection, and retained outcomes](./transaction-quiescence.md)
 - [consensus durability, replication pacing, log retention, and snapshot recovery](./consensus-storage-and-replication.md)
 - [resource versions, pinned bindings, `LATEST` resolution, rebinding, and the HTTPS listener refresh](./resource-versions.md)

@@ -538,6 +538,11 @@ tier = "cluster"
 
 [[test]]
 host = "java"
+identity = "io.nervix.client.suite.RecoveryTests#aRefusedSubscriptionRestorationReportsItsCauseAndRecovers"
+tier = "cluster"
+
+[[test]]
+host = "java"
 identity = "io.nervix.client.suite.RecoveryTests#cancellationAfterAnObservedEffectRecoversTheSamePreparedExecution"
 tier = "cluster"
 

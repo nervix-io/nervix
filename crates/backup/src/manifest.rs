@@ -4,6 +4,7 @@ use std::{collections::BTreeSet, fmt};
 
 use error_stack::Report;
 use nervix_models::{BackupCut, BackupQuiesceCounters, BackupResources, DomainName, Timestamp};
+use uuid::{Uuid, Variant, Version};
 
 use crate::{
     error::{ArchiveReadError, ArchiveWriteError},
@@ -17,10 +18,10 @@ use crate::{
 
 /// The archive format major version this crate writes and reads. A reader refuses any other: a
 /// new major is a format this reader cannot interpret.
-pub const ARCHIVE_FORMAT_MAJOR: u16 = 6;
+pub const ARCHIVE_FORMAT_MAJOR: u16 = 7;
 
 /// The manifest record's format version.
-const MANIFEST_VERSION: u16 = 2;
+const MANIFEST_VERSION: u16 = 3;
 
 /// What an archive is and every section it holds, in the order the archive holds them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +32,8 @@ pub struct BackupManifest {
     pub language_version: String,
     /// The cluster the archive was taken from.
     pub cluster_id: String,
+    /// The source cluster's permanent UID, for display. Restore retains the target's identity.
+    pub cluster_uid: Uuid,
     /// When the archive's contents were read.
     pub captured_at: Timestamp,
     pub scope: ArchiveScope,
@@ -167,6 +170,9 @@ impl ArchiveRecord for BackupManifest {
     const VERSION: u16 = MANIFEST_VERSION;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
+        if !is_cluster_uid(self.cluster_uid) {
+            return Err(Report::new(ArchiveWriteError::InvalidClusterUid));
+        }
         encode_record(Self::KIND, Self::VERSION, &ManifestWire::from(self))
     }
 
@@ -224,6 +230,7 @@ impl From<&BackupManifest> for ManifestWire {
             producer_version: manifest.producer_version.clone(),
             language_version: manifest.language_version.clone(),
             cluster_id: manifest.cluster_id.clone(),
+            cluster_uid: manifest.cluster_uid.into_bytes(),
             captured_at_unix_nanos: manifest.captured_at.unix_nanos(),
             scope,
             resources: ResourcesWire::from(manifest.resources),
@@ -235,6 +242,13 @@ impl From<&BackupManifest> for ManifestWire {
 
 impl BackupManifest {
     fn from_wire(wire: ManifestWire) -> Result<Self, Report<ArchiveReadError>> {
+        let cluster_uid = Uuid::from_bytes(wire.cluster_uid);
+        if !is_cluster_uid(cluster_uid) {
+            return Err(Report::new(ArchiveReadError::InvalidValue {
+                path: MANIFEST_PATH.to_string(),
+                field: "cluster UID",
+            }));
+        }
         if wire.format_major != ARCHIVE_FORMAT_MAJOR {
             return Err(Report::new(ArchiveReadError::UnsupportedArchiveFormat {
                 found: wire.format_major,
@@ -324,6 +338,7 @@ impl BackupManifest {
             producer_version: wire.producer_version,
             language_version: wire.language_version,
             cluster_id: wire.cluster_id,
+            cluster_uid,
             captured_at: Timestamp::from_unix_nanos(wire.captured_at_unix_nanos),
             scope,
             resources: BackupResources::from(wire.resources),
@@ -331,6 +346,10 @@ impl BackupManifest {
             sections,
         })
     }
+}
+
+fn is_cluster_uid(uid: Uuid) -> bool {
+    uid.get_version() == Some(Version::Random) && uid.get_variant() == Variant::RFC4122
 }
 
 fn manifest_domain(raw: &str) -> Result<DomainName, Report<ArchiveReadError>> {

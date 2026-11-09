@@ -136,10 +136,19 @@ Use the handle the new event carries. Restoration sees subsequent rows and does 
 {{#include ../../tests/client_conformance/java/suite/cluster/RecoveryTests.java:subscription_interrupted}}
 ```
 
+`RESTORATION_FAILED` says the new server session refused for now to open the subscription again.
+Its `restorationFailure()` carries the typed `RestorationCause`, the server's message and
+`waitNanos`, how long the client waits before it tries again; read it only for that event kind.
+The subscription stays and the client keeps trying. The suite asks its scenario to refuse one
+restoration, checks those details, then reads rows after a later attempt succeeds:
+
+```java
+{{#include ../../tests/client_conformance/java/suite/cluster/RecoveryTests.java:restoration_failed}}
+```
+
 `ENDED` is terminal for that generation. Its reason distinguishes a removed relay from a changed
 relay. Delete a subscription with `DELETE SUBSCRIPTION <name>;`; creating that name again obtains
-a new generation. `RESTORATION_FAILED` carries a typed cause, message and retry wait; read it only
-for that event kind. `DELIVERY_LOST`, `ROWS_SKIPPED` and `CONSUMER_OVERFLOW` report delivery gaps.
+a new generation. `DELIVERY_LOST`, `ROWS_SKIPPED` and `CONSUMER_OVERFLOW` report delivery gaps.
 
 ```java
 {{#include ../../tests/client_conformance/java/suite/cluster/RecoveryTests.java:subscription_ended}}

@@ -3673,8 +3673,14 @@ also bounds writing it. EOF, a mismatched confirmation or an oversized one fails
 The Python runner duplicates stdin and stdout before starting pytest. Its action fixture borrows
 those copies, so requests and confirmations bypass capture while pytest keeps its ordinary fd
 capture of Python and native stdout and stderr. The runner closes both copies after pytest's
-teardowns, including on failure. Hosts reuse this exchange without
-another dependency; it is a test harness contract, with no product endpoint.
+teardowns, including on failure. The JVM suite's `Actions` adapter writes each request through
+`System.out`, which the JUnit console launcher does not capture. Java cannot wait for a pipe with a
+deadline, so one daemon thread reads confirmations, a line of at most 256 bytes at a time, into a
+one-line queue that the waiting request reads within its 120 seconds. Once input ends, a line
+outgrows its bound or reading fails, every later request fails at once. A test's
+`Actions.Refusals` resource clears an armed refusal when it closes, including after a failed
+assertion. Hosts reuse this exchange without another dependency; it is a test harness contract,
+with no product endpoint.
 
 The step that reads the run waits for the runner to end, for the duration the step names and never
 longer than 600 seconds, so a suite that stops making progress fails with its own report inside the
