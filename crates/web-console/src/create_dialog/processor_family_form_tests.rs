@@ -21,7 +21,7 @@ use super::{
     ChoiceControl, CreateDialog, CreateDialogProps, CreateDispatch, CreateKind, CreateSignals,
     ingestor_route_draft::{FlushDraft, MessageErrorDraft},
     processor_correlator_draft::CorrelationSide,
-    select_choice,
+    select_choice, selected_choice,
 };
 
 fn node(kind: ModelKind, name: &str) -> NodeRef {
@@ -284,6 +284,88 @@ fn correlator_choices_ask_for_each_side_and_its_timeout_by_that_side_s_first_rel
                 ChoiceValue::Model(node(ModelKind::Relay, "payments"))
             )
         );
+    });
+}
+
+#[test]
+fn relay_pickers_hold_the_right_input_and_each_side_s_timeout_relay_they_selected() {
+    Owner::new().with(|| {
+        let signals = CreateSignals::new();
+        signals.open(
+            CreateKind::Correlator,
+            Some(orders()),
+            "global-create-button",
+        );
+        signals.correlator.update(|draft| draft.choose_unbranched());
+        let payments = ChoiceValue::Model(node(ModelKind::Relay, "payments"));
+        let unpaid = ChoiceValue::Model(node(ModelKind::Relay, "unpaid"));
+        let unclaimed = ChoiceValue::Model(node(ModelKind::Relay, "unclaimed"));
+        select_choice(
+            signals,
+            ChoiceControl::ProcessorRightInputRelay,
+            payments.clone(),
+        );
+        signals.correlator.update(|draft| {
+            if let Some(correlator) = draft.correlator_mut() {
+                correlator.timeout_mut(CorrelationSide::Left).choose_send();
+                correlator.timeout_mut(CorrelationSide::Right).choose_send();
+            }
+        });
+        select_choice(
+            signals,
+            ChoiceControl::ProcessorLeftTimeoutRelay,
+            unpaid.clone(),
+        );
+        select_choice(
+            signals,
+            ChoiceControl::ProcessorRightTimeoutRelay,
+            unclaimed.clone(),
+        );
+
+        let draft = signals.correlator.get_untracked();
+        let correlator = draft
+            .correlator()
+            .assured("a correlator draft holds its correlation");
+        let right = correlator.right.current_first().map(|relay| relay.as_str());
+        assert_eq!(right, Some("payments"));
+        let left_timeout = correlator
+            .left_timeout
+            .current_relay()
+            .map(|relay| relay.as_str());
+        assert_eq!(left_timeout, Some("unpaid"));
+        let right_timeout = correlator
+            .right_timeout
+            .current_relay()
+            .map(|relay| relay.as_str());
+        assert_eq!(right_timeout, Some("unclaimed"));
+
+        // Each relay picker shows only its own selection; a field picker never holds one.
+        for (control, held, other) in [
+            (ChoiceControl::ProcessorRightInputRelay, &payments, &unpaid),
+            (
+                ChoiceControl::ProcessorLeftTimeoutRelay,
+                &unpaid,
+                &unclaimed,
+            ),
+            (
+                ChoiceControl::ProcessorRightTimeoutRelay,
+                &unclaimed,
+                &payments,
+            ),
+        ] {
+            assert!(selected_choice(signals, control, held), "{control:?}");
+            assert!(!selected_choice(signals, control, other), "{control:?}");
+        }
+        assert!(!selected_choice(
+            signals,
+            ChoiceControl::ProcessorRightInputRelay,
+            &ChoiceValue::Model(node(ModelKind::Schema, "payments")),
+        ));
+        assert!(!selected_choice(
+            signals,
+            ChoiceControl::ProcessorCorrelateLeftField,
+            &ChoiceValue::Field(field("order_id")),
+        ));
     });
 }
 
