@@ -3663,6 +3663,22 @@ subject to the current task execution policy.
 
 ## Processor State Inspection Requests
 
+Deduplicator and window inspections capture one immutable published generation per selected
+concrete branch. A cold Bulk job scans the installed state registries, releases each map guard
+after cloning its generation and existing catalog registration identity, then sorts branches by
+their canonical keys. The catalog epoch and registration number distinguish replacement state even
+when keys, ingestion timestamps and publication revisions repeat. Keys are filtered against
+one domain-clock reading without touching the owning keyspace. A changed expiry prefix fences a
+continuation even when no input has published another generation.
+
+Window inspection reads input and argument views, sequence and lifetime facts, the next duration or
+delayed-removal deadline, and the production state admission charge. Sealed metadata parsing runs
+on the Bulk executor with cancellation; the existing bounded native decoder opens its Arrow
+sections. Decoded columns and metadata remain charged through projection and encoding. Each
+branch's rows, header and accumulator facts come from the same publication. Metadata is bounded
+before retained-row frames, consumes the byte/section budget and never advances a retained-row
+continuation. These reads introduce no branch command, lock or recurring record-path lookup.
+
 Reorderer route buffers and correlator pending sides stay exclusively owned by their concrete
 branch task; nothing publishes them. `SHOW REORDERER ... STATE`, `SHOW CORRELATOR ... STATE` and the
 `DESCRIBE` state counts read them through a cold request on that branch task's existing command

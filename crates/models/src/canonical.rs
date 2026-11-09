@@ -974,6 +974,12 @@ impl Statement {
                     crate::StateInspectedProcessor::Correlator(name) => {
                         format!("SHOW CORRELATOR {} STATE", name.as_str())
                     }
+                    crate::StateInspectedProcessor::Deduplicator(name) => {
+                        format!("SHOW DEDUPLICATOR {} STATE", name.as_str())
+                    }
+                    crate::StateInspectedProcessor::WindowProcessor(name) => {
+                        format!("SHOW WINDOW PROCESSOR {} STATE", name.as_str())
+                    }
                 };
                 state_inspection_text(
                     head,

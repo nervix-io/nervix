@@ -1318,13 +1318,21 @@ impl SessionServiceImpl {
             Ok(metrics) => metrics,
             Err(message) => return command_error(format!("{message:#}")),
         };
+        let mut lines = match scheduled_node.as_ref() {
+            Some(node) => {
+                let processor = NodeRef::new(ModelKind::Deduplicator, describe.name.clone());
+                self.processor_state_lines(domain, processor, node).await
+            }
+            None => Vec::new(),
+        };
+        lines.extend(metrics);
         command_ok(append_metrics_lines(
             format_deduplicator_describe_output(
                 &describe.name,
                 &deduplicator,
                 scheduled_node.as_ref(),
             ),
-            metrics,
+            lines,
         ))
     }
 
@@ -1678,6 +1686,14 @@ impl SessionServiceImpl {
             Ok(metrics) => metrics,
             Err(message) => return command_error(format!("{message:#}")),
         };
+        let mut lines = match scheduled_node.as_ref() {
+            Some(node) => {
+                let processor = NodeRef::new(ModelKind::WindowProcessor, describe.name.clone());
+                self.processor_state_lines(domain, processor, node).await
+            }
+            None => Vec::new(),
+        };
+        lines.extend(metrics);
         command_ok(append_metrics_lines(
             format_window_processor_describe_output(
                 &describe.name,
@@ -1685,7 +1701,7 @@ impl SessionServiceImpl {
                 &aggregate,
                 scheduled_node.as_ref(),
             ),
-            metrics,
+            lines,
         ))
     }
 

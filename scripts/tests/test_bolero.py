@@ -193,6 +193,7 @@ class InventoryTests(unittest.TestCase):
             "relay-channel-watermark-turnover",
             "client-emitter-wire",
             "client-state-inspection",
+            "client-published-processor-sections",
             "interconnect-state-inspection",
             "interconnect-processor-state-inspection",
             "state-inspection-cursor",
@@ -546,11 +547,11 @@ class InventoryTests(unittest.TestCase):
             "ingestor-describe-envelope": 7,
             "plexus-model": 56,
             "plexus-archive-model": 60,
-            "plexus-statement": 61,
-            "plexus-statement-text": 60,
-            "plexus-format-document": 60,
-            "plexus-format-text": 59,
-            "models-archived-models": 60,
+            "plexus-statement": 62,
+            "plexus-statement-text": 61,
+            "plexus-format-document": 61,
+            "plexus-format-text": 60,
+            "models-archived-models": 61,
             "registry-archived-models": 51,
             "consensus-state-records": 57,
             "consensus-state-corruption": 57,
@@ -579,7 +580,7 @@ class InventoryTests(unittest.TestCase):
 
     def test_state_inspection_representations_are_bounded_pairs(self) -> None:
         targets = {target.id: target for target in bolero.load_inventory().targets}
-        for name, version in (("client-state-inspection", 1), ("state-inspection-cursor", 2)):
+        for name, version in (("client-state-inspection", 1), ("state-inspection-cursor", 3)):
             with self.subTest(target=name):
                 self.assertEqual(targets[name].domain_version, version)
                 self.assertEqual(targets[name].max_input_bytes, 512)
