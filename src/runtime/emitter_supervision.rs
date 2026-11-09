@@ -327,7 +327,7 @@ impl Runtime {
 
     pub(super) fn emitter_status(
         &self,
-        key: &DomainNodeRef,
+        key: &DomainNodeUnitRef,
     ) -> Arc<task_status::TaskStatus<EmitterRetryStatus>> {
         if let Some(status) = self.inner.emitter_statuses.get(key) {
             return status.clone();
@@ -340,7 +340,7 @@ impl Runtime {
         status
     }
 
-    pub(super) fn register_emitter_readiness(&self, key: &DomainNodeRef) -> Arc<AtomicBool> {
+    pub(super) fn register_emitter_readiness(&self, key: &DomainNodeUnitRef) -> Arc<AtomicBool> {
         let ready = Arc::new(AtomicBool::new(false));
         self.inner
             .emitter_readiness
@@ -391,7 +391,11 @@ impl Runtime {
         backoff: Duration,
         kind: EmitterRetryKind,
     ) {
-        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
+        let key = DomainNodeUnitRef::single(DomainNodeRef::node_in(
+            domain.clone(),
+            ModelKind::Emitter,
+            emitter.clone(),
+        ));
         self.emitter_status(&key).fail(
             error.into(),
             Some(EmitterRetryStatus {
@@ -404,7 +408,7 @@ impl Runtime {
         );
     }
 
-    pub(super) fn emitter_confirmation_counter(&self, key: &DomainNodeRef) -> Arc<AtomicUsize> {
+    pub(super) fn emitter_confirmation_counter(&self, key: &DomainNodeUnitRef) -> Arc<AtomicUsize> {
         self.inner
             .emitter_confirmation_waits
             .entry(key.clone())
@@ -418,24 +422,30 @@ impl Runtime {
         domain: &DomainName,
         emitter: &EmitterName,
     ) -> EmitterConfirmationWaitGuard {
-        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
+        let key = DomainNodeUnitRef::single(DomainNodeRef::node_in(
+            domain.clone(),
+            ModelKind::Emitter,
+            emitter.clone(),
+        ));
         EmitterConfirmationWaitGuard::begin(&self.emitter_confirmation_counter(&key))
     }
 
-    /// Resolves the mounts in an already decided emitter plan, then starts its task.
+    /// Resolves the mounts in an already decided emitter plan, then starts the task of its `unit`.
     pub(in crate::runtime) fn spawn_emitter_task(
         &self,
         build: EmitterTaskBuildDeps<'_>,
         emitter: EmitterExecutionPlan,
-        inputs: Vec<(RelayName, RelayRuntimeFanIn)>,
+        unit: Unit,
+        inputs: Vec<EmitterInput>,
     ) -> error_stack::Result<ScheduledEmitterTask, EmitterStartError> {
         let domain = build.domain;
         let start = EmitterStartError::Start {
             domain: domain.clone(),
             emitter: emitter.name.clone(),
         };
-        // A client whose templates name the instance that connects, an MQTT identity template,
-        // renders the emitter's one connection as instance 0, as CREATE CLIENT validated it.
+        // A client whose templates name the instance that connects renders this unit's index:
+        // the instance index of an emitter with instances, and 0 for one that runs a single unit,
+        // as CREATE CLIENT validated it.
         let renders_instance = emitter
             .connector
             .connector
@@ -449,7 +459,7 @@ impl Runtime {
                     domain,
                     config.mount.as_ref(),
                     &config.entries,
-                    0,
+                    instance_index(unit),
                 )
             } else {
                 self.resolve_client_config(domain, config.mount.as_ref(), &config.entries)
@@ -462,14 +472,32 @@ impl Runtime {
             Ok(plan) => plan,
             Err(error) => return Err(error.change_context(start)),
         };
-        emitter_task::EmitterTask::spawn(self, build, emitter, plan, inputs).change_context(start)
+        emitter_task::EmitterTask::spawn(self, build, emitter, plan, unit, inputs)
+            .change_context(start)
     }
+}
+
+/// The index a unit's client configuration templates render: an instance's index, and 0 for the
+/// one unit an emitter without instances runs.
+fn instance_index(unit: Unit) -> u64 {
+    match unit.kind() {
+        nervix_models::UnitKind::Instance(index) => index,
+        nervix_models::UnitKind::Single | nervix_models::UnitKind::Partition(_) => 0,
+    }
+}
+
+/// One relay consumer an emitter unit reads: the whole relay, or the audience of one relay unit
+/// it serves beside its other units of the same relay.
+pub(in crate::runtime) struct EmitterInput {
+    pub(in crate::runtime) relay: RelayName,
+    pub(in crate::runtime) relay_unit: Option<Unit>,
+    pub(in crate::runtime) fan_in: RelayRuntimeFanIn,
 }
 
 /// Registration ends with its emitter task. A replacement task owns different retained handles.
 pub(super) struct EmitterTaskRegistration {
     runtime: Runtime,
-    key: DomainNodeRef,
+    key: DomainNodeUnitRef,
     status: Arc<task_status::TaskStatus<EmitterRetryStatus>>,
     confirmations: Arc<AtomicUsize>,
     readiness: Arc<AtomicBool>,
@@ -479,11 +507,7 @@ impl EmitterTaskRegistration {
     pub(super) fn new(context: &EmitterConnectorContext) -> Self {
         Self {
             runtime: context.runtime.clone(),
-            key: DomainNodeRef::node_in(
-                context.domain.clone(),
-                ModelKind::Emitter,
-                context.emitter.clone(),
-            ),
+            key: context.registry_key(),
             status: context.status.clone(),
             confirmations: context.confirmation_waits.clone(),
             readiness: context.readiness.clone(),
@@ -522,11 +546,7 @@ mod tests {
     fn retiring_readiness_cannot_change_or_remove_its_replacement() {
         use super::*;
         let predecessor = crate::runtime::test_fixtures::emitter_context();
-        let key = DomainNodeRef::node_in(
-            predecessor.domain.clone(),
-            ModelKind::Emitter,
-            predecessor.emitter.clone(),
-        );
+        let key = predecessor.registry_key();
         let registration = EmitterTaskRegistration::new(&predecessor);
         let replacement = predecessor.runtime.register_emitter_readiness(&key);
         predecessor.emitter_host().mark_ready();
@@ -564,6 +584,7 @@ mod tests {
     /// as a domain's installed schedule decides it.
     fn zero_mq_emitter_plan() -> EmitterExecutionPlan {
         let emitter = CreateEmitter {
+            instances: nervix_models::EmitterInstances::ONE,
             name: named("audit"),
             from: ProcessorInputs::new(vec![named("events")], Vec::new()),
             body: nervix_models::EmitterBody::Codec {

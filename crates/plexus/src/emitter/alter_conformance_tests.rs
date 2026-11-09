@@ -19,9 +19,11 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
+use meticulous::OptionExt as _;
 use nervix_models::{
     AlterEmitter, AlterEmitterError, AlterEmitterOperation, CreateEmitter, DeclaredPublishing,
-    EmitterBodyForm, EmitterEntityKind, EmitterPublishingModeKind, EmitterReferenceKind,
+    EmitterBodyForm, EmitterEntityKind, EmitterInstances, EmitterPublishingModeKind,
+    EmitterReferenceKind,
     EnvelopeClauseKind, EnvelopeDeclarationError, GeneralErrorPolicy, Model, OptionDeclaration,
     OptionForm, OptionPresence, Statement,
 };
@@ -428,6 +430,41 @@ fn set_general_error_replaces_the_general_error_policy() {
             GeneralErrorPolicy::Ignore,
             "{kind}"
         );
+    }
+}
+
+#[test]
+fn set_instances_is_accepted_exactly_where_the_entity_declares_several_instances() {
+    for kind in EmitterEntityKind::all() {
+        let created = Generated::of(kind);
+        let refusal = kind.capabilities().instancing.refusal(kind);
+        let prefix = format!("ALTER {} EMITTER generated SET ", kind.phrase());
+        let offered = crate::statement::suggest_statement(&prefix, prefix.len())
+            .contains(&"INSTANCES".to_owned());
+        match refusal {
+            None => {
+                let emitter = altered(&created, "SET INSTANCES 2");
+                assert_eq!(
+                    emitter.instances,
+                    EmitterInstances::Count(std::num::NonZeroU64::new(2).assured("two is positive")),
+                    "{kind}"
+                );
+                let emitter = altered(&created, "SET INSTANCES PER PARTITION");
+                assert_eq!(emitter.instances, EmitterInstances::PerPartition, "{kind}");
+                assert!(offered, "completion after SET offers INSTANCES for {kind}");
+            }
+            Some(refusal) => {
+                let text = alter_text(kind, "SET INSTANCES 2");
+                let Err(error) = parse_statement(&text) else {
+                    panic!("the grammar accepts INSTANCES, which {kind} refuses: {text}");
+                };
+                assert!(
+                    format!("{error:?}").contains(&refusal.to_string()),
+                    "{kind} refuses INSTANCES without its declared reason: {error:?}"
+                );
+                assert!(!offered, "completion after SET offers INSTANCES for {kind}");
+            }
+        }
     }
 }
 

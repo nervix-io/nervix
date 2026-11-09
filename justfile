@@ -444,6 +444,13 @@ test-processor-partitions *args: build-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/processor_partitions.feature {{ quote(args) }}
 
+# Emitter instances against the Kafka test broker, on one and three in-process nodes.
+test-emitter-instances *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/emitter_instances.feature {{ quote(args) }}
+
 # Observe emitter outcomes through public sessions and the owning node's metric endpoint.
 test-emitter-outcomes *args: build-deps
     #!/usr/bin/env bash

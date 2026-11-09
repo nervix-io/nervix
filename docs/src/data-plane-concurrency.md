@@ -3536,6 +3536,26 @@ checkpoint locks. These are lifecycle and interleaving claims; no new cross-loca
 protocol is introduced. The concurrent-map ledger records preparation, observation and retirement
 frequency for each affected registry, including the execution-owned immutable MQTT client cache.
 
+## Independent Emitter Instances
+
+Emitter tasks are keyed by `NodeUnitRef`, and the emitter status, readiness, confirmation-wait,
+buffer and pool-wait registries by `DomainNodeUnitRef`, so two instances of one emitter on one node
+never share a registry entry; each task resolves its entries when it starts and retains the
+handles on record paths. An instance registers one receiver per relay unit it serves through the
+relay's existing unit audiences, the same registration a partitioned processor uses, and its relay
+interaction keys its sources by relay and unit. A batch of partition `p` therefore reaches only the
+instance that serves `p`, and a partition's handoff fence waits only for its own audience's
+backlog. No new synchronization protocol or cross-location memory-ordering claim is introduced: the
+unit audiences, their dispatch gates and the routed admission are the existing owners.
+
+The Shuttle check
+`shuttle_emitter_instances_receive_only_their_partitions_while_a_sibling_moves` explores owner
+fan-out of one batch to each of four partitions read by the two instances of an `INSTANCES 2`
+emitter, while instance 1 fences its partitions, withdraws its receivers and registers their
+successors. It asserts that instance 0 receives exactly the batches of its own partitions and is
+acknowledged for them, and that each batch of instance 1 reaches the receiver of its own partition
+at most once or ends unacknowledged, never a sibling.
+
 ## Live Cluster Policy
 
 Runtime timing and resource bounds are immutable publications through the governed `ArcSwap`.

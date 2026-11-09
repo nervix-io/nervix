@@ -2304,6 +2304,20 @@ Startup preparation shares a mutually exclusive state with a live producer inste
 its native footprint. Kafka and Pulsar box only their temporary preparation; their live producer
 and its existing confirmation or retirement owners stay inline.
 
+Every emitter entity declares `Single { reason } | Instances` once in the vocabulary, beside its
+other capabilities. Grammar, validation, inspection and the capability export consume that
+declaration, and a `Single` entity refuses `INSTANCES` with its declared reason before the
+statement reaches the registry. The registry resolves `INSTANCES n` or `INSTANCES PER PARTITION`
+into exact `Instance(i)` unit placements, and the emitter execution plan records which units of
+each input relay every instance serves: relay partition `p` for instance `p mod n`, and an
+unpartitioned relay's single unit for instance 0. The host runs each locally placed instance as
+its own emitter task, with its own connector instance, buffer, retry schedule and backoff,
+readiness handle, confirmation window and metric children, and resolves client configuration
+templates for the instance's index. Each instance registers one receiver per relay unit it serves
+with that unit's audience, so a partition's handoff waits only for its own partition's work. An
+instance that serves no relay unit runs no task. Moving one instance stops and starts only that
+instance; its siblings keep their tasks and open connectors.
+
 `EmitterLifecycle::resume` acquires the connection; a transient publish failure calls `suspend`
 then `resume` on that same instance after the policy's backoff. A failed resume retains that owner,
 its prepared configuration, pool lease, staged data and pending confirmations for another attempt.

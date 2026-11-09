@@ -222,6 +222,7 @@ pub struct ZeroMqPushEmitter {
 
 impl EmitterDeclaration for ZeroMqPushEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        instancing: crate::EmitterInstancingCapability::Instances,
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::ZeroMq),
         body: EmitterBodyForm::Codec,

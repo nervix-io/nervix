@@ -15,7 +15,7 @@ use std::{collections::hash_map::Entry, time::Duration};
 use ahash::HashMap;
 use meticulous::ResultExt as _;
 use nervix_models::{
-    ClusterNodeName, DomainName, DomainNodeRef, EmitterEntityKind, EmitterName, ModelKind,
+    ClusterNodeName, DomainName, DomainNodeRef, EmitterEntityKind, EmitterName, ModelKind, Unit,
 };
 use nervix_primitives::{collections::DashMap, sync::Arc, time::Instant};
 use prometheus::{
@@ -43,10 +43,11 @@ mod interaction_metrics;
 
 const PUBLISH_ATTEMPTS: &str = "nervix_emitter_publish_attempts_total";
 pub(super) const PUBLISH_DURATION: &str = "nervix_emitter_publish_duration_seconds";
-const EMITTER_LABELS: [&str; 5] = [
+const EMITTER_LABELS: [&str; 6] = [
     "domain",
     "emitter",
     "physical_node_id",
+    "instance",
     "connector",
     "entity",
 ];
@@ -54,6 +55,7 @@ const ATTEMPT_LABELS: &[&str] = &[
     "domain",
     "emitter",
     "physical_node_id",
+    "instance",
     "connector",
     "entity",
     "operation",
@@ -63,6 +65,7 @@ const DURATION_LABELS: &[&str] = &[
     "domain",
     "emitter",
     "physical_node_id",
+    "instance",
     "connector",
     "entity",
     "operation",
@@ -97,6 +100,8 @@ pub(crate) enum EmitterAttemptOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct EmitterSeriesKey {
     physical_node: Option<ClusterNodeName>,
+    /// The emitter's `Single` unit or one of its instances, which keep separate children.
+    unit: Unit,
     kind: EmitterEntityKind,
 }
 
@@ -163,11 +168,13 @@ impl ConnectorInteractionMetrics {
     fn register_emitter(
         &self,
         entity: DomainNodeRef,
+        unit: Unit,
         physical_node: Option<&ClusterNodeName>,
         kind: EmitterEntityKind,
     ) -> EmitterInteractionMetrics {
         let key = EmitterSeriesKey {
             physical_node: physical_node.cloned(),
+            unit,
             kind,
         };
         let mut scopes = self.emitters.entry(entity.clone()).or_default();
@@ -176,10 +183,12 @@ impl ConnectorInteractionMetrics {
             Entry::Vacant(entry) => {
                 let key = entry.key();
                 let connector = key.kind.connector().to_string();
+                let instance = super::instance_label(key.unit);
                 let values = [
                     entity.domain.as_str(),
                     entity.identifier().as_str(),
                     physical_node_label(key.physical_node.as_ref()),
+                    instance.as_ref(),
                     connector.as_str(),
                     key.kind.entity_keyword(),
                 ];
@@ -243,13 +252,14 @@ impl RuntimeMetrics {
         &self,
         domain: &DomainName,
         emitter: &EmitterName,
+        unit: Unit,
         physical_node: Option<&ClusterNodeName>,
         kind: EmitterEntityKind,
     ) -> EmitterInteractionMetrics {
         let entity = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
         self.series
             .connector
-            .register_emitter(entity, physical_node, kind)
+            .register_emitter(entity, unit, physical_node, kind)
     }
 
     #[cfg_attr(
@@ -287,7 +297,7 @@ impl EmitterInteractions {
             reason = "formats the immutable selector at task registration"
         )
     )]
-    fn selector(values: &[&str; 5]) -> String {
+    fn selector(values: &[&str; 6]) -> String {
         let mut selector = String::new();
         for (name, value) in EMITTER_LABELS.iter().zip(values) {
             if !selector.is_empty() {
@@ -401,7 +411,7 @@ impl AttemptCounter {
     )]
     fn register(
         store: &ConnectorInteractionMetrics,
-        values: &[&str; 5],
+        values: &[&str; 6],
         operation: EmitterAttemptOperation,
         outcome: EmitterAttemptOutcome,
     ) -> Self {
@@ -443,7 +453,7 @@ impl OperationMetrics {
     )]
     fn register(
         store: &ConnectorInteractionMetrics,
-        values: &[&str; 5],
+        values: &[&str; 6],
         operation: EmitterAttemptOperation,
     ) -> Self {
         let mut labels = values.to_vec();

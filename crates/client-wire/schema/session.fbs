@@ -625,7 +625,8 @@ enum ModelChangeAspect : ubyte {
   EntityReplaced,
   EntityCreated,
   EntityDropped,
-  BranchPartitions
+  BranchPartitions,
+  EmitterInstances
 }
 
 table ConfigurationReason {

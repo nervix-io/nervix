@@ -63,6 +63,7 @@ impl Arbitrary<'_> {
         CreateEmitter {
             name: self.name(),
             from: self.processor_inputs(true),
+            instances: self.emitter_instances_of(kind),
             body,
             envelope: Box::new(envelope),
             connector: Box::new(connector),
@@ -73,6 +74,31 @@ impl Arbitrary<'_> {
             construction: self.route_construction(construction_shape),
             materialized_state: self.materialized_state(),
         }
+    }
+
+    /// The instances an emitter of `kind` declares, with small counts and both boundary forms.
+    ///
+    /// Plexus writes no `INSTANCES` clause for an entity that runs one instance. The vocabulary
+    /// can still hold a declaration, which a stored form must carry back, so its domain may draw
+    /// one for every entity.
+    pub fn emitter_instances_of(&mut self, kind: EmitterEntityKind) -> EmitterInstances {
+        let single = matches!(
+            kind.capabilities().instancing,
+            EmitterInstancingCapability::Single { .. }
+        );
+        if single && self.domain == Domain::Plexus {
+            return EmitterInstances::ONE;
+        }
+        if self.entropy.flag() {
+            return EmitterInstances::ONE;
+        }
+        if self.entropy.flag() {
+            return EmitterInstances::PerPartition;
+        }
+        let count = self.entropy.pick([2_u64, 3, 4, u64::MAX]);
+        EmitterInstances::Count(
+            NonZeroU64::new(count).assured("every declared count choice is positive"),
+        )
     }
 
     /// The envelope an emitter of `kind` writes.

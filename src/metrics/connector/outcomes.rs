@@ -242,7 +242,7 @@ impl OutcomeFamilies {
         nervix_lint,
         nervix::context(lifecycle, reason = "resolves every child before an emitter starts")
     )]
-    pub(super) fn emitter(&self, values: &[&str; 5]) -> OutcomeMetrics {
+    pub(super) fn emitter(&self, values: &[&str; 6]) -> OutcomeMetrics {
         OutcomeMetrics {
             rejected: EmitterRejectionCode::ALL
                 .map(|code| Self::child(&self.rejected, values, code.as_ref())),
@@ -267,7 +267,7 @@ impl OutcomeFamilies {
         nervix_lint,
         nervix::context(lifecycle, reason = "resolves one bounded enum child")
     )]
-    fn child(family: &IntCounterVec, values: &[&str; 5], extra: &str) -> IntCounter {
+    fn child(family: &IntCounterVec, values: &[&str; 6], extra: &str) -> IntCounter {
         let mut labels = values.to_vec();
         labels.push(extra);
         family.with_label_values(&labels)

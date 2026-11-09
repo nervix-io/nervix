@@ -25,14 +25,14 @@ use nervix_interconnect::{
     LookupDescribeEnvelope, TransportPositionEnvelope,
 };
 use nervix_models::{
-    BranchSelection, CanonicalPlexusError, CreateCorrelator, CreateDeduplicator, CreateEmitter,
+    BranchSelection, CanonicalPlexusError, ClusterNodeName, CreateCorrelator, CreateDeduplicator, CreateEmitter,
     CreateEndpoint, CreateIngestor, CreateJunction, CreateReingestor, CreateReorderer,
     CreateWindowProcessor, EmitterBody, EmitterPayloadPresentation, FieldPath, HeaderModel,
     IcebergTableEmitter, IngestTimestampSource, IngestorEntity, IngestorInput, KafkaIngestor,
     KafkaOffsetMode, KafkaTopicIngestor, Model, ModelKind, ModelName, NodeRef, NodeUnitRef,
     PlacementName, PlacementPolicy, ProcessorInputs, ProcessorOutputs, RequestedResourceVersion,
     ResourceDescription, ResourceEntryContent, ResourceManifestEntry, ResourceUsage,
-    ResourceVersionEntries, ScheduledNode, Unit, WasmStateInspection, WasmUnitStateInspection,
+    ResourceVersionEntries, ScheduledNode, Unit, UnitKind, WasmStateInspection, WasmUnitStateInspection,
     expression_to_plexus,
 };
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, WindowArguments};
@@ -965,12 +965,66 @@ pub(in crate::application) fn format_reorderer_describe_output(
     lines.join("\n")
 }
 
+/// Whether an emitter instance's task runs on the node it is scheduled on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+#[strum(serialize_all = "lowercase")]
+pub(in crate::application) enum EmitterInstanceStatus {
+    /// Its task runs on its scheduled node.
+    Running,
+    /// It serves partitions, but its scheduled node runs no task for it.
+    Stopped,
+    /// It serves no input partition, so it runs nothing.
+    Idle,
+    /// Its scheduled node did not report whether its task runs.
+    Unknown,
+}
+
+/// One instance of an emitter with several, as `DESCRIBE EMITTER` lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::application) struct EmitterInstanceSummary {
+    pub(in crate::application) index: u64,
+    pub(in crate::application) owner: Option<ClusterNodeName>,
+    pub(in crate::application) status: EmitterInstanceStatus,
+    /// The units of its input relays it serves, in partition order.
+    pub(in crate::application) partitions: Vec<Unit>,
+}
+
+impl EmitterInstanceSummary {
+    /// `instance <index>: node=<owner> status=<status> partitions=<list|all|none>`, where `all`
+    /// names the one unit of inputs that are not divided into partitions.
+    fn describe_line(&self) -> String {
+        let owner = match &self.owner {
+            Some(owner) => owner.as_str(),
+            None => "-",
+        };
+        let mut partitions = Vec::with_capacity(self.partitions.len());
+        for unit in &self.partitions {
+            let label = match unit.kind() {
+                UnitKind::Partition(partition) => partition.to_string(),
+                UnitKind::Single => "all".to_string(),
+                UnitKind::Instance(index) => format!("instance {index}"),
+            };
+            partitions.push(label);
+        }
+        let partitions = if partitions.is_empty() {
+            "none".to_string()
+        } else {
+            partitions.join(",")
+        };
+        format!(
+            "instance {}: node={owner} status={} partitions={partitions}",
+            self.index, self.status
+        )
+    }
+}
+
 pub(in crate::application) fn format_emitter_describe_output(
     name: impl Into<ModelName>,
     emitter: &CreateEmitter,
     payload: &EmitterPayloadPresentation,
     scheduled_node: Option<&ScheduledNode>,
     status: Option<&DataflowNodeStatusEnvelope>,
+    instances: &[EmitterInstanceSummary],
 ) -> error_stack::Result<String, CanonicalPlexusError> {
     let name = name.into();
     let mut lines = vec![
@@ -1047,7 +1101,14 @@ pub(in crate::application) fn format_emitter_describe_output(
             format_header_model(emitter.connector.capabilities().headers)
         ),
     ]);
-    lines.extend(format_schedule_placement_lines(scheduled_node));
+    if instances.is_empty() {
+        lines.extend(format_schedule_placement_lines(scheduled_node));
+    } else {
+        lines.push(format!("instances: {}", emitter.instances));
+        for instance in instances {
+            lines.push(instance.describe_line());
+        }
+    }
     if let Some(status) = status {
         lines.extend([
             format!("status: {}", status.status),
@@ -1668,6 +1729,42 @@ mod tests {
     use nervix_models::ClusterNodeName;
 
     use super::{super::test_fixtures::placement_member, *};
+
+    #[test]
+    fn an_emitter_instance_line_names_its_owner_status_and_the_partitions_it_serves() {
+        let node = ClusterNodeName::parse("node-2").assured("a literal node name");
+        let running = EmitterInstanceSummary {
+            index: 1,
+            owner: Some(node.clone()),
+            status: EmitterInstanceStatus::Running,
+            partitions: vec![Unit::partition(1), Unit::partition(3)],
+        };
+        assert_eq!(
+            running.describe_line(),
+            "instance 1: node=node-2 status=running partitions=1,3"
+        );
+        let whole = EmitterInstanceSummary {
+            index: 0,
+            owner: Some(node),
+            status: EmitterInstanceStatus::Unknown,
+            partitions: vec![Unit::SINGLE],
+        };
+        assert_eq!(
+            whole.describe_line(),
+            "instance 0: node=node-2 status=unknown partitions=all"
+        );
+        let idle = EmitterInstanceSummary {
+            index: 5,
+            owner: None,
+            status: EmitterInstanceStatus::Idle,
+            partitions: Vec::new(),
+        };
+        assert_eq!(
+            idle.describe_line(),
+            "instance 5: node=- status=idle partitions=none"
+        );
+        assert_eq!(EmitterInstanceStatus::Stopped.to_string(), "stopped");
+    }
 
     #[test]
     fn a_resource_description_renders_every_version_entry_and_usage() {

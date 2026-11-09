@@ -215,6 +215,11 @@ fn filled(value: &CreateEmitter) -> EmitterDraft {
         name: value.name.to_string(),
         destination: destination(&value.connector),
         collect: value.from.collect_policy.clone(),
+        instances: if value.instances.is_one() {
+            String::new()
+        } else {
+            value.instances.to_string()
+        },
         mode: value.mode,
         predicate: match &value.construction.where_clause {
             Some(value) => expression(value),

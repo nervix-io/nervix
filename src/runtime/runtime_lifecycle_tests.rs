@@ -119,7 +119,10 @@ fn execution_with_deadline_reporting_emitter(
     let task = deadline_reporting_emitter(&execution, report);
     execution
         .emitter_tasks
-        .insert(NodeRef::new(ModelKind::Emitter, &emitter), task);
+        .insert(
+            NodeUnitRef::new(NodeRef::new(ModelKind::Emitter, &emitter), Unit::SINGLE),
+            task,
+        );
     (execution, reported)
 }
 

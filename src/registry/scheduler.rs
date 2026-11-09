@@ -17,7 +17,7 @@ use std::cmp::Reverse;
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use meticulous::OptionExt;
 use nervix_models::{
-    ClusterNodeName, DomainName, DomainSchedule, Model, NodeRef, NodeUnitRef,
+    ClusterNodeName, DomainName, DomainSchedule, Model, ModelKind, NodeRef, NodeUnitRef,
     PlacementGroupSchedule, PlacementPolicy, ScheduledNode, ScheduledNodes, SchemaFingerprint,
     Unit,
 };
@@ -148,6 +148,42 @@ fn partition_locality_affinity(
             partition_locality_affinity(graph, edge.source(), unit, assigned, visited, scores);
         }
     }
+}
+
+/// Affinity of an emitter instance to the owners of the input partitions it serves, one point per
+/// partition, so it prefers the node that owns most of them and never its siblings' partitions.
+fn served_partition_affinity(
+    graph: &DiGraph<ActiveNode, EdgeKind>,
+    index: NodeIndex,
+    unit: Unit,
+    assigned: &HashMap<NodeUnitRef, ClusterNodeName>,
+) -> HashMap<ClusterNodeName, usize> {
+    let mut scores = HashMap::<ClusterNodeName, usize>::new();
+    let emitter = graph
+        .node_weight(index)
+        .verified("the scheduled emitter belongs to this unchanged graph");
+    for edge in graph.edges_directed(index, Direction::Incoming) {
+        if !edge.weight().is_runtime_flow_edge() {
+            continue;
+        }
+        let source = graph
+            .node_weight(edge.source())
+            .verified("the source belongs to this unchanged graph");
+        if source.kind != ModelKind::Relay {
+            continue;
+        }
+        let correspondence = super::unit_placement::UnitCorrespondence::decide(source, emitter);
+        for partition in correspondence.partners(false, unit) {
+            let Some(node) = assigned.get(&NodeUnitRef::new(source.node_ref(), partition)) else {
+                continue;
+            };
+            let score = scores.entry(node.clone()).or_default();
+            *score = score
+                .checked_add(1)
+                .assured("affinity counts partitions held in memory");
+        }
+    }
+    scores
 }
 
 struct AssignmentPlanner<'a> {
@@ -638,8 +674,17 @@ impl ActiveGraph {
                         #[cfg(not(feature = "testing"))]
                         planner.for_group(&unit_groups.groups[group], &index_by_key)
                     } else if units.len() > 1 {
-                        let (unit_affinity, placement_order) =
-                            if matches!(unit.kind(), nervix_models::UnitKind::Partition(_)) {
+                        let (unit_affinity, placement_order) = if node.kind == ModelKind::Emitter {
+                            (
+                                served_partition_affinity(&self.graph, index, unit, &assigned_by_unit),
+                                placement_unit_affinity_scores(
+                                    &member,
+                                    &placement.pairs,
+                                    &self.placement.topology,
+                                    &assigned_by_unit,
+                                ),
+                            )
+                        } else if matches!(unit.kind(), nervix_models::UnitKind::Partition(_)) {
                                 let mut affinity = HashMap::new();
                                 partition_locality_affinity(
                                     &self.graph,
@@ -757,7 +802,7 @@ mod tests {
     use nervix_models::{
         AckMode, BranchSelection, CodecName, CreateIngestor, CreateJunction, EndpointName,
         GeneralErrorPolicy, HttpEndpointIngestor, HttpIngestor, IngestorEntity, IngestorName,
-        ModelKind, ProcessorInputs, SyslogIngestor, SyslogListenerIngestor,
+        ProcessorInputs, SyslogIngestor, SyslogListenerIngestor,
         WebsocketsEndpointIngestor, WebsocketsIngestor,
     };
     use nonzero_ext::nonzero;

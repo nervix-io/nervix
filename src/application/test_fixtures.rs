@@ -395,6 +395,7 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
             filter_where: None,
         }),
         ModelKind::Emitter => Model::Emitter(CreateEmitter {
+            instances: nervix_models::EmitterInstances::ONE,
             name: named(identifier_raw),
             from: ProcessorInputs::new(Vec::new(), Vec::new()),
             body: nervix_models::EmitterBody::Values,

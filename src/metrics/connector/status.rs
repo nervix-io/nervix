@@ -72,7 +72,7 @@ impl FailureProjection {
         nervix_lint,
         nervix::context(lifecycle, reason = "registers one retained identity's collector")
     )]
-    pub(super) fn register(registry: &Registry, values: &[&str; 5]) -> Arc<Self> {
+    pub(super) fn register(registry: &Registry, values: &[&str; 6]) -> Arc<Self> {
         // The descriptor constructor owns its required foreign map representation.
         let labels = EMITTER_LABELS
             .iter()

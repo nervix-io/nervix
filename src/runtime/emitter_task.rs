@@ -64,12 +64,24 @@ pub(in crate::runtime) struct EmitterConnectorContext {
     pub(super) runtime: Runtime,
     pub(super) domain: DomainName,
     pub(super) emitter: EmitterName,
+    /// The unit of the emitter this task runs: its `Single` unit, or one of its instances.
+    pub(super) unit: Unit,
     pub(super) error_policies: ErrorPolicies,
     pub(super) udfs: Option<UdfExecutor>,
     /// The bound clock that resolves this emitter's explicit `FLUSH EACH` and `COMMIT EACH`
     /// cadences. Publish attempts, retry backoff, acknowledgement keepalive and stop deadlines
     /// stay on the monotonic clock and never read it.
     pub(super) clock: DomainClock,
+}
+
+impl EmitterConnectorContext {
+    /// The key of this exact emitter unit in the node's emitter registries.
+    pub(super) fn registry_key(&self) -> DomainNodeUnitRef {
+        DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(self.domain.clone(), ModelKind::Emitter, self.emitter.clone()),
+            self.unit,
+        )
+    }
 }
 
 struct EmitterBatchContext<'a> {
@@ -867,7 +879,8 @@ impl EmitterTask {
         build: EmitterTaskBuildDeps<'_>,
         emitter: EmitterExecutionPlan,
         plan: EmitterStartPlan,
-        inputs: Vec<(RelayName, RelayRuntimeFanIn)>,
+        unit: Unit,
+        inputs: Vec<super::emitter_supervision::EmitterInput>,
     ) -> error_stack::Result<ScheduledEmitterTask, EmitterStartError> {
         let EmitterTaskBuildDeps {
             domain,
@@ -929,28 +942,37 @@ impl EmitterTask {
         let task_interactions = runtime.inner.metrics.register_emitter_interactions(
             domain,
             &task_emitter,
+            unit,
             physical_node_id,
             plan.connector.kind(),
         );
-        let task_input_metrics = inputs
-            .iter()
-            .map(|(relay, _)| {
-                let metrics = runtime.inner.metrics.resolve_node_input_metrics(
-                    domain,
-                    ModelKind::Emitter,
-                    &ModelName::from(&emitter.name),
-                    relay,
-                    physical_node_id,
-                    None,
-                );
-                (relay.clone(), metrics)
-            })
-            .collect::<HashMap<_, _>>();
+        let task_node = ModelName::from(&emitter.name);
+        let mut task_input_metrics = HashMap::new();
+        for input in &inputs {
+            if task_input_metrics.contains_key(&input.relay) {
+                continue;
+            }
+            let metrics =
+                runtime
+                    .inner
+                    .metrics
+                    .resolve_unit_node_input_metrics(NodeBatchMetricsSpec {
+                        unit,
+                        domain,
+                        kind: ModelKind::Emitter,
+                        node: &task_node,
+                        relay: &input.relay,
+                        physical_node_id,
+                        direction: "received",
+                        branch: None,
+                    });
+            task_input_metrics.insert(input.relay.clone(), metrics);
+        }
         let task_output_metrics = match &task_metric_relay {
             Some(relay) => {
                 EmitterOutputMetrics::Relay(runtime.inner.metrics.resolve_node_batch_metrics(
                     NodeBatchMetricsSpec {
-                        unit: Unit::SINGLE,
+                        unit,
                         domain,
                         kind: ModelKind::Emitter,
                         node: &ModelName::from(&emitter.name),
@@ -962,10 +984,11 @@ impl EmitterTask {
                 ))
             }
             None => EmitterOutputMetrics::WithoutRelay(
-                runtime.inner.metrics.resolve_global_node_message_metrics(
+                runtime.inner.metrics.resolve_unit_node_message_metrics(
                     domain,
                     ModelKind::Emitter,
                     &ModelName::from(&emitter.name),
+                    unit,
                     physical_node_id,
                     "sent",
                 ),
@@ -980,8 +1003,8 @@ impl EmitterTask {
         );
         let routing_relay = inputs
             .first()
-            .map(|(relay, _)| relay.clone())
-            .verified("the registry validated that every emitter has at least one input");
+            .map(|input| input.relay.clone())
+            .verified("a started emitter unit reads at least one relay unit");
         let fault_injection = runtime.inner.fault_injection.clone();
         let runtime = runtime.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
@@ -990,16 +1013,17 @@ impl EmitterTask {
         let mut terminal_shutdown_rx = shutdown_tx.subscribe();
         let (work_cancel, mut work_cancel_rx) = watch::channel(false);
         let task_work_cancel = work_cancel.clone();
-        let quiesce_counters =
-            runtime.node_quiesce_counters(domain, NodeRef::new(ModelKind::Emitter, &emitter.name));
+        let quiesce_counters = runtime.unit_quiesce_counters(
+            domain,
+            NodeUnitRef::new(NodeRef::new(ModelKind::Emitter, &emitter.name), unit),
+        );
         let force_flush = runtime.force_flush_participant(domain, quiesce_counters.clone());
         let emitter_buffer_count = runtime
             .inner
             .emitter_buffers
-            .entry(DomainNodeRef::node_in(
-                domain.clone(),
-                ModelKind::Emitter,
-                emitter.name.clone(),
+            .entry(DomainNodeUnitRef::new(
+                DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.name.clone()),
+                unit,
             ))
             .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
             .clone();
@@ -1054,17 +1078,21 @@ impl EmitterTask {
                     }
                 }));
             let mut interaction_inputs = Vec::with_capacity(inputs.len());
-            for (relay, receiver) in inputs {
-                let input = match input_collect_policy {
+            for input in inputs {
+                let interaction_input = match input_collect_policy {
                     Some(policy) => RelayInteractionInput::collecting(
-                        relay,
-                        receiver,
+                        input.relay,
+                        input.fan_in,
                         policy,
                         domain_clock.clone(),
                     ),
-                    None => RelayInteractionInput::immediate(relay, receiver),
+                    None => RelayInteractionInput::immediate(input.relay, input.fan_in),
                 };
-                interaction_inputs.push(input);
+                let interaction_input = match input.relay_unit {
+                    Some(relay_unit) => interaction_input.of_relay_unit(relay_unit),
+                    None => interaction_input,
+                };
+                interaction_inputs.push(interaction_input);
             }
             let interaction = RelayInteraction::with_commands(
                 interaction_inputs,
@@ -1077,20 +1105,18 @@ impl EmitterTask {
                 "the registry validated this emitter's inputs, and a non-empty input list builds \
                  an interaction",
             );
-            let emitter_key = DomainNodeRef::node_in(
-                task_domain.clone(),
-                ModelKind::Emitter,
-                task_emitter.clone(),
+            let emitter_key = DomainNodeUnitRef::new(
+                DomainNodeRef::node_in(task_domain.clone(), ModelKind::Emitter, task_emitter.clone()),
+                unit,
             );
             let status = runtime.emitter_status(&emitter_key);
             let confirmation_waits = runtime.emitter_confirmation_counter(&emitter_key);
             let context = EmitterConnectorContext {
                 readiness: runtime.register_emitter_readiness(&emitter_key),
                 routing: shared_routing,
-                metrics_dirty: runtime.branch_metrics_mark(
+                metrics_dirty: runtime.unit_branch_metrics_mark(
                     &task_domain,
-                    ModelKind::Emitter,
-                    &task_emitter,
+                    &NodeUnitRef::new(NodeRef::new(ModelKind::Emitter, &task_emitter), unit),
                 ),
                 status,
                 confirmation_waits,
@@ -1098,6 +1124,7 @@ impl EmitterTask {
                 runtime: runtime.clone(),
                 domain: task_domain.clone(),
                 emitter: task_emitter.clone(),
+                unit,
                 error_policies: task_error_policies.clone(),
                 udfs,
                 clock: domain_clock.clone(),

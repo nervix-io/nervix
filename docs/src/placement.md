@@ -60,8 +60,8 @@ Nervix classifies each directed hop before applying its effective policy:
 
 | Hop class | Correspondence | Applicable policies |
 | --- | --- | --- |
-| `identity` | Both sides are single, or their partition structures correspond index for index. An intake declared `INSTANCES PER PARTITION` maps instance `p` to relay partition `p`. | All four policies. |
-| `fiber` | A declared mapping determines the destination unit without inspecting a record. A partitioned relay feeding a single emitter maps every partition to that emitter. | All four policies, applied to each fiber. |
+| `identity` | Both sides are single, or their partition structures correspond index for index. An intake declared `INSTANCES PER PARTITION` maps instance `p` to relay partition `p`, and so does an emitter declared `INSTANCES PER PARTITION` from each input relay. | All four policies. |
+| `fiber` | A declared mapping determines the destination unit without inspecting a record. A partitioned relay feeding a single emitter maps every partition to that emitter, and an input relay feeding an emitter declared `INSTANCES n` maps partition `p` to instance `p mod n`. | All four policies, applied to each fiber. |
 | `single↔many` | One side has one unit and the other has several, without an identity or fiber contract. | `NEUTRAL` and `SUGGEST SEPARATION`. |
 | `data-dependent` | The unit reached depends on record data or competing consumption. Examples are a competing-consumer ingestor feeding partitions and a re-sharding reingestor's output. | `NEUTRAL` only. |
 
@@ -638,3 +638,16 @@ Named rules add bonds only through each hop's validated correspondence. Placemen
 exact `NodeUnitRef` members, including different unit kinds within one component. Shared group
 drain, failover and explicit relocation update only those members; ordinary relay members need no
 state replica to move with a stateful ingestor. See [Instancing](ingestors.md#instancing).
+
+## Emitter Instance Units
+
+An emitter declared `INSTANCES n` or `INSTANCES PER PARTITION` has one `Instance(i)` placement per
+instance, each with its own primary and ownership transition; an emitter without the clause keeps
+its one `Single` unit. Instance `i` of `n` serves the input partitions `p` with `p mod n = i`.
+
+`INSTANCES PER PARTITION` introduces an exact colocation component for each index, as an intake's
+does: emitter instance `p` and partition `p` of every input relay. An instance of `INSTANCES n`
+has no hard component of its own. It prefers the node that owns most of the partitions it serves,
+and a named `REQUIRE COLOCATION` rule on the fiber hop from an input relay joins it with all of
+them. An instance beyond the partition count serves no partition; it is placed like its siblings
+and runs nothing. See [Emitter instances](emitters.md#emitter-instances).

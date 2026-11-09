@@ -27,6 +27,7 @@ mod error;
 mod execution_revision;
 mod graph;
 mod ingestor_plan;
+mod emitter_units;
 mod ingestor_units;
 mod message_error_plan;
 mod mutation;

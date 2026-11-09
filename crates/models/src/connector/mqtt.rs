@@ -723,6 +723,11 @@ pub struct MqttTopicEmitter {
 
 impl EmitterDeclaration for MqttTopicEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        // An MQTT broker keeps one session per client identifier, and every instance would connect
+        // with the emitter's one identifier.
+        instancing: crate::EmitterInstancingCapability::Single {
+            reason: crate::SingleEmitterReason::OneClientIdentifier,
+        },
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         reference: EmitterReferenceKind::Client(ConnectorKind::Mqtt),
         body: EmitterBodyForm::Codec,

@@ -868,8 +868,9 @@ fn assert_generated_ingestor_states_what_its_entity_declares(bytes: &[u8]) {
 }
 
 /// Checks that a generated emitter names a declared publishing mode, writes a body of the
-/// declared form, batching its declared legality admits and only the envelope clauses and
-/// properties its entity declares, and publishes through a client of a declared connector.
+/// declared form, batching its declared legality admits, instances only where its entity runs
+/// several and only the envelope clauses and properties its entity declares, and publishes
+/// through a client of a declared connector.
 fn assert_generated_emitter_states_what_its_entity_declares(bytes: &[u8]) {
     let mut arbitrary = Arbitrary::new(bytes, Domain::Plexus);
     let emitters = EmitterEntityKind::all().collect::<Vec<_>>();
@@ -916,6 +917,13 @@ fn assert_generated_emitter_states_what_its_entity_declares(bytes: &[u8]) {
         | (EmitterBatchLegality::Unavailable { .. }, Some(_)) => false,
     };
     assert!(batching, "{emitter_kind} batches as {:?}", emitter.batch);
+    if declared.instancing.refusal(emitter_kind).is_some() {
+        assert!(
+            emitter.instances.is_one(),
+            "{emitter_kind} runs as {} instances, which its entity refuses",
+            emitter.instances
+        );
+    }
     if let Err(refused) = emitter.envelope.check_declared(emitter_kind) {
         panic!("{emitter_kind} writes an undeclared envelope: {refused:?}");
     }

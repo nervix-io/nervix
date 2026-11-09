@@ -40,7 +40,7 @@ use error_stack::Report;
 use futures_util::{StreamExt as _, stream::FuturesUnordered};
 use indexmap::IndexMap;
 use meticulous::OptionExt as _;
-use nervix_models::RelayName;
+use nervix_models::{RelayName, Unit};
 use nervix_primitives::sync::{Arc, mpsc, watch};
 use thiserror::Error;
 
@@ -152,6 +152,10 @@ impl<C> RelayInteractionWork<C> {
 
 pub(super) struct RelayInteractionInput {
     relay: RelayName,
+    /// The relay unit whose audience this input reads, where one interaction reads several units
+    /// of one relay, as an emitter instance serving several partitions does. Absent where this is
+    /// the interaction's only input from its relay.
+    relay_unit: Option<Unit>,
     receiver: RelayRuntimeFanIn,
     collection_mode: RelayInputCollectionMode,
 }
@@ -160,9 +164,17 @@ impl RelayInteractionInput {
     pub(super) fn immediate(relay: RelayName, receiver: RelayRuntimeFanIn) -> Self {
         Self {
             relay,
+            relay_unit: None,
             receiver,
             collection_mode: RelayInputCollectionMode::Immediate,
         }
+    }
+
+    /// This input reads the audience of `unit` of its relay, beside the interaction's inputs from
+    /// that relay's other units.
+    pub(super) fn of_relay_unit(mut self, unit: Unit) -> Self {
+        self.relay_unit = Some(unit);
+        self
     }
 
     pub(super) fn collecting(
@@ -173,6 +185,7 @@ impl RelayInteractionInput {
     ) -> Self {
         Self {
             relay,
+            relay_unit: None,
             receiver,
             collection_mode: RelayInputCollectionMode::Collect {
                 policy,
@@ -436,7 +449,7 @@ impl RelayInteractionInputs {
         let mut declared = HashSet::new();
         let mut sources = Vec::with_capacity(inputs.len());
         for input in inputs {
-            if !declared.insert(input.relay.clone()) {
+            if !declared.insert((input.relay.clone(), input.relay_unit)) {
                 return Err(Report::new(RelayInteractionError::DuplicateInput {
                     relay: input.relay,
                 }));

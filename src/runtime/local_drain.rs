@@ -480,7 +480,7 @@ impl LocalDomainDrainSources for RuntimeDomainDrainSources<'_> {
     fn buffered_emitter_messages(&self) -> usize {
         let mut buffered = 0;
         for messages in self.runtime.inner.emitter_buffers.iter() {
-            if &messages.key().domain == self.domain {
+            if &messages.key().entity.domain == self.domain {
                 LocalDomainDrainStatus::tally(
                     &mut buffered,
                     messages.value().load(Ordering::Acquire),
@@ -493,12 +493,13 @@ impl LocalDomainDrainSources for RuntimeDomainDrainSources<'_> {
     fn publishing_emitters(&self) -> usize {
         let mut publishing = 0;
         for waits in self.runtime.inner.emitter_confirmation_waits.iter() {
-            if &waits.key().domain == self.domain && waits.value().load(Ordering::Acquire) != 0 {
+            if &waits.key().entity.domain == self.domain && waits.value().load(Ordering::Acquire) != 0
+            {
                 LocalDomainDrainStatus::tally(&mut publishing, 1);
             }
         }
         for status in self.runtime.inner.emitter_statuses.iter() {
-            if &status.key().domain == self.domain
+            if &status.key().entity.domain == self.domain
                 && let Some(failure) = status.value().snapshot()
                 && failure.retry.is_some()
             {

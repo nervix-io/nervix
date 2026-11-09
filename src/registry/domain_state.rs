@@ -147,6 +147,12 @@ impl DomainState {
                     ),
                     _ => None,
                 },
+                emitter_units: match model {
+                    Model::Emitter(emitter) => Some(
+                        super::emitter_units::EmitterUnits::decide(domain, emitter, models)?,
+                    ),
+                    _ => None,
+                },
                 identifier: key.identifier.clone(),
                 kind: key.kind,
                 config: Arc::new(model.clone()),

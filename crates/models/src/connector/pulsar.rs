@@ -615,6 +615,7 @@ pub struct PulsarTopicEmitter {
 
 impl EmitterDeclaration for PulsarTopicEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        instancing: crate::EmitterInstancingCapability::Instances,
         // The producer keeps a message's properties in a map: one value per name, the last written.
         headers: Some(HeaderModel::exact(HeaderLayout::LastWins)),
         reference: EmitterReferenceKind::Client(ConnectorKind::Pulsar),

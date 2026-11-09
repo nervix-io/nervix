@@ -411,6 +411,7 @@ pub struct SyslogCollectorEmitter {
 
 impl EmitterDeclaration for SyslogCollectorEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        instancing: crate::EmitterInstancingCapability::Instances,
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::Syslog),
         body: EmitterBodyForm::Codec,

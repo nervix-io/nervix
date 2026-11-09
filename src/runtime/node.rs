@@ -45,10 +45,11 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) ingestor_readiness:
         DashMap<DomainNodeUnitRef, IngestorInstanceReadiness, RandomState>,
     pub(in crate::runtime) emitter_statuses:
-        DashMap<DomainNodeRef, Arc<task_status::TaskStatus<EmitterRetryStatus>>, RandomState>,
-    pub(in crate::runtime) emitter_readiness: DashMap<DomainNodeRef, Arc<AtomicBool>, RandomState>,
+        DashMap<DomainNodeUnitRef, Arc<task_status::TaskStatus<EmitterRetryStatus>>, RandomState>,
+    pub(in crate::runtime) emitter_readiness:
+        DashMap<DomainNodeUnitRef, Arc<AtomicBool>, RandomState>,
     pub(in crate::runtime) emitter_confirmation_waits:
-        DashMap<DomainNodeRef, Arc<AtomicUsize>, RandomState>,
+        DashMap<DomainNodeUnitRef, Arc<AtomicUsize>, RandomState>,
     /// One connector instance per named client on this node, keyed by the client it belongs to and
     /// held open by the emitters and ingestors leasing it.
     pub(in crate::runtime) shared_clients:
@@ -56,7 +57,7 @@ pub(in crate::runtime) struct RuntimeInner {
     /// The graph nodes that have asked a shared client for a connection and not yet been given
     /// one, keyed by the waiting node rather than the client it waits on.
     pub(in crate::runtime) pool_waits:
-        DashMap<DomainNodeRef, Arc<shared_clients::PoolWaitSlot>, RandomState>,
+        DashMap<DomainNodeUnitRef, Arc<shared_clients::PoolWaitSlot>, RandomState>,
     pub(in crate::runtime) executions: DashMap<DomainName, DomainExecution, RandomState>,
     /// Stable per-domain publication handles retained across execution rebuilds. Data-plane tasks
     /// resolve one handle when they start and keep its cache instead of revisiting `executions`.
@@ -94,7 +95,8 @@ pub(in crate::runtime) struct RuntimeInner {
         DashMap<DomainNodeUnitRef, Arc<AckRootTracker>, RandomState>,
     pub(in crate::runtime) generator_activity_by_domain:
         DashMap<DomainName, Arc<AtomicUsize>, RandomState>,
-    pub(in crate::runtime) emitter_buffers: DashMap<DomainNodeRef, Arc<AtomicUsize>, RandomState>,
+    pub(in crate::runtime) emitter_buffers:
+        DashMap<DomainNodeUnitRef, Arc<AtomicUsize>, RandomState>,
     pub(in crate::runtime) force_flush_by_domain:
         DashMap<DomainName, Arc<DomainForceFlush>, RandomState>,
     pub(in crate::runtime) node_quiesce_counters:

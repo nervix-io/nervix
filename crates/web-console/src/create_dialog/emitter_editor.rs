@@ -1,7 +1,8 @@
 //! Composition of the visual emitter form and its ordered relay inputs.
 //!
 //! Layer: edges.
-//! - **Owns.** Emitter naming, attachment, collection and the composition of its focused editors.
+//! - **Owns.** Emitter naming, instances, attachment, collection and the composition of its focused
+//!   editors.
 //! - **Depends on.** Browser drafts, declared entity choices and shared dialog dispatch.
 //! - **Must not know.** Emitter tasks, placement or transport clients.
 
@@ -55,6 +56,11 @@ pub(super) fn EmitterEditor(
             <EmitterText label="Input WHERE expression (optional)" class_name="create-emitter-input-where" signals=signals multiline=true
                 read=|draft| match draft.inputs.get(draft.active_input) { Some(input) => input.where_clause.clone(), None => String::new() }
                 write=|draft, value| { if let Some(input) = draft.inputs.get_mut(draft.active_input) { input.where_clause = value; } } />
+            <Show when=move || signals.emitter.with(|draft| draft.destination.kind.is_some_and(|kind| kind.capabilities().instancing.refusal(kind).is_none())) fallback=|| ()>
+                <EmitterText label="INSTANCES (a count or PER PARTITION; empty runs one instance)" class_name="create-emitter-instances" signals=signals
+                    read=|draft| draft.instances.clone()
+                    write=|draft, value| draft.instances = value />
+            </Show>
             <fieldset class="create-field create-emitter-attachment"><legend>"Input acknowledgement"</legend>
                 <button type="button" data-mode="attached" class:active=move || signals.emitter.get().mode == AckMode::Attached disabled=pending
                     on:click=move |_| { signals.emitter.update(|draft| draft.mode = AckMode::Attached); signals.edit(); }>"ATTACHED"</button>

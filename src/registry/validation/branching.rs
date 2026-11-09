@@ -1221,6 +1221,7 @@ mod tests {
         let mut graph = DiGraph::<ActiveNode, EdgeKind>::new();
         let relay_index = graph.add_node(ActiveNode {
             ingestor_units: None,
+            emitter_units: None,
             identifier: named("events"),
             kind: ModelKind::Relay,
             config: Arc::new(relay("events", "event_schema")),

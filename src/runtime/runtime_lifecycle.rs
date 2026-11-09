@@ -850,7 +850,7 @@ impl Runtime {
             Self::await_shutdown_task_with_grace(
                 emitter_task.task,
                 domain,
-                Some(&IngestorName::from(&entity.identifier)),
+                Some(&IngestorName::from(&entity.node.identifier)),
                 "scheduled emitter",
                 self.branch_task_stop_timeout(),
             )

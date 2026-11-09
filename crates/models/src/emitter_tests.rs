@@ -26,6 +26,7 @@ fn ack_mode_default_is_attached() {
 #[test]
 fn emitter_alter_applies_operations_in_order_and_is_atomic() {
     let mut emitter = CreateEmitter {
+        instances: crate::EmitterInstances::ONE,
         name: named("event_emitter"),
         from: ProcessorInputs::single(named("events")),
         body: EmitterBody::Codec {
@@ -120,6 +121,7 @@ fn http_emitter_alter_replaces_body_explicitly_and_rejects_drop_encode() {
         max_backoff: "30s".to_string(),
     };
     let mut emitter = CreateEmitter {
+        instances: crate::EmitterInstances::ONE,
         name: named("request_emitter"),
         from: ProcessorInputs::single(named("events")),
         body: EmitterBody::WithoutBody,
@@ -212,6 +214,7 @@ fn http_emitter_alter_replaces_body_explicitly_and_rejects_drop_encode() {
     );
     assert_eq!(emitter, before);
     let batched = CreateEmitter {
+        instances: crate::EmitterInstances::ONE,
         batch: Some(batch_policy(10, "64KiB")),
         ..emitter
     };
@@ -233,6 +236,7 @@ fn batching_emitter(
     batch: Option<crate::EmitterBatchPolicy>,
 ) -> CreateEmitter {
     CreateEmitter {
+        instances: crate::EmitterInstances::ONE,
         name: named("event_emitter"),
         from: ProcessorInputs::single(named("events")),
         body: EmitterBody::Values,
@@ -481,6 +485,7 @@ fn database_emitters_require_the_batch_clause_and_the_others_do_not() {
 #[test]
 fn emitter_alter_reports_name_and_commit_policy_errors() {
     let emitter = CreateEmitter {
+        instances: crate::EmitterInstances::ONE,
         name: named("event_emitter"),
         from: ProcessorInputs::single(named("events")),
         body: EmitterBody::Codec {

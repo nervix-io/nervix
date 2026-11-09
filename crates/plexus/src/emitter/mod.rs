@@ -227,6 +227,64 @@ fn encode_using_clause<'src>()
         .ignore_then(codec_ref())
         .boxed()
 }
+
+/// `<count>` or `PER PARTITION`, the instances an `INSTANCES` clause or `SET INSTANCES` declares.
+fn instances_form<'src>()
+-> impl Parser<'src, &'src [Token], EmitterInstances, extra::Err<ParseError<'src>>> + Clone {
+    choice((
+        kw_phrase2(Identifier::Per, Identifier::Partition).to(EmitterInstances::PerPartition),
+        nonzero_u64_value("instance_count", "instances must be greater than 0")
+            .map(EmitterInstances::Count),
+    ))
+    .boxed()
+}
+
+/// The optional `INSTANCES` clause after an emitter's inputs, where its entity runs more than one
+/// instance; [`EmitterInstances::ONE`] where the statement writes none. An entity that runs one
+/// instance refuses the clause with its declared reason.
+fn instances_clause<'src, S>()
+-> Boxed<'src, 'src, &'src [Token], EmitterInstances, extra::Err<ParseError<'src>>>
+where
+    S: EmitterEntityModel + 'src,
+{
+    match S::KIND.capabilities().instancing.refusal(S::KIND) {
+        None => kw(Identifier::Instances)
+            .ignore_then(instances_form())
+            .or_not()
+            .map(|instances| instances.unwrap_or(EmitterInstances::ONE))
+            .boxed(),
+        Some(refusal) => refused_words(&[Identifier::Instances], refusal)
+            .to(EmitterInstances::ONE)
+            .boxed(),
+    }
+}
+
+/// Consumes nothing and succeeds unless the next words are exactly `words`, which it refuses with
+/// `refusal`. The refusal is a custom error recorded where this parser starts, so it wins over
+/// the other alternatives failing on the same word, and it never adds an expectation completion
+/// would offer: an entity that runs one instance neither offers `INSTANCES` nor accepts it.
+fn refused_words<'src>(
+    words: &'static [Identifier],
+    refusal: SingleInstanceRefusal,
+) -> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
+    custom(move |inp| {
+        let before = inp.save();
+        let start = inp.cursor();
+        for word in words {
+            let next = inp.next_maybe();
+            let matched = next
+                .as_deref()
+                .is_some_and(|token| token_is_keyword(token, *word));
+            if !matched {
+                inp.rewind(before);
+                return Ok(());
+            }
+        }
+        let span = inp.span_since(&start);
+        inp.rewind(before);
+        Err(Rich::custom(span, refusal.to_string()))
+    })
+}
 /// A complete body of one statically selected emitter entity. The statement converts the
 /// concrete entity into the public union exactly once, after its kinded head has parsed.
 struct ParsedDestination<S> {
@@ -355,6 +413,7 @@ where
 struct DeclaredEmitter {
     name: EmitterName,
     from: ProcessorInputs,
+    instances: EmitterInstances,
     mode: AckMode,
     materialized_state: Vec<MaterializedStateDependency>,
     destination: ParsedDestination<EmitterEntity>,
@@ -373,14 +432,16 @@ where
         .ignore_then(emitter_name())
         .then_ignore(kw(Identifier::From))
         .then(from_relay_clauses())
+        .then(instances_clause::<S>())
         .then(ack_mode().or_not())
         .then(materialized_state_dependencies())
         .then_ignore(kw(Identifier::To))
         .then(with_batch::<S, _>(definition))
         .map(
-            |((((name, from), mode), materialized_state), parsed)| DeclaredEmitter {
+            |(((((name, from), instances), mode), materialized_state), parsed)| DeclaredEmitter {
                 name,
                 from,
+                instances,
                 mode: mode.unwrap_or_default(),
                 materialized_state,
                 destination: ParsedDestination {
@@ -412,6 +473,7 @@ pub fn create_emitter_parser<'src>()
                     CreateEmitter {
                         name: declared.name,
                         from: declared.from,
+                        instances: declared.instances,
                         materialized_state: declared.materialized_state,
                         connector: Box::new(parsed.destination),
                         body: parsed.body,
@@ -564,6 +626,30 @@ fn delivery_operations<'src>() -> Vec<Operation<'src>> {
 fn declared_operations<'src>(kind: EmitterEntityKind) -> Vec<Operation<'src>> {
     let capabilities = kind.capabilities();
     let mut choices = Vec::new();
+    match capabilities.instancing.refusal(kind) {
+        None => choices.push(
+            kw_phrase2(Identifier::Set, Identifier::Instances)
+                .ignore_then(instances_form())
+                .map(|instances| AlterEmitterOperation::SetInstances { instances })
+                .boxed(),
+        ),
+        // The refusal starts at the word after `SET`, where every other `SET` operation fails on
+        // `INSTANCES`, so the merged error is the entity's reason.
+        Some(refusal) => choices.push(
+            kw(Identifier::Set)
+                .ignore_then(refused_words(&[Identifier::Instances], refusal))
+                .ignore_then(empty().try_map(|(), span| {
+                    Err(<ParseError<'src> as LabelError<
+                        'src,
+                        &'src [Token],
+                        chumsky::error::RichPattern<'src, Token>,
+                    >>::expected_found(
+                        [chumsky::error::RichPattern::SomethingElse], None, span
+                    ))
+                }))
+                .boxed(),
+        ),
+    }
     if let EmitterReferenceKind::Client(_) | EmitterReferenceKind::StorageClient(_) =
         capabilities.reference
     {

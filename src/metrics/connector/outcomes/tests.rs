@@ -22,6 +22,7 @@ fn fixture() -> (RuntimeMetrics, EmitterInteractionMetrics) {
     let handle = metrics.register_emitter_interactions(
         &DomainName::parse("outcomes").assured("fixture domain"),
         &EmitterName::parse("destination").assured("fixture emitter"),
+        nervix_models::Unit::SINGLE,
         Some(&ClusterNodeName::parse("node-1").assured("fixture node")),
         EmitterEntityKind::Redis(RedisEmitterEntity::PubSub),
     );
@@ -87,6 +88,7 @@ fn emitter_outcomes_register_every_child_at_zero_with_only_bounded_dimensions() 
             assert_eq!(labels["domain"], "outcomes");
             assert_eq!(labels["emitter"], "destination");
             assert_eq!(labels["physical_node_id"], "node-1");
+            assert_eq!(labels["instance"], "-");
             assert_eq!(labels["connector"], "REDIS");
             assert_eq!(labels["entity"], "PUBSUB");
             for key in labels.keys() {
@@ -149,11 +151,13 @@ fn emitter_outcomes_keep_source_record_units_and_fractional_wait_seconds() {
     let description = handle.describe_lines().join("\n");
     assert!(description.contains(
         "nervix_emitter_retry_wait_seconds_total{domain=\"outcomes\",emitter=\"destination\",\
-         physical_node_id=\"node-1\",connector=\"REDIS\",entity=\"PUBSUB\"} total=0.875"
+         physical_node_id=\"node-1\",instance=\"-\",connector=\"REDIS\",entity=\"PUBSUB\"} \
+         total=0.875"
     ));
     assert!(description.contains(
         "nervix_emitter_pool_wait_seconds_total{domain=\"outcomes\",emitter=\"destination\",\
-         physical_node_id=\"node-1\",connector=\"REDIS\",entity=\"PUBSUB\"} total=0.375"
+         physical_node_id=\"node-1\",instance=\"-\",connector=\"REDIS\",entity=\"PUBSUB\"} \
+         total=0.375"
     ));
 }
 

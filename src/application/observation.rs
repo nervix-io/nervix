@@ -22,6 +22,7 @@ use std::{collections::BTreeSet, num::NonZeroU64, time::Duration};
 
 use arch_into::ArchInto;
 use error_stack::{Report, ResultExt as _};
+use futures_util::future::join_all;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_dataflow_graph::DataflowNodeHealth;
 use nervix_execution::MemoryClass;
@@ -38,7 +39,7 @@ use nervix_interconnect::{
     LookupResponse as RemoteLookupResponse, RemoteOperationFailure, RemoteOperationSubject,
 };
 use nervix_models::{
-    ClusterNodeName, CodecName, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
+    BranchPartitions, ClusterNodeName, CodecName, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
     CreateEndpoint, CreateIngestor, CreateJunction, CreateLookup, CreatePlacement,
     CreateReingestor, CreateReorderer, CreateUdf, CreateWasmProcessor, CreateWindowProcessor,
     DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
@@ -47,7 +48,8 @@ use nervix_models::{
     DescribeWindowProcessor, DomainName, DomainStatus, EmitterName, FieldName, IngestorName,
     InspectionFormat, LookupName, LookupQuery, Model, ModelKind, ModelName, NodeRef, ParseAsType,
     ResourceDescription, ResourceId, ResourceName, ResourceUsage, ResourceVersion,
-    ResourceVersionDescription, ResourceVersionEntries, ScheduledNode, SchemaName,
+    ResourceVersionDescription, ResourceVersionEntries, ScheduledNode,
+    SchemaName, DomainSchedule, Unit, UnitKind,
     UniquelyKindedModel, WasmStateInspection,
 };
 use nervix_vm::window::{WindowAggregateProgram, lower_window_assignments};
@@ -56,7 +58,7 @@ use tracing::{debug, warn};
 use super::{
     command_result::CommandResult,
     describe_output::{
-        append_metrics_lines, dataflow_node_status_from_envelope, dataflow_node_status_to_envelope,
+        EmitterInstanceStatus, EmitterInstanceSummary, append_metrics_lines, dataflow_node_status_from_envelope, dataflow_node_status_to_envelope,
         format_correlator_describe_output, format_deduplicator_describe_output,
         format_emitter_describe_output, format_endpoint_describe_output,
         format_ingestor_describe_output, format_ingestor_listing_line,
@@ -939,6 +941,7 @@ impl SessionServiceImpl {
                     domain: domain.clone(),
                     kind: model_kind,
                     name: identifier.clone(),
+                    unit: Unit::SINGLE,
                 },
                 Duration::from_secs(2),
             )
@@ -981,6 +984,21 @@ impl SessionServiceImpl {
     ) -> Result<DataflowNodeStatusEnvelope, RemoteOperationFailure> {
         self.prepare_owner_control_request(&request.domain, request.kind, &request.name)
             .await?;
+        if request.kind == ModelKind::Emitter
+            && matches!(request.unit.kind(), UnitKind::Instance(_))
+            && !self.inner.runtime.emitter_unit_is_running(
+                &request.domain,
+                &EmitterName::from(&request.name),
+                request.unit,
+            )
+        {
+            return Err(RemoteOperationFailure::Unavailable {
+                subject: RemoteOperationSubject::Entity {
+                    domain: request.domain.clone(),
+                    entity: NodeRef::new(request.kind, request.name.clone()),
+                },
+            });
+        }
         let health = self.inner.runtime.dataflow_node_status(
             &request.domain,
             request.kind.as_str(),
@@ -1028,7 +1046,9 @@ impl SessionServiceImpl {
         let Some(node) = scheduled_node else {
             return Ok(self.local_runtime_describe(domain, kind, identifier, &metric_kind));
         };
-        if node.is_partitioned() {
+        // Each partition owner, and each owner of an emitter's instances, reports the units it
+        // executes.
+        if node.is_partitioned() || (kind == ModelKind::Emitter && node.is_instanced()) {
             return self
                 .describe_partitioned_runtime(domain, kind, identifier, node)
                 .await;
@@ -1580,17 +1600,158 @@ impl SessionServiceImpl {
             Ok(metrics) => metrics,
             Err(message) => return command_error(format!("{message:#}")),
         };
+        let instances = match (scheduled_domain, scheduled_node.as_ref()) {
+            (Some(scheduled_domain), Some(node)) if node.is_instanced() => {
+                self.emitter_instance_summaries(domain, &emitter, scheduled_domain, node)
+                    .await
+            }
+            _ => Vec::new(),
+        };
         let description = match format_emitter_describe_output(
             &describe.name,
             &emitter,
             &payload,
             scheduled_node.as_ref(),
             Some(&status),
+            &instances,
         ) {
             Ok(description) => description,
             Err(error) => return command_error(error.to_string()),
         };
         command_ok(append_metrics_lines(description, metrics))
+    }
+
+    /// One summary per instance of `emitter`, in instance order: the node it is scheduled on,
+    /// whether its task runs there, and the input partitions it serves. Owners are asked
+    /// concurrently, so an owner that does not answer costs one request deadline, not one per
+    /// instance.
+    async fn emitter_instance_summaries(
+        &self,
+        domain: &DomainName,
+        emitter: &CreateEmitter,
+        scheduled_domain: &DomainSchedule,
+        node: &ScheduledNode,
+    ) -> Vec<EmitterInstanceSummary> {
+        let partitions = Self::emitter_input_partitions(emitter, scheduled_domain);
+        let unit_count: u64 = node.units.len().arch_into();
+        let Some(count) = NonZeroU64::new(unit_count) else {
+            return Vec::new();
+        };
+        let mut summaries = Vec::with_capacity(node.units.len());
+        for unit in node.units.keys() {
+            nervix_primitives::task::consume_budget().await;
+            let UnitKind::Instance(index) = unit.kind() else {
+                continue;
+            };
+            let owner = node.unit_execution_node(*unit).cloned();
+            let served = partitions.units_served_by(index, count);
+            summaries.push(self.emitter_instance_summary(
+                domain,
+                &emitter.name,
+                EmitterInstanceUnit {
+                    unit: *unit,
+                    index,
+                },
+                owner,
+                served,
+            ));
+        }
+        join_all(summaries).await
+    }
+
+    /// The partitions of an instanced emitter's inputs. Validation admits instances only over
+    /// inputs that share one branch, so the first input's partitions are every input's.
+    fn emitter_input_partitions(
+        emitter: &CreateEmitter,
+        scheduled_domain: &DomainSchedule,
+    ) -> BranchPartitions {
+        let Some(relay) = emitter.from.relays().first() else {
+            return BranchPartitions::ONE;
+        };
+        let Some(relay) = scheduled_domain
+            .nodes
+            .get(&NodeRef::new(ModelKind::Relay, relay))
+        else {
+            return BranchPartitions::ONE;
+        };
+        let Some(branching) = &relay.resolved_branching else {
+            return BranchPartitions::ONE;
+        };
+        match branching.partitions() {
+            Some(partitions) => partitions,
+            None => BranchPartitions::ONE,
+        }
+    }
+
+    async fn emitter_instance_summary(
+        &self,
+        domain: &DomainName,
+        emitter: &EmitterName,
+        instance: EmitterInstanceUnit,
+        owner: Option<ClusterNodeName>,
+        partitions: Vec<Unit>,
+    ) -> EmitterInstanceSummary {
+        let status = if partitions.is_empty() {
+            EmitterInstanceStatus::Idle
+        } else {
+            self.emitter_instance_status(domain, emitter, instance.unit, owner.as_ref())
+                .await
+        };
+        EmitterInstanceSummary {
+            index: instance.index,
+            owner,
+            status,
+            partitions,
+        }
+    }
+
+    /// Whether the task of an emitter instance that serves partitions runs on `owner`, as the
+    /// owner itself reports it.
+    async fn emitter_instance_status(
+        &self,
+        domain: &DomainName,
+        emitter: &EmitterName,
+        unit: Unit,
+        owner: Option<&ClusterNodeName>,
+    ) -> EmitterInstanceStatus {
+        let Some(owner) = owner else {
+            return EmitterInstanceStatus::Stopped;
+        };
+        if owner == self.inner.consensus.local_node_id() {
+            if self
+                .inner
+                .runtime
+                .emitter_unit_is_running(domain, emitter, unit)
+            {
+                return EmitterInstanceStatus::Running;
+            }
+            return EmitterInstanceStatus::Stopped;
+        }
+        let response = self
+            .inner
+            .interconnect
+            .request_with_timeout(
+                owner,
+                RemoteDataflowNodeStatusRequest {
+                    domain: domain.clone(),
+                    kind: ModelKind::Emitter,
+                    name: ModelName::from(emitter),
+                    unit,
+                },
+                Duration::from_secs(2),
+            )
+            .await;
+        match response {
+            Ok(RemoteDataflowNodeStatusResponse { result: Ok(_) }) => {
+                EmitterInstanceStatus::Running
+            }
+            Ok(RemoteDataflowNodeStatusResponse {
+                result: Err(RemoteOperationFailure::Unavailable { .. }),
+            }) => EmitterInstanceStatus::Stopped,
+            Ok(RemoteDataflowNodeStatusResponse { result: Err(_) }) | Err(_) => {
+                EmitterInstanceStatus::Unknown
+            }
+        }
     }
 
     pub(in crate::application) async fn describe_window_processor(
@@ -2474,6 +2635,13 @@ impl SessionServiceImpl {
         };
         Ok(Some((emitter.clone(), node.clone())))
     }
+}
+
+/// An emitter instance's unit and the index its unit names.
+#[derive(Debug, Clone, Copy)]
+struct EmitterInstanceUnit {
+    unit: Unit,
+    index: u64,
 }
 
 #[cfg(test)]

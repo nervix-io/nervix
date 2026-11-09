@@ -274,6 +274,8 @@ impl DeclaredPublishing {
 /// documentation and the generated conformance tests read the same declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmitterEntityCapabilities {
+    /// Whether its emitters may declare `INSTANCES`, or run one instance for a declared reason.
+    pub instancing: crate::EmitterInstancingCapability,
     /// What the `write_header` calls of an emitter's record become on the message it publishes,
     /// or `None` where its messages carry no transport headers.
     pub headers: Option<HeaderModel>,

@@ -33,6 +33,7 @@ An emitter defines:
 
 - one or more source relays that declare the same payload schema
 - an optional input collection policy
+- optionally, the [instances](#emitter-instances) it runs, each serving its own input partitions
 - the codec used for encoding
 - the transport-specific emitter
 - the emitter's explicit publishing mode, confirmation window and bound where applicable, and retry
@@ -54,6 +55,7 @@ Every Plexus emitter names its connector and entity before `EMITTER`:
 ```plexus,ignore
 CREATE [IF NOT EXISTS] <CONNECTOR> <ENTITY> EMITTER <name>
   FROM <relays> [COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]]
+  [INSTANCES <count> | INSTANCES PER PARTITION]
   [ATTACHED | DETACHED]
   TO <reference> [<LOCATOR> '<external name>'] [<entity options>]
     MODE <entity publishing policy>
@@ -76,8 +78,8 @@ Nervix resolves S3, GCS or Azure Blob from that client's kind. Its `NAMESPACE`, 
 `MODE`; `VALUES`, `ATTRIBUTES`, `RESOURCE` and `SCOPE` form their payload section after it.
 Database conflict clauses follow `VALUES`.
 
-The optional input acknowledgement clause follows the complete `FROM` list and its collection
-policy, before materialized-state dependencies and `TO`. Omitting it selects `ATTACHED`.
+The optional `INSTANCES` clause follows the complete `FROM` list and its collection policy, and the
+optional input acknowledgement clause follows it, before materialized-state dependencies and `TO`. Omitting it selects `ATTACHED`.
 Canonical Plexus and `SHOW CREATE EMITTER` always write the mode explicitly in that position.
 `ALTER <CONNECTOR> <ENTITY> EMITTER ... SET ATTACHED | SET DETACHED` changes the same input contract.
 The head keeps the emitter's connector and entity while that operation changes its body property;
@@ -183,6 +185,85 @@ expressions at a later domain time. Explicit source event timestamps remain unch
 whose public contract is observation time, such as OTEL `observed_time_unix_nano`, read actual UTC
 only at the external export boundary.
 
+## Emitter instances
+
+An emitter runs one instance unless its statement writes `INSTANCES`:
+
+```plexus
+CREATE KAFKA TOPIC EMITTER orders_out
+  FROM orders
+  INSTANCES PER PARTITION
+  TO kafka_main TOPIC 'orders_out'
+    MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+      RETRY POLICY BACKOFF 250ms MAX 30s
+    ENCODE USING order_codec
+  INHERIT ALL
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+`INSTANCES <count>` runs that many instances, and `INSTANCES PER PARTITION` one instance for each
+partition of the branch its input relays share. Instance `i` of `n` serves the input partitions `p`
+with `p mod n = i`; with `PER PARTITION`, instance `p` serves partition `p`. One key lives in one
+partition, so one instance publishes all of a key's records, in the order its relay delivered them,
+and the order of each key holds end to end. Records of different keys published by different
+instances have no order between them.
+
+Every instance is its own placement unit and task, with its own buffer, `FLUSH` cadence, retry
+schedule and backoff, open destination, confirmation window and acknowledgement keepalive. A relay
+partition delivers its records only to the instance that serves it, on that instance's node,
+whether the partition's owner is the same node or another one. `COLLECT FOR` still collects each
+source relay and concrete branch on its own. A pooled destination leases from the pool of the node
+its instance runs on.
+
+The input relays of an emitter with more than one instance share one branch, as the inputs of a
+multi-input processor do, or are all unbranched; `INSTANCES PER PARTITION` requires a branch. An
+input that does not share the branch is refused when the emitter is created or altered. A
+`PER PARTITION` emitter whose branch has one partition runs one instance.
+
+Each instance is placed independently:
+
+- A `PER PARTITION` instance is placed with its partition, as one placement unit with the
+  corresponding partition of every input relay.
+- An instance of `INSTANCES <count>` prefers the node that owns most of the partitions it serves.
+  A [`REQUIRE COLOCATION`](placement.md) rule between an input relay and the emitter keeps every
+  instance with all of the partitions it serves.
+- An instance beyond the partition count serves no partition. It is placed and reported as idle,
+  and runs no task and opens no destination.
+
+Draining or losing a node moves only the instances it ran. The other instances keep their tasks,
+buffers and open destinations. A replaced instance starts from its partitions' undelivered records
+as any restarted emitter does.
+
+Whether an entity can run several instances is declared by the entity, and the
+[capability reference](connector-capabilities.md) lists it. `CLIENT CONSUMER`, `ICEBERG TABLE` and
+`MQTT TOPIC` emitters run one instance and refuse the clause with their reason, such as
+`ICEBERG TABLE emitters commit through one table writer, so they refuse INSTANCES`:
+
+- a client consumer delivers its rows to application sessions through one consumer stream;
+- an Iceberg emitter stages its rows and commits each snapshot of the table through one writer;
+- an MQTT broker keeps one session per client identifier, so a second connection with the emitter's
+  identifier would take the first one's session over.
+
+`SHOW CREATE EMITTER` writes `INSTANCES` after the input list and leaves the single default
+instance unwritten. `SHOW CLUSTER STATUS` lists each instance as `unit=instance:<i>` with its owner.
+`DESCRIBE EMITTER` of an emitter with several instances adds an `instances:` line and one line per
+instance:
+
+```text
+instances: PER PARTITION
+instance 0: node=node-1 status=running partitions=0
+instance 1: node=node-2 status=running partitions=1
+```
+
+`status` is `running` when the instance's task runs on its scheduled node, `stopped` when that node
+reports that it does not, `unknown` when that node does not answer, and `idle` for an instance that
+serves no partition, whose `partitions` is `none`. When the inputs are not divided into partitions,
+instance 0 reads each of them whole and lists `partitions=all`. Every emitter metric series carries
+an `instance` label: the instance index, or `-` for an emitter that runs one instance. A drain that
+waits for emitters still publishing names each instance as `<emitter> instance <i>`.
+
 ## Publishing modes
 
 Every emitter entity requires `MODE <body>` before its body selection, immediately before
@@ -260,6 +341,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
 | Headers | Not offered: Native Arrow batches cross an application session; producers submit batches and consumers explicitly acknowledge delivery attempts, with no broker envelope. |
+| Instancing | single: deliver through one consumer stream |
 | Body | native Arrow output; no codec |
 | BATCH | required |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -343,6 +425,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `METHOD 'POST'` (expression); required<br>`PATH '/events'` (expression); required |
 | Headers | `write_header`; `sorted_by_name`, lowercase names: one value per name, the last one written for it; names in ascending byte order; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
+| Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | ENCODE USING &lt;codec&gt; \| WITHOUT BODY |
 | BATCH | unavailable: send one request per record |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -1025,6 +1108,8 @@ ALTER <CONNECTOR> <ENTITY> EMITTER <emitter>
   | DROP COLLECT
   | SET ATTACHED
   | SET DETACHED
+  | SET INSTANCES <count>
+  | SET INSTANCES PER PARTITION
   | SET BATCH MAX MESSAGES <n> MAX SIZE <bytes>
   | DROP BATCH
   | SET FLUSH EACH <duration> MAX BATCH SIZE <bytes>
@@ -1078,6 +1163,10 @@ The other operations change one part of the stored emitter and keep the rest of 
   `DROP` of a part the construction does not write is refused.
 - `SET BATCH` adds or replaces a clause, while `DROP BATCH` fails if it is absent or required by
   the entity.
+- `SET INSTANCES <count>` and `SET INSTANCES PER PARTITION` replace the emitter's
+  [instances](#emitter-instances), revalidating its inputs' shared branch and every placement rule
+  that names it. An entity that runs one instance does not offer the operation and refuses it with
+  its reason.
 - `SET GENERAL ERROR` replaces the emitter's general error policy.
 
 An operation whose result the entity does not keep is refused once every operation of the
@@ -1091,9 +1180,9 @@ fails when the source has no predicate.
 Changing only `FLUSH` is a `DYNAMIC` update. The live emitter keeps its pending Arrow batches,
 installs the new cadence, and receives a force-flush kick, so buffered output is neither discarded
 nor re-encoded. Source-predicate, destination, option, publishing-mode, client, codec, envelope,
-construction, collection, batching, attachment and general error policy changes use
+construction, collection, batching, attachment, instance and general error policy changes use
 `ENTITY_PAUSE`: Nervix gates all of the emitter's source relays, drains collected input and pending
-emitter output, replaces that emitter task, and releases the gates. Changing source membership uses
+emitter output, replaces that emitter's tasks, one per instance, and releases the gates. Changing source membership uses
 `DOMAIN_PAUSE` because it changes graph topology. Other relays continue flowing during an entity
 pause; sibling consumers of a gated source may see bounded backpressure until the gate is released.
 The complete candidate graph is validated before any change is committed.
@@ -1436,6 +1525,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
 | Headers | `write_header`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -1556,6 +1646,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
 | Headers | `write_header`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
+| Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -1572,8 +1663,9 @@ See the [PULSAR TOPIC capability and mirror reference](connector-capabilities.md
 
 The emitter uses the same [Pulsar topic names](ingestors.md#pulsar-topic-names) as the ingestor:
 short names use the client's namespace and fully qualified persistent or non-persistent names are
-sent as written. Provision the output topic before starting the emitter. `SUBSCRIPTION`, `TYPE`
-and `INSTANCES` configure consumption and are unavailable on an emitter.
+sent as written. Provision the output topic before starting the emitter. `SUBSCRIPTION` and
+`TYPE` configure consumption and are unavailable on an emitter. A Pulsar emitter's `INSTANCES`
+clause follows its input list, as every emitter's does; see [emitter instances](#emitter-instances).
 
 `ACK` waits for each broker receipt, for up to `ACK TIMEOUT` after that record's hand-over. The
 driver uses the same timeout, including values longer than thirty seconds. If a later enqueue
@@ -1700,6 +1792,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
 | Headers | `write_header`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
+| Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -1742,6 +1835,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `ROUTING KEY input.category` (expression); required |
 | Headers | `write_header`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
+| Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -1939,6 +2033,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
 | Headers | Not offered: Redis Pub/Sub carries a channel and a payload, and for a pattern subscription the pattern that matched, but no headers. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. An ingestor subscribes to a quoted channel or channel pattern and an emitter publishes to a quoted channel, each case-preserving. |
+| Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -2059,6 +2154,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 0)<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 1 or 2) |
 | Options in statement order | `QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |
 | Headers | `write_header`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| Instancing | single: publish through one client identifier |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -2195,6 +2291,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
 | Headers | `write_header`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -2270,6 +2367,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `SUBJECT 'orders.created'` (string literal checked by nats_publish_subject); required |
 | Headers | `write_header`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -2341,6 +2439,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
 | Headers | Not offered: The PULL listener receives payload frames and the PUSH socket sends them; neither has a broker acknowledgement or header map. |
+| Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -2421,6 +2520,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
 | Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
+| Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | A batch is written as one frame within the frame limits below; general BATCH limits still apply. |
@@ -2479,6 +2579,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `FIFO GROUP branch.tenant` (expression); optional; omitted when unset<br>`SEND SINGLE` (keyword choice); `SEND BATCH` (keyword choice); required |
 | Headers | `write_header`; `last_wins`, exact names; STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included; a value's exact type decides the type it travels as |
+| Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | 1MiB |
@@ -2608,6 +2709,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `PLATFORM 'python'` (string literal); optional; default other |
 | Headers | Not offered: An event is encoded inside its Sentry envelope; arbitrary per-event HTTP header writes are not supported. |
+| Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -2773,6 +2875,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `ATTRIBUTES {'tenant' = 'eu'}` (named expressions); optional; omitted when unset<br>`RESOURCE {'service.name' = 'nervix'}` (named expressions); optional; omitted when unset<br>`SCOPE 'nervix' VERSION '1.0'` (composed clause); optional; omitted when unset |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
+| Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -2819,6 +2922,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `ATTRIBUTES {'tenant' = 'eu'}` (named expressions); optional; omitted when unset<br>`RESOURCE {'service.name' = 'nervix'}` (named expressions); optional; omitted when unset<br>`SCOPE 'nervix' VERSION '1.0'` (composed clause); optional; omitted when unset |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
+| Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -2866,6 +2970,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `METRIC 'temperature' UNIT 'Cel' GAUGE` (composed clause); `METRIC 'requests' UNIT '1' SUM MONOTONIC DELTA` (composed clause); `METRIC 'latency' UNIT 'ms' HISTOGRAM CUMULATIVE` (composed clause); required<br>`ATTRIBUTES {'tenant' = 'eu'}` (named expressions); optional; omitted when unset<br>`RESOURCE {'service.name' = 'nervix'}` (named expressions); optional; omitted when unset<br>`SCOPE 'nervix' VERSION '1.0'` (composed clause); optional; omitted when unset |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
+| Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -3074,6 +3179,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
+| Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
 | BATCH | required |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -3322,6 +3428,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `ON CONFLICT DO NOTHING` (keyword choice); `ON CONFLICT ('id') DO UPDATE` (composed clause); optional; omitted when unset |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
+| Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
 | BATCH | required |
 | Protocol batch maximum | 1073741822B |
@@ -3495,6 +3602,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `ON CONFLICT DO NOTHING` (keyword choice); `ON CONFLICT DO UPDATE` (keyword choice); optional; omitted when unset |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
+| Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
 | BATCH | required |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -3699,6 +3807,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `ON CONFLICT ('id') DO NOTHING` (keyword choice); `ON CONFLICT ('id') DO UPDATE` (keyword choice); optional; omitted when unset |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
+| Instancing | INSTANCES &lt;count&gt; \| INSTANCES PER PARTITION |
 | Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
 | BATCH | required |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -3810,6 +3919,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `NAMESPACE 'Analytics.Events'` (string literal); required<br>`LOCATION 's3://warehouse/orders'` (string literal); required<br>`CATALOG catalog` (ICEBERG_REST client); required<br>`COMMIT EACH 10s MAX SIZE 64MiB` (composed clause); required |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
+| Instancing | single: commit through one table writer |
 | Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |

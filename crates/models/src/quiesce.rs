@@ -234,6 +234,7 @@ declare_model_change_aspects! {
     EmitterConstruction => EntityPause, None, false;
     EmitterErrorPolicies => EntityPause, None, false;
     EmitterMaterializedState => EntityPause, None, false;
+    EmitterInstances => EntityPause, None, false;
     IngestorSource => EntityPause, None, false;
     IngestorCodec => EntityPause, None, false;
     IngestorTimestamp => EntityPause, None, false;
@@ -1304,6 +1305,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     let CreateEmitter {
         name: base_name,
         from: base_from,
+        instances: base_instances,
         body: base_body,
         envelope: base_envelope,
         connector: base_emitter,
@@ -1317,6 +1319,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     let CreateEmitter {
         name: candidate_name,
         from: candidate_from,
+        instances: candidate_instances,
         body: candidate_body,
         envelope: candidate_envelope,
         connector: candidate_emitter,
@@ -1370,6 +1373,9 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     }
     if base_batch != candidate_batch {
         changes.push(ModelChangeAspect::EmitterBatchPolicy);
+    }
+    if base_instances != candidate_instances {
+        changes.push(ModelChangeAspect::EmitterInstances);
     }
     if base_flush_policy != candidate_flush_policy {
         changes.push_dynamic(
@@ -1492,6 +1498,7 @@ mod tests {
 
     fn emitter() -> CreateEmitter {
         CreateEmitter {
+            instances: crate::EmitterInstances::ONE,
             name: named("emit"),
             from: ProcessorInputs::single(named("events")),
             body: EmitterBody::Codec {
