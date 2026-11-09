@@ -200,10 +200,11 @@ mod tests {
                     arbitrary.name(),
                     ClusterNodeIncarnation::new(arbitrary.positive_u64().get()),
                 );
-                let kind = if arbitrary.entropy().flag() {
-                    ModelKind::Reorderer
-                } else {
-                    ModelKind::Correlator
+                let kind = match arbitrary.entropy().byte() % 4 {
+                    0 => ModelKind::Reorderer,
+                    1 => ModelKind::Correlator,
+                    2 => ModelKind::Deduplicator,
+                    _ => ModelKind::WindowProcessor,
                 };
                 let after = if arbitrary.entropy().flag() {
                     let position = arbitrary.entropy().flag().then_some(branch);
@@ -234,7 +235,16 @@ mod tests {
                 } else {
                     let sections = match kind {
                         ModelKind::Reorderer => vec![ProcessorStateSection::Pending],
-                        _ => vec![ProcessorStateSection::Left, ProcessorStateSection::Right],
+                        ModelKind::Correlator => {
+                            vec![ProcessorStateSection::Left, ProcessorStateSection::Right]
+                        }
+                        ModelKind::Deduplicator => vec![ProcessorStateSection::Keys],
+                        ModelKind::WindowProcessor => vec![
+                            ProcessorStateSection::Rows,
+                            ProcessorStateSection::Header,
+                            ProcessorStateSection::Accumulators,
+                        ],
+                        _ => unreachable!("the generated processor kind is one of the four above"),
                     };
                     let mut runs = Vec::new();
                     for _ in 0..arbitrary.entropy().byte() % 4 {

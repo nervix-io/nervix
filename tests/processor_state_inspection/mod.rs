@@ -1,4 +1,4 @@
-//! Public typed reorderer and correlator state reads across scenario nodes.
+//! Public typed stateful processor reads across scenario nodes.
 //!
 //! Layer: test harness, outside the product layer order.
 //! - **Owns.** Held-row, deadline, redaction, paging and count comparisons of processor state
@@ -22,13 +22,16 @@ use crate::{ScenarioWorld, docstring, expand_placeholders};
 
 /// Columns whose values are domain times decided when the processor received or will release a
 /// row, so a scenario compares them with dedicated steps instead of literal values.
-const TIME_COLUMNS: [&str; 3] = ["received_at", "release_at", "timeout_at"];
+const TIME_COLUMNS: [&str; 4] = ["received_at", "release_at", "timeout_at", "seen_at"];
 
 /// What a saved page remembers to resume the same read.
 #[derive(Debug, Default)]
 pub(crate) struct Observations {
     continuation: Option<String>,
 }
+
+#[path = "published.rs"]
+mod published;
 
 /// One displayed row: its branch key and fields as the shared Row presentation renders them.
 struct DisplayedRow {
@@ -40,6 +43,8 @@ fn statement_kind(kind: &str) -> &'static str {
     match kind {
         "reorderer" => "REORDERER",
         "correlator" => "CORRELATOR",
+        "deduplicator" => "DEDUPLICATOR",
+        "window" => "WINDOW PROCESSOR",
         other => panic!("the scenario names an inspected processor kind, got {other:?}"),
     }
 }
@@ -117,6 +122,9 @@ fn complete_rows(state: &StateInspection) -> Vec<String> {
     let mut rows = Vec::new();
     for unit in &page.units {
         for section in &unit.sections {
+            if metadata_section(state, &section.name) {
+                continue;
+            }
             for row in displayed_rows(section) {
                 rows.push(
                     serde_json::to_string(
@@ -128,6 +136,11 @@ fn complete_rows(state: &StateInspection) -> Vec<String> {
         }
     }
     rows
+}
+
+fn metadata_section(state: &StateInspection, section: &str) -> bool {
+    state.entity.node.kind == nervix_models::ModelKind::WindowProcessor
+        && matches!(section, "header" | "accumulators")
 }
 
 fn sorted(mut rows: Vec<String>) -> Vec<String> {
@@ -274,7 +287,16 @@ fn counts(world: &mut ScenarioWorld, rows: u64, branches: u64) {
     };
     assert_eq!(page.counts.rows, rows, "{state:?}");
     assert_eq!(page.counts.branches, branches, "{state:?}");
-    assert_eq!(page.counts.bytes == 0, rows == 0, "{state:?}");
+    if state.entity.node.kind == nervix_models::ModelKind::WindowProcessor {
+        if rows > 0 {
+            assert!(
+                page.counts.bytes > 0,
+                "retained windows have a live state charge"
+            );
+        }
+    } else {
+        assert_eq!(page.counts.bytes == 0, rows == 0, "{state:?}");
+    }
     let mut units = (0_u64, 0_u64, 0_u64);
     for unit in &page.units {
         units.0 += unit.counts.rows;
@@ -283,6 +305,9 @@ fn counts(world: &mut ScenarioWorld, rows: u64, branches: u64) {
         let mut returned = 0_u64;
         let mut omitted = 0_u64;
         for section in &unit.sections {
+            if metadata_section(state, &section.name) {
+                continue;
+            }
             omitted += section.omitted_rows;
             returned += section
                 .frames

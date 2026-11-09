@@ -467,6 +467,7 @@ fn processor_page_rows(
     };
     let count = descriptor.offset.checked_sub(start).ok_or_else(framing)?;
     if count > request.max_rows
+        || (request.max_rows == 0 && !descriptor.runs.is_empty())
         || descriptor.more != (descriptor.offset < descriptor.counts.rows)
         || descriptor.offset > descriptor.counts.rows
         || descriptor.sections.len() > MAX_PROCESSOR_SECTIONS
@@ -497,7 +498,9 @@ fn processor_page_rows(
         section_rows[index] = section_rows[index]
             .checked_add(run.rows)
             .ok_or_else(framing)?;
-        returned = returned.checked_add(run.rows).ok_or_else(framing)?;
+        if !run.section.is_metadata() {
+            returned = returned.checked_add(run.rows).ok_or_else(framing)?;
+        }
     }
     if returned != count {
         return Err(framing());
