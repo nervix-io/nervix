@@ -35,7 +35,7 @@ pub(super) fn ChoiceGroup(
     #[prop(optional)]
     show_detail: bool,
 ) -> impl IntoView {
-    let ChoiceControlSignals { search, load } = signals.choices.of(control);
+    let ChoiceControlSignals { search, load } = signals.choice_signals(control);
     view! {
         <fieldset class=format!("create-choice-group {class_name}")>
             <legend>{label}</legend>

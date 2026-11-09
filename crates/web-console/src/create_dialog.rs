@@ -546,7 +546,7 @@ impl ChoiceControls {
         }
     }
 
-    fn of(self, control: ChoiceControl) -> ChoiceControlSignals {
+    fn of(&self, control: ChoiceControl) -> ChoiceControlSignals {
         match control {
             ChoiceControl::DomainPace => self.domain_pace,
             ChoiceControl::PlacementPolicy => self.placement_policy,
@@ -1059,10 +1059,19 @@ pub(crate) struct CreateSignals {
     /// The number the next generated subscription name carries. Numbers only increase, so no two
     /// generated names of one console coincide.
     next_subscription_name: RwSignal<u64>,
-    choices: ChoiceControls,
+    /// Every structured control's signals, behind one stored handle. The dialog's views copy
+    /// `CreateSignals` into each closure they keep, so holding the controls by value would copy
+    /// every control's signals into each such closure and into each unoptimized render frame
+    /// that moves one.
+    choices: StoredValue<ChoiceControls>,
 }
 
 impl CreateSignals {
+    /// The search text and the loaded choices of one structured control.
+    fn choice_signals(self, control: ChoiceControl) -> ChoiceControlSignals {
+        self.choices.with_value(|choices| choices.of(control))
+    }
+
     fn processor(self, family: ProcessorFamily) -> RwSignal<ProcessorDraft> {
         match family {
             ProcessorFamily::Junction => self.junction,
@@ -1126,7 +1135,7 @@ impl CreateSignals {
             reorderer: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Reorderer)),
             reingestor: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Reingestor)),
             next_subscription_name: RwSignal::new(2),
-            choices: ChoiceControls::new(),
+            choices: StoredValue::new(ChoiceControls::new()),
         }
     }
 
@@ -1337,7 +1346,7 @@ impl CreateSignals {
         {
             return;
         }
-        let target = self.choices.of(context.control).load;
+        let target = self.choice_signals(context.control).load;
         match outcome.status {
             ChoiceStatus::Ready if outcome.choices.is_empty() && !context.append => {
                 target.set(ChoiceLoad::Empty);
@@ -1383,8 +1392,7 @@ impl CreateSignals {
         if self.revision.get_untracked() == context.draft_revision
             && current_generation == context.session_generation
         {
-            self.choices
-                .of(context.control)
+            self.choice_signals(context.control)
                 .load
                 .set(ChoiceLoad::Failed(reason));
         }
@@ -2051,7 +2059,7 @@ fn request_choices(
     generation: u64,
     append: bool,
 ) {
-    let control_signals = signals.choices.of(control);
+    let control_signals = signals.choice_signals(control);
     let query = match signals.choice_query(control) {
         Ok(query) => query,
         Err(reason) => {
@@ -2305,7 +2313,10 @@ pub(crate) fn CreateDialog(
             if connected {
                 request_choices(signals, control, request_tx, generation, false);
             } else {
-                signals.choices.of(control).load.set(ChoiceLoad::Waiting);
+                signals
+                    .choice_signals(control)
+                    .load
+                    .set(ChoiceLoad::Waiting);
             }
         }
     });
