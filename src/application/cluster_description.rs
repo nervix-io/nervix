@@ -355,6 +355,7 @@ mod tests {
         let stale = claim("node-3", 2, 1, 1);
         let departed = claim("node-4", 4, 1, 1);
         let description = ClusterDescription {
+            identity: None,
             leader: None,
             leader_record: None,
             nodes: BTreeMap::from([
