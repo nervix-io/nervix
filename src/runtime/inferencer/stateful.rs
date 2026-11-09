@@ -94,8 +94,87 @@ pub(in crate::runtime) enum StatefulInferenceError {
 }
 
 /// Immutable initial generation shared by newly created branches; successors belong to one branch.
-struct NativeGeneration {
+pub(in crate::runtime) struct NativeGeneration {
     tensors: Vec<DynValue>,
+}
+
+impl std::fmt::Debug for NativeGeneration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeGeneration")
+            .field("tensors", &self.tensors.len())
+            .finish_non_exhaustive()
+    }
+}
+impl NativeGeneration {
+    pub(in crate::runtime) fn snapshot(
+        &self,
+        cancellation: &Cancellation,
+    ) -> error_stack::Result<
+        Vec<crate::inferencer_state_snapshot::TensorSnapshot<'_>>,
+        StatefulInferenceError,
+    > {
+        self.tensors
+            .iter()
+            .map(|tensor| {
+                cancellation
+                    .check()
+                    .change_context(StatefulInferenceError::Cancelled)?;
+                let (shape, values) = tensor
+                    .try_extract_tensor::<f32>()
+                    .change_context(StatefulInferenceError::Initial)?;
+                let shape = shape
+                    .iter()
+                    .map(|axis| {
+                        u64::try_from(*axis).change_context(StatefulInferenceError::Initial)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(crate::inferencer_state_snapshot::TensorSnapshot {
+                    shape,
+                    values: std::borrow::Cow::Borrowed(values),
+                })
+            })
+            .collect()
+    }
+    pub(in crate::runtime) fn restore(
+        tensors: Vec<crate::inferencer_state_snapshot::TensorSnapshot<'static>>,
+        plan: &InferencerStatePlan,
+        cancellation: &Cancellation,
+    ) -> error_stack::Result<Self, StatefulInferenceError> {
+        if tensors.len() != plan.bindings.len() {
+            return Err(Report::new(StatefulInferenceError::Initial));
+        }
+        let tensors = tensors
+            .into_iter()
+            .zip(&plan.bindings)
+            .map(|(tensor, binding)| {
+                cancellation
+                    .check()
+                    .change_context(StatefulInferenceError::Cancelled)?;
+                let expected: Vec<u64> = binding
+                    .schema
+                    .dimensions
+                    .iter()
+                    .filter_map(|axis| match axis {
+                        InferencerTensorDimension::Fixed(size) => Some(u64::from(size.get())),
+                        _ => None,
+                    })
+                    .collect();
+                if tensor.shape != expected || tensor.values.len() != binding.elements {
+                    return Err(Report::new(StatefulInferenceError::Initial));
+                }
+                let shape = tensor
+                    .shape
+                    .into_iter()
+                    .map(usize::try_from)
+                    .collect::<Result<Vec<_>, _>>()
+                    .change_context(StatefulInferenceError::Initial)?;
+                Tensor::<f32>::from_array((shape, tensor.values.into_owned()))
+                    .map(Tensor::into_dyn)
+                    .change_context(StatefulInferenceError::Initial)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { tensors })
+    }
 }
 
 #[derive(Clone)]
@@ -130,9 +209,12 @@ impl PreparedStatefulInference {
         udfs: Option<&UdfExecutor>,
     ) -> error_stack::Result<Self, StatefulInferenceError> {
         let limit = executor.limits().snapshot_section_bytes.as_u64();
-        if state.bytes_per_branch > limit {
+        let snapshot_bytes = state
+            .snapshot_bytes()
+            .change_context(StatefulInferenceError::Initial)?;
+        if snapshot_bytes > limit {
             return Err(Report::new(StatefulInferenceError::StateSize {
-                bytes: state.bytes_per_branch,
+                bytes: snapshot_bytes,
                 limit,
             }));
         }
@@ -225,6 +307,15 @@ impl PreparedStatefulInference {
             session: None,
             generation: self.initial.clone(),
         }
+    }
+}
+
+impl StatefulInferenceSession {
+    pub(in crate::runtime) fn generation(&self) -> Arc<NativeGeneration> {
+        self.generation.clone()
+    }
+    pub(in crate::runtime) fn restore_generation(&mut self, generation: Arc<NativeGeneration>) {
+        self.generation = generation;
     }
 }
 

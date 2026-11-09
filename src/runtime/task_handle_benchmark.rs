@@ -138,6 +138,7 @@ impl TaskHandleBenchmark {
             DomainNodeRef::node_in(domain.clone(), ModelKind::WasmProcessor, wasm_node.clone()),
             ScheduledStateAssignment {
                 identity: ScheduledStateIdentity {
+                    inferencer_model: None,
                     schema_fingerprint: schema,
                     wasm_state_generations: Some(nervix_models::WasmStateGenerations::first()),
                 },

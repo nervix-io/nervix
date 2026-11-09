@@ -118,6 +118,7 @@ fn bolero_stored_wasm_checkpoints_preserve_bytes_and_typed_placement() {
             let initial = generations.of_branch(None);
             let selected = generations.begin_branch(alpha);
             let identity = ScheduledStateIdentity {
+                inferencer_model: None,
                 schema_fingerprint: schema,
                 wasm_state_generations: Some(generations),
             };
@@ -144,6 +145,7 @@ fn bolero_stored_wasm_checkpoints_preserve_bytes_and_typed_placement() {
                 Some(&alpha)
             ));
             let absent = ScheduledStateIdentity {
+                inferencer_model: None,
                 schema_fingerprint: schema,
                 wasm_state_generations: None,
             };

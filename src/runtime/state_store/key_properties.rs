@@ -18,7 +18,7 @@ use nervix_arbitrary::{Arbitrary, Domain};
 use super::{
     generation::{
         CheckpointChunkSet, StateNamespace, chunk_prefix, domain_prefix, index_key,
-        physical_namespace,
+        indexed_revision, physical_namespace,
     },
     *,
 };
@@ -27,7 +27,7 @@ use super::{
 /// names.
 fn runtime_state(arbitrary: &mut Arbitrary<'_>) -> RuntimeState {
     let schema = arbitrary.schema_fingerprint();
-    match arbitrary.entropy().byte() % 8 {
+    match arbitrary.entropy().byte() % 9 {
         0 => RuntimeState::BranchAggregated,
         1 => RuntimeState::Correlator { schema },
         2 => RuntimeState::Deduplicator { schema },
@@ -39,6 +39,12 @@ fn runtime_state(arbitrary: &mut Arbitrary<'_>) -> RuntimeState {
             RuntimeState::WasmProcessor { schema, generation }
         }
         6 => RuntimeState::WindowProcessor { schema },
+        7 => RuntimeState::Inferencer {
+            schema,
+            model: InferencerModelFingerprint::from_digest(std::array::from_fn(|_| {
+                arbitrary.entropy().byte()
+            })),
+        },
         _ => RuntimeState::BranchLru { schema },
     }
 }
@@ -144,6 +150,15 @@ fn bolero_runtime_state_keys_decode_their_placement_and_stay_apart() {
             expected_index.push(0);
             expected_index.extend_from_slice(&lsm.to_be_bytes());
             assert_eq!(index, expected_index);
+            assert_eq!(
+                indexed_revision(&key, &index).expect("the current index decodes"),
+                lsm
+            );
+            let mut damaged_index = index.clone();
+            damage_repeatedly(&mut arbitrary, &mut damaged_index);
+            if let Ok(decoded) = indexed_revision(&key, &damaged_index) {
+                assert_eq!(index_key(&key, decoded), damaged_index);
+            }
             let mut expected_chunks = index.clone();
             expected_chunks.push(0);
             assert_eq!(chunk_prefix(&key, lsm), expected_chunks);
