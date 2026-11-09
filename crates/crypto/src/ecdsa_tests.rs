@@ -1,8 +1,12 @@
-//! P-256 known answers, secret ownership and bounded sign/verify properties.
+//! P-256 known answers, cross-build signatures, secret ownership and bounded sign/verify
+//! properties.
 
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 
-use crate::ecdsa::{EcdsaP256KeyPair, EcdsaP256Signature, verify};
+use crate::{
+    ecdsa::{EcdsaP256KeyPair, EcdsaP256Signature, verify},
+    provider::{ModuleMode, module_mode},
+};
 
 #[test]
 fn nist_cavp_p256_sha256_verification_vectors() {
@@ -38,7 +42,8 @@ fn nist_cavp_p256_sha256_verification_vectors() {
 
 fn hex(value: &str) -> Vec<u8> {
     let mut bytes = vec![0; value.len() / 2];
-    faster_hex::hex_decode(value.as_bytes(), &mut bytes).assured("CAVP fixture is hexadecimal");
+    faster_hex::hex_decode(value.as_bytes(), &mut bytes)
+        .assured("committed CAVP and signature fixtures are hexadecimal");
     bytes
 }
 
@@ -61,21 +66,83 @@ fn generated_key_round_trips_through_pkcs8_and_exposes_coordinates() {
     assert_sign_verify(&restored, b"");
 }
 
+/// The message the cross-build signatures sign (licensing specification §17.6).
+const PORTABLE_MESSAGE: &[u8] = b"Nervix P-256 cross-build signature fixture";
+
+/// Public test-only private key. Never use it outside these interoperability fixtures.
+fn portable_key() -> EcdsaP256KeyPair {
+    EcdsaP256KeyPair::from_pkcs8(include_bytes!("test_data/p256_test_key.pk8"))
+        .assured("the committed test key imports")
+}
+
+/// The committed signature of [`PORTABLE_MESSAGE`] that `module`'s build produced. AWS-LC's ECDSA
+/// signatures are randomized, so each build's signature is produced once and saved;
+/// `just signature-vectors <build>` rewrites it through [`write_the_portable_signature`].
+fn saved_signature(module: ModuleMode) -> Vec<u8> {
+    let text = match module {
+        ModuleMode::Ordinary => include_str!("test_data/p256_signature_ordinary.hex"),
+        ModuleMode::Fips => include_str!("test_data/p256_signature_fips.hex"),
+    };
+    hex(text.trim_end())
+}
+
+fn saved_signature_path(module: ModuleMode) -> &'static str {
+    match module {
+        ModuleMode::Ordinary => concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/test_data/p256_signature_ordinary.hex"
+        ),
+        ModuleMode::Fips => concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/test_data/p256_signature_fips.hex"
+        ),
+    }
+}
+
+/// Each build verifies the signature the other build produced as well as its own: Nervix CI runs
+/// this on the ordinary module, and the licensing service's FIPS lane on the FIPS module.
 #[test]
-fn portable_signature_fixture() {
-    // Public test-only private key. Never use it outside these interoperability fixtures.
-    let key = EcdsaP256KeyPair::from_pkcs8(include_bytes!("test_data/p256_test_key.pk8"))
-        .assured("the committed test key imports");
-    let message = b"Nervix P-256 cross-build signature fixture";
-    let signature = key.sign(message).assured("AWS-LC signs the fixture");
-    verify(key.public_key(), message, signature.as_bytes()).assured("the fixture verifies");
-    // Produced by this boundary's ordinary AWS-LC build. The service's FIPS lane runs this same
-    // fixture and the independent NIST verification cases without regenerating expected bytes.
-    let ordinary_signature = hex(concat!(
-        "2b345239480dac1be410572623aeb70bed47053504828bb19b00937dfe8316d6a",
-        "878455df3fc146f5ee785c7bb0dcec316927edb4720299f6144a831185ada3d"
-    ));
-    verify(key.public_key(), message, &ordinary_signature).assured("the saved signature verifies");
+fn saved_signatures_of_both_builds_verify_on_this_build() {
+    let key = portable_key();
+    assert_sign_verify(&key, PORTABLE_MESSAGE);
+    let ordinary = saved_signature(ModuleMode::Ordinary);
+    let fips = saved_signature(ModuleMode::Fips);
+    assert_ne!(
+        ordinary, fips,
+        "randomized signatures differ when each build signs on its own"
+    );
+    for saved in [ordinary, fips] {
+        verify(key.public_key(), PORTABLE_MESSAGE, &saved)
+            .assured("a saved signature verifies on either module");
+        let mut changed = saved.clone();
+        let last = changed
+            .last_mut()
+            .assured("a saved signature holds its 64 bytes");
+        *last ^= 1;
+        assert!(verify(key.public_key(), PORTABLE_MESSAGE, &changed).is_err());
+        let mut changed_message = PORTABLE_MESSAGE.to_vec();
+        let first = changed_message
+            .first_mut()
+            .assured("the fixture message is not empty");
+        *first ^= 1;
+        assert!(verify(key.public_key(), &changed_message, &saved).is_err());
+    }
+}
+
+/// Rewrites the linked module's saved signature. `just signature-vectors <build>` runs it.
+#[test]
+#[ignore = "writes src/test_data/p256_signature_<build>.hex for the linked AWS-LC module"]
+fn write_the_portable_signature() {
+    let key = portable_key();
+    let signature = key
+        .sign(PORTABLE_MESSAGE)
+        .assured("AWS-LC signs the fixture message");
+    verify(key.public_key(), PORTABLE_MESSAGE, signature.as_bytes())
+        .assured("a signature verifies on the module that made it");
+    let mut text = faster_hex::hex_string(signature.as_bytes());
+    text.push('\n');
+    std::fs::write(saved_signature_path(module_mode()), text)
+        .assured("the test data directory is writable in a checkout");
 }
 
 #[test]

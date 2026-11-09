@@ -181,6 +181,36 @@ public final class ClusterTests {
         }
     }
 
+    // Runs after every other test of the class: no statement removes a resource, and the backup test
+    // archives this domain expecting it to hold no resource version.
+    @Test @Order(Order.DEFAULT + 1)
+    void anUploadCompletesAgainUnderItsIdentityAndRefusesAnotherArchive() throws Exception {
+        String resource = cluster.unique("bundle");
+        completed(session, "CREATE RESOURCE " + resource + ";");
+        var directory = Files.createDirectory(cluster.backups.resolve(resource));
+        var payload = directory.resolve("payload.txt");
+        Files.writeString(payload, "first archive\n", StandardCharsets.UTF_8);
+        // ANCHOR: upload
+        try (var execution = session.prepare("UPLOAD RESOURCE " + resource + " VERSION '" + directory + "';", null)) {
+            try (var cancel = deadline(); var uploaded = session.execute(execution, cancel)) {
+                assertEquals(Nervix.Disposition.COMPLETED, uploaded.disposition(), uploaded.message());
+                assertNull(uploaded.uploadFailure());
+            }
+            // The same execution sends the same archive under the same upload identity, so it completes
+            // again instead of installing a second version.
+            try (var cancel = deadline(); var again = session.execute(execution, cancel)) {
+                assertEquals(Nervix.Disposition.COMPLETED, again.disposition(), again.message());
+                assertNull(again.uploadFailure());
+            }
+            Files.writeString(payload, "different archive\n", StandardCharsets.UTF_8);
+            try (var cancel = deadline(); var refused = session.execute(execution, cancel)) {
+                assertEquals(Nervix.Disposition.FAILED, refused.disposition());
+                assertEquals(Nervix.UploadFailure.IDENTITY_CONFLICT, refused.uploadFailure());
+            }
+        }
+        // ANCHOR_END: upload
+    }
+
     @Test
     void completesStatementsAndContinuesEveryPage() {
         String text = "CREATE SCH";
