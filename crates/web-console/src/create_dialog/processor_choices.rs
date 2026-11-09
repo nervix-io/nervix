@@ -124,7 +124,7 @@ impl CreateSignals {
         let draft = signal.get_untracked();
         match control {
             ChoiceControl::ProcessorInputRelay => {
-                if draft.active_input > 0 {
+                if draft.from.active > 0 {
                     let Some(input) = draft.current_first_input() else {
                         return Err("Choose the first input relay before another input");
                     };

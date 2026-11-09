@@ -28,9 +28,9 @@ use super::{
         InvocationDraft, MessageErrorDraft, RouteBranchDraft,
     },
     processor_draft::{
-        InputDraft, NodeBranchDraft, ProcessorDraft, ProcessorFamily, StateDependencyDraft,
-        StatePolicyDraft,
+        NodeBranchDraft, ProcessorDraft, ProcessorFamily, StateDependencyDraft, StatePolicyDraft,
     },
+    processor_input_draft::{InputDraft, InputListDraft},
 };
 
 fn expression(value: &Expression) -> String {
@@ -72,6 +72,15 @@ fn inputs(value: &ProcessorInputs) -> Vec<InputDraft> {
         });
     }
     drafts
+}
+
+/// The input list a draft shows for `value`, its collection included.
+fn input_list(value: &ProcessorInputs) -> InputListDraft {
+    InputListDraft {
+        relays: inputs(value),
+        active: 0,
+        collect: value.collect_policy.clone(),
+    }
 }
 
 fn branching(value: Option<&BranchSelection>) -> NodeBranchDraft {
@@ -210,8 +219,7 @@ fn shared_draft(family: ProcessorFamily, parts: SharedParts<'_>) -> ProcessorDra
     let mut draft = ProcessorDraft::new(family);
     draft.name = parts.name;
     draft.mode = parts.mode;
-    draft.inputs = inputs(parts.from);
-    draft.collect = parts.from.collect_policy.clone();
+    draft.from = input_list(parts.from);
     draft.filter = optional_expression(parts.filter_where);
     draft.branching = branching(parts.branched_by);
     draft.state = state(parts.materialized_state);

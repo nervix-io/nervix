@@ -3,9 +3,11 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** Ordered browser drafts for processor inputs, key expressions, state dependencies,
-//!   routes, and branch-boundary choices, and their conversion to current semantic Models.
-//! - **Depends on.** Typed vocabulary, expression parsing, and shared route drafts.
+//! - **Owns.** Browser drafts for processor key expressions, node branches, state dependencies,
+//!   routes, and branch-boundary choices, composed with their ordered input list, and their
+//!   conversion to current semantic Models.
+//! - **Depends on.** Typed vocabulary, expression parsing, and the shared input list and route
+//!   drafts.
 //! - **Must not know.** Registry state, runtime execution, or session transport.
 
 #![cfg_attr(
@@ -18,10 +20,9 @@ use std::collections::BTreeSet;
 use error_stack::{Report, ResultExt as _};
 use nervix_models::{
     AckMode, BranchName, BranchSelection, CreateDeduplicator, CreateJunction, CreateReingestor,
-    CreateReorderer, DeduplicatorName, Expression, InputCollectPolicy, JunctionName,
-    MaterializedStateDependency, MaterializedStatePolicy, Model, ModelKind, NodeRef,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, ReingestorName, RelayName,
-    ReordererName,
+    CreateReorderer, DeduplicatorName, Expression, JunctionName, MaterializedStateDependency,
+    MaterializedStatePolicy, Model, ModelKind, NodeRef, ProcessorInputs, ProcessorOutputs,
+    ReingestorName, RelayName, ReordererName,
 };
 use nervix_plexus::parse_expression;
 use strum::Display;
@@ -30,6 +31,7 @@ use thiserror::Error;
 use super::{
     SelectedReference,
     ingestor_route_draft::{AssignmentDraft, IngestRouteDraft, IngestRouteDraftError},
+    processor_input_draft::InputListDraft,
 };
 
 /// The processor kinds the shared visual processor form creates.
@@ -208,32 +210,6 @@ impl ProcessorStage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(super) struct InputDraft {
-    pub(super) relay: Option<SelectedReference<RelayName>>,
-    pub(super) where_clause: String,
-}
-
-impl InputDraft {
-    pub(super) fn select_relay(&mut self, node: &NodeRef) {
-        if node.kind == ModelKind::Relay {
-            self.relay = Some(SelectedReference::chosen(RelayName::from(&node.identifier)));
-        }
-    }
-
-    pub(super) fn current_relay(&self) -> Option<&RelayName> {
-        self.relay
-            .as_ref()
-            .and_then(SelectedReference::current_name)
-    }
-
-    pub(super) fn invalidate(&mut self) {
-        if let Some(relay) = &mut self.relay {
-            relay.invalidate();
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(super) enum NodeBranchDraft {
     #[default]
     Unselected,
@@ -389,9 +365,7 @@ pub(super) struct ProcessorDraft {
     pub(super) name: String,
     pub(super) if_not_exists: bool,
     pub(super) mode: AckMode,
-    pub(super) inputs: Vec<InputDraft>,
-    pub(super) active_input: usize,
-    pub(super) collect: Option<InputCollectPolicy>,
+    pub(super) from: InputListDraft,
     pub(super) filter: String,
     pub(super) branching: NodeBranchDraft,
     pub(super) state: Vec<StateDependencyDraft>,
@@ -407,9 +381,7 @@ impl ProcessorDraft {
             name: String::new(),
             if_not_exists: false,
             mode: AckMode::Attached,
-            inputs: vec![InputDraft::default()],
-            active_input: 0,
-            collect: None,
+            from: InputListDraft::default(),
             filter: String::new(),
             branching: NodeBranchDraft::Unselected,
             state: Vec::new(),
@@ -439,31 +411,14 @@ impl ProcessorDraft {
         }
     }
 
-    pub(super) fn active_input(&self) -> Option<&InputDraft> {
-        self.inputs.get(self.active_input)
-    }
-
-    pub(super) fn active_input_mut(&mut self) -> Option<&mut InputDraft> {
-        self.inputs.get_mut(self.active_input)
-    }
-
     pub(super) fn current_first_input(&self) -> Option<&RelayName> {
-        self.inputs.first().and_then(InputDraft::current_relay)
+        self.from.current_first()
     }
 
+    /// Selects `node` for the active input. The state and routes are offered by the first input's
+    /// branch, so a changed first input requires them again.
     pub(super) fn select_input(&mut self, node: &NodeRef) {
-        if node.kind != ModelKind::Relay {
-            return;
-        }
-        let previous = self.current_first_input().cloned();
-        let active = self.active_input;
-        if let Some(input) = self.active_input_mut() {
-            input.select_relay(node);
-        }
-        if active == 0 && self.current_first_input() != previous.as_ref() {
-            for input in self.inputs.iter_mut().skip(1) {
-                input.invalidate();
-            }
+        if self.from.select(node) {
             for state in &mut self.state {
                 state.invalidate();
             }
@@ -496,9 +451,7 @@ impl ProcessorDraft {
     }
 
     fn invalidate_relays(&mut self) {
-        for input in &mut self.inputs {
-            input.invalidate();
-        }
+        self.from.invalidate();
         for state in &mut self.state {
             state.invalidate();
         }
@@ -526,32 +479,6 @@ impl ProcessorDraft {
 
     pub(super) fn active_route_mut(&mut self) -> Option<&mut IngestRouteDraft> {
         self.routes.get_mut(self.active_route)
-    }
-
-    pub(super) fn add_input(&mut self) {
-        self.inputs.push(InputDraft::default());
-        self.active_input = self.inputs.len() - 1;
-    }
-
-    pub(super) fn remove_input(&mut self) {
-        if self.inputs.len() > 1 {
-            self.inputs.remove(self.active_input);
-            self.active_input = self.active_input.min(self.inputs.len() - 1);
-        }
-    }
-
-    pub(super) fn move_input(&mut self, up: bool) {
-        let other = if up {
-            self.active_input.checked_sub(1)
-        } else if self.active_input + 1 < self.inputs.len() {
-            Some(self.active_input + 1)
-        } else {
-            None
-        };
-        if let Some(other) = other {
-            self.inputs.swap(self.active_input, other);
-            self.active_input = other;
-        }
     }
 
     pub(super) fn add_state(&mut self) {
@@ -703,47 +630,7 @@ impl ProcessorDraft {
 
     /// The ordered inputs with their predicates and collection, and the node filter.
     fn build_input(&self) -> error_stack::Result<ProcessorInputParts, ProcessorDraftError> {
-        if self.inputs.is_empty() {
-            return Err(Report::new(ProcessorDraftError::Inputs));
-        }
-        let mut from = Vec::new();
-        let mut input_where = Vec::new();
-        let mut seen_inputs = BTreeSet::new();
-        for (index, input) in self.inputs.iter().enumerate() {
-            let number = index + 1;
-            let relay = match &input.relay {
-                Some(relay) => relay.current_name().ok_or_else(|| {
-                    Report::new(ProcessorDraftError::InputChanged { index: number })
-                })?,
-                None => return Err(Report::new(ProcessorDraftError::Input { index: number })),
-            };
-            if !seen_inputs.insert(relay.clone()) {
-                return Err(Report::new(ProcessorDraftError::DuplicateInput {
-                    relay: relay.clone(),
-                }));
-            }
-            from.push(relay.clone());
-            if !input.where_clause.trim().is_empty() {
-                input_where.push(ProcessorInputWhere {
-                    relay: relay.clone(),
-                    where_clause: parse_expression(input.where_clause.trim())
-                        .change_context(ProcessorDraftError::InputWhere { index: number })?,
-                });
-            }
-        }
-        let mut inputs = ProcessorInputs::new(from, input_where);
-        if let Some(collect) = &self.collect {
-            if collect.collect_for.trim().is_empty() {
-                return Err(Report::new(ProcessorDraftError::CollectFor));
-            }
-            inputs.collect_policy = Some(InputCollectPolicy {
-                collect_for: collect.collect_for.trim().to_string(),
-                max_batch_size: match collect.max_batch_size.as_deref() {
-                    Some(size) if !size.trim().is_empty() => Some(size.trim().to_string()),
-                    _ => None,
-                },
-            });
-        }
+        let inputs = self.from.build()?;
         let filter = if self.filter.trim().is_empty() {
             None
         } else {
@@ -879,8 +766,8 @@ mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
         BinaryOperator, BranchName, CreateStatement, Expression, FieldName, FieldReference,
-        FieldScope, Literal, MaterializedStatePolicy, Model, ModelName, OutputBranch,
-        RequestedResourceVersion, Statement,
+        FieldScope, InputCollectPolicy, Literal, MaterializedStatePolicy, Model, ModelName,
+        OutputBranch, RequestedResourceVersion, Statement,
     };
     use nervix_plexus::statement::parse_statement;
 
@@ -939,7 +826,7 @@ mod tests {
                     }
                     draft.mode = mode;
                     let collection = if collect {
-                        draft.collect = Some(InputCollectPolicy {
+                        draft.from.collect = Some(InputCollectPolicy {
                             collect_for: "25ms".into(),
                             max_batch_size: Some("1MiB".into()),
                         });
@@ -964,11 +851,11 @@ mod tests {
     #[test]
     fn junction_keeps_input_predicate_state_route_and_assignment_order() {
         let mut draft = complete(ProcessorFamily::Junction);
-        draft.inputs[0].where_clause = "input.message != ''".into();
-        draft.add_input();
+        draft.from.relays[0].where_clause = "input.message != ''".into();
+        draft.from.add();
         draft.select_input(&node(ModelKind::Relay, "incoming_b"));
-        draft.inputs[1].where_clause = "input.message != 'x'".into();
-        draft.collect = Some(InputCollectPolicy {
+        draft.from.relays[1].where_clause = "input.message != 'x'".into();
+        draft.from.collect = Some(InputCollectPolicy {
             collect_for: "25ms".into(),
             max_batch_size: Some("1MiB".into()),
         });
@@ -1027,9 +914,9 @@ mod tests {
     #[test]
     fn processor_draft_round_trip_keeps_all_ordered_sections() {
         let mut draft = complete(ProcessorFamily::Junction);
-        draft.add_input();
+        draft.from.add();
         draft.select_input(&node(ModelKind::Relay, "alternate"));
-        draft.move_input(true);
+        draft.from.move_active(true);
 
         draft.add_state();
         let first = draft.active_state_mut().assured("state exists");
@@ -1103,7 +990,7 @@ mod tests {
     #[test]
     fn input_predicates_and_filters_read_a_backslash_in_a_string_literal_verbatim() {
         let mut draft = complete(ProcessorFamily::Junction);
-        draft.inputs[0].where_clause = r"input.message = 'a\nb'".into();
+        draft.from.relays[0].where_clause = r"input.message = 'a\nb'".into();
         draft.filter = r#"input.message != "c\'d""#.into();
         let built = draft.build_junction().assured("complete junction builds");
         let message = Expression::Field(FieldReference::scoped(
@@ -1158,7 +1045,7 @@ mod tests {
     #[test]
     fn stale_and_duplicate_references_stay_invalid() {
         let mut draft = complete(ProcessorFamily::Reingestor);
-        draft.add_input();
+        draft.from.add();
         draft.select_input(&node(ModelKind::Relay, "incoming"));
         assert!(matches!(
             draft.build_reingestor().unwrap_err().current_context(),
@@ -1175,16 +1062,16 @@ mod tests {
     #[test]
     fn changing_the_first_input_invalidates_dependent_references() {
         let mut draft = complete(ProcessorFamily::Reingestor);
-        draft.add_input();
+        draft.from.add();
         draft.select_input(&node(ModelKind::Relay, "second"));
         draft.add_state();
         let state = draft.active_state_mut().assured("state exists");
         state.select_relay(&node(ModelKind::Relay, "profile"));
         state.policy = StatePolicyDraft::RequiredSkip;
 
-        draft.active_input = 0;
+        draft.from.active = 0;
         draft.select_input(&node(ModelKind::Relay, "replacement"));
-        assert!(draft.inputs[1].current_relay().is_none());
+        assert!(draft.from.relays[1].current_relay().is_none());
         assert!(draft.state[0].current_relay().is_none());
         assert!(draft.routes[0].current_relay().is_none());
         assert!(matches!(
@@ -1261,9 +1148,9 @@ mod tests {
     #[test]
     fn reordering_later_inputs_and_reselecting_state_keeps_independent_choices() {
         let mut draft = complete(ProcessorFamily::Reingestor);
-        draft.add_input();
+        draft.from.add();
         draft.select_input(&node(ModelKind::Relay, "second"));
-        draft.add_input();
+        draft.from.add();
         draft.select_input(&node(ModelKind::Relay, "third"));
         draft.add_state();
         let state = draft.active_state_mut().assured("state exists");
@@ -1272,7 +1159,7 @@ mod tests {
             FieldName::parse("message").assured("valid field"),
         )]);
 
-        draft.move_input(true);
+        draft.from.move_active(true);
         assert_eq!(
             draft
                 .current_first_input()
@@ -1282,7 +1169,8 @@ mod tests {
         );
         assert_eq!(
             draft
-                .inputs
+                .from
+                .relays
                 .iter()
                 .map(|input| input.current_relay().assured("input exists").as_str())
                 .collect::<Vec<_>>(),
@@ -1308,8 +1196,8 @@ mod tests {
                 .assured("field exists")
                 .is_current()
         );
-        draft.active_input = 0;
-        draft.move_input(false);
+        draft.from.active = 0;
+        draft.from.move_active(false);
         assert_eq!(
             draft
                 .current_first_input()

@@ -290,7 +290,7 @@ pub(super) fn selected_choice(
         }
         (ChoiceControl::ProcessorInputRelay, ChoiceValue::Model(node)) => {
             signals.active_processor().is_some_and(|signal| {
-                signal.get().active_input().is_some_and(|input| {
+                signal.get().from.active().is_some_and(|input| {
                     input
                         .relay
                         .as_ref()

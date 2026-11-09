@@ -73,6 +73,7 @@ mod processor_choices;
 mod processor_draft;
 mod processor_editor;
 mod processor_inheritance_editor;
+mod processor_input_draft;
 mod processor_input_editor;
 mod processor_invocation_editor;
 mod processor_key_editor;
