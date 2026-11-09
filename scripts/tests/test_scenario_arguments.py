@@ -20,6 +20,71 @@ COVERAGE_RECIPES = ("coverage-scenarios", "coverage-scenarios-append")
 
 
 class ScenarioArgumentTests(unittest.TestCase):
+    def test_packaging_failure_prevents_python_clusters_in_coverage_recipes(self) -> None:
+        just = shutil.which("just")
+        with tempfile.TemporaryDirectory(prefix="coverage packaging gate ") as directory:
+            root = Path(directory)
+            capture = root / "calls.jsonl"
+            target = root / "build target"
+            (target / "debug").mkdir(parents=True)
+            (target / "llvm-cov-target/debug").mkdir(parents=True)
+            (target / "debug/nervix-plexus-format").write_bytes(b"fixture formatter\n")
+            for tool in ("just", "cargo"):
+                recorder = root / tool
+                recorder.write_text(
+                    f"#!{sys.executable}\n"
+                    "import json, os, pathlib, sys\n"
+                    "with open(os.environ['SCENARIO_ARGUMENT_CAPTURE'], 'a') as output:\n"
+                    "    output.write(json.dumps([pathlib.Path(sys.argv[0]).name, *sys.argv[1:]]) + '\\n')\n"
+                    "sys.exit(39 if 'test-client-python-api-run' in sys.argv else 0)\n"
+                )
+                recorder.chmod(0o755)
+            environment = {**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                           "SCENARIO_ARGUMENT_CAPTURE": str(capture)}
+            cases = (
+                ("coverage-scenarios", str(root / "report.lcov")),
+                ("coverage-scenarios-append", str(root / "report.lcov")),
+                ("test-coverage-feature", "tests/features/runtime/client_suites.feature"),
+                ("test-coverage-scenario-filter", "tests/features/runtime/client_suites.feature", "suite passes"),
+            )
+            for recipe in cases:
+                with self.subTest(recipe=recipe[0]):
+                    capture.unlink(missing_ok=True)
+                    completed = subprocess.run(
+                        [just, "--no-deps", "--set", "cargo_target_dir", str(target), *recipe],
+                        cwd=ROOT, env=environment, capture_output=True, text=True, timeout=30,
+                    )
+                    self.assertNotEqual(completed.returncode, 0, completed.stdout)
+                    calls = [json.loads(line) for line in capture.read_text().splitlines()]
+                    self.assertTrue(any("test-client-python-api-run" in call for call in calls), calls)
+                    self.assertFalse(any(call[0] == "cargo" and "nervix-scenarios" in call for call in calls), calls)
+
+    def test_packaging_failure_prevents_conformance_scenarios(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="client packaging gate ") as directory:
+            root = Path(directory)
+            capture = root / "calls.jsonl"
+            for tool in ("just", "cargo"):
+                recorder = root / tool
+                recorder.write_text(
+                    f"#!{sys.executable}\n"
+                    "import json, os, pathlib, sys\n"
+                    "with open(os.environ['SCENARIO_ARGUMENT_CAPTURE'], 'a') as output:\n"
+                    "    output.write(json.dumps([pathlib.Path(sys.argv[0]).name, *sys.argv[1:]]) + '\\n')\n"
+                    "sys.exit(39 if 'test-client-suites-api-run' in sys.argv else 0)\n"
+                )
+                recorder.chmod(0o755)
+            environment = {**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                           "SCENARIO_ARGUMENT_CAPTURE": str(capture)}
+            completed = subprocess.run(
+                [shutil.which("just"), "--no-deps", "test-client-conformance-run"],
+                cwd=ROOT, env=environment, capture_output=True, text=True, timeout=30,
+            )
+            self.assertNotEqual(completed.returncode, 0, completed.stdout)
+            calls = [json.loads(line) for line in capture.read_text().splitlines()]
+            self.assertEqual(len(calls), 1, calls)
+            self.assertEqual(calls[0][0], "just")
+            self.assertIn("test-client-suites-api-run", calls[0])
+
     def test_upload_recipes_select_their_public_cases_and_keep_failure(self) -> None:
         # Each case names the input its recipe passes and the features that input selects from.
         # The conformance recipe passes one absolute pattern for the probes' and the host suites'
@@ -62,6 +127,14 @@ class ScenarioArgumentTests(unittest.TestCase):
                 "sys.exit(37)\n"
             )
             cargo.chmod(0o755)
+            just = root / "just"
+            just.write_text(
+                f"#!{sys.executable}\n"
+                "import os, sys\n"
+                "if 'test-client-suites-api-run' not in sys.argv:\n"
+                f"    os.execv({shutil.which('just')!r}, [{shutil.which('just')!r}, *sys.argv[1:]])\n"
+            )
+            just.chmod(0o755)
             environment = os.environ.copy()
             environment["PATH"] = str(root) + os.pathsep + environment["PATH"]
             environment["SCENARIO_ARGUMENT_CAPTURE"] = str(capture)
@@ -70,7 +143,7 @@ class ScenarioArgumentTests(unittest.TestCase):
             for recipe, selected_input, features, tag, pattern, count, names in cases:
                 with self.subTest(recipe=recipe):
                     completed = subprocess.run(
-                        ["just", "--no-deps", recipe],
+                        [shutil.which("just"), "--no-deps", recipe],
                         cwd=ROOT, env=environment, capture_output=True, text=True, timeout=30,
                     )
                     self.assertNotEqual(completed.returncode, 0)
@@ -274,7 +347,7 @@ class ScenarioArgumentTests(unittest.TestCase):
         tool_variables = (
             "ORT_DYLIB_PATH", "NERVIX_DEADLOCK_REPORT_TOOL", "NERVIX_TEST_CLI_PATH",
             "NERVIX_PACED_SIMULATION_PATH", "NERVIX_PACED_SIMULATION_PYTHON", "NERVIX_CLIENT_LIBRARY",
-            "NERVIX_TESTCONTAINERS_MODE",
+            "NERVIX_TESTCONTAINERS_MODE", "LLVM_PROFILE_FILE",
         )
         with tempfile.TemporaryDirectory(prefix="coverage arguments ") as directory:
             root = Path(directory)
@@ -332,9 +405,12 @@ class ScenarioArgumentTests(unittest.TestCase):
                             ("just", ["coverage-cli-binary"]),
                             ("just", ["coverage-deadlock-report-binary"]),
                             ("just", ["coverage-paced-simulation-binaries"]),
+                            ("just", [f"cargo_target_dir={target}", "test-client-python-api-run"]),
                         ])
                         for call in calls[:-1]:
                             self.assertEqual(call["environment"]["ORT_DYLIB_PATH"], expected_library)
+                            if "test-client-python-api-run" in call["arguments"]:
+                                self.assertEqual(call["environment"]["LLVM_PROFILE_FILE"], "/dev/null")
                         cargo = calls[-1]
                         self.assertEqual(cargo["tool"], "cargo")
                         expected_arguments = ["llvm-cov"]

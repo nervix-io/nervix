@@ -256,6 +256,7 @@ pub(super) fn placed(entity: usize, branch: usize, generation: u8) -> RuntimeSta
 pub(super) fn assigned(generation: u8) -> StdArc<ScheduledStateAssignment> {
     StdArc::new(ScheduledStateAssignment {
         identity: ScheduledStateIdentity {
+            inferencer_model: None,
             schema_fingerprint: SchemaFingerprint::from_digest([generation; 32]),
             wasm_state_generations: None,
         },

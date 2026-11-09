@@ -42,7 +42,7 @@ ROOT = shards.ROOT
 MESSAGES = Path("target/unit-tests/cargo-messages.jsonl")
 PROGRAMS = Path("target/unit-tests/programs.json")
 MANIFEST = Path("target/unit-tests/manifest.json")
-JVM_ARTIFACTS = Path("target/client-conformance/java")
+JVM_ARTIFACTS = Path("target/llvm-cov-target/client-conformance/java")
 RUBY_ARTIFACTS = Path("target/llvm-cov-target/client-conformance")
 NATIVE_ARTIFACTS = Path("target/client-conformance")
 
@@ -105,11 +105,26 @@ def jvm_inputs(root: Path, programs: Sequence[TestProgram]) -> list[Path]:
     classes = JVM_ARTIFACTS / "tests"
     required = [jar, *(classes / "io/nervix/client" / name for name in (
         "Properties.class", "BoundaryTests.class",
-    ))]
+    )), JVM_ARTIFACTS / "junit-platform-console-standalone.jar",
+        classes / "META-INF/services/org.junit.platform.launcher.TestExecutionListener"]
     for path in required:
         if not (root / path).is_file():
             raise shards.ShardError(f"{path} is missing; run `just build-client-jvm-tests` before packing JVM tests")
-    return [jar, *(path.relative_to(root) for path in sorted((root / classes).rglob("*.class")))]
+    return [jar, JVM_ARTIFACTS / "junit-platform-console-standalone.jar",
+            *(path.relative_to(root) for path in sorted((root / classes).rglob("*")) if path.is_file())]
+
+
+def python_inputs(root: Path, programs: Sequence[TestProgram]) -> list[Path]:
+    """Carry the wheel installed before pytest runs and its LLVM coverage object."""
+    if not any(program.directory == "crates/client-python" for program in programs):
+        return []
+    wheels = sorted((root / shards.PYTHON_WHEELS).glob("nervix_client-*.whl"))
+    if len(wheels) != 1:
+        raise shards.ShardError(f"expected exactly one Python wheel in {shards.PYTHON_WHEELS}, found {len(wheels)}")
+    library = shards.COVERAGE_DEBUG / "libnervix_client_python.so"
+    if not (root / library).is_file():
+        raise shards.ShardError(f"{library} is missing; run `just test-coverage-binaries` first")
+    return [wheels[0].relative_to(root), library]
 
 
 def ruby_inputs(root: Path, programs: Sequence[TestProgram]) -> list[Path]:
@@ -169,7 +184,8 @@ def pack(root: Path, archive: Path) -> shards.Manifest:
     for program in programs:
         if program.executable not in held:
             raise shards.ShardError(f"the build left no {program.executable}")
-    host_inputs = [*jvm_inputs(root, programs), *ruby, *native_inputs(root, programs)]
+    host_inputs = [*jvm_inputs(root, programs), *ruby, *native_inputs(root, programs),
+                   *python_inputs(root, programs)]
     return shards.write_archive(
         root,
         archive,
@@ -211,6 +227,8 @@ def run(root: Path) -> None:
         environment = {**os.environ, "CARGO_MANIFEST_DIR": str(directory), "LD_LIBRARY_PATH": loader_path}
         if program.directory == "crates/client-ruby":
             environment["NERVIX_CLIENT_RUBY_TEST_ARTIFACTS"] = str(root / RUBY_ARTIFACTS)
+        if program.directory == "crates/client-jvm":
+            environment["NERVIX_CLIENT_JVM_TEST_ARTIFACTS"] = str(root / JVM_ARTIFACTS)
         completed = subprocess.run([str(root / program.executable)], cwd=directory, env=environment)
         if completed.returncode != 0:
             failed.append(f"{program.executable} exited {completed.returncode}")

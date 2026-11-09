@@ -325,6 +325,34 @@ impl RelayProcessorNode {
         }
     }
 
+    pub(super) fn evict_inferencer_state(&mut self) {
+        if let RelayProcessorOperationNode::StatefulInferencer {
+            replicated_state, ..
+        } = &self.operation
+        {
+            replicated_state.publish(None);
+        }
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "retirement follows the exact branch task and its final checkpoint ending"
+        )
+    )]
+    pub(super) fn retire_evicted_inferencer_state(&self, runtime: &Runtime) {
+        if let RelayProcessorOperationNode::StatefulInferencer {
+            replicated_state, ..
+        } = &self.operation
+        {
+            runtime
+                .inner
+                .state_replication_routing
+                .retire_inferencer(replicated_state);
+        }
+    }
+
     async fn filter_input_batch_with_kind(
         &mut self,
         branch: &mut BranchRuntime,
@@ -1336,6 +1364,9 @@ impl RelayProcessorNode {
                     compiled_input_program,
                     prepared,
                     session,
+                    replicated_state,
+                    incarnation,
+                    snapshot_bytes,
                 } => {
                     stateful_inferencer::admit_stateful_inferencer(
                         stateful_inferencer::StatefulAdmissionContext {
@@ -1349,6 +1380,9 @@ impl RelayProcessorNode {
                             program: compiled_input_program,
                             prepared,
                             session,
+                            replicated_state,
+                            incarnation: *incarnation,
+                            snapshot_bytes: *snapshot_bytes,
                             materialized_values: &materialized_values,
                             execution_now,
                         },
@@ -2148,11 +2182,13 @@ impl RelayProcessorNode {
             RelayProcessorOperationNode::WindowProcessor {
                 replicated_state, ..
             } => PublishedBranchState::WindowProcessor(replicated_state.clone()),
+            RelayProcessorOperationNode::StatefulInferencer {
+                replicated_state, ..
+            } => PublishedBranchState::Inferencer(replicated_state.clone()),
             RelayProcessorOperationNode::Junction { .. }
             | RelayProcessorOperationNode::Reorderer { .. }
             | RelayProcessorOperationNode::Correlator { .. }
             | RelayProcessorOperationNode::Inferencer { .. }
-            | RelayProcessorOperationNode::StatefulInferencer { .. }
             | RelayProcessorOperationNode::WasmProcessor { .. } => {
                 return SpawnedSnapshotTask {
                     task: None,

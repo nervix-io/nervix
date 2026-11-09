@@ -32,7 +32,8 @@ polars. Install the same wheel into your own environment with `pip install` or `
 A `Session` opens a session on one server and keeps it open: it follows the leader, reconnects after
 a lost connection and restores what it held. Pass the server's session URI, the domain the session
 works in, and the user's credentials. A listener that serves TLS is named with `https://`; pass the
-certificate authority its certificate chains to as PEM bytes when it is not one your system trusts.
+certificate authority its certificate chains to as PEM bytes. The client loads no system roots,
+so every TLS connection needs that explicit authority.
 
 ```python
 {{#include ../../tests/client_conformance/python/suite/cluster/test_connect.py:connect}}

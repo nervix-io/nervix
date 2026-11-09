@@ -546,3 +546,5 @@ pointer identity distinguishes its receipt from a bucket recreated after success
 The receipt pins only that key allocation and relies on no reference-count ordering. Node teardown
 owns final disposal. No record, batch or
 acknowledgement path reaches this state; the async mutex is untracked by Deloxide.
+
+Stateful inferencer checkpoints retain their exact `ReplicatedInferencerState` in the existing immutable state-replication route index. Cold branch construction resolves that index once; admission retains the carrier and publishes native generations by pointer. No concurrent map is added. Assignment identity includes the typed model fingerprint; stale-schema/model purge and entity/domain teardown retire these routes. TTL/capacity eviction persists its empty final generation before retiring its exact unit and branch route.

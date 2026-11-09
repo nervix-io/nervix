@@ -19,8 +19,8 @@
 use std::time::Duration;
 
 use nervix_models::{
-    DomainName, ModelKind, ModelName, RemoteRuntimeField, SchemaFingerprint, Unit,
-    WasmStateGeneration,
+    DomainName, InferencerModelFingerprint, ModelKind, ModelName, RemoteRuntimeField,
+    SchemaFingerprint, Unit, WasmStateGeneration,
 };
 use rkyv::{Archive, Deserialize, Serialize};
 use strum::{FromRepr, IntoStaticStr};
@@ -68,6 +68,7 @@ declare_runtime_state_kinds! {
     KafkaOffset = 3,
     MaterializedRelay = 4,
     WasmProcessor = 5,
+    Inferencer = 6,
     WindowProcessor = 8,
     BranchLru = 7,
 }
@@ -78,7 +79,11 @@ impl RuntimeStateKind {
     pub fn is_branch_local(self) -> bool {
         matches!(
             self,
-            Self::Correlator | Self::Deduplicator | Self::WasmProcessor | Self::WindowProcessor
+            Self::Correlator
+                | Self::Deduplicator
+                | Self::WasmProcessor
+                | Self::WindowProcessor
+                | Self::Inferencer
         )
     }
 }
@@ -92,6 +97,10 @@ impl RuntimeStateKind {
 /// was saved in, so a placement of an earlier lifetime never addresses the current state.
 #[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum RuntimeState {
+    Inferencer {
+        schema: SchemaFingerprint,
+        model: InferencerModelFingerprint,
+    },
     BranchAggregated,
     Correlator {
         schema: SchemaFingerprint,
@@ -128,6 +137,7 @@ impl RuntimeState {
     /// The kind of runtime state this names.
     pub const fn kind(self) -> RuntimeStateKind {
         match self {
+            Self::Inferencer { .. } => RuntimeStateKind::Inferencer,
             Self::BranchAggregated => RuntimeStateKind::BranchAggregated,
             Self::Correlator { .. } => RuntimeStateKind::Correlator,
             Self::Deduplicator { .. } => RuntimeStateKind::Deduplicator,
@@ -143,7 +153,8 @@ impl RuntimeState {
     pub const fn schema(self) -> StateSchema {
         match self {
             Self::BranchAggregated | Self::KafkaOffset => StateSchema::Independent,
-            Self::Correlator { schema }
+            Self::Inferencer { schema, .. }
+            | Self::Correlator { schema }
             | Self::Deduplicator { schema }
             | Self::MaterializedRelay { schema }
             | Self::WasmProcessor { schema, .. }

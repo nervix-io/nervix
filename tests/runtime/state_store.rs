@@ -528,6 +528,7 @@ fn current_identity(
         ),
         ScheduledStateIdentity {
             schema_fingerprint: guest_schema(),
+            inferencer_model: None,
             wasm_state_generations: Some(generations),
         },
     )])
@@ -806,6 +807,10 @@ fn every_runtime_state_round_trips_through_its_storage_key() {
         RuntimeState::Correlator { schema },
         RuntimeState::Deduplicator { schema },
         RuntimeState::MaterializedRelay { schema },
+        RuntimeState::Inferencer {
+            schema,
+            model: InferencerModelFingerprint::from_digest([9; 32]),
+        },
         RuntimeState::WasmProcessor {
             schema,
             generation: generation(2),
@@ -871,6 +876,7 @@ fn a_schema_change_replaces_only_schema_bound_state() {
                     ),
                     ScheduledStateIdentity {
                         schema_fingerprint: current,
+                        inferencer_model: None,
                         wasm_state_generations: None,
                     },
                 )]),
@@ -1069,5 +1075,143 @@ fn an_operation_under_a_replaced_assignment_is_refused() {
         authority
             .authorize(current, StateCapability::InstallSnapshot, || ())
             .is_err()
+    );
+}
+
+/// A complete section stays bounded through the owned storage path, retains one revision index,
+/// and cannot be replaced by a late writer or a transferred checkpoint with a smaller revision.
+#[nervix_primitives::test]
+async fn inferencer_checkpoint_selects_the_newest_complete_bounded_generation() {
+    let dir = tempfile::tempdir().expect("temporary runtime state directory");
+    let executor = Executor::default();
+    let mut placement = orders_placement(
+        RuntimeState::Inferencer {
+            schema: SchemaFingerprint::from_digest([7; 32]),
+            model: InferencerModelFingerprint::from_digest([9; 32]),
+        },
+        Some(tenant_branch("acme")),
+    );
+    placement.kind = ModelKind::Inferencer;
+    let limit = executor.limits().snapshot_section_bytes.as_u64();
+    let payload = vec![0xA5; usize::try_from(limit).expect("a section fits usize")];
+    let snapshot = PersistedRuntimeStateEntry { lsm: 7, payload };
+    {
+        let store = open_store_on(&dir, executor.clone());
+        let charge = executor
+            .reserve(
+                MemoryClass::Bulk,
+                RuntimeStateStore::bounded_snapshot_working_bytes(limit)
+                    .expect("bounded storage buffers"),
+            )
+            .await
+            .expect("a complete section is admitted");
+        assert!(
+            store
+                .persist_owned_snapshot(&placement, snapshot.clone(), charge)
+                .await
+                .expect("owned checkpoint persists")
+        );
+        let charge = executor
+            .reserve(
+                MemoryClass::Bulk,
+                RuntimeStateStore::bounded_snapshot_working_bytes(limit)
+                    .expect("bounded storage buffers"),
+            )
+            .await
+            .expect("a late writer is admitted");
+        assert!(
+            !store
+                .persist_owned_snapshot(
+                    &placement,
+                    PersistedRuntimeStateEntry {
+                        lsm: 6,
+                        payload: vec![1]
+                    },
+                    charge
+                )
+                .await
+                .expect("late writer is ignored")
+        );
+        for transfer in [
+            None,
+            Some(PersistedRuntimeStateEntry {
+                lsm: 6,
+                payload: vec![2],
+            }),
+        ] {
+            assert_eq!(
+                store
+                    .select_latest_snapshot(&placement, transfer, limit)
+                    .expect("bounded checkpoint selection"),
+                Some(snapshot.clone())
+            );
+        }
+        let newer = PersistedRuntimeStateEntry {
+            lsm: 8,
+            payload: vec![3; 32],
+        };
+        assert_eq!(
+            store
+                .select_latest_snapshot(&placement, Some(newer.clone()), limit)
+                .expect("newer transfer is selected"),
+            Some(newer)
+        );
+        assert!(
+            store
+                .select_latest_snapshot(&placement, None, limit - 1)
+                .is_err(),
+            "a stored value above the section bound is refused before decoding"
+        );
+        let view = store.db.snapshot();
+        let prefix = generation::StateNamespace::Initial.prefix(&placement.domain);
+        let counts = [&store.latest, &store.lsm_index].map(|keyspace| {
+            let mut count = 0;
+            for entry in view.prefix(keyspace, &prefix) {
+                entry.key().expect("the current key can be read");
+                count += 1;
+            }
+            count
+        });
+        assert_eq!(counts, [1, 1], "one index per selected checkpoint");
+    }
+    let store = open_store_on(&dir, executor);
+    assert_eq!(
+        store
+            .select_latest_snapshot(&placement, None, limit)
+            .expect("complete checkpoint survives reopen"),
+        Some(snapshot)
+    );
+    let mut replaced = placement.clone();
+    replaced.state = RuntimeState::Inferencer {
+        schema: SchemaFingerprint::from_digest([7; 32]),
+        model: InferencerModelFingerprint::from_digest([10; 32]),
+    };
+    assert_eq!(
+        store
+            .select_latest_snapshot(&replaced, None, limit)
+            .expect("replacement identity is isolated"),
+        None
+    );
+    store
+        .purge_stale_state_identities(
+            &placement.domain,
+            &HashMap::from_iter([(
+                NodeUnitRef::new(
+                    NodeRef::new(placement.kind, placement.identifier.clone()),
+                    placement.unit,
+                ),
+                ScheduledStateIdentity {
+                    schema_fingerprint: SchemaFingerprint::from_digest([7; 32]),
+                    inferencer_model: Some(InferencerModelFingerprint::from_digest([10; 32])),
+                    wasm_state_generations: None,
+                },
+            )]),
+        )
+        .expect("schedule application removes the replaced identity");
+    assert_eq!(
+        store
+            .select_latest_snapshot(&placement, None, limit)
+            .expect("replaced identity is purged"),
+        None
     );
 }
