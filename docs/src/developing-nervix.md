@@ -628,7 +628,7 @@ compares it with the workflows.
 | `extra-doctests` | Check | Capability doctests |
 | `extra-miri` | Check | Miri over the expiry map |
 | `extra-mutation` | Check | Mutation tests of the expiry map |
-| `extra-runners` | Check | Python coverage of the reporters, gates and collectors: patch coverage, the ordinary merge, the CRAP report, the full union, the paced simulation policy, the release gate, the deployment controller, the kache contract, the connector matrix renderer, the test selection, the wasm-bindgen tool, the native collector, the client suite readers with the unit-test archive, and the primitive source validator |
+| `extra-runners` | Check | Python coverage of the reporters, gates and collectors: patch coverage, the ordinary merge, the CRAP report, the full union, the paced simulation policy, the release gate, the deployment controller, the kache contract, the connector matrix renderer, the test selection, the wasm-bindgen tool, the external binding chaos controls, the native collector, the client suite readers with the unit-test archive, and the primitive source validator |
 | `extra-compiler` | Check | Source contracts, compiler diagnostics, the Rust runner/gate/audit owners, paired API doctests, compiler cache qualification and the Python coverage of the ratchet's callers |
 | `extra-bench-smoke` | Check | Benchmark smoke tests |
 | `extra-primitives` | Check | Primitive boundary conformance in ordinary, Shuttle, Loom and Turmoil modes, plus ordinary documentation and browser checks. `coverage-full` then requires those collections |
@@ -1096,8 +1096,8 @@ suites run selections of those scenarios, each as its own `just chaos run` comma
 
 ```bash
 just chaos suite list
-just chaos suite smoke --image ghcr.io/nervix-io/nervix@sha256:<digest>
-just chaos suite soak --image ghcr.io/nervix-io/nervix@sha256:<digest>
+just chaos suite smoke --image ghcr.io/nervix-io/nervix@sha256:<digest> --binding-image ghcr.io/nervix-io/nervix@sha256:<binding-digest>
+just chaos suite soak --image ghcr.io/nervix-io/nervix@sha256:<digest> --binding-image ghcr.io/nervix-io/nervix@sha256:<binding-digest>
 ```
 
 The smoke suite runs a baseline, a leader crash with its restart and a partition with its recovery;
@@ -1116,7 +1116,7 @@ release-mode diagnostic server of this checkout on an available image:
 
 ```bash
 just build-chaos-diagnostic-image nervix:diagnostic-local ghcr.io/nervix-io/nervix:debian-latest deloxide-order
-just chaos suite smoke --image nervix:diagnostic-local --image-kind deloxide-order
+just chaos suite smoke --image nervix:diagnostic-local --binding-image nervix:chaos-client --image-kind deloxide-order
 ```
 
 [External Cluster Chaos](./cluster-chaos.md) describes the runner, every scenario and its verdicts,
