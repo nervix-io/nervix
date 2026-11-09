@@ -46,11 +46,15 @@ pub struct NodeSettings {
     pub shutdown: ShutdownSettings,
     pub resources: ResourceSettings,
     pub capacity: CapacitySettings,
-    pub peer_receive: nervix_interconnect::PeerReceiveSettings,
     pub interconnect: nervix_interconnect::TransportSettings,
     pub dns: nervix_dns::DnsSettings,
     pub node_database: nervix_models::DatabaseSettings<nervix_models::NodeDatabase>,
     pub consensus_database: nervix_models::DatabaseSettings<nervix_models::ConsensusDatabase>,
+    pub peer_receive: nervix_interconnect::PeerReceiveOverrides,
+    /// Execution inputs remain optional until startup resolves machine capacity.
+    pub execution: nervix_execution::ExecutionOverrides,
+    pub runtime_threads: super::RuntimeThreadOverrides,
+    pub client_endpoints: crate::runtime::ClientEndpointOverrides,
 }
 
 impl NodeSettings {

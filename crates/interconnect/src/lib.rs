@@ -103,11 +103,12 @@ pub use runtime_state::{
 pub use settings::{
     BulkChunkBytes, BulkReceiveWindow, BulkReceiveWindowError, ConcurrentHandshakes,
     ConnectionReceiveWindow, ConnectionSetupTimeout, IncomingQueueCapacity, InterconnectLiveness,
-    MaxPeers, MaxReconnectBackoff, PeerReceiveSettings, PeerReceiveSettingsError, PingInterval,
-    PingTimeout, ProbeTimeout, ProgressTimeout, ReconnectBackoff, ReconnectJitterPermille,
-    RelayBatchBytes, RelayChannelRetention, RelayChannelSweep, RelayDecodedBytes,
-    RelayRetentionSettings, RequestDeadline, RequestQuota, RequestTimeout, StreamReceiveWindow,
-    TransportSettingValues, TransportSettings, TransportSettingsError,
+    MaxPeers, MaxReconnectBackoff, PeerReceiveOverrides, PeerReceiveSettings,
+    PeerReceiveSettingsError, PingInterval, PingTimeout, ProbeTimeout, ProgressTimeout,
+    ReconnectBackoff, ReconnectJitterPermille, RelayBatchBytes, RelayChannelRetention,
+    RelayChannelSweep, RelayDecodedBytes, RelayRetentionSettings, RequestDeadline, RequestQuota,
+    RequestTimeout, StreamReceiveWindow, TransportSettingValues, TransportSettings,
+    TransportSettingsError,
 };
 pub use wasm_state::{
     CoordinateWasmStateResetRequest, CoordinateWasmStateResetResponse,
@@ -1556,6 +1557,8 @@ mod tests;
 
 mod state_inspection;
 pub use state_inspection::{
-    MaterializedStatePageBody, MaterializedStatePageDescriptor, MaterializedStatePageReply,
-    MaterializedStatePageTransfer, ReadMaterializedStatePage,
+    MaterializedStatePageDescriptor, MaterializedStatePageReply, MaterializedStatePageTransfer,
+    ProcessorStatePageDescriptor, ProcessorStatePageReply, ProcessorStateRunTransfer,
+    ProcessorStateSectionTransfer, ReadMaterializedStatePage, ReadProcessorStatePage,
+    StatePageBody,
 };

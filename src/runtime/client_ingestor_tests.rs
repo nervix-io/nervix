@@ -829,7 +829,7 @@ async fn an_acknowledgement_without_progress_times_out() {
 #[test]
 fn the_node_budget_refuses_what_it_cannot_hold_and_takes_back_what_it_gave() {
     let budget = ClientProducerBudget::default();
-    let half = NonZeroU64::new(CLIENT_PRODUCER_NODE_BYTES / 2).assured("a non-zero half");
+    let half = NonZeroU64::new(budget.capacity() / 2).assured("a non-zero half");
     let first = budget.try_reserve(half).assured("half the budget fits");
     let second = budget.try_reserve(half).assured("the other half fits");
     assert!(budget.try_reserve(NonZeroU64::MIN).is_none());

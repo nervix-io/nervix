@@ -54,6 +54,20 @@ fn page(listing: CheckpointListing) -> (bool, CheckpointPage) {
 }
 
 #[test]
+fn state_inspection_identity_is_stable_for_updates_and_distinct_for_replacements() {
+    let catalog = BranchCheckpointCatalog::with_epoch(EPOCH);
+    let first = catalog.register(None, state(), 7);
+    let identity = first.inspection_identity();
+    first.record(8);
+    assert_eq!(first.inspection_identity(), identity);
+    let replacement = catalog.register(None, state(), 7);
+    assert_ne!(replacement.inspection_identity(), identity);
+    let other = BranchCheckpointCatalog::with_epoch(EPOCH + 1);
+    let other = other.register(None, state(), 7);
+    assert_ne!(other.inspection_identity(), identity);
+}
+
+#[test]
 fn a_replica_without_a_cursor_learns_every_checkpoint_in_the_order_it_changed() {
     let catalog = BranchCheckpointCatalog::with_epoch(EPOCH);
     let acme = tenant("acme");

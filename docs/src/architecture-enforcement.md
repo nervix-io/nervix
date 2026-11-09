@@ -443,6 +443,8 @@ labeled `extra-compiler` runs `just coverage-native-extras test-typed-ratchet`, 
 `just test-typed-ratchet` with its ordinary part under native coverage and its product doctests and
 modeled fixture configurations after it, then `just qualify-typed-ratchet-cache` and
 `just coverage-typed-ratchet-python`; one labeled `extra-doctests` runs `just test-capability-docs`.
+Compiler qualification installs uv before the product doctests prepare their Python driver
+fixtures, as well as before the later Python coverage collection.
 A pull request that changes a compiler rule or fixture carries `extra-compiler`, and one that changes
 an API with paired doctests carries `extra-doctests`.
 

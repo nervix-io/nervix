@@ -1,4 +1,4 @@
-//! Opaque continuations for one domain-owned materialized-state read.
+//! Opaque continuations for one domain-owned state inspection.
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** Canonical cursor encoding and identity checks for a captured read.
@@ -12,8 +12,7 @@
 
 use error_stack::{Report, ResultExt as _};
 use nervix_models::{
-    DomainName, RelayName, SchemaFingerprint, StateInspectionBranchSelection,
-    StateInspectionPosition,
+    DomainName, NodeRef, SchemaFingerprint, StateInspectionBranchSelection, StateInspectionPosition,
 };
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +20,9 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub(crate) struct StateInspectionCursor {
     pub(crate) domain: DomainName,
-    pub(crate) relay: RelayName,
+    /// The node whose state the read inspects: a relay's materialized state, or the rows a
+    /// reorderer or correlator holds.
+    pub(crate) entity: NodeRef,
     pub(crate) schema: SchemaFingerprint,
     pub(crate) control_revision: u64,
     pub(crate) generations: [u8; 32],
@@ -77,14 +78,17 @@ impl StateInspectionCursor {
 #[cfg(test)]
 mod tests {
     use meticulous::ResultExt as _;
-    use nervix_models::{BranchKeyFingerprint, Unit};
+    use nervix_models::{BranchKeyFingerprint, ModelKind, ModelName, RelayName, Unit};
 
     use super::*;
 
     fn cursor() -> StateInspectionCursor {
         StateInspectionCursor {
             domain: DomainName::parse("sales").assured("valid domain"),
-            relay: RelayName::parse("events").assured("valid relay"),
+            entity: NodeRef::new(
+                ModelKind::Relay,
+                RelayName::parse("events").assured("valid relay"),
+            ),
             schema: SchemaFingerprint::from_digest([7; 32]),
             control_revision: 31,
             generations: [13; 32],
@@ -121,7 +125,14 @@ mod tests {
                     nervix_arbitrary::Arbitrary::new(bytes, nervix_arbitrary::Domain::Vocabulary);
                 let mut original = cursor();
                 original.domain = arbitrary.name();
-                original.relay = arbitrary.name();
+                let kind = match arbitrary.entropy().byte() % 5 {
+                    0 => ModelKind::Relay,
+                    1 => ModelKind::Reorderer,
+                    2 => ModelKind::Correlator,
+                    3 => ModelKind::Deduplicator,
+                    _ => ModelKind::WindowProcessor,
+                };
+                original.entity = NodeRef::new(kind, arbitrary.name::<ModelName>());
                 original.schema = SchemaFingerprint::from_digest(std::array::from_fn(|_| {
                     arbitrary.entropy().byte()
                 }));

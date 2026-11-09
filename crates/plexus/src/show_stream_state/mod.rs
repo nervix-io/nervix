@@ -1,43 +1,31 @@
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
-use nervix_models::{InspectionFormat, ShowRelayMaterializedState, StateInspectionPageRequest};
+use nervix_models::ShowRelayMaterializedState;
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, inspection_format, into_parse_error, kw,
-        lex_input, nonzero_u64_value, relay_ref, string_lit, suggest_from, tok,
+        LexedInput, ParseError, ParseFromSourceError, into_parse_error, kw, lex_input, relay_ref,
+        suggest_from,
     },
+    state_inspection_clauses::state_inspection_clauses,
 };
 
 pub fn show_stream_materialized_state_parser<'src>()
 -> impl Parser<'src, &'src [Token], ShowRelayMaterializedState, extra::Err<ParseError<'src>>> + Clone
 {
-    let page = kw(Identifier::Limit)
-        .ignore_then(nonzero_u64_value("row_limit", "LIMIT must be positive"))
-        .then(kw(Identifier::After).ignore_then(string_lit()).or_not())
-        .map(|(limit, after)| StateInspectionPageRequest { limit, after });
     kw(Identifier::Show)
         .ignore_then(kw(Identifier::Relay))
         .ignore_then(relay_ref())
         .then_ignore(kw(Identifier::Materialized))
         .then_ignore(kw(Identifier::State))
-        .then(crate::state_branch_selection::branch_selection().or_not())
-        .then(page.or_not())
-        .then(
-            kw(Identifier::Format)
-                .ignore_then(inspection_format())
-                .or_not(),
-        )
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .map(
-            |(((relay, selection), page), format)| ShowRelayMaterializedState {
-                relay,
-                selection,
-                page,
-                format: format.unwrap_or(InspectionFormat::Text),
-            },
-        )
+        .then(state_inspection_clauses())
+        .map(|(relay, clauses)| ShowRelayMaterializedState {
+            relay,
+            selection: clauses.selection,
+            page: clauses.page,
+            format: clauses.format,
+        })
 }
 
 pub fn parse_show_stream_materialized_state_tokens(

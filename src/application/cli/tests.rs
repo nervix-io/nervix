@@ -20,7 +20,7 @@ use crate::application::{
 };
 
 /// The headings of the settings areas, in the order help lists them.
-const SETTINGS_HEADINGS: [&str; 13] = [
+const SETTINGS_HEADINGS: [&str; 14] = [
     "Databases",
     "Consensus capacities",
     "DNS",
@@ -34,10 +34,11 @@ const SETTINGS_HEADINGS: [&str; 13] = [
     "Shutdown",
     "Resources",
     "Capacity",
+    "Execution",
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 78] = [
+const SETTING_NAMES: [&str; 113] = [
     "database-cache-bytes",
     "database-journal-bytes",
     "database-workers",
@@ -116,6 +117,41 @@ const SETTING_NAMES: [&str; 78] = [
     "interconnect-bulk-receive-window",
     "cpu-count",
     "memory-limit",
+    "execution-control-cpu-workers",
+    "execution-control-cpu-pending-jobs",
+    "execution-credentials-cpu-workers",
+    "execution-credentials-cpu-pending-jobs",
+    "execution-data-cpu-workers",
+    "execution-data-cpu-pending-jobs",
+    "execution-extension-cpu-workers",
+    "execution-extension-cpu-pending-jobs",
+    "execution-bulk-cpu-workers",
+    "execution-bulk-cpu-pending-jobs",
+    "execution-consensus-storage-workers",
+    "execution-consensus-storage-pending-jobs",
+    "execution-filesystem-storage-workers",
+    "execution-filesystem-storage-pending-jobs",
+    "execution-connector-storage-workers",
+    "execution-connector-storage-pending-jobs",
+    "execution-management-memory-bytes",
+    "execution-commands-memory-bytes",
+    "execution-relay-memory-bytes",
+    "execution-state-read-memory-bytes",
+    "execution-state-read-cache-memory-bytes",
+    "execution-bulk-memory-bytes",
+    "execution-bulk-window-memory-bytes",
+    "execution-restore-metadata-memory-bytes",
+    "execution-credentials-memory-bytes",
+    "execution-relay-encoded-bytes",
+    "execution-relay-decoded-bytes",
+    "execution-relay-scratch-bytes",
+    "execution-resident-replication-batches",
+    "execution-bulk-chunk-bytes",
+    "runtime-worker-threads",
+    "runtime-max-blocking-threads",
+    "runtime-thread-stack-size",
+    "client-producer-node-bytes",
+    "client-consumer-node-bytes",
 ];
 
 #[test]

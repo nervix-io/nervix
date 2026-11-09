@@ -37,10 +37,56 @@ pub use transport::*;
 /// Why the receiver cannot enforce an advertised capacity claim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum PeerReceiveSettingsError {
+    #[error("{setting} must be greater than zero")]
+    Empty { setting: &'static str },
     #[error("{setting} must be greater than zero and at most the executor's {maximum} bytes")]
     Operation { setting: &'static str, maximum: u64 },
     #[error("the bulk receive window cannot be advertised")]
     Window,
+}
+
+/// Local requests retained until startup has resolved the executor's actual operation limits.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PeerReceiveOverrides {
+    pub relay_batch_bytes: Option<ByteUnit>,
+    pub relay_decoded_bytes: Option<ByteUnit>,
+    pub bulk_chunk_bytes: Option<ByteUnit>,
+    pub bulk_window_bytes: Option<ByteUnit>,
+}
+
+impl PeerReceiveOverrides {
+    /// Checks relationships that need no detected capacity, before startup performs I/O.
+    pub fn validate(&self) -> Result<(), Report<PeerReceiveSettingsError>> {
+        for (setting, value) in [
+            (RelayBatchBytes::NAME, self.relay_batch_bytes),
+            (RelayDecodedBytes::NAME, self.relay_decoded_bytes),
+            (BulkChunkBytes::NAME, self.bulk_chunk_bytes),
+        ] {
+            if let Some(value) = value
+                && value.as_u64() == 0
+            {
+                return Err(Report::new(PeerReceiveSettingsError::Empty { setting }));
+            }
+        }
+        BulkReceiveWindow::resolve(self.bulk_window_bytes)
+            .map_err(|error| error.change_context(PeerReceiveSettingsError::Window))?;
+        Ok(())
+    }
+
+    /// Resolve omitted bounds from the final executor while preserving every explicit request.
+    pub fn resolve(
+        &self,
+        limits: &OperationLimits,
+    ) -> Result<PeerReceiveSettings, Report<PeerReceiveSettingsError>> {
+        self.validate()?;
+        PeerReceiveSettings::resolve(
+            self.relay_batch_bytes,
+            self.relay_decoded_bytes,
+            self.bulk_chunk_bytes,
+            self.bulk_window_bytes,
+            limits,
+        )
+    }
 }
 
 macro_rules! operation_bound {
@@ -226,6 +272,32 @@ mod tests {
     use meticulous::OptionExt as _;
 
     use super::*;
+
+    #[test]
+    fn omitted_bounds_follow_the_final_executor_but_explicit_defaults_stay_explicit() {
+        let limits = OperationLimits {
+            relay_encoded_bytes: ByteUnit::Mebibyte(4),
+            ..Default::default()
+        };
+        let derived = PeerReceiveOverrides::default()
+            .resolve(&limits)
+            .expect("omitted bounds fit the final limits");
+        assert_eq!(
+            derived.relay_batch_bytes.value().as_u64(),
+            limits.relay_encoded_bytes.as_u64()
+        );
+        let explicit = PeerReceiveOverrides {
+            relay_batch_bytes: Some(OperationLimits::default().relay_encoded_bytes),
+            ..Default::default()
+        };
+        let refused = explicit
+            .resolve(&limits)
+            .expect_err("an explicit 32 MiB bound cannot fit a four MiB executor");
+        assert!(matches!(
+            refused.current_context(),
+            PeerReceiveSettingsError::Operation { .. }
+        ));
+    }
 
     #[test]
     fn the_default_window_grants_each_bulk_stream_one_mebibyte() {

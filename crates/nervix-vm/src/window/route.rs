@@ -84,17 +84,20 @@ pub struct CompiledWindowRoute {
     pub invocations: Vec<CompiledWindowInvocation>,
 }
 
-/// The columns a window saves its retained rows' aggregate arguments in: one nullable column per
-/// argument of every demand, in demand order, named `argument_0` onwards.
-///
-/// A window's snapshots and backup archives both lay the argument columns out by this schema, so
-/// saved arguments read back only into a window whose compiled demands match them.
+/// The public saved-argument column at a flattened demand position.
+#[inline]
+pub fn argument_snapshot_column(position: usize) -> String {
+    format!("argument_{position}")
+}
+
+/// The nullable saved argument columns in flattened demand order, named `argument_0` onwards.
+/// Snapshots and backup archives use this schema to reopen arguments against the compiled plan.
 pub fn argument_snapshot_schema(demands: &[CompiledWindowDemand]) -> Schema {
     let mut fields = Vec::new();
     for demand in demands {
         for column in demand.arguments.iter() {
             fields.push(Field::new(
-                format!("argument_{}", fields.len()),
+                argument_snapshot_column(fields.len()),
                 column.data_type.clone(),
                 true,
             ));
@@ -201,6 +204,27 @@ impl WindowAggregateFunction {
 }
 
 impl CompiledWindowRoute {
+    /// Infer the saved argument columns in their snapshot order, retaining the sensitivity of
+    /// each expression. Inspection consumes this projection; private argument execution keeps
+    /// its existing compiled program and does not gain work on the record path.
+    pub fn argument_inspection_fields(
+        program: &WindowAggregateProgram,
+        input: &StdArc<Schema>,
+        sensitivity: &SchemaSensitivity,
+        options: &CompileOptions,
+    ) -> Result<Vec<crate::InferredSetField>, Report<WindowRouteCompileError>> {
+        infer_set_expr_types_for_bindings_with_udfs(
+            &CompiledArguments::argument_program(program),
+            [
+                CompileBinding::writeonly(WINDOW_ARGUMENT_NAMESPACE, StdArc::new(Schema::empty())),
+                CompileBinding::readonly(INPUT_NAMESPACE, StdArc::clone(input))
+                    .with_sensitivity(sensitivity.clone()),
+            ],
+            options.udf_signatures.clone(),
+        )
+        .change_context(WindowRouteCompileError::ArgumentInference)
+    }
+
     /// Compile `program` for a route reading `schemas.input` and writing `schemas.output`.
     pub fn compile(
         program: &WindowAggregateProgram,
@@ -395,11 +419,7 @@ struct CompiledArguments {
 }
 
 impl CompiledArguments {
-    fn compile(
-        program: &WindowAggregateProgram,
-        input: &StdArc<Schema>,
-        options: &CompileOptions,
-    ) -> Result<Self, Report<WindowRouteCompileError>> {
+    fn argument_program(program: &WindowAggregateProgram) -> SpannedNode<Program> {
         let span: Span = (0..0).into();
         let mut set = Vec::new();
         for demand in program.demands() {
@@ -416,14 +436,22 @@ impl CompiledArguments {
                 ));
             }
         }
-        let argument_program = SpannedNode {
+        SpannedNode {
             inner: Program {
                 filter: None,
                 set,
                 invoke: Vec::new(),
             },
             span,
-        };
+        }
+    }
+
+    fn compile(
+        program: &WindowAggregateProgram,
+        input: &StdArc<Schema>,
+        options: &CompileOptions,
+    ) -> Result<Self, Report<WindowRouteCompileError>> {
+        let argument_program = Self::argument_program(program);
         let inferred = infer_set_expr_types_for_bindings_with_udfs(
             &argument_program,
             [
@@ -579,6 +607,43 @@ mod tests {
                 false,
             ),
         ])
+    }
+
+    #[test]
+    fn inspection_arguments_keep_expression_sensitivity_in_saved_column_order() {
+        let construction = nervix_plexus::parse_route_construction(
+            "SET safe = SUM(input.optional_value), private = FIRST(input.sensor), pair = \
+             ARG_MAX(input.value, input.sensor)",
+        )
+        .expect("current aggregate syntax");
+        let program = lower_window_assignments(&construction).expect("aggregate arguments lower");
+        let sensitivity = SchemaSensitivity::from_sensitive_fields(["sensor"]);
+        let fields = CompiledWindowRoute::argument_inspection_fields(
+            &program.inner,
+            &readings(),
+            &sensitivity,
+            &CompileOptions::default(),
+        )
+        .expect("inspection infers arguments with the production compiler");
+        assert_eq!(fields.len(), 4);
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.sensitive)
+                .collect::<Vec<_>>(),
+            vec![false, true, false, true]
+        );
+        assert_eq!(fields[0].data_type, DataType::Int64);
+        assert!(fields[0].nullable);
+        assert_eq!(fields[1].data_type, DataType::Utf8);
+        let compiled =
+            CompiledArguments::compile(&program.inner, &readings(), &CompileOptions::default())
+                .expect("the execution argument program still compiles");
+        let saved = argument_snapshot_schema(&compiled.demands);
+        for (index, (field, saved)) in fields.iter().zip(saved.fields()).enumerate() {
+            assert_eq!(saved.name(), &argument_snapshot_column(index));
+            assert_eq!(saved.data_type(), &field.data_type);
+        }
     }
 
     #[test]

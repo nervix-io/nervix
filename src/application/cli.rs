@@ -19,6 +19,7 @@ mod database;
 #[cfg(feature = "deloxide")]
 mod diagnostics;
 mod dns;
+mod execution;
 mod interconnect;
 mod membership;
 mod memory_pressure;
@@ -40,6 +41,7 @@ pub use self::diagnostics::DiagnosticArgs;
 pub use self::{
     capacity::CapacityArgs,
     consensus::ConsensusArgs,
+    execution::ExecutionArgs,
     membership::MembershipArgs,
     memory_pressure::MemoryPressureArgs,
     node::NodeArgs,

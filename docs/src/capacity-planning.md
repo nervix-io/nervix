@@ -43,7 +43,7 @@ and never a worker another class needs. See the
 ## Bounded Execution And Transient Memory
 
 Every variable-size encode, decode, validation, hash, compilation and program execution a node
-runs off its asynchronous runtime is admitted into one of seven bounded classes, and is charged
+runs off its asynchronous runtime is admitted into one of eight bounded classes, and is charged
 against a reserved byte budget before it allocates. Each class has its own admission, so work
 saturating one cannot take the slots another is entitled to.
 
@@ -51,11 +51,17 @@ saturating one cannot take the slots another is entitled to.
 | --- | --- | --- |
 | Control | 1 | Control-plane and consensus work: heartbeats, votes, acknowledgements, administrative replies |
 | Credentials | 1 | Password hashing and verification for users being created or authenticated |
-| Data | available CPUs − 1 | Per-message relay body encoding, decoding and validation, expressions over batches above 1,024 messages, ingest branch preparation and model inference |
-| Extension | available CPUs − 1 | Operator-supplied code the node cannot bound: UDF-bearing expressions and JAQ transformations |
-| Bulk | available CPUs − 1 | Whole-transfer work: resource archives, large read results, and compiling UDFs, WASM modules, protobuf descriptors and ONNX models |
+| Data | Share of remaining CPUs | Per-message relay body encoding, decoding and validation, expressions over batches above 1,024 messages, ingest branch preparation and model inference |
+| Extension | Share of remaining CPUs | Operator-supplied code the node cannot bound: UDF-bearing expressions and JAQ transformations |
+| Bulk | Share of remaining CPUs | Whole-transfer work: resource archives, large read results, and compiling UDFs, WASM modules, protobuf descriptors and ONNX models |
 | Consensus storage | 1, ordered | Consensus storage batches, applied in the order they were admitted |
 | Filesystem storage | 2 | Every other synchronous filesystem and database operation, including Iceberg's staged files |
+| Connector storage | 2 | Blocking external driver work, independent of filesystem and consensus |
+
+Control and credentials reserve their own admission first. Data, extension and bulk divide the
+remaining CPU claim, with one place each on small nodes; the total is at most the larger of CPU
+count and five. [Execution Capabilities](node-settings.md#execution-capabilities) lists the per-class
+worker and queue overrides and their validation.
 
 An ONNX binding inspection reserves 16 KiB from the bulk budget for sequential native-image
 preparation. That fixed buffer is read and released on the admitted worker, with cancellation
@@ -71,7 +77,8 @@ class's count is the number of its jobs that may be on that pool at once. A clas
 share of admission; it is not guaranteed an idle thread. Apart from the classes, only work that
 waits rather than computes uses the pool: a Kafka producer's final drain and partition
 inspection, which wait on the broker, and the one read of the resolver configuration at startup.
-Each class also holds at most 1,024 jobs waiting for a worker; a job beyond that is refused, and
+Each class defaults to 64 pending jobs per worker, capped at 1,024; an explicit per-class queue
+can override this bound. A job beyond its queue is refused, and
 the work that submitted it reports the refusal as its own failure. The one exception is work the
 node already accepted and keeps: the unfolding of a payload a quiesce buffer retained waits for a
 place instead, while its payload stays counted in the buffer. So does the unfolding of a poll a
@@ -81,15 +88,19 @@ Holding one of those ingestor loops pushes back into its transport, so a node wh
 extension workers stay full delays polls and lets those transports buffer or drop at their own
 bounds; see [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).
 
-Transient memory is 675 MiB per node, divided into ceilings that cannot borrow from each other:
-8 MiB for management, 24 MiB for commands and replication, 192 MiB each for relay work, active
-materialized snapshots and retained materialized-source reads, 32 MiB for
-bulk buffers, 16 MiB for the receive windows of bulk streams and 19 MiB for credential preparation. Each bulk
-stream a node opens, such as a resource, checkpoint or snapshot fetch, holds one 1 MiB receive
-window for as long as it is open, so sixteen bulk streams run at once and a seventeenth waits for
-a window within its own request deadline. One relay operation may hold at most 32 MiB of encoded
-body, 32 MiB of decoded data and 16 MiB of conversion scratch, and the relay budget is sized to hold
-two such operations at once so one blocked channel cannot exhaust the capacity another needs.
+Transient memory ceilings derive from the node's known memory. Management gets 1/128, commands
+and bulk each 1/32, relay 1/16, bulk receive windows 1/64, credentials 1/256, and restore metadata
+1/8. Active materialized reads and retained source reads each default to the resolved relay
+capacity. Minimum working sets, representation caps, explicit overrides and unknown-capacity
+defaults are listed in [Execution Capabilities](node-settings.md#execution-capabilities).
+The 1 GiB example totals 427 MiB of executor ceilings, plus 32 MiB each of producer and consumer
+node byte credit. The pools cannot borrow from one another.
+
+A relay operation defaults to one sixth of the relay pool each for encoded body and decoded data,
+and one twelfth for scratch, capped at 32, 32 and 16 MiB respectively. The validated pools hold two
+complete operations so a blocked channel leaves room for another. Bulk streams retain their own
+1 MiB default receive window, drawn from the dedicated bulk-window pool; the stream waits within
+its request deadline when that pool is full.
 An Iceberg commit charges the bulk budget for the staged batches it reads back, only when the
 budget has room for them now, so a commit whose staged batches exceed the budget reads them in
 groups, a single staged batch larger than the budget waits until the whole budget is free and is
@@ -106,10 +117,9 @@ there waits instead of failing. A grant reserves the largest decoded batch and t
 whatever the body's size, so the budget grants about three deliveries at once; a sender whose grant
 is refused for that room, and a sender whose own budget has no room to store the acknowledgements
 of the rows it sends, hold their delivery back and wait as well; see
-[Held Deliveries](./interconnect.md#held-deliveries). The budgets are fixed defaults and do not
-follow the node's own memory.
+[Held Deliveries](./interconnect.md#held-deliveries). The derived ceilings follow node memory; explicit settings retain the operator's exact bounds.
 Decoded materialized snapshots use the independent `state_read` pool; optional source retention
-uses `state_read_cache`. Each has the relay pool's capacity. Retaining a complete generation
+uses `state_read_cache`. Each defaults to the relay pool's capacity and has its own override. Retaining a complete generation
 transfers its admission to the cache before returning its active-read charges. A full cache
 leaves the current read uncached, without waiting for retention space. Both active and retained
 views leave live relay capacity available for evaluation, encoding and dispatch, and both pools
@@ -120,7 +130,7 @@ Consensus storage operations that need that working set queue at the store rathe
 budget, so the rest of it stays with command and replication traffic and with ingestor control calls
 while they wait; see
 [Storage Working Sets](./consensus-storage-and-replication.md#storage-working-sets).
-The Credentials memory class retains 19 MiB for password work and mounted NATS credentials files.
+The Credentials memory class retains at least 19 MiB by default for password work and mounted NATS credentials files.
 A password operation charges only the verifier's 64-byte output buffer; native PBKDF2 scratch is
 fixed stack state. The isolated Credentials CPU worker computes one password at a time, and a
 burst waits there without taking another class's budget. Files keep their exact-byte charge until
@@ -150,11 +160,12 @@ cannot hold it:
 
 - **Memory.** The node's memory limit is `--memory-limit` (`NERVIX_MEMORY_LIMIT`) when given, and
   otherwise the smallest memory limit of its control group and the groups above it, or its
-  physical memory when no group limit is smaller. It must hold every execution budget at once: the
-  675 MiB of transient budgets above and the 2 GiB grant for restore metadata, 2,787 MiB in all including the two 32 MiB database caches,
-  and a `--memory-high-watermark` when one is set. A container limited to 2 GiB therefore cannot
-  start a node. Size the limit above the budgets by the process memory a running graph holds, which
-  the memory-pressure watermarks govern.
+  physical memory when no group limit is smaller. It must hold all nine derived executor pools
+  and both node client-credit capacities once each, plus the configured node and consensus database
+  caches (32 MiB each by default). A 1 GiB node can start with the default
+  derivations; explicit oversized totals refuse startup. Leave headroom for graph state, engine
+  allocations and stacks. Omitted high and low memory-pressure watermarks derive as 7/8 and 3/4
+  of known memory, while an explicitly supplied pair keeps its exact thresholds.
 - **Volume.** The volume that holds the node's database directory must be at least as large as
   each of its quotas. The restore-staging quota, `--restore-staging-max-bytes`, follows the volume
   when it is not given: the node takes the smaller of 128 GiB and the volume's total size, and a

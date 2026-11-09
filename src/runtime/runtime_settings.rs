@@ -108,6 +108,7 @@ pub(crate) struct RuntimeEnvironment {
     pub(crate) executor: Executor,
     /// The resolved node-local request budget, shared with its transport.
     pub(crate) interconnect_request_timeout: Duration,
+    pub(crate) client_endpoints: super::ClientEndpointSettings,
     pub(crate) outward_tls: nervix_tls::OutwardTlsPolicy,
     /// The node's resolver, which connectors resolve host names through.
     pub(crate) dns: Option<DnsResolver>,
@@ -130,6 +131,7 @@ impl RuntimeEnvironment {
             executor,
             interconnect_request_timeout:
                 <nervix_interconnect::RequestTimeout as SettingDefinition>::default_value(&()),
+            client_endpoints: super::ClientEndpointSettings::default(),
             outward_tls: nervix_tls::OutwardTlsPolicy::default(),
             dns: None,
             db: None,
