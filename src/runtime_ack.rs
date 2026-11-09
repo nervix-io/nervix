@@ -45,6 +45,16 @@ pub enum AckProgress {
     Complete(AckOutcome),
 }
 
+/// What a wait bounded by how long a root may stay silent observed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AckWaitOutcome {
+    /// The root resolved while the wait watched it.
+    Resolved(AckOutcome),
+    /// The root reported no progress for `silence`, which ended the wait without resolving the
+    /// root.
+    TimedOut { silence: Duration },
+}
+
 #[derive(Debug)]
 pub struct AckCompletion {
     receiver: oneshot::Receiver<AckResolution>,
@@ -411,22 +421,17 @@ impl AckCompletion {
     /// Waits for the root's terminal outcome for as long as the root keeps reporting progress.
     ///
     /// Every progress report restarts `silence`, so this bounds how long the root may stay silent
-    /// rather than how long it may take. A root silent for longer ends the wait with a negative
-    /// outcome without resolving the root itself.
-    pub async fn wait_while_alive(&mut self, silence: Duration) -> AckOutcome {
+    /// rather than how long it may take. A root silent for longer ends the wait as
+    /// [`AckWaitOutcome::TimedOut`] with that bound, without resolving the root itself.
+    pub async fn wait_while_alive(&mut self, silence: Duration) -> AckWaitOutcome {
         loop {
             nervix_primitives::task::consume_budget().await;
             let progress =
                 nervix_primitives::time::timeout(silence, self.wait_for_progress()).await;
             match progress {
                 Ok(AckProgress::Alive) => {}
-                Ok(AckProgress::Complete(outcome)) => return outcome,
-                Err(_) => {
-                    return AckOutcome::NoAck(format!(
-                        "ack timeout elapsed after {}",
-                        humantime::format_duration(silence)
-                    ));
-                }
+                Ok(AckProgress::Complete(outcome)) => return AckWaitOutcome::Resolved(outcome),
+                Err(_) => return AckWaitOutcome::TimedOut { silence },
             }
         }
     }
@@ -981,7 +986,7 @@ mod tests {
 
     use nervix_primitives::{sync::Arc, time::timeout};
 
-    use super::{AckOutcome, AckProgress, AckRootTracker, AckSet};
+    use super::{AckOutcome, AckProgress, AckRootTracker, AckSet, AckWaitOutcome};
 
     const STOPPED_WAITING: &str = "node stopped while waiting for required materialized state";
 
@@ -1121,7 +1126,9 @@ mod tests {
 
         assert_eq!(
             outcome,
-            AckOutcome::NoAck("ack timeout elapsed after 10ms".to_string())
+            AckWaitOutcome::TimedOut {
+                silence: Duration::from_millis(10)
+            }
         );
         assert_eq!(tracker.outstanding(), 1);
         acks.ack_success();

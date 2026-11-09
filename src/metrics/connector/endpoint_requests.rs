@@ -338,17 +338,25 @@ mod tests {
             )
         };
         let lines = metrics.describe_ingestor_interactions(&unit(&http));
-        assert_eq!(lines.len(), 13, "seven read lines and six request lines");
+        assert_eq!(
+            lines.len(),
+            31,
+            "seven read lines, six request lines and eighteen acknowledgement and lifecycle lines"
+        );
         assert!(lines[7].starts_with(
             "nervix_ingestor_endpoint_requests_total{domain=\"endpoint_requests\",ingestor=\"\
              http_in\",physical_node_id=\"node-1\",instance=\"-\",connector=\"HTTP\",entity=\"\
              ENDPOINT\",outcome=\"accepted\"} total=2 "
         ));
         assert!(lines[8].contains("outcome=\"busy\"} total=1 "));
+        assert!(
+            lines[13].starts_with("nervix_ingestor_ack_outcomes_total{"),
+            "the request lines precede the acknowledgement and lifecycle lines"
+        );
         assert_eq!(
             metrics.describe_ingestor_interactions(&unit(&kafka)).len(),
-            7,
-            "an ingestor that reads no endpoint describes its read lines alone"
+            25,
+            "an ingestor that reads no endpoint describes no request lines"
         );
 
         metrics.remove_ingestor_metrics(&domain, &http, Some(&node));

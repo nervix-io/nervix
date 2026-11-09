@@ -30,7 +30,7 @@ pub(super) fn ProcessorStateEditor(
 ) -> impl IntoView {
     let draft = signals.processor(family);
     let pending = move || signals.progress.get().is_pending();
-    view! {
+    let section = view! {
         <section class="create-processor-state">
             <h3>"Ordered materialized dependencies"</h3>
             <p>"Available state binds immediately. REQUIRED SKIP drops a record when state is absent; REQUIRED WAIT holds it until state arrives. DEFAULT constructs a typed record."</p>
@@ -95,5 +95,9 @@ pub(super) fn ProcessorStateEditor(
                 </Show>
             </Show>
         </section>
-    }
+    };
+    // Erased at the section boundary: the processor editor composing this section then holds and
+    // names a boxed view, so neither its rendering frames nor the debug names of every form that
+    // embeds it repeat this section's complete nested view.
+    section.into_any()
 }

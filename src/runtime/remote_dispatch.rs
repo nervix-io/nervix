@@ -1783,7 +1783,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::runtime_ack::{AckCompletion, AckOutcome, AckSet};
+    use crate::runtime_ack::{AckCompletion, AckOutcome, AckSet, AckWaitOutcome};
 
     /// Scheduler-independent hang guard for event-driven unit-test observations.
     const ASYNC_EVENT_FAILSAFE: Duration = Duration::from_secs(30);
@@ -1933,7 +1933,7 @@ mod tests {
             completion
                 .wait_while_alive(Duration::from_millis(200))
                 .await,
-            AckOutcome::Ack
+            AckWaitOutcome::Resolved(AckOutcome::Ack)
         );
     }
 
@@ -2233,7 +2233,7 @@ mod tests {
             completion
                 .wait_while_alive(Duration::from_millis(200))
                 .await,
-            AckOutcome::Ack
+            AckWaitOutcome::Resolved(AckOutcome::Ack)
         );
         assert!(
             !runtime.inner.remote_dispatch.holds_ack(registration.ack_id),

@@ -29,6 +29,8 @@ mod endpoint_requests;
 pub(crate) use endpoint_requests::{EndpointIntakeOutcome, IngestorEndpointMetrics};
 mod ingestor;
 pub(crate) use ingestor::IngestorInteractionMetrics;
+mod ingestor_acknowledgements;
+pub(crate) use ingestor_acknowledgements::IngestorAcknowledgementMetrics;
 mod ingestor_reads;
 use ingestor_reads::IngestorReadFamilies;
 pub(crate) use ingestor_reads::IngestorReadMetrics;
@@ -39,6 +41,7 @@ pub(crate) use outcomes::{
     EmitterFinishOutcome, EmitterOpenOutcome, EmitterRejectionCode, EmitterRetryCause,
 };
 mod status;
+pub(crate) use status::TaskFailureBinding;
 
 #[cfg(test)]
 mod interaction_metrics;

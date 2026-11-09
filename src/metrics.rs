@@ -72,7 +72,7 @@ pub(crate) use connector::{
     EmitterAttemptOperation, EmitterAttemptOutcome, EmitterFinishOutcome,
     EmitterInteractionMetrics, EmitterOpenOutcome, EmitterRejectionCode, EmitterRetryCause,
     EmitterWork, EmitterWorkKind, EndpointIntakeOutcome, IngestorEndpointMetrics,
-    IngestorInteractionMetrics,
+    IngestorInteractionMetrics, TaskFailureBinding,
 };
 pub use interconnection::NodeObservations;
 use interconnection::{InterconnectionCollector, InterconnectionCollectorHandle};
