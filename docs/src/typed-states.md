@@ -359,8 +359,8 @@ that header state, and inferencer state bindings with their initial expressions.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
-Consensus's `raft_identity_credentials_` keyspaces and current `ClusterState`
-metadata encoding, 18, identify its stored shapes, including the partition count of every resolved branch
+Consensus's `raft_identity_inference_credential_` keyspaces and current `ClusterState`
+metadata encoding, 19, identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations. The runtime state store's
 `ranked-intake-unit-checkpoint-segments` format identifies the checkpoints it keeps, including the
@@ -716,6 +716,12 @@ independence explicitly. No fingerprint byte pattern means “missing” or “i
 fingerprint is accepted for its identity even if its bytes happen to be zero. Scheduling must
 publish the required fingerprint before schema-bound state can be loaded or replicated. Missing
 required identity is an error, not a default digest.
+
+Stateful inferencer placement also requires an `InferencerModelFingerprint` naming the resource,
+pinned version, file and complete ordered state declarations. Stateless inference has no such
+identity. The decision boundary computes it once; the runtime receives the typed value and never
+reads the inferencer Model to reconstruct it. Snapshot restoration accepts tensors only under that
+identity and the same branch incarnation, and validates their shapes before installation.
 
 The runtime Kafka offset key remains schema-independent. A backup archive also records the
 ingestor's scheduled fingerprint with those offsets, so restore applies them only to the same

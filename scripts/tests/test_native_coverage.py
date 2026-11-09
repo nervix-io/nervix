@@ -153,12 +153,17 @@ class InventoryTests(unittest.TestCase):
         self.assertIn("run: just test-coverage-run\n", job_section(workflow, "tests"))
         self.assertIn("cargo test --package nervix-client-ffi --test native_suites", justfile)
         conformance = job_section(workflow, "client-conformance")
+        self.assertIn("run: just test-client-conformance-run\n", conformance)
+        gate = justfile.split("\ntest-client-suites-api-run:\n", 1)[1].split("\n\n", 1)[0]
+        runner = justfile.split("\ntest-client-conformance-run ", 1)[1].split("\n\n", 1)[0]
+        self.assertLess(runner.index("test-client-suites-api-run"), runner.index("test-client-conformance-scenarios"))
         for host in ("c", "cpp"):
             producer = next(p for p in native_coverage.LOCAL_PRODUCERS
                             if p.name == f"test-client-{host}-api")
             self.assertEqual(producer.instrumented, producer.name)
             self.assertIn(f"\n{producer.name}:\n", justfile)
-            self.assertIn(f"just test-client-native-api-run {host}\n", conformance)
+            self.assertIn("    just cargo_target_dir={{ quote(cargo_target_dir) }} "
+                          f"test-client-native-api-run {host}", gate.splitlines())
 
     def test_a_check_composed_otherwise_than_its_producer_is_refused(self) -> None:
         producer = Producer("check", "ordinary", ("prepare",), "body", ("finish",))

@@ -149,6 +149,11 @@ authenticated command ownership, and transport security retain their own contrac
 establish the provenance of files they restore. No current BLAKE3 operation requires a
 security-digest migration under this trust model.
 
+The inferencer model identity in `src/registry/execution_revision.rs` uses the boundary's SHA-256
+over the resource, pinned version, file and ordered `STATE` declarations. This is a non-security
+cache and placement identity; it neither authenticates model contents nor authorizes a resource.
+The vocabulary carries only the resulting `InferencerModelFingerprint` bytes.
+
 The expression function `md5()` in `crates/nervix-vm/src/runtime.rs` is a non-security checksum
 over UTF-8 text. It establishes no authenticity, authorization or collision-resistance guarantee;
 expressions needing collision resistance use the boundary-backed `sha256()` function.

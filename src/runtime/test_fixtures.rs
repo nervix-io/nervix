@@ -495,6 +495,7 @@ pub(super) fn publish_state_identity(
         nervix_models::DomainNodeRef::node_in(domain.clone(), kind, identifier.into()),
         ScheduledStateAssignment {
             identity: super::ScheduledStateIdentity {
+                inferencer_model: None,
                 schema_fingerprint: SchemaFingerprint::from_digest([7; 32]),
                 wasm_state_generations,
             },

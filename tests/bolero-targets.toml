@@ -1138,7 +1138,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/backup__wire_properties__bolero_restore_installation_requests_round_trip/corpus"
-domain_version = 4
+domain_version = 5
 features = []
 id = "restore-installation-wire"
 invariant = "Every current restore installation action and success or refusal retains its complete value through its declared class's production wire codec, with every runtime state kind branched and unbranched, full-width lengths and arbitrary digests."
@@ -1558,7 +1558,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/__fuzz__/archive_count_tests__bolero_consensus_counts_round_trip/corpus"
-domain_version = 5
+domain_version = 6
 features = []
 id = "consensus-archived-counts"
 invariant = "Every native count in current consensus commands, outcomes, limits, progress, report headers and topology headers survives the production bounded storage codec with complete record equality."
@@ -2488,7 +2488,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__properties__bolero_consensus_state_records_recover_every_stored_value/corpus"
-domain_version = 51
+domain_version = 52
 features = []
 id = "consensus-state-records"
 invariant = "A generated replicated state holding records of every family, including unit-keyed schedules, stored by the consensus state writer into a real keyspace, and a second revision stored as the changes from it each recover with complete equality of every record, index and metadata field."
@@ -2503,7 +2503,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__properties__bolero_corrupt_consensus_state_records_fail_typed_or_recover_canonically/corpus"
-domain_version = 51
+domain_version = 52
 features = []
 id = "consensus-state-corruption"
 invariant = "Flipped, truncated, extended, rekeyed, copied, unknown and missing consensus state records free every decoding allocation and either fail recovery with the typed invalid-state failure or recover a state stored under its own canonical keys whose readers' invariants hold and which recovers again unchanged."
@@ -2518,7 +2518,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__raft_properties__bolero_consensus_raft_records_round_trip_through_the_storage_codec/corpus"
-domain_version = 50
+domain_version = 51
 features = []
 id = "consensus-raft-records"
 invariant = "Votes, log positions, log entries of every consensus command, current state metadata, snapshot manifests and sections restore with complete equality through the storage codec, and every log and section key names exactly the position or section it was built for."
@@ -2533,7 +2533,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__raft_properties__bolero_malformed_consensus_raft_records_fail_typed/corpus"
-domain_version = 37
+domain_version = 38
 features = []
 id = "consensus-raft-records-malformed"
 invariant = "Arbitrary bytes read as any Raft record, log key or section key free every decoding allocation and fail with the typed storage failure or name a value that stores back to the same record."
@@ -2668,7 +2668,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/state_store/__fuzz__/runtime__state_store__identity_properties__bolero_malformed_runtime_state_identity_records_fail_typed/corpus"
-domain_version = 6
+domain_version = 7
 features = []
 id = "runtime-state-identity-records-malformed"
 invariant = "Arbitrary bytes read as a handoff or forced-recovery record free every decoding allocation and fail with the store's typed decode failure or restore a record whose placements convert back and which stores back unchanged."
@@ -2698,7 +2698,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/state_store/__fuzz__/runtime__state_store__snapshot_properties__bolero_malformed_runtime_state_snapshots_fail_typed/corpus"
-domain_version = 7
+domain_version = 8
 features = []
 id = "runtime-state-snapshots-malformed"
 invariant = "Arbitrary bytes read as any snapshot payload free every decoding allocation and fail with that kind's typed decode failure or restore a value that stores back to the same payload."
@@ -4679,6 +4679,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "src/__fuzz__/inferencer_state_snapshot__tests__bolero_inferencer_snapshots_preserve_shapes_float_bits_and_lifetimes/corpus"
+domain_version = 1
+features = []
+id = "inferencer-state-snapshots"
+invariant = "The current frame preserves every shape, F32 bit (including signed zeros, infinities and NaN payloads), branch presence, incarnation and revision, fits its derived footprint and refuses an insufficient section."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-server"
+random_iterations = 128
+source = "src/inferencer_state_snapshot.rs"
+test = "inferencer_state_snapshot::tests::bolero_inferencer_snapshots_preserve_shapes_float_bits_and_lifetimes"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/models/src/password_credential/__fuzz__/password_credential__tests__bolero_password_credentials_preserve_the_complete_value/corpus"
 domain_version = 1
 features = []
@@ -4690,6 +4705,36 @@ package = "nervix-models"
 random_iterations = 256
 source = "crates/models/src/password_credential/tests.rs"
 test = "password_credential::tests::bolero_password_credentials_preserve_the_complete_value"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/__fuzz__/inferencer_state_snapshot__tests__bolero_malformed_inferencer_snapshots_fail_typed_or_reencode_complete_values/corpus"
+domain_version = 1
+features = []
+id = "inferencer-state-snapshots-malformed"
+invariant = "Bounded arbitrary and damaged current frames fail with a typed error or preserve complete values through canonical reencoding; footprint overflow refuses."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-server"
+random_iterations = 128
+source = "src/inferencer_state_snapshot.rs"
+test = "inferencer_state_snapshot::tests::bolero_malformed_inferencer_snapshots_fail_typed_or_reencode_complete_values"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/inferencer/stateful/__fuzz__/runtime__inferencer__stateful__tests__bolero_native_snapshot_projection_preserves_tensor_shapes_and_float_bits/corpus"
+domain_version = 1
+features = []
+id = "inferencer-native-snapshot-projection"
+invariant = "The native tensor restore and snapshot projection preserve exact shapes and every F32 bit, including signed zeros, infinities and NaN payloads, through the production owner."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-server"
+random_iterations = 128
+source = "src/runtime/inferencer/stateful/tests.rs"
+test = "runtime::inferencer::stateful::tests::bolero_native_snapshot_projection_preserves_tensor_shapes_and_float_bits"
 test_target = "lib"
 
 [[target]]
