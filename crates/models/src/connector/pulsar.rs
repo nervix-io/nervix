@@ -490,6 +490,7 @@ const PULSAR_TOPIC_METADATA: IngestorMetadataDeclaration = IngestorMetadataDecla
 
 impl IngestorDeclaration for PulsarTopicIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::PerPartition,
         // A Pulsar message carries its properties as a list, in the order the producer wrote them.
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
@@ -616,6 +617,7 @@ pub struct PulsarTopicEmitter {
 
 impl EmitterDeclaration for PulsarTopicEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         // The producer keeps a message's properties in a map: one value per name, the last written.
         headers: Some(HeaderModel::exact(HeaderLayout::LastWins)),
         reference: EmitterReferenceKind::Client(ConnectorKind::Pulsar),

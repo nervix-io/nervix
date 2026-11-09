@@ -114,6 +114,8 @@ impl FakeHost {
     }
 }
 
+impl nervix_connector::ConnectorEventProvider for FakeHost {}
+
 #[async_trait]
 impl IngestorHostServices for FakeHost {
     fn record_read(&self, outcome: nervix_connector::IngestorReadOutcome) {

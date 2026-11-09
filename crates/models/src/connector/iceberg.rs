@@ -494,6 +494,7 @@ const ICEBERG_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl EmitterDeclaration for IcebergTableEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         headers: None,
         reference: EmitterReferenceKind::StorageClient(&[
             ConnectorKind::S3,

@@ -168,7 +168,8 @@ def entity_rows(row, side, notes):
         headers = absent(notes, row, f"{side}_headers")
     rows = [("Reference", row["reference"]), ("Locator and validation rule", location),
             ("Modes (complete bodies after MODE)", "\n".join(row["modes"])),
-            ("Options in statement order", option_text(row["options"])), ("Headers", headers)]
+            ("Options in statement order", option_text(row["options"])), ("Headers", headers),
+            ("Connector events", ", ".join(f"`{event}`" for event in row["events"]) or "None declared.")]
     if side == "ingest":
         rows.extend([
             ("Instancing", row["instancing"]),

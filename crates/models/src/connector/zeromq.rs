@@ -111,6 +111,7 @@ const ZEROMQ_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl IngestorDeclaration for ZeroMqPullIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::Single,
         headers: None,
         metadata: IngestorMetadataDeclaration::NONE,
@@ -223,6 +224,7 @@ pub struct ZeroMqPushEmitter {
 
 impl EmitterDeclaration for ZeroMqPushEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::ZeroMq),
         body: EmitterBodyForm::Codec,

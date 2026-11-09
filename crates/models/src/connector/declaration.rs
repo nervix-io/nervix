@@ -24,6 +24,9 @@ use std::fmt::{Display, Formatter};
 
 use strum::EnumIter;
 
+mod events;
+pub use events::{ConnectorEvent, DeclaredEvents};
+
 use crate::{
     ConnectorKind, DeadlineKey, DeclaredBounds, EmitterPublishingModeKind, IngestDeliveryKind,
     ParseAsType,
@@ -486,6 +489,8 @@ impl Display for PropertyType {
 /// One thing a statement can make an entity do at run time, which a scenario observes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuntimeCapability {
+    /// An entity counting one declared transport observation.
+    Event(ConnectorEvent),
     /// An ingestor delivering in one declared mode.
     Delivery(IngestDeliveryKind),
     /// An emitter publishing in one declared mode.
@@ -553,6 +558,7 @@ impl RuntimeCapability {
 impl Display for RuntimeCapability {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Event(event) => write!(f, "EVENT {event}"),
             Self::Delivery(kind) => write!(f, "MODE {}", kind.phrase()),
             Self::Publishing(kind) => write!(f, "MODE {}", kind.label()),
             Self::Option { keywords } => f.write_str(keywords),

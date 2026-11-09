@@ -45,6 +45,7 @@
 mod client_config;
 mod client_deadline;
 mod confirmation_window;
+mod connector_events;
 mod http_client;
 mod ingest_metadata;
 // Reached through its own path rather than re-exported here, so the owner the clock-boundary check
@@ -66,6 +67,9 @@ pub use client_config::{
 pub use client_deadline::{ConfiguredDeadline, DeadlineElapsed};
 pub use confirmation_window::{
     BrokerAnswer, BrokerVerdict, ConfirmationWindow, ConfirmationWindowError,
+};
+pub use connector_events::{
+    ConnectorEventCounter, ConnectorEventProvider, UndeclaredConnectorEvent,
 };
 pub use emitter::{
     AckConfirmation, BrokerPublishingMode, EmitterBoundedExecution, EmitterCommitReport,

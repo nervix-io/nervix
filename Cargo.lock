@@ -7508,6 +7508,7 @@ dependencies = [
  "futures-util",
  "meticulous",
  "nervix-connector",
+ "nervix-connector-fake",
  "nervix-dns",
  "nervix-model-harness",
  "nervix-models",

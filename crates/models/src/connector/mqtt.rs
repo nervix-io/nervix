@@ -415,6 +415,7 @@ const MQTT_TOPIC_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclara
 
 impl IngestorDeclaration for MqttTopicIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::PerPartition,
         // MQTT 5 user properties: a broker keeps their order and repeats from the publisher, and
         // their names compare exactly.
@@ -724,6 +725,7 @@ pub struct MqttTopicEmitter {
 
 impl EmitterDeclaration for MqttTopicEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         reference: EmitterReferenceKind::Client(ConnectorKind::Mqtt),
         body: EmitterBodyForm::Codec,

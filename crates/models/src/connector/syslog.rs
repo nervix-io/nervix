@@ -292,6 +292,7 @@ const SYSLOG_LISTENER_METADATA: IngestorMetadataDeclaration = IngestorMetadataDe
 
 impl IngestorDeclaration for SyslogListenerIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::Single,
         headers: None,
         metadata: SYSLOG_LISTENER_METADATA,
@@ -413,6 +414,7 @@ pub struct SyslogCollectorEmitter {
 
 impl EmitterDeclaration for SyslogCollectorEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::Syslog),
         body: EmitterBodyForm::Codec,
