@@ -179,6 +179,7 @@ mod join_supervision;
 mod leader_redirect;
 mod model_mutation;
 mod model_validation;
+mod node_capabilities;
 mod node_identity;
 mod node_initialization;
 mod node_settings;
@@ -428,6 +429,7 @@ impl Application {
         let shutdown_coordinator = self.shutdown.clone();
         let shutdown = shutdown_coordinator.drain_support_token();
         let fault_injection = self.fault_injection.clone();
+        let outward_tls = nervix_tls::OutwardTlsPolicy::default();
         let grpc_tls_server_config = match &self.identity.grpc_transport {
             GrpcTransport::Http => None,
             GrpcTransport::Https {
@@ -435,16 +437,18 @@ impl Application {
                 private_key,
                 ..
             } => {
-                let config = match load_grpc_tls_server_config(certificate, private_key).await {
-                    Ok(config) => config,
-                    Err(error) => {
-                        error!(
-                            error = format!("{error:#}"),
-                            "failed to build grpc tls server config"
-                        );
-                        return Err(error);
-                    }
-                };
+                let config =
+                    match load_grpc_tls_server_config(certificate, private_key, &outward_tls).await
+                    {
+                        Ok(config) => config,
+                        Err(error) => {
+                            error!(
+                                error = format!("{error:#}"),
+                                "failed to build grpc tls server config"
+                            );
+                            return Err(error);
+                        }
+                    };
                 Some(config)
             }
         };
@@ -456,13 +460,14 @@ impl Application {
                 let Some(_) = web_console_https_listen_addr else {
                     return Err(Report::new(AppError::MissingWebConsoleHttpsListenAddress));
                 };
-                let config = match load_web_console_tls_server_config(cert_path, key_path) {
-                    Ok(config) => config,
-                    Err(error) => {
-                        error!(?error, "failed to build web console tls server config");
-                        return Err(error);
-                    }
-                };
+                let config =
+                    match load_web_console_tls_server_config(cert_path, key_path, &outward_tls) {
+                        Ok(config) => config,
+                        Err(error) => {
+                            error!(?error, "failed to build web console tls server config");
+                            return Err(error);
+                        }
+                    };
                 Some(config)
             }
             (Some(_), None) => {
@@ -492,6 +497,7 @@ impl Application {
             executor,
             dns,
             memory,
+            capabilities,
             restore_staging_max_bytes,
             database_volume,
         } = match preflight {
@@ -593,6 +599,7 @@ impl Application {
             let mapping_input = Runtime::with_environment(
                 RuntimeEnvironment {
                     executor,
+                    outward_tls: outward_tls.clone(),
                     dns: Some(dns.clone()),
                     db: Some(db.clone()),
                     restore_staging_max_bytes,
@@ -663,7 +670,10 @@ impl Application {
                 join_terms: settings.join_terms(),
             },
             interconnect_tls,
-            Default::default(),
+            nervix_interconnect::TransportOptions {
+                peer_receive: Some(settings.peer_receive),
+                ..Default::default()
+            },
             startup.runtime.executor().clone(),
             PeerResolver::new(dns),
         )
@@ -852,7 +862,9 @@ impl Application {
         let interconnect =
             interconnect.verified("startup assigns this handle before it reaches this point");
         let mut interconnect_rx = interconnect_rx;
-        let runtime_admission = Arc::new(runtime_admission::RuntimeAdmission::new());
+        let runtime_admission = Arc::new(runtime_admission::RuntimeAdmission::new(
+            cluster.local_node_identity().await,
+        ));
         runtime.attach_remote_dispatcher(cluster.clone(), interconnect.clone());
         let node_observations = NodeObservations::new(
             runtime.executor().clone(),
@@ -864,6 +876,13 @@ impl Application {
             .metrics()
             .install_node_observations(node_observations.clone());
         let mut background_tasks = Vec::new();
+        background_tasks.push(node_capabilities::spawn(
+            consensus.proposer(),
+            cluster.clone(),
+            interconnect.clone(),
+            capabilities,
+            shutdown.clone(),
+        ));
         let scheduler_delay_shutdown = shutdown.clone();
         background_tasks.push(nervix_primitives::task::spawn(async move {
             node_observations
@@ -1008,8 +1027,12 @@ impl Application {
                 }
             }
         }));
-        let certificates =
-            HttpsListenerCertificates::new(&resource_store, &fault_injection, &cluster);
+        let certificates = HttpsListenerCertificates::new(
+            &resource_store,
+            &fault_injection,
+            &cluster,
+            outward_tls.clone(),
+        );
         certificates
             .register_installation_handler(&interconnect)
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
@@ -1464,8 +1487,10 @@ impl Application {
                             .filter(|node| {
                                 topology.voters().contains(node)
                                     && !topology.cordoned().contains(node)
+                                    && topology.capabilities().get(node).is_some_and(|record| live_node_incarnations.get(node) == Some(&record.identity.incarnation()))
                             })
                             .collect::<Vec<_>>();
+                        let scheduling_capabilities = topology.capabilities().iter().filter(|(node, record)| live_node_incarnations.get(*node) == Some(&record.identity.incarnation())).map(|(node, record)| (node.clone(), record.capabilities)).collect::<BTreeMap<_, _>>();
                         let current_schedule = &automatic_schedule_input.runtime_state().schedule;
                         let live_voter_set = live_voters.iter().cloned().collect::<BTreeSet<_>>();
                         let schedulable_node_set = schedulable_node_ids
@@ -1583,13 +1608,13 @@ impl Application {
                                     &schedulable_node_ids,
                                     usize::try_from(automatic_schedule_input.runtime_state().parameters.verified("scheduling starts after parameter seeding").values.replica_count()).assured("the committed replica count fits a supported target"),
                                     scheduler_mode,
-                                );
+                                 &scheduling_capabilities,);
                                 #[cfg(not(feature = "testing"))]
                                 let mut schedule = graph.schedule_for_domain(
                                     &domain,
                                     &schedulable_node_ids,
                                     usize::try_from(automatic_schedule_input.runtime_state().parameters.verified("scheduling starts after parameter seeding").values.replica_count()).assured("the committed replica count fits a supported target"),
-                                );
+                                 &scheduling_capabilities,);
                                 let current_domain = current_schedule.domain(&domain);
                                 let mut failover_existing = current_domain.cloned();
                                 if let Some(existing) = &mut failover_existing {

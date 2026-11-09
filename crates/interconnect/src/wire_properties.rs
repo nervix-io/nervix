@@ -72,10 +72,13 @@ async fn nested_request_bulk_admission_refuses_a_queued_charge_without_waiting()
     let waiting = executor.reserve(MemoryClass::Bulk, 8192);
     let mut waiting = std::pin::pin!(waiting);
     assert!(waiting.as_mut().now_or_never().is_none());
-    let request = crate::request::RequestEnvelope {
-        class: PoolClass::Bulk,
-        request: "test_snapshot".to_owned(),
-        payload: vec![7; 4096],
+    let request = crate::request::StreamRequestEnvelope {
+        receive: crate::PeerReceiveSettings::default().bounds(),
+        request: crate::request::RequestEnvelope {
+            class: PoolClass::Bulk,
+            request: "test_snapshot".to_owned(),
+            payload: vec![7; 4096],
+        },
     };
     let result = super::encode_stream_request(&executor, request, payload_charge).now_or_never();
     assert!(
@@ -105,12 +108,18 @@ fn bolero_bulk_request_envelopes_preserve_payload_and_release_charges() {
         .with_max_len(4096)
         .for_each(|input| {
             let executor = Executor::default();
-            let request = crate::request::RequestEnvelope {
-                class: PoolClass::Bulk,
-                request: "snapshot".to_owned(),
-                payload: input.to_vec(),
+            let request = crate::request::StreamRequestEnvelope {
+                receive: Arbitrary::new(input, Domain::Vocabulary)
+                    .node_capability_record()
+                    .capabilities
+                    .receive,
+                request: crate::request::RequestEnvelope {
+                    class: PoolClass::Bulk,
+                    request: "snapshot".to_owned(),
+                    payload: input.to_vec(),
+                },
             };
-            let payload_bytes = u64::try_from(request.payload.len())
+            let payload_bytes = u64::try_from(request.request.payload.len())
                 .assured("the bounded property input fits the byte budget");
             let charge = executor
                 .try_reserve(MemoryClass::Bulk, payload_bytes)
@@ -124,7 +133,7 @@ fn bolero_bulk_request_envelopes_preserve_payload_and_release_charges() {
                     u64::try_from(encoded.len()).assured("the bounded envelope length fits"),
                     "encoding returns the input charge before the request opens a stream"
                 );
-                let (decoded, charge) = decode_rkyv::<crate::request::RequestEnvelope>(
+                let (decoded, charge) = decode_rkyv::<crate::request::StreamRequestEnvelope>(
                     &executor,
                     MemoryClass::Bulk,
                     CpuClass::Bulk,
@@ -232,9 +241,17 @@ impl ExactValue {
 
 /// Asserts that `actual` is `expected` field by field, the branch key by its exact values.
 fn assert_same_metadata(actual: &RelayMetadata, expected: &RelayMetadata) {
+    assert_eq!(
+        actual.decoded_bytes, expected.decoded_bytes,
+        "the decoded byte measure is kept"
+    );
     assert_eq!(actual.kind, expected.kind, "the payload role is kept");
     assert_eq!(actual.domain, expected.domain, "the domain is kept");
     assert_eq!(actual.relay, expected.relay, "the relay is kept");
+    assert_eq!(
+        actual.unit, expected.unit,
+        "the concrete relay unit is kept"
+    );
     assert_eq!(
         ExactValue::key(&actual.key),
         ExactValue::key(&expected.key),
@@ -287,7 +304,7 @@ impl WireCase {
         // most 64 bytes, and a choice read after they run out takes its first option, which would
         // leave nearly every case with the first disposition, status and outcome and no branch
         // key.
-        let disposition_choice = arbitrary.entropy().byte() % 7;
+        let disposition_choice = arbitrary.entropy().byte() % 8;
         let refusal_choice = arbitrary.entropy().byte();
         let status_choice = arbitrary.entropy().byte() % 8;
         let outcome_choice = arbitrary.entropy().byte() % 4;
@@ -324,6 +341,7 @@ impl WireCase {
             body.push(arbitrary.entropy().byte());
         }
         let payload = RelayPayload {
+            decoded_bytes: arbitrary.entropy().any_u64(),
             delivery: delivery(arbitrary.entropy()),
             kind,
             domain: arbitrary.rule_name::<DomainName>(),
@@ -347,6 +365,9 @@ impl WireCase {
             3 => RelayGrantDisposition::Rejected(reason.clone()),
             4 => RelayGrantDisposition::Cancelled,
             5 => RelayGrantDisposition::Retired,
+            6 => RelayGrantDisposition::Resize(
+                arbitrary.node_capability_record().capabilities.receive,
+            ),
             _ => RelayGrantDisposition::Refused(refusal(refusal_choice)),
         };
         let status = match status_choice {
@@ -819,6 +840,7 @@ fn a_grant_request_refused_for_a_registrar_frees_the_registrations_read_before_i
         },
         body_bytes: 0,
         metadata: RelayMetadata {
+            decoded_bytes: 0,
             kind: RelayPayloadKind::Routed,
             domain: DomainName::parse("orders").assured("a literal domain name"),
             relay: RelayName::parse("accepted").assured("a literal relay name"),

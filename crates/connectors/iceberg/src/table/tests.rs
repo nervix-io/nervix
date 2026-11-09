@@ -144,7 +144,7 @@ fn a_client_tls_file_that_cannot_be_read_stops_the_emitter_naming_its_client() {
         IcebergClientTlsError::ObjectStore,
     ] {
         let refusal = client
-            .client_config(&config)
+            .client_config(&config, &Default::default())
             .expect_err("an unreadable CA file cannot configure a client");
         assert!(matches!(
             refusal.current_context(),
@@ -161,7 +161,7 @@ fn a_client_tls_file_that_cannot_be_read_stops_the_emitter_naming_its_client() {
         ));
     }
     IcebergClientTlsError::Catalog
-        .client_config(&[])
+        .client_config(&[], &Default::default())
         .assured("a client without TLS files trusts the bundled and platform roots");
 }
 
@@ -331,7 +331,7 @@ async fn iceberg_catalog_authentication_uses_the_node_dns_client() {
         },
     ];
     let tls = IcebergClientTlsError::Catalog
-        .client_config(&catalog_config)
+        .client_config(&catalog_config, &Default::default())
         .assured("a catalog client without TLS files trusts the default roots");
     let storage_root = Url::parse("s3://bucket/table").assured("the fixture storage root is a URL");
     let storage =

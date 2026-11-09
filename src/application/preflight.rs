@@ -113,6 +113,7 @@ pub(in crate::application) struct PreflightOutcome {
     pub(in crate::application) executor: Executor,
     pub(in crate::application) dns: DnsResolver,
     pub(in crate::application) memory: NodeMemory,
+    pub(in crate::application) capabilities: nervix_models::NodeCapabilities,
     /// The restore staging the node's state store may hold, resolved against the database volume.
     pub(in crate::application) restore_staging_max_bytes: ByteUnit,
     pub(in crate::application) database_volume: ByteUnit,
@@ -143,8 +144,21 @@ impl Preflight<'_> {
             .total()
             .ok_or_else(|| Report::new(PreflightError::UnaddressableBudgets))?;
 
-        let detected = run_filesystem_work(&executor, DetectedMemory::detect).await?;
+        let (detected, detected_cpu) = run_filesystem_work(&executor, || {
+            (
+                DetectedMemory::detect(),
+                crate::capacity::CpuCount::detect(),
+            )
+        })
+        .await?;
         let memory = self.settings.capacity.effective_memory_limit(detected);
+        let capabilities = nervix_models::NodeCapabilities {
+            cpu_count: self.settings.capacity.effective_cpu_count(detected_cpu),
+            memory_bytes: memory
+                .limit()
+                .and_then(|limit| std::num::NonZeroU64::new(limit.as_u64())),
+            receive: self.settings.peer_receive.bounds(),
+        };
         if let Some(limit) = memory.limit() {
             if limit < budgets {
                 return Err(Report::new(PreflightError::MemoryBelowBudgets {
@@ -189,6 +203,7 @@ impl Preflight<'_> {
             .change_context(PreflightError::Resolver)?;
 
         info!(
+            capabilities = ?capabilities,
             memory = %memory,
             memory_budgets = %budgets,
             database_volume = %database.capacity,
@@ -200,6 +215,7 @@ impl Preflight<'_> {
             executor,
             dns,
             memory,
+            capabilities,
             restore_staging_max_bytes,
             database_volume: database.capacity,
         })

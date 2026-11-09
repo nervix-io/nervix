@@ -12,15 +12,16 @@
     nervix::layer(decisions, reason = "owns the decisions boundary declared above")
 )]
 
-use std::cmp::Reverse;
+use std::{cmp::Reverse, collections::BTreeMap};
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use meticulous::OptionExt;
 use nervix_models::{
-    ClusterNodeName, DomainName, DomainSchedule, Model, NodeRef, NodeUnitRef,
+    ClusterNodeName, DomainName, DomainSchedule, Model, NodeCapabilities, NodeRef, NodeUnitRef,
     PlacementGroupSchedule, PlacementPolicy, ScheduledNode, ScheduledNodes, SchemaFingerprint,
     Unit,
 };
+use num_rational::Ratio;
 use petgraph::{Direction, graph::DiGraph, prelude::NodeIndex, visit::EdgeRef};
 use sorted_vec::SortedSet;
 
@@ -57,8 +58,8 @@ pub enum SchedulerMode {
 struct AssignmentCandidate {
     placement_order: isize,
     preferred_order: usize,
-    unit_primaries: Reverse<usize>,
-    load: Reverse<usize>,
+    unit_primaries: Reverse<Ratio<u128>>,
+    load: Reverse<Ratio<u128>>,
     round_robin_distance: Reverse<usize>,
     node_id: ClusterNodeName,
 }
@@ -151,6 +152,7 @@ fn partition_locality_affinity(
 }
 
 struct AssignmentPlanner<'a> {
+    capacities: &'a super::node_capacity::CapacityWeights,
     graph: &'a DiGraph<ActiveNode, EdgeKind>,
     cluster_nodes: &'a [ClusterNodeName],
     assigned_by_key: &'a HashMap<NodeRef, Vec<ClusterNodeName>>,
@@ -264,8 +266,14 @@ impl AssignmentPlanner<'_> {
             .map(|(position, node_id)| AssignmentCandidate {
                 placement_order: placement_order.get(node_id).copied().unwrap_or(0),
                 preferred_order: preferred_order.get(node_id).copied().unwrap_or(0),
-                unit_primaries: Reverse(self.unit_primaries.get(node_id).copied().unwrap_or(0)),
-                load: Reverse(self.node_load.get(node_id).copied().unwrap_or(0)),
+                unit_primaries: Reverse(self.capacities.load(
+                    node_id,
+                    self.unit_primaries.get(node_id).copied().unwrap_or(0),
+                )),
+                load: Reverse(
+                    self.capacities
+                        .load(node_id, self.node_load.get(node_id).copied().unwrap_or(0)),
+                ),
                 round_robin_distance: Reverse(
                     (position + self.cluster_nodes.len()
                         - (*self.next_assignment % self.cluster_nodes.len()))
@@ -496,6 +504,7 @@ impl ActiveGraph {
         domain: &DomainName,
         cluster_nodes: &[ClusterNodeName],
         replica_count: usize,
+        capabilities: &BTreeMap<ClusterNodeName, NodeCapabilities>,
     ) -> DomainSchedule {
         #[cfg(feature = "testing")]
         {
@@ -504,11 +513,12 @@ impl ActiveGraph {
                 cluster_nodes,
                 replica_count,
                 SchedulerMode::Sticky,
+                capabilities,
             )
         }
         #[cfg(not(feature = "testing"))]
         {
-            self.schedule_for_domain_inner(domain, cluster_nodes, replica_count)
+            self.schedule_for_domain_inner(domain, cluster_nodes, replica_count, capabilities)
         }
     }
 
@@ -519,8 +529,15 @@ impl ActiveGraph {
         cluster_nodes: &[ClusterNodeName],
         replica_count: usize,
         scheduler_mode: SchedulerMode,
+        capabilities: &BTreeMap<ClusterNodeName, NodeCapabilities>,
     ) -> DomainSchedule {
-        self.schedule_for_domain_inner(domain, cluster_nodes, replica_count, scheduler_mode)
+        self.schedule_for_domain_inner(
+            domain,
+            cluster_nodes,
+            replica_count,
+            scheduler_mode,
+            capabilities,
+        )
     }
 
     fn schedule_for_domain_inner(
@@ -529,8 +546,17 @@ impl ActiveGraph {
         cluster_nodes: &[ClusterNodeName],
         replica_count: usize,
         #[cfg(feature = "testing")] scheduler_mode: SchedulerMode,
+        capabilities: &BTreeMap<ClusterNodeName, NodeCapabilities>,
     ) -> DomainSchedule {
-        let cluster_nodes = SortedSet::from_unsorted(cluster_nodes.to_vec()).into_vec();
+        let cluster_nodes = SortedSet::from_unsorted(
+            cluster_nodes
+                .iter()
+                .filter(|node| capabilities.contains_key(*node))
+                .cloned()
+                .collect(),
+        )
+        .into_vec();
+        let capacities = super::node_capacity::CapacityWeights::new(&cluster_nodes, capabilities);
         let placement = self.placement.effective();
         let unit_groups = super::unit_placement::UnitPlacementGroups::decide(self, &placement);
         let assignment_slots = replica_count
@@ -602,6 +628,7 @@ impl ActiveGraph {
                     cached
                 } else {
                     let mut planner = AssignmentPlanner {
+                        capacities: &capacities,
                         graph: &self.graph,
                         cluster_nodes: &cluster_nodes,
                         assigned_by_key: &assigned_by_key,
@@ -748,9 +775,72 @@ impl ActiveGraph {
     }
 }
 
+/// Uniform current claims for decision fixtures that do not exercise hardware weighting.
+#[cfg(test)]
+pub(crate) fn uniform_capabilities(
+    nodes: &[ClusterNodeName],
+) -> BTreeMap<ClusterNodeName, NodeCapabilities> {
+    let capabilities = NodeCapabilities {
+        cpu_count: Some(std::num::NonZeroU64::MIN),
+        memory_bytes: Some(std::num::NonZeroU64::MIN),
+        receive: nervix_interconnect::PeerReceiveSettings::default().bounds(),
+    };
+    nodes
+        .iter()
+        .map(|node| (node.clone(), capabilities))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
+
+    #[test]
+    fn committed_capacity_weights_partition_owners_and_repeats_the_same_assignment() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry opens");
+        let domain = DomainName::parse("default").expect("domain name");
+        registry
+            .apply_batch(
+                &domain,
+                partitioned_relay_models("tenant_events", 32, false),
+            )
+            .expect("partitioned graph");
+        let graph = registry.active_graph(&domain).expect("active graph");
+        let nodes = three_nodes();
+        let mut capabilities = uniform_capabilities(&nodes);
+        let large = capabilities.get_mut(&nodes[1]).expect("middle node claim");
+        large.cpu_count = std::num::NonZeroU64::new(2);
+        large.memory_bytes = std::num::NonZeroU64::new(2);
+        let schedule = graph.schedule_for_domain(&domain, &nodes, 0, &capabilities);
+        let relay = scheduled_node(&schedule, ModelKind::Relay, "tenant_events");
+        let counts = nodes
+            .iter()
+            .map(|node| {
+                relay
+                    .units
+                    .values()
+                    .filter(|unit| unit.primary_node.as_ref() == Some(node))
+                    .count()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(counts, vec![8, 16, 8]);
+        assert_eq!(
+            schedule,
+            graph.schedule_for_domain(&domain, &nodes, 0, &capabilities)
+        );
+        capabilities.remove(&nodes[2]);
+        let restricted = graph.schedule_for_domain(&domain, &nodes, 0, &capabilities);
+        assert!(
+            scheduled_node(&restricted, ModelKind::Relay, "tenant_events")
+                .units
+                .values()
+                .all(|unit| !unit.assigned_nodes.contains(&nodes[2]))
+        );
+        drop(graph);
+        drop(registry);
+        std::fs::remove_dir_all(path).expect("closed registry directory");
+    }
 
     #[cfg(feature = "testing")]
     use nervix_models::ModelName;
@@ -803,6 +893,11 @@ mod tests {
             ],
             0,
             SchedulerMode::Random,
+            &crate::registry::uniform_capabilities(&[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+                ClusterNodeName::parse("node-3").expect("valid name"),
+            ]),
         );
 
         let owner = scheduled_node(&schedule, ModelKind::Ingestor, "ing")
@@ -860,6 +955,10 @@ mod tests {
                 ClusterNodeName::parse("node-2").expect("valid name"),
             ],
             0,
+            &crate::registry::uniform_capabilities(&[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+            ]),
         );
 
         let intake = scheduled_node(&schedule, ModelKind::Ingestor, "ing")
@@ -934,6 +1033,10 @@ mod tests {
                 ClusterNodeName::parse("node-2").expect("valid name"),
             ],
             0,
+            &crate::registry::uniform_capabilities(&[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+            ]),
         );
 
         assert_eq!(
@@ -1041,7 +1144,12 @@ mod tests {
         let graph = registry
             .active_graph(&domain)
             .assured("the batch installed the graph");
-        let schedule = graph.schedule_for_domain(&domain, &three_nodes(), 1);
+        let schedule = graph.schedule_for_domain(
+            &domain,
+            &three_nodes(),
+            1,
+            &crate::registry::uniform_capabilities(&three_nodes()),
+        );
         let upstream = scheduled_node(&schedule, ModelKind::Relay, "events");
         let processor = scheduled_node(&schedule, ModelKind::Junction, "route");
         assert_eq!(processor.units.len(), 4);
@@ -1071,7 +1179,12 @@ mod tests {
             .expect("graph should be installed");
         let nodes = three_nodes();
 
-        let schedule = graph.schedule_for_domain(&domain, &nodes, 0);
+        let schedule = graph.schedule_for_domain(
+            &domain,
+            &nodes,
+            0,
+            &crate::registry::uniform_capabilities(&nodes),
+        );
 
         let relay = scheduled_node(&schedule, ModelKind::Relay, "tenant_events");
         let units = relay.units.keys().copied().collect::<Vec<_>>();
@@ -1110,7 +1223,12 @@ mod tests {
         assert_eq!(relay.execution_node(), None);
         assert_eq!(relay.execution_nodes().len(), 3);
 
-        let again = graph.schedule_for_domain(&domain, &nodes, 0);
+        let again = graph.schedule_for_domain(
+            &domain,
+            &nodes,
+            0,
+            &crate::registry::uniform_capabilities(&nodes),
+        );
         assert_eq!(again, schedule, "the same inputs place the same partitions");
 
         let _ = fs::remove_dir_all(path);
@@ -1128,7 +1246,12 @@ mod tests {
             .active_graph(&domain)
             .expect("graph should be installed");
 
-        let schedule = graph.schedule_for_domain(&domain, &three_nodes(), 1);
+        let schedule = graph.schedule_for_domain(
+            &domain,
+            &three_nodes(),
+            1,
+            &crate::registry::uniform_capabilities(&three_nodes()),
+        );
 
         let relay = scheduled_node(&schedule, ModelKind::Relay, "tenant_state");
         assert_eq!(relay.units.len(), 2);
@@ -1177,6 +1300,10 @@ mod tests {
                 ClusterNodeName::parse("node-2").expect("valid name"),
             ],
             0,
+            &crate::registry::uniform_capabilities(&[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+            ]),
         );
 
         assert_eq!(
@@ -1216,6 +1343,11 @@ mod tests {
                 ClusterNodeName::parse("node-3").expect("valid name"),
             ],
             0,
+            &crate::registry::uniform_capabilities(&[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+                ClusterNodeName::parse("node-3").expect("valid name"),
+            ]),
         );
 
         let ingestor_node = scheduled_node(&schedule, ModelKind::Ingestor, "ing")
@@ -1300,8 +1432,13 @@ mod tests {
             named::<ClusterNodeName>("node-2"),
             named::<ClusterNodeName>("node-3"),
         ];
-        let expected =
-            graph.schedule_for_domain_with_mode(&domain, &cluster_nodes, 0, SchedulerMode::Random);
+        let expected = graph.schedule_for_domain_with_mode(
+            &domain,
+            &cluster_nodes,
+            0,
+            SchedulerMode::Random,
+            &crate::registry::uniform_capabilities(&cluster_nodes),
+        );
         for _ in 0..32 {
             assert_eq!(
                 graph.schedule_for_domain_with_mode(
@@ -1309,6 +1446,7 @@ mod tests {
                     &cluster_nodes,
                     0,
                     SchedulerMode::Random,
+                    &crate::registry::uniform_capabilities(&cluster_nodes),
                 ),
                 expected,
                 "periodic reconciliation must not move an unchanged random schedule"
@@ -1353,7 +1491,12 @@ mod tests {
             named::<ClusterNodeName>("node-2"),
             named::<ClusterNodeName>("node-3"),
         ];
-        let schedule = graph.schedule_for_domain(&domain, &cluster_nodes, 0);
+        let schedule = graph.schedule_for_domain(
+            &domain,
+            &cluster_nodes,
+            0,
+            &crate::registry::uniform_capabilities(&cluster_nodes),
+        );
         let ingestor = scheduled_node(&schedule, ModelKind::Ingestor, "ing");
         assert_eq!(ingestor.single_unit().assigned_nodes, cluster_nodes);
         assert_eq!(ingestor.execution_node(), None);
@@ -1389,6 +1532,7 @@ mod tests {
                 &cluster_nodes,
                 0,
                 SchedulerMode::Random,
+                &crate::registry::uniform_capabilities(&cluster_nodes),
             );
             let ingestor =
                 scheduled_node(&schedule, ModelKind::Ingestor, "ing").assigned_single_node();
@@ -1460,6 +1604,10 @@ mod tests {
                 ClusterNodeName::parse("node-2").expect("valid name"),
             ],
             0,
+            &crate::registry::uniform_capabilities(&[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+            ]),
         );
 
         assert_eq!(
@@ -1550,6 +1698,11 @@ mod tests {
                 ClusterNodeName::parse("node-3").expect("valid name"),
             ],
             0,
+            &crate::registry::uniform_capabilities(&[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+                ClusterNodeName::parse("node-3").expect("valid name"),
+            ]),
         );
 
         assert_eq!(
@@ -1565,7 +1718,12 @@ mod tests {
 
         let live_nodes = [named("node-1"), named("node-2"), named("node-3")];
         for eligible in [Vec::new(), vec![named("node-2")]] {
-            let mut schedule = graph.schedule_for_domain(&domain, &eligible, 0);
+            let mut schedule = graph.schedule_for_domain(
+                &domain,
+                &eligible,
+                0,
+                &crate::registry::uniform_capabilities(&eligible),
+            );
             super::assign_server_listener_nodes(&mut schedule, &live_nodes);
             let listener = scheduled_node(&schedule, ModelKind::Ingestor, "http_ing");
             assert_eq!(listener.single_unit().assigned_nodes, live_nodes);
@@ -1647,6 +1805,11 @@ mod tests {
                 ClusterNodeName::parse("node-3").expect("valid name"),
             ],
             0,
+            &crate::registry::uniform_capabilities(&[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-2").expect("valid name"),
+                ClusterNodeName::parse("node-3").expect("valid name"),
+            ]),
         );
         let reduced_schedule = graph.schedule_for_domain(
             &domain,
@@ -1655,6 +1818,10 @@ mod tests {
                 ClusterNodeName::parse("node-3").expect("valid name"),
             ],
             0,
+            &crate::registry::uniform_capabilities(&[
+                ClusterNodeName::parse("node-1").expect("valid name"),
+                ClusterNodeName::parse("node-3").expect("valid name"),
+            ]),
         );
 
         assert_eq!(

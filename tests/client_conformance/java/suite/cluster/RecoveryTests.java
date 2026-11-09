@@ -3,6 +3,7 @@ package io.nervix.client.suite;
 import static org.junit.jupiter.api.Assertions.*;
 import static io.nervix.client.suite.support.Cluster.*;
 import io.nervix.client.Nervix;
+import io.nervix.client.suite.support.Actions;
 import io.nervix.client.suite.support.Cluster;
 import io.nervix.client.suite.support.Relay;
 import java.lang.ref.WeakReference;
@@ -75,6 +76,57 @@ public final class RecoveryTests {
                 assertThrows(Nervix.TypeMismatchException.class, event::frame);
             }
             // ANCHOR_END: subscription_ended
+        }
+    }
+
+    @Test
+    void aRefusedSubscriptionRestorationReportsItsCauseAndRecovers() throws Exception {
+        var cluster = new Cluster();
+        // The cut session reaches only the leader through its relay, as in the restoration above.
+        try (var administration = cluster.connect(); var relay = new Relay(cluster.leader);
+                var watching = cluster.connect(relay.uri(), cluster.domain);
+                var refusals = new Actions.Refusals()) {
+            String name = cluster.unique("refused");
+            completed(watching, "CREATE SUBSCRIPTION " + name + " TO watched_rows;");
+            relay.cut();
+            refusals.refuseNextSubscriptionOpening();
+            relay.restore();
+            try (var cancel = deadline(); var interrupted = watching.nextEvent(cancel)) {
+                assertEquals(Nervix.EventKind.INTERRUPTED, interrupted.kind());
+                assertEquals(name, interrupted.subscription().name());
+            }
+            // ANCHOR: restoration_failed
+            try (var cancel = deadline(); var refused = watching.nextEvent(cancel)) {
+                assertEquals(Nervix.EventKind.RESTORATION_FAILED, refused.kind());
+                assertEquals(name, refused.subscription().name());
+                Nervix.RestorationFailure failure = refused.restorationFailure();
+                assertNotNull(failure);
+                assertEquals(Nervix.RestorationCause.UNAVAILABLE, failure.cause());
+                assertFalse(failure.message().isEmpty());
+                assertTrue(failure.waitNanos() > 0);
+            }
+            // The subscription stays; once a later opening succeeds, it delivers new rows.
+            long expires = System.nanoTime() + TimeUnit.SECONDS.toNanos(120);
+            boolean delivered = false;
+            while (!delivered) {
+                assertTrue(System.nanoTime() < expires, "the restored subscription delivered no row");
+                cluster.publish(administration, 1201);
+                try (var cancel = Nervix.Cancel.deadline(2); var event = watching.nextEvent(cancel)) {
+                    if (event.kind() == Nervix.EventKind.RESTORATION_FAILED) {
+                        // Every refused attempt is observable; the session keeps trying.
+                        assertEquals(Nervix.RestorationCause.UNAVAILABLE, event.restorationFailure().cause());
+                        continue;
+                    }
+                    assertEquals(Nervix.EventKind.ROWS, event.kind());
+                    assertEquals(name, event.subscription().name());
+                    try (var batch = event.batch()) { assertEquals(1201, id(batch)); }
+                    delivered = true;
+                } catch (Nervix.DeadlineException restoring) {
+                    // The next opening waits out the retry; only rows published later witness it.
+                }
+            }
+            // ANCHOR_END: restoration_failed
+            completed(watching, "DELETE SUBSCRIPTION " + name + ";");
         }
     }
 

@@ -141,6 +141,7 @@ fn requirements(requirements: &[ChoiceRequirement]) -> String {
 
 fn ingestor(kind: IngestorEntityKind) -> Value {
     let IngestorEntityCapabilities {
+        events,
         instancing,
         headers,
         metadata,
@@ -195,7 +196,7 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
         option_template(declared_options),
     );
     json!({
-        "entity": kind.phrase(), "connector": kind.connector().keyword(),
+        "entity": kind.phrase(), "connector": kind.connector().keyword(), "events": events,
         "instancing": instancing.as_ref(),
         "reference": reference, "locator": locators(&declared_locators), "options": options,
         "modes": modes, "quiesce": quiesce, "metadata": metadata,
@@ -318,6 +319,7 @@ fn option_template(options: &[OptionDeclaration]) -> String {
 
 fn emitter(kind: EmitterEntityKind) -> Value {
     let EmitterEntityCapabilities {
+        events,
         headers,
         reference,
         body,
@@ -362,7 +364,7 @@ fn emitter(kind: EmitterEntityKind) -> Value {
         EmitterBodyForm::Native => "native Arrow output; no codec",
     };
     json!({
-        "entity": kind.phrase(), "connector": kind.connector().keyword(),
+        "entity": kind.phrase(), "connector": kind.connector().keyword(), "events": events,
         "reference": reference, "locator": locator(declared_locator), "options": options,
         "modes": modes, "headers": header_model(headers),
         "batch": batch, "batch_maximum": maximum, "body": body,

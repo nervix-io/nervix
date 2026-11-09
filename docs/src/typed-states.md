@@ -210,6 +210,13 @@ typed validation report on failure, and provides no mutable access around that b
 class is a compile-time error. [Node Settings](node-settings.md) owns their operational meaning,
 carriers, defaults, change procedures and source ratchet.
 
+`NodeCapabilities` also holds resolved optional positive CPU/memory measurements and positive
+`PeerReceiveBounds`. `NodeCapabilityRecord` binds those values to the shared `ClusterNodeIdentity`.
+The committed node-name key must match its identity. Schedule topology and transaction planning
+fences include the captured records; data-plane payload attempts and row admission prefixes remain
+volatile. A peer-pool publication retains the committed claim without replacing its connection
+slots, and `RelaySliceCursor` advances a contiguous prefix only after confirmed admission.
+
 Redis subscription plans carry a nonzero bounded message capacity and a validated idle deadline.
 The ingestor's absent subscription means it needs a resume. An installed subscription owns its
 bounded receiver and exact reader task; close and suspend join that task before replacing it.
@@ -360,9 +367,10 @@ Placement coverage is one semantic choice: a corridor with named endpoints or a 
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
 Consensus's `raft_wasm_inspection_` keyspaces and current `ClusterState`
-metadata encoding, 20, identify its stored shapes, including the partition count of every resolved branch
+metadata encoding, 23, identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule and the statements a transaction keeps, including per-entity
-`ALTER INGESTOR` and `ALTER EMITTER` operations. The runtime state store's
+`ALTER INGESTOR` and `ALTER EMITTER` operations and a `RESET WASM PROCESSOR ... STATE` that takes
+its domain from the transaction. The runtime state store's
 `ranked-intake-unit-checkpoint-segments` format identifies the checkpoints it keeps, including the
 unsigned 64-bit instance identity and the unit every branch-aggregated metric series carries.
 Fixed intake counts remain `NonZeroU64`; branch partition counts remain `NonZeroU16`. The
@@ -722,6 +730,14 @@ pinned version, file and complete ordered state declarations. Stateless inferenc
 identity. The decision boundary computes it once; the runtime receives the typed value and never
 reads the inferencer Model to reconstruct it. Snapshot restoration accepts tensors only under that
 identity and the same branch incarnation, and validates their shapes before installation.
+
+`InferencerStateDescriptor` is the archive-owned projection of that identity: domain/entity/unit,
+schema and model fingerprints, paired optional typed branch fields/fingerprint, nonzero incarnation,
+revision, ordered shapes and exact raw length/digest. Decoding validates names, field order,
+branch presence, positive axes and checked products before tensor allocation. Scalar shape `[]`
+is one element. The manifest reader binds the descriptor to its exact `state.bin` path, length and
+digest. Restore admits the branch under the restored declaration and model plan, then wraps identical
+F32 bits in the current snapshot frame; the archive never adopts a native snapshot representation.
 
 The runtime Kafka offset key remains schema-independent. A backup archive also records the
 ingestor's scheduled fingerprint with those offsets, so restore applies them only to the same
@@ -1400,3 +1416,13 @@ Normalization sorts and deduplicates within the selected form. Persisted transac
 interconnect requests and runtime holds retain that choice. A held lease must contain the exact
 unit and its exact freeze before it authorizes a handoff checkpoint. Placement groups also carry
 exact unit members, allowing an ingestor instance and a relay partition in the same component.
+
+## Resolved TLS Parameter Pairs
+
+The mandatory `ClusterParameterValues` TLS fields contain bounded, nonempty, unique ordered
+algorithm identifiers. Aliases exist only at input conversion. Individual selection decoding rejects
+gaps and duplicates; complete JSON and archive record decoding applies the same joint validation
+as bootstrap and administrative transitions. The complete candidate includes TLS 1.3 and, when it
+retains a TLS 1.2 suite, a usable TLS 1.2 group. Neither decoding nor installation supplies an omitted
+policy field. Current storage headers and the interconnect contract fingerprint identify this
+complete shape. See [Algorithm Policy](cryptography.md#algorithm-policy).

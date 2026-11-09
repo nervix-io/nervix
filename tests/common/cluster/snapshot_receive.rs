@@ -178,6 +178,45 @@ impl Cluster {
 }
 
 impl SnapshotProbe {
+    async fn installed_checkpoint(
+        &self,
+        node: &str,
+        placement: StatePlacementEnvelope,
+        revision: u64,
+    ) -> io::Result<(StateSnapshotEnvelope, Vec<u8>)> {
+        let snapshot = self
+            .transport
+            .request(
+                &node_name(node),
+                StateSyncRequest {
+                    placement: placement.clone(),
+                    after_lsm: None,
+                },
+            )
+            .await
+            .map_err(io::Error::other)?
+            .result
+            .map_err(io::Error::other)?
+            .ok_or_else(|| io::Error::other("the restored typed placement has no checkpoint"))?;
+        if snapshot.lsm != revision {
+            return Err(io::Error::other(
+                "the restored checkpoint revision differs from the archive",
+            ));
+        }
+        let bytes = self
+            .fetch(
+                node,
+                FetchStateCheckpoint {
+                    placement,
+                    lsm: revision,
+                    read: StateCheckpointRead::Published,
+                },
+                &snapshot,
+            )
+            .await?;
+        Ok((snapshot, bytes))
+    }
+
     async fn shutdown(self) {
         drop(self.end);
         self.cleanup
@@ -215,6 +254,58 @@ impl SnapshotProbe {
 }
 
 impl Cluster {
+    /// A stopped restore has no live branch catalog. Its archived placements directly name the
+    /// installed frames; the restore's completed publication makes every one immediately readable.
+    pub(crate) async fn verify_installed_inferencer_checkpoints(
+        &self,
+        owner: &str,
+        replicas: &[&str],
+        placements: Vec<(StatePlacementEnvelope, u64)>,
+    ) -> io::Result<()> {
+        let probe = self.snapshot_probe(owner).await?;
+        let result = async {
+            for replica in replicas {
+                let target = self
+                    .nodes
+                    .get(*replica)
+                    .ok_or_else(|| io::Error::other("unknown replica"))?;
+                probe
+                    .transport
+                    .register_outbound_target(
+                        node_name(replica),
+                        PeerTarget::new(target.spec.interconnect_listen_addr(), "localhost")
+                            .endpoint(),
+                    )
+                    .map_err(io::Error::other)?;
+            }
+            for (placement, revision) in placements {
+                nervix_primitives::task::consume_budget().await;
+                let expected = probe
+                    .installed_checkpoint(owner, placement.clone(), revision)
+                    .await?;
+                if expected.1.is_empty() {
+                    return Err(io::Error::other(
+                        "an installed inference frame cannot be empty",
+                    ));
+                }
+                for replica in replicas {
+                    let found = probe
+                        .installed_checkpoint(replica, placement.clone(), revision)
+                        .await?;
+                    if found != expected {
+                        return Err(io::Error::other(
+                            "the installed replica frame differs from the complete owner frame",
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        }
+        .await;
+        probe.shutdown().await;
+        result
+    }
+
     /// A public checkpoint listing supplies exact model identities; fetching the replica's bytes
     /// proves it holds the listed generations before the scenario ends their owner.
     pub(crate) async fn wait_for_inferencer_replica_checkpoints(

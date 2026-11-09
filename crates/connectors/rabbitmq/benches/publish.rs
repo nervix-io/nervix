@@ -123,6 +123,8 @@ impl EmitterBoundedExecution for BenchmarkHost {
     }
 }
 
+impl nervix_connector::ConnectorEventProvider for BenchmarkHost {}
+
 impl EmitterPayloadObserver for BenchmarkHost {
     fn record_prepared_payload(&self, _measurement: EmitterPayloadMeasurement) {
         panic!("the host supplies the RabbitMQ record publisher's prepared bytes");

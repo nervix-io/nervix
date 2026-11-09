@@ -546,7 +546,7 @@ impl IngestorBatchAcknowledgement {
                   acknowledgements"
     )
 )]
-pub trait IngestorHostServices: Send + 'static {
+pub trait IngestorHostServices: crate::ConnectorEventProvider + Send + 'static {
     /// Observes one completed broker read or host-interrupted read, without changing its outcome.
     fn record_read(&self, outcome: IngestorReadOutcome);
     /// Counts raw transport payloads before decoding or graph admission, never internal replay.
@@ -615,6 +615,18 @@ pub enum IngestorReadOutcome {
 }
 
 impl IngestorHost {
+    /// Resolves one declared observation at connector construction.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(lifecycle, reason = "resolves a declared event once before intake")
+    )]
+    pub fn event_counter(
+        &self,
+        event: nervix_models::ConnectorEvent,
+    ) -> error_stack::Result<crate::ConnectorEventCounter, crate::UndeclaredConnectorEvent> {
+        self.services.event_counter(event)
+    }
+
     pub fn record_read(&self, outcome: IngestorReadOutcome) {
         self.services.record_read(outcome);
     }

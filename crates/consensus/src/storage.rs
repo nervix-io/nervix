@@ -231,7 +231,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    ClusterState = 20,
+    ClusterState = 23,
 }
 
 #[derive(Debug)]
@@ -373,6 +373,7 @@ impl StateMachineData {
             },
             cordoned_node_ids: Records::load(b'n', sm)?,
             node_admission_fences: Records::load(b'f', sm)?,
+            node_capabilities: Records::load(b'C', sm)?,
             domain_mutations: Records::load(b'x', sm)?,
             domain_restore_installations: Records::load(b'I', sm)?,
             transactions: Records::load(b't', sm)?,
@@ -428,6 +429,7 @@ impl StateMachineData {
             self.resources.stored_records()?,
             self.cordoned_node_ids.len(),
             self.node_admission_fences.len(),
+            self.node_capabilities.len(),
             self.domain_mutations.len(),
             self.domain_restore_installations.len(),
             self.transactions.len(),
@@ -540,6 +542,8 @@ impl StateMachineData {
         )?;
         self.domain_mutations
             .write_changes(&preceding.domain_mutations, b'x', batch, sm)?;
+        self.node_capabilities
+            .write_changes(&preceding.node_capabilities, b'C', batch, sm)?;
         self.domain_restore_installations.write_changes(
             &preceding.domain_restore_installations,
             b'I',

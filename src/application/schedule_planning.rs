@@ -94,6 +94,7 @@ pub(in crate::application) struct DomainSchedulePlanningSnapshot {
     placement_candidate_identities: BTreeSet<ClusterNodeIdentity>,
     live_voters: SortedSet<ClusterNodeName>,
     cluster_nodes: SortedSet<ClusterNodeName>,
+    capabilities: std::collections::BTreeMap<ClusterNodeName, nervix_models::NodeCapabilities>,
     replica_count: usize,
     mode: SchedulePlanningMode,
 }
@@ -146,10 +147,15 @@ impl DomainSchedulePlanningSnapshot {
                     &self.cluster_nodes,
                     self.replica_count,
                     self.mode.scheduler_mode(),
+                    &self.capabilities,
                 );
                 #[cfg(not(feature = "testing"))]
-                let mut schedule =
-                    graph.schedule_for_domain(domain, &self.cluster_nodes, self.replica_count);
+                let mut schedule = graph.schedule_for_domain(
+                    domain,
+                    &self.cluster_nodes,
+                    self.replica_count,
+                    &self.capabilities,
+                );
                 SessionServiceImpl::merge_existing_schedule_data(
                     &mut schedule,
                     current,
@@ -175,6 +181,12 @@ impl DomainSchedulePlanningSnapshot {
 
     pub(in crate::application) fn cluster_nodes(&self) -> &[ClusterNodeName] {
         &self.cluster_nodes
+    }
+
+    pub(in crate::application) fn capabilities(
+        &self,
+    ) -> &std::collections::BTreeMap<ClusterNodeName, nervix_models::NodeCapabilities> {
+        &self.capabilities
     }
 
     pub(in crate::application) fn live_node_ids(&self) -> BTreeSet<ClusterNodeName> {
@@ -319,6 +331,13 @@ impl SessionServiceImpl {
         let cordoned = inputs.topology().cordoned();
         let (live_identities, placement_candidate_identities) =
             DomainSchedulePlanningSnapshot::eligibility_inputs(&availability, &voters, cordoned);
+        let capabilities = inputs
+            .topology()
+            .capabilities()
+            .iter()
+            .filter(|(_, record)| live_identities.contains(&record.identity))
+            .map(|(node, record)| (node.clone(), record.capabilities))
+            .collect::<std::collections::BTreeMap<_, _>>();
         let live_node_ids = availability.live_node_ids();
         let placement_candidate_node_ids = availability.placement_candidate_node_ids();
         let terminating_node_ids = availability
@@ -333,7 +352,9 @@ impl SessionServiceImpl {
             .collect();
         let cluster_nodes: SortedSet<ClusterNodeName> = placement_candidate_node_ids
             .into_iter()
-            .filter(|node| voters.contains(node) && !cordoned.contains(node))
+            .filter(|node| {
+                voters.contains(node) && !cordoned.contains(node) && capabilities.contains_key(node)
+            })
             .collect();
         #[cfg(feature = "testing")]
         let mode = match self.inner.runtime.scheduler_mode() {
@@ -351,6 +372,7 @@ impl SessionServiceImpl {
             placement_candidate_identities,
             live_voters,
             cluster_nodes,
+            capabilities,
             replica_count: usize::try_from(self.cluster_parameters().replica_count())
                 .assured("the committed count fits a supported target"),
             mode,

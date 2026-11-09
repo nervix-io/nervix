@@ -9,7 +9,7 @@ delivery attempt. An attached client-to-client path completes its input only aft
 ACK. Endpoint configuration survives a restart. Payloads, attachments, delivery attempts and ACK
 state are volatile, so applications own replayable input and idempotent effects.
 
-The native endpoints, automatic restoration, shared C binding, native Python package, and
+The native endpoints, automatic restoration, C ABI, native Python package, and
 Rust/Python paced drivers are implemented. This chapter connects their delivered contracts. The
 Python paced driver uses the package's typed endpoint, batch, cancellation and clock objects;
 Python owns their lifetimes. The following chapters remain the owners of their respective rules:
@@ -19,7 +19,7 @@ Python owns their lifetimes. The following chapters remain the owners of their r
 | Ingestor syntax, admission and ingestor outcomes | [Ingestors](./ingestors.md#client-ingestors) |
 | Emitter syntax, construction, batching and graph ACK boundary | [Emitters](./emitters.md#client-emitters) |
 | Public attachments, subscriptions and clock observation | [Sessions](./sessions.md) |
-| Rust handles and shared binding | [Rust Client Library](./client-library.md#producers), [C and C++ Client Library](./client-library-c.md), and the [Client Implementation Manual](./client-implementation-manual.md#using-the-shared-binding), with [its Python package rules](./client-implementation-manual.md#using-the-python-package) |
+| Rust handles and host bindings | [Rust Client Library](./client-library.md#producers), [Client Host Bindings](./client-host-bindings.md), the host guides and the [Client Implementation Manual](./client-implementation-manual.md#using-the-c-abi) |
 | FlatBuffers, transport, correlation, cancellation and restoration | [Client Session Protocol](./client-session-protocol.md#producers) and the [Client Implementation Manual](./client-implementation-manual.md#producers) |
 | Model validation, typed revision construction and installation | [Execution Plans](./execution-plans.md) |
 | Native ingestor/emitter composition and the common emitter host | [Connector Contract](./connector-contract.md#ingestor-boundary) |
@@ -59,7 +59,7 @@ A native gRPC session may enter through any live node. That serving node routes 
 endpoint's scheduled execution; producer, relay and emitter owners may all be different nodes.
 The console's binary WebSocket uses the same endpoint operations and FlatBuffers contract, but
 console sessions are served by the leader. Public endpoint scenarios exercise both transports.
-The Rust library and its shared C binding connect through native gRPC; the console's ordinary
+The Rust library and its host bindings connect through native gRPC; the console's ordinary
 inspection flow does not open a consumer or claim output.
 
 ```mermaid
@@ -335,18 +335,16 @@ inspectable. Rejoining retrieves the original result. Closing proceeds from its 
 the caller stops waiting. The [Rust Client Library](./client-library.md#emitter-consumers) owns
 the supported signatures, errors and examples.
 
-### Shared C Binding And Buffer Lifetimes
+### Host Bindings And Buffer Lifetimes
 
-C and C++ hosts use the existing Rust binding through
-[`nervix_client.h`](https://github.com/nervix-io/nervix/blob/main/crates/client-ffi/include/nervix_client.h),
-CPython hosts through its Python package, `nervix_client`, and JVM hosts through the Java 21 JNI
-classes in `crates/client-jvm`. Ruby 3.3+ hosts load the magnus gem `nervix-client` from
-`crates/client-ruby`; its collector owns native objects, blocking calls release the GVL, and
-immutable IPC buffers mark their owner through every derived slice. Ruby builders copy inputs
-and endpoint opens retain a complete field snapshot. All forward through the host session
-runtime to the same Rust handles and recovery owner. Its blocking calls belong on application
-threads, never a thread driving a Tokio runtime. Native data access is bulk column access or
-canonical IPC, without per-value language callbacks or row-map payloads.
+Every binding calls the same `nervix-client-host` runtime over the Rust client: the C ABI for
+C/C++, pyo3 for Python, magnus for Ruby and JNI for the JVM. [Client Host
+Bindings](client-host-bindings.md) owns the runtime's threads, cancellation and deadline entry,
+host ownership, borrowed views, failure projection and Arrow exchange. The application guides
+and [manual](client-implementation-manual.md#using-the-c-abi) specify each host's calls.
+
+The C ABI's endpoint operations have these explicit buffer and reference contracts; the native
+host libraries map them into their own object ownership:
 
 | Binding operation | Buffer and reference contract |
 | --- | --- |
@@ -362,33 +360,17 @@ canonical IPC, without per-value language callbacks or row-map payloads.
 | Delivery/batch retain and release | Keep borrowed views alive; releasing storage never settles a delivery |
 | `nx_producer_close`, `nx_consumer_close`, handle free | End attachments and fence late restoration; an abandoned close continues cleanup |
 
-The JVM host suite and its [guide](client-library-jvm.md) use the published Java API. Its
-JUnit boundary tier retains the original bulk-column, cancellation, Cleaner and reentrant-close
-checks; its cluster tier exercises the public session/endpoint lifecycle on one and three nodes,
-over TLS and plaintext.
-The inventory accounts for every test after teardown. Java compiler elements resolve the suite
-references to the binding's declared public members; the guide includes compiled, executed suite
-examples. JNI representation properties remain a separate instrument.
+Python memoryviews, Ruby immutable `IO::Buffer` roots and Java read-only direct buffers retain
+their native owners, including derived slices. Python additionally exchanges Arrow batches
+through PyCapsules under the exact producer schema; Ruby and Java exchange canonical IPC or bulk
+column levels. [Host lifetimes and views](client-host-bindings.md#host-lifetimes-and-views) and
+[columnar exchange](client-host-bindings.md#columnar-data-and-arrow-exchange) define which buffers
+are borrowed and which are copied. Host suites exercise these public ownership contracts and
+account for every test after teardown; the ledger records their scope separately from probes and
+representation properties.
 
-The Ruby minitest suite and its [guide](client-library-ruby.md) exercise the native gem, including
-GVL release, collection, retained buffer slices, typed failures and explicit or block-scoped close.
-The boundary tier runs the prepared gem without a cluster, including a fresh installed archive;
-the cluster tier uses the same one-/three-node TLS and plaintext fixture. Results are reported
-after teardown and judged against the common inventory. The source check reads magnus registrations
-and Prism syntax with receiver identity; it rejects missing references rather than counting names
-in strings or comments. Representation properties remain with the native binding owner.
-
-The JNI edge leases every input before a blocking host call, then releases the Java handle's
-monitor. Cleaner cleanup and explicit `close()` release each allocation once, after any admitted
-short call returns; reentrant close ends new admission immediately, and nested access is refused.
-Retained leases keep
-an in-flight call valid. Java arrays copy whole column levels. A read-only direct buffer holds a
-native owner lease through its root; slices and duplicates retain that root, so closing a Java
-handle cannot invalidate a buffer. Field snapshots preserve order, all type levels, nullability and
-sensitivity. No Java thread implements endpoint recovery, and native runtime threads never call Java.
-
-A field list or builder is used from one thread at a time. Producers, consumers, deliveries and
-batches support the header's concurrent-use contract; delivery and batch references may be released
+For C and C++, a field list or builder is used from one thread at a time. Producers, consumers,
+deliveries and batches support the header's concurrent-use contract; references may be released
 on any thread. Each retained reference must be released exactly once. No borrowed pointer outlives
 the reference it was read from. Producer, consumer and delivery handles keep their session alive
 until released; retaining bytes does not retain the right to ACK an ended attempt.
@@ -397,20 +379,10 @@ A cancelled or expired C submission wait before the producer holds the batch sub
 After an identity was returned, cancelled/expired `nx_producer_rejoin` keeps that submission and
 its result with the producer: join it again. A cancelled or expired settlement may already have
 settled the attempt. Repeating it reads its retained result or a stale reference; it cannot undo
-the application's effect. [Manual B-12 through B-16](./client-implementation-manual.md#using-the-shared-binding)
+the application's effect. [Manual B-12 through B-16](./client-implementation-manual.md#using-the-c-abi)
 states these requirements, and the
 [conformance ledger](https://github.com/nervix-io/nervix/blob/main/tests/client-conformance-ledger.md)
 records the host probes and their limits.
-
-The Python package keeps the same contracts with Python's ownership. A `Batch`, `Delivery` or rows
-`Event` exports its stream or frame as a `memoryview` that keeps it alive, so no reference is
-retained or released by hand, and collecting a delivery settles nothing. Builder calls copy the
-host's buffers before returning. A `Batch` also exports itself through the Arrow PyCapsule
-interface, and `Producer.submit` imports Arrow data held to the producer's exact schema before
-anything is sent, so pyarrow and polars exchange batches without a copy and without converting
-types. Every wait releases the GIL; cancellation and deadlines behave as in the C ABI, and
-[Manual N-1 through N-5](./client-implementation-manual.md#using-the-python-package) state the
-host's requirements.
 
 ## Completion, Attempts And Replay
 

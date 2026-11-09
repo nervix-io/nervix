@@ -1129,13 +1129,9 @@ impl Arbitrary<'_> {
         start.assured("statement_of builds the statement form it is asked for")
     }
 
-    /// The reset a `RESET WASM PROCESSOR ... STATE` statement requests for `processor` of `domain`:
-    /// its unbranched state, every branch, or the branch its fields select.
-    fn requested_reset(
-        &mut self,
-        domain: &DomainName,
-        processor: &WasmProcessorName,
-    ) -> ResetWasmState {
+    /// The reset a `RESET WASM PROCESSOR ... STATE` statement requests for `processor` in its
+    /// transaction's domain: its unbranched state, every branch, or the branch its fields select.
+    fn requested_reset(&mut self, processor: &WasmProcessorName) -> ResetWasmState {
         let statement = self.statement_of(StatementVariant::ResetWasmState);
         let scope = match statement {
             Statement::ResetWasmState(reset) => Some(reset.scope),
@@ -1143,7 +1139,6 @@ impl Arbitrary<'_> {
         };
         let scope = scope.assured("statement_of builds the statement form it is asked for");
         ResetWasmState {
-            domain: domain.clone(),
             processor: processor.clone(),
             scope,
         }
@@ -1318,7 +1313,7 @@ impl Arbitrary<'_> {
         domain: &DomainName,
         processor: &WasmProcessorName,
     ) -> TransactionCommitStepKind {
-        let reset = self.requested_reset(domain, processor);
+        let reset = self.requested_reset(processor);
         let request = self.reset_request();
         let schedule = self.published_schedule(domain);
         TransactionCommitStepKind::ResetWasmState {
@@ -2298,7 +2293,6 @@ mod tests {
                         TransactionOperation::ResetWasmState { processor, .. },
                     ) => {
                         self.see("TransactionCommitStepKind::ResetWasmState");
-                        assert_eq!(&reset.domain, domain);
                         assert_eq!(&reset.processor, processor);
                         self.schedule(schedule, domain);
                     }

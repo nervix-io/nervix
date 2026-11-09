@@ -130,7 +130,9 @@ impl CaptureWireCase {
     }
 }
 
-const SECTION_KINDS: [CapturedStateSectionKind; 12] = [
+const SECTION_KINDS: [CapturedStateSectionKind; 14] = [
+    CapturedStateSectionKind::InferencerDescriptor,
+    CapturedStateSectionKind::InferencerTensorValues,
     CapturedStateSectionKind::WasmDescriptor,
     CapturedStateSectionKind::KafkaOffsets,
     CapturedStateSectionKind::BranchLifecycle,

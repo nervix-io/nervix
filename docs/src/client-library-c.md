@@ -5,7 +5,7 @@
 The Nervix C ABI runs the [Rust Client Library](client-library.md) in your process. C and C++
 programs use the same session, execution recovery, subscriptions, clocks and client endpoints as
 other Nervix clients. Include `nervix_client.h` and link the shared binding. The
-[Client Implementation Manual](client-implementation-manual.md#using-the-shared-binding) gives
+[Client Implementation Manual](client-implementation-manual.md#using-the-c-abi) gives
 the normative B-1 to B-16 host rules.
 
 Every example below comes from the C11 or C++17 application suite under
@@ -127,7 +127,7 @@ B-6). A null data buffer asks the variable-length accessor for its required size
 An interrupted event names a subscription gap: rows between sessions are unavailable. A restoration
 failure carries a typed cause, message and retry wait; an ended event is the end of that generation.
 A consumer overflow also ends delivery of that subscription on the session. Handle every kind under
-[B-7](client-implementation-manual.md#using-the-shared-binding); accessor calls for another event
+[B-7](client-implementation-manual.md#using-the-c-abi); accessor calls for another event
 kind fail with `NX_ERROR_TYPE`.
 
 ```c

@@ -409,7 +409,6 @@ impl Arbitrary<'_> {
             StatementVariant::ResetWasmState => {
                 let scope = self.state_branch_selection();
                 Statement::ResetWasmState(ResetWasmState {
-                    domain: self.name(),
                     processor: self.name(),
                     scope,
                 })

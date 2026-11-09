@@ -48,6 +48,7 @@ mod message_error;
 mod model_index;
 mod name_spelling;
 mod names;
+mod node_capabilities;
 mod node_endpoint;
 mod node_ref;
 mod password_credential;
@@ -122,26 +123,26 @@ pub use connector::{
     ClientDeclaration, ClientEmitter, ClientEmitterChange, ClientEmitterEntity, ClientEmitterMode,
     ClientIngestMode, ClientIngestorAlteration, ClientIngestorEntity, ClientPoolBounds,
     ClientPoolBoundsError, ClientPooling, ClientProducerIngestor, ClientProducerIngestorChange,
-    ClientResourceMount, ConfiguredClientRef, ConnectorKind, CreateClientAzureBlob,
+    ClientResourceMount, ConfiguredClientRef, ConnectorEvent, ConnectorKind, CreateClientAzureBlob,
     CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
     CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
     CreateClientOtel, CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar,
     CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
     CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq, DEFAULT_CONNECT_TIMEOUT,
-    DeadlineKey, DeclaredBounds, DeclaredBuffer, DeclaredDelivery, DeclaredPublishing,
-    DeclaredQuiesce, DeclaredValueMapping, DeclaredWait, DriverUrl, EmitterBodyForm, EmitterChange,
-    EmitterClientReference, EmitterDeclaration, EmitterEntity, EmitterEntityBody,
-    EmitterEntityCapabilities, EmitterEntityChange, EmitterEntityKind, EmitterEntityMetadata,
-    EmitterEntityModel, EmitterModeChange, EmitterPayloadFormat, EmitterPublication,
-    EmitterReference, EmitterReferenceKind, EmitterValueMapping, EmitterValueMappings,
-    EndpointIngestMode, EnvelopeClauseForm, EnvelopeClauseKind, EnvelopeValueType, ExternalName,
-    ExternalNameDeclaration, ExternalNameError, GcsConfigEntry, HTTP_CLIENT_SECRET_KEY_PREFIX,
-    HTTP_DEFAULT_MAX_BODY_SIZE, HeaderLayout, HeaderModel, HeaderNames, HeaderPair,
-    HeaderPairsError, HeaderValueType, HeaderValues, HostPort, HostPortError, HttpConfigEntry,
-    HttpEmitter, HttpEmitterChange, HttpEmitterEntity, HttpEndpointIngestor,
-    HttpEndpointIngestorChange, HttpIngestor, HttpIngestorEntity, HttpRequestEmitter,
-    HttpRequestEmitterChange, HttpRequestEmitterMode, HttpRequestHeader, HttpRequestHeaderValue,
-    HttpRequestHeadersError, HttpRequestIngestMode, HttpRequestIngestor,
+    DeadlineKey, DeclaredBounds, DeclaredBuffer, DeclaredDelivery, DeclaredEvents,
+    DeclaredPublishing, DeclaredQuiesce, DeclaredValueMapping, DeclaredWait, DriverUrl,
+    EmitterBodyForm, EmitterChange, EmitterClientReference, EmitterDeclaration, EmitterEntity,
+    EmitterEntityBody, EmitterEntityCapabilities, EmitterEntityChange, EmitterEntityKind,
+    EmitterEntityMetadata, EmitterEntityModel, EmitterModeChange, EmitterPayloadFormat,
+    EmitterPublication, EmitterReference, EmitterReferenceKind, EmitterValueMapping,
+    EmitterValueMappings, EndpointIngestMode, EnvelopeClauseForm, EnvelopeClauseKind,
+    EnvelopeValueType, ExternalName, ExternalNameDeclaration, ExternalNameError, GcsConfigEntry,
+    HTTP_CLIENT_SECRET_KEY_PREFIX, HTTP_DEFAULT_MAX_BODY_SIZE, HeaderLayout, HeaderModel,
+    HeaderNames, HeaderPair, HeaderPairsError, HeaderValueType, HeaderValues, HostPort,
+    HostPortError, HttpConfigEntry, HttpEmitter, HttpEmitterChange, HttpEmitterEntity,
+    HttpEndpointIngestor, HttpEndpointIngestorChange, HttpIngestor, HttpIngestorEntity,
+    HttpRequestEmitter, HttpRequestEmitterChange, HttpRequestEmitterMode, HttpRequestHeader,
+    HttpRequestHeaderValue, HttpRequestHeadersError, HttpRequestIngestMode, HttpRequestIngestor,
     HttpRequestIngestorAlteration, HttpRequestIngestorChange, HttpRequestPublishingMode,
     IcebergCatalog, IcebergCatalogProperties, IcebergEmitter, IcebergEmitterChange,
     IcebergEmitterEntity, IcebergFileIoEntry, IcebergLocationError, IcebergNamespace,
@@ -288,6 +289,7 @@ pub use names::{
     SubscriptionName, UdfName, UserName, VhostName, WasmProcessorName, WindowProcessorName,
     WireSchemaName,
 };
+pub use node_capabilities::{NodeCapabilities, NodeCapabilityRecord, PeerReceiveBounds};
 pub use node_endpoint::{
     NodeEndpoint, NodeEndpointParseError, NodeServiceUrl, NodeServiceUrlParseError,
 };
@@ -370,9 +372,7 @@ pub use schema::{
     WireSchemaField, WireSchemaStrictness,
 };
 pub use schema_fingerprint::SchemaFingerprint;
-pub use settings::{
-    ClusterParameters, NodeCapabilities, Prerequisites, Setting, SettingClass, SettingDefinition,
-};
+pub use settings::{ClusterParameters, Prerequisites, Setting, SettingClass, SettingDefinition};
 pub use state_branch_selection::{
     ResolvedStateBranchSelection, StateBranchField, StateBranchSelection, StateBranchSelectionError,
 };

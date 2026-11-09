@@ -103,8 +103,9 @@ struct WasmStateResetPlan {
 }
 
 impl SessionServiceImpl {
-    /// Apply the reset effect of one durable transaction step. Its request reference belongs to
-    /// the queued statement and survives reconnects and leader changes unchanged.
+    /// Apply the reset effect of one durable transaction step to the processor of the domain the
+    /// transaction is bound to. Its request reference belongs to the queued statement and survives
+    /// reconnects and leader changes unchanged.
     pub(in crate::application) async fn apply_transaction_wasm_state_reset(
         &self,
         transaction: &ReplicatedTransaction,
@@ -113,12 +114,6 @@ impl SessionServiceImpl {
     ) -> error_stack::Result<(), WasmStateResetError> {
         let domain = &transaction.domain;
         let processor = ModelName::from(&reset.processor);
-        if reset.domain != *domain {
-            return Err(Report::new(WasmStateResetError::InvalidTarget {
-                domain: domain.clone(),
-                processor,
-            }));
-        }
         let inputs = self.inner.consensus.domain_planning_inputs(domain).await;
         let entity = NodeRef::new(ModelKind::WasmProcessor, processor.clone());
         let scheduled_node = inputs

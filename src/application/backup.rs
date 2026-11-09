@@ -29,6 +29,7 @@ pub(in crate::application) mod cut_progress;
 pub(in crate::application) mod cut_reach;
 #[cfg(test)]
 mod failure_tests;
+mod inferencer_state_sections;
 pub(in crate::application) mod interconnect;
 mod materialized_sections;
 mod native_metadata_sections;
@@ -488,8 +489,9 @@ impl SessionServiceImpl {
     }
 
     /// Reads one domain while its mutation lease prevents a concurrent configuration change.
-    /// A stopped domain has no intake to quiesce; a live cut reads the current checkpoint without
-    /// touching its lifecycle. The quiesced path resumes before archive transfer begins.
+    /// A stopped domain has no intake to quiesce; a live cut keeps intake running while its owners
+    /// publish inference state and read current checkpoints. The quiesced path resumes before
+    /// archive transfer begins.
     async fn capture_backup_domain(
         &self,
         execution: &CommandExecution,

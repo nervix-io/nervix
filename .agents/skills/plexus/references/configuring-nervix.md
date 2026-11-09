@@ -26,6 +26,7 @@ Keep detailed grammar in those chapters when reviewing a configuration.
 | User need | Documentation index entry |
 | --- | --- |
 | Domain timing and lifecycle | `Domains And Time` |
+| Detected or overridden node CPU/memory, committed capability rolls, negotiated peer receive bounds and proportional placement | `Node Settings` → `Committed Node Capabilities`, then `Placement` → `Capacity At The Load Tier` |
 | Administrative durability, storage errors, and recovery of uncertain commits | `Control Plane` → `Durability and recovery` |
 | Internal/wire schemas, schema evolution, codecs, JAQ, Protobuf, and type mapping | `Schemas And Codecs` and `Control Plane` |
 | Expressions, operators, casts, built-in functions, window aggregates, and approximate sketches | `Expression Functions` |
@@ -657,6 +658,11 @@ current connection, retry and deadline limits.
 - Every Sentry emitter references a `SENTRY CLIENT` with a project DSN and a positive `timeout_ms`,
   encodes one event JSON object per record, or per batch through `ON EMITTING BATCH`, and has no
   `write_header` invocation.
+- A Redis PUBSUB emitter counts successful publications with zero receivers as
+  `published_without_subscribers`; they still satisfy its server-acceptance delivery boundary.
+  Read `Metrics And Observability` → `Connector-declared events` for cumulative totals and
+  inspection-sampled wall rates, and the generated connector capability reference for each
+  entity's declared events.
 - Every custom WASM guest is built for the current ABI, accepts
   `nervix_process_batch(ptr, size)`, validates that exact range against its reusable buffer, and
   declares positive `MAX FUEL` then `MAX MEMORY` limits immediately after `FILE`. Its

@@ -28,7 +28,7 @@ const READS: &str = "nervix_ingestor_reads_total";
 const PAYLOADS: &str = "nervix_ingestor_read_payloads_total";
 const BYTES: &str = "nervix_ingestor_read_bytes_total";
 const POLL_DURATION: &str = "nervix_ingestor_poll_duration_seconds";
-const LABELS: &[&str] = &[
+pub(super) const LABELS: &[&str] = &[
     "domain",
     "ingestor",
     "physical_node_id",
@@ -38,15 +38,15 @@ const LABELS: &[&str] = &[
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ReadSeriesKey {
-    node: Option<ClusterNodeName>,
-    kind: IngestorEntityKind,
+pub(super) struct IngestorSeriesKey {
+    pub(super) node: Option<ClusterNodeName>,
+    pub(super) kind: IngestorEntityKind,
 }
 
 #[derive(Debug)]
 pub(super) struct IngestorReadFamilies {
     /// Registration, withdrawal and observers alone reach this map; read loops retain children.
-    scopes: DashMap<DomainNodeUnitRef, HashMap<ReadSeriesKey, IngestorReadMetrics>>,
+    scopes: DashMap<DomainNodeUnitRef, HashMap<IngestorSeriesKey, IngestorReadMetrics>>,
     reads: IntCounterVec,
     payloads: IntCounterVec,
     bytes: IntCounterVec,
@@ -130,7 +130,7 @@ impl IngestorReadFamilies {
         node: Option<&ClusterNodeName>,
         kind: IngestorEntityKind,
     ) -> IngestorReadMetrics {
-        let key = ReadSeriesKey {
+        let key = IngestorSeriesKey {
             node: node.cloned(),
             kind,
         };
@@ -370,6 +370,10 @@ impl ReadCounter {
 }
 
 impl IngestorReadMetrics {
+    pub(super) fn selector(&self) -> &str {
+        &self.series.selector
+    }
+
     #[cfg_attr(
         nervix_lint,
         nervix::context(recurring, reason = "selects only a retained read counter")
@@ -470,7 +474,8 @@ impl RuntimeMetrics {
         ingestor: &IngestorName,
         node: Option<&ClusterNodeName>,
     ) -> Vec<Unit> {
-        self.series
+        let mut units: Vec<_> = self
+            .series
             .connector
             .reads
             .scopes
@@ -482,7 +487,13 @@ impl RuntimeMetrics {
                     && scope.value().keys().any(|key| key.node.as_ref() == node)
             })
             .map(|scope| scope.key().unit)
-            .collect()
+            .collect();
+        let event_units = self.series.connector.events.units(domain, ingestor, node);
+        if !event_units.is_empty() {
+            let mut seen: std::collections::BTreeSet<_> = units.iter().copied().collect();
+            units.extend(event_units.into_iter().filter(|unit| seen.insert(*unit)));
+        }
+        units
     }
 
     #[cfg_attr(
@@ -527,7 +538,10 @@ impl RuntimeMetrics {
         )
     )]
     pub(crate) fn describe_ingestor_interactions(&self, entity: &DomainNodeUnitRef) -> Vec<String> {
-        self.series.connector.reads.describe(entity)
+        let mut lines = self.series.connector.reads.describe(entity);
+        let events = self.series.connector.events.describe_ingestor(entity);
+        lines.extend(events);
+        lines
     }
 }
 

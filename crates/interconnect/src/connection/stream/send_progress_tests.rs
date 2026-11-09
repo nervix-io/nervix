@@ -95,7 +95,13 @@ async fn a_moving_streamed_chunk_outlasts_one_progress_bound() {
     let reader = spawn(moving_reader(server_io));
     let (mut stream, driver) = open_stream(client_io).await;
     let started = Instant::now();
-    let result = send_stream_chunk(&mut stream, charged_chunk().await, PROGRESS_BOUND).await;
+    let result = send_stream_chunk(
+        &mut stream,
+        charged_chunk().await,
+        PROGRESS_BOUND,
+        std::num::NonZeroU64::MAX,
+    )
+    .await;
     assert!(
         result.is_ok(),
         "a chunk whose reader continually releases capacity must outlast one progress bound: \
@@ -146,7 +152,13 @@ async fn a_streamed_chunk_without_released_capacity_reaches_its_progress_bound()
         }
     });
     let (mut stream, driver) = open_stream(client_io).await;
-    let result = send_stream_chunk(&mut stream, charged_chunk().await, PROGRESS_BOUND).await;
+    let result = send_stream_chunk(
+        &mut stream,
+        charged_chunk().await,
+        PROGRESS_BOUND,
+        std::num::NonZeroU64::MAX,
+    )
+    .await;
     assert!(
         matches!(result, Err(ref error) if matches!(error.current_context(), TransportError::ProgressTimeout { timeout } if *timeout == PROGRESS_BOUND)),
         "a reader that releases no capacity must reach the unchanged progress bound: {result:?}"

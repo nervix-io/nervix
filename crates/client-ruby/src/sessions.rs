@@ -333,6 +333,12 @@ struct Outcome {
 }
 
 impl Outcome {
+    fn state_inspection(&self) -> Option<crate::inspection::Inspection> {
+        self.outcome
+            .state_inspection()
+            .map(crate::inspection::Inspection::new)
+    }
+
     fn disposition(&self) -> i32 {
         enums::Disposition::code(self.outcome.disposition())
     }
@@ -547,6 +553,7 @@ impl Outcome {
     fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
         let outcome = crate::class(ruby, module, "Outcome")?;
         outcome.define_method("disposition", method!(Outcome::disposition, 0))?;
+        outcome.define_method("state_inspection", method!(Outcome::state_inspection, 0))?;
         outcome.define_method("message", method!(Outcome::message, 0))?;
         outcome.define_method(
             "execution_reference",

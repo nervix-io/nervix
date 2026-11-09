@@ -151,6 +151,7 @@ const MONGODB_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl EmitterDeclaration for MongoDbCollectionEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::MongoDb),
         body: EmitterBodyForm::Values,

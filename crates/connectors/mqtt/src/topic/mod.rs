@@ -1238,6 +1238,8 @@ mod tests {
         fn report_error(&self, _message: String) {}
     }
 
+    impl nervix_connector::ConnectorEventProvider for SilentHost {}
+
     impl nervix_connector::EmitterPayloadObserver for SilentHost {
         fn record_prepared_payload(
             &self,
@@ -1289,6 +1291,8 @@ mod tests {
     impl nervix_connector::EmitterEventReporter for RecordingHost {
         fn report_error(&self, _message: String) {}
     }
+
+    impl nervix_connector::ConnectorEventProvider for RecordingHost {}
 
     impl nervix_connector::EmitterPayloadObserver for RecordingHost {
         fn record_prepared_payload(

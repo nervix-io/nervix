@@ -203,6 +203,8 @@ struct ConfirmingHost {
     record: Arc<Mutex<ConfirmationRecord>>,
 }
 
+impl nervix_connector::ConnectorEventProvider for ConfirmingHost {}
+
 #[async_trait]
 impl IngestorHostServices for ConfirmingHost {
     fn record_read(&self, _outcome: nervix_connector::IngestorReadOutcome) {}

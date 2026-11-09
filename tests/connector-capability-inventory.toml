@@ -18,6 +18,13 @@
 # hold the grammar to both.
 
 [[capability]]
+capability = "EVENT published_without_subscribers"
+entity = "REDIS PUBSUB EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/connector_events.feature", scenario = "Redis publishes without subscribers stay delivered and count their declared event" },
+]
+
+[[capability]]
 capability = "BATCH"
 entity = "CLICKHOUSE TABLE EMITTER"
 scenarios = [

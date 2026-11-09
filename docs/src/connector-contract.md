@@ -130,12 +130,14 @@ connector crate.
 The contract may name shared vocabulary types, Arrow, the async and error facilities needed by its
 boundary, the node's bounded executor, and configuration helpers for TLS, HTTP clients, service
 URLs, resource mounts, and physical time. It must not name the registry, runtime, relays, branches, schedules, or a driver.
-TLS provider selection belongs to `nervix-crypto`. Shared connector TLS uses its outward process
-default, keeping the full AWS-LC algorithms and a provider installed by an embedding host. SQS
-projects the boundary's typed outward choice into Smithy's AWS-LC mode, retaining the SDK's cipher
-filtering. The interconnect has an independent fixed provider, so its algorithm restrictions do not
-change connector TLS. [Cryptography](cryptography.md#algorithm-policy) owns this policy; connectors
-still own trust roots, identities and protocol negotiation.
+TLS algorithm implementations belong to `nervix-crypto`; the host supplies the node-owned committed
+outward policy to shared-provider construction. Every new handshake captures its current pair,
+while established connections retain their negotiation and the connector retains its driver.
+SDKs that construct their own provider remain inventoried gaps. SQS projects the boundary's typed
+outward choice into Smithy's AWS-LC mode, retaining the SDK's cipher filtering. The interconnect
+has an independent fixed provider. [Cryptography](cryptography.md#algorithm-policy) owns membership
+and the governed-path inventory; connectors still own trust roots, identities and protocol
+negotiation.
 An integration crate may depend on the contract, vocabulary, Arrow, and its own driver stack. It
 must not depend on the server, another integration crate, or runtime collectors. Driver libraries
 belong in that integration's manifest, with test-harness dependencies kept separately. A
@@ -984,6 +986,11 @@ A capability joins its entity's declaration in the same change as its grammar an
 behavior. That change also supplies its generated conformance and runtime scenario registration.
 The declaration describes the product a user can execute; plans for additional connector clauses
 remain in their owning work records until that delivery.
+
+Every ingestor and emitter also declares its `DeclaredEvents`, a closed set of typed
+`ConnectorEvent` identities. The generated matrix and manual regions render those names from the
+declaration, including an empty set. Event names are observations, not Plexus options or driver
+error strings.
 
 The declaration crosses each boundary once, without becoming runtime graph policy:
 
@@ -3539,6 +3546,15 @@ sequenceDiagram
 
 ## Failure and observation
 
+A connector-specific fact uses the entity's declared event counter. The host registers all its
+event children at zero and exposes `ConnectorEventProvider` through `EmitterHost` and
+`IngestorHost`. Construction resolves a `ConnectorEventCounter` by typed event identity;
+requesting an undeclared event returns a typed refusal. The connector retains that counter and
+records through it without naming a metrics type, rebuilding labels or resolving a registry on
+the recurring path. The host owns counting, wall rates, process-local history and inspection.
+The event itself changes no delivery outcome. [Connector-declared events](metrics-and-observability.md#connector-declared-events)
+defines the public families and the Redis zero-subscriber event.
+
 The ingestor host resolves its interaction counter children once at startup for its exact execution
 unit. The retained group preserves each instance's counters, including decode rejections, without
 resolving labels or looking up a shared registry while recording a payload outcome.
@@ -3721,7 +3737,7 @@ drain boundary. This chapter does not redefine those output formats.
 
 1. Declare each entity it serves in the vocabulary: one Model per entity with its
    [declaration](#entity-declarations), which states its modes, quiesce modes, locator, options,
-   body, batching, [bounds](#bounds-and-deadlines), an ingestor's position class and acknowledgement
+   body, batching, connector events, [bounds](#bounds-and-deadlines), an ingestor's position class and acknowledgement
    confirmation as its transport gives them, and every other fact a statement can say about it,
    and a typed name, checked by the entity's own rule, for each external name its statement
    writes. The connector and entity together name the statement's head, such as
@@ -3801,3 +3817,14 @@ WebSocket upgrade headers use the same committed caps at model admission and par
 transitions. Their canonical subprotocol offer counts as one field, and its comma-joined tokens
 contribute to the byte count. Syntax and plan conversion enforce physical HTTP representation
 bounds; they impose no second fixed default on a model admitted under raised cluster caps.
+
+## Live Outward TLS Algorithms
+
+The host supplies a node-owned `OutwardTlsPolicy` to every shared-provider TLS construction path.
+A connector retains its native client, pool, prepared requests and confirmations across an algorithm
+change. The rustls configuration captures the current complete pair for each new connection,
+including a driver-created reconnect; an established connection keeps its snapshot. Policy changes
+do not re-open the connector or alter its retry, quiesce, finish or acknowledgement contract.
+Trust roots, identity and ALPN remain properties of the concrete client configuration.
+[Cryptography](cryptography.md#algorithm-policy) owns the exact governed-path and driver-owned-gap
+inventory.
