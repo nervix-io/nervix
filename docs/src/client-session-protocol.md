@@ -2307,160 +2307,43 @@ it restores them.
 
 ## Bindings For Other Hosts
 
-A host language reaches the protocol in one of two ways. It uses the shared Rust binding, or it
-implements the protocol itself from the schema. The binding is the supported path: C and C++
-hosts load its C ABI, `nervix-client-ffi`, whose contract is
-`crates/client-ffi/include/nervix_client.h`. CPython hosts import `nervix_client`, Ruby hosts load
-the native gem `nervix-client` with `require 'nervix_client'`, and JVM hosts use the Java 21 JNI
-library in `crates/client-jvm`. All drive the host session runtime every binding of the Rust client shares,
-`nervix-client-host`, and through it the Rust client's own state machine, so request correlation,
-leader redirects, reconnection, execution identity across retries, and desired-subscription
-restoration are decided once, in the library, and a host never retries, reroutes, or reinterprets
-an outcome on its own. A separate SDK per language would have to reimplement each of those
-decisions and be qualified again.
+C and C++, CPython, Ruby and JVM applications reuse the Rust client's state machine through
+`nervix-client-host`. C and C++ reach it through the C ABI; Python uses pyo3, Ruby magnus and Java
+JNI, each in its own Rust binding crate. [Client Host Bindings](client-host-bindings.md) owns
+runtime and thread ownership, call cancellation, retained views, failure projection, Arrow
+exchange, packaging and qualification. Application APIs belong in the [C and C++](client-library-c.md),
+[Python](client-library-python.md), [Ruby](client-library-ruby.md) and
+[JVM](client-library-jvm.md) guides.
 
-The C ABI's lifecycle follows from that choice:
+The C ABI's public contract is `crates/client-ffi/include/nervix_client.h`.
+[Manual B-1 through B-16](client-implementation-manual.md#using-the-c-abi) apply to its callers:
 
-- **Handles.** A host opens a session with `nx_session_connect` and releases it with
-  `nx_session_free`; outcomes, events and batches read from a session stay valid after it is freed,
-  and its producers, consumers and deliveries keep it running until they are released too. Every
-  object a function hands out is owned by the caller and has exactly one release function, and a
-  borrowed pointer stays valid only until the object it was read from is released.
-- **Connection policy.** A host builds an `nx_connect_options` handle with copied credentials,
-  a TLS requirement, copied CA PEM, additional seed URLs and connect, request, retry and backup
-  wait deadlines. `nx_session_connect` reads a snapshot of that handle and applies the Rust
-  client's URL, TLS and deadline validation. A session begun at an HTTPS URL requires HTTPS on
-  every seed and redirect, even when the host selected preferred TLS.
-- **Execution identity.** `nx_session_prepare` captures one statement and a reference before
-  anything is sent. For a durable command, `nx_session_execute` reuses that reference, so running
-  the same prepared execution after uncertainty, cancellation or timeout recovers its outcome.
-  CREATE SUBSCRIPTION, DELETE SUBSCRIPTION and ATTACH or DETACH DOMAIN CLOCK are session-local
-  requests without durable outcome identity. Repeating CREATE, DELETE or ATTACH can be refused
-  even when the first succeeded; a repeated DELETE fails when the subscription is already absent.
-  The host inspects the session state or events to establish the earlier effect.
-- **Threads.** Each session runs on a runtime of its own, with two threads the library owns. The
-  library never calls host code, so no host function ever runs on a library thread. Every blocking
-  call runs on the calling thread until it completes, fails, or is cancelled, and a session may be
-  used from several threads at once; commands of one session still run one at a time. The call's
-  futures, and every frame that polls them, live on that thread's stack. A prepared command
-  completes on a thread with a 512 KiB stack in the unoptimized library, half the default stack of
-  a Java thread, as `a_prepared_command_completes_on_a_host_thread_with_half_a_java_stack` in
-  `nervix-client-core` holds. A call made
-  from a thread that is itself driving a Tokio runtime cannot block on the library's runtime and
-  aborts the process, so a Rust host calls the binding from a blocking thread.
-- **Cancellation and deadlines.** Every blocking call takes an optional `nx_cancel`. A token
-  triggered from any thread makes the call return `NX_ERROR_CANCELLED`, and a token created with a
-  deadline makes it return `NX_ERROR_DEADLINE` once the deadline passes. Cancelling a wait never
-  rolls back admitted work.
-- **Bulk access.** A Row event keeps the verified frame it was decoded from, after checking the
-  batch against its subscription's schema. `nx_event_frame` borrows that frame without copying it, a
-  column accessor copies one whole column into caller-provided memory in one call, and
-  `nx_event_cell_varlen` borrows one string or bytes value. Events are reference counted:
-  `nx_event_retain` adds a reference, and the event and its frame are freed with the last
-  `nx_event_release`, from any thread.
-- **Restoration failures.** A subscription or clock event with kind `RESTORATION_FAILED` exposes
-  the server or local failure message as borrowed bytes and the wait until the next attempt as
-  unsigned nanoseconds. Accessors return `NX_ERROR_TYPE` for other kinds and
-  `NX_ERROR_INVALID_ARGUMENT` for missing outputs. `NX_ERROR_OVERFLOW` is returned when the
-  bounded subscription event queue loses unread events; a per-subscription consumer overflow is
-  delivered as `NX_EVENT_CONSUMER_OVERFLOW` instead.
-- **Clock events.** `nx_session_next_clock_event` uses the same cancellation and deadline rules as
-  the subscription wait, but returns a separate `nx_clock_event` reference. Its kind, domain,
-  generation, state, paced mapping, tick and end-reason accessors expose the fields each event
-  carries. An accessor for a field its event lacks returns `NX_ERROR_TYPE`. Retain and release
-  preserve the event and its borrowed domain name across threads until the last reference ends.
-- **Attached clocks.** `nx_session_domain_clock` reads, without blocking, the clock the Rust client
-  holds for a followed domain, or NULL for a domain it does not follow. After an attach completes
-  it is the clock the attach reply carried, so a host reads the generation and committed mapping of
-  a running clock before its first tick, and every later observation and tick replaces it in the
-  order the session received them, so it is never older than an event the host has taken. Its
-  accessors expose the domain, generation, state, paced mapping and newest tick, and its
-  projections answer logical time, physical waits and admission with the Rust client's arithmetic.
-  A read never changes; retain and release share it across threads.
-- **Producers and consumers.** `nx_session_open_ingestor` and `nx_session_subscribe_emitter` open
-  the Rust client's producer and consumer with the host's exact fields, built with `nx_fields`, and
-  the credit it asks for; a refusal carries its typed `nx_open_refusal`. A producer submits a batch
-  and waits for credit, and its outcome is taken with `nx_producer_rejoin`, listed with
-  `nx_producer_pending` and let go with `nx_producer_release`, each with the Rust producer's
-  semantics: a cancelled wait leaves the submission and its outcome with the producer. A consumer
-  hands out reference-counted `nx_delivery` handles; releasing one settles nothing, and
-  `nx_delivery_ack`, `nx_delivery_retry` and `nx_delivery_reject` return the server's typed
-  settlement. Both keep the Rust client's restoration: a consumer reports `NX_ERROR_INTERRUPTED`
-  once per gap, and a handle whose endpoint changed reports `NX_ERROR_REOPEN_REQUIRED` with its
-  typed reason. The binding keeps no acknowledgement, credit or reconnect state of its own.
-- **Batches.** A producer's batch is built with `nx_batch_builder` from the host's columns, one
-  level of a column's type at a time, and every buffer is copied before the call returns. A
-  delivered batch is decoded the first time it is read, held to the consumer's schema and member
-  count, and read the same way. Every batch is its canonical Arrow IPC stream, which
-  `nx_batch_ipc` and `nx_delivery_ipc` borrow and `nx_producer_submit_ipc` accepts from a host's
-  own Arrow tooling, so the binding encodes nothing a second way and the observation API stays
-  free of Arrow.
-- **Typed failures.** A failing call returns an `nx_error` whose kind separates an invalid argument,
-  a failed connection, a failed session, an uncertain outcome that carries the execution reference
-  or leaves a settlement unconfirmed, a server refusal, a deadline, a cancellation, a protocol
-  violation, a type mismatch, a session or handle that ended, an interrupted consumer, and an
-  endpoint that has to be opened again. The binding classifies the Rust client's
-  `error_stack::Report<ClientError>` by its current context, and a failed backup download by the
-  `BackupDownloadError` beneath that context, never by text, and `nx_error_message` returns the
-  report's whole chain.
+- Each owned handle has exactly one matching release function. Event, clock-event, domain-clock,
+  delivery and batch references can be retained; borrowed frames, streams, strings and values
+  require a live owning reference. Strings use pointer/length pairs and may contain NUL.
+- `nx_connect_options` carries copied credentials, a TLS requirement, CA PEM, seed URLs and the
+  Rust client's connection/request/retry/backup deadlines. Connect snapshots it; HTTPS remains
+  required on every seed and redirect after an HTTPS start.
+- A host prepares a durable command once and executes that same `nx_execution` after uncertainty,
+  cancellation or timeout. Session-local subscription and clock requests have no durable outcome
+  identity. Cancelling a waiter never rolls back admitted work.
+- Blocking calls accept `nx_cancel`, may run concurrently on application threads, and cannot be
+  entered from a thread driving a Tokio runtime. The shared host runtime owns worker threads and
+  invokes no application callbacks. The binding does not raise SIGPIPE.
+- Rows retain verified frames and expose bulk columns and borrowed scalar values. Endpoint batches
+  use copied builder inputs or canonical Arrow IPC. Releasing a delivery settles nothing;
+  producer outcome waits retain their submission identity after cancellation.
+- Error kinds, dispositions, restoration causes and endpoint refusal/reopen reasons are typed.
+  Restoration events expose cause, message and retry wait. A session-event queue overflow is a
+  failed wait, distinct from a subscription consumer-overflow event.
 
-The C ABI connects with the Rust client's default options. It exposes no seeds, timeouts, or
-certificate authority, so it reaches a node over plaintext and connects to it directly. It exposes
-commands, completion, subscriptions and their events, domain clock events and attached clocks,
-bulk row access, and producers and consumers of client endpoints with their batches, but not the
-typed transaction status, inspection, choice lookups, notices, or leadership. A host executes
-`ATTACH DOMAIN CLOCK;`, reads the clock the reply carried with `nx_session_domain_clock`, and
-reads later observations and ticks through the clock-event wait; the Rust client restores the
-attachment after reconnect. An attach reports a refusal as a failed
-disposition carrying the server's reason, not as a typed refusal. Its Row column accessors cover
-scalar, string, and bytes fields; a list field of a subscription reports its levels, and its values
-are read from the borrowed frame with generated code, while an endpoint batch's lists are read one
-level at a time.
-
-A CPython host imports the Python package instead, `nervix_client`, which `crates/client-python`
-builds on pyo3 for CPython 3.12 and later with the stable ABI. It drives the same host session
-runtime, so every decision above is the C ABI's, and it differs from the C ABI only where a Python
-host differs from a C one:
-
-- **Lifetimes.** An object owns its share of the session and releases it when Python collects it;
-  no application retain or release call exists. A session, a producer, a consumer and a delivery
-  also release their share when their `with` block ends, after which a call on them raises
-  `ClosedError`; a call another thread is in keeps its own share until it returns. A producer, a
-  consumer and a delivery keep their session running until they are released, and a `memoryview`
-  of an event's frame or a batch's or delivery's stream keeps that object alive, a released
-  delivery's stream included.
-- **Threads.** Every call that waits runs on the calling Python thread with the GIL released for
-  as long as it waits, and the library never calls Python from a thread of its own. A `Cancel`
-  triggered from another thread ends a wait with `CancelledError`, and one created with a deadline
-  ends it with `DeadlineError`.
-- **Failures.** A failure raises the exception class of its kind, under `ClientError`, classified
-  by the report's context exactly as the C ABI classifies it, with the whole chain as its message,
-  the command's execution reference on `execution_reference` and an open's refusal on
-  `open_refusal`.
-- **Connection options.** A session takes the Rust client's TLS requirement, certificate
-  authority, seed servers and timeouts, and the message and wait of a refused restoration are read
-  from the event that reports it.
-- **Data.** Columns of an event or a batch read as Python values, one level at a time, or, for an
-  event, in native byte order. A batch exports itself and a submission is imported through the
-  Arrow PyCapsule interface, so pyarrow and polars read and build batches without a copy, and a
-  rows event's rows export as one Arrow batch whose sensitive fields are nullable.
-
-A JVM host uses `io.nervix.client.Nervix` from the jar built by `just build-client-jvm`.
-The jar bundles its target's JNI library and extracts it to a private temporary directory when
-loaded; `-Dio.nervix.client.library=/absolute/path/to/library` selects an explicit library instead.
-A jar without a bundled library uses `System.loadLibrary`. Build an artifact for the host's native
-target; no Java preview feature or native-access flag is required on Java 21. Every handle is
-`AutoCloseable` with Cleaner fallback. A short call borrows under its handle's private monitor;
-reentrant close stops new admission and defers release until the short call returns, and nested
-access to that handle is refused;
-a blocking call first takes an independent native lease and releases that monitor. Closing the
-original handle cannot invalidate that call, and another thread may trigger its `Cancel`.
-The library calls no Java from its own threads. A frame or IPC `ByteBuffer` is direct and read-only;
-its root retains the native event, batch or delivery through every slice and duplicate. Bulk
-column arrays and builder inputs are copied. Strings preserve UTF-8 bytes and embedded NUL;
-unsigned 64-bit values preserve their bits in `long`. Prepared executions, typed failure causes,
-completion edits, clocks, endpoint admission, recovery and settlement all remain the shared host's.
-`end(Cancel)` waits for endpoint closure; `close()` releases ownership without acknowledging data.
+The C ABI also exposes an independently retained typed state-inspection envelope through
+`nx_outcome_inspection`: JSON, counts, section schemas and verified Row frames outlive the
+originating outcome. That projection currently has no Python, Ruby or JVM counterpart. Typed
+transaction status/inspection, choice lookups, server notices and leadership observation are
+outside the shared binding surface. The architecture chapter's
+[guarantees and limits](client-host-bindings.md#guarantees-and-limits) and the ledger distinguish
+available host operations from the wider Rust client API.
 
 Independent implementations exist as qualification clients rather than supported SDKs. The Go client
 speaks native gRPC with `flatc --go` output and `google.golang.org/grpc`, and the TypeScript client
@@ -2477,23 +2360,6 @@ clients check each frame's identifier and every union discriminant and required 
 the Rust verifier remains the only full structural verification. [Conformance
 Evidence](./client-implementation-manual.md#conformance-evidence) lists the probes, the runtimes
 they cover, and how to run them.
-
-The Ruby gem uses magnus over rb-sys in `crates/client-ruby`. Its `Nervix::Client` classes
-forward to the same host runtime. Each blocking call releases the GVL with only native owned
-inputs; library workers never enter Ruby. A call holds its own share of the session, execution,
-endpoint or batch, so collecting or closing the original session cannot invalidate that call.
-An endpoint open retains a complete field snapshot; a concurrent draft edit copies it first.
-Ruby collection releases native ownership without waiting. Producers, consumers and deliveries
-keep the runtime they need, and dropping a delivery does not settle it.
-
-`Event#frame`, `Batch#ipc` and `Delivery#ipc` return immutable `IO::Buffer` views. Their root is
-frozen and locked and marks its native owner; slices retain that root through Ruby's buffer
-source. `get_string` makes an ordinary binary String copy. Typed column arrays preserve unsigned
-integers, signed DATETIME nanoseconds, nulls, redaction and nested lists; bulk fixed-width reads
-preserve float bits, and builders copy every input before returning. A `ClientError` subclass
-carries its `kind`, whole `message`, `execution_reference` and `open_refusal`. Recovery executes
-the original prepared `Execution` again. A Ruby interrupt cancels only its current call; a
-shared `Cancel` still cancels every child call and carries the same deadline.
 
 ## Measured Costs
 
