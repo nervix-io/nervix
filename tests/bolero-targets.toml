@@ -3928,10 +3928,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__endpoint_acknowledgement__tests__bolero_endpoint_bodies_preserve_the_complete_client_outcome_object/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "endpoint-acknowledgement-body"
-invariant = "The one-way endpoint reply projection encodes exactly the complete existing client outcome class and cause object, with fixed labels, bounded bytes and no payload or diagnostics; local refusal and downstream rejection share the same cause."
+invariant = "The one-way endpoint reply projection encodes exactly the complete existing client outcome class and cause object for every outcome a request can reach, with fixed labels, bounded bytes and no payload or diagnostics; local refusal and downstream rejection share the same cause, as do a full window and full extension workers."
 manifest = "Cargo.toml"
 max_input_bytes = 64
 package = "nervix-server"

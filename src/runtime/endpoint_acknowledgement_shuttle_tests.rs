@@ -82,7 +82,7 @@ fn responses_release_their_own_slot_in_completion_order() {
             .await;
         assert_eq!(
             full,
-            EndpointRequestOutcome::NotAdmitted(ClientSubmissionRefusal::Busy)
+            EndpointRequestOutcome::NotAdmitted(EndpointAdmissionRefusal::WindowFull)
         );
         second_ack.send(()).assured("the second request is held");
         assert_eq!(
