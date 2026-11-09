@@ -794,8 +794,13 @@ Feature: Changing a running branch's partition count
         first_latency I64 OPTIONAL,
         last_latency I64 OPTIONAL
       );
+      CREATE SCHEMA profile ( tenant STRING, tier STRING );
+      CREATE WIRE JSON SCHEMA profile_wire MODE STRICT ( tenant string, tier string );
+      CREATE WIRE JSON CODEC profile_codec FROM WIRE SCHEMA profile_wire TO SCHEMA profile;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m PARTITIONS 4;
+      CREATE RELAY profiles SCHEMA profile BRANCHED BY by_tenant
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY unique_events SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY metrics SCHEMA metric BRANCHED BY by_tenant;
@@ -803,6 +808,11 @@ Feature: Changing a running branch's partition count
       CREATE VHOST edge repartition-backup-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT metric_ingress ON edge PATH '/metrics';
+      CREATE HTTP ENDPOINT profile_ingress ON edge PATH '/profiles';
+      CREATE HTTP ENDPOINT INGESTOR profile_ingestor FROM profile_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING profile_codec TIMESTAMP NOW
+        TO profiles INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
@@ -856,6 +866,24 @@ Feature: Changing a running branch's partition count
       "tenant":"xi" | "seq":1
       "tenant":"kappa" | "seq":1
       """
+    When http payload is posted to host "repartition-backup-{{test_id}}.example.com" path "/profiles"
+      """
+      {"tenant":"eta","tier":"gold"}
+      """
+    And http payload is posted to host "repartition-backup-{{test_id}}.example.com" path "/profiles"
+      """
+      {"tenant":"beta","tier":"bronze"}
+      """
+    And http payload is posted to host "repartition-backup-{{test_id}}.example.com" path "/profiles"
+      """
+      {"tenant":"kappa","tier":"silver"}
+      """
+    Then within "30s" node "node-1" eventually reports materialized state for relay "profiles" containing
+      """
+      {"branch":{"tenant":"eta"},"fields":{"tenant":"eta","tier":"gold"}}
+      {"branch":{"tenant":"beta"},"fields":{"tenant":"beta","tier":"bronze"}}
+      {"branch":{"tenant":"kappa"},"fields":{"tenant":"kappa","tier":"silver"}}
+      """
     When http payload is posted to host "repartition-backup-{{test_id}}.example.com" path "/metrics"
       """
       {"tenant":"beta","latency":10}
@@ -880,13 +908,19 @@ Feature: Changing a running branch's partition count
     Then the current leader node is saved as placeholder "leader"
     Given the restore coordinator uses remote placement in a multi-node cluster
     When the CLI restores "domain {{domain}} --resume" from "repartition.nvxb" on node "{{leader}}" reporting JSON
-    Then the CLI restore succeeded, restoring domain "{{domain}}" with 0 resource versions and 20 models
+    Then the CLI restore succeeded, restoring domain "{{domain}}" with 0 resource versions and 26 models
     And the CLI restore reports domain "{{domain}}" as "RUNNING" at start version 1
     And the CLI restore reports no warnings
     And within "30s" DESCRIBE BRANCH "by_tenant" on node "{{leader}}" contains
       """
       partitions: 8
       partition epoch: 1
+      """
+    And within "30s" node "restored-1" eventually reports materialized state for relay "profiles" containing
+      """
+      {"branch":{"tenant":"eta"},"fields":{"tenant":"eta","tier":"gold"}}
+      {"branch":{"tenant":"beta"},"fields":{"tenant":"beta","tier":"bronze"}}
+      {"branch":{"tenant":"kappa"},"fields":{"tenant":"kappa","tier":"silver"}}
       """
     And within "60s" node "restored-1" accepts http payload for host "repartition-backup-{{test_id}}.example.com" path "/events"
       """
