@@ -49,7 +49,7 @@ fn every_declared_emitter_renders_its_entity_options_body_modes_and_policies() {
                     .connection_state(connection_state)
                     .session_generation(generation)
                     .request_tx(request_tx)
-                    .submit(|_, _, _| {})
+                    .submit(super::tests::ignore_submission)
                     .build(),
             );
             any_spawner::Executor::poll_local();
