@@ -1409,9 +1409,13 @@ bound. A retained frame MUST keep its backing bytes alive after its containing o
 Clients MUST preserve full integer widths, float bits, datetime values, bytes, nested lists, null
 and redaction. Watermark column identities are their declared positions, never guessed names.
 
-Resume the opaque continuation with the same domain, relay and selector. On `StaleContinuation`,
+Resume the opaque continuation with the same domain, inspected entity and selector. On `StaleContinuation`,
 start a new read; do not combine it with rows from the abandoned sequence. Complete counts describe
-the whole selected cut. An empty page has no row sections or continuation. See
+the whole selected cut. An empty materialized page has no row sections or continuation. Processor
+reads use the same envelope: a window page with no retained inputs can still carry `header` and
+`accumulators` sections. Clients preserve these metadata frames without counting them toward the
+retained-row limit or continuation offset. See [Runtime Nodes](./processors.md#inspect-retained-window-state)
+for section meanings and
 [Materialized State Inspection Envelope](./client-session-protocol.md#materialized-state-inspection-envelope).
 
 The native Python, Ruby and JVM bindings expose this envelope through

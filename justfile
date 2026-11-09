@@ -1152,6 +1152,11 @@ measure-web-console-debug-strings target_dir=(cargo_target_dir + "/web-console-d
 coverage-connector package output *args:
     cargo llvm-cov --no-clean --package {{ package }} --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
+# Measure the shared licensing protocol's unit tests and properties, for a patch confined to it,
+# through the configured compiler cache.
+coverage-licensing-protocol output *args:
+    cargo llvm-cov --no-clean --package nervix-licensing-protocol --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+
 # Collect focused unit coverage for the cryptography boundary and its TLS/signing consumers.
 coverage-crypto output *args:
     cargo llvm-cov --no-clean --package nervix-crypto --package nervix-interconnect --package nervix-connector --package nervix-connector-nats --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}

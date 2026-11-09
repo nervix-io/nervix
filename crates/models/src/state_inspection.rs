@@ -33,7 +33,7 @@ pub struct StateInspectionCounts {
     /// Concrete branched keys in the selection; an unbranched row adds no branch.
     pub branches: u64,
     pub rows: u64,
-    /// Logical Arrow payload bytes, as charged by the row carrier's payload measure.
+    /// The inspected state owner's byte charge: logical payloads or bounded live window state.
     pub bytes: u64,
 }
 
@@ -105,8 +105,7 @@ pub enum StateInspectionRejection {
     ReplyTooLarge,
 }
 
-/// A section of the state a reorderer or correlator holds: the rows a reorderer holds back, or the
-/// records one side of a correlator holds waiting for a match.
+/// Typed sections of the current stateful processor kinds, including window branch metadata.
 #[derive(
     Debug,
     Clone,
@@ -126,6 +125,51 @@ pub enum ProcessorStateSection {
     Pending,
     Left,
     Right,
+    Keys,
+    Rows,
+    Header,
+    Accumulators,
+}
+
+impl ProcessorStateSection {
+    /// Headers and accumulator facts describe a window's retained rows without consuming the
+    /// row limit or advancing a continuation within those rows.
+    pub const fn is_metadata(self) -> bool {
+        matches!(self, Self::Header | Self::Accumulators)
+    }
+
+    /// The fixed, non-sensitive facts a window metadata section publishes.
+    pub fn metadata_fields(self) -> Vec<crate::SchemaField> {
+        use crate::ParseAsType;
+        match self {
+            Self::Header => vec![
+                metadata_field("publication_revision", ParseAsType::U64, false),
+                metadata_field("rows", ParseAsType::U64, false),
+                metadata_field("first_sequence", ParseAsType::U64, true),
+                metadata_field("next_sequence", ParseAsType::U64, false),
+                metadata_field("incarnation", ParseAsType::U64, true),
+                metadata_field("due_at", ParseAsType::Datetime, true),
+                metadata_field("state_bytes", ParseAsType::U64, false),
+            ],
+            Self::Accumulators => vec![
+                metadata_field("structure", ParseAsType::U32, false),
+                metadata_field("kind", ParseAsType::String, false),
+                metadata_field("count", ParseAsType::U64, false),
+            ],
+            Self::Pending | Self::Left | Self::Right | Self::Keys | Self::Rows => Vec::new(),
+        }
+    }
+}
+
+fn metadata_field(name: &str, ty: crate::ParseAsType, optional: bool) -> crate::SchemaField {
+    use meticulous::ResultExt as _;
+    crate::SchemaField {
+        name: crate::FieldName::try_from(name)
+            .assured("fixed inspection field names satisfy the name contract"),
+        ty,
+        optional,
+        sensitive: false,
+    }
 }
 
 /// A resolved inspection selector retains no sensitive branch value.

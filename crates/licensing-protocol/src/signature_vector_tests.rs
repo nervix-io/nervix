@@ -120,6 +120,17 @@ impl VectorKeys {
         }
     }
 
+    /// The successor root's proof of life for the epoch the succession installs.
+    fn proof_of_life(&self) -> ProofOfLife {
+        ProofOfLife {
+            doc: ProofOfLifeKind::ProofOfLife,
+            protocol: 1,
+            issued_at: time(-900),
+            root_epoch: 1,
+            kid: self.successor_root.key_id().clone(),
+        }
+    }
+
     fn decision(&self) -> Decision {
         Decision {
             doc: DecisionKind::LicenseDecision,
@@ -286,6 +297,10 @@ impl VectorKeys {
                 .root
                 .sign(&self.succession(), limits())
                 .assured("the bounded vector succession signs"),
+            proof_of_life: self
+                .successor_root
+                .sign(&self.proof_of_life(), limits())
+                .assured("the bounded vector proof of life signs"),
         }
     }
 }
@@ -322,6 +337,8 @@ struct SignatureVectors {
     revocation: String,
     #[serde(rename = "nervix.licensing.trust.succession")]
     succession: String,
+    #[serde(rename = "nervix.licensing.trust.proof-of-life")]
+    proof_of_life: String,
 }
 
 impl SignatureVectors {
@@ -347,7 +364,7 @@ impl SignatureVectors {
         }
     }
 
-    fn compacts(&self) -> [&str; 6] {
+    fn compacts(&self) -> [&str; 7] {
         [
             &self.decision,
             &self.request,
@@ -355,6 +372,7 @@ impl SignatureVectors {
             &self.working_key,
             &self.revocation,
             &self.succession,
+            &self.proof_of_life,
         ]
     }
 
@@ -384,9 +402,10 @@ impl SignatureVectors {
     }
 
     /// Verifies every vector the way a receiver does, and checks what each one decodes to: the
-    /// trust documents through the whole chain from the embedded root, the decision through the
-    /// working key that chain authorizes, the creation request under the cluster key it carries
-    /// and the stream ticket under the cluster key of its activation.
+    /// trust documents through the whole chain from the embedded root, the proof of life under the
+    /// root that chain installs, the decision through the working key that chain authorizes, the
+    /// creation request under the cluster key it carries and the stream ticket under the cluster
+    /// key of its activation.
     fn verify(&self, keys: &VectorKeys) {
         let trust = self.trust(keys);
         let mut contents = Vec::new();
@@ -401,6 +420,10 @@ impl SignatureVectors {
                 TrustDocumentContent::Revocation(keys.revocation()),
             ]
         );
+        let proof = trust
+            .verify_proof_of_life(&self.proof_of_life, limits())
+            .assured("the vector proof of life verifies under the root the succession installs");
+        assert_eq!(proof, keys.proof_of_life());
         let decision = trust
             .verify_decision(&self.decision, DecisionVerification::Apply, limits())
             .assured("the vector decision verifies under its authorized working key");
@@ -447,6 +470,13 @@ impl SignatureVectors {
             ));
             assert_signature_refused(&error);
         }
+        let error = self
+            .trust(keys)
+            .verify_proof_of_life(&tampered(&self.proof_of_life), limits())
+            .err()
+            .assured("a proof of life with a changed signature byte does not verify");
+        assert!(matches!(error.current_context(), TrustError::Document));
+        assert_signature_refused(&error);
         let error = self
             .trust(keys)
             .verify_decision(

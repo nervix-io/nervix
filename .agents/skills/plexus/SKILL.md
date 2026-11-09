@@ -91,6 +91,11 @@ For typed state inspection in Python, Ruby or JVM applications, read that host g
 `Inspect Materialized State` section for page/refusal metadata, opaque continuation and retained
 schema/frame lifetimes before suggesting application code.
 
+For deduplicator keys and retained window state, read [Runtime Nodes → Inspect Remembered Keys](../../../docs/src/processors.md#inspect-remembered-keys)
+and [Inspect Retained Window State](../../../docs/src/processors.md#inspect-retained-window-state).
+Follow those sections for sensitive argument projection, branch selectors, paging and the distinction
+between retained rows and window metadata; use each processor's `DESCRIBE` for a count summary.
+
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
 contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and

@@ -250,6 +250,27 @@ CREATE DEDUPLICATOR unique_notifications
 Deduplication state is branch-local. Duplicate details are logged at `debug` or `trace`, never at
 `info`.
 
+### Inspect Remembered Keys
+
+```plexus
+SHOW DEDUPLICATOR unique_notifications STATE
+  FOR BRANCH VALUES { tenant = 'alpha' } LIMIT 100 FORMAT JSON;
+```
+
+`SHOW DEDUPLICATOR <name> STATE` reads one immutable publication per selected branch through the
+[shared inspection envelope](relay.md#inspect-materialized-state). Its `keys` section contains
+`key_1` onwards in `DEDUPLICATE ON` order, with each expression's exact type, followed by
+`seen_at`, the key's ingestion time. A key expression that reads a sensitive input or branch field
+is redacted. Keys are listed oldest first within each branch. Expired keys are excluded using one
+domain-clock reading, including when no new input has caused the branch task to prune them.
+
+The ordered `FOR`, `LIMIT ... AFTER` and `FORMAT` clauses, owner routing and typed refusals are
+shared with materialized-state inspection. A continuation is refused as `stale_continuation` when
+its publication or visible expiry prefix changes. Reading state does not refresh a key's expiry.
+`DESCRIBE DEDUPLICATOR` reports `branches:`, `keys:` and `state bytes:` for each execution unit;
+bytes include key values and their `seen_at` timestamps. Partitioned units prefix these lines with
+the partition. An unavailable owner reports its typed refusal in place of the count.
+
 ### Altering Deduplicators
 
 `ALTER DEDUPLICATOR` applies comma-separated operations in written order:
@@ -422,6 +443,38 @@ restoring a snapshot re-admits its retained rows.
 In a window route, `COUNT`, `SUM`, `FIRST`, `LAST`, `MIN`, and `MAX` always name window aggregates.
 The [array and vector functions](filter-map-functions.md#array-and-vector-functions) with the same
 names apply to one `ARRAY` or `VEC` value everywhere else.
+
+### Inspect Retained Window State
+
+```plexus
+SHOW WINDOW PROCESSOR latency_windows STATE FOR ALL BRANCHES LIMIT 100 FORMAT JSON;
+```
+
+`SHOW WINDOW PROCESSOR <name> STATE` reads one published generation per selected branch. The
+`rows` section contains the retained input fields, followed by `sequence`, `received_at`, and
+`argument_0` onwards: the saved argument columns in flattened aggregate-demand order. Input fields
+and argument expressions retain their declared sensitivity and are redacted before encoding.
+Rows are listed by branch and then sequence. Sealed publications use bounded native decoding under
+bulk admission; a read never changes, emits or steps the live window.
+
+Two additional typed sections describe each selected branch, including an empty published window:
+
+- `header`: `publication_revision`, `rows`, nullable `first_sequence`, `next_sequence`, nullable
+  `incarnation`, nullable `due_at`, and `state_bytes`. The due deadline is the earlier of the oldest
+  retained input's duration-width deadline and any delayed histogram removal. A branch with neither
+  has no due deadline. State bytes use the production `MAX STATE SIZE` charge, including shared
+  Arrow allocations, row handles, branch keys and reserved sketch panes.
+- `accumulators`: `structure`, the demand index starting at zero; `kind`, the VM's storage-kind
+  name; and `count`, the number of contributing retained argument rows, including pending delayed
+  histogram removals. Sketch contents and internal values are never exposed.
+
+`LIMIT`, continuation offsets and complete row counts count only retained input rows. Headers and
+accumulator facts do not advance the row position; they do consume the reply's byte bound and are
+repeated on each page. Metadata that cannot fit is refused as `reply_too_large`. Every section uses
+the same captured publication, and a changed publication or branch lifetime invalidates its
+continuation. Branch selectors, formats and owner routing use the shared inspection contract.
+`DESCRIBE WINDOW PROCESSOR` reports each unit's `branches:`, `rows:` and `state bytes:` without
+returning retained rows; the byte count is the sum of the same per-branch charges in the headers.
 
 ### Window aggregate functions
 

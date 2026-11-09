@@ -125,10 +125,12 @@ mod tests {
                     nervix_arbitrary::Arbitrary::new(bytes, nervix_arbitrary::Domain::Vocabulary);
                 let mut original = cursor();
                 original.domain = arbitrary.name();
-                let kind = match arbitrary.entropy().byte() % 3 {
+                let kind = match arbitrary.entropy().byte() % 5 {
                     0 => ModelKind::Relay,
                     1 => ModelKind::Reorderer,
-                    _ => ModelKind::Correlator,
+                    2 => ModelKind::Correlator,
+                    3 => ModelKind::Deduplicator,
+                    _ => ModelKind::WindowProcessor,
                 };
                 original.entity = NodeRef::new(kind, arbitrary.name::<ModelName>());
                 original.schema = SchemaFingerprint::from_digest(std::array::from_fn(|_| {
