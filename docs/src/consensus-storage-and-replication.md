@@ -512,9 +512,11 @@ the bounded storage executor, but consensus has its own single ordered worker.
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_hop_rule_logs`, `raft_hop_rule_meta`, `raft_hop_rule_state`, and
-`raft_hop_rule_snapshots`. Opening it validates the complete keyspace namespace before reading
-any records. This namespace identifies the current Model shape, including the separate JSON
+`raft_tls_hop_logs`, `raft_tls_hop_meta`, `raft_tls_hop_state`, and
+`raft_tls_hop_snapshots`. Opening it validates the complete keyspace namespace before reading
+any records. The committed cluster-parameter record stores ordered typed TLS cipher suites and
+key-exchange groups; recovery validates their complete pair before returning that record.
+This namespace identifies the current Model shape, including the separate JSON
 and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec encoding, a Pulsar
 subscription's required type, an owned Pulsar subscription's required start position, a Kafka
 consumer group's required start position, the serialized Sentry platform field, an ingestor's
