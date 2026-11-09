@@ -30,6 +30,7 @@ pub(in crate::application) async fn describe_cluster(
     cluster: &cluster::ClusterHandle,
     consensus: &Observer,
     interconnect: &nervix_interconnect::Transport,
+    runtime: &crate::runtime::Runtime,
 ) -> String {
     let leader = consensus.current_leader().await;
     let gossip = cluster.gossip_state().await;
@@ -57,7 +58,52 @@ pub(in crate::application) async fn describe_cluster(
         ));
     }
     lines.extend(super::cluster_parameters::describe_parameters(cluster, consensus).await);
+    lines.extend(LocalExecutionDescription { runtime }.lines());
     lines.join("\n")
+}
+
+struct LocalExecutionDescription<'runtime> {
+    runtime: &'runtime crate::runtime::Runtime,
+}
+
+impl LocalExecutionDescription<'_> {
+    fn lines(&self) -> Vec<String> {
+        let runtime = self.runtime;
+        let mut lines = Vec::new();
+        lines.push("local execution capacity:".to_string());
+        let snapshot = runtime.executor().snapshot();
+        for (class, workers) in snapshot.worker_classes() {
+            lines.push(format!(
+                "  execution workers: class={} workers={} pending_jobs={}",
+                class.as_str(),
+                workers.workers,
+                workers.queue_capacity
+            ));
+        }
+        for (class, memory) in snapshot.memory_classes() {
+            lines.push(format!(
+                "  execution memory: class={} bytes={}",
+                class.as_str(),
+                memory.capacity_bytes
+            ));
+        }
+        lines.push(format!(
+            "  client byte credit: producer={} consumer={}",
+            runtime.client_endpoint_capacities().0,
+            runtime.client_endpoint_capacities().1
+        ));
+        let limits = runtime.executor().limits();
+        lines.push(format!(
+            "  execution operation limits: relay_encoded={} relay_decoded={} relay_scratch={} \
+             resident_replication_batches={} bulk_chunk={}",
+            limits.relay_encoded_bytes.as_u64(),
+            limits.relay_decoded_bytes.as_u64(),
+            limits.relay_scratch_bytes.as_u64(),
+            limits.resident_replication_batches.get(),
+            limits.bulk_chunk_bytes.as_u64()
+        ));
+        lines
+    }
 }
 
 /// One view of the cluster, as the lines of `DESCRIBE CLUSTER` render it.

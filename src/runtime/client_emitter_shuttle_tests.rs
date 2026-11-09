@@ -17,8 +17,7 @@ use bytes::Bytes;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::{
-    AckWindow, CLIENT_CONSUMER_NODE_BYTES, DomainName, EmitterName, FieldName, ParseAsType,
-    RelayName, SchemaField, Timestamp,
+    AckWindow, DomainName, EmitterName, FieldName, ParseAsType, RelayName, SchemaField, Timestamp,
 };
 use nervix_primitives::sync::{Arc, atomic::Ordering};
 use uuid::Uuid;
@@ -45,21 +44,20 @@ fn description(fields: Vec<SchemaField>) -> ClientEmitterDescription {
 fn shuttle_competing_consumer_grants_never_exceed_the_node_budget() {
     check_interleavings(|| {
         shuttle::future::block_on(async {
-            let budget = ClientEmitterBudget::default();
-            let bytes = NonZeroU64::new(CLIENT_CONSUMER_NODE_BYTES / 2 + 1)
+            let budget = ClientEmitterBudget::new(
+                nervix_models::Setting::new(ubyte::ByteUnit::Byte(17), &None)
+                    .assured("the configured credit is positive"),
+            );
+            let bytes = NonZeroU64::new(budget.capacity() / 2 + 1)
                 .assured("more than half the node budget is nonzero");
             let mut workers = Vec::new();
             for _ in 0..3 {
                 let budget = budget.clone();
                 workers.push(nervix_primitives::task::spawn(async move {
                     if let Some(grant) = budget.try_grant(bytes) {
-                        assert!(
-                            budget.granted.load(Ordering::Acquire) <= CLIENT_CONSUMER_NODE_BYTES
-                        );
+                        assert!(budget.inner.granted.load(Ordering::Acquire) <= budget.capacity());
                         nervix_primitives::task::yield_now().await;
-                        assert!(
-                            budget.granted.load(Ordering::Acquire) <= CLIENT_CONSUMER_NODE_BYTES
-                        );
+                        assert!(budget.inner.granted.load(Ordering::Acquire) <= budget.capacity());
                         drop(grant);
                     }
                 }));
@@ -67,7 +65,7 @@ fn shuttle_competing_consumer_grants_never_exceed_the_node_budget() {
             for worker in workers {
                 worker.await.expect("consumer grant task completes");
             }
-            assert_eq!(budget.granted.load(Ordering::Acquire), 0);
+            assert_eq!(budget.inner.granted.load(Ordering::Acquire), 0);
         });
     });
 }
@@ -79,9 +77,12 @@ fn shuttle_competing_consumer_grants_never_exceed_the_node_budget() {
 fn shuttle_a_reservation_waiting_for_a_full_budget_takes_the_bytes_a_release_returns() {
     check_interleavings(|| {
         shuttle::future::block_on(async {
-            let budget = ClientEmitterBudget::default();
+            let budget = ClientEmitterBudget::new(
+                nervix_models::Setting::new(ubyte::ByteUnit::Byte(17), &None)
+                    .assured("the configured credit is positive"),
+            );
             let whole_budget =
-                NonZeroU64::new(CLIENT_CONSUMER_NODE_BYTES).assured("the node budget is nonzero");
+                NonZeroU64::new(budget.capacity()).assured("the node budget is nonzero");
             let held = budget
                 .reserve(whole_budget)
                 .await
