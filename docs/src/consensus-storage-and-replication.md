@@ -518,8 +518,8 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_tls_credential_pause_logs`, `raft_tls_credential_pause_meta`, `raft_tls_credential_pause_state`, and
-`raft_tls_credential_pause_snapshots`. Opening it validates the complete keyspace namespace before reading
+`raft_tls_inferencer_credential_pause_logs`, `raft_tls_inferencer_credential_pause_meta`, `raft_tls_inferencer_credential_pause_state`, and
+`raft_tls_inferencer_credential_pause_snapshots`. Opening it validates the complete keyspace namespace before reading
 any records. The committed cluster-parameter record stores ordered typed TLS cipher suites and
 key-exchange groups; recovery validates their complete pair before returning that record.
 This namespace identifies the current Model shape, including the separate JSON
@@ -739,6 +739,8 @@ same fence; an idempotent retry only rejoins retained progress and never reappli
 The metadata encoding has one current identity. Data from a different stored shape fails decoding
 with a typed error asking for node-state recreation. Parameter durations and numeric bounds are
 validated on archive recovery as well as construction. No migration or second decoder is present.
+
+The current schedule archive includes the inferencer ownership-state component. Native tensor checkpoints remain node-owned runtime state, never consensus records. Their placement combines the schema fingerprint and the decision layer's typed fingerprint of the pinned resource, file and ordered `STATE` declarations. Schedule application removes checkpoints whose model identity was replaced. The interconnect, consensus schedule and runtime storage identifiers name this one current shape; stored state in another shape must be recreated.
 
 ### Credential Publication
 

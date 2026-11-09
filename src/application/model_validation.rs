@@ -114,6 +114,8 @@ pub(in crate::application) enum ModelBindingValidationError {
 
 #[derive(Debug, thiserror::Error)]
 enum InferencerBindingValidationError {
+    #[error("inferencer STATE snapshot does not fit one section")]
+    StateSnapshot,
     #[error("inferencer '{node}' has invalid tensor schemas")]
     TensorSchemas { node: InferencerName },
     #[error(
@@ -546,6 +548,33 @@ impl SessionServiceImpl {
                 node: processor.name.clone(),
             },
         )?;
+        if !processor.state.is_empty() {
+            let mut shapes = Vec::with_capacity(processor.state.len());
+            for binding in &processor.state {
+                let elements = binding
+                    .schema
+                    .fixed_element_count()
+                    .ok_or_else(|| Report::new(InferencerBindingValidationError::StateSnapshot))?;
+                shapes.push((
+                    u64::try_from(binding.schema.dimensions.len())
+                        .change_context(InferencerBindingValidationError::StateSnapshot)?,
+                    u64::try_from(elements)
+                        .change_context(InferencerBindingValidationError::StateSnapshot)?,
+                ));
+            }
+            let bytes = crate::inferencer_state_snapshot::footprint(shapes)
+                .change_context(InferencerBindingValidationError::StateSnapshot)?;
+            crate::inferencer_state_snapshot::check_bound(
+                bytes,
+                self.inner
+                    .runtime
+                    .executor()
+                    .limits()
+                    .snapshot_section_bytes
+                    .as_u64(),
+            )
+            .change_context(InferencerBindingValidationError::StateSnapshot)?;
+        }
         let id = ResourceId::new(
             domain.clone(),
             processor.resource.clone(),

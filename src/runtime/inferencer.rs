@@ -39,7 +39,7 @@ use ort::{
 use crate::runtime_schema::{RuntimeRecordBatch, RuntimeValue};
 
 mod stateful;
-pub(super) use stateful::{PreparedStatefulInference, StatefulInferenceSession};
+pub(super) use stateful::{NativeGeneration, PreparedStatefulInference, StatefulInferenceSession};
 
 /// Every way ONNX inference fails, from loading a model to reshaping one tensor axis.
 #[derive(Debug, thiserror::Error)]

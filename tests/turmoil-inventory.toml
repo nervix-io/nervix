@@ -93,5 +93,6 @@ tests = [
   "transport::relay::relay_restart_fences_unresolved_delivery_and_accepts_fresh_work",
   "transport::relay::sender_retirement_reclaims_capacity_while_an_admitted_intake_is_retained",
   "transport::materialized::materialized_branch_state_transfers_reconnect_to_the_replacement_owner",
+  "transport::materialized::inferencer_branch_state_transfers_reconnect_to_the_replacement_owner",
   "transport::materialized::materialized_inspection_pages_recover_after_partition_and_lost_stream_chunks",
 ]
