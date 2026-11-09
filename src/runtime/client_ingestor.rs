@@ -1860,6 +1860,7 @@ impl WorkerMailbox {
 impl ClientIntake {
     /// Validates one batch and dispatches it into the graph under a new ACK root.
     async fn admit(&self, job: AdmissionJob) -> AdmissionResult {
+        let payload_bytes = job.body.len();
         let limits = ClientBatchLimits {
             max_bytes: job.max_batch_bytes,
             max_rows: NonZeroUsize::new(job.max_batch_rows.get().arch_into())
@@ -1906,6 +1907,7 @@ impl ClientIntake {
                 branched_senders: &self.branched_senders,
                 metrics: &self.metrics,
                 batch,
+                payload_bytes,
                 acks: root.attached(),
                 ingested_at: actual_utc_now(),
             })

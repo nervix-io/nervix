@@ -83,7 +83,20 @@ command.
 
 An outcome also carries the subscription and schema a command opened, its backup or restore
 report, and a typed `upload_failure` for a refused `UPLOAD RESOURCE`. Attributes absent from that
-outcome are `nil`. Upload identity is fixed by the execution; recovery must send the same archive.
+outcome are `nil`.
+
+`UPLOAD RESOURCE <name> VERSION '<directory>';` streams a local directory as a new version of a
+resource the domain declares. The session serves it itself, under the upload identity its
+`Execution` fixed, so executing the same execution again sends the same archive under the same
+identity and completes without installing a second version. An upload the cluster refused is a
+`FAILED` outcome whose `upload_failure` says why; it is `nil` for a completed upload and for every
+other command. `NX::UploadFailure::IDENTITY_CONFLICT` means the identity already names another
+archive: keep the original bytes to recover that upload, and prepare the statement again for a
+different one.
+
+```ruby
+{{#include ../../tests/client_conformance/ruby/suite/cluster/commands_test.rb:upload}}
+```
 
 ### Inspect Materialized State
 

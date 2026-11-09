@@ -150,6 +150,23 @@ impl LicensingRefusal {
     }
 }
 
+impl Quota {
+    pub const fn admits(self, usage: u64) -> bool {
+        match self {
+            Self::Unlimited => true,
+            Self::Bounded { value } => usage <= value,
+        }
+    }
+
+    pub const fn is_reduction_from(self, previous: Self) -> bool {
+        match (previous, self) {
+            (Self::Unlimited, Self::Bounded { .. }) => true,
+            (Self::Bounded { value: previous }, Self::Bounded { value }) => value < previous,
+            _ => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,22 +209,5 @@ mod tests {
                 .admit(u64::MAX, 1, false)
                 .is_err()
         );
-    }
-}
-
-impl Quota {
-    pub const fn admits(self, usage: u64) -> bool {
-        match self {
-            Self::Unlimited => true,
-            Self::Bounded { value } => usage <= value,
-        }
-    }
-
-    pub const fn is_reduction_from(self, previous: Self) -> bool {
-        match (previous, self) {
-            (Self::Unlimited, Self::Bounded { .. }) => true,
-            (Self::Bounded { value: previous }, Self::Bounded { value }) => value < previous,
-            _ => false,
-        }
     }
 }

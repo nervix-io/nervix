@@ -237,6 +237,7 @@ mod http_transport;
 mod iceberg_delivery;
 mod ingestion_time;
 mod ingestor_instances;
+mod ingestor_payload;
 mod kafka_metadata;
 mod licensing;
 mod materialized_state_inspection;

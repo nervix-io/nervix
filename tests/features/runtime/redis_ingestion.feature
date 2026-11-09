@@ -165,6 +165,7 @@ Feature: Redis ingestion
         CREATE REDIS PUBSUB INGESTOR redis_notifications
         FROM redis_main CHANNEL '<channel>_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
+        FILTER WHERE payload.bytes > (0 AS U64)
         TO notifications
         INHERIT ALL
         BRANCHED BY by_redis_notifications

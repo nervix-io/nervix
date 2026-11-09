@@ -316,6 +316,10 @@ impl RabbitMqQueueIngestorMessage {
 /// routing key, delivery tag and redelivery flag, then the basic properties it carries. Each value is
 /// read from the borrowed delivery, so handing them over copies nothing.
 impl IngestMessageMetadata for RabbitMqQueueIngestorMessage {
+    fn payload_bytes(&self) -> usize {
+        nervix_connector::IngestorMessage::payload(self).len()
+    }
+
     fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
         let delivery = &self.headers.delivery;
         values.string(delivery.exchange.as_str());

@@ -395,8 +395,18 @@ The boundary tests retain the complete P-256/SHA-256 section of the
 [NIST CAVP FIPS 186-4 verification vectors](https://csrc.nist.gov/projects/cryptographic-algorithm-validation-program/digital-signatures),
 including invalid signatures, changed messages and changed public keys. Registered bounded
 properties cover message/signature bit changes and complete PKCS#8 round trips. These are algorithm
-and representation checks; they do not claim a FIPS-qualified build. Cross-build signature
-qualification belongs to the licensing service's FIPS lane.
+and representation checks; they do not claim a FIPS-qualified build.
+
+Cross-build signatures check that the two AWS-LC builds agree in both directions. One P-256
+signature of a fixed message under the committed test key was produced by the ordinary build and
+another by the boundary's `fips` build; both are committed, and every build verifies both and
+refuses each with a changed signature byte or message byte. Nervix CI runs that check on the
+ordinary module and the licensing service's FIPS lane on the FIPS module, at the Nervix revision
+the service pins. The [licensing protocol](./licensing-protocol.md#evidence) extends these vectors
+to every signed licensing document. AWS-LC's ECDSA signatures are randomized, so
+`just signature-vectors ordinary` and `just signature-vectors fips` each rewrite one build's
+vectors, the FIPS build needing Go and CMake, and `just test-signature-vectors [ordinary|fips]`
+verifies both builds' vectors on one build.
 
 The JWS adapter uses `jsonwebtoken` 11 with default features disabled and only `aws_lc_rs` enabled.
 It installs that library's native AWS-LC provider once. A provider installed beforehand by an

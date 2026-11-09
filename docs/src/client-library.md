@@ -43,10 +43,7 @@ Capabilities:
 
 Suggestion pages report `Ready`, `MissingContext`, `StaleContext`, or `LookupFailed`. Every
 candidate carries a UTF-8 byte text edit against the full input and a continuation requests the
-next bounded page. The C ABI exposes the same result through `nx_session_suggest`,
-`nx_suggestions_at`, and `nx_suggestions_continuation`; its header is
-`crates/client-ffi/include/nervix_client.h`. The [Python Client Library](client-library-python.md)
-returns it from `Session.suggest`.
+next bounded page.
 
 Structured choice pages carry typed enum variants or domain, resource, and model references beside
 separate presentation metadata. The request includes typed dependencies, search, and a
@@ -242,8 +239,7 @@ budget for each running domain's cut, so a cluster capture may validly exceed th
 
 `execute` refuses `DESCRIBE BACKUP`, which `nervix-cli` serves from a local file without a server;
 the `nervix-backup` crate's `describe_archive` reads and verifies an archive for other Rust
-programs. The C binding runs `BACKUP` through `nx_session_execute` the same way and reports the
-archive's size and digest through `nx_outcome_backup`. See [Backup And Restore](backup-and-restore.md).
+programs. See [Backup And Restore](backup-and-restore.md).
 
 ## Restoring
 
@@ -292,9 +288,7 @@ before a recorded failure.
 The outcome's `restore` field carries the typed `RestoreReport`: the mode, the archive's size and
 digest, the capture time, what the users step did, each restored domain, and each step's outcome.
 With no earlier uncertain attempt, a stream the leader refused before the restore ran is a failed
-outcome whose message names the typed failure. The C binding runs `RESTORE` through
-`nx_session_execute` and reports the report's
-counts, whether it was a dry run, and whether a step failed through `nx_outcome_restore`.
+outcome whose message names the typed failure.
 
 ## Uploading A Resource
 
@@ -313,10 +307,13 @@ a version is never transaction content, so reverting the transaction could not t
 origin and call count, and optional typed `UploadFailure`. `IdentityConflict` means the identity
 already names another archive; its `version` is the version bound to that identity. Preserve the
 original identity and bytes when recovering that upload, and use a fresh identity for a different
-logical upload. The host outcome exposes the failure through `Outcome::upload_failure()`, Python's
-`Outcome.upload_failure`, Java's `Outcome.uploadFailure()` and the C ABI's
-`nx_outcome_upload_failure`. The optional result is absent for a successful upload or any other
-command. These accessors return the typed cause directly, without matching the diagnostic text.
+logical upload. The failure is absent for a successful upload, and `resource_upload` is absent for
+any other command; read the typed cause from it, never from the diagnostic text.
+
+The other libraries read the same typed failure from their outcomes, which each guide shows with
+a tested example: [Python](client-library-python.md#execute-plexus),
+[Ruby](client-library-ruby.md#execute-plexus), [JVM](client-library-jvm.md#execute-plexus) and
+[C and C++](client-library-c.md#execute-plexus).
 
 ## Following A Domain Clock
 
@@ -717,10 +714,9 @@ datetime nanoseconds and bytes. `state.to_json()` and `state.display_text()` ren
 and summary/quota sections, including when no domain is selected. Match `StateInspectionEntity::DomainNode`
 to access the domain and graph-node reference of a materialized-state observation.
 
-The shared host runtime exposes `Outcome::state_inspection()` as an independently owned `Inspection`.
-It retains the envelope, lossless JSON, counts, section schemas and verified frame backing. C and
-C++ hosts read it through `nx_inspection`, which the
-[C and C++ Client Library](client-library-c.md#read-materialized-state) describes with a tested
-example.
-The Python, Ruby and JVM outcome APIs do not currently project this envelope; see
-[Client Host Bindings](client-host-bindings.md#guarantees-and-limits) for the current host surface.
+The other libraries read the same envelope through their own typed inspection objects, which
+each guide shows with a tested example: [Python](client-library-python.md#inspect-materialized-state),
+[Ruby](client-library-ruby.md#inspect-materialized-state),
+[JVM](client-library-jvm.md#inspect-materialized-state) and
+[C and C++](client-library-c.md#read-materialized-state).
+[Typed Inspection](client-host-bindings.md#typed-inspection) owns how they retain it.

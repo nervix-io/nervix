@@ -9,6 +9,7 @@
 //!   the header model of each side, the metadata namespace, where an ingestor executes, what an emitter
 //!   requires of its emitter, and what a body references. Each connector's own module owns its
 //!   client Model, its entity Models, their modes and the rules its external names follow.
+//!   Ingest entities also own the required payload facts their programs may read.
 //! - **Depends on.** Validated names, expressions, schema types, and the acknowledgement, retry and
 //!   batching vocabulary the entity Models share.
 //! - **Must not know.** How a connector is planned, validated, hosted or driven, or any connector
@@ -41,6 +42,7 @@ mod http;
 mod iceberg;
 mod ingestor;
 mod ingestor_metadata;
+mod ingestor_payload;
 mod kafka;
 mod mapped_values;
 mod mongodb;
@@ -65,9 +67,10 @@ use strum::{AsRefStr, Display, EnumIter, IntoStaticStr};
 pub use self::{
     bounds::*, clickhouse::*, client::*, config_schema::*, configured_client::*, deadline::*,
     declaration::*, emitter::*, external_name::ExternalNameError, header_model::*, header_pairs::*,
-    host_port::*, http::*, iceberg::*, ingestor::*, ingestor_metadata::*, kafka::*,
-    mapped_values::*, mongodb::*, mqtt::*, mysql::*, nats::*, otel::*, postgres::*, prometheus::*,
-    pulsar::*, rabbitmq::*, redis::*, sentry::*, sqs::*, syslog::*, websockets::*, zeromq::*,
+    host_port::*, http::*, iceberg::*, ingestor::*, ingestor_metadata::*, ingestor_payload::*,
+    kafka::*, mapped_values::*, mongodb::*, mqtt::*, mysql::*, nats::*, otel::*, postgres::*,
+    prometheus::*, pulsar::*, rabbitmq::*, redis::*, sentry::*, sqs::*, syslog::*, websockets::*,
+    zeromq::*,
 };
 pub(crate) use self::{entity_union::ALTERED_PAIR_CHECKED, ingestor::AlteredIngestorEntity};
 

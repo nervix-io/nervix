@@ -518,8 +518,8 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_identity_licensing_capability_tls_inference_reset_logs`, `raft_identity_licensing_capability_tls_inference_reset_meta`, `raft_identity_licensing_capability_tls_inference_reset_state`, and
-`raft_identity_licensing_capability_tls_inference_reset_snapshots`. Opening it validates the complete keyspace namespace before reading
+`raft_payload_identity_licensing_capability_tls_inference_reset_logs`, `raft_payload_identity_licensing_capability_tls_inference_reset_meta`, `raft_payload_identity_licensing_capability_tls_inference_reset_state`, and
+`raft_payload_identity_licensing_capability_tls_inference_reset_snapshots`. Opening it validates the complete keyspace namespace before reading
 any records. The committed cluster-parameter record stores ordered typed TLS cipher suites and
 key-exchange groups; recovery validates their complete pair before returning that record.
 This namespace identifies the current Model shape, including the separate JSON
@@ -537,12 +537,13 @@ resolved branch declaration of the committed schedule carries. It identifies
 the current statement shape as well, which the statements a transaction keeps are stored in:
 `ALTER BRANCH` among those statements, an `ALTER INGESTOR` or `ALTER EMITTER` operation that
 changes one part of its entity's body, an envelope clause or the properties, or one part of a
-construction where it stands, and a `RESET WASM PROCESSOR ... STATE` that names its processor and
-scope and takes its domain from the transaction, as the step effect and commit plan step that apply
-it keep it too. The database's state metadata requires the current `ClusterState` encoding, 23,
-including incarnation-bound node capability claims under record-family tag `C`, the cluster identity
-reference, committed cluster parameters, the durable restore installation gate and the unit-keyed
-committed schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
+construction where it stands, including the typed `payload` expression scope and a
+`RESET WASM PROCESSOR ... STATE` that names its processor and scope and takes its domain from
+the transaction, as the step effect and commit plan step keep it too. The database also stores
+incarnation-bound node capability claims under record-family tag `C`. Its state metadata
+requires the current `ClusterState` encoding, 23, including the cluster identity reference,
+committed cluster parameters, the durable restore installation gate and the unit-keyed committed
+schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,
 typed ingestor instancing, exact-unit placement-group members
 and entity-versus-unit transaction gate targets. Placement Models carry corridor or domain-wide

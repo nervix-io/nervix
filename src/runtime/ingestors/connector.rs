@@ -112,6 +112,12 @@ impl IngestorSpec {
         self.declared_input.entity_kind().capabilities().metadata
     }
 
+    pub(in crate::runtime) fn payload_declaration(
+        &self,
+    ) -> nervix_models::IngestorPayloadDeclaration {
+        self.declared_input.entity_kind().capabilities().payload
+    }
+
     /// The capabilities this ingestor's connector runs with, derived from the ingestor vocabulary.
     pub(super) fn ingestor_capabilities(
         &self,

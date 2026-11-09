@@ -23,6 +23,8 @@ pub mod validation;
 #[cfg(test)]
 mod probe_tests;
 #[cfg(test)]
+mod signature_vector_tests;
+#[cfg(test)]
 mod test_fixture;
 #[cfg(test)]
 mod verification_tests;

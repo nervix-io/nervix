@@ -4,15 +4,18 @@
 
 The Python, Ruby and JVM libraries and the C ABI share the Rust client's session through
 `nervix-client-host`. This chapter owns their architecture: runtime and thread ownership, call
-cancellation, host lifetimes, failure projection, data exchange, packaging and qualification.
-Changes to a binding crate, the host runtime, a conformance probe or its ledger keep this chapter
-current. The [Client Session Protocol](client-session-protocol.md) owns the exchange with a node;
-the [Client Implementation Manual](client-implementation-manual.md#using-the-c-abi) owns normative
-host requirements.
+cancellation, host lifetimes, failure projection, data exchange, packaging and qualification, and
+the language-level suites and guides that hold each library to its documented behaviour. Changes
+to a binding crate, the host runtime, a conformance probe or its ledger, a host suite or its
+inventory, `validate-client-suites` or the shape of a host guide keep this chapter current. The
+[Client Session Protocol](client-session-protocol.md) owns the exchange with a node; the
+[Client Implementation Manual](client-implementation-manual.md#using-the-c-abi) owns normative host
+requirements.
 
 Application APIs and executed examples belong in the [Python](client-library-python.md),
 [Ruby](client-library-ruby.md), [JVM](client-library-jvm.md) and
-[C and C++](client-library-c.md) guides. The [conformance ledger](https://github.com/nervix-io/nervix/blob/main/tests/client-conformance-ledger.md)
+[C and C++](client-library-c.md) guides, which the [Client Libraries](client-libraries.md) index
+introduces. The [conformance ledger](https://github.com/nervix-io/nervix/blob/main/tests/client-conformance-ledger.md)
 records exactly what each probe and host suite proves.
 
 ## Ownership By Layer
@@ -28,7 +31,7 @@ vocabulary and verified wire views, and carry no server implementation.
 | `crates/client-python` | pyo3 classes, exceptions and enums, GIL release, Python-owned views and Arrow PyCapsule exchange |
 | `crates/client-ruby` | magnus classes over rb-sys, GVL release and interrupt handling, collector-visible ownership and immutable buffer views |
 | `crates/client-jvm` | JNI exports, Java classes and exceptions, Cleaner-owned handles, native leases and direct buffers |
-| `tests/client_conformance` and the conformance ledger | External host probes, language-level suites, exact test inventories and evidence boundaries |
+| `tests/client_conformance` and the conformance ledger | External host probes, language-level suites, exact test inventories and evidence boundaries, as [Host Suites And Guides](#host-suites-and-guides) describes |
 
 A binding maps host values into the shared types and projects the result back. It never retries a
 request, chooses a server, restores a subscription or implements acknowledgement state itself.
@@ -252,15 +255,9 @@ restoration causes and C connection policy; their actual runtime rows define the
 The `client-conformance` PR label selects the cross-language lane.
 
 Host suites separately exercise each published API in its own framework: pytest, JUnit 5,
-minitest, and the C/C++ registered native tests. Their boundary and cluster tiers, public-member
-reference checks, exact inventory and guide includes are specified in the ledger. Prepared
-artifacts precede test execution; tests never invoke a compiler or package manager. A probe's
-report is not coverage of every host API, and a public-member reference is not a behavioral
-assertion.
-
-Every host boundary tier runs in ordinary CI, and the Python cluster examples also run in
-ordinary scenario shards. The `client-conformance` lane runs every host's cluster tier and the
-cross-language probes. Prepared boundary and packaging checks pass before any cluster starts.
+minitest, and the C/C++ registered native tests. [Host Suites And Guides](#host-suites-and-guides)
+owns their tiers, results, completeness check, guides and placement in CI. A probe's report is not
+coverage of every host API, and a public-member reference is not a behavioral assertion.
 
 Registered Bolero batch and field-description properties live with the actual conversion owner:
 the shared host's Arrow interface and the C, Ruby and JNI boundaries. A new binding adds its
@@ -275,6 +272,149 @@ emitted after teardown and checked against exact inventory identities. Server me
 remain server observations; the bindings add no independent
 retry counters or outcome inference. Logs, measurements and qualification reports are recorded
 on the owning ClickUp task rather than committed as architecture text.
+
+## Host Suites And Guides
+
+A probe holds every runtime to one report. A host suite holds one library to the behaviour its
+guide documents, in its host's own idiom and test framework, and asserts values and failures
+rather than report lines. The guide teaches that behaviour to an application developer, and every
+example it shows is a test of the suite. Every binding host has both: the Python package, the JVM
+library, the Ruby gem, and the C ABI from C11 and from C++17.
+
+| Owner | Responsibility |
+| --- | --- |
+| `tests/client_conformance/<host>/suite` | One suite per host beside its probe: pytest for `python`, JUnit 5 for `java`, minitest for `ruby`, and the registered test tables of checked C11 and C++17 programs for `c` and `cpp`, each split into a `boundary` and a `cluster` tier |
+| `docs/src/client-library-{python,jvm,ruby,c}.md` | One guide per host language under the [Client Libraries](client-libraries.md) index; C and C++ share one |
+| `tests/client-suites-inventory.toml` | Every suite test by host, tier and stable identity |
+| `scripts/client_suites.py` and its host readers | `just validate-client-suites`, which holds each suite to its binding's public surface, the inventory to the suite sources, the Python stub to the package and every guide to the shared shape; and `check-run`, which judges one tier's results against the inventory |
+| `tests/features/runtime/client_suites.feature` and `tests/common/client_suites.rs` | The cluster tier: one outline per host on one and three nodes, the runner's environment, declared scenario actions and the run's verdict against the inventory |
+
+### Two Tiers
+
+The boundary tier needs no cluster. It covers construction, enumerations, builders and readers at
+their bounds, Arrow exchange, typed failures from invalid arguments, a connect cancelled from
+another thread or ended by its deadline against a listener that never answers, and lifetimes under
+explicit collection. `just test-client-<host>-api` runs one host's boundary tier, for `python`,
+`jvm`, `ruby`, `c` and `cpp`, and `just test` runs all of them: Python's and the JVM's through
+their prepared-run recipes, Ruby's through the `host_suite` test of `nervix-client-ruby`, and C's
+and C++'s through the `native_suites` test of `nervix-client-ffi`, which runs each native program
+both ordinarily and under AddressSanitizer and UndefinedBehaviorSanitizer.
+
+The cluster tier runs as one outline per host in `client_suites.feature`, on one- and three-node
+clusters whose session listener serves HTTPS, and for the JVM, Ruby, C and C++ also HTTP. Its
+graph is the conformance graph's shape, and a suite creates what a test changes itself. The
+scenario starts the host's runner on a follower when the cluster has one, with the probe's
+environment and what a suite needs beside it: the leader's listener to relay a session through,
+every node as a seed, the fixture certificate authority and a backup directory. C and C++ run
+their sanitized programs. A running suite can ask its scenario for a declared testing-build
+action and wait for its numbered confirmation; [Client
+Suites](integration-test-lifecycle.md#client-suites) owns that exchange and the run's bounds.
+`just test-client-<host>-cluster` runs one host's rows, for `python`, `jvm`, `ruby`, and `c`
+for both native hosts, and `just test-client-conformance` runs them beside the probes.
+
+In CI, the ordinary `tests` job runs every boundary tier from prepared artifacts, and the ordinary
+scenario shards also run Python's cluster rows from the wheel their archive carries. The JVM,
+Ruby, C and C++ rows need toolchains and artifacts that only the `client-conformance` job
+prepares, so they run under that label beside the probes. Every runner that starts host
+clusters first runs the prepared boundary tiers, so an artifact that fails its boundary tier stops
+the run before a cluster starts.
+
+### Results And The Inventory
+
+A runner prints `NERVIX-SUITE <outcome> <identity>` once a test's teardown ends, where the outcome
+is `passed`, `failed` or `skipped` and the identity is the test's stable name: a pytest node id
+relative to the suite, such as `boundary/test_packaging.py::test_the_package_loads_without_pyarrow_or_polars`,
+a JUnit `class#method`, a minitest `Class#method`, or a C or C++ test function. The suite owns the
+adapter that prints it: the `Results` plugin of the pytest `conftest.py`, a registered JUnit
+`TestExecutionListener`, a minitest reporter, and the native programs' test tables. A line on
+standard output serves every framework without another dependency: minitest writes no
+machine-readable report without an extra gem, and a C program has no reporter.
+
+`scripts/client_suites.py check-run` judges a boundary run and the scenario step judges a cluster
+run by the same rule. Every test the inventory registers for that host's tier ran once and passed,
+nothing was skipped, nothing ran that the inventory does not register, and the runner exited
+successfully. A test cannot disappear silently, pass by being skipped or run unregistered. Every
+identity names one test, so parametrized pytest tests are refused.
+
+### Completeness
+
+`just validate-client-suites`, part of `just validate` and `just validate-ci`, reads each binding's
+public surface from its source and names every member that no test of that host references:
+
+- Python: pyo3 classes, methods, getters, renames, enumeration members and registered exceptions,
+  with references resolved by a mypy plugin over the typed suite.
+- JVM: every public type, constructor, method, record component and enumeration constant of
+  `io.nervix.client`, with references resolved from the Java compiler's trees.
+- Ruby: every class and method the magnus extension registers, against Prism-parsed constant and
+  typed-receiver references.
+- C and C++: every function, typedef and enumerator of `nervix_client.h`, against Clang-resolved
+  references from both programs.
+
+There is no allowance list: a member a suite cannot reach is a defect in the member or in the
+suite. The same check holds the inventory to the suite sources, so every registered identity
+exists and every test is registered; holds the Python stub to the package; and holds every guide
+to its shape. A reference shows that a test uses a member, not that it asserts all of its
+behaviour.
+
+### The Guides
+
+A guide is written for an application developer who has not read the protocol chapter: it
+explains how to write the code, not how the binding is built. Every guide has the same sections in
+the same order, which `validate-client-suites` checks: Install, Connect, Execute Plexus, Complete A
+Statement, Subscribe And Read Rows, Follow A Domain Clock, Publish Through A Client Ingestor,
+Consume A Client Emitter, Back Up And Restore, Errors, Threads, Cancellation And Deadlines,
+Lifetimes And Memory, Arrow Interop, What The Library Does Not Expose, and A Complete Application.
+A developer who knows one guide finds the same answer at the same place in the next. The C and
+C++ guide shows a C++ example beside the C one wherever ownership differs.
+
+Every code block of a guide is one mdBook include of an anchored test of that host's suite, and
+the check verifies that the file is a source of that suite and that it holds the anchor. A
+documented call that stops working therefore fails a test, and a guide never shows code its suite
+does not run. A behaviour a suite cannot demonstrate is a documentation defect, fixed in the
+change that finds it. The guides own host how-to. The manual keeps each host's normative rules and
+links its guide, this chapter keeps the internals, and the [Rust Client Library](client-library.md)
+keeps the Rust API, with no host section.
+
+### Typing And Packaging
+
+The wheel ships the hand-written stub `crates/client-python/nervix_client.pyi` as
+`nervix_client/__init__.pyi` beside a `py.typed` marker, so mypy and pyright check an application
+against the package's real surface instead of `Any`. `validate-client-suites` holds every class,
+member, parameter name, keyword-only marker and default of the stub to the pyo3 source, and type
+checks the suite and the paced simulation driver against it with `mypy --strict`. The JVM's types
+are the jar's own Java types, C and C++ read the declarations of `nervix_client.h`, and the Ruby
+gem ships no type signatures.
+
+Each host checks its artifact as an application loads it, before its other tests rely on it:
+
+| Host | Packaging check |
+| --- | --- |
+| Python | Boundary tests load the wheel from `python-bare`, an environment holding the package and nothing else, so it imports without pyarrow or polars, and find its stub and typed marker |
+| JVM | The cluster tier's first test starts a fresh JVM under `-Xcheck:jni` that loads the jar without JUnit, an explicit native-library path or a second application library |
+| Ruby | Each tier's runner first loads the gem from the fresh `GEM_HOME` its build installed it into, checking its ABI and version, and runs no other test when that fails |
+| C and C++ | `just build-client-c-suites` compiles and links the header from C11 and from C++17 with `-Wall -Wextra -Werror -pthread`, ordinary and sanitized, before any test runs |
+
+Installation stays in the recipes: no test runs Cargo, a compiler or a package manager, and
+`scripts/scenario_shards.py` packs the wheel the ordinary shards install for Python's rows.
+
+### What Each Instrument Proves
+
+| Instrument | Proves | Leaves to the others |
+| --- | --- | --- |
+| Host suite | One library behaves as its guide documents, in its host's idiom: values and typed failures, context managers, try-with-resources and blocks, `__repr__`, `toString` and `inspect`, equality and hashing, optional values, threads and cancellation from another thread, lifetimes under collection, packaging, and a reference to every public member | How another runtime reads the protocol, conversions of generated values, and whether a referenced member's whole behaviour is asserted |
+| Conformance probe | Every runtime prints one expected report on one and three nodes: typed rows and operation outcomes for every runtime, the independent Go and TypeScript clients included, and attached clocks, generations and producer and consumer exchange for every binding host | The library surface and host idioms beyond that report |
+| Bolero property | A conversion its owner performs keeps every bounded generated value: the shared host's Arrow interface, the C, JNI and Ruby column and field boundaries, and the typed inspection views | Behaviour against a cluster |
+| Binding owner test | What a live cluster cannot provoke on demand, such as a refused clock restoration, a domain-removed clock end or a settlement whose answer was lost | That an application reaches it through the published API in a separate process |
+
+### Limits Of The Suites
+
+A suite observes only what its graph, its own statements and the declared testing-build actions
+provoke. The one declared fault refuses the next subscription opening on every node, so every
+suite reads a refused subscription restoration live; a refused clock restoration and a
+domain-removed clock end are binding owner-test evidence. A passing suite qualifies its host on the revision it ran; C and C++
+sanitizers judge the host programs' use of the ABI while the Rust library stays uninstrumented,
+and Deloxide does not observe the host processes. The suites run the libraries the repository
+builds; no package registry or asynchronous adapter is involved.
 
 ## Guarantees And Limits
 
