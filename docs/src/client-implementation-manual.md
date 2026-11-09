@@ -1222,8 +1222,10 @@ language-level suite is the other instrument: it holds one package to the behavi
 documents, in that host's own test framework, and every code block of the guide is one of its
 tests. A host suite can ask its scenario for the declared subscription-opening refusal through
 the request/confirmation exchange in [Client Suites](integration-test-lifecycle.md#client-suites).
-Python's `test_a_refused_subscription_restoration_reports_its_cause_and_recovers` and the C and
-C++ suites' `test_b7_refused_subscription_restoration_reports_its_cause_and_recovers` observe the
+Python's `test_a_refused_subscription_restoration_reports_its_cause_and_recovers`, the JVM suite's
+`aRefusedSubscriptionRestorationReportsItsCauseAndRecovers`, Ruby's
+`test_refused_restoration_is_observable_and_the_subscription_recovers` and the C and C++ suites'
+`test_b7_refused_subscription_restoration_reports_its_cause_and_recovers` observe the
 interruption, unavailable restoration with its message and retry wait, and later row delivery
 through the live cluster. The Python package's suite is `tests/client_conformance/python/suite`,
 with the [Python Client Library](client-library-python.md) guide; the JVM suite is
