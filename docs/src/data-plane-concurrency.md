@@ -2043,6 +2043,10 @@ across them. The boundary is
 borrowed string traversal; local SQL quoting callbacks retain their recurring-execution checks.
 Statement construction reaches no internal runtime acquisition.
 
+Processor state inspection's branch selection carries a dispatch contract for the branch
+registry's opaque iterator over a unit's live instances. The unit task walks its own registry once
+per inspection, bounded by its live branches, and the walk acquires nothing.
+
 Local iteration and polling implementations remain call edges. Generated `await` polling is the
 Rust scheduling protocol, rather than a separate application callback diagnostic. Synchronization
 inside external libraries, opaque external future implementations and unsupported whole-program
@@ -3591,6 +3595,48 @@ inspection scenarios exercise native page capture/decoding and continuation beha
 materialized publication model checks continue to own update/capture interleavings; inspection does
 not claim a new model of Arrow encoding or network execution. Diagnostic lock campaigns remain
 subject to the current task execution policy.
+
+## Processor State Inspection Requests
+
+Reorderer route buffers and correlator pending sides stay exclusively owned by their concrete
+branch task; nothing publishes them. `SHOW REORDERER ... STATE`, `SHOW CORRELATOR ... STATE` and the
+`DESCRIBE` state counts read them through a cold request on that branch task's existing command
+channel, the bounded channel that already carries its checkpoint and stop commands.
+
+The request is scoped by the `NodeUnitRef` of the inspected processor unit and the concrete branch
+key. The unit task answers a `SelectStateBranches` command from its own branch registry by cloning
+the selected branch tasks' handles in canonical branch order, without waiting for any branch, so
+input dispatch is never held behind the branches' answers. The reader then sends each selected
+branch task one `Inspect` command with its skip, row and byte bounds, and waits on a `oneshot`
+reply. The branch loop serves commands before its next input batch, buffer deadline or force flush,
+so it answers between two batches: an immutable copy of row views over the Arrow batches it holds,
+bounded by the requested rows and bytes before anything is copied, the complete row and byte counts
+of the branch, its lifetime and the number of events it has handled. The copy borrows nothing the
+task keeps mutable and changes neither what the branch holds nor when or in which order it releases
+it. A task that ended, or that stopped serving commands while it drains, drops the request, and
+the reader refuses the read as `owner_unavailable` rather than waiting. The command channel's
+capacity of one bounds what the request queues, and the inspection read deadline,
+`StateInspectionReadTimeout`, bounds the reader's whole wait, from the unit selection to the last
+branch's answer; a reply to a reader that left is discarded. Gathering the copies into Arrow
+columns runs on the bounded Bulk executor after the branch tasks answered, admitted before any
+column is built.
+
+Answering takes the branch task time proportional to the batches a reorderer's routes hold and the
+records a correlator's sides hold, plus the copied rows: a reorderer counts the rows of each held
+batch and keeps its byte estimate as batches arrive, and a correlator counts each batch its pending
+records keep alive once, by identity, without copying or measuring the records themselves. Only the
+copied rows are measured one by one, and the read's row bound limits them.
+
+The request adds no lock, shared map or publication on the record path. The branch task's event
+count is a task-local integer incremented once per handled event. The protocol takes no tracked
+`sync::blocking` lock, so Deloxide does not observe it.
+The Shuttle check `runtime::processor_state_inspection::shuttle_tests` races inspections with a
+branch task taking batches and ending, using the production request, answer and reorderer buffer
+copy: every answered copy holds exactly the whole batches the task had taken, in arrival order, a
+request the task no longer takes is refused, and a task that ended answers nothing. The request
+makes no cross-location memory-ordering claim, so it has no Loom model. The one- and three-node
+public scenarios exercise the local and remote owner pages, interleaved branches, paging, stale
+continuations and inspection during steady input.
 
 ## Retained Emitter Lifecycle
 

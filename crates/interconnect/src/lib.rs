@@ -1490,5 +1490,7 @@ mod tests;
 mod state_inspection;
 pub use state_inspection::{
     MaterializedStatePageDescriptor, MaterializedStatePageReply, MaterializedStatePageTransfer,
-    ReadMaterializedStatePage, StatePageBody,
+    ProcessorStatePageDescriptor, ProcessorStatePageReply, ProcessorStateRunTransfer,
+    ProcessorStateSectionTransfer, ReadMaterializedStatePage, ReadProcessorStatePage,
+    StatePageBody,
 };

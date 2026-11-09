@@ -26,11 +26,11 @@ use nervix_models::{
     Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
     RelocationSelection, ResetWasmState, Restore, RestoreLifecycle, RestoreMode, RestoreScope,
     RestoreState, ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowPlacements,
-    ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SqsIngestorEntity, StartDomain,
-    StateBranchField, StateBranchSelection, Statement, StopDomain, SubscriptionBinding,
-    SubscriptionLiteral, SyslogIngestorEntity, TransactionInspectionRequest,
-    TransactionInspectionTarget, TransactionOperationNumber, UncordonNode, UploadResource,
-    WebsocketsIngestorEntity, ZeroMqIngestorEntity,
+    ShowProcessorState, ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SqsIngestorEntity,
+    StartDomain, StateBranchField, StateBranchSelection, StateInspectedProcessor, Statement,
+    StopDomain, SubscriptionBinding, SubscriptionLiteral, SyslogIngestorEntity,
+    TransactionInspectionRequest, TransactionInspectionTarget, TransactionOperationNumber,
+    UncordonNode, UploadResource, WebsocketsIngestorEntity, ZeroMqIngestorEntity,
 };
 use strum::IntoEnumIterator as _;
 
@@ -161,6 +161,7 @@ pub enum StatementVariant {
     ShowEmitters,
     ShowPlacements,
     ShowRelayMaterializedState,
+    ShowProcessorState,
     ShowClusterStatus,
     ShowTransactions,
     DescribeTransaction,
@@ -232,6 +233,7 @@ impl StatementVariant {
             Statement::ShowEmitters(_) => Self::ShowEmitters,
             Statement::ShowPlacements(_) => Self::ShowPlacements,
             Statement::ShowRelayMaterializedState(_) => Self::ShowRelayMaterializedState,
+            Statement::ShowProcessorState(_) => Self::ShowProcessorState,
             Statement::ShowClusterStatus(_) => Self::ShowClusterStatus,
             Statement::ShowTransactions(_) => Self::ShowTransactions,
             Statement::DescribeTransaction(_) => Self::DescribeTransaction,
@@ -732,6 +734,20 @@ impl Arbitrary<'_> {
                 let clauses = self.state_inspection_clauses();
                 Statement::ShowRelayMaterializedState(ShowRelayMaterializedState {
                     relay,
+                    selection: clauses.selection,
+                    page: clauses.page,
+                    format: clauses.format,
+                })
+            }
+            StatementVariant::ShowProcessorState => {
+                let processor = if self.entropy.flag() {
+                    StateInspectedProcessor::Reorderer(self.name())
+                } else {
+                    StateInspectedProcessor::Correlator(self.name())
+                };
+                let clauses = self.state_inspection_clauses();
+                Statement::ShowProcessorState(ShowProcessorState {
+                    processor,
                     selection: clauses.selection,
                     page: clauses.page,
                     format: clauses.format,

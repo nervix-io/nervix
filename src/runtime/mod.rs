@@ -297,6 +297,7 @@ mod processor_branch_restore;
 mod processor_branch_task;
 mod processor_output;
 mod processor_plan_binding;
+mod processor_state_inspection;
 mod processor_template;
 mod processors;
 mod published_generation;
@@ -557,8 +558,8 @@ use planning::{
 };
 use processor_branch_restore::PendingProcessorBranchRestore;
 use processor_branch_task::{
-    PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, PreparedProcessorBranch, ProcessorBranchHandoff,
-    ProcessorBranchLifetime, ProcessorBranchTask, ProcessorBranchTaskError,
+    PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, PreparedProcessorBranch, ProcessorBranchCommand,
+    ProcessorBranchHandoff, ProcessorBranchLifetime, ProcessorBranchTask, ProcessorBranchTaskError,
     ProcessorCheckpointPurpose, ProcessorNodeCommand, ProcessorSnapshotRequest,
     SpawnedSnapshotTask,
 };
@@ -571,6 +572,14 @@ use processor_output::{
     ProcessorOutputBatchScope, ProcessorOutputDispatchContext, ProcessorOutputError,
     dispatch_processor_output, dispatch_processor_outputs, flush_all_processor_outputs,
     flush_due_processor_outputs, pending_output_batches_by_key,
+};
+use processor_state_inspection::{
+    BranchStateCopy, BranchStateRead, HeldReordererRow, HeldRowsBudget, SelectedStateBranches,
+    answer_branch_state, held_row_bytes,
+};
+pub(crate) use processor_state_inspection::{
+    BranchStateReadError, ProcessorStatePageBounds, ProcessorStatePageError,
+    ProcessorStateSectionColumns,
 };
 use processor_template::{
     MaterializedDependencyResolution, ProcessorInputFilterKind, ProcessorTemplateError,

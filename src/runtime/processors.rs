@@ -31,11 +31,12 @@ use ordered_float::OrderedFloat;
 
 use super::{
     BranchBufferDeadline, BranchBufferTimer, BranchBufferTimingResult, BranchRuntime, BranchScope,
-    CompiledDeduplicatorKeyProgram, CompiledProgramWithMaterializedInterest, DeduplicatorKeyspace,
-    DomainClock, DomainExecutionSnapshot, PendingMaterializedBatch, RelayBoundaryServices,
-    RelayMessage, RelayRecordBatch, ReplicatedWasmProcessorState, ReplicatedWindowProcessorState,
-    RuntimeFlushPolicy, RuntimeInputCollectPolicy, RuntimeInputCollector, WasmGuestStateResetFence,
-    WasmLiveInstance, WindowAccumulatorPlan, WindowProcessorState,
+    BranchStateReadError, CompiledDeduplicatorKeyProgram, CompiledProgramWithMaterializedInterest,
+    DeduplicatorKeyspace, DomainClock, DomainExecutionSnapshot, HeldReordererRow, HeldRowsBudget,
+    PendingMaterializedBatch, RelayBoundaryServices, RelayMessage, RelayRecordBatch,
+    ReplicatedWasmProcessorState, ReplicatedWindowProcessorState, RuntimeFlushPolicy,
+    RuntimeInputCollectPolicy, RuntimeInputCollector, WasmGuestStateResetFence, WasmLiveInstance,
+    WindowAccumulatorPlan, WindowProcessorState, held_row_bytes,
     inferencer::{OnnxInferencerSession, PreparedStatefulInference, StatefulInferenceSession},
 };
 use crate::{
@@ -875,6 +876,58 @@ impl ReordererOutputBuffer {
 
     pub(super) fn estimated_bytes(&self) -> u64 {
         self.estimated_bytes
+    }
+
+    /// The rows of every batch this route holds.
+    pub(super) fn held_rows(&self) -> u64 {
+        let mut rows = 0_u64;
+        for pending in &self.pending {
+            let batch_rows = u64::try_from(pending.batch.record_batch().num_rows())
+                .assured("an addressable row count fits u64");
+            rows = rows
+                .checked_add(batch_rows)
+                .assured("rows a node holds in memory are fewer than 2^64");
+        }
+        rows
+    }
+
+    /// Copies the rows this route holds in arrival order, within `budget`: each row after those the
+    /// budget still skips, with its order key, its arrival time and the route's `release_at`. The
+    /// copies are views over the held batches; no value is rebuilt.
+    pub(super) fn copy_held(
+        &self,
+        output: u32,
+        release_at: Timestamp,
+        budget: &mut HeldRowsBudget,
+        copied: &mut Vec<HeldReordererRow>,
+    ) -> error_stack::Result<(), BranchStateReadError> {
+        for pending in &self.pending {
+            if budget.is_full() {
+                break;
+            }
+            let rows = pending.batch.record_batch().num_rows();
+            let skipped = budget.skip(rows);
+            for index in skipped..rows {
+                let Some(order) = pending.row_order.get(index) else {
+                    return Err(Report::new(BranchStateReadError::OrderKey));
+                };
+                let row = pending
+                    .batch
+                    .runtime_row(index)
+                    .change_context(BranchStateReadError::Row)?;
+                if !budget.admit(held_row_bytes(&row)) {
+                    break;
+                }
+                copied.push(HeldReordererRow {
+                    row,
+                    output,
+                    key: order.key.clone(),
+                    received_at: pending.received_at,
+                    release_at,
+                });
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn acks(&self) -> impl Iterator<Item = &AckSet> {

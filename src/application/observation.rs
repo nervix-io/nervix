@@ -18,6 +18,7 @@
 
 mod inspection_pages;
 mod materialized_state;
+mod processor_state;
 
 use std::{collections::BTreeSet, num::NonZeroU64, time::Duration};
 
@@ -1402,9 +1403,18 @@ impl SessionServiceImpl {
             Ok(metrics) => metrics,
             Err(message) => return command_error(format!("{message:#}")),
         };
+        // A running correlator reports the rows its units hold before its metrics.
+        let mut lines = match scheduled_node.as_ref() {
+            Some(node) => {
+                let processor = NodeRef::new(ModelKind::Correlator, describe.name.clone());
+                self.processor_state_lines(domain, processor, node).await
+            }
+            None => Vec::new(),
+        };
+        lines.extend(metrics);
         command_ok(append_metrics_lines(
             format_correlator_describe_output(&describe.name, &correlator, scheduled_node.as_ref()),
-            metrics,
+            lines,
         ))
     }
 
@@ -1449,9 +1459,18 @@ impl SessionServiceImpl {
             Ok(metrics) => metrics,
             Err(message) => return command_error(format!("{message:#}")),
         };
+        // A running reorderer reports the rows its units hold before its metrics.
+        let mut lines = match scheduled_node.as_ref() {
+            Some(node) => {
+                let processor = NodeRef::new(ModelKind::Reorderer, describe.name.clone());
+                self.processor_state_lines(domain, processor, node).await
+            }
+            None => Vec::new(),
+        };
+        lines.extend(metrics);
         command_ok(append_metrics_lines(
             format_reorderer_describe_output(&describe.name, &reorderer, scheduled_node.as_ref()),
-            metrics,
+            lines,
         ))
     }
 

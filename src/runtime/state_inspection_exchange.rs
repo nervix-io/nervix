@@ -10,21 +10,25 @@
     nervix::layer(control_plane, reason = "owns the boundary declared above")
 )]
 
+use arrow_array::RecordBatch;
 use error_stack::{Report, ResultExt as _};
 use futures_util::{StreamExt as _, stream};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, MemoryClass, Reservation};
 use nervix_interconnect::{
     MaterializedStatePageDescriptor, MaterializedStatePageReply, MaterializedStatePageTransfer,
-    PoolClass, ReadMaterializedStatePage, RkyvMessage, StatePageBody, StreamHandlerError,
-    StreamingResponse,
+    PoolClass, ProcessorStatePageDescriptor, ProcessorStatePageReply,
+    ProcessorStateSectionTransfer, ReadMaterializedStatePage, ReadProcessorStatePage, RkyvMessage,
+    StatePageBody, StreamHandlerError, StreamingResponse,
 };
-use nervix_models::StateInspectionRejection;
+use nervix_models::{ProcessorStateSection, SchemaField, StateInspectionRejection};
+use nervix_primitives::sync::StdArc;
 
 use super::{
     MaterializedGenerationRecord, RestoredMaterializedSnapshot, SealedSource,
     state_inspection_read::MaterializedInspectionPage,
 };
+use crate::runtime_schema::RuntimeRecordBatch;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum StatePageExchangeError {
@@ -181,6 +185,73 @@ pub(crate) async fn stream_materialized_page(
     .await
     .map_err(StreamHandlerError::with_cause)?;
     page_stream(executor, header, charge, body.into_iter().collect())
+}
+
+/// One section's returned rows as the owner hands them to its page stream; absent when the page
+/// returns none of the section's rows.
+pub(crate) struct ProcessorPageSection {
+    pub(crate) batch: Option<RecordBatch>,
+}
+
+/// Stream framing is the descriptor framing of every page, then one native Arrow snapshot section
+/// for each section that returns rows, in the descriptor's section order. A page whose sections
+/// exceed `max_bytes` is refused as too large and carries no body.
+pub(crate) async fn stream_processor_page(
+    executor: &Executor,
+    result: Result<
+        (ProcessorStatePageDescriptor, Vec<ProcessorPageSection>),
+        StateInspectionRejection,
+    >,
+    max_bytes: u64,
+) -> Result<StreamingResponse, Report<StreamHandlerError>> {
+    let (reply, bodies) = match result {
+        Ok((mut descriptor, sections)) => {
+            if descriptor.sections.len() != sections.len() {
+                return Err(StreamHandlerError::with_cause(Report::new(
+                    StatePageExchangeError::Framing,
+                )));
+            }
+            let mut bodies = Vec::new();
+            let mut bytes = 0_u64;
+            let mut too_large = false;
+            for (transfer, section) in descriptor.sections.iter_mut().zip(sections) {
+                let Some(batch) = section.batch else {
+                    continue;
+                };
+                let batch = RuntimeRecordBatch::from_record_batch(batch.schema(), batch)
+                    .map_err(StreamHandlerError::with_cause)?;
+                let body = batch
+                    .encode_arrow_snapshot_section(executor)
+                    .await
+                    .map_err(StreamHandlerError::with_cause)?;
+                bytes = bytes
+                    .checked_add(u64::try_from(body.len()).assured("resident allocations fit u64"))
+                    .assured("resident page allocations fit u64");
+                if bytes > max_bytes {
+                    too_large = true;
+                    break;
+                }
+                let (identity, body) = identified_body(executor, body).await?;
+                transfer.body = Some(identity);
+                bodies.push(body);
+            }
+            if too_large {
+                (Err(StateInspectionRejection::ReplyTooLarge), Vec::new())
+            } else {
+                (Ok(descriptor), bodies)
+            }
+        }
+        Err(reason) => (Err(reason), Vec::new()),
+    };
+    let (header, charge) = ProcessorStatePageReply::encode_rkyv(
+        reply,
+        executor.clone(),
+        PoolClass::Bulk,
+        PoolClass::Bulk.payload_limit(executor),
+    )
+    .await
+    .map_err(StreamHandlerError::with_cause)?;
+    page_stream(executor, header, charge, bodies)
 }
 
 pub(crate) struct ReceivedMaterializedPage {
@@ -364,6 +435,205 @@ pub(crate) async fn receive_materialized_page(
     Ok(Ok(ReceivedMaterializedPage {
         descriptor,
         snapshot: Some(snapshot),
+    }))
+}
+
+/// A processor's state has at most two sections, fixed by its kind: a reorderer's held rows, or a
+/// correlator's left and right pending records.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a reorderer holds one section and a correlator one per side, so a page names at \
+                  most two"
+    )
+)]
+const MAX_PROCESSOR_SECTIONS: usize = 2;
+
+/// One received section of a processor page: every row of it the unit holds, its complete fields,
+/// and its returned rows, absent when the page returned none of them.
+pub(crate) struct ReceivedProcessorSection {
+    pub(crate) section: ProcessorStateSection,
+    pub(crate) fields: Vec<SchemaField>,
+    pub(crate) rows: u64,
+    pub(crate) batch: Option<RecordBatch>,
+}
+
+pub(crate) struct ReceivedProcessorPage {
+    pub(crate) descriptor: ProcessorStatePageDescriptor,
+    pub(crate) sections: Vec<ReceivedProcessorSection>,
+}
+
+/// The rows a processor page returns of each of its sections, in descriptor order, once its
+/// counts, offset, sections and runs agree with the read that asked for it.
+fn processor_page_rows(
+    descriptor: &ProcessorStatePageDescriptor,
+    request: &ReadProcessorStatePage,
+    payload: &[(ProcessorStateSection, Vec<SchemaField>)],
+) -> Result<Vec<u64>, Report<StatePageExchangeError>> {
+    let framing = || Report::new(StatePageExchangeError::Framing);
+    let start = match request.after {
+        Some((_, offset)) => offset,
+        None => 0,
+    };
+    let count = descriptor.offset.checked_sub(start).ok_or_else(framing)?;
+    if count > request.max_rows
+        || descriptor.more != (descriptor.offset < descriptor.counts.rows)
+        || descriptor.offset > descriptor.counts.rows
+        || descriptor.sections.len() > MAX_PROCESSOR_SECTIONS
+    {
+        return Err(framing());
+    }
+    if payload.is_empty() {
+        if count != 0 {
+            return Err(framing());
+        }
+    } else if descriptor.sections.len() != payload.len() {
+        return Err(framing());
+    }
+    let mut section_rows = vec![0_u64; descriptor.sections.len()];
+    let mut returned = 0_u64;
+    for run in &descriptor.runs {
+        // At most MAX_PROCESSOR_SECTIONS sections, checked above.
+        let Some(index) = descriptor
+            .sections
+            .iter()
+            .position(|section| section.section == run.section)
+        else {
+            return Err(framing());
+        };
+        if run.rows == 0 {
+            return Err(framing());
+        }
+        section_rows[index] = section_rows[index]
+            .checked_add(run.rows)
+            .ok_or_else(framing)?;
+        returned = returned.checked_add(run.rows).ok_or_else(framing)?;
+    }
+    if returned != count {
+        return Err(framing());
+    }
+    Ok(section_rows)
+}
+
+/// The Arrow bodies a processor page stream carries after its descriptor, taken in section order
+/// within the read's byte bound.
+struct ProcessorPageBodies<'a> {
+    bytes: &'a ChargedBytes,
+    /// Where the next body starts in the stream.
+    offset: usize,
+    /// The body bytes taken so far.
+    received: u64,
+    max_bytes: u64,
+}
+
+impl ProcessorPageBodies<'_> {
+    /// The `rows` returned rows of one section. A section names no body exactly when it returns no
+    /// row; otherwise its next body is bounded, verified against its digest and decoded with
+    /// exactly the section's declared fields, and must hold exactly those rows.
+    async fn section(
+        &mut self,
+        executor: &Executor,
+        transfer: &ProcessorStateSectionTransfer,
+        rows: u64,
+    ) -> Result<Option<RecordBatch>, Report<StatePageExchangeError>> {
+        let framing = || Report::new(StatePageExchangeError::Framing);
+        let Some(identity) = &transfer.body else {
+            if rows != 0 {
+                return Err(framing());
+            }
+            return Ok(None);
+        };
+        if rows == 0 {
+            return Err(framing());
+        }
+        self.received = self
+            .received
+            .checked_add(identity.bytes)
+            .ok_or_else(framing)?;
+        if self.received > self.max_bytes {
+            return Err(framing());
+        }
+        let length = usize::try_from(identity.bytes).map_err(|_| framing())?;
+        let end = self.offset.checked_add(length).ok_or_else(framing)?;
+        let body = self.bytes.slice(self.offset, end).ok_or_else(framing)?;
+        self.offset = end;
+        let body = verified_body(executor, body, identity.clone()).await?;
+        let schema = StdArc::new(SchemaField::arrow_schema(&transfer.fields));
+        let decoded = RuntimeRecordBatch::decode_arrow_snapshot_section(executor, schema, body)
+            .await
+            .change_context(StatePageExchangeError::Columns)?;
+        let decoded_rows =
+            u64::try_from(decoded.batch().num_rows()).assured("a decoded row count fits u64");
+        if decoded_rows != rows {
+            return Err(framing());
+        }
+        Ok(Some(decoded.batch().clone()))
+    }
+}
+
+/// Receives one processor page and checks it against the read before any row is used.
+///
+/// `payload` names the sections the coordinator expects, in order, each with the payload fields its
+/// own committed schema gives it: a section that returns rows declares exactly those fields first.
+/// A count-only read passes no section and accepts no returned row. Every body is bounded,
+/// verified against its digest and decoded with exactly its declared fields, and the runs, the
+/// returned offset and the row counts must agree with the bodies and the descriptor.
+pub(crate) async fn receive_processor_page(
+    executor: &Executor,
+    stream: nervix_interconnect::IncomingByteStream,
+    request: &ReadProcessorStatePage,
+    payload: &[(ProcessorStateSection, Vec<SchemaField>)],
+) -> Result<Result<ReceivedProcessorPage, StateInspectionRejection>, Report<StatePageExchangeError>>
+{
+    let framing = || Report::new(StatePageExchangeError::Framing);
+    let bytes = receive_page_bytes(executor, stream, request.max_bytes).await?;
+    let end = descriptor_end(executor, &bytes)?;
+    let reply: ProcessorStatePageReply = decode_reply(executor, &bytes, end).await?;
+    let descriptor = match reply {
+        Ok(descriptor) => descriptor,
+        Err(reason) => {
+            if end != bytes.len() {
+                return Err(framing());
+            }
+            return Ok(Err(reason));
+        }
+    };
+    let section_rows = processor_page_rows(&descriptor, request, payload)?;
+    let mut bodies = ProcessorPageBodies {
+        bytes: &bytes,
+        offset: end,
+        received: 0,
+        max_bytes: request.max_bytes,
+    };
+    let mut sections = Vec::with_capacity(descriptor.sections.len());
+    for (index, transfer) in descriptor.sections.iter().enumerate() {
+        if let Some((expected, fields)) = payload.get(index) {
+            let declared = transfer.fields.get(..fields.len());
+            if transfer.section != *expected
+                || (transfer.body.is_some() && declared != Some(fields.as_slice()))
+            {
+                return Err(framing());
+            }
+        }
+        let rows = section_rows[index];
+        if rows > transfer.rows {
+            return Err(framing());
+        }
+        let batch = bodies.section(executor, transfer, rows).await?;
+        sections.push(ReceivedProcessorSection {
+            section: transfer.section,
+            fields: transfer.fields.clone(),
+            rows: transfer.rows,
+            batch,
+        });
+    }
+    if bodies.offset != bytes.len() {
+        return Err(framing());
+    }
+    Ok(Ok(ReceivedProcessorPage {
+        descriptor,
+        sections,
     }))
 }
 

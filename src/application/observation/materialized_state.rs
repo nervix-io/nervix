@@ -23,7 +23,7 @@ use nervix_interconnect::{
 };
 use nervix_models::{
     ClusterNodeIdentity, CreateRelay, CreateSchema, DomainName, DomainNodeRef, InspectionFormat,
-    ModelKind, ParseAsType, RelayName, ResolvedBranching, ResolvedStateBranchSelection,
+    ModelKind, NodeRef, ParseAsType, RelayName, ResolvedBranching, ResolvedStateBranchSelection,
     ScheduledNode, ShowRelayMaterializedState, StateInspectionBranchSelection,
     StateInspectionCounts, StateInspectionOrigin, StateInspectionPosition,
     StateInspectionRejection,
@@ -223,7 +223,7 @@ impl SessionServiceImpl {
         };
         if cursor.as_ref().is_some_and(|cursor| {
             cursor.domain != *domain
-                || cursor.relay != show.relay
+                || cursor.entity != NodeRef::new(ModelKind::Relay, show.relay.clone())
                 || cursor.schema != relay.node.schema_fingerprint
                 || cursor.control_revision != state.revision
                 || cursor.selection != selection
@@ -434,7 +434,7 @@ impl SessionServiceImpl {
             Some(
                 StateInspectionCursor {
                     domain: plan.domain,
-                    relay: plan.relay,
+                    entity: NodeRef::new(ModelKind::Relay, plan.relay),
                     schema: plan.node.schema_fingerprint,
                     control_revision: plan.control_revision,
                     generations,

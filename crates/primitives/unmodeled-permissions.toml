@@ -98,6 +98,13 @@ path = "src/runtime/entity_gate_shuttle_tests.rs"
 reason = "Each record must change in the same scheduling step as the operation it records, so recording adds no scheduling point."
 
 [[permission]]
+items = ["sync::atomic::AtomicBool", "sync::atomic::Ordering"]
+limit = "The record observes the branch task's end and never synchronizes an inspection; the commands, the batches and every answer travel on modeled channels."
+owner = "The processor state inspection Shuttle check."
+path = "src/runtime/processor_state_inspection_shuttle_tests.rs"
+reason = "The end must change in the same scheduling step as the loop exit it records, so recording adds no scheduling point."
+
+[[permission]]
 items = [
   "sync::atomic::AtomicBool",
   "sync::atomic::AtomicUsize",
