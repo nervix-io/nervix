@@ -69,6 +69,7 @@ pub(super) fn CodecEditor(
         <CodecTransformationEditor signals=signals />
         <CodecEncodingEditor signals=signals />
     }
+    .into_any()
 }
 
 /// The codec's family and format, and the schemas it binds.
@@ -105,6 +106,7 @@ fn CodecFormatEditor(
                 session_generation=session_generation />
         </Show>
     }
+    .into_any()
 }
 
 /// The codec's Protobuf descriptor binding and message types.
@@ -151,6 +153,7 @@ fn CodecProtobufEditor(
             </label>
         </Show>
     }
+    .into_any()
 }
 
 /// The codec's jaq transformations for each direction.
@@ -243,6 +246,7 @@ fn CodecTransformationEditor(signals: CreateSignals) -> impl IntoView {
             </fieldset>
         </Show>
     }
+    .into_any()
 }
 
 /// The codec's ordered field encoding rules.
@@ -304,4 +308,5 @@ fn CodecEncodingEditor(signals: CreateSignals) -> impl IntoView {
             </div>
         </Show>
     }
+    .into_any()
 }
