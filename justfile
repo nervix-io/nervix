@@ -1754,6 +1754,22 @@ test-crypto *args:
 test-crypto-policy *args:
     cargo test --package nervix-crypto-policy --lib -- {{ quote(args) }}
 
+# Run the cryptography boundary's and the licensing protocol crate's unit tests, both AWS-LC
+# builds' committed signature vectors included (licensing specification §17.6), on one build:
+# `ordinary`, or `fips`, AWS-LC's FIPS module, whose `aws-lc-fips-sys` build needs Go and CMake.
+test-signature-vectors build="ordinary":
+    cargo test --package nervix-crypto --package nervix-licensing-protocol --lib {{ aws_lc_build_features(build) }}
+
+# Rewrite the signature vectors one AWS-LC build signs, `ordinary` or `fips`: the boundary's P-256
+# signature and a compact JWS of every licensing document type. ECDSA signatures are randomized, so
+# every run writes new vectors. When a signed document's shape changes, rewrite and commit both
+# builds' vectors together; `just test-signature-vectors` on either build then verifies both.
+signature-vectors build:
+    cargo test --package nervix-crypto --lib {{ aws_lc_build_features(build) }} -- --ignored --exact ecdsa_tests::write_the_portable_signature
+    cargo test --package nervix-licensing-protocol --lib {{ aws_lc_build_features(build) }} -- --ignored --exact signature_vector_tests::write_the_signature_vectors
+
+aws_lc_build_features(build) := if build == "ordinary" { "" } else if build == "fips" { "--features nervix-crypto/fips" } else { error("the AWS-LC build is ordinary or fips, not " + build) }
+
 # Run the boundary's registered properties with canonical corpus and case accounting. They have
 # no server or console assets, so this focused owner does not need bolero-deps.
 test-crypto-properties:
