@@ -324,6 +324,7 @@ mod relay_memory_hold;
 mod relay_processor_node;
 mod relay_repartition;
 mod relay_send_attempts;
+mod relay_slicing;
 mod relay_state_task;
 mod relay_subscription;
 mod relay_transit;

@@ -1,5 +1,14 @@
 # Data-Plane Concurrency
 
+Committed node capabilities are control-plane configuration. A retained outbound peer pool owns
+their coherent receive-bound publication; changing it replaces neither slots nor stream-release
+waiters. Relay sends read that retained publication after their existing target selection.
+`RelaySliceCursor` owns contiguous unadmitted ranges. Only confirmed admission advances its prefix,
+and the remote ACK owner admits the same registration range. Refusal and cancellation never
+reassign an admitted prefix. The publication/cursor Shuttle check explores a lowering publication
+racing stale sizing and admission; it observes owner operations, not ArcSwap internals or networks.
+The real-transport tests and public native-client rolling scenarios cover the wire and row shares.
+
 *Plexus, the Nervix graph definition language.*
 
 Nervix keeps the paths that carry records, batches, remote relay frames, and acknowledgements free
@@ -231,6 +240,14 @@ Relay services retain the domain drain tracker resolved during construction. Rec
 ACK roots through that handle; they never register or discover the tracker per row. Watchers read
 the membership writer's immutable incarnation publication, so registrar retirement ends their
 charged task lifetime without a gossip lock.
+
+A watch receiving a registration from a newer run can precede that run's membership publication.
+An observed earlier incarnation therefore uses the existing undiscovered or missing grace; it
+never proves that the registrar was replaced. Only an observed newer incarnation retires the
+registrar immediately. Terminal acknowledgements remain available through the same grace: an undiscovered run is
+reported to, while a previously seen but missing run is held until it becomes visible. The registrar owner tests retain the exact discovery and
+silence bounds, and its production watcher Shuttle check races a terminal root with publication
+of the matching incarnation. This check models watcher decisions, not gossip or a network.
 
 One authenticated peer transport owns its ordinary grant, attempt, channel, watermark and outbound
 correlation collections. Connections and operation leases retain that owner. Its guard serializes

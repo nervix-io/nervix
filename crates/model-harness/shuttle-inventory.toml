@@ -31,6 +31,7 @@ name = "nervix-execution"
 
 [[package]]
 checks = [
+  "capability_publication::tests::shuttle_publication_racing_re_slicing_preserves_every_admitted_row_once",
   "connection::retained_slots_tests::shuttle_a_retained_pool_slot_claims_one_worker_and_retirement_is_final",
   "connection::relay_owner::tests::shuttle_peer_retirement_racing_runtime_admission_releases_the_exact_intake",
   "connection::relay_owner::tests::shuttle_a_claimed_body_racing_cancellation_keeps_one_reconcilable_verdict",
@@ -259,6 +260,7 @@ checks = [
   "runtime::relay_channel::tests::shuttle_cancelling_a_partial_audience_admission_wakes_a_sibling_publisher",
   "runtime::relay_subscription::shuttle_tests::shuttle_an_attachment_racing_a_redefinition_is_refused_or_closed_by_it",
   "runtime::remote_dispatch::shuttle_tests::shuttle_a_report_racing_the_final_sweep_keeps_the_share_it_reached",
+  "runtime::remote_dispatch::shuttle_tests::shuttle_a_new_registrar_keeps_its_terminal_ack_while_its_live_view_publication_catches_up",
   "runtime::remote_dispatch::shuttle_tests::shuttle_delayed_events_cannot_resolve_a_reused_delivery_position",
   "runtime::remote_dispatch::shuttle_tests::shuttle_registration_racing_shutdown_leaves_no_unresolved_accepted_share",
   "runtime::remote_dispatch::shuttle_tests::shuttle_a_departed_admission_waiter_racing_its_reply_returns_one_position",

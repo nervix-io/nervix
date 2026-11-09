@@ -1736,6 +1736,10 @@ test-websockets *args:
 test-websockets-shuttle check:
     SHUTTLE_TRACE_DIR={{ quote(cargo_target_dir + "/shuttle-failures/nervix-connector-websockets/" + check) }} cargo test --package nervix-connector-websockets --features shuttle --lib {{ quote(check) }} -- --exact --nocapture --test-threads=1
 
+# Explore one interconnect owner; the complete inventory gate remains test-shuttle in CI.
+test-interconnect-shuttle check:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/shuttle") }} SHUTTLE_TRACE_DIR={{ quote(cargo_target_dir + "/shuttle-failures/nervix-interconnect/" + check) }} cargo test --package nervix-interconnect --features shuttle --lib {{ quote(check) }} -- --exact --nocapture --test-threads=1
+
 # Explore one client owner and its nondeterminism check without unrelated server test roots.
 # The inventory and complete package selection remain qualified by test-shuttle in CI.
 test-client-shuttle check:

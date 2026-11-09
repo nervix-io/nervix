@@ -624,6 +624,7 @@ impl SessionServiceImpl {
                     .assured("the committed count fits a supported target"),
                 inputs.schedule(),
                 self.inner.runtime.scheduler_mode(),
+                planning.capabilities(),
             );
             #[cfg(not(feature = "testing"))]
             let mut schedule = graph.schedule_for_domain(
@@ -632,6 +633,7 @@ impl SessionServiceImpl {
                 usize::try_from(self.cluster_parameters().replica_count())
                     .assured("the committed count fits a supported target"),
                 inputs.schedule(),
+                planning.capabilities(),
             );
             Self::merge_existing_schedule_data(&mut schedule, inputs.schedule(), preservable_nodes);
             if let Err(error) = self.validate_domain_planning_inputs(&inputs).await {
@@ -878,6 +880,7 @@ impl SessionServiceImpl {
                         .assured("the committed count fits a supported target"),
                     inputs.schedule(),
                     self.inner.runtime.scheduler_mode(),
+                    planning.capabilities(),
                 );
                 #[cfg(not(feature = "testing"))]
                 let desired = graph.schedule_for_domain(
@@ -886,6 +889,7 @@ impl SessionServiceImpl {
                     usize::try_from(self.cluster_parameters().replica_count())
                         .assured("the committed count fits a supported target"),
                     inputs.schedule(),
+                    planning.capabilities(),
                 );
                 let Some(current_domain) = inputs.schedule() else {
                     if let Err(error) = self.validate_domain_planning_inputs(&inputs).await {

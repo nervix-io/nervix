@@ -56,7 +56,7 @@ fn scratch() -> TempDir {
 async fn a_high_watermark_above_the_memory_limit_refuses_the_node_naming_both() {
     let scratch = scratch();
     let settings = NodeSettings {
-        capacity: CapacitySettings::resolve(Some(ByteUnit::Gibibyte(4)))
+        capacity: CapacitySettings::resolve(Some(ByteUnit::Gibibyte(4)), None)
             .assured("four GiB is a memory limit"),
         memory_pressure: MemoryPressureSettings::resolve(
             Some(ByteUnit::Gibibyte(8)),

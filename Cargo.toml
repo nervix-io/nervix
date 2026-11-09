@@ -188,6 +188,7 @@ nervix-vm = { workspace = true }
 nervix-wasm = { workspace = true }
 nix = { workspace = true, features = ["fs"] }
 nonzero_ext = { workspace = true }
+num-rational = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry-otlp = { workspace = true, default-features = false, features = [
   "grpc-tonic",
@@ -424,6 +425,9 @@ jose-b64 = { version = "0.1.2", default-features = false, features = ["json"] }
 jose-jws = { version = "0.1.2", default-features = false }
 jsonwebtoken = { version = "11.1.0", default-features = false, features = [
   "aws_lc_rs",
+] }
+num-rational = { version = "0.4.2", default-features = false, features = [
+  "std",
 ] }
 serde-big-array = "0.5.1"
 unicode-normalization = "0.1"

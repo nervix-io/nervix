@@ -791,6 +791,7 @@ async fn inbound_subscription_wait_does_not_hold_domain_execution() {
     let inbound = nervix_primitives::task::spawn(async move {
         inbound_runtime
             .handle_remote_subscription_payload(RelayPayload {
+                decoded_bytes: 0,
                 delivery: RelayDelivery {
                     channel_incarnation: [1; 16],
                     sequence: 0,
@@ -1000,6 +1001,7 @@ async fn owner_ingress_publishes_branch_presence_to_the_relay_state_placement() 
     runtime
         .handle_remote_stream_payload_with_owner_ingress(
             RelayPayload {
+                decoded_bytes: 0,
                 delivery: RelayDelivery {
                     channel_incarnation: [1; 16],
                     sequence: 0,
@@ -1067,6 +1069,7 @@ impl JoinedRelayOwner {
         let relay = RelayName::parse("notifications").expect("valid identifier");
         let schema = test_schema(&[("user_id", ParseAsType::U32)]);
         let services = test_relay_boundary_services();
+        services.replace_owner_routes(RelayOwnerRoutes::single(node.clone()));
         install_test_domain_execution(
             &runtime,
             &domain,
@@ -1104,6 +1107,7 @@ impl JoinedRelayOwner {
             .await
             .expect("batch ipc should serialize");
         RelayPayload {
+            decoded_bytes: 0,
             delivery: RelayDelivery {
                 channel_incarnation: [5; 16],
                 sequence: 0,
@@ -1294,6 +1298,7 @@ async fn a_routed_attached_delivery_fails_on_a_node_that_no_longer_runs_its_cons
     let delivery = runtime
         .handle_remote_stream_payload_with_owner_ingress(
             RelayPayload {
+                decoded_bytes: 0,
                 delivery: RelayDelivery {
                     channel_incarnation: [3; 16],
                     sequence: 0,
@@ -1388,6 +1393,7 @@ async fn a_remote_payload_that_does_not_decode_names_its_defect() {
         let delivery = runtime
             .handle_remote_stream_payload_with_owner_ingress(
                 RelayPayload {
+                    decoded_bytes: 0,
                     delivery: RelayDelivery {
                         channel_incarnation: [4; 16],
                         sequence: 0,
@@ -1476,6 +1482,7 @@ async fn a_subscription_fanout_that_does_not_decode_is_refused() {
     for (metadata, acks, expected) in cases {
         let error = runtime
             .handle_remote_subscription_payload(RelayPayload {
+                decoded_bytes: 0,
                 delivery: RelayDelivery {
                     channel_incarnation: [5; 16],
                     sequence: 0,
@@ -2456,7 +2463,11 @@ async fn a_decoded_body_is_bounded_by_the_payload_it_carries() {
         .await
         .expect("the body should encode");
     let decoded = schema
-        .decode_arrow_body(&generous, body.clone())
+        .decode_arrow_body(
+            &generous,
+            body.clone(),
+            generous.limits().relay_decoded_bytes.as_u64(),
+        )
         .await
         .expect("the body should decode under the default limits");
     let payload = decoded.estimated_bytes();
@@ -2485,7 +2496,11 @@ async fn a_decoded_body_is_bounded_by_the_payload_it_carries() {
     })
     .expect("a decoded bound below the default holds the default budgets");
     schema
-        .decode_arrow_body(&executor, body)
+        .decode_arrow_body(
+            &executor,
+            body,
+            executor.limits().relay_decoded_bytes.as_u64(),
+        )
         .await
         .expect("a body whose payload fits the decoded bound decodes");
 }
@@ -2569,6 +2584,7 @@ async fn a_three_destination_fanout_shares_one_encoded_body() {
         .enumerate()
         .map(|(index, consumer)| {
             routed_payload(RoutedDelivery {
+                decoded_bytes: crate::runtime_schema::batch_payload_bytes(batch.batch.batch()),
                 delivery: RelayDelivery {
                     channel_incarnation: [1; 16],
                     sequence: index.arch_into(),
@@ -2606,7 +2622,11 @@ async fn a_three_destination_fanout_shares_one_encoded_body() {
             "each destination owes its own acknowledgement"
         );
         let decoded = schema
-            .decode_arrow_body(&executor, payload.batch_ipc.clone())
+            .decode_arrow_body(
+                &executor,
+                payload.batch_ipc.clone(),
+                executor.limits().relay_decoded_bytes.as_u64(),
+            )
             .await
             .expect("every destination decodes the shared body");
         assert_eq!(decoded.batch(), batch.batch.batch());
@@ -2884,6 +2904,7 @@ async fn a_payload_for_a_relay_this_node_has_not_instantiated_names_its_domain_a
         .await
         .expect("batch ipc should serialize");
     let payload = |kind, target: &DomainName| RelayPayload {
+        decoded_bytes: 0,
         delivery: RelayDelivery {
             channel_incarnation: [1; 16],
             sequence: 0,

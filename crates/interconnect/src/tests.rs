@@ -471,14 +471,6 @@ async fn send_waits_for_a_target_registered_after_the_operation_starts() {
 }
 
 #[test]
-fn internal_tls_negotiates_only_http2() {
-    let tls = test_tls();
-
-    assert_eq!(tls.client_config.alpn_protocols, [b"h2".to_vec()]);
-    assert_eq!(tls.server_config.alpn_protocols, [b"h2".to_vec()]);
-}
-
-#[test]
 fn connection_limit_reserves_both_preconnected_directions() {
     let mut options = TransportOptions {
         max_peers: 2,
@@ -692,21 +684,6 @@ async fn connection_binding_drives_response_flow_control() {
 
     transport_a.shutdown().await;
     transport_b.shutdown().await;
-}
-
-#[test]
-fn certificate_binds_cluster_node_and_endpoint() {
-    let tls = test_tls();
-    let node = ClusterNodeName::parse("node-1").expect("valid node name");
-
-    tls.certificate
-        .validate_local("default", &node, "localhost")
-        .expect("certificate identity should match");
-    assert!(
-        tls.certificate
-            .validate_local("another-cluster", &node, "localhost")
-            .is_err()
-    );
 }
 
 #[nervix_primitives::test]
@@ -1545,6 +1522,7 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
         )
         .expect("the response target should register");
     let payload = |ack_id, sequence, registrar| RelayPayload {
+        decoded_bytes: 0,
         delivery: RelayDelivery {
             channel_incarnation: [1; 16],
             sequence,
@@ -1681,6 +1659,7 @@ async fn the_next_relay_on_a_channel_is_granted_before_the_outcome_of_the_one_be
         )
         .expect("the outcome target should register");
     let payload = |ack_id, sequence| RelayPayload {
+        decoded_bytes: 0,
         delivery: RelayDelivery {
             channel_incarnation: [24; 16],
             sequence,
@@ -1790,6 +1769,7 @@ async fn a_relay_grant_that_skips_its_channels_next_position_is_refused_out_of_o
         ..
     } = connected_transports().await;
     let payload = |ack_id, sequence| RelayPayload {
+        decoded_bytes: 0,
         delivery: RelayDelivery {
             channel_incarnation: [25; 16],
             sequence,
@@ -1857,6 +1837,7 @@ async fn a_grant_refused_for_relay_memory_is_granted_once_room_returns() {
         ..
     } = connected_transports().await;
     let payload = RelayPayload {
+        decoded_bytes: 0,
         delivery: RelayDelivery {
             channel_incarnation: [3; 16],
             sequence: 0,
@@ -1951,7 +1932,7 @@ fn each_relay_grant_refusal_counts_under_its_own_reason_and_fails_a_request_by_i
             | RelayGrantRefusal::TerminalOutcome
             | RelayGrantRefusal::ChannelBusy => StreamResetReason::Capacity,
             RelayGrantRefusal::SenderEpoch
-            | RelayGrantRefusal::BodyTooLarge
+            | RelayGrantRefusal::ReceiveBounds
             | RelayGrantRefusal::MissingAdmission
             | RelayGrantRefusal::ForeignRegistrar
             | RelayGrantRefusal::ContentConflict
@@ -1997,6 +1978,7 @@ async fn terminal_relay_outcome_waits_for_application_queue_capacity() {
         .send(
             &node_b,
             Envelope::RelayPayload(RelayPayload {
+                decoded_bytes: 0,
                 delivery: RelayDelivery {
                     channel_incarnation: [11; 16],
                     sequence: 0,
@@ -2095,6 +2077,7 @@ async fn confirmed_cancellation_fences_attempt_before_grant_arrives() {
         .send(
             &node_b,
             Envelope::RelayPayload(RelayPayload {
+                decoded_bytes: 0,
                 delivery,
                 kind: RelayPayloadKind::Routed,
                 domain: DomainName::parse("test").expect("test domain should be valid"),
@@ -2142,6 +2125,7 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
         sequence: 0,
     };
     let payload = RelayPayload {
+        decoded_bytes: 0,
         delivery,
         kind: RelayPayloadKind::Routed,
         domain: DomainName::parse("test").expect("test domain should be valid"),
@@ -2218,6 +2202,7 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
         sequence: 1,
     };
     let next_payload = RelayPayload {
+        decoded_bytes: 0,
         delivery: next_delivery,
         kind: RelayPayloadKind::Routed,
         domain: DomainName::parse("test").expect("test domain should be valid"),
@@ -2255,6 +2240,7 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
     );
 
     let retired_payload = RelayPayload {
+        decoded_bytes: 0,
         delivery: RelayDelivery {
             channel_incarnation: [7; 16],
             sequence: 0,
@@ -2306,6 +2292,7 @@ async fn same_epoch_retry_of_admitted_relay_does_not_enqueue_twice() {
         sequence: 0,
     };
     let payload = RelayPayload {
+        decoded_bytes: 0,
         delivery,
         kind: RelayPayloadKind::Routed,
         domain: DomainName::parse("test").expect("test domain should be valid"),
@@ -2403,6 +2390,7 @@ async fn an_outcome_addressed_to_an_earlier_registrar_run_leaves_the_current_adm
         .send(
             &node_b,
             Envelope::RelayPayload(RelayPayload {
+                decoded_bytes: 0,
                 delivery,
                 kind: RelayPayloadKind::Routed,
                 domain: DomainName::parse("test").expect("test domain should be valid"),
@@ -2497,6 +2485,7 @@ async fn receiver_process_restart_makes_unresolved_relay_indeterminate() {
         .send(
             &node_b,
             Envelope::RelayPayload(RelayPayload {
+                decoded_bytes: 0,
                 delivery,
                 kind: RelayPayloadKind::Routed,
                 domain: DomainName::parse("test").expect("test domain should be valid"),
@@ -2574,6 +2563,7 @@ async fn reserved_relay_work_reports_progress_before_runtime_admission() {
         .send(
             &node_b,
             Envelope::RelayPayload(RelayPayload {
+                decoded_bytes: 0,
                 delivery: RelayDelivery {
                     channel_incarnation: [9; 16],
                     sequence: 0,

@@ -54,6 +54,13 @@ path = "crates/interconnect/src/tests/lease.rs"
 reason = "The test races synchronous public target registration from external threads with an entered ordinary runtime; it is a harness, not a node's accepted work."
 
 [[permission]]
+bound = "Two model threads per execution: one publishes one lower claim, the other admits at most eight rows; both join within the 1,000-schedule DFS check."
+items = ["thread::spawn"]
+owner = "The retained peer publication and contiguous re-slice production-owner check."
+path = "crates/interconnect/src/capability_publication.rs"
+reason = "Shuttle contenders exercise the actual publication and cursor owners; they are bounded model participants, not node work for the executor."
+
+[[permission]]
 bound = "At most two model threads coexist: each binds or selects one channel, replaces routing, or retires one lifetime. Each pair is joined before the bounded Shuttle execution advances or ends."
 items = ["thread::spawn"]
 owner = "The relay channel binding and retirement models."

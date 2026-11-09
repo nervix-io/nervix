@@ -90,6 +90,7 @@ fn one_instance_exposes_its_single_execution_and_several_instances_keep_distinct
         std::slice::from_ref(&owner),
         0,
         None,
+        &crate::registry::uniform_capabilities(std::slice::from_ref(&owner)),
     );
     let identity = NodeRef::new(ModelKind::Ingestor, named::<ModelName>("source"));
     let source = schedule
@@ -113,7 +114,13 @@ fn one_instance_exposes_its_single_execution_and_several_instances_keep_distinct
     );
 
     let multiple_graph = graph(IngestorInstances::Count(nonzero!(3u64)), false);
-    let schedule = multiple_graph.schedule_for_domain(&named("instances"), &[owner], 0, None);
+    let schedule = multiple_graph.schedule_for_domain(
+        &named("instances"),
+        std::slice::from_ref(&owner),
+        0,
+        None,
+        &crate::registry::uniform_capabilities(std::slice::from_ref(&owner)),
+    );
     let source = &schedule.nodes[&identity];
     assert!(source.sole_unit().is_none());
     assert!(source.assigned_single_node().is_none());
@@ -124,7 +131,13 @@ fn one_instance_exposes_its_single_execution_and_several_instances_keep_distinct
 fn independent_instances_spread_primaries_and_keep_their_own_replicas() {
     let graph = graph(IngestorInstances::Count(nonzero!(3u64)), false);
     let nodes = [named("node-1"), named("node-2"), named("node-3")];
-    let schedule = graph.schedule_for_domain(&named("instances"), &nodes, 1, None);
+    let schedule = graph.schedule_for_domain(
+        &named("instances"),
+        &nodes,
+        1,
+        None,
+        &crate::registry::uniform_capabilities(&nodes),
+    );
     let source = &schedule.nodes[&NodeRef::new(ModelKind::Ingestor, named::<ModelName>("source"))];
     assert_eq!(
         source.units.keys().copied().collect::<Vec<_>>(),
@@ -174,6 +187,11 @@ fn per_partition_groups_bind_only_the_corresponding_instance_and_relay_unit() {
         &[named("node-1"), named("node-2"), named("node-3")],
         1,
         None,
+        &crate::registry::uniform_capabilities(&[
+            named("node-1"),
+            named("node-2"),
+            named("node-3"),
+        ]),
     );
     assert_eq!(schedule.placement_groups.len(), 4);
     for group in &schedule.placement_groups {

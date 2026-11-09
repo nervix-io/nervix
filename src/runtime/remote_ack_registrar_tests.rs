@@ -134,3 +134,51 @@ fn an_undiscovered_registrar_is_reported_to_until_its_discovery_deadline() {
         RegistrarLook::Release
     );
 }
+
+#[test]
+fn an_earlier_live_view_keeps_the_new_registrars_existing_discovery_and_missing_bounds() {
+    let registrar = run(7);
+    let start = Instant::now();
+    let mut discovering = RegistrarPresence::undiscovered(start);
+    assert_eq!(
+        discovering.look(registrar, Some(run(6)), start),
+        RegistrarLook::Report
+    );
+    assert_eq!(
+        discovering.look(
+            registrar,
+            Some(run(6)),
+            after(start, REMOTE_RELAY_INSTANTIATION_WAIT)
+        ),
+        RegistrarLook::Release
+    );
+    let (mut present, start) = seen_live(registrar);
+    assert_eq!(
+        present.look(registrar, Some(run(6)), start),
+        RegistrarLook::Hold
+    );
+    assert_eq!(
+        present.look(
+            registrar,
+            Some(registrar),
+            after(start, Duration::from_millis(1))
+        ),
+        RegistrarLook::Report
+    );
+    assert_eq!(
+        present.look(
+            registrar,
+            Some(run(6)),
+            after(start, Duration::from_millis(2))
+        ),
+        RegistrarLook::Hold
+    );
+    let deadline = after(
+        after(start, Duration::from_millis(2)),
+        RegistrarPresence::missing_grace(),
+    );
+    assert_eq!(
+        present.look(registrar, Some(run(6)), deadline),
+        RegistrarLook::Release
+    );
+}

@@ -165,6 +165,12 @@ impl StoredUnder<DomainName> for DomainSchedule {
     }
 }
 
+impl StoredUnder<nervix_models::ClusterNodeName> for nervix_models::NodeCapabilityRecord {
+    fn is_stored_under(&self, node: &nervix_models::ClusterNodeName) -> bool {
+        self.identity.node_id() == node
+    }
+}
+
 impl StoredUnder<DomainName> for nervix_models::DomainState {
     fn is_stored_under(&self, domain: &DomainName) -> bool {
         self.id == *domain

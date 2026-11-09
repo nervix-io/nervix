@@ -138,7 +138,12 @@ impl<'bytes> GeneratedSettings<'bytes> {
         } else {
             None
         };
-        CapacitySettings::resolve(memory_limit)
+        let cpu_count = if self.entropy.flag() {
+            Some(self.entropy.between(1..=u64::MAX))
+        } else {
+            None
+        };
+        CapacitySettings::resolve(memory_limit, cpu_count)
             .assured("a memory limit, when given, is at least one byte")
     }
 
@@ -243,6 +248,27 @@ impl<'bytes> GeneratedSettings<'bytes> {
         )
         .assured("the resource settings declare no validation");
         let capacity = self.capacity();
+        let limits = nervix_execution::OperationLimits::default();
+        let peer_receive = nervix_interconnect::PeerReceiveSettings::resolve(
+            Some(ByteUnit::Byte(
+                self.positive_bytes()
+                    .as_u64()
+                    .min(limits.relay_encoded_bytes.as_u64()),
+            )),
+            Some(ByteUnit::Byte(
+                self.positive_bytes()
+                    .as_u64()
+                    .min(limits.relay_decoded_bytes.as_u64()),
+            )),
+            Some(ByteUnit::Byte(
+                self.positive_bytes()
+                    .as_u64()
+                    .min(limits.bulk_chunk_bytes.as_u64()),
+            )),
+            Some(ByteUnit::Byte(self.positive_bytes().as_u64().min(16 << 20))),
+            &limits,
+        )
+        .assured("generated positive bounds fit executor and HTTP/2 limits");
         let mut settings = NodeSettings {
             parameter_seeds: nervix_models::ClusterParameterSeedValues {
                 tls_cipher_suites: Some(tls_cipher_suites),
@@ -260,6 +286,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
             shutdown,
             resources,
             capacity,
+            peer_receive,
         };
         let args = super::SettingsArgs::from(&settings);
         settings.parameter_seeds = args.parameter_seeds();

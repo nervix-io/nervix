@@ -26,6 +26,7 @@ Keep detailed grammar in those chapters when reviewing a configuration.
 | User need | Documentation index entry |
 | --- | --- |
 | Domain timing and lifecycle | `Domains And Time` |
+| Detected or overridden node CPU/memory, committed capability rolls, negotiated peer receive bounds and proportional placement | `Node Settings` → `Committed Node Capabilities`, then `Placement` → `Capacity At The Load Tier` |
 | Administrative durability, storage errors, and recovery of uncertain commits | `Control Plane` → `Durability and recovery` |
 | Internal/wire schemas, schema evolution, codecs, JAQ, Protobuf, and type mapping | `Schemas And Codecs` and `Control Plane` |
 | Expressions, operators, casts, built-in functions, window aggregates, and approximate sketches | `Expression Functions` |

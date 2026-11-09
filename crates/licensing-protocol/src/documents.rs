@@ -302,3 +302,28 @@ pub struct DecisionResponse {
     pub trust: TrustDocuments,
     pub server_time: DateTime<Utc>,
 }
+
+/// The trust bundle a licensing service publishes (licensing specification §5.4, §9.4): the root
+/// sets of its trust state and every signed trust document that state verified, each in its exact
+/// original signed form. Only the signed members are authoritative: a receiver verifies them
+/// against its own embedded bundle, never trusts `epochs`, and learns no anchor from them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustBundleResponse {
+    pub epochs: Vec<RootSet>,
+    pub successions: Vec<SignedTrustDocument>,
+    pub authorizations: Vec<SignedTrustDocument>,
+    pub revocations: Vec<SignedTrustDocument>,
+}
+
+impl TrustBundleResponse {
+    /// The signed members, successions first, as the trust documents a receiver verifies against
+    /// its own embedded bundle.
+    pub fn documents(&self) -> TrustDocuments {
+        let mut documents = Vec::new();
+        documents.extend(self.successions.iter().cloned());
+        documents.extend(self.authorizations.iter().cloned());
+        documents.extend(self.revocations.iter().cloned());
+        TrustDocuments { documents }
+    }
+}

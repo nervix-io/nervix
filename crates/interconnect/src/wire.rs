@@ -52,8 +52,8 @@ const INITIAL_MESSAGE_CHARGE: u64 = 4 * 1024;
     )
 )]
 pub const WIRE_CONTRACT: WireContractFingerprint = WireContractFingerprint::from_digest([
-    0x50, 0xc0, 0x71, 0x92, 0xcc, 0xbe, 0xec, 0xe7, 0x24, 0xa5, 0x90, 0x7d, 0x34, 0x00, 0x01, 0x37,
-    0x0c, 0x89, 0x07, 0x3b, 0x0e, 0x08, 0xb9, 0x53, 0x5b, 0xfc, 0x47, 0xf3, 0x0a, 0x14, 0xae, 0x7c,
+    0x42, 0xbb, 0x6a, 0x22, 0x9e, 0xed, 0x52, 0x9d, 0x32, 0xe2, 0x8c, 0x0a, 0xa5, 0x8c, 0xf0, 0x1b,
+    0x0c, 0x3a, 0x6d, 0x48, 0xca, 0x5f, 0xab, 0xe5, 0xb8, 0xe9, 0xd1, 0x65, 0x47, 0x48, 0xf7, 0x20,
 ]);
 
 /// The first message of every connection: who dials, for which pool, and everything the dialing
@@ -100,6 +100,7 @@ pub(crate) struct RelayGrantResponse {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) enum RelayGrantDisposition {
+    Resize(nervix_models::PeerReceiveBounds),
     SendBody { grant_id: u64 },
     BodyReceived,
     Admitted,
@@ -186,6 +187,7 @@ impl<T> Decoded<T> {
 /// The rkyv metadata admitted before an Arrow relay body stream starts.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub(crate) struct RelayMetadata {
+    pub(crate) decoded_bytes: u64,
     pub(crate) kind: RelayPayloadKind,
     pub(crate) domain: nervix_models::DomainName,
     pub(crate) relay: nervix_models::RelayName,
@@ -199,6 +201,7 @@ pub(crate) struct RelayMetadata {
 impl RelayMetadata {
     pub(crate) fn from_payload(payload: &RelayPayload) -> Self {
         Self {
+            decoded_bytes: payload.decoded_bytes,
             kind: payload.kind,
             domain: payload.domain.clone(),
             relay: payload.relay.clone(),
@@ -216,6 +219,7 @@ impl RelayMetadata {
         batch_ipc: ChargedBytes,
     ) -> RelayPayload {
         RelayPayload {
+            decoded_bytes: self.decoded_bytes,
             delivery,
             kind: self.kind,
             domain: self.domain,
@@ -291,14 +295,14 @@ where
 /// instead of queueing behind a charge that needs the retained payload to be released.
 pub(crate) async fn encode_stream_request(
     executor: &Executor,
-    envelope: crate::request::RequestEnvelope,
+    envelope: crate::request::StreamRequestEnvelope,
     payload_charge: Reservation,
 ) -> Result<ChargedBytes, Report<TransportError>> {
     let encoding = RkyvEncoding {
         value: envelope,
         _input_charge: Some(payload_charge),
     };
-    let class = encoding.value.class;
+    let class = encoding.value.request.class;
     let limit = class.control_body_limit(executor);
     let reservation = executor
         .try_reserve(class.memory_class(), INITIAL_MESSAGE_CHARGE.min(limit))
