@@ -127,6 +127,7 @@ fn ProgramListEditor(
                 }>{format!("Add {label}")}</button>
         </div>
     }
+    .into_any()
 }
 
 #[component]
@@ -205,6 +206,7 @@ fn SignalingStepEditor(signals: CreateSignals, index: usize) -> impl IntoView {
             </Show>
         </div>
     }
+    .into_any()
 }
 
 #[component]
@@ -239,6 +241,7 @@ pub(super) fn SignalingEditor(
                 } />
         </label>
     }
+    .into_any()
 }
 
 /// The protocol's wire format and its Protobuf descriptor binding and message types.
@@ -294,6 +297,7 @@ fn SignalingFormatEditor(
             </label>
         </Show>
     }
+    .into_any()
 }
 
 /// Whether the connection accepts data when it opens, and the ordered steps that run on connect.
@@ -325,4 +329,5 @@ fn SignalingConnectEditor(signals: CreateSignals) -> impl IntoView {
             </div>
         </div>
     }
+    .into_any()
 }
