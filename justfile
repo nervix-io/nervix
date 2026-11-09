@@ -935,6 +935,16 @@ test-wire-schema-lists *args: build-web-console wasm-processor-guests download-o
     cargo test --package nervix-scenarios --test scenarios -- \
         --input tests/features/runtime/wire_schema_lists.feature "$@"
 
+# Exercise coordinated WASM guest-state resets through in-process nodes: the RESET statement on the
+# session's active domain, its retries and refusals, and the operator and guest-requested resets.
+[positional-arguments]
+test-wasm-state-reset *args: build-web-console wasm-processor-guests download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/runtime/wasm_state_reset.feature "$@"
+
 # Verify every processor/emitter acknowledgement clause through public CREATE and SHOW CREATE.
 [positional-arguments]
 test-acknowledgement-clauses *args: generate-test-onnx download-onnxruntime build-web-console wasm-processor-guests build-test-cli
