@@ -13,6 +13,16 @@ use nervix_models::{ClusterParameterSeedValues, ClusterParameterValues};
 use super::{Arbitrary, Entropy};
 
 impl Arbitrary<'_> {
+    pub fn password_credential(&mut self) -> nervix_models::PasswordCredential {
+        let iterations = self
+            .entropy
+            .boundary_biased(1..=nervix_models::PasswordIterations::MAXIMUM);
+        let salt = std::array::from_fn(|_| self.entropy.byte());
+        let digest = std::array::from_fn(|_| self.entropy.byte());
+        nervix_models::PasswordCredential::from_parts(iterations, salt, digest)
+            .assured("generated password costs are within the declared bound")
+    }
+
     pub fn cluster_parameter_record(&mut self) -> nervix_models::ClusterParameterRecord {
         let revision = std::num::NonZeroU64::new(self.entropy.any_u64().max(1))
             .assured("generated revisions are positive");
@@ -25,6 +35,9 @@ impl Arbitrary<'_> {
     pub fn cluster_parameter_values(&mut self) -> ClusterParameterValues {
         let entropy = &mut self.entropy;
         ClusterParameterValues::resolve(ClusterParameterSeedValues {
+            password_iterations: Some(
+                entropy.boundary_biased(1..=nervix_models::PasswordIterations::MAXIMUM),
+            ),
             node_unavailability_timeout: Some(parameter_duration(entropy)),
             domain_drain_timeout: Some(parameter_duration(entropy)),
             entity_gate_deadline: Some(parameter_duration(entropy)),

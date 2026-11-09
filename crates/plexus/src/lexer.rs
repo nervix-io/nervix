@@ -94,6 +94,7 @@ pub enum Identifier {
     HttpHeaderBytes,
     HttpHeaderFields,
     ClientBatchRows,
+    PasswordIterations,
     Headers,
     Secret,
     Platform,

@@ -13,6 +13,8 @@ source "${script_dir}/docker-event-recording.sh"
 source "${script_dir}/require-jq.sh"
 # shellcheck source=image-identity.sh
 source "${script_dir}/image-identity.sh"
+# shellcheck source=binding-image.sh
+source "${script_dir}/binding-image.sh"
 # shellcheck source=output-boundary.sh
 source "${script_dir}/output-boundary.sh"
 # shellcheck source=image-package-check.sh
@@ -30,6 +32,8 @@ Required:
   --image IMAGE          Already-built Nervix image reference or local image ID.
 
 Options:
+  --binding-image IMAGE  Already-built Python binding image of the same source revision;
+                         required by the binding-endpoints scenario.
   --nodes 1|3            Cluster topology (default: 3).
   --records N            Finite fixture size, 1..1000; mixed-instability 1..20000 and by default
                          twice its planned timeline plus 15 minutes of records (default: ${record_count}).
@@ -48,7 +52,8 @@ Options:
                          isolated before startup admission, 20..600 (default: ${isolation_seconds}).
   --fault FAULT          stateful fault: none, owner-crash, owner-pause, owner-partition or
                          cluster-restart; endpoints and lifetimes fault: none, owner-crash,
-                         owner-partition or cluster-restart; domain-time fault: none,
+                         owner-partition or cluster-restart; binding-endpoints: none, owner-crash,
+                         owner-stop or cluster-restart; domain-time fault: none,
                          voter-crash, voter-pause, voter-partition, voter-stop or
                          cluster-restart. One node supports none and cluster-restart (default:
                          ${fault}). backup-fault requires one of owner-crash, leader-crash,
@@ -95,6 +100,7 @@ setup_error() {
 }
 
 image_ref=""
+binding_image_ref=""
 scenario="baseline"
 node_count=3
 record_count=24
@@ -151,6 +157,11 @@ while [[ "$#" -gt 0 ]]; do
             image_ref="$2"
             shift 2
             ;;
+        --binding-image)
+            [[ "$#" -ge 2 && -n "$2" ]] || setup_error '--binding-image requires a value'
+            binding_image_ref="$2"
+            shift 2
+            ;;
         --scenario)
             [[ "$#" -ge 2 ]] || setup_error '--scenario requires a value'
             scenario="$2"
@@ -169,7 +180,7 @@ while [[ "$#" -gt 0 ]]; do
             elif [[ "${scenario}" == stateful || "${scenario}" == domain-time ]]; then
                 record_count=1000
                 overall_timeout=2700
-            elif [[ "${scenario}" == endpoints ]]; then
+            elif [[ "${scenario}" == endpoints || "${scenario}" == binding-endpoints ]]; then
                 record_count=1000
                 overall_timeout=1800
             elif [[ "${scenario}" == lifetimes ]]; then
@@ -414,8 +425,14 @@ if [[ -n "${replay_dir}" ]]; then
 fi
 
 [[ -n "${image_ref}" ]] || setup_error '--image is required and must name an already-built Nervix image'
+if [[ -n "${binding_image_ref}" && "${scenario}" != binding-endpoints ]]; then
+    setup_error '--binding-image applies only to binding-endpoints'
+fi
+if [[ "${scenario}" == binding-endpoints && -z "${binding_image_ref}" ]]; then
+    setup_error 'binding-endpoints requires --binding-image'
+fi
 case "${scenario}" in
-    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | ingestor-instances-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | lifetimes | domain-time | mixed-instability) ;;
+    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | ingestor-instances-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | binding-endpoints | lifetimes | domain-time | mixed-instability) ;;
     *) setup_error "unknown scenario: ${scenario}" ;;
 esac
 [[ "${node_count}" == "1" || "${node_count}" == "3" ]] \
@@ -435,7 +452,7 @@ case "${stateful_partitions}" in
     *) setup_error '--state-partitions must be 1 or 4' ;;
 esac
 case "${scenario}" in
-    stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | lifetimes | domain-time | mixed-instability | backup-fault | restore-fresh-cluster | restore-fault | restore-volume) recovery_scenario=true ;;
+    stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | binding-endpoints | lifetimes | domain-time | mixed-instability | backup-fault | restore-fresh-cluster | restore-fault | restore-volume) recovery_scenario=true ;;
 esac
 # The backup scenarios install the backup form of the baseline graph, whose Kafka ingestor keeps
 # domain-owned offsets instead of a consumer group.
@@ -464,7 +481,7 @@ uses_pumba=true
 case "${scenario}" in
     baseline | backup | backup-cycles | restore-fresh-cluster | restore-volume) uses_pumba=false ;;
 esac
-if [[ "${scenario}" != baseline && "${scenario}" != backup && "${scenario}" != backup-cycles && "${scenario}" != rolling-restart && "${scenario}" != leader-crash && "${scenario}" != cluster-restart && "${scenario}" != stateful && "${scenario}" != endpoints && "${scenario}" != lifetimes && "${scenario}" != domain-time && "${node_count}" != 3 ]]; then
+if [[ "${scenario}" != baseline && "${scenario}" != backup && "${scenario}" != backup-cycles && "${scenario}" != rolling-restart && "${scenario}" != leader-crash && "${scenario}" != cluster-restart && "${scenario}" != stateful && "${scenario}" != endpoints && "${scenario}" != binding-endpoints && "${scenario}" != lifetimes && "${scenario}" != domain-time && "${node_count}" != 3 ]]; then
     setup_error "${scenario} requires --nodes 3"
 fi
 case "${scenario}" in
@@ -472,6 +489,12 @@ case "${scenario}" in
         case "${fault}" in
             none | owner-crash | owner-pause | owner-partition | cluster-restart) ;;
             *) setup_error "--fault for stateful must be none, owner-crash, owner-pause, owner-partition or cluster-restart, not ${fault}" ;;
+        esac
+        ;;
+    binding-endpoints)
+        case "${fault}" in
+            none | owner-crash | owner-stop | cluster-restart) ;;
+            *) setup_error "--fault for binding-endpoints must be none, owner-crash, owner-stop or cluster-restart, not ${fault}" ;;
         esac
         ;;
     endpoints | lifetimes)
@@ -500,7 +523,7 @@ case "${scenario}" in
         ;;
     *)
         [[ "${fault_option_set}" != true ]] \
-            || setup_error '--fault applies only to stateful, endpoints, lifetimes, domain-time, backup-fault and restore-fault'
+            || setup_error '--fault applies only to stateful, endpoints, binding-endpoints, lifetimes, domain-time, backup-fault and restore-fault'
         ;;
 esac
 if [[ "${node_count}" == 1 && "${fault}" != none && "${fault}" != cluster-restart ]]; then
@@ -705,6 +728,8 @@ export CHAOS_PROBE_IMAGE="${chaos_probe_image}"
 export CHAOS_PUMBA_IMAGE="${chaos_pumba_image}"
 export CHAOS_NETTOOLS_IMAGE="${chaos_nettools_image}"
 export CHAOS_PYTHON_IMAGE="${chaos_python_image}"
+# Compose validates even inactive services; the binding profile is enabled only with its image.
+export CHAOS_BINDING_IMAGE="${image_ref}"
 export CHAOS_POSTGRES_IMAGE="${chaos_postgres_image}"
 export CHAOS_LOAD_FILE="${artifact_dir}/fixtures/input.ndjson"
 export CHAOS_TRAFFIC_DIR="${artifact_dir}/traffic"
@@ -728,7 +753,7 @@ case "${scenario}" in
         # One record every two seconds keeps the bounded fixture flowing through all four cases.
         load_interval_ms=2000
         ;;
-    pause-resume | stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | lifetimes | domain-time | backup-fault | restore-fresh-cluster | restore-fault | restore-volume)
+    pause-resume | stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | binding-endpoints | lifetimes | domain-time | backup-fault | restore-fresh-cluster | restore-fault | restore-volume)
         # One record a second keeps the bounded fixture flowing through the slowest case.
         load_interval_ms=1000
         ;;
@@ -946,6 +971,8 @@ if [[ "${scenario}" == stateful ]]; then
     compose_args+=(--profile stateful)
 elif [[ "${scenario}" == endpoints ]]; then
     compose_args+=(--profile endpoints)
+elif [[ "${scenario}" == binding-endpoints ]]; then
+    compose_args+=(--profile binding)
 elif [[ "${scenario}" == lifetimes ]]; then
     compose_args+=(--profile lifetimes)
 elif [[ "${scenario}" == domain-time ]]; then
@@ -1457,9 +1484,12 @@ finish() {
         elif [[ "${scenario}" == former-owner-restart ]]; then
             reproducer="$(printf 'just chaos run %q --image %q --records %q --isolation-seconds %q' \
                 "${scenario}" "${reproducer_image}" "${record_count}" "${isolation_seconds}")"
-        elif [[ "${scenario}" == stateful || "${scenario}" == endpoints || "${scenario}" == lifetimes || "${scenario}" == domain-time ]]; then
+        elif [[ "${scenario}" == stateful || "${scenario}" == endpoints || "${scenario}" == binding-endpoints || "${scenario}" == lifetimes || "${scenario}" == domain-time ]]; then
             reproducer="$(printf 'just chaos run %q --image %q --nodes %q --fault %q --records %q' \
                 "${scenario}" "${reproducer_image}" "${node_count}" "${fault}" "${record_count}")"
+            if [[ "${scenario}" == binding-endpoints ]]; then
+                reproducer+="$(printf ' --binding-image %q' "${tool_image_ids[binding]:-${binding_image_ref}}")"
+            fi
             if [[ "${outage_option_set}" == true ]]; then
                 reproducer+="$(printf ' --outage-seconds %q' "${outage_seconds}")"
             fi
@@ -1497,6 +1527,8 @@ finish() {
             diagnostics/image-package/result.json diagnostics/image-package/stdout.txt \
             diagnostics/image-package/stderr.txt diagnostics/image-package/inspect.json \
             diagnostics/image-package/inspect.stderr \
+            diagnostics/binding-controls.txt diagnostics/binding-provenance.json \
+            diagnostics/binding-provenance.stderr \
             diagnostics/startup-status/result.json diagnostics/startup-status/stdout.txt \
             diagnostics/startup-status/stderr.txt public/cluster-status.attempt.txt \
             crash/kill-events.ndjson crash/all-node-events.ndjson \
@@ -2061,6 +2093,11 @@ fi
 if [[ "${scenario}" == endpoints ]]; then
     resolve_tool_image python "${CHAOS_PYTHON_IMAGE}"
 fi
+if [[ -n "${binding_image_ref}" ]]; then
+    command -v python3 >/dev/null || setup_error 'the binding verifier requires Python 3'
+    resolve_tool_image binding "${binding_image_ref}"
+    export CHAOS_BINDING_IMAGE="${tool_image_ids[binding]}"
+fi
 if [[ "${scenario}" == lifetimes ]]; then
     resolve_tool_image postgres "${CHAOS_POSTGRES_IMAGE}"
 fi
@@ -2105,6 +2142,33 @@ if ((image_package_status != 0)); then
     setup_error "image-package probe for '${image_ref}' failed with status ${image_package_status}; see diagnostics/image-package"
 fi
 prepare_diagnostic_evidence
+if [[ -n "${binding_image_ref}" ]]; then
+    binding_revision="$(jq -r '.image_revision // ""' "${artifact_dir}/manifest.json")"
+    binding_labels="$(run_bounded 30 docker image inspect --format '{{json .Config.Labels}}' "${CHAOS_BINDING_IMAGE}")"
+    binding_image_labels_match "${binding_labels}" "${binding_revision}" \
+        || setup_error 'the binding image does not declare the product source revision and Python client kind'
+    run_bounded 30 docker run --rm --network none \
+        --label "io.nervix.chaos.run=${run_id}" --label io.nervix.chaos.role=probe \
+        --entrypoint python3 "${CHAOS_BINDING_IMAGE}" -I -c \
+        'import nervix_client; from pathlib import Path; print(Path("/opt/nervix-client/provenance.json").read_text(), end="")' \
+        >"${artifact_dir}/diagnostics/binding-provenance.json" \
+        2>"${artifact_dir}/diagnostics/binding-provenance.stderr" \
+        || setup_error 'the binding image cannot load its prepared wheel and provenance offline'
+    binding_image_provenance_matches "${artifact_dir}/diagnostics/binding-provenance.json" "${binding_revision}" \
+        || setup_error 'the installed binding wheel provenance does not match the product source revision'
+    update_manifest '.tool_images.binding.provenance = $provenance[0]' \
+        --slurpfile provenance "${artifact_dir}/diagnostics/binding-provenance.json"
+    # Keep the existing scenarios independent of host Python. Each binding run qualifies its own
+    # Python oracle even when it adopts the shared verifier record of a suite.
+    run_bounded 30 env PYTHONDONTWRITEBYTECODE=1 \
+        "PYTHONPATH=${script_dir}/../..${PYTHONPATH:+:${PYTHONPATH}}" \
+        python3 -m unittest scripts.chaos.tests.test_binding \
+        >"${artifact_dir}/diagnostics/binding-controls.txt" 2>&1 \
+        || setup_error 'the binding verifier controls failed; see diagnostics/binding-controls.txt'
+    update_manifest '.binding_verifier_self_check = {status: "passed", bound_seconds: 30,
+            output: "diagnostics/binding-controls.txt", scripts_sha256: $scripts}' \
+        --arg scripts "$(chaos_scripts_identity "${script_dir}")"
+fi
 if [[ "${uses_pumba}" == true ]]; then
     [[ -S /var/run/docker.sock ]] \
         || setup_error "${scenario} requires a local /var/run/docker.sock for Pumba"
@@ -2181,7 +2245,7 @@ elif [[ "${scenario}" == former-owner-restart ]]; then
 elif [[ "${scenario}" == cluster-restart ]]; then
     # shellcheck disable=SC2016
     update_manifest '.recovery = {minimum_outage_seconds: $seconds}' --argjson seconds "${outage_seconds}"
-elif [[ "${scenario}" == stateful || "${scenario}" == endpoints || "${scenario}" == lifetimes || "${scenario}" == domain-time ]]; then
+elif [[ "${scenario}" == stateful || "${scenario}" == endpoints || "${scenario}" == binding-endpoints || "${scenario}" == lifetimes || "${scenario}" == domain-time ]]; then
     # The dollars in this jq filter are jq variables, not shell expansion.
     # shellcheck disable=SC2016
     update_manifest '.fault = $fault | .deployment = {replica_count: ($replicas | tonumber), state_snapshot_interval: $interval}' \
@@ -2467,6 +2531,13 @@ if [[ "${scenario}" == endpoints ]]; then
         run_cli "${endpoint_domain}" 'START;' >"${artifact_dir}/public/start-domain-${endpoint_domain}.txt" 2>&1
     done
 fi
+if [[ "${scenario}" == binding-endpoints ]]; then
+    cli_command 'CREATE UNPACED DOMAIN chaos_binding;' \
+        >"${artifact_dir}/public/create-domain-chaos_binding.txt" 2>&1
+    run_cli chaos_binding "$(<"${script_dir}/fixtures/binding-endpoints.plexus")" \
+        >"${artifact_dir}/public/configure-binding-endpoints.txt" 2>&1
+    run_cli chaos_binding 'START;' >"${artifact_dir}/public/start-domain-chaos_binding.txt" 2>&1
+fi
 if [[ "${scenario}" == domain-time ]]; then
     cli_command 'CREATE PACED DOMAIN chaos_paced WITH PERIOD 1s SKEW 1s;' \
         >"${artifact_dir}/public/create-paced-domain.txt" 2>&1
@@ -2601,6 +2672,12 @@ if [[ "${scenario}" != "baseline" ]]; then
         # shellcheck source=stateful-scenario.sh
         source "${script_dir}/stateful-scenario.sh"
         run_stateful
+    elif [[ "${scenario}" == binding-endpoints ]]; then
+        # shellcheck source=endpoints-scenario.sh
+        source "${script_dir}/endpoints-scenario.sh"
+        # shellcheck source=binding-scenario.sh
+        source "${script_dir}/binding-scenario.sh"
+        run_binding_endpoints
     elif [[ "${scenario}" == endpoints ]]; then
         # shellcheck source=endpoints-scenario.sh
         source "${script_dir}/endpoints-scenario.sh"

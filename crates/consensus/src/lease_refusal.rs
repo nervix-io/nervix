@@ -3,7 +3,7 @@
 //!
 //! Layer: engines and infrastructure; arming is exposed only to test harnesses.
 //! - **Owns.** One armed refusal of a command execution's admission, domain-mutation release or
-//!   finalization proposal, and whether a proposal met it.
+//!   finalization or orphaned-pause recovery proposal, and whether a proposal met it.
 //! - **Depends on.** The vocabulary's execution references and asynchronous synchronization.
 //! - **Must not know.** How the refusal is classified, answered or recovered.
 
@@ -39,6 +39,8 @@ mod enabled {
         Finalization,
         /// The proposal that releases one domain's mutation lease after its cut.
         DomainMutationRelease,
+        /// The conditional proposal that releases an orphaned model-alteration pause.
+        PauseRecovery,
     }
 
     /// The refusal a test harness armed for one command execution's proposal on this node.
@@ -90,6 +92,12 @@ mod enabled {
                 }
                 ConsensusCommand::ReleaseCommandDomainMutation { reference, .. } => {
                     (reference, CommandWrite::DomainMutationRelease)
+                }
+                ConsensusCommand::RecoverOrphanedModelPause { mutation, .. } => {
+                    let crate::DomainMutationOwner::Command(reference) = mutation.owner() else {
+                        return false;
+                    };
+                    (reference, CommandWrite::PauseRecovery)
                 }
                 _ => return false,
             };

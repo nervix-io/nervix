@@ -673,11 +673,13 @@ tags = [
   "@wasm_reset_publication_failure",
   "@client_wire_pause_leadership",
   "@client_wire_pause_lapsed_publication",
+  "@client_wire_orphaned_pause",
   "@client_wire_standalone_preparation",
   "@client_wire_tombstone_retention",
   "@client_wire_tombstone_recovery",
   "@deadlock_diagnostics",
   "@restore_installation",
+  "@password_credentials",
   "@client_ingestor_alter_drain",
   "@syslog_suspend_handoff",
   "@syslog_listener_rebind",
@@ -3653,6 +3655,26 @@ scenario = "A partition a surviving node keeps goes on applying its materialized
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "An admitted model command encounters a confirmed one-shot orphaned domain pause on one and three nodes, then reaches tracked model application, transaction impact recording and pause release. Async consensus proposals and the test-fault registry remain outside Deloxide."
+examples = 2
+feature = "tests/features/runtime/client_wire_pause_recovery.feature"
+id = "scenario.command-orphaned-pause"
+invariant = "The command holding the domain mutation lease recovers an orphaned pause before preflight, succeeds under one execution reference, replays that outcome and admits a dependent mutation."
+invocation = "scenarios"
+scenario = "A model command recovers an orphaned pause before preflight on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: an admitted command encounters a confirmed orphaned pause on one and three nodes before tracked model application, transaction impact recording and pause release. Async consensus proposals and the test-fault registry remain untracked."
+examples = 2
+feature = "tests/features/runtime/client_wire_pause_recovery.feature"
+id = "stress.command-orphaned-pause"
+invariant = "The command holding the domain mutation lease recovers an orphaned pause before preflight, succeeds under one execution reference, replays that outcome and admits a dependent mutation."
+invocation = "stress-scenarios"
+scenario = "A model command recovers an orphaned pause before preflight on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Transaction model application, tracked impact recording and domain pause release across two controlled leadership transfers. Async proposal waits and fault barriers remain untracked."
 examples = 1
 feature = "tests/features/runtime/client_wire_pause_recovery.feature"
@@ -3837,6 +3859,8 @@ selections = ["deloxide-stress"]
 gap = "CPU-worker interruption between simulated callbacks belongs to the mutually exclusive Turmoil mode. Native blocking-task teardown before its first callback is not deterministically reached by these public scenarios. Native workloads reach normal FIFO admission, cancellation and draining; the ordinary interrupted-worker regression covers selected and queued destructor cleanup without claiming tracked-lock interleavings."
 path = "crates/execution/src/workers.rs"
 workloads = [
+  "scenario.password-credentials",
+  "stress.password-credentials",
   "scenario.snapshot-receive-admission",
   "stress.snapshot-receive-admission",
   "scenario.restore-client-inspection",
@@ -3998,6 +4022,8 @@ workloads = [
 [[owner]]
 path = "crates/consensus/src/lib.rs"
 workloads = [
+  "scenario.password-credentials",
+  "stress.password-credentials",
   "scenario.command-transaction-retention",
   "stress.command-transaction-retention",
   "scenario.command-transaction-retention-recovery",
@@ -4019,6 +4045,8 @@ workloads = [
 [[owner]]
 path = "crates/consensus/src/restore.rs"
 workloads = [
+  "scenario.password-credentials",
+  "stress.password-credentials",
   "scenario.restore-generation",
   "scenario.stale-restore-coordinator",
   "scenario.restore-staging-quota",
@@ -4039,6 +4067,8 @@ workloads = [
 [[owner]]
 path = "crates/consensus/src/storage.rs"
 workloads = [
+  "scenario.password-credentials",
+  "stress.password-credentials",
   "scenario.materialized-bulk-overlap",
   "stress.materialized-bulk-overlap",
   "scenario.resource-source-discovery",
@@ -4136,6 +4166,8 @@ workloads = [
 [[owner]]
 path = "src/application/model_mutation.rs"
 workloads = [
+  "scenario.command-orphaned-pause",
+  "stress.command-orphaned-pause",
   "scenario.syslog-suspend-handoff",
   "stress.syslog-suspend-handoff",
   "scenario.standalone-preflight",
@@ -4244,6 +4276,8 @@ workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 [[owner]]
 path = "src/application/transaction.rs"
 workloads = [
+  "scenario.command-orphaned-pause",
+  "stress.command-orphaned-pause",
   "scenario.wasm-reset-authority-recovery",
   "stress.wasm-reset-authority-recovery",
   "scenario.wasm-reset-publication-failure",
@@ -4265,6 +4299,8 @@ workloads = [
 [[owner]]
 path = "src/application/transaction/impact.rs"
 workloads = [
+  "scenario.command-orphaned-pause",
+  "stress.command-orphaned-pause",
   "scenario.standalone-preflight",
   "stress.standalone-preflight",
   "scenario.transaction-pause-release",
@@ -6273,6 +6309,26 @@ id = "stress.client-restore-reply-validation-restore"
 invariant = "A completed restore with an undecodable or differently correlated reply remains uncertain under its own reference, ends only its originating session and recovers its recorded outcome."
 invocation = "stress-restore-scenarios"
 scenario = "A <client> recovers a completed restore after <reply> on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "One- and three-node public authentication reaches the credentials worker admission and consensus credential publication, then user backup, restore, restart and browser session admission. AWS-LC computation, async transport waits and browser internals are untracked."
+examples = 2
+feature = "tests/features/cluster/password_credentials.feature"
+id = "scenario.password-credentials"
+invariant = "The complete bounded credential and common verification work survive restore and restart; every listener accepts the password and refuses a wrong password."
+invocation = "scenarios"
+scenario = "A committed password policy creates credentials that survive restart and restore"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: One- and three-node public authentication reaches the credentials worker admission and consensus credential publication, then user backup, restore, restart and browser session admission. AWS-LC computation, async transport waits and browser internals are untracked."
+examples = 2
+feature = "tests/features/cluster/password_credentials.feature"
+id = "stress.password-credentials"
+invariant = "The complete bounded credential and common verification work survive restore and restart; every listener accepts the password and refuses a wrong password."
+invocation = "stress-restore-scenarios"
+scenario = "A committed password policy creates credentials that survive restart and restore"
 selections = ["deloxide-stress-restore"]
 
 [[invocation]]
