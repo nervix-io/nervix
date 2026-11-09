@@ -1948,10 +1948,12 @@ pub(crate) fn CreateMenu(
     active_domain: RwSignal<Option<DomainName>>,
 ) -> impl IntoView {
     let menu_open = RwSignal::new(false);
-    let choose = move |kind| {
+    // Every menu item's click handler holds this callback, a handle to one stored closure, rather
+    // than its own copy of a closure that carries all of the dialog's signals.
+    let choose = Callback::new(move |kind| {
         signals.open(kind, active_domain.get_untracked(), "global-create-button");
         menu_open.set(false);
-    };
+    });
     view! {
         <div
             class="menu-wrap create-menu-wrap"
@@ -1973,76 +1975,76 @@ pub(crate) fn CreateMenu(
                 <span>"Create"</span>
             </button>
             <div class="popup-menu create-menu" class:open=move || menu_open.get() role="menu">
-                <button type="button" role="menuitem" data-create-kind="domain" on:click=move |_| choose(CreateKind::Domain)>
+                <button type="button" role="menuitem" data-create-kind="domain" on:click=move |_| choose.run(CreateKind::Domain)>
                     <span>"Domain"</span><em>"Clock and lifecycle"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="placement" on:click=move |_| choose(CreateKind::Placement)>
+                <button type="button" role="menuitem" data-create-kind="placement" on:click=move |_| choose.run(CreateKind::Placement)>
                     <span>"Placement"</span><em>"Domain-wide policy"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="user" on:click=move |_| choose(CreateKind::User)>
+                <button type="button" role="menuitem" data-create-kind="user" on:click=move |_| choose.run(CreateKind::User)>
                     <span>"User"</span><em>"Login credential"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="resource" on:click=move |_| choose(CreateKind::Resource)>
+                <button type="button" role="menuitem" data-create-kind="resource" on:click=move |_| choose.run(CreateKind::Resource)>
                     <span>"Resource"</span><em>"Catalog and upload"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="schema" on:click=move |_| choose(CreateKind::Schema)>
+                <button type="button" role="menuitem" data-create-kind="schema" on:click=move |_| choose.run(CreateKind::Schema)>
                     <span>"Schema"</span><em>"Internal record fields"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="wire-json-schema" on:click=move |_| choose(CreateKind::WireJsonSchema)>
+                <button type="button" role="menuitem" data-create-kind="wire-json-schema" on:click=move |_| choose.run(CreateKind::WireJsonSchema)>
                     <span>"Wire JSON schema"</span><em>"JSON payload fields"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="wire-cbor-schema" on:click=move |_| choose(CreateKind::WireCborSchema)>
+                <button type="button" role="menuitem" data-create-kind="wire-cbor-schema" on:click=move |_| choose.run(CreateKind::WireCborSchema)>
                     <span>"Wire CBOR schema"</span><em>"CBOR payload fields"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="wire-avro-schema" on:click=move |_| choose(CreateKind::WireAvroSchema)>
+                <button type="button" role="menuitem" data-create-kind="wire-avro-schema" on:click=move |_| choose.run(CreateKind::WireAvroSchema)>
                     <span>"Wire AVRO schema"</span><em>"AVRO payload fields"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="branch" on:click=move |_| choose(CreateKind::Branch)>
+                <button type="button" role="menuitem" data-create-kind="branch" on:click=move |_| choose.run(CreateKind::Branch)>
                     <span>"Branch"</span><em>"Key schema and lifetime"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="relay" on:click=move |_| choose(CreateKind::Relay)>
+                <button type="button" role="menuitem" data-create-kind="relay" on:click=move |_| choose.run(CreateKind::Relay)>
                     <span>"Relay"</span><em>"Schema, branching and capacity"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="subscription" on:click=move |_| choose(CreateKind::Subscription)>
+                <button type="button" role="menuitem" data-create-kind="subscription" on:click=move |_| choose.run(CreateKind::Subscription)>
                     <span>"Subscription"</span><em>"Read-only relay tab"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="codec" on:click=move |_| choose(CreateKind::Codec)>
+                <button type="button" role="menuitem" data-create-kind="codec" on:click=move |_| choose.run(CreateKind::Codec)>
                     <span>"Codec"</span><em>"Wire format and schema mapping"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="signaling-protocol" on:click=move |_| choose(CreateKind::SignalingProtocol)>
+                <button type="button" role="menuitem" data-create-kind="signaling-protocol" on:click=move |_| choose.run(CreateKind::SignalingProtocol)>
                     <span>"Signaling protocol"</span><em>"Ordered connection handshake"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="client" on:click=move |_| choose(CreateKind::Client)>
+                <button type="button" role="menuitem" data-create-kind="client" on:click=move |_| choose.run(CreateKind::Client)>
                     <span>"Client"</span><em>"External transport configuration"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="vhost" on:click=move |_| choose(CreateKind::Vhost)>
+                <button type="button" role="menuitem" data-create-kind="vhost" on:click=move |_| choose.run(CreateKind::Vhost)>
                     <span>"VHOST"</span><em>"Hostnames and optional TLS"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="endpoint" on:click=move |_| choose(CreateKind::Endpoint)>
+                <button type="button" role="menuitem" data-create-kind="endpoint" on:click=move |_| choose.run(CreateKind::Endpoint)>
                     <span>"Endpoint"</span><em>"HTTP or WebSocket path"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="hash-map" on:click=move |_| choose(CreateKind::HashMap)>
+                <button type="button" role="menuitem" data-create-kind="hash-map" on:click=move |_| choose.run(CreateKind::HashMap)>
                     <span>"Hash map"</span><em>"Resource-backed lookup"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="udf" on:click=move |_| choose(CreateKind::Udf)>
+                <button type="button" role="menuitem" data-create-kind="udf" on:click=move |_| choose.run(CreateKind::Udf)>
                     <span>"Roto UDF"</span><em>"Typed function and source tests"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="ingestor" on:click=move |_| choose(CreateKind::Ingestor)>
+                <button type="button" role="menuitem" data-create-kind="ingestor" on:click=move |_| choose.run(CreateKind::Ingestor)>
                     <span>"Ingestor"</span><em>"External source and ordered routes"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="emitter" on:click=move |_| choose(CreateKind::Emitter)>
+                <button type="button" role="menuitem" data-create-kind="emitter" on:click=move |_| choose.run(CreateKind::Emitter)>
                     <span>"Emitter"</span><em>"External publication and client output"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="junction" on:click=move |_| choose(CreateKind::Junction)>
+                <button type="button" role="menuitem" data-create-kind="junction" on:click=move |_| choose.run(CreateKind::Junction)>
                     <span>"Junction"</span><em>"Transform and fan out relay records"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="deduplicator" on:click=move |_| choose(CreateKind::Deduplicator)>
+                <button type="button" role="menuitem" data-create-kind="deduplicator" on:click=move |_| choose.run(CreateKind::Deduplicator)>
                     <span>"Deduplicator"</span><em>"Suppress repeated keys in each branch"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="reorderer" on:click=move |_| choose(CreateKind::Reorderer)>
+                <button type="button" role="menuitem" data-create-kind="reorderer" on:click=move |_| choose.run(CreateKind::Reorderer)>
                     <span>"Reorderer"</span><em>"Release each branch in key order"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="reingestor" on:click=move |_| choose(CreateKind::Reingestor)>
+                <button type="button" role="menuitem" data-create-kind="reingestor" on:click=move |_| choose.run(CreateKind::Reingestor)>
                     <span>"Reingestor"</span><em>"Transform records across branch boundaries"</em>
                 </button>
             </div>
