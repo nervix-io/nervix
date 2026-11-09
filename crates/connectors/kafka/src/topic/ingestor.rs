@@ -602,6 +602,10 @@ impl IngestorMessage for KafkaTopicIngestorMessage {
 /// and offset, binary key, timestamp and kind, and whether its value is null. The timestamp is
 /// converted here, when the host visits the record's metadata, never when the record is read.
 impl IngestMessageMetadata for KafkaTopicIngestorMessage {
+    fn payload_bytes(&self) -> usize {
+        nervix_connector::IngestorMessage::payload(self).len()
+    }
+
     fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
         values.string(self.message.topic());
         values.i32(self.message.partition());

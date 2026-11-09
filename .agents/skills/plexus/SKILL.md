@@ -190,6 +190,12 @@ For intake parallelism, read [Ingestors → Instancing](../../../docs/src/ingest
 Check the entity's instancing capability, Pulsar subscription type, Kafka offset mode and constructing
 routes before setting a count or following branch partitions. Use `DESCRIBE INGESTOR` to verify
 the planned instance placement.
+For payload sizes, client batch row counts or peer-address keys, read
+[Ingestors → Payload Facts](../../../docs/src/ingestors.md#payload-facts) and the entity's declaration
+in `Connector Capabilities`. Every ingestor exposes required `payload.bytes: U64`; only
+`CLIENT PRODUCER` exposes required `payload.rows: U64`. Keep these original transport/batch facts
+when filtering or constructing rows. On HTTP, WebSocket and Syslog listeners, use
+`metadata.remote_ip` for an IP without a port, including IPv6.
 
 ## Assemble the graph
 

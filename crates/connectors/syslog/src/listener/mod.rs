@@ -197,12 +197,22 @@ impl IngestorMessage for SyslogListenerIngestorMessage {
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
         IngestMetadataRow {
-            fields: &self.peer,
+            fields: self,
             headers: IngestRowHeaders::NONE,
             position: Some(IngestTransportPosition::Syslog {
                 peer: self.peer.address(),
             }),
         }
+    }
+}
+
+impl nervix_connector::IngestMessageMetadata for SyslogListenerIngestorMessage {
+    fn payload_bytes(&self) -> usize {
+        self.payload.len()
+    }
+
+    fn visit_metadata(&self, values: &mut dyn nervix_connector::IngestMetadataValues) {
+        self.peer.visit_metadata(values);
     }
 }
 

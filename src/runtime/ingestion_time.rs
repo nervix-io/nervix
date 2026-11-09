@@ -352,14 +352,20 @@ mod tests {
             .capabilities()
             .metadata;
         let polled = Timestamp::from_unix_nanos(1_234);
-        let answered = RetainedIngestMetadata::from_values(vec![
-            RetainedIngestMetadataValue::U16(200),
-            RetainedIngestMetadataValue::Datetime(polled),
-        ]);
-        let unanswered = RetainedIngestMetadata::from_values(vec![
-            RetainedIngestMetadataValue::U16(200),
-            RetainedIngestMetadataValue::Absent,
-        ]);
+        let answered = RetainedIngestMetadata::from_values(
+            0,
+            vec![
+                RetainedIngestMetadataValue::U16(200),
+                RetainedIngestMetadataValue::Datetime(polled),
+            ],
+        );
+        let unanswered = RetainedIngestMetadata::from_values(
+            0,
+            vec![
+                RetainedIngestMetadataValue::U16(200),
+                RetainedIngestMetadataValue::Absent,
+            ],
+        );
         let rows = [
             IngestMetadataRow {
                 fields: &answered,

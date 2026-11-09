@@ -145,6 +145,7 @@ pub(crate) struct HttpEndpointRequestMetadata<'a> {
     query: Option<&'a str>,
     remote_addr: SocketAddr,
     host: Cow<'a, str>,
+    payload_bytes: usize,
 }
 
 impl<'a> HttpEndpointRequestMetadata<'a> {
@@ -156,6 +157,7 @@ impl<'a> HttpEndpointRequestMetadata<'a> {
         query: Option<&'a str>,
         remote_addr: SocketAddr,
         host: &'a str,
+        payload_bytes: usize,
     ) -> Self {
         Self {
             method,
@@ -163,11 +165,16 @@ impl<'a> HttpEndpointRequestMetadata<'a> {
             query,
             remote_addr,
             host: normalize_http_host(host),
+            payload_bytes,
         }
     }
 }
 
 impl IngestMessageMetadata for HttpEndpointRequestMetadata<'_> {
+    fn payload_bytes(&self) -> usize {
+        self.payload_bytes
+    }
+
     fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
         values.string(self.method);
         values.string(self.path);
@@ -177,6 +184,7 @@ impl IngestMessageMetadata for HttpEndpointRequestMetadata<'_> {
         }
         values.rendered(&self.remote_addr);
         values.string(&self.host);
+        values.rendered(&self.remote_addr.ip());
     }
 }
 
@@ -188,13 +196,19 @@ pub(crate) struct WebsocketsEndpointFrameMetadata<'a> {
     pub(crate) frame_type: WebsocketsFrameType,
     pub(crate) remote_addr: SocketAddr,
     pub(crate) path: &'a str,
+    pub(crate) payload_bytes: usize,
 }
 
 impl IngestMessageMetadata for WebsocketsEndpointFrameMetadata<'_> {
+    fn payload_bytes(&self) -> usize {
+        self.payload_bytes
+    }
+
     fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
         values.string(self.frame_type.as_ref());
         values.rendered(&self.remote_addr);
         values.string(self.path);
+        values.rendered(&self.remote_addr.ip());
     }
 }
 

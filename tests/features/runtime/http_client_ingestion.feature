@@ -173,6 +173,7 @@ Feature: HTTP client ingestion
       CREATE HTTP REQUEST INGESTOR http_notifications
       FROM http_main METHOD 'GET' EVERY 1s
       MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_codec
+      FILTER WHERE payload.bytes > (0 AS U64)
       TO notifications
       INHERIT ALL
       BRANCHED BY by_http_notifications
