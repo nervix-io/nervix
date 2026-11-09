@@ -32,8 +32,7 @@ use nervix_models::{
     KafkaOffsetMode, KafkaTopicIngestor, Model, ModelKind, ModelName, NodeRef, NodeUnitRef,
     PlacementName, PlacementPolicy, ProcessorInputs, ProcessorOutputs, RequestedResourceVersion,
     ResourceDescription, ResourceEntryContent, ResourceManifestEntry, ResourceUsage,
-    ResourceVersionEntries, ScheduledNode, Unit, WasmUnitStateInspection,
-    expression_to_plexus,
+    ResourceVersionEntries, ScheduledNode, Unit, WasmUnitStateInspection, expression_to_plexus,
 };
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, WindowArguments};
 use sorted_vec::SortedSet;
