@@ -18,7 +18,7 @@
 use std::net::SocketAddr;
 
 use error_stack::Report;
-use nervix_connector::{IngestMessageMetadata, IngestMetadataValues};
+use nervix_connector::IngestMetadataValues;
 use nervix_primitives::sync::Arc;
 use rustls::{ServerConnection, pki_types::CertificateDer};
 use strum::AsRefStr;
@@ -83,8 +83,8 @@ impl SyslogTlsPeer {
     }
 }
 
-impl IngestMessageMetadata for SyslogPeer {
-    fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
+impl SyslogPeer {
+    pub(super) fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
         values.rendered(&self.address());
         values.string(self.as_ref());
         if let Some(subject) = self.subject() {
@@ -92,6 +92,7 @@ impl IngestMessageMetadata for SyslogPeer {
         } else {
             values.absent();
         }
+        values.rendered(&self.address().ip());
     }
 }
 
@@ -223,6 +224,7 @@ mod tests {
                         Value::String(address.to_string()),
                         Value::String(transport.to_string()),
                         expected_subject,
+                        Value::String(address.ip().to_string()),
                     ]
                 );
                 assert_eq!(RetainedIngestMetadata::capture(&retained), retained);

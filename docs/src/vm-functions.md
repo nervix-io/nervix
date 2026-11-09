@@ -393,12 +393,15 @@ The host builds a program's input with `project_vm_input_batch` in `src/runtime/
 - **Carrier columns.** Each is an Arc clone of the carrier batch's column, checked for its exact
   type. No buffer is copied.
 - **Built columns.** Branch key fields, broadcast materialized-state values, lookup results, and
-  selected ingest metadata are built as new columns. `SharedVmInputColumns` builds each of them
+  selected ingest metadata and payload facts are built as new columns. `SharedVmInputColumns` builds each of them
   once per dispatched batch and shares it among every output route that reads it.
 - **Missing nullable inputs.** These are typed Arrow null columns with the carrier's row count.
   This includes unread metadata fields such as a Kafka record's binary key. Absence does not pass
   through scalar `RuntimeValue` construction, so an unread `BYTES` declaration needs no scalar
   byte representation and does not visit the message's metadata.
+- **Payload inputs.** An ingestor binds only the payload fields its program reads, using the
+  entity's required `U64` declaration. A group's projection shares the original byte or batch-row
+  count through filtering and every route; an unread required payload field needs no null column.
 - **Uninitialized outputs.** These stay `TypedArray::Uninitialized` until finalization
   materializes them.
 

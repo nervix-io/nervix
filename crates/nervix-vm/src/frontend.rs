@@ -605,6 +605,7 @@ pub fn lower_branch_construction(
                 FieldScope::Left
                 | FieldScope::Right
                 | FieldScope::Metadata
+                | FieldScope::Payload
                 | FieldScope::PartialOutput
                 | FieldScope::Error => Err(FrontendError::report(
                     span,
@@ -1432,6 +1433,7 @@ fn lower_expression_with_span(
                     format!("relay_state.{}", relay.as_str())
                 }
                 FieldScope::Metadata => "metadata".to_string(),
+                FieldScope::Payload => "payload".to_string(),
                 FieldScope::PartialOutput => "partial_output".to_string(),
                 FieldScope::Error => "error".to_string(),
             };

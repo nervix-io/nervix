@@ -154,6 +154,10 @@ struct GeneratedMessage {
 }
 
 impl IngestMessageMetadata for GeneratedMessage {
+    fn payload_bytes(&self) -> usize {
+        0
+    }
+
     fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
         for (field, value) in DECLARED_FIELDS.iter().zip(&self.values) {
             if self.defers_values {
@@ -235,6 +239,10 @@ impl GeneratedMessage {
 struct Unvisited;
 
 impl IngestMessageMetadata for Unvisited {
+    fn payload_bytes(&self) -> usize {
+        0
+    }
+
     fn visit_metadata(&self, _values: &mut dyn IngestMetadataValues) {
         panic!("a group whose programs read no metadata field visited a message's metadata values");
     }
@@ -500,7 +508,7 @@ impl MetadataCase {
                 row.fields = &Unvisited;
             }
             builders
-                .append(&row)
+                .append(&row, None)
                 .verified("every generated message hands over one value of each declared type");
         }
         let metadata = builders
@@ -684,6 +692,10 @@ fn deferred_metadata_computes_only_requested_fields() {
     ];
     struct Fields;
     impl IngestMessageMetadata for Fields {
+        fn payload_bytes(&self) -> usize {
+            0
+        }
+
         fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
             values.deferred(IngestorMetadataType::String, &|_| {
                 panic!("the unread field is not evaluated")
@@ -696,11 +708,14 @@ fn deferred_metadata_computes_only_requested_fields() {
             .unwrap();
     let mut builders = IngestMetadataBuilders::new(projection, 1);
     builders
-        .append(&IngestMetadataRow {
-            fields: &Fields,
-            headers: IngestRowHeaders::NONE,
-            position: None,
-        })
+        .append(
+            &IngestMetadataRow {
+                fields: &Fields,
+                headers: IngestRowHeaders::NONE,
+                position: None,
+            },
+            None,
+        )
         .unwrap();
     let metadata = builders.finish().unwrap();
     let column = metadata.field_column("read").unwrap().unwrap();
@@ -715,6 +730,10 @@ fn deferred_metadata_requires_exactly_one_value_per_callback() {
     ];
     struct Fields(usize);
     impl IngestMessageMetadata for Fields {
+        fn payload_bytes(&self) -> usize {
+            0
+        }
+
         fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
             values.deferred(IngestorMetadataType::U64, &|values| {
                 for _ in 0..self.0 {
@@ -730,11 +749,14 @@ fn deferred_metadata_requires_exactly_one_value_per_callback() {
                 .unwrap();
         let mut builders = IngestMetadataBuilders::new(projection, 1);
         let failure = builders
-            .append(&IngestMetadataRow {
-                fields: &Fields(count),
-                headers: IngestRowHeaders::NONE,
-                position: None,
-            })
+            .append(
+                &IngestMetadataRow {
+                    fields: &Fields(count),
+                    headers: IngestRowHeaders::NONE,
+                    position: None,
+                },
+                None,
+            )
             .unwrap_err();
         assert!(
             matches!(failure.current_context(), IngestMetadataError::DeferredValues { field: "first", visited } if *visited == count)

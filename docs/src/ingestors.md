@@ -577,13 +577,14 @@ General notes:
   topic, flags, quality of service and MQTT 5 properties, `RABBITMQ QUEUE` declares the delivery's
   envelope and its AMQP basic properties, `SQS QUEUE` declares the message identity and its system
   attributes, `PULSAR TOPIC` declares the [message identity, times, keys and delivery fields](#pulsar),
-  `SYSLOG LISTENER` declares `metadata.peer_addr`, `metadata.transport`, and `metadata.tls_peer`,
+  `SYSLOG LISTENER` declares `metadata.peer_addr`, `metadata.transport`, `metadata.tls_peer`, and
+  `metadata.remote_ip`,
   `HTTP REQUEST` declares `metadata.status` and `metadata.polled_at`,
   `HTTP ENDPOINT` declares `metadata.method`, `metadata.path`, `metadata.query`,
-  `metadata.remote_addr`, and `metadata.host`, `PROMETHEUS QUERY` declares `metadata.query` and
+  `metadata.remote_addr`, `metadata.host`, and `metadata.remote_ip`, `PROMETHEUS QUERY` declares `metadata.query` and
   `metadata.evaluated_at`, `WEBSOCKETS CONNECTION` declares `metadata.frame_type`,
   `WEBSOCKETS ENDPOINT` declares `metadata.frame_type`, `metadata.remote_addr`, and
-  `metadata.path`, and `REDIS PUBSUB` declares `metadata.channel` and `metadata.pattern`; every
+  `metadata.path` and `metadata.remote_ip`, and `REDIS PUBSUB` declares `metadata.channel` and `metadata.pattern`; every
   field is optional and none is sensitive
 - a route expression may read any declared field; `CREATE` and `ALTER` refuse a route that reads a
   field its entity does not declare, naming the ingestor, the route's relay and the fields the
@@ -624,6 +625,37 @@ The expression type surface matches the full Nervix internal schema type set:
 - `BOOL`, `STRING`, `DATETIME`
 
 `DATETIME` is the internal logical timestamp type. JSON or AVRO `string` and CBOR `text` wire values require `ENCODE <field> AS RFC3339` on the codec before they can decode into the named `DATETIME` field.
+
+### Payload Facts
+
+Every ingestor entity declares `payload.bytes: U64`, required and not sensitive. It counts the
+original bytes supplied by its transport: a Kafka record's value without its key or headers; a
+Pulsar, MQTT, NATS, RabbitMQ, Redis or SQS message body; the first frame of a ZeroMQ message; a Syslog frame; a WebSocket data
+message; an HTTP request body; or an HTTP or Prometheus poll's response body. Decompressed HTTP
+bodies count after decompression. A Prometheus poll's samples share the size of its original
+response body. A `CLIENT PRODUCER` counts the exact submitted Arrow IPC batch body and alone
+also declares `payload.rows: U64`, the original batch's row count.
+
+These facts are available in `FILTER WHERE`, route construction and route `WHERE`. A payload that
+decodes into several rows repeats its byte count on every row; filtering and construction do not
+change the count, and client rows retain their whole batch's row count. The host builds only the
+fact columns a program reads, shares them across selected views and routes, and never copies a
+body to measure it. For example:
+
+```plexus,ignore
+FILTER WHERE payload.bytes > (1024 AS U64)
+TO measured INHERIT ALL SET size = payload.bytes
+  UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+```
+
+`CREATE` and `ALTER` refuse an undeclared payload field, naming the entity and its declared fields.
+In particular, `payload.rows` is available only on `CLIENT PRODUCER`.
+
+`HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT` and `SYSLOG LISTENER` also expose
+`metadata.remote_ip: STRING OPTIONAL`. It is the actual peer's IP without its port: `127.0.0.1`
+for an IPv4 loopback peer and `::1` for an IPv6 loopback peer. Their existing address fields retain
+the port. These peer facts describe the accepted connection or datagram and do not read forwarded
+HTTP headers.
 
 ### Header Context
 
@@ -868,7 +900,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Connector events | None declared. |
 | Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
-| Metadata | Not offered: Application batches carry their declared schema; there is no separate transport metadata namespace. |
+| Metadata | Not offered: Application batches have no broker envelope, peer address or external message attributes; the native schema describes each row. |
+| Payload facts | payload.bytes: U64<br>payload.rows: U64 |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -1105,6 +1138,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
 | Metadata | metadata.status: U16 OPTIONAL<br>metadata.polled_at: DATETIME OPTIONAL |
+| Payload facts | payload.bytes: U64 |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -1363,6 +1397,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | per_partition |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.partition: I32 OPTIONAL<br>metadata.offset: I64 OPTIONAL<br>metadata.key: BYTES OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.timestamp_type: STRING OPTIONAL<br>metadata.tombstone: BOOL OPTIONAL |
+| Payload facts | payload.bytes: U64 |
 | Every live node | no; scheduled owner |
 | Position class | replayable |
 | Acknowledgement confirmation | answered |
@@ -1599,6 +1634,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | per_partition |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.publish_time: DATETIME OPTIONAL<br>metadata.event_time: DATETIME OPTIONAL<br>metadata.key: STRING OPTIONAL<br>metadata.ordering_key: BYTES OPTIONAL<br>metadata.producer_name: STRING OPTIONAL<br>metadata.sequence_id: I64 OPTIONAL<br>metadata.redelivery_count: I64 OPTIONAL |
+| Payload facts | payload.bytes: U64 |
 | Every live node | no; scheduled owner |
 | Position class | replayable |
 | Acknowledgement confirmation | answered |
@@ -1864,6 +1900,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | per_partition |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | metadata.exchange: STRING OPTIONAL<br>metadata.routing_key: STRING OPTIONAL<br>metadata.delivery_tag: U64 OPTIONAL<br>metadata.redelivered: BOOL OPTIONAL<br>metadata.content_type: STRING OPTIONAL<br>metadata.content_encoding: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.correlation_id: STRING OPTIONAL<br>metadata.reply_to: STRING OPTIONAL<br>metadata.type: STRING OPTIONAL<br>metadata.app_id: STRING OPTIONAL<br>metadata.user_id: STRING OPTIONAL<br>metadata.priority: U8 OPTIONAL<br>metadata.expiration: STRING OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL |
+| Payload facts | payload.bytes: U64 |
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
@@ -2031,6 +2068,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | metadata.channel: STRING OPTIONAL<br>metadata.pattern: STRING OPTIONAL |
+| Payload facts | payload.bytes: U64 |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -2165,6 +2203,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | per_partition |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND (requires SESSION PERSISTENT and QOS 1 or 2)<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.retain: BOOL OPTIONAL<br>metadata.qos: U8 OPTIONAL<br>metadata.duplicate: BOOL OPTIONAL<br>metadata.content_type: STRING OPTIONAL<br>metadata.response_topic: STRING OPTIONAL<br>metadata.correlation_data: BYTES OPTIONAL<br>metadata.message_expiry: U32 OPTIONAL |
+| Payload facts | payload.bytes: U64 |
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
@@ -2431,6 +2470,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | per_partition |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | metadata.subject: STRING OPTIONAL<br>metadata.reply: STRING OPTIONAL |
+| Payload facts | payload.bytes: U64 |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -2516,6 +2556,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | metadata.subject: STRING OPTIONAL<br>metadata.reply: STRING OPTIONAL<br>metadata.stream: STRING OPTIONAL<br>metadata.consumer: STRING OPTIONAL<br>metadata.sequence: U64 OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.delivered: U64 OPTIONAL |
+| Payload facts | payload.bytes: U64 |
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | answered |
@@ -2614,6 +2655,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | Not offered: The driver exposes no peer identity on receive. Only frame 0 is ingested, with no broker position or typed transport metadata namespace. |
+| Payload facts | payload.bytes: U64 |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -2692,11 +2734,12 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | Not offered: The configured client owns the transport address; no separate external entity name is written in this body. |
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | No entity-specific options. |
-| Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
+| Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer socket address, IP without its port, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
 | Connector events | None declared. |
 | Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
-| Metadata | metadata.peer_addr: STRING OPTIONAL<br>metadata.transport: STRING OPTIONAL<br>metadata.tls_peer: STRING OPTIONAL |
+| Metadata | metadata.peer_addr: STRING OPTIONAL<br>metadata.transport: STRING OPTIONAL<br>metadata.tls_peer: STRING OPTIONAL<br>metadata.remote_ip: STRING OPTIONAL |
+| Payload facts | payload.bytes: U64 |
 | Every live node | yes |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -2751,6 +2794,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | per_partition |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | metadata.message_id: STRING OPTIONAL<br>metadata.sent_at: DATETIME OPTIONAL<br>metadata.receive_count: U32 OPTIONAL<br>metadata.first_received_at: DATETIME OPTIONAL<br>metadata.group_id: STRING OPTIONAL<br>metadata.deduplication_id: STRING OPTIONAL<br>metadata.sequence_number: STRING OPTIONAL<br>metadata.sender_id: STRING OPTIONAL |
+| Payload facts | payload.bytes: U64 |
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | answered |
@@ -2901,6 +2945,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
 | Metadata | metadata.query: STRING OPTIONAL<br>metadata.evaluated_at: DATETIME OPTIONAL |
+| Payload facts | payload.bytes: U64 |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -3124,7 +3169,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Connector events | None declared. |
 | Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
-| Metadata | metadata.method: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.query: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.host: STRING OPTIONAL |
+| Metadata | metadata.method: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.query: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.host: STRING OPTIONAL<br>metadata.remote_ip: STRING OPTIONAL |
+| Payload facts | payload.bytes: U64 |
 | Every live node | yes |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -3161,7 +3207,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Connector events | None declared. |
 | Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
-| Metadata | metadata.frame_type: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL |
+| Metadata | metadata.frame_type: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.remote_ip: STRING OPTIONAL |
+| Payload facts | payload.bytes: U64 |
 | Every live node | yes |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -3383,6 +3430,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | metadata.frame_type: STRING OPTIONAL |
+| Payload facts | payload.bytes: U64 |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |

@@ -1,10 +1,10 @@
 //! Typed ingestion metadata projection.
 //!
 //! Layer: data plane.
-//! - **Owns.** Which declared metadata fields an ingestor's programs read, the metadata columns of
+//! - **Owns.** Which declared metadata and payload fields an ingestor's programs read, the columns of
 //!   those fields and the transport header columns for accepted input batches, and the VM
 //!   namespaces programs read them through.
-//! - **Depends on.** Arrow arrays, the vocabulary's metadata declarations, the connector contract's
+//! - **Depends on.** Arrow arrays, the vocabulary's ingest declarations, the connector contract's
 //!   metadata rows, value sink and header trait, and explicit execution timestamps.
 //! - **Must not know.** Plexus parsing, ingestor-client lifecycle or persisted control state.
 
@@ -17,12 +17,14 @@ use std::fmt;
 
 use arrow_array::builder::BinaryBuilder;
 use arrow_buffer::BooleanBuffer;
+use error_stack::ResultExt as _;
 use nervix_connector::{IngestMetadataFailure, IngestMetadataRow, IngestMetadataValues};
 use nervix_models::{IngestorMetadataDeclaration, IngestorMetadataField, IngestorMetadataType};
 
 use super::*;
 
 pub(super) const INGEST_METADATA_NAMESPACE: &str = "metadata";
+pub(super) const INGEST_PAYLOAD_NAMESPACE: &str = "payload";
 
 pub(super) const BRANCH_NAMESPACE: &str = "branch";
 
@@ -128,6 +130,10 @@ pub(super) enum IngestMetadataError {
     )]
     UndeclaredField { field: String },
     #[error(
+        "the ingestor's programs read payload field '{field}', which its entity does not declare"
+    )]
+    UndeclaredPayloadField { field: String },
+    #[error(
         "a message handed metadata field '{field}' a {found} value, but its entity declares it \
          {declared}"
     )]
@@ -182,6 +188,8 @@ pub(super) struct IngestMetadataProjection {
     /// One entry for every field the ingestor's entity declares, in declared order: the index of
     /// the column the field is built into, or `None` where no program reads it.
     columns: Box<[Option<usize>]>,
+    payload_columns: Box<[Option<usize>]>,
+    metadata_read: usize,
     /// The fields that are read, in declared order, which is the order of their columns.
     read: Vec<IngestorMetadataField>,
     /// The Arrow schema of the read fields, built once for every group.
@@ -193,6 +201,8 @@ impl IngestMetadataProjection {
     pub(super) fn none() -> Arc<Self> {
         Arc::new(Self {
             columns: Box::default(),
+            payload_columns: Box::default(),
+            metadata_read: 0,
             read: Vec::new(),
             schema: StdArc::new(arrow_schema::Schema::empty()),
         })
@@ -203,9 +213,24 @@ impl IngestMetadataProjection {
     ///
     /// A name `declared` does not declare is refused. The registry refuses a program that reads
     /// one, so it means the programs and the declaration they were validated against disagree.
+    #[cfg(test)]
     pub(super) fn reading<'name>(
         declared: IngestorMetadataDeclaration,
         read: impl IntoIterator<Item = &'name str>,
+    ) -> IngestMetadataResult<Arc<Self>> {
+        Self::reading_input(
+            declared,
+            read,
+            nervix_models::IngestorPayloadDeclaration::BYTES,
+            std::iter::empty(),
+        )
+    }
+
+    pub(super) fn reading_input<'name>(
+        declared: IngestorMetadataDeclaration,
+        read: impl IntoIterator<Item = &'name str>,
+        payload: nervix_models::IngestorPayloadDeclaration,
+        payload_read: impl IntoIterator<Item = &'name str>,
     ) -> IngestMetadataResult<Arc<Self>> {
         let fields = declared.fields();
         let mut is_read = vec![false; fields.len()];
@@ -230,13 +255,41 @@ impl IngestMetadataProjection {
                 columns.push(None);
             }
         }
-        let schema = arrow_schema::Schema::new(
-            read.iter()
-                .map(|field| field.arrow_field())
-                .collect::<Vec<_>>(),
-        );
+        let metadata_read = read.len();
+        let mut schema_fields = read
+            .iter()
+            .map(|field| field.arrow_field())
+            .collect::<Vec<_>>();
+        let mut payload_is_read = vec![false; payload.fields().len()];
+        for name in payload_read {
+            let Some(position) = payload.position(name) else {
+                return Err(Report::new(IngestMetadataError::UndeclaredPayloadField {
+                    field: name.to_string(),
+                }));
+            };
+            *payload_is_read
+                .get_mut(position)
+                .assured("a payload declaration position is inside its field list") = true;
+        }
+        let mut payload_columns = Vec::with_capacity(payload.fields().len());
+        for (field, is_read) in payload.fields().iter().zip(payload_is_read) {
+            if is_read {
+                payload_columns.push(Some(read.len()));
+                read.push(IngestorMetadataField::new(field.name(), field.ty()));
+                schema_fields.push(
+                    field
+                        .arrow_field()
+                        .with_name(format!("{INGEST_PAYLOAD_NAMESPACE}.{}", field.name())),
+                );
+            } else {
+                payload_columns.push(None);
+            }
+        }
+        let schema = arrow_schema::Schema::new(schema_fields);
         Ok(Arc::new(Self {
             columns: columns.into_boxed_slice(),
+            payload_columns: payload_columns.into_boxed_slice(),
+            metadata_read,
             read,
             schema: StdArc::new(schema),
         }))
@@ -245,7 +298,11 @@ impl IngestMetadataProjection {
     /// Whether a program reads any metadata field, which is whether a group visits its messages'
     /// metadata values at all.
     pub(super) fn reads_any(&self) -> bool {
-        !self.read.is_empty()
+        self.metadata_read != 0
+    }
+
+    fn reads_payload(&self) -> bool {
+        self.read.len() != self.metadata_read
     }
 }
 
@@ -352,7 +409,8 @@ enum MetadataVisitFault {
 /// that field, and counts the values, so that a message handing over another number than its
 /// entity declares is refused.
 struct ProjectedMetadataValues<'a> {
-    projection: &'a IngestMetadataProjection,
+    declared_columns: &'a [Option<usize>],
+    read: &'a [IngestorMetadataField],
     columns: &'a mut [IngestMetadataColumnBuilder],
     /// How many values the message has handed over, which is the declared position of the next.
     /// It never exceeds the declared field count: a value beyond it is recorded as a fault.
@@ -369,7 +427,7 @@ impl ProjectedMetadataValues<'_> {
         if self.fault.is_some() {
             return None;
         }
-        let Some(column) = self.projection.columns.get(self.visited).copied() else {
+        let Some(column) = self.declared_columns.get(self.visited).copied() else {
             self.fault = Some(MetadataVisitFault::Excess);
             return None;
         };
@@ -392,8 +450,7 @@ impl ProjectedMetadataValues<'_> {
 
     /// The read field whose values the built column `column` holds.
     fn read_field(&self, column: usize) -> IngestorMetadataField {
-        self.projection
-            .read
+        self.read
             .get(column)
             .copied()
             .assured("the projection reads one field for every column it builds")
@@ -426,7 +483,7 @@ impl ProjectedMetadataValues<'_> {
             }
             Some(MetadataVisitFault::Excess) => {
                 Err(Report::new(IngestMetadataError::ExcessValues {
-                    declared: self.projection.columns.len(),
+                    declared: self.declared_columns.len(),
                 }))
             }
             Some(MetadataVisitFault::Deferred { field, visited }) => {
@@ -435,9 +492,9 @@ impl ProjectedMetadataValues<'_> {
                     visited,
                 }))
             }
-            None if self.visited != self.projection.columns.len() => {
+            None if self.visited != self.declared_columns.len() => {
                 Err(Report::new(IngestMetadataError::MissingValues {
-                    declared: self.projection.columns.len(),
+                    declared: self.declared_columns.len(),
                     visited: self.visited,
                 }))
             }
@@ -452,7 +509,7 @@ impl IngestMetadataValues for ProjectedMetadataValues<'_> {
             return;
         }
         let before = self.visited;
-        let Some(column) = self.projection.columns.get(before).copied() else {
+        let Some(column) = self.declared_columns.get(before).copied() else {
             self.fault = Some(MetadataVisitFault::Excess);
             return;
         };
@@ -579,7 +636,7 @@ impl IngestMetadataValues for ProjectedMetadataValues<'_> {
         if self.fault.is_some() {
             return;
         }
-        let Some(column) = self.projection.columns.get(self.visited).copied() else {
+        let Some(column) = self.declared_columns.get(self.visited).copied() else {
             self.fault = Some(MetadataVisitFault::Excess);
             return;
         };
@@ -692,10 +749,15 @@ impl IngestMetadataBuilders {
         nervix::dispatch(reason = "the ingestor supplies its metadata values and transport \
                                    header visitor; this host appends the bounded row metadata")
     )]
-    pub(super) fn append(&mut self, row: &IngestMetadataRow<'_>) -> IngestMetadataResult<()> {
+    pub(super) fn append(
+        &mut self,
+        row: &IngestMetadataRow<'_>,
+        batch_rows: Option<usize>,
+    ) -> IngestMetadataResult<()> {
         if self.projection.reads_any() {
             let mut values = ProjectedMetadataValues {
-                projection: &self.projection,
+                declared_columns: &self.projection.columns,
+                read: &self.projection.read,
                 columns: &mut self.columns,
                 visited: 0,
                 fault: None,
@@ -705,6 +767,21 @@ impl IngestMetadataBuilders {
             if let Some(refusal) = values.finish()? {
                 self.refusals.insert(self.rows, refusal);
             }
+        }
+        if self.projection.reads_payload() {
+            let mut values = ProjectedMetadataValues {
+                declared_columns: &self.projection.payload_columns,
+                read: &self.projection.read,
+                columns: &mut self.columns,
+                visited: 0,
+                fault: None,
+                refusal: None,
+            };
+            values.u64(row.fields.payload_bytes().arch_into());
+            if let Some(rows) = batch_rows {
+                values.u64(rows.arch_into());
+            }
+            values.finish()?;
         }
         let (names, values) = (&mut self.header_names, &mut self.header_values);
         row.headers.headers().visit(&mut |name, value| {
@@ -732,10 +809,7 @@ impl IngestMetadataBuilders {
             integration_columns,
             &RecordBatchOptions::new().with_row_count(Some(rows)),
         )
-        .map_err(|source| {
-            Report::new(IngestMetadataError::BuildIntegrationColumns)
-                .attach_printable(source.to_string())
-        })?;
+        .change_context(IngestMetadataError::BuildIntegrationColumns)?;
         let header_names: ArrayRef = StdArc::new(self.header_names.finish());
         let header_values: ArrayRef = StdArc::new(self.header_values.finish());
         let refusals = std::mem::take(&mut self.refusals);
@@ -761,11 +835,21 @@ impl IngestMetadataBuilders {
 impl IngestFilterMapMetadata {
     /// The metadata of `rows` messages that arrived without transport headers or integration
     /// fields, as every row of a client batch does.
+    #[cfg(test)]
     pub(super) fn headerless(rows: usize) -> IngestMetadataResult<Self> {
-        let mut builders = IngestMetadataBuilders::new(IngestMetadataProjection::none(), rows);
-        let row = IngestMetadataRow::headers(&nervix_connector::NoIngestHeaders);
+        Self::client_batch(IngestMetadataProjection::none(), 0, rows)
+    }
+
+    pub(super) fn client_batch(
+        projection: Arc<IngestMetadataProjection>,
+        bytes: usize,
+        rows: usize,
+    ) -> IngestMetadataResult<Self> {
+        let mut builders = IngestMetadataBuilders::new(projection, rows);
+        let fields = nervix_connector::NoIngestMetadata(bytes);
+        let row = IngestMetadataRow::headers(&nervix_connector::NoIngestHeaders, &fields);
         for _ in 0..rows {
-            builders.append(&row)?;
+            builders.append(&row, Some(rows))?;
         }
         builders.finish()
     }
@@ -1020,15 +1104,18 @@ mod tests {
 
     /// The values a Kafka record hands over, in the order KAFKA TOPIC declares them.
     fn kafka_metadata(topic: &str, partition: i32, offset: i64) -> RetainedIngestMetadata {
-        RetainedIngestMetadata::from_values(vec![
-            Value::String(topic.to_string()),
-            Value::I32(partition),
-            Value::I64(offset),
-            Value::Absent,
-            Value::Absent,
-            Value::Absent,
-            Value::Bool(false),
-        ])
+        RetainedIngestMetadata::from_values(
+            0,
+            vec![
+                Value::String(topic.to_string()),
+                Value::I32(partition),
+                Value::I64(offset),
+                Value::Absent,
+                Value::Absent,
+                Value::Absent,
+                Value::Bool(false),
+            ],
+        )
     }
 
     fn row<'a>(
@@ -1050,9 +1137,9 @@ mod tests {
             .metadata;
         let mut builders = IngestMetadataBuilders::new(reading_all_metadata(declared), 1);
         let polled =
-            RetainedIngestMetadata::from_values(vec![Value::U16(206), Value::Datetime(instant)]);
+            RetainedIngestMetadata::from_values(0, vec![Value::U16(206), Value::Datetime(instant)]);
         builders
-            .append(&row(&polled, &NoIngestHeaders))
+            .append(&row(&polled, &NoIngestHeaders), None)
             .expect("the HTTP poll hands over the values its entity declares");
         let metadata = builders.finish().expect("HTTP columns finish");
         let fields = &metadata.columns.integration_fields;
@@ -1108,6 +1195,10 @@ mod tests {
     struct Unvisited;
 
     impl IngestMessageMetadata for Unvisited {
+        fn payload_bytes(&self) -> usize {
+            0
+        }
+
         fn visit_metadata(&self, _values: &mut dyn nervix_connector::IngestMetadataValues) {
             panic!("a group of an ingestor that reads no metadata field visits no value");
         }
@@ -1121,7 +1212,7 @@ mod tests {
         let mut builders = IngestMetadataBuilders::new(unread, 2);
         for _ in 0..2 {
             builders
-                .append(&row(&Unvisited, &NoIngestHeaders))
+                .append(&row(&Unvisited, &NoIngestHeaders), None)
                 .expect("a row of an unread declaration appends its headers alone");
         }
         let metadata = builders.finish().expect("the group closes");
@@ -1194,10 +1285,10 @@ mod tests {
         let first = kafka_metadata("orders", 0, 42);
         let second = kafka_metadata("orders", 1, 43);
         builders
-            .append(&row(&first, &NoIngestHeaders))
+            .append(&row(&first, &NoIngestHeaders), None)
             .expect("a record hands over the values KAFKA TOPIC declares");
         builders
-            .append(&row(&second, &NoIngestHeaders))
+            .append(&row(&second, &NoIngestHeaders), None)
             .expect("a record hands over the values KAFKA TOPIC declares");
         let metadata = builders.finish().expect("the group closes");
 
@@ -1230,7 +1321,13 @@ mod tests {
     fn metadata_shape_failures_keep_their_typed_context() {
         let mut refusing = IngestMetadataBuilders::new(reading_all_metadata(kafka_declared()), 1);
         let missing = refusing
-            .append(&IngestMetadataRow::headers(&NoIngestHeaders))
+            .append(
+                &IngestMetadataRow::headers(
+                    &NoIngestHeaders,
+                    &nervix_connector::NoIngestMetadata(0),
+                ),
+                None,
+            )
             .expect_err("a row without its entity's declared values cannot be appended");
         assert!(matches!(
             missing.current_context(),
@@ -1239,17 +1336,20 @@ mod tests {
                 visited: 0,
             }
         ));
-        let mistyped = RetainedIngestMetadata::from_values(vec![
-            Value::I64(1),
-            Value::I32(2),
-            Value::I64(3),
-            Value::Absent,
-            Value::Absent,
-            Value::Absent,
-            Value::Bool(false),
-        ]);
+        let mistyped = RetainedIngestMetadata::from_values(
+            0,
+            vec![
+                Value::I64(1),
+                Value::I32(2),
+                Value::I64(3),
+                Value::Absent,
+                Value::Absent,
+                Value::Absent,
+                Value::Bool(false),
+            ],
+        );
         let wrong_type = refusing
-            .append(&row(&mistyped, &NoIngestHeaders))
+            .append(&row(&mistyped, &NoIngestHeaders), None)
             .expect_err("a value of another type than its field's declaration is refused");
         assert!(matches!(
             wrong_type.current_context(),
@@ -1259,18 +1359,21 @@ mod tests {
                 found: IngestorMetadataType::I64,
             }
         ));
-        let excess = RetainedIngestMetadata::from_values(vec![
-            Value::String("orders".to_string()),
-            Value::I32(2),
-            Value::I64(3),
-            Value::Absent,
-            Value::Absent,
-            Value::Absent,
-            Value::Bool(false),
-            Value::I64(4),
-        ]);
+        let excess = RetainedIngestMetadata::from_values(
+            0,
+            vec![
+                Value::String("orders".to_string()),
+                Value::I32(2),
+                Value::I64(3),
+                Value::Absent,
+                Value::Absent,
+                Value::Absent,
+                Value::Bool(false),
+                Value::I64(4),
+            ],
+        );
         let beyond = refusing
-            .append(&row(&excess, &NoIngestHeaders))
+            .append(&row(&excess, &NoIngestHeaders), None)
             .expect_err("a value beyond the last declared field is refused");
         assert!(matches!(
             beyond.current_context(),
@@ -1296,7 +1399,13 @@ mod tests {
 
         let mut header_builders = IngestMetadataBuilders::new(IngestMetadataProjection::none(), 1);
         header_builders
-            .append(&IngestMetadataRow::headers(&NoIngestHeaders))
+            .append(
+                &IngestMetadataRow::headers(
+                    &NoIngestHeaders,
+                    &nervix_connector::NoIngestMetadata(0),
+                ),
+                None,
+            )
             .expect("the matching metadata row should append");
         header_builders.rows = 2;
         let headers = header_builders
@@ -1313,7 +1422,13 @@ mod tests {
 
         let mut builders = IngestMetadataBuilders::new(IngestMetadataProjection::none(), 1);
         builders
-            .append(&IngestMetadataRow::headers(&NoIngestHeaders))
+            .append(
+                &IngestMetadataRow::headers(
+                    &NoIngestHeaders,
+                    &nervix_connector::NoIngestMetadata(0),
+                ),
+                None,
+            )
             .expect("the matching metadata row should append");
         let metadata = builders.finish().expect("valid metadata should finish");
         let array: ArrayRef = StdArc::new(StringArray::from(vec!["value"]));
@@ -1550,8 +1665,8 @@ mod tests {
         let metadata = ingest_metadata_for_test(
             IngestMetadataProjection::none(),
             &[
-                IngestMetadataRow::headers(&first_headers),
-                IngestMetadataRow::headers(&second_headers),
+                IngestMetadataRow::headers(&first_headers, &nervix_connector::NoIngestMetadata(0)),
+                IngestMetadataRow::headers(&second_headers, &nervix_connector::NoIngestMetadata(0)),
             ],
         );
         let injector = IngestHeaderFunctionInjector::from_metadata(Some(&metadata), 2);
@@ -1687,7 +1802,10 @@ mod tests {
         ]);
         let metadata = ingest_metadata_for_test(
             IngestMetadataProjection::none(),
-            &[IngestMetadataRow::headers(&first_headers)],
+            &[IngestMetadataRow::headers(
+                &first_headers,
+                &nervix_connector::NoIngestMetadata(0),
+            )],
         );
 
         let output = execute_filter_map_for_test(
@@ -1728,8 +1846,8 @@ mod tests {
         let grouped_metadata = ingest_metadata_for_test(
             IngestMetadataProjection::none(),
             &[
-                IngestMetadataRow::headers(&first_headers),
-                IngestMetadataRow::headers(&second_headers),
+                IngestMetadataRow::headers(&first_headers, &nervix_connector::NoIngestMetadata(0)),
+                IngestMetadataRow::headers(&second_headers, &nervix_connector::NoIngestMetadata(0)),
             ],
         );
         let grouped_runtime_metadata = RecordMetadataColumns::from_rows([

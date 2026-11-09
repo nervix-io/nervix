@@ -5,17 +5,21 @@ This is the executable ledger of [Client Wire 14](https://app.clickup.com/t/86bc
 binding exposes, [Clock Attach 05A](https://app.clickup.com/t/86bc95p44) with the clock an attach
 reports, and [Client I/O 04](https://app.clickup.com/t/86bc8bj89) with the producers and consumers
 of client endpoints. Native Bindings adds the pyo3 Python package, magnus Ruby gem and JNI JVM
-library over the shared Rust host runtime; the C ABI serves C and C++ only. This ledger records
-which runtimes implement the session protocol independently or reuse that runtime, how to build
-and run them, and exactly what each probe checks. The native libraries are application interfaces;
-the independent Go and TypeScript probes are qualification clients rather than maintained SDKs.
+library over the shared Rust host runtime; the C ABI serves C and C++ only.
+[Client Suites](https://app.clickup.com/t/86bcz5ctu) gives every binding host a language-level
+suite and a guide. This ledger records which runtimes implement the session protocol
+independently or reuse that runtime, how to build and run them, and exactly what each probe and
+each host suite checks. The native libraries are application interfaces, each with a guide under
+the [Client Libraries](../docs/src/client-libraries.md) index; the independent Go and TypeScript
+probes are qualification clients rather than maintained SDKs.
 
 The [Client Ingestors And Emitters](../docs/src/client-io-architecture.md) architecture chapter
 connects the qualified endpoint operations to graph ownership, ACK/credit boundaries, buffer
 lifetimes, restoration and runnable paced workflows. This ledger owns the qualification scope.
 The authoritative [Client Host Bindings](../docs/src/client-host-bindings.md) chapter owns the
-shared runtime, per-host lifetimes, failure mapping, Arrow exchange and packaging. A change to a
-binding, its shared runtime, a probe or this ledger keeps that chapter current in the same change.
+shared runtime, per-host lifetimes, failure mapping, Arrow exchange, packaging, and the contract of
+the host suites and guides. A change to a binding, its shared runtime, a probe, a host suite or
+this ledger keeps that chapter current in the same change.
 
 ## Paths
 
@@ -363,9 +367,10 @@ for the outstanding-outcome deadline or a producer close that cannot drain that 
   not cut a session between the server applying a settlement and its answer. The binding's unit
   test `a_consumer_reads_and_settles_a_delivery_and_a_lost_confirmation_is_uncertain` does, and the
   settlement reports `NX_ERROR_UNCERTAIN`.
-- The probes connect over plaintext. TLS selection is the Rust client's and is not reimplemented by
-  the binding; the Python suite's cluster tier connects over TLS with the fixture certificate
-  authority.
+- The probes connect over plaintext, except the C binding's connection-policy outline, which
+  reaches an HTTPS seed. TLS selection is the Rust client's and is not reimplemented by a binding;
+  every host suite's cluster tier connects over TLS with the fixture certificate authority, and
+  the JVM, Ruby, C and C++ tiers also over plaintext.
 - C and C++ consume the binding. No independent C or C++ reader is maintained.
 - Only the Rust client restores subscriptions and domain clock attachments after reconnection. The
   Go and TypeScript clients show that the protocol is implementable, not that they recover; a
