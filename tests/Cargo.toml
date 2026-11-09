@@ -43,7 +43,7 @@ deloxide-stress = [
 ]
 
 # This package has test targets only, and every dependency stays a dev-dependency so that the
-# `testing` feature of the server, which injects faults and weakens password hashing, reaches no
+# `testing` feature of the server, which injects test faults, reaches no
 # ordinary build of the workspace.
 [dev-dependencies]
 ahash = { workspace = true }

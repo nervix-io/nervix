@@ -12,6 +12,10 @@ on:
         description: Nervix image the image-build job published; the plan resolves it to its digest.
         type: string
         required: true
+      binding-image:
+        description: Prepared Python binding image of the same source; resolved to a digest before shards run.
+        type: string
+        required: true
       image-kind:
         description: ordinary, or the Deloxide selection a diagnostic image declares.
         type: string
@@ -30,6 +34,10 @@ on:
         description: Immutable Nervix image, REPOSITORY@sha256:DIGEST.
         type: string
         required: true
+      binding-image:
+        description: Immutable prepared Python binding image of the product revision; required for smoke and soak.
+        type: string
+        required: false
       image-kind:
         description: ordinary, or the Deloxide selection a diagnostic image declares.
         type: choice
@@ -58,6 +66,7 @@ permissions:
 
 env:
   CHAOS_IMAGE_INPUT: ${{ inputs.image }}
+  CHAOS_BINDING_IMAGE_INPUT: ${{ inputs.binding-image }}
   CHAOS_IMAGE_KIND: ${{ inputs.image-kind }}
   CHAOS_IMAGE_REVISION: ${{ inputs.revision }}
   CHAOS_SUITE: ${{ inputs.suite }}
@@ -73,6 +82,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       image: ${{ steps.image.outputs.image }}
+      binding-image: ${{ steps.binding.outputs.image }}
       shards: ${{ steps.shards.outputs.shards }}
       shard-count: ${{ steps.shards.outputs.count }}
     steps:
@@ -124,6 +134,23 @@ jobs:
           echo "image=${repository}@${digest}" >> "${GITHUB_OUTPUT}"
           echo "${reference} resolves to ${repository}@${digest}"
 
+      - name: Resolve the prepared binding image to its digest
+        id: binding
+        if: inputs.binding-image != ''
+        run: |
+          reference="${CHAOS_BINDING_IMAGE_INPUT}"
+          if [[ "${GITHUB_EVENT_NAME}" == workflow_dispatch && ! "${reference}" =~ @sha256:[a-f0-9]{64}$ ]]; then
+            echo "::error::a manual binding image must be immutable, REPOSITORY@sha256:DIGEST"
+            exit 1
+          fi
+          timeout 180 docker pull "${reference}"
+          immutable="$(timeout 30 docker image inspect --format '{{index .RepoDigests 0}}' "${reference}")"
+          [[ "${immutable}" =~ @sha256:[a-f0-9]{64}$ ]] || {
+            echo '::error::the binding image has no immutable repository digest'
+            exit 1
+          }
+          echo "image=${immutable}" >> "${GITHUB_OUTPUT}"
+
       - name: Logout from GHCR
         if: always()
         run: docker logout ghcr.io
@@ -146,6 +173,7 @@ jobs:
         shard: ${{ fromJSON(needs.plan.outputs.shards) }}
     env:
       CHAOS_IMAGE: ${{ needs.plan.outputs.image }}
+      CHAOS_BINDING_IMAGE: ${{ needs.plan.outputs.binding-image }}
       CHAOS_SHARD: ${{ matrix.shard.shard }}
       CHAOS_SUITE_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.suite }}${{ inputs.image-kind != 'ordinary' && '-diagnostic' || '' }}-${{ matrix.shard.shard }}
       # The chaos scripts need jq 1.8; the worker's own jq is Ubuntu's 1.7.
@@ -236,7 +264,11 @@ jobs:
           if [[ -n "${CHAOS_IMAGE_REVISION}" ]]; then
             revision=(--image-revision "${CHAOS_IMAGE_REVISION}")
           fi
-          exec just chaos suite "${CHAOS_SUITE}" --shard "${CHAOS_SHARD}" --image "${CHAOS_IMAGE}" \
+          binding_args=()
+          if [[ -n "${CHAOS_BINDING_IMAGE}" ]]; then
+            binding_args=(--binding-image "${CHAOS_BINDING_IMAGE}")
+          fi
+          exec just chaos suite "${CHAOS_SUITE}" --shard "${CHAOS_SHARD}" --image "${CHAOS_IMAGE}" "${binding_args[@]}" \
             --image-kind "${CHAOS_IMAGE_KIND}" "${revision[@]}" \
             --artifacts "${RUNNER_TEMP}/chaos" --suite-id "${CHAOS_SUITE_ID}"
 

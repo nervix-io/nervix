@@ -257,7 +257,7 @@ pub enum CommandExecutionEffect {
     CreateUser {
         if_not_exists: bool,
         name: UserName,
-        password_hash: String,
+        password_credential: nervix_models::PasswordCredential,
     },
     DropNode {
         identity: ClusterNodeIdentity,
@@ -273,7 +273,7 @@ pub enum CommandExecutionEffect {
 pub enum CommandExecutionRequestEvidence {
     Statement,
     UserCredentials {
-        password_hash: String,
+        password_credential: nervix_models::PasswordCredential,
     },
     Transaction {
         target: CommandExecutionTransactionTarget,
@@ -532,10 +532,13 @@ impl CommandExecution {
         }
     }
 
-    pub fn password_hash(&self) -> Option<&str> {
+    pub fn password_credential(&self) -> Option<&nervix_models::PasswordCredential> {
         match &self.state {
             CommandExecutionState::Applying { effect, .. } => match effect.as_ref() {
-                CommandExecutionEffect::CreateUser { password_hash, .. } => Some(password_hash),
+                CommandExecutionEffect::CreateUser {
+                    password_credential,
+                    ..
+                } => Some(password_credential),
                 CommandExecutionEffect::CreateDomain { .. }
                 | CommandExecutionEffect::AlterCluster { .. }
                 | CommandExecutionEffect::Transaction { .. }
@@ -545,9 +548,9 @@ impl CommandExecution {
                 | CommandExecutionEffect::Restore(_) => None,
             },
             CommandExecutionState::Finished { request, .. } => match &request.evidence {
-                CommandExecutionRequestEvidence::UserCredentials { password_hash } => {
-                    Some(password_hash)
-                }
+                CommandExecutionRequestEvidence::UserCredentials {
+                    password_credential,
+                } => Some(password_credential),
                 CommandExecutionRequestEvidence::Statement
                 | CommandExecutionRequestEvidence::Transaction { .. } => None,
             },
@@ -623,11 +626,12 @@ impl CommandExecution {
             return None;
         };
         let evidence = match effect.as_ref() {
-            CommandExecutionEffect::CreateUser { password_hash, .. } => {
-                CommandExecutionRequestEvidence::UserCredentials {
-                    password_hash: password_hash.clone(),
-                }
-            }
+            CommandExecutionEffect::CreateUser {
+                password_credential,
+                ..
+            } => CommandExecutionRequestEvidence::UserCredentials {
+                password_credential: password_credential.clone(),
+            },
             CommandExecutionEffect::TransactionRequest(request) => {
                 CommandExecutionRequestEvidence::Transaction {
                     target: request.target.clone(),
@@ -1162,7 +1166,10 @@ mod tests {
                 if_not_exists: false,
                 name: UserName::parse("created_user")
                     .assured("the test target is a valid user name"),
-                password_hash: "argon2-hash".to_string(),
+                password_credential: nervix_models::PasswordCredential::from_parts(
+                    210000, [51; 16], [51; 64],
+                )
+                .assured("the fixed credential has a bounded iteration count"),
             },
         )
     }

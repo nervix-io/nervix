@@ -12,6 +12,8 @@ report_program="${script_dir}/suite-report.jq"
 source "${script_dir}/require-jq.sh"
 # shellcheck source=verifier-self-check.sh
 source "${script_dir}/verifier-self-check.sh"
+# shellcheck source=binding-image.sh
+source "${script_dir}/binding-image.sh"
 # A run's teardown after its own --timeout is bounded on its own and fits this reserve, the
 # runner's teardown_reserve_seconds; a shard's step budget keeps it for the last run.
 teardown_reserve_minutes=15
@@ -27,7 +29,7 @@ usage() {
 Usage:
   just chaos suite list
   just chaos suite SUITE --image IMAGE [--image-kind KIND] [--image-revision REVISION] [--shard N]
-      [--entry ID]... [--artifacts DIR] [--suite-id ID]
+      [--binding-image IMAGE] [--entry ID]... [--artifacts DIR] [--suite-id ID]
   just chaos suite shards SUITE
   just chaos suite cleanup [--wait SECONDS] SUITE_DIRECTORY
   just chaos suite report [--expect-shards N] SUITE_JSON...
@@ -575,6 +577,8 @@ run_suite() {
     suite_name="$1"
     shift
     local image_ref=""
+    local binding_image_ref=""
+    local binding_image_id=""
     local artifact_root="target/chaos"
     local suite_id=""
     local shard=""
@@ -586,6 +590,11 @@ run_suite() {
             --image)
                 [[ "$#" -ge 2 ]] || suite_error '--image requires a value'
                 image_ref="$2"
+                shift 2
+                ;;
+            --binding-image)
+                [[ "$#" -ge 2 && -n "$2" ]] || suite_error '--binding-image requires a value'
+                binding_image_ref="$2"
                 shift 2
                 ;;
             --image-kind)
@@ -786,6 +795,22 @@ run_suite() {
         suite_error "${refusal}"
     fi
 
+    if jq -e 'any(.entries[]; .run[0] == "binding-endpoints")' "${suite_dir}/suite.json" >/dev/null; then
+        [[ -n "${binding_image_ref}" ]] || suite_error 'binding-endpoints entries require --binding-image'
+        if ! timeout --kill-after=5s 30s docker image inspect "${binding_image_ref}" >/dev/null 2>&1; then
+            timeout --kill-after=10s 180s docker pull "${binding_image_ref}" >"${suite_dir}/binding-image-pull.txt" 2>&1 \
+                || suite_error 'the prepared binding image is unavailable'
+        fi
+        binding_image_id="$(timeout --kill-after=5s 30s docker image inspect --format '{{.Id}}' "${binding_image_ref}")"
+        [[ "${binding_image_id}" =~ ^sha256:[a-f0-9]{64}$ ]] || suite_error 'the binding image has no immutable image ID'
+        local binding_labels
+        binding_labels="$(timeout --kill-after=5s 30s docker image inspect --format '{{json .Config.Labels}}' "${binding_image_id}")"
+        binding_image_labels_match "${binding_labels}" "${revision}" \
+            || suite_error 'the binding image does not declare the product source revision and Python client kind'
+        update_record '.binding_image = {requested: $requested, id: $id, revision: $revision}' \
+            --arg requested "${binding_image_ref}" --arg id "${binding_image_id}" --arg revision "${revision}"
+    fi
+
     local kernel docker_version compose_version cpus memory_bytes
     kernel="$(uname -sr)"
     docker_version="$(timeout --kill-after=5s 30s docker version --format '{{.Server.Version}}' 2>/dev/null || true)"
@@ -799,11 +824,13 @@ run_suite() {
         | .worker = {kernel: $kernel, docker: $docker, compose: $compose,
                      cpus: ($cpus | tonumber), memory_bytes: ($memory | tonumber)}
         | .entries |= map(. + {command: (["just", "chaos", "run"] + .run
-                                         + ["--image", $run_image, "--timeout", (.budget_minutes * 60 | tostring)])}
+                                         + ["--image", $run_image, "--timeout", (.budget_minutes * 60 | tostring)]
+                                         + (if .run[0] == "binding-endpoints" and $binding_image != ""
+                                            then ["--binding-image", $binding_image] else [] end))}
                           | .display = (.command | map(if test("^[A-Za-z0-9_./:=@-]+$") then . else @sh end) | join(" ")))' \
         --arg id "${image_id}" --arg digests "${repo_digests}" --arg run_image "${run_image}" \
         --arg kernel "${kernel}" --arg docker "${docker_version}" --arg compose "${compose_version}" \
-        --arg cpus "${cpus}" --arg memory "${memory_bytes}"
+        --arg cpus "${cpus}" --arg memory "${memory_bytes}" --arg binding_image "${binding_image_id}"
 
     # Every run judges with the same external verifiers on this worker; the suite proves them once
     # here rather than in every run's own budget.
@@ -821,6 +848,9 @@ run_suite() {
         budget_seconds="$(jq -r --argjson index "${entry_index}" '.entries[$index].budget_minutes * 60' "${suite_dir}/suite.json")"
         local run_arguments=()
         mapfile -t run_arguments < <(jq -r --argjson index "${entry_index}" '.entries[$index].run[]' "${suite_dir}/suite.json")
+        if [[ "${run_arguments[0]}" == binding-endpoints && -n "${binding_image_id}" ]]; then
+            run_arguments+=(--binding-image "${binding_image_id}")
+        fi
         printf '\n==> chaos suite %s: %s (%d of %d)\n' "${suite_name}" "${entry_id}" \
             "$((entry_index + 1))" "${entry_count}"
         # The dollars in this jq filter are jq variables, not shell expansion.

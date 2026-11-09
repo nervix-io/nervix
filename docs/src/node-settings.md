@@ -299,6 +299,7 @@ describes, defaults included.
 | `--raft-snapshot-entry-threshold`, `--raft-snapshot-byte-threshold`, `--raft-covered-log-entries-retained`, `--raft-covered-log-bytes-retained`, `--raft-retained-log-cap` | node capability | Raft retention |
 | `--node-unavailability-timeout` | cluster parameter | membership |
 | `--replica-count` | cluster parameter | scheduling |
+| `--password-iterations` | cluster parameter | password creation policy |
 | `--state-snapshot-interval` | cluster parameter | runtime |
 | `--domain-drain-timeout`, `--entity-gate-deadline` | cluster parameter | cluster policy |
 | `--max-batch-messages`, `--client-producer-session-bytes`, `--client-consumer-session-bytes`, `--udf-code-bytes`, `--http-header-bytes`, `--http-header-fields`, `--client-batch-rows` | cluster parameter | model and session policy |
@@ -587,6 +588,17 @@ Resource-volume checks use the chosen seed before the first commit, and the live
 a joining or returning node. Local default resource limits do not refuse a node before it can
 learn that policy. The local preflight still measures and validates the restore-staging capability
 before opening the database or binding listeners.
+
+### Password Creation Policy
+
+`ALTER CLUSTER SET PASSWORD_ITERATIONS = 210000;` changes the cost of newly created user
+credentials. The setting defaults to 210,000 and accepts positive counts through 1,000,000.
+`--password-iterations` (`NERVIX_PASSWORD_ITERATIONS`) seeds it only at first bootstrap.
+The value is cluster policy, because every node must honor the same creation promise.
+Existing users and admitted CREATE USER command executions retain their exact credential.
+Verification uses a persisted common work count that never falls below any cost the cluster has
+admitted, preserving equal work for known and unknown names across changes, restart and restore.
+[Cryptography](cryptography.md#password-credentials) owns the credential and workload contract.
 
 ## State Inspection Capabilities
 
