@@ -2602,6 +2602,7 @@ fn CreateKindFields(
             <ProcessorEditor family=ProcessorFamily::Reingestor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
     }
+    .into_any()
 }
 
 /// Whether the open form's statement creates its entity only if it does not exist yet.
@@ -2675,6 +2676,7 @@ fn IfNotExistsField(signals: CreateSignals) -> impl IntoView {
             </label>
         </Show>
     }
+    .into_any()
 }
 
 fn event_target_value(event: &ev::Event) -> String {
