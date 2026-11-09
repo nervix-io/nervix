@@ -49,6 +49,7 @@ async fn remote_relay_frame_cost() {
             let frame_start = Instant::now();
             let registration = registration(sequence, &pair.node_a);
             let payload = RelayPayload {
+                decoded_bytes: 0,
                 delivery: RelayDelivery {
                     channel_incarnation: [92; 16],
                     sequence,
@@ -140,6 +141,7 @@ async fn remote_relay_frame_cost() {
 async fn peer_departure_reclaims_an_admitted_relays_capacity() {
     let mut pair = connected_transports().await;
     let payload = RelayPayload {
+        decoded_bytes: 0,
         delivery: RelayDelivery {
             channel_incarnation: [91; 16],
             sequence: 0,
@@ -196,6 +198,7 @@ fn turnover_payload(
     registrar: &ClusterNodeName,
 ) -> RelayPayload {
     RelayPayload {
+        decoded_bytes: 0,
         delivery,
         kind: RelayPayloadKind::Routed,
         domain: DomainName::parse("turnover").assured("the fixture domain is valid"),

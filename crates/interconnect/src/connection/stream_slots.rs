@@ -437,18 +437,18 @@ mod shuttle_checks;
 
 pub(super) fn configure_client_builder(
     builder: &mut client::Builder,
-    options: &TransportOptions,
+    state: &super::TransportState,
     class: PoolClass,
 ) -> Result<(), Report<TransportError>> {
     let stream_slots = class.stream_slots_per_connection();
     let streams = u32::try_from(stream_slots).map_err(|_| TransportError::InvalidOptions {
         reason: "pool stream slots exceed the HTTP/2 setting width".to_string(),
     })?;
-    let windows = options.receive_windows(class);
+    let windows = state.receive_windows(class);
     builder
         .initial_window_size(windows.stream)
         .initial_connection_window_size(windows.connection)
-        .max_header_list_size(options.max_header_bytes)
+        .max_header_list_size(state.options.max_header_bytes)
         .max_concurrent_streams(streams)
         .initial_max_send_streams(stream_slots)
         .max_local_error_reset_streams(Some(RESET_LIMIT))

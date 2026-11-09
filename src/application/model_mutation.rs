@@ -2481,9 +2481,14 @@ impl SessionServiceImpl {
             Statement::AlterCluster(_) => {
                 command_error("ALTER CLUSTER SET requires durable command admission".to_string())
             }
-            Statement::DescribeCluster(_) => {
-                command_ok(describe_cluster(&self.inner.cluster, &self.inner.consensus).await)
-            }
+            Statement::DescribeCluster(_) => command_ok(
+                describe_cluster(
+                    &self.inner.cluster,
+                    &self.inner.consensus,
+                    &self.inner.interconnect,
+                )
+                .await,
+            ),
             Statement::ShowTransactions(_) => self.show_transactions().await,
             Statement::DescribeTransaction(describe) => {
                 self.describe_transaction(describe, query, session).await

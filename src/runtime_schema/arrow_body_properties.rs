@@ -129,7 +129,11 @@ fn bolero_arrow_bodies_restore_every_column_value_and_null() {
                 let exact = case
                     .schema
                     .compiled
-                    .decode_arrow_body(&executor, body.clone())
+                    .decode_arrow_body(
+                        &executor,
+                        body.clone(),
+                        executor.limits().relay_decoded_bytes.as_u64(),
+                    )
                     .await
                     .assured("the encoded body decodes against its schema");
                 assert_same_batch(exact.batch(), &case.rows);
@@ -155,7 +159,11 @@ fn bolero_arrow_bodies_restore_every_column_value_and_null() {
                 let refused = case
                     .schema
                     .compiled
-                    .decode_arrow_body(&executor, several.clone())
+                    .decode_arrow_body(
+                        &executor,
+                        several.clone(),
+                        executor.limits().relay_decoded_bytes.as_u64(),
+                    )
                     .await
                     .expect_err("a relay body carries exactly one section");
                 assert!(
@@ -215,7 +223,11 @@ fn bolero_damaged_arrow_bodies_are_refused_typed_or_decode_canonically() {
                 let exact = case
                     .schema
                     .compiled
-                    .decode_arrow_body(&executor, charged(&executor, damaged.clone()))
+                    .decode_arrow_body(
+                        &executor,
+                        charged(&executor, damaged.clone()),
+                        executor.limits().relay_decoded_bytes.as_u64(),
+                    )
                     .await;
                 check_damaged_outcome(&executor, exact, Some(&case.arrow_schema())).await;
                 let section = RuntimeRecordBatch::decode_arrow_snapshot_section(
@@ -333,7 +345,11 @@ async fn a_body_longer_than_the_encoded_limit_is_refused_before_it_is_read() {
     let refused = case
         .schema
         .compiled
-        .decode_arrow_body(&executor, charged(&executor, body))
+        .decode_arrow_body(
+            &executor,
+            charged(&executor, body),
+            executor.limits().relay_decoded_bytes.as_u64(),
+        )
         .await
         .expect_err("the body is one byte over the limit");
     assert!(
@@ -355,7 +371,11 @@ async fn sections_that_decode_past_the_decoded_limit_stop_at_the_section_that_cr
     let measured = case
         .schema
         .compiled
-        .decode_arrow_body(&generous, charged(&generous, case.sections(1)))
+        .decode_arrow_body(
+            &generous,
+            charged(&generous, case.sections(1)),
+            generous.limits().relay_decoded_bytes.as_u64(),
+        )
         .await
         .assured("one section decodes under the default limits");
     let one = super::batch_payload_bytes(measured.batch());
@@ -367,7 +387,11 @@ async fn sections_that_decode_past_the_decoded_limit_stop_at_the_section_that_cr
     let accepted = case
         .schema
         .compiled
-        .decode_arrow_body(&executor, charged(&executor, case.sections(1)))
+        .decode_arrow_body(
+            &executor,
+            charged(&executor, case.sections(1)),
+            executor.limits().relay_decoded_bytes.as_u64(),
+        )
         .await
         .assured("one section of exactly the decoded limit decodes");
     assert_same_batch(accepted.batch(), &case.rows);
@@ -392,7 +416,11 @@ async fn a_stream_without_a_section_is_refused_where_one_is_required() {
     let refused = case
         .schema
         .compiled
-        .decode_arrow_body(&executor, charged(&executor, empty.clone()))
+        .decode_arrow_body(
+            &executor,
+            charged(&executor, empty.clone()),
+            executor.limits().relay_decoded_bytes.as_u64(),
+        )
         .await
         .expect_err("a relay body carries one section");
     assert!(matches!(
@@ -430,7 +458,11 @@ async fn a_body_of_another_schema_is_refused_where_the_schema_is_known() {
     let refused = case
         .schema
         .compiled
-        .decode_arrow_body(&executor, charged(&executor, other.sections(1)))
+        .decode_arrow_body(
+            &executor,
+            charged(&executor, other.sections(1)),
+            executor.limits().relay_decoded_bytes.as_u64(),
+        )
         .await
         .expect_err("the body declares another schema");
     assert!(matches!(
@@ -464,7 +496,11 @@ fn a_body_arrows_reader_would_panic_on_is_refused_before_it_is_read(
     property_runtime().block_on(async {
         let exact = schema
             .compiled
-            .decode_arrow_body(&executor, charged(&executor, stream.clone()))
+            .decode_arrow_body(
+                &executor,
+                charged(&executor, stream.clone()),
+                executor.limits().relay_decoded_bytes.as_u64(),
+            )
             .await
             .expect_err("the stream declares what no valid stream does");
         let any = RuntimeRecordBatch::decode_arrow_ipc(&executor, charged(&executor, stream))

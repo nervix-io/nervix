@@ -17,8 +17,8 @@ use std::{net::SocketAddr, time::Duration};
 
 #[cfg(not(feature = "testing"))]
 use nervix_models::{
-    ClusterNodeName, DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName,
-    RelayName, Unit,
+    ClusterNodeIncarnation, ClusterNodeName, DomainName, DomainNodeRef, EmitterName, IngestorName,
+    ModelKind, ModelName, RelayName, Unit,
 };
 
 #[cfg(not(feature = "testing"))]
@@ -205,12 +205,12 @@ impl ConfiguredFaultInjection {
         false
     }
 
-    pub(in crate::runtime) fn misses_live_run(
+    pub(in crate::runtime) fn registrar_live_view_override(
         &self,
         _observer: &ClusterNodeName,
         _missing: &ClusterNodeName,
-    ) -> bool {
-        false
+    ) -> Option<Option<ClusterNodeIncarnation>> {
+        None
     }
 
     pub(in crate::runtime) fn fill_relay_memory_before_acknowledgement_watches_if_armed(
