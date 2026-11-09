@@ -360,6 +360,13 @@ test-scenarios *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
 
+# Password-policy cases use in-process nodes and the native session client.
+test-password-credentials *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/password_credentials.feature {{ quote(args) }}
+
 # Exercise domain pause recovery with ordinary assets and the shared native tool graph.
 test-client-wire-pause-recovery *args: build-deps build-codec-tools
     #!/usr/bin/env bash

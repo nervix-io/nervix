@@ -370,3 +370,35 @@ impl ClientBatchRows {
     )]
     pub const DEFAULT: u32 = 65536;
 }
+
+/// The work committed for newly created PBKDF2-HMAC-SHA-512 credentials.
+pub struct PasswordIterations;
+
+impl PasswordIterations {
+    /// Cluster acceptance bounds the work a stored credential may request.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the current credential profile refuses counts beyond this validity ceiling \
+                      before admitting cryptographic work; the creation policy is the declared \
+                      setting"
+        )
+    )]
+    pub const MAXIMUM: u64 = 1_000_000;
+}
+
+impl SettingDefinition for PasswordIterations {
+    type Class = ClusterParameters;
+    type Value = u64;
+    type Context = ();
+    type Error = ClusterParameterError;
+    const NAME: &'static str = "password-iterations";
+    const DERIVATION: Option<&'static str> = None;
+    fn default_value(_: &()) -> u64 {
+        210_000
+    }
+    fn validate(value: &u64, _: &()) -> Result<(), Report<ClusterParameterError>> {
+        ClusterParameterKey::PasswordIterations.validate_count(*value, 1, Self::MAXIMUM)
+    }
+}
