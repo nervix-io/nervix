@@ -549,6 +549,8 @@ pub enum AcknowledgementConfirmation {
 /// documentation and the generated conformance tests read the same declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IngestorEntityCapabilities {
+    /// The transport observations its connector may count through the host.
+    pub events: crate::DeclaredEvents,
     /// The instancing forms its intake can honor.
     pub instancing: IngestorInstancingCapability,
     /// How its messages carry the transport headers that `read_header` and `read_headers` read,
@@ -624,6 +626,13 @@ impl IngestorEntityCapabilities {
             });
         }
         capabilities.extend(RuntimeCapability::of_bounds(self.bounds));
+        capabilities.extend(
+            self.events
+                .as_slice()
+                .iter()
+                .copied()
+                .map(RuntimeCapability::Event),
+        );
         capabilities
     }
 

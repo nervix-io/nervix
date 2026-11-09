@@ -987,6 +987,11 @@ behavior. That change also supplies its generated conformance and runtime scenar
 The declaration describes the product a user can execute; plans for additional connector clauses
 remain in their owning work records until that delivery.
 
+Every ingestor and emitter also declares its `DeclaredEvents`, a closed set of typed
+`ConnectorEvent` identities. The generated matrix and manual regions render those names from the
+declaration, including an empty set. Event names are observations, not Plexus options or driver
+error strings.
+
 The declaration crosses each boundary once, without becoming runtime graph policy:
 
 | Reader | What it takes from the declaration |
@@ -3541,6 +3546,15 @@ sequenceDiagram
 
 ## Failure and observation
 
+A connector-specific fact uses the entity's declared event counter. The host registers all its
+event children at zero and exposes `ConnectorEventProvider` through `EmitterHost` and
+`IngestorHost`. Construction resolves a `ConnectorEventCounter` by typed event identity;
+requesting an undeclared event returns a typed refusal. The connector retains that counter and
+records through it without naming a metrics type, rebuilding labels or resolving a registry on
+the recurring path. The host owns counting, wall rates, process-local history and inspection.
+The event itself changes no delivery outcome. [Connector-declared events](metrics-and-observability.md#connector-declared-events)
+defines the public families and the Redis zero-subscriber event.
+
 The ingestor host resolves its interaction counter children once at startup for its exact execution
 unit. The retained group preserves each instance's counters, including decode rejections, without
 resolving labels or looking up a shared registry while recording a payload outcome.
@@ -3723,7 +3737,7 @@ drain boundary. This chapter does not redefine those output formats.
 
 1. Declare each entity it serves in the vocabulary: one Model per entity with its
    [declaration](#entity-declarations), which states its modes, quiesce modes, locator, options,
-   body, batching, [bounds](#bounds-and-deadlines), an ingestor's position class and acknowledgement
+   body, batching, connector events, [bounds](#bounds-and-deadlines), an ingestor's position class and acknowledgement
    confirmation as its transport gives them, and every other fact a statement can say about it,
    and a typed name, checked by the entity's own rule, for each external name its statement
    writes. The connector and entity together name the statement's head, such as

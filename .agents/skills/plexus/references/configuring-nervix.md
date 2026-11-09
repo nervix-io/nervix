@@ -657,6 +657,11 @@ current connection, retry and deadline limits.
 - Every Sentry emitter references a `SENTRY CLIENT` with a project DSN and a positive `timeout_ms`,
   encodes one event JSON object per record, or per batch through `ON EMITTING BATCH`, and has no
   `write_header` invocation.
+- A Redis PUBSUB emitter counts successful publications with zero receivers as
+  `published_without_subscribers`; they still satisfy its server-acceptance delivery boundary.
+  Read `Metrics And Observability` → `Connector-declared events` for cumulative totals and
+  inspection-sampled wall rates, and the generated connector capability reference for each
+  entity's declared events.
 - Every custom WASM guest is built for the current ABI, accepts
   `nervix_process_batch(ptr, size)`, validates that exact range against its reusable buffer, and
   declares positive `MAX FUEL` then `MAX MEMORY` limits immediately after `FILE`. Its

@@ -395,6 +395,13 @@ test-endpoint-request-metrics *args: build-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/endpoint_request_metrics.feature {{ quote(args) }}
 
+# Declared connector events use the real Redis fixture and native client producers.
+test-connector-events *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/connector_events*.feature") }} {{ quote(args) }}
+
 # Exercise retained interaction metrics and the native ingestor owners without client fixtures.
 test-ingestor-interactions filter="runtime::ingestors::connector::" *args: build-deps
     #!/usr/bin/env bash
@@ -2869,6 +2876,36 @@ coverage-archive-counts-server-append output="target/archive-counts.lcov": downl
 # Measure the server owner regressions with the same dependencies and environment as test-runtime.
 coverage-runtime output="target/task-handles-runtime.lcov" *args: build-web-console wasm-processor-guests download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo llvm-cov --package nervix-server --features testing --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} {{ args }}
+
+# Start ordinary coverage with the declared-event owners; the append recipe adds the public path.
+coverage-connector-events output="lcov-workspace.info": build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    just coverage-clean-workspace
+    cargo llvm-cov --no-report --package nervix-models --lib -- \
+        connector::declaration::events::tests::every_entity_declares_unique_event_identities
+    cargo llvm-cov --no-report --package nervix-connector --lib -- connector_events::tests
+    cargo llvm-cov --no-report --package nervix-connector-redis --lib -- pubsub::event_tests
+    cargo llvm-cov --no-report --package nervix-server --features testing --lib -- \
+        metrics::connector::events::tests
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} \
+        --package nervix-models --package nervix-connector --package nervix-connector-redis \
+        --package nervix-server
+
+# Continue event owner and public-path coverage without discarding the current ordinary profiles.
+coverage-connector-events-append output="lcov-workspace.info": build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov --no-clean --package nervix-server --features testing --lib \
+        --lcov --output-path {{ quote(output) }} -- metrics::connector::events::tests
+    cargo llvm-cov --no-clean --package nervix-scenarios --test scenarios \
+        --lcov --output-path {{ quote(output) }} -- \
+        --input {{ quote(justfile_directory() / "tests/features/runtime/connector_events*.feature") }} --concurrency 2 --retry 0
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} \
+        --package nervix-models --package nervix-connector --package nervix-connector-redis \
+        --package nervix-server
 
 # Ordinary coverage for delivery correlations, membership publication and authenticated relay owners.
 coverage-remote-owners output="target/remote-owners.lcov": build-web-console wasm-processor-guests download-onnxruntime
