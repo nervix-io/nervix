@@ -229,61 +229,95 @@ impl InspectionFrame {
 }
 
 pub(crate) fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
-    let inspection = crate::class(ruby, module, "Inspection")?;
-    inspection.define_method("domain", method!(Inspection::domain, 0))?;
-    inspection.define_method("entity_kind", method!(Inspection::entity_kind, 0))?;
-    inspection.define_method("entity_name", method!(Inspection::entity_name, 0))?;
-    inspection.define_method("json", method!(Inspection::json, 0))?;
-    inspection.define_method("rejection", method!(Inspection::rejection, 0))?;
-    inspection.define_method("counts", method!(Inspection::counts, 0))?;
-    inspection.define_method("unit_count", method!(Inspection::unit_count, 0))?;
-    inspection.define_method("continuation", method!(Inspection::continuation, 0))?;
-    inspection.define_method("units", method!(Inspection::units, 0))?;
-    let counts = crate::class(ruby, module, "InspectionCounts")?;
-    counts.define_method("branches", method!(InspectionCounts::branches, 0))?;
-    counts.define_method("rows", method!(InspectionCounts::rows, 0))?;
-    counts.define_method("bytes", method!(InspectionCounts::bytes, 0))?;
-    let unit = crate::class(ruby, module, "InspectionUnit")?;
-    unit.define_method("kind", method!(InspectionUnit::kind, 0))?;
-    unit.define_method("index", method!(InspectionUnit::index, 0))?;
-    unit.define_method("owner", method!(InspectionUnit::owner, 0))?;
-    unit.define_method("replicas", method!(InspectionUnit::replicas, 0))?;
-    unit.define_method("origin_node", method!(InspectionUnit::origin_node, 0))?;
-    unit.define_method(
-        "origin_incarnation",
-        method!(InspectionUnit::origin_incarnation, 0),
-    )?;
-    unit.define_method(
-        "origin_fingerprint",
-        method!(InspectionUnit::origin_fingerprint, 0),
-    )?;
-    unit.define_method(
-        "origin_generation",
-        method!(InspectionUnit::origin_generation, 0),
-    )?;
-    unit.define_method(
-        "origin_revision",
-        method!(InspectionUnit::origin_revision, 0),
-    )?;
-    unit.define_method("origin_stage", method!(InspectionUnit::origin_stage, 0))?;
-    unit.define_method("counts", method!(InspectionUnit::counts, 0))?;
-    unit.define_method("sections", method!(InspectionUnit::sections, 0))?;
-    let section = crate::class(ruby, module, "InspectionSection")?;
-    section.define_method("name", method!(InspectionSection::name, 0))?;
-    section.define_method("omitted_rows", method!(InspectionSection::omitted_rows, 0))?;
-    section.define_method(
-        "watermark_low",
-        method!(InspectionSection::watermark_low, 0),
-    )?;
-    section.define_method(
-        "watermark_high",
-        method!(InspectionSection::watermark_high, 0),
-    )?;
-    section.define_method("schema", method!(InspectionSection::schema, 0))?;
-    section.define_method("frames", method!(InspectionSection::frames, 0))?;
-    let frame = crate::class(ruby, module, "InspectionFrame")?;
-    frame.define_method("row_count", method!(InspectionFrame::row_count, 0))?;
-    frame.define_method("schema", method!(InspectionFrame::schema, 0))?;
-    frame.define_method("frame", method!(InspectionFrame::frame, 0))?;
-    Ok(())
+    Inspection::register(ruby, module)?;
+    InspectionCounts::register(ruby, module)?;
+    InspectionUnit::register(ruby, module)?;
+    InspectionSection::register(ruby, module)?;
+    InspectionFrame::register(ruby, module)
+}
+
+impl Inspection {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let inspection = crate::class(ruby, module, "Inspection")?;
+        inspection.define_method("domain", method!(Inspection::domain, 0))?;
+        inspection.define_method("entity_kind", method!(Inspection::entity_kind, 0))?;
+        inspection.define_method("entity_name", method!(Inspection::entity_name, 0))?;
+        inspection.define_method("json", method!(Inspection::json, 0))?;
+        inspection.define_method("rejection", method!(Inspection::rejection, 0))?;
+        inspection.define_method("counts", method!(Inspection::counts, 0))?;
+        inspection.define_method("unit_count", method!(Inspection::unit_count, 0))?;
+        inspection.define_method("continuation", method!(Inspection::continuation, 0))?;
+        inspection.define_method("units", method!(Inspection::units, 0))?;
+        Ok(())
+    }
+}
+
+impl InspectionCounts {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let counts = crate::class(ruby, module, "InspectionCounts")?;
+        counts.define_method("branches", method!(InspectionCounts::branches, 0))?;
+        counts.define_method("rows", method!(InspectionCounts::rows, 0))?;
+        counts.define_method("bytes", method!(InspectionCounts::bytes, 0))?;
+        Ok(())
+    }
+}
+
+impl InspectionUnit {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let unit = crate::class(ruby, module, "InspectionUnit")?;
+        unit.define_method("kind", method!(InspectionUnit::kind, 0))?;
+        unit.define_method("index", method!(InspectionUnit::index, 0))?;
+        unit.define_method("owner", method!(InspectionUnit::owner, 0))?;
+        unit.define_method("replicas", method!(InspectionUnit::replicas, 0))?;
+        unit.define_method("origin_node", method!(InspectionUnit::origin_node, 0))?;
+        unit.define_method(
+            "origin_incarnation",
+            method!(InspectionUnit::origin_incarnation, 0),
+        )?;
+        unit.define_method(
+            "origin_fingerprint",
+            method!(InspectionUnit::origin_fingerprint, 0),
+        )?;
+        unit.define_method(
+            "origin_generation",
+            method!(InspectionUnit::origin_generation, 0),
+        )?;
+        unit.define_method(
+            "origin_revision",
+            method!(InspectionUnit::origin_revision, 0),
+        )?;
+        unit.define_method("origin_stage", method!(InspectionUnit::origin_stage, 0))?;
+        unit.define_method("counts", method!(InspectionUnit::counts, 0))?;
+        unit.define_method("sections", method!(InspectionUnit::sections, 0))?;
+        Ok(())
+    }
+}
+
+impl InspectionSection {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let section = crate::class(ruby, module, "InspectionSection")?;
+        section.define_method("name", method!(InspectionSection::name, 0))?;
+        section.define_method("omitted_rows", method!(InspectionSection::omitted_rows, 0))?;
+        section.define_method(
+            "watermark_low",
+            method!(InspectionSection::watermark_low, 0),
+        )?;
+        section.define_method(
+            "watermark_high",
+            method!(InspectionSection::watermark_high, 0),
+        )?;
+        section.define_method("schema", method!(InspectionSection::schema, 0))?;
+        section.define_method("frames", method!(InspectionSection::frames, 0))?;
+        Ok(())
+    }
+}
+
+impl InspectionFrame {
+    fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+        let frame = crate::class(ruby, module, "InspectionFrame")?;
+        frame.define_method("row_count", method!(InspectionFrame::row_count, 0))?;
+        frame.define_method("schema", method!(InspectionFrame::schema, 0))?;
+        frame.define_method("frame", method!(InspectionFrame::frame, 0))?;
+        Ok(())
+    }
 }
