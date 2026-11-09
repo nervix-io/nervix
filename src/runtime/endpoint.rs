@@ -343,9 +343,9 @@ impl EndpointIntakeRoute<EndpointIngestBinding> {
                 refused.push(RefusedBinding::Ended);
                 continue;
             };
-            let Some(refusal) = binding.refusal() else {
-                return None;
-            };
+            // An ingestor that can take the request leaves the route without a refusal, so
+            // dispatch decides, and counts, every ingestor's outcome.
+            let refusal = binding.refusal()?;
             refused.push(RefusedBinding::Running {
                 binding: binding.clone(),
                 refusal,
