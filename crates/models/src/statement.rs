@@ -1321,11 +1321,12 @@ impl Model {
     }
 
     /// Whether this model keeps durable state per branch key: a deduplicator, window or WASM
-    /// processor, or a materialized relay. A change of its branch's partition count moves that
-    /// state between the model's units.
+    /// processor, an inferencer that declares state, or a materialized relay. A change of its
+    /// branch's partition count moves that state between the model's units.
     pub fn keeps_state_per_key(&self) -> bool {
         match self {
             Self::Deduplicator(_) | Self::WindowProcessor(_) | Self::WasmProcessor(_) => true,
+            Self::Inferencer(inferencer) => !inferencer.state.is_empty(),
             Self::Relay(relay) => relay.materialized_state.is_some(),
             _ => false,
         }

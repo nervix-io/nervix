@@ -514,6 +514,7 @@ fn processor_state_kind(kind: ModelKind) -> RuntimeStateKind {
     match kind {
         ModelKind::WindowProcessor => RuntimeStateKind::WindowProcessor,
         ModelKind::WasmProcessor => RuntimeStateKind::WasmProcessor,
+        ModelKind::Inferencer => RuntimeStateKind::Inferencer,
         _ => RuntimeStateKind::Deduplicator,
     }
 }

@@ -780,8 +780,8 @@ Prometheus exposes branch lifecycle state without a concrete branch-key label:
   executes in on that physical node: `1` until its first partition count change, then one more for
   each committed change.
 - `nervix_branch_partition_keys_pending{domain,branch,physical_node_id}` is a gauge of the concrete
-  keys the physical node's units of the branch's deduplicators, window and WASM processors and
-  materialized relays still have to move while the branch changes its partition count: the keys
+  keys the physical node's units of the branch's deduplicators, window and WASM processors,
+  inferencers that declare state and materialized relays still have to move while the branch changes its partition count: the keys
   each holds that the current count places in another unit, and the keys each is claiming. It is
   `0` once every key lies in its partition; the summed value across the cluster is what
   `DESCRIBE BRANCH` reports as `keys pending`.

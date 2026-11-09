@@ -1751,8 +1751,9 @@ from an empty one. A processor's unit hands its branches over to the next superv
 unit, so a key the new count places elsewhere stays where it was.
 
 While keys placed under the previous count may still lie outside their partition, the epoch keeps a
-transition. A unit of a deduplicator, window processor, WASM processor or materialized relay that
-the previous count scheduled and the current count does not stays scheduled as a holding unit. A
+transition. A unit of a deduplicator, window processor, WASM processor, inferencer that declares
+state or materialized relay that the previous count scheduled and the current count does not stays
+scheduled as a holding unit. A
 holding unit takes no input: its supervisor reads a dormant audience no producer dispatches to,
 and a materialized relay's holding unit has a state task but no owner task.
 

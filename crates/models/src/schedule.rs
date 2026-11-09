@@ -651,8 +651,8 @@ impl ScheduledNode {
     }
 
     /// Whether this node keeps durable state per branch key, which a change of its branch's
-    /// partition count moves between its units: a deduplicator, window or WASM processor, or a
-    /// materialized relay.
+    /// partition count moves between its units: a deduplicator, window or WASM processor, an
+    /// inferencer that declares state, or a materialized relay.
     pub fn keeps_state_per_key(&self) -> bool {
         Model::keeps_state_per_key(self.config.as_ref())
     }

@@ -83,8 +83,9 @@ impl ActiveGraph {
     }
 
     /// The branches at least one of whose entities keeps durable state per key: a deduplicator,
-    /// window or WASM processor it branches, or a materialized relay it branches. Only such a
-    /// branch has keys to move between units when its partition count changes.
+    /// window or WASM processor or an inferencer that declares state it branches, or a
+    /// materialized relay it branches. Only such a branch has keys to move between units when its
+    /// partition count changes.
     pub(in crate::registry) fn branches_with_keyed_state(
         &self,
     ) -> std::collections::BTreeSet<BranchName> {

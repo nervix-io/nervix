@@ -115,7 +115,7 @@ A key whose partition changes keeps its state. The partition the new count place
 it the first time it receives one of the key's records: that record and the key's later records
 wait while the partition that held the key drains the key's pending work, checkpoints its state and
 hands it over, and then the key continues with its deduplicator keys, its window, its WASM guest
-state and its materialized row. A materialized relay's partition does not wait for a record: it
+state, its inferencer's declared state and its materialized row. A materialized relay's partition does not wait for a record: it
 claims every row the partitions of the previous count hold for it as soon as it starts, since a row
 is read far more often than it is written. A record that a `REQUIRED WAIT` dependency held in the old partition
 when the key moved is refused, and its source sends it again to the key's new partition. A key that
@@ -156,8 +156,8 @@ in [Metrics And Observability](metrics-and-observability.md). A backup cut while
 every key into the partition the restored count places it in, and the restored branch begins its
 first partition epoch with no keys pending.
 
-A branch none of whose entities keeps state per key, no deduplicator, window or WASM processor and
-no materialized relay, has nothing to move: its new count applies at once and its epoch has no
+A branch none of whose entities keeps state per key, no deduplicator, window or WASM processor, no
+inferencer that declares state and no materialized relay, has nothing to move: its new count applies at once and its epoch has no
 transition. [Data-Plane Concurrency](data-plane-concurrency.md#partition-transitions-and-key-claims)
 owns the claim protocol and its bounds.
 
