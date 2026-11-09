@@ -440,6 +440,7 @@ class InventoryTests(unittest.TestCase):
             "console-codec-drafts",
             "console-endpoint-drafts",
             "console-emitter-drafts",
+            "console-processor-drafts",
             "runtime-window-sketch-panes",
             "kafka-partition-offsets",
             "kafka-destination-partitions",
