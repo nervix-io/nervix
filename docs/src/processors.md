@@ -559,13 +559,17 @@ outcome in either format. See
 
 ### Reset guest state from Plexus
 
-`RESET WASM PROCESSOR <processor> STATE IN DOMAIN <domain> FOR <scope>;` replaces the selected
-guest-state lifetime of an existing, running processor. The scope is mandatory:
+`RESET WASM PROCESSOR <processor> STATE FOR <scope>;` replaces the selected guest-state lifetime of
+an existing, running processor in the session's active domain, like every other statement that
+acts on a domain. Inside `BEGIN` it acts on the domain the transaction is bound to. Without an
+active domain it fails with `no active domain selected`. A processor of the same name in another
+domain is a different processor and keeps its state. The scope is mandatory:
 
 ```plexus
-RESET WASM PROCESSOR normalize_events STATE IN DOMAIN sales FOR UNBRANCHED;
-RESET WASM PROCESSOR normalize_events STATE IN DOMAIN sales FOR ALL BRANCHES;
-RESET WASM PROCESSOR normalize_events STATE IN DOMAIN sales FOR BRANCH VALUES { tenant = 'acme' };
+USE sales;
+RESET WASM PROCESSOR normalize_events STATE FOR UNBRANCHED;
+RESET WASM PROCESSOR normalize_events STATE FOR ALL BRANCHES;
+RESET WASM PROCESSOR normalize_events STATE FOR BRANCH VALUES { tenant = 'acme' };
 ```
 
 Use `FOR UNBRANCHED` only for an unbranched processor. Use `FOR ALL BRANCHES` or exact

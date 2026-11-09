@@ -19,7 +19,7 @@ Feature: Coordinated WASM processor state reset
       """
     When these Plexus commands are executed through the client on the leader node
       """
-      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
+      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 'alpha' };
       """
     Then within "10s" DESCRIBE WASM PROCESSOR "counting_guest" on the leader node contains
       """
@@ -54,7 +54,7 @@ Feature: Coordinated WASM processor state reset
 
     When these Plexus commands are executed through the client on the leader node
       """
-      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'beta' };
+      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 'beta' };
       """
     Then within "10s" DESCRIBE WASM PROCESSOR "counting_guest" on the leader node contains
       """
@@ -89,7 +89,7 @@ Feature: Coordinated WASM processor state reset
     When the next 2 WASM reset publications for domain "{{domain}}" lose authority
     And this Plexus command request with execution reference "authority-reset-{{test_id}}" is executed on the leader node
       """
-      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
+      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 'alpha' };
       """
     Then the last command request succeeded
     And domain "{{domain}}" has consumed 2 WASM reset publication authority refusals
@@ -103,7 +103,7 @@ Feature: Coordinated WASM processor state reset
       """
     And this Plexus command request with execution reference "authority-reset-{{test_id}}" is executed on the leader node
       """
-      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
+      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 'alpha' };
       """
     Then the last command request succeeded
     And within "10s" DESCRIBE WASM PROCESSOR "counting_guest" on the leader node contains
@@ -150,7 +150,7 @@ Feature: Coordinated WASM processor state reset
       """
     When this Plexus command request with execution reference "failed-reset-{{test_id}}" is executed on the leader node
       """
-      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
+      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 'alpha' };
       """
     Then the last command error contains
       """
@@ -162,7 +162,7 @@ Feature: Coordinated WASM processor state reset
     Then domain "{{domain}}" has WASM reset publication failure state disabled
     When this Plexus command request with execution reference "failed-reset-{{test_id}}" is executed on the leader node
       """
-      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
+      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 'alpha' };
       """
     Then the last command error contains
       """
@@ -199,7 +199,7 @@ Feature: Coordinated WASM processor state reset
       """
     And this Plexus command request with execution reference "retry-reset-{{test_id}}" is executed on the leader node
       """
-      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
+      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 'alpha' };
       """
     Then the last command request succeeded
     When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
@@ -208,7 +208,7 @@ Feature: Coordinated WASM processor state reset
       """
     And this Plexus command request with execution reference "retry-reset-{{test_id}}" is executed on the leader node
       """
-      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
+      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 'alpha' };
       """
     Then the last command request succeeded
     When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
@@ -239,7 +239,7 @@ Feature: Coordinated WASM processor state reset
     Given command response delivery on node "{{old_leader}}" pauses after execution
     When the active session begins this Plexus command request with execution reference "lost-reset-{{test_id}}" in the background
       """
-      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
+      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 'alpha' };
       """
     Then the command response delivery pause on node "{{old_leader}}" is reached
     When the background command request connection is dropped
@@ -252,7 +252,7 @@ Feature: Coordinated WASM processor state reset
       """
     And this Plexus command request with execution reference "lost-reset-{{test_id}}" is executed on the leader node
       """
-      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
+      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 'alpha' };
       """
     Then the last command request succeeded
     When these Plexus commands are executed on the leader node
@@ -279,7 +279,7 @@ Feature: Coordinated WASM processor state reset
       """
     And this Plexus command request with an execution reference created "1h" before now is executed on the leader node
       """
-      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
+      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 'alpha' };
       """
     Then the last command error contains
       """
@@ -326,12 +326,152 @@ Feature: Coordinated WASM processor state reset
       """
 
     Examples:
-      | command                                                                                                   | error                                       |
-      | RESET WASM PROCESSOR missing_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };     | does not exist                              |
-      | RESET WASM PROCESSOR counting_guest STATE IN DOMAIN absent_domain FOR BRANCH VALUES { tenant = 'alpha' }; | names domain                                |
-      | RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR UNBRANCHED;                            | invalid branch scope                        |
-      | RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 7 };          | requires an exact STRING literal            |
-      | RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'unseen' };   | no active execution for the selected branch |
+      | command                                                                            | error                                       |
+      | RESET WASM PROCESSOR missing_guest STATE FOR BRANCH VALUES { tenant = 'alpha' };   | does not exist                              |
+      | RESET WASM PROCESSOR counting_guest STATE FOR UNBRANCHED;                          | invalid branch scope                        |
+      | RESET WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 7 };        | requires an exact STRING literal            |
+      | RESET WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 'unseen' }; | no active execution for the selected branch |
+
+  Scenario Outline: A reset acts on the active domain and leaves the same processor of another domain counting
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
+    And a branched state-counting WASM reset graph is running on host "wasm-kept-{{test_id}}.example.com"
+    And the active domain is saved as placeholder "kept_domain"
+    And client "operator" is connected to the leader node
+    And the active domain is "{{kept_domain}}_reset"
+    And a branched state-counting WASM reset graph is running
+    And the active domain is saved as placeholder "reset_domain"
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":1}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":1}
+      """
+    And http payload is posted to host "wasm-kept-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":1}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When client "operator" executes these Plexus commands
+      """
+      USE {{reset_domain}};
+      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 'alpha' };
+      """
+    Then client "operator" active domain is "{{reset_domain}}"
+    And within "10s" DESCRIBE WASM PROCESSOR "counting_guest" on the leader node contains
+      """
+      state reset: READY, branch, generation 2
+      state reset reason: TRANSACTION
+      state reset readiness: READY
+      """
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":2}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":3}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
+      """
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":2}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"beta"} | "tenant":"beta" | "note":"even"
+      """
+    When this Plexus command request with execution reference "domain-reset-{{test_id}}" is executed on the leader node
+      """
+      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 'beta' };
+      """
+    Then the last command request succeeded
+    Given the active domain is "{{kept_domain}}"
+    When this Plexus command request with execution reference "domain-reset-{{test_id}}" is executed on the leader node
+      """
+      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 'beta' };
+      """
+    Then the last command error contains
+      """
+      conflicts by domain
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION counted_events_subscription TO counted_events;
+      """
+    And http payload is posted to host "wasm-kept-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":2}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
+  Scenario Outline: A reset without an active domain is refused and plans nothing
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
+    And a branched state-counting WASM reset graph is running
+    And the active domain is saved as placeholder "reset_domain"
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":1}
+      """
+    Given client "operator" is connected to the leader node
+    When client "operator" executes these Plexus commands
+      """
+      BEGIN;
+      """
+    And client "operator" selects domain ""
+    And client "operator" fails to execute these Plexus commands
+      """
+      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 'alpha' };
+      """
+    Then the last command error contains
+      """
+      no active domain selected
+      """
+    When client "operator" selects domain "{{reset_domain}}"
+    And client "operator" executes these Plexus commands
+      """
+      REVERT;
+      """
+    Given the active domain is ""
+    When these Plexus commands fail with "no active domain selected"
+      """
+      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 'alpha' };
+      """
+    Given the active domain is "{{reset_domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION counted_events_subscription TO counted_events;
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":2}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
 
   Scenario Outline: Plexus all-branch reset replaces each active branch together
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
@@ -348,7 +488,7 @@ Feature: Coordinated WASM processor state reset
       """
     When these Plexus commands are executed through the client on the leader node
       """
-      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR ALL BRANCHES;
+      RESET WASM PROCESSOR counting_guest STATE FOR ALL BRANCHES;
       """
     And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
       """
@@ -389,7 +529,7 @@ Feature: Coordinated WASM processor state reset
       """
     When these Plexus commands are executed through the client on the leader node
       """
-      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR UNBRANCHED;
+      RESET WASM PROCESSOR counting_guest STATE FOR UNBRANCHED;
       """
     And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
       """
@@ -423,7 +563,7 @@ Feature: Coordinated WASM processor state reset
     When client "owner" executes these Plexus commands
       """
       BEGIN;
-      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
+      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 'alpha' };
       """
     Then client "owner" transaction id is saved as placeholder "transaction_id"
     When client "owner" executes these Plexus commands
