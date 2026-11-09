@@ -510,6 +510,12 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
+The archived command and response shapes include conditional orphaned model-pause recovery under
+an exact mutation lease, its typed outcome and its mutation-fence and restore-installation
+conflicts. The operation checks lease authority, the restore start gate and all same-domain
+committing transactions before resuming a pause in one applied revision. It changes only domain
+status, keeping the start version, start mode, clock, schedule and incremental storage unchanged.
+
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
 `raft_cluster_identity_logs`, `raft_cluster_identity_meta`, `raft_cluster_identity_state`, and
@@ -529,7 +535,7 @@ resolved branch declaration of the committed schedule carries. It identifies
 the current statement shape as well, which the statements a transaction keeps are stored in:
 `ALTER BRANCH` among those statements, and an `ALTER INGESTOR` or `ALTER EMITTER` operation that
 changes one part of its entity's body, an envelope clause or the properties, or one part of a
-construction where it stands. Its state metadata requires the current `ClusterState` encoding, 16,
+construction where it stands. Its state metadata requires the current `ClusterState` encoding, 17,
 including the cluster identity reference, committed cluster parameters, the durable restore installation gate and the unit-keyed
 committed schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,

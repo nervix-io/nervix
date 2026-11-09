@@ -484,6 +484,8 @@ cluster stop and start with all nodes on the same version.
 The contract includes `InstallClusterIdentity` and the complete validated identity record in Raft
 commands and snapshots. Its private key travels only over the authenticated interconnect. Public
 identity observation and backup source metadata use their separate public projections.
+The current fingerprint includes the conditional orphaned model-pause recovery command, its exact
+mutation lease, typed recovery reply and typed mutation-fence and restore-installation conflicts.
 The subscription-interest visibility request includes the advertisement version, and its current
 wire fingerprint fences that request shape during connection setup.
 

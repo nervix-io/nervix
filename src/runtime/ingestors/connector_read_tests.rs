@@ -339,7 +339,7 @@ struct ImmediateAck;
 #[async_trait]
 impl IngestorBatchAcknowledgementServices for ImmediateAck {
     async fn wait(&mut self, _timeout: Duration) -> IngestorAcknowledgementOutcome {
-        IngestorAcknowledgementOutcome::Ack
+        IngestorAcknowledgementOutcome::Acknowledged
     }
 }
 
@@ -447,9 +447,22 @@ impl IngestorHostServices for RecordingHost {
     fn report_error(&self, message: String) {
         self.reported_errors.lock().push(message);
     }
-    fn handle_ack_failure(&self, reason: String) {
-        panic!("a test graph that acknowledges every batch failed one: {reason}");
+    fn record_acknowledgement(&self, outcome: &IngestorAcknowledgementOutcome) {
+        if let IngestorAcknowledgementOutcome::Failed { .. }
+        | IngestorAcknowledgementOutcome::TimedOut { .. } = outcome
+        {
+            panic!("a test graph that acknowledges every batch failed one: {outcome:?}");
+        }
     }
+    fn record_transport_settlement(
+        &self,
+        _operation: IngestorSettlementOperation,
+        _outcome: IngestorSettlementOutcome,
+        _elapsed: Duration,
+    ) {
+    }
+    fn record_resume(&self, _outcome: IngestorResumeOutcome) {}
+    fn record_suspend(&self, _cause: IngestorSuspendCause) {}
     fn record_transport_redeliveries(&self, positions: usize) {
         panic!("a replayable test ingestor discarded {positions} positions after a reconnect");
     }

@@ -360,7 +360,7 @@ Placement coverage is one semantic choice: a corridor with named endpoints or a 
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
 Consensus's `raft_cluster_identity_` keyspaces and current `ClusterState`
-metadata encoding, 16, identify its stored shapes, including the partition count of every resolved branch
+metadata encoding, 17, identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations. The runtime state store's
 `ranked-intake-unit-checkpoint-segments` format identifies the checkpoints it keeps, including the
