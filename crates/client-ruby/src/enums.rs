@@ -257,9 +257,7 @@ Text = 1 as "TEXT",
 } }
 
 pub(crate) fn register(module: RModule) -> Result<(), Error> {
-    InspectionRejection::register(module)?;
-    InspectionStage::register(module)?;
-    InspectionUnitKind::register(module)?;
+    register_inspection(module)?;
     FailureKind::register(module)?;
     Disposition::register(module)?;
     UploadFailure::register(module)?;
@@ -288,5 +286,12 @@ pub(crate) fn register(module: RModule) -> Result<(), Error> {
     let tls = module.define_module("Tls")?;
     tls.const_set("PREFERRED", 1)?;
     tls.const_set("REQUIRED", 2)?;
+    Ok(())
+}
+
+fn register_inspection(module: RModule) -> Result<(), Error> {
+    InspectionRejection::register(module)?;
+    InspectionStage::register(module)?;
+    InspectionUnitKind::register(module)?;
     Ok(())
 }
