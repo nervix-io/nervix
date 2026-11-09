@@ -20,6 +20,32 @@ COVERAGE_RECIPES = ("coverage-scenarios", "coverage-scenarios-append")
 
 
 class ScenarioArgumentTests(unittest.TestCase):
+    def test_packaging_failure_prevents_conformance_scenarios(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="client packaging gate ") as directory:
+            root = Path(directory)
+            capture = root / "calls.jsonl"
+            for tool in ("just", "cargo"):
+                recorder = root / tool
+                recorder.write_text(
+                    f"#!{sys.executable}\n"
+                    "import json, os, pathlib, sys\n"
+                    "with open(os.environ['SCENARIO_ARGUMENT_CAPTURE'], 'a') as output:\n"
+                    "    output.write(json.dumps([pathlib.Path(sys.argv[0]).name, *sys.argv[1:]]) + '\\n')\n"
+                    "sys.exit(39 if 'test-client-suites-api-run' in sys.argv else 0)\n"
+                )
+                recorder.chmod(0o755)
+            environment = {**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                           "SCENARIO_ARGUMENT_CAPTURE": str(capture)}
+            completed = subprocess.run(
+                [shutil.which("just"), "--no-deps", "test-client-conformance-run"],
+                cwd=ROOT, env=environment, capture_output=True, text=True, timeout=30,
+            )
+            self.assertNotEqual(completed.returncode, 0, completed.stdout)
+            calls = [json.loads(line) for line in capture.read_text().splitlines()]
+            self.assertEqual(len(calls), 1, calls)
+            self.assertEqual(calls[0][0], "just")
+            self.assertIn("test-client-suites-api-run", calls[0])
+
     def test_upload_recipes_select_their_public_cases_and_keep_failure(self) -> None:
         # Each case names the input its recipe passes and the features that input selects from.
         # The conformance recipe passes one absolute pattern for the probes' and the host suites'
@@ -62,6 +88,14 @@ class ScenarioArgumentTests(unittest.TestCase):
                 "sys.exit(37)\n"
             )
             cargo.chmod(0o755)
+            just = root / "just"
+            just.write_text(
+                f"#!{sys.executable}\n"
+                "import os, sys\n"
+                "if 'test-client-suites-api-run' not in sys.argv:\n"
+                f"    os.execv({shutil.which('just')!r}, [{shutil.which('just')!r}, *sys.argv[1:]])\n"
+            )
+            just.chmod(0o755)
             environment = os.environ.copy()
             environment["PATH"] = str(root) + os.pathsep + environment["PATH"]
             environment["SCENARIO_ARGUMENT_CAPTURE"] = str(capture)
@@ -70,7 +104,7 @@ class ScenarioArgumentTests(unittest.TestCase):
             for recipe, selected_input, features, tag, pattern, count, names in cases:
                 with self.subTest(recipe=recipe):
                     completed = subprocess.run(
-                        ["just", "--no-deps", recipe],
+                        [shutil.which("just"), "--no-deps", recipe],
                         cwd=ROOT, env=environment, capture_output=True, text=True, timeout=30,
                     )
                     self.assertNotEqual(completed.returncode, 0)
