@@ -71,6 +71,9 @@ fn validate_kind(kind: RecordKind, bytes: &[u8]) -> Result<(), Report<ArchiveRea
         RecordKind::MaterializedIdentities => validate::<MaterializedIdentitiesRecord>(bytes),
         RecordKind::DeduplicatorStateDescriptor => validate::<DeduplicatorStateDescriptor>(bytes),
         RecordKind::WindowStateDescriptor => validate::<WindowStateDescriptor>(bytes),
+        RecordKind::InferencerStateDescriptor => {
+            validate::<crate::InferencerStateDescriptor>(bytes)
+        }
     }
 }
 
@@ -87,6 +90,7 @@ fn current_version(kind: RecordKind) -> u16 {
         RecordKind::MaterializedIdentities => MaterializedIdentitiesRecord::VERSION,
         RecordKind::DeduplicatorStateDescriptor => DeduplicatorStateDescriptor::VERSION,
         RecordKind::WindowStateDescriptor => WindowStateDescriptor::VERSION,
+        RecordKind::InferencerStateDescriptor => crate::InferencerStateDescriptor::VERSION,
     }
 }
 
@@ -218,7 +222,8 @@ impl Case {
                         "branch incarnation",
                     );
                 }
-                crate::archive_values::State::Wasm { .. } => {}
+                crate::archive_values::State::Wasm { .. }
+                | crate::archive_values::State::Inferencer { .. } => {}
                 crate::archive_values::State::Materialized(value) => value.assert_invalid_fields(),
                 crate::archive_values::State::Deduplicator(value) => value.assert_invalid_fields(),
                 crate::archive_values::State::Window(value) => value.assert_invalid_fields(),

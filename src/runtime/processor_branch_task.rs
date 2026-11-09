@@ -88,7 +88,7 @@ pub(super) enum ProcessorBranchLifetime {
 /// What a processor's branches publish when they are asked to checkpoint, decided by who asks.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum ProcessorCheckpointPurpose {
-    /// A quiesced backup cut reads the state store next. A branch publishes the state its periodic
+    /// A backup capture reads the state store next. A branch publishes the state its periodic
     /// snapshot may not hold yet. A WASM branch publishes nothing: the checkpoint that completed
     /// its last callback already holds the guest state on its owner and its replicas, and saving
     /// the guest again would wait for those replicas inside the cut.

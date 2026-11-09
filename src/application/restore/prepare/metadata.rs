@@ -170,6 +170,7 @@ impl SectionVisitor for MetadataMeasure<'_> {
                 SectionContent::Record(_) => RECORD_WORKING_MULTIPLIER,
                 SectionContent::Plexus => MODEL_WORKING_MULTIPLIER,
                 SectionContent::ResourceArchive
+                | SectionContent::InferencerTensorValues
                 | SectionContent::WasmGuestBlob
                 | SectionContent::MaterializedColumns
                 | SectionContent::DeduplicatorKeys

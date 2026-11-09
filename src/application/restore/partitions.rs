@@ -82,6 +82,11 @@ impl<'a> PerKeySection<'a> {
                 unit: descriptor.unit,
                 key: descriptor.branch_fingerprint.as_ref(),
             }),
+            DescribedRuntimeState::Inferencer { descriptor, .. } => Some(Self {
+                entity: NodeRef::new(ModelKind::Inferencer, descriptor.entity.clone()),
+                unit: descriptor.unit,
+                key: descriptor.branch_fingerprint.as_ref(),
+            }),
             DescribedRuntimeState::KafkaOffsets { .. }
             | DescribedRuntimeState::BranchLifecycle { .. }
             | DescribedRuntimeState::Materialized { .. } => None,

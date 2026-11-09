@@ -37,6 +37,20 @@ impl SectionMappingCase {
         let entity = ModelName::parse(&format!("state_{}", self.entity))
             .assured("a generated decimal suffix makes a valid model name");
         match kind {
+            CapturedStateSectionKind::InferencerDescriptor => SectionPath::inferencer_descriptor(
+                &domain,
+                &entity,
+                nervix_models::Unit::SINGLE,
+                branch,
+            ),
+            CapturedStateSectionKind::InferencerTensorValues => {
+                SectionPath::inferencer_tensor_values(
+                    &domain,
+                    &entity,
+                    nervix_models::Unit::SINGLE,
+                    branch,
+                )
+            }
             CapturedStateSectionKind::WasmDescriptor => SectionPath::wasm_state_descriptor(
                 &domain,
                 &entity,
@@ -122,6 +136,8 @@ fn bolero_captured_section_mapping_is_total_and_injective() {
         .for_each(|case| {
             let fingerprint = BranchKeyFingerprint::new(case.fingerprint);
             let kinds = [
+                CapturedStateSectionKind::InferencerDescriptor,
+                CapturedStateSectionKind::InferencerTensorValues,
                 CapturedStateSectionKind::WasmDescriptor,
                 CapturedStateSectionKind::KafkaOffsets,
                 CapturedStateSectionKind::BranchLifecycle,

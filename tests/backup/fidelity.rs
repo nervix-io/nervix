@@ -128,6 +128,37 @@ impl ArchiveValues {
                             .assured("the imported-resource expectation encodes"),
                     )
                 }
+                RecordKind::InferencerStateDescriptor => {
+                    let mut record = nervix_backup::InferencerStateDescriptor::decode(
+                        path.as_str(),
+                        &section.bytes,
+                    )
+                    .assured("the source inference descriptor validates");
+                    payload_paths.insert(
+                        SectionPath::inferencer_tensor_values(
+                            &record.domain,
+                            &record.entity,
+                            record.unit,
+                            record.branch_fingerprint.as_ref(),
+                        ),
+                        SectionPath::inferencer_tensor_values(
+                            target,
+                            &record.entity,
+                            record.unit,
+                            record.branch_fingerprint.as_ref(),
+                        ),
+                    );
+                    record.domain = target.clone();
+                    (
+                        SectionPath::inferencer_descriptor(
+                            target,
+                            &record.entity,
+                            record.unit,
+                            record.branch_fingerprint.as_ref(),
+                        ),
+                        record.encode().assured("the inference descriptor encodes"),
+                    )
+                }
                 RecordKind::WasmStateDescriptor => {
                     let mut record = WasmStateDescriptor::decode(path.as_str(), &section.bytes)
                         .assured("the original WASM descriptor validates");
@@ -350,6 +381,7 @@ impl ArchiveValues {
                 | SectionContent::MaterializedColumns
                 | SectionContent::DeduplicatorKeys
                 | SectionContent::WindowInputRows
+                | SectionContent::InferencerTensorValues
                 | SectionContent::WindowArgumentColumns => payload_paths
                     .remove(&path)
                     .assured("the raw payload has its original owning descriptor"),

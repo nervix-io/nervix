@@ -356,13 +356,14 @@ impl OwnershipStateComponent {
     /// never archived: a restored entity starts its metrics afresh.
     pub fn is_archived(self) -> bool {
         match self {
-            Self::BranchAggregated | Self::Inferencer => false,
+            Self::BranchAggregated => false,
             Self::BranchLifecycle
             | Self::Deduplicator
             | Self::KafkaOffsets
             | Self::MaterializedRelay
             | Self::WasmProcessor
-            | Self::WindowProcessor => true,
+            | Self::WindowProcessor
+            | Self::Inferencer => true,
         }
     }
 }

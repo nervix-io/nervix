@@ -140,6 +140,8 @@ pub enum CapturedStateSectionKind {
     WindowDescriptor,
     WindowInputRows,
     WindowArgumentColumns,
+    InferencerDescriptor,
+    InferencerTensorValues,
 }
 
 impl InterconnectRequest for CaptureInventoryRequest {

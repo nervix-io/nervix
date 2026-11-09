@@ -312,6 +312,26 @@ impl Default for StateReplicationRouting {
 }
 
 impl StateReplicationRouting {
+    /// Retain current inference owners for a lifecycle cut; no route guard escapes this read.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(lifecycle, reason = "a backup cut freezes current inference owners")
+    )]
+    pub(in crate::runtime) fn inferencers(&self) -> Vec<Arc<ReplicatedInferencerState>> {
+        self.current
+            .load()
+            .routes
+            .values()
+            .filter_map(|route| {
+                let state = route.current_state()?;
+                match state.as_ref() {
+                    ReplicatedState::Inferencer(state) => Some(state.clone()),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
     pub(in crate::runtime) fn assigned_request(
         &self,
         placement: &RuntimeStatePlacement,
