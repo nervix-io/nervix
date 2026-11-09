@@ -298,6 +298,7 @@ mod processor_branch_task;
 mod processor_output;
 mod processor_plan_binding;
 mod processor_template;
+mod processor_wasm_state_reset;
 mod processors;
 mod published_generation;
 mod reconnect_backoff;
