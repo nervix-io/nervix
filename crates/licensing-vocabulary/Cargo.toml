@@ -1,0 +1,12 @@
+[package]
+description = "Runtime-independent licensing quota vocabulary"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-licensing-vocabulary"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }

@@ -102,6 +102,10 @@ separate testing-only composition seam.
 
 ## Conditions And Resolution
 
+`nervix-licensing-vocabulary` owns the runtime-independent `Quota` value and its arithmetic.
+The protocol re-exports that one type. Vocabulary consumers can use its bounded/unlimited
+distinction without depending on cryptography.
+
 The catalog declares the kind, scope and owner of every current name. Cluster quotas belong in
 `usage`; relationship quotas, durations, sets and policy belong in `operating`.
 

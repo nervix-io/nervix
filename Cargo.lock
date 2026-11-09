@@ -7903,12 +7903,20 @@ dependencies = [
  "meticulous",
  "nervix-bounded-write",
  "nervix-crypto",
+ "nervix-licensing-vocabulary",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "url",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "nervix-licensing-vocabulary"
+version = "0.1.0-dev"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
