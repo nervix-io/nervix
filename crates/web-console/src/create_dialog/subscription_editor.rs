@@ -123,4 +123,5 @@ pub(super) fn SubscriptionEditor(
             </label>
         </Show>
     }
+    .into_any()
 }

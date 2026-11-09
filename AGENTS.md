@@ -215,6 +215,17 @@ violates instead of softening the contract to match today's imports.
 - Connectors adapt external systems at explicit data-plane boundaries and never weaken internal
   schema, branch, error or sensitivity rules.
 
+### Client host bindings
+
+- A host-language binding is a Rust crate on its host's Rust binding library: pyo3 for Python,
+  magnus for Ruby and `jni` for the JVM. Each calls the shared host runtime over the Rust client.
+  The C ABI serves C and C++ only; hand-written ctypes, Fiddle, Foreign Function and Memory or
+  cgo declarations of that surface for another host are a change to reject.
+- A new binding or probe ships with its conformance-ledger row, its one- and three-node examples
+  in all three core conformance outlines, its registered Bolero batch property and the
+  `client-conformance` PR label. [Client Host Bindings](docs/src/client-host-bindings.md) owns
+  the boundary and qualification contract.
+
 ### Connector crates
 
 Every external integration is its own crate under `crates/connectors/` implementing the ingestor
@@ -434,9 +445,13 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
 - [Client Session Protocol](docs/src/client-session-protocol.md), and its normative companion the
   [Client Implementation Manual](docs/src/client-implementation-manual.md) whenever what a client
   implementation must do changes: client protocol code (the session schema and wire crate, the
-  session service and its transports, the Row encoder, the Rust client, the shared binding, and the
-  session handling of the web console and the CLI) and every client-to-node operation.
+  session service and its transports, the Row encoder, the Rust client, the shared host runtime
+  and binding crates, and the session handling of the web console and the CLI) and every
+  client-to-node operation.
   This includes server-notice kinds and their routing through every client and binding.
+- [Client Host Bindings](docs/src/client-host-bindings.md): a binding crate, the shared host
+  runtime, a host probe or the conformance ledger. Every change to one keeps this chapter current
+  in the same change.
 - [Errors And Diagnostics](docs/src/errors-and-diagnostics.md): error types, error or diagnostic
   propagation, failure classification, reporting at a layer or public boundary.
 - [Consensus Storage And Replication](docs/src/consensus-storage-and-replication.md): consensus

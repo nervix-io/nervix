@@ -159,6 +159,7 @@ pub(super) fn ProcessorAssignmentRows(
                 </div>
             } />
     }
+    .into_any()
 }
 
 #[cfg(test)]

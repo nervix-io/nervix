@@ -521,6 +521,10 @@ impl<'a> Values<'a> {
             producer_version: self.0.string(),
             language_version: nervix_models::PLEXUS_LANGUAGE_VERSION.into(),
             cluster_id: self.0.string(),
+            cluster_uid: uuid::Builder::from_random_bytes(std::array::from_fn(|_| {
+                self.0.entropy().byte()
+            }))
+            .into_uuid(),
             captured_at: self.timestamp(),
             scope,
             resources,

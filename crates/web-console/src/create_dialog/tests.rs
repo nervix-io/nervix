@@ -1137,7 +1137,7 @@ fn creation_components_render_each_typed_draft_and_accessible_status() {
                     .connection_state(connection_state)
                     .session_generation(generation)
                     .request_tx(request_tx)
-                    .submit(|_, _, _| {})
+                    .submit(super::ignore_test_submission)
                     .build(),
             );
             any_spawner::Executor::poll_local();

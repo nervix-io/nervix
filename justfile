@@ -407,6 +407,14 @@ test-endpoint-heads *args: build-deps build-plexus-format build-test-cli build-d
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/kinded_endpoint_heads.feature {{ quote(args) }}
 
+# Cluster identity, replication and restore checks use the native session client.
+test-cluster-identity *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    # Absolute globs keep Cucumber's file walk within the feature directory.
+    cargo test --package nervix-scenarios --test scenarios -- --input "$(pwd)/tests/features/runtime/cluster_identity*.feature" {{ quote(args) }}
+
 # Placement and console scenarios use native nodes and public clients, without paced simulation.
 test-partition-placement feature="tests/features/cluster/partition_placement.feature" *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash
@@ -992,6 +1000,23 @@ coverage-client-core output *args:
 # Measure selected console request-owner regressions without running unrelated browser tests.
 coverage-web-console output *args:
     cargo llvm-cov --package nervix-web-console --bin nervix-web-console --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ quote(args) }}
+
+# Keep the codegen-unit objects of the console's unoptimized test build in a target directory of
+# their own and print each object's `.debug_str` size, largest first. These are the debug names the
+# linker merges, which a create form multiplies when its view is not erased at its boundary. The
+# build is not incremental, so its codegen units are partitioned as CI's are.
+measure-web-console-debug-strings target_dir=(cargo_target_dir + "/web-console-debug-strings"):
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export CARGO_TARGET_DIR={{ quote(target_dir) }}
+    export CARGO_INCREMENTAL=0
+    llvm_bin="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin"
+    rm -f "${CARGO_TARGET_DIR}"/debug/deps/nervix_web_console-*.rcgu.o
+    cargo rustc --package nervix-web-console --bin nervix-web-console --profile test -- -C save-temps
+    for object in "${CARGO_TARGET_DIR}"/debug/deps/nervix_web_console-*.rcgu.o; do
+        "${llvm_bin}/llvm-size" -A "${object}" \
+            | awk -v object="${object##*/}" '$1 == ".debug_str" { print $2, object }'
+    done | sort -rn
 
 # Measure one connector crate's unit tests, for a patch confined to it, through the configured
 # compiler cache.
