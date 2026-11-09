@@ -18,6 +18,7 @@ rkyv = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
 tar = { workspace = true }
 thiserror = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 alloc_count = { workspace = true }
