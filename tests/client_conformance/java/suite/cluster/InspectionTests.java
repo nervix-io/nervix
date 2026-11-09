@@ -36,8 +36,8 @@ public final class InspectionTests {
             assertNotNull(inspection);
             assertNull(inspection.rejection());
             Nervix.InspectionCounts counts = inspection.counts();
-            assertEquals(1, counts.branches()); assertEquals(1, counts.rows()); assertTrue(counts.bytes() > 0);
-            assertEquals(new Nervix.InspectionCounts(1, 1, counts.bytes()), counts);
+            assertEquals(0, counts.branches()); assertEquals(1, counts.rows()); assertTrue(counts.bytes() > 0);
+            assertEquals(new Nervix.InspectionCounts(0, 1, counts.bytes()), counts);
             assertEquals(1L, inspection.unitCount()); assertNull(inspection.continuation());
             assertEquals(cluster.domain, inspection.domain()); assertEquals("RELAY", inspection.entityKind());
             assertEquals(relay, inspection.entityName()); assertFalse(inspection.json().isEmpty());

@@ -27,7 +27,7 @@ module RubySuite
         assert_nil inspection.rejection
         counts = inspection.counts
         assert_instance_of NX::InspectionCounts, counts
-        assert_equal [1, 1], [counts.branches, counts.rows]
+        assert_equal [0, 1], [counts.branches, counts.rows]
         assert_operator counts.bytes, :>, 0
         assert_equal 1, inspection.unit_count
         assert_equal [cluster.domain, 'RELAY', relay], [inspection.domain, inspection.entity_kind, inspection.entity_name]

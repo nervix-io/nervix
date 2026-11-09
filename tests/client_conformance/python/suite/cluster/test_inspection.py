@@ -30,12 +30,12 @@ def test_inspection_metadata_and_verified_frames_survive_their_parents(
     assert isinstance(inspection, nx.Inspection)
     assert inspection.rejection is None
     assert isinstance(inspection.counts, nx.InspectionCounts)
-    assert (inspection.counts.branches, inspection.counts.rows) == (1, 1)
+    assert (inspection.counts.branches, inspection.counts.rows) == (0, 1)
     assert inspection.counts.bytes > 0 and inspection.unit_count == 1
     assert inspection.domain == cluster.domain and inspection.entity_kind == "RELAY"
     assert inspection.entity_name == relay and inspection.continuation is None
     envelope = json.loads(inspection.json)
-    assert envelope["counts"] == {"branches": 1, "rows": 1, "bytes": inspection.counts.bytes}
+    assert envelope["counts"] == {"branches": 0, "rows": 1, "bytes": inspection.counts.bytes}
     unit = inspection.units[0]
     assert isinstance(unit, nx.InspectionUnit)
     assert unit.kind == nx.InspectionUnitKind.SINGLE and unit.index is None

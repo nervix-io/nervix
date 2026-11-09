@@ -33,7 +33,11 @@ fn outcome_inspection<'local>(
 macro_rules! inspection_string {
     ($name:ident, $accessor:ident) => {
         native!($name(handle: long) -> JString);
-        fn $name<'local>(env: &mut Env<'local>, _class: JClass<'local>, handle: jlong) -> Result<JString<'local>, Error> {
+        fn $name<'local>(
+            env: &mut Env<'local>,
+            _class: JClass<'local>,
+            handle: jlong,
+        ) -> Result<JString<'local>, Error> {
             Ok(env.new_string(value!(handle).inspection()?.$accessor())?)
         }
     };
