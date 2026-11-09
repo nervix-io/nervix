@@ -153,6 +153,8 @@ class InventoryTests(unittest.TestCase):
             "crypto-p256-keys",
             "crypto-p256-signatures",
             "runtime-kafka-unit-layouts",
+            "password-credentials",
+            "password-credentials-malformed",
             "runtime-ingestor-metric-layouts",
             "models-ingestor-instancing",
             "interconnect-intake-units",
@@ -526,23 +528,23 @@ class InventoryTests(unittest.TestCase):
         }
         for target, version in {
             "benchmark-metrics-report": 1,
-            "ingestor-describe-envelope": 9,
-            "plexus-model": 58,
-            "plexus-archive-model": 60,
-            "plexus-statement": 59,
-            "plexus-statement-text": 58,
-            "plexus-format-document": 58,
-            "plexus-format-text": 57,
-            "models-archived-models": 58,
-            "registry-archived-models": 53,
-            "consensus-state-records": 50,
-            "consensus-state-corruption": 50,
-            "consensus-raft-records": 50,
-            "registry-stored-models": 46,
-            "registry-stored-models-corruption": 46,
+            "ingestor-describe-envelope": 10,
+            "plexus-model": 59,
+            "plexus-archive-model": 61,
+            "plexus-statement": 60,
+            "plexus-statement-text": 59,
+            "plexus-format-document": 59,
+            "plexus-format-text": 58,
+            "models-archived-models": 59,
+            "registry-archived-models": 54,
+            "consensus-state-records": 51,
+            "consensus-state-corruption": 51,
+            "consensus-raft-records": 51,
+            "registry-stored-models": 47,
+            "registry-stored-models-corruption": 47,
             "inferencer-tensor-columns": 1,
-            "console-emitter-drafts": 3,
-            "client-requests": 9,
+            "console-emitter-drafts": 4,
+            "client-requests": 10,
         }.items():
             with self.subTest(target=target):
                 self.assertEqual(versions[target], version)
@@ -551,7 +553,7 @@ class InventoryTests(unittest.TestCase):
         targets = {target.id: target for target in bolero.load_inventory().targets}
         for name in ("client-state-inspection", "state-inspection-cursor"):
             with self.subTest(target=name):
-                self.assertEqual(targets[name].domain_version, 3)
+                self.assertEqual(targets[name].domain_version, 4)
                 self.assertEqual(targets[name].max_input_bytes, 512)
                 self.assertEqual(targets[name].random_iterations, 128)
 

@@ -17,6 +17,8 @@ use crate::application::cli_values::{HumanBytes, HumanDuration};
 #[derive(clap::Args, Debug, Clone, PartialEq)]
 #[command(next_help_heading = "First-bootstrap cluster parameters")]
 pub struct ClusterParameterArgs {
+    #[arg(long = nervix_models::PasswordIterations::NAME, env = "NERVIX_PASSWORD_ITERATIONS", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::PasswordIterations, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    pub password_iterations: Option<u64>,
     #[arg(long = nervix_models::DomainDrainTimeout::NAME, env = "NERVIX_DOMAIN_DRAIN_TIMEOUT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::DomainDrainTimeout, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
     pub domain_drain_timeout: Option<HumanDuration>,
     #[arg(long = nervix_models::EntityGateDeadline::NAME, env = "NERVIX_ENTITY_GATE_DEADLINE", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::EntityGateDeadline, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
@@ -39,6 +41,7 @@ pub struct ClusterParameterArgs {
 impl ClusterParameterArgs {
     pub(super) fn from_seeds(seeds: &nervix_models::ClusterParameterSeedValues) -> Self {
         Self {
+            password_iterations: seeds.password_iterations,
             domain_drain_timeout: seeds.domain_drain_timeout.map(HumanDuration),
             entity_gate_deadline: seeds.entity_gate_deadline.map(HumanDuration),
             max_batch_messages: seeds.max_batch_messages,
@@ -59,6 +62,10 @@ impl ClusterParameterArgs {
         }
     }
     pub(super) fn render(&self, command_line: &mut CommandLine) {
+        command_line.optional(
+            nervix_models::PasswordIterations::NAME,
+            self.password_iterations,
+        );
         command_line.optional(
             nervix_models::DomainDrainTimeout::NAME,
             self.domain_drain_timeout,

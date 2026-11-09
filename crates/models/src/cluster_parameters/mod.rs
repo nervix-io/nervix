@@ -24,7 +24,7 @@ use thiserror::Error;
 
 use crate::{Setting, SettingDefinition};
 
-mod archive;
+pub(crate) mod archive;
 mod durations;
 mod limits;
 mod publication;
@@ -235,6 +235,7 @@ parameter_values! {
     http_header_bytes: HttpHeaderBytes(u64) => Bytes,
     http_header_fields: HttpHeaderFields(u64) => Count,
     client_batch_rows: ClientBatchRows(u64) => Count,
+    password_iterations: PasswordIterations(u64) => Count,
 }
 
 trait ParameterDisplay {

@@ -4634,8 +4634,16 @@ impl NodeHandle {
             }
             NodeTaskState::NotStarted | NodeTaskState::Terminal(_) => {}
         }
-        let settings = self.config.node_settings(&self.spec.node_id)?;
+        let mut settings = self.config.node_settings(&self.spec.node_id)?;
         let db_path = self.spec.db_path()?;
+        if self.spec.allow_bootstrap
+            && !db_path.join("consensus").exists()
+            && settings.parameter_seeds.password_iterations.is_none()
+        {
+            // The fixture explicitly seeds cheap credentials; product builds keep the definition's
+            // default. Returning nodes read the committed value rather than reseeding it.
+            settings.parameter_seeds.password_iterations = Some(1);
+        }
         let grpc_transport = match self.config.grpc_mode {
             InternalTransportMode::Http => GrpcTransport::Http,
             InternalTransportMode::Https => {
