@@ -133,7 +133,7 @@ mod tests {
     use std::num::NonZeroUsize;
 
     use meticulous::OptionExt as _;
-    use nervix_execution::{ExecutionConfig, WorkerCounts};
+    use nervix_execution::{ExecutionConfig, PendingJobCounts, WorkerCounts};
     use nervix_primitives::sync::blocking::mpsc;
 
     use super::*;
@@ -154,7 +154,9 @@ mod tests {
         let executor = Executor::new(ExecutionConfig {
             workers: WorkerCounts {
                 bulk_cpu: NonZeroUsize::MIN,
-                pending_jobs: NonZeroUsize::new(4).assured("four is positive"),
+                pending_jobs: PendingJobCounts::uniform(
+                    NonZeroUsize::new(4).assured("four is positive"),
+                ),
                 ..WorkerCounts::default()
             },
             ..ExecutionConfig::default()
