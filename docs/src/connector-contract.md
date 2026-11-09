@@ -1582,7 +1582,12 @@ returns; see [Confirmed acknowledgements](#confirmed-acknowledgements).
 
 A client ingestor's plan is not a connector plan: it carries the input schema, its compiled form, the
 producer policy of window, ACK timeout, and retry backoff, and the endpoint contract digest producers
-attach to. It declares no header model or metadata field and supports only `SUSPEND`.
+attach to. It declares no header model and supports only `SUSPEND`. Its first metadata field is
+`user: STRING`, the canonical user name authenticated by the producer's opening session. The
+session supplies that typed identity to the local or forwarded open; the endpoint retains it per
+attachment and the batch projection supplies it on every row, independently of payload fields.
+As with other metadata fields, its schema type is optional; an authenticated producer always
+supplies the value. Producers sharing a forwarding link keep their individual identities.
 
 Every ingestor entity declares its required, non-sensitive `payload` fields beside its metadata.
 All declare `bytes: U64`; `CLIENT PRODUCER` also declares `rows: U64`. The registry validates the
@@ -1647,7 +1652,7 @@ read context. They never become absent values. The generic retained row and Arro
 `U32` through quiesce and projection without widening it; the FIFO sequence number stays text.
 
 The host projects metadata lazily. When an ingestor binds its programs, the host records which
-declared fields its route programs and its `TIMESTAMP AT metadata.<field>` read, and every ingest
+declared fields its arrival filter, route programs and `TIMESTAMP AT metadata.<field>` read, and every ingest
 group of the ingestor builds Arrow columns for those fields and no others. A group of an ingestor
 that reads none visits no metadata value at all. A message whose value for a read field is
 unrepresentable or invalid is refused once its ingestor's `FILTER WHERE` has kept it and before

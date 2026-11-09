@@ -19,8 +19,8 @@ use arrow_buffer::BooleanBuffer;
 use nervix_connector::{IngestMetadataRow, NoIngestHeaders};
 use nervix_models::{
     AckMode, CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,
-    CreateWireSchema, ErrorPolicies, JsonType, ModelKind, ParseAsType, ResolvedCodecWireFormat,
-    SchemaField, Timestamp, WireSchemaField,
+    CreateWireSchema, ErrorPolicies, IngestorDeclaration, JsonType, ModelKind, ParseAsType,
+    ResolvedCodecWireFormat, SchemaField, Timestamp, WireSchemaField,
 };
 use nervix_primitives::{
     sync::{Arc, StdArc},
@@ -39,6 +39,51 @@ use crate::{
         RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue, compile_codec, test_runtime_row,
     },
 };
+
+#[test]
+fn client_batch_user_metadata_survives_row_selection_beside_original_payload_counts() {
+    let capabilities = nervix_models::ClientProducerIngestor::CAPABILITIES;
+    let projection = IngestMetadataProjection::reading_input(
+        capabilities.metadata,
+        ["user"],
+        capabilities.payload,
+        ["bytes", "rows"],
+    )
+    .assured("the client declaration includes the requested metadata and payload fields");
+    let user = UserName::parse("alice").assured("a literal user name");
+    let fields = ClientBatchMetadata {
+        user: &user,
+        payload_bytes: 4096,
+    };
+    let metadata = IngestFilterMapMetadata::client_batch(projection, &fields, 3)
+        .assured("all rows carry the authenticated producer's identity");
+    let selected = metadata
+        .select(&BooleanBuffer::from(vec![false, true, true]))
+        .assured("the selection has one entry per submitted row");
+    let who = selected
+        .field_column("user")
+        .assured("selected row indices remain in bounds")
+        .assured("the route requested the producer identity");
+    let who = who
+        .as_any()
+        .downcast_ref::<arrow_array::StringArray>()
+        .assured("the identity keeps its declared STRING type");
+    assert_eq!(
+        who.iter().collect::<Vec<_>>(),
+        [Some("alice"), Some("alice")]
+    );
+    for (field, expected) in [("payload.bytes", 4096), ("payload.rows", 3)] {
+        let column = selected
+            .field_column(field)
+            .assured("selected row indices remain in bounds")
+            .assured("the route requested both original payload counts");
+        let column = column
+            .as_any()
+            .downcast_ref::<arrow_array::UInt64Array>()
+            .assured("payload counts keep their declared U64 type");
+        assert_eq!(column.values().as_ref(), &[expected, expected]);
+    }
+}
 
 /// The one-field schema the ingest-group decode tests below decode into.
 fn grouped_event_schema() -> Arc<CompiledSchema> {

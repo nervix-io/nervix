@@ -632,6 +632,11 @@ statuses and operator-facing output.
 
 ## Producers
 
+Nervix supplies the opening session's authenticated user name as `metadata.user` to the ingestor's
+arrival filter and routes. That identity belongs to the producer attachment, including when the
+serving node forwards it to another owner. The producer's expected input fields and submitted rows
+remain the schema the ingestor declares; a payload field cannot replace the authenticated name.
+
 - **P-1.** A client MUST open a producer with `OpenIngestorRequest`, naming the domain, the
   ingestor, the exact fields it expects, including each field's optionality and sensitivity, and
   positive credit no larger than 1,024 batches and the committed producer session-byte cap

@@ -85,6 +85,8 @@ Java and JVM programs follow [JVM Client Library](../../../docs/src/client-libra
 Ruby applications follow [Ruby Client Library](../../../docs/src/client-library-ruby.md),
 and C and C++ programs follow [C And C++ Client Library](../../../docs/src/client-library-c.md).
 Read its execution, clock and endpoint sections before choosing application-side lifecycle handling.
+For using the authenticated producer identity in arrival filters and routes, read
+[Client Ingestors](../../../docs/src/ingestors.md#client-ingestors) before choosing metadata fields.
 For typed state inspection in Python, Ruby or JVM applications, read that host guide's
 `Inspect Materialized State` section for page/refusal metadata, opaque continuation and retained
 schema/frame lifetimes before suggesting application code.

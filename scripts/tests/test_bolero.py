@@ -574,6 +574,8 @@ class InventoryTests(unittest.TestCase):
             "inferencer-native-snapshot-projection": 1,
             "console-emitter-drafts": 5,
             "client-requests": 11,
+            "client-producer-link-frames": 10,
+            "client-producer-link-frames-malformed": 10,
         }.items():
             with self.subTest(target=target):
                 self.assertEqual(versions[target], version)

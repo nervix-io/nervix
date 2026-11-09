@@ -1105,7 +1105,13 @@ async fn serve_ordered(
             let in_transaction = subscriptions.transaction_active();
             shared
                 .producers
-                .open(shared, request_id, open, in_transaction)
+                .open(
+                    shared,
+                    request_id,
+                    open,
+                    subscriptions.user.clone(),
+                    in_transaction,
+                )
                 .await;
         }
         OrderedRequest::OpenEmitter(open) => {

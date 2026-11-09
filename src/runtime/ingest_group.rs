@@ -15,8 +15,9 @@ use arrow_buffer::{BooleanBuffer, BooleanBufferBuilder};
 use bytes::Bytes;
 use error_stack::ResultExt as _;
 use indexmap::{Equivalent, IndexMap};
-use nervix_connector::IngestMetadataRow;
+use nervix_connector::{IngestMessageMetadata, IngestMetadataRow, IngestMetadataValues};
 use nervix_execution::{CpuClass, ExecutionError, MemoryClass};
+use nervix_models::UserName;
 
 use super::*;
 
@@ -411,6 +412,7 @@ pub(super) struct IngestGroupContribution<'a> {
 ///
 /// Every row shares the batch's ACK set, so the batch resolves once each of its rows has.
 pub(super) struct ClientBatchDispatch<'a> {
+    pub(super) user: &'a UserName,
     pub(super) handles: &'a IngestTaskHandles,
     pub(super) domain: &'a DomainName,
     pub(super) ingestor: &'a IngestorName,
@@ -423,6 +425,22 @@ pub(super) struct ClientBatchDispatch<'a> {
     pub(super) payload_bytes: usize,
     pub(super) acks: AckSet,
     pub(super) ingested_at: Timestamp,
+}
+
+/// The authenticated producer identity shared by every row of an admitted client batch.
+struct ClientBatchMetadata<'a> {
+    user: &'a UserName,
+    payload_bytes: usize,
+}
+
+impl IngestMessageMetadata for ClientBatchMetadata<'_> {
+    fn payload_bytes(&self) -> usize {
+        self.payload_bytes
+    }
+
+    fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
+        values.string(self.user.as_str());
+    }
 }
 
 /// The payloads of one [`BufferedIngestPayload`] that decoded into their ingest group, which the
@@ -2143,6 +2161,7 @@ impl Runtime {
         dispatch: ClientBatchDispatch<'_>,
     ) -> error_stack::Result<(), IngestGroupError> {
         let ClientBatchDispatch {
+            user,
             handles,
             domain,
             ingestor,
@@ -2162,9 +2181,13 @@ impl Runtime {
             acks.ack_success();
             return Ok(());
         }
+        let fields = ClientBatchMetadata {
+            user,
+            payload_bytes,
+        };
         let ingest_metadata = IngestFilterMapMetadata::client_batch(
             output_routes.metadata.clone(),
-            payload_bytes,
+            &fields,
             row_count,
         )
         .change_context(IngestGroupError::Metadata {
