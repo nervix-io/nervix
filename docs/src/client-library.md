@@ -723,5 +723,6 @@ It retains the envelope, lossless JSON, counts, section schemas and verified fra
 C++ hosts read it through `nx_inspection`, which the
 [C and C++ Client Library](client-library-c.md#read-materialized-state) describes with a tested
 example.
-The Python, Ruby and JVM outcome APIs do not currently project this envelope; see
-[Client Host Bindings](client-host-bindings.md#guarantees-and-limits) for the current host surface.
+The Python, Ruby and JVM outcome APIs project this envelope as
+[Client Host Bindings](client-host-bindings.md#typed-inspection) describes; they read a WASM page's
+guest-state facts from its lossless JSON.
