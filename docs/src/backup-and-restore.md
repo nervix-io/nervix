@@ -277,7 +277,8 @@ DESCRIBE BACKUP './cluster.nvxb' FORMAT JSON;
 
 `DESCRIBE BACKUP` runs in `nervix-cli` against a file on its own machine and contacts no server. It
 reads the whole archive and verifies every section's length and digest before it prints anything.
-The description names the archive format, the Nervix and Plexus releases that wrote it, the cluster,
+The description names the archive format, the Nervix and Plexus releases that wrote it, the source
+cluster's configured name and permanent UUID,
 the capture time, the scope, whether resource bytes are included, and the users of a cluster
 archive. For each domain it names the revision and Raft log entry the domain was read at, its
 status, pace and start count, its latest start point, the clock mapping and logical frontier when
@@ -298,10 +299,11 @@ deduplicator keys.
 
 ```text
 backup: ./cluster.nvxb
-format: 7
+format: 8
 producer_version: 0.1.0
 language_version: 0.1.0
 cluster: nervix-3f1c
+cluster uid: 72f3a93e-64f0-40a5-b95d-790c8a738fee
 captured_at: 2026-09-27 12:00:00 UTC
 scope: cluster
 resources: included
@@ -381,6 +383,12 @@ archive file the operator chooses; see [From The Web Console](#from-the-web-cons
 sent alone: not in a batch with other statements and not while a transaction is open.
 
 ### What A Restore Recreates
+
+A restore retains the target cluster's permanent identity and signing key. The source `cluster_uid`
+in the manifest is display metadata: text inspection prints `cluster uid`, and JSON inspection
+prints `cluster_uid`. Archives carry no cluster private key, identity record or licensing state.
+Restoring into a fresh cluster is a clone with that cluster's own UUID and key. Recovering a
+licensed installation requires an administrative transfer to the rebuilt cluster.
 
 - **Users.** Each archived user, with its complete credential exactly as the archive holds it.
 - **Domains.** Each restored domain is initially created stopped, with its archived pace,
@@ -866,7 +874,7 @@ its format version, each a little-endian 16-bit integer. The rest is an
 
 | Kind | Tag | Format version | Holds |
 | --- | --- | --- | --- |
-| Manifest | 1 | 3 | Archive format major version, producer and Plexus releases, cluster id, capture time, scope, whether resource bytes are included, each domain's revision, Raft log entry and cut kind, with a quiesced cut's engagement and release times and quiesce counters, and each section's path, content kind, length and BLAKE3 digest |
+| Manifest | 1 | 4 | Archive format major version, producer and Plexus releases, cluster id and source cluster UID, capture time, scope, whether resource bytes are included, each domain's revision, Raft log entry and cut kind, with a quiesced cut's engagement and release times and quiesce counters, and each section's path, content kind, length and BLAKE3 digest |
 | Users | 2 | 2 | Every user's name and typed PBKDF2-HMAC-SHA-512 credential: validated iterations, 128-bit salt and 64-byte digest |
 | Domain | 3 | 2 | Pace, lifecycle status, start count, the point the latest start began from, the committed clock mapping, the logical instant the clock had reached, and each declared resource with its next version number |
 | Resource version | 4 | 1 | The version's domain, resource and number, its upload state, and for a published version its checksums, file count, sizes, creation time and creating node |
@@ -879,7 +887,7 @@ its format version, each a little-endian 16-bit integer. The rest is an
 | Window state descriptor | 11 | 4 | Domain and window processor names, scheduled unit, schema fingerprint, window model digest, branch fingerprint and typed branch fields, revision, branch incarnation, first and next admission sequence, each retained row's low/high ingestion watermarks, group count, and each aggregate's structure: rebuilt from the retained rows, or a linear histogram with its delayed removals as expiry time and bucket |
 | Inferencer state descriptor | 12 | 1 | Domain and inferencer names, scheduled unit, schema and pinned model fingerprints, typed branch key and fingerprint, nonzero branch incarnation, revision, ordered shapes and the exact raw section byte length and BLAKE3 digest |
 
-The archive format major version is `7`. An archive with another major version fails before any
+The archive format major version is `8`. An archive with another major version fails before any
 state section can be skipped or installed; capture a new archive in the current instance-unit format. A reader refuses invalid record magic, an unsupported
 manifest or required configuration record, an unknown record kind in the manifest, a first entry
 other than the manifest, and any section whose place, length or digest differs from what the

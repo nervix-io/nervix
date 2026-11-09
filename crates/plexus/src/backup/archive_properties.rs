@@ -89,6 +89,9 @@ impl ModelArchive {
                 producer_version: "property".into(),
                 language_version: nervix_models::PLEXUS_LANGUAGE_VERSION.into(),
                 cluster_id: arbitrary.string(),
+                cluster_uid: "72f3a93e-64f0-40a5-b95d-790c8a738fee"
+                    .parse()
+                    .assured("the archive fixture UID is version four"),
                 captured_at: Timestamp::from_unix_nanos(arbitrary.entropy().any_i64()),
                 scope: ArchiveScope::Cluster,
                 resources: BackupResources::Included,

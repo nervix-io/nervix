@@ -144,6 +144,7 @@ impl PulsarClientError {
 /// One connection a client's entries declare, with the operation timeout its user holds the driver
 /// to. Both directions connect through this, so they cannot disagree on how.
 pub(super) struct PulsarClientConnection<'a> {
+    tls_policy: &'a nervix_connector::OutwardTlsPolicy,
     config: &'a [ClientConfigEntry],
     /// The time the driver gives one operation, or the driver's own 30 seconds when absent.
     operation_timeout: Option<Duration>,
@@ -185,8 +186,10 @@ impl<'a> PulsarClientConnection<'a> {
     pub(super) fn new(
         config: &'a [ClientConfigEntry],
         operation_timeout: Option<Duration>,
+        tls_policy: &'a nervix_connector::OutwardTlsPolicy,
     ) -> Self {
         Self {
+            tls_policy,
             config,
             operation_timeout,
         }
@@ -208,7 +211,7 @@ impl<'a> PulsarClientConnection<'a> {
         let parsed = Url::parse(&address).change_context(PulsarClientError::Configuration)?;
         let tls = if parsed.scheme() == TLS_SCHEME {
             Some(
-                RustlsClientConfigProvider::new(self.config)
+                RustlsClientConfigProvider::new(self.config, self.tls_policy)
                     .build_with_server_trust(self.server_certificate_trust()?)
                     .change_context(PulsarClientError::Configuration)?,
             )

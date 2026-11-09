@@ -130,4 +130,5 @@ pub(super) fn RelayEditor(
             </div>
         </fieldset>
     }
+    .into_any()
 }

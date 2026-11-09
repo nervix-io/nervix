@@ -51,6 +51,7 @@ impl HttpRequestIngestorStartPlan {
         };
         PacedIngestorStart {
             connector: HttpRequestIngestorPlan {
+                tls_policy: runtime.outward_tls().clone(),
                 config: resolved.entries,
                 dns: dns.clone(),
                 method,

@@ -136,6 +136,7 @@ pub(super) fn ProcessorInheritanceEditor(
                 } />
         </Show>
     }
+    .into_any()
 }
 
 #[cfg(test)]

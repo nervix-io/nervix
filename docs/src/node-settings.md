@@ -50,6 +50,27 @@ without a committed capability record receives no placements. If an advertised b
 a peer can refuse an operation with a typed answer so the sender slices it again while retaining
 the row acknowledgement accounting.
 
+## Permanent Cluster Identity
+
+The first leader commits a permanent UUID and signing key for the cluster. `DESCRIBE CLUSTER;`
+prints their public identity immediately after the leader line:
+
+```text
+leader: node-1
+cluster uid: 72f3a93e-64f0-40a5-b95d-790c8a738fee
+cluster key: <key thumbprint>
+cluster created: 2026-11-08T12:00:00Z
+```
+
+The key value is its RFC 7638 SHA-256 thumbprint in canonical base64url. Every node reports the same
+UUID, key and creation instant after it applies the record. Restart, leadership transfer and
+membership changes preserve them. The private key is never included in this description.
+
+`--cluster-id` remains the operator's display name and interconnect/gossip prerequisite. The
+indented `cluster identity` prerequisite names that configured value; the unindented `cluster uid`
+names the permanent generated identity. [Backup And Restore](backup-and-restore.md#what-a-restore-recreates)
+explains why a fresh cluster restored from an archive keeps its own UUID and key.
+
 ## The Prerequisite List Is Closed
 
 The prerequisites are cluster identity; the trust root; the node-to-node wire contract; the
@@ -299,6 +320,7 @@ describes, defaults included.
 | `--raft-snapshot-entry-threshold`, `--raft-snapshot-byte-threshold`, `--raft-covered-log-entries-retained`, `--raft-covered-log-bytes-retained`, `--raft-retained-log-cap` | node capability | Raft retention |
 | `--node-unavailability-timeout` | cluster parameter | membership |
 | `--replica-count` | cluster parameter | scheduling |
+| `--tls-cipher-suites`, `--tls-key-exchange-groups` | cluster parameter | outward TLS algorithm policy |
 | `--password-iterations` | cluster parameter | password creation policy |
 | `--state-snapshot-interval` | cluster parameter | runtime |
 | `--domain-drain-timeout`, `--entity-gate-deadline` | cluster parameter | cluster policy |
@@ -462,6 +484,18 @@ cap, and prerequisite relationships must still hold. Apply committed changes liv
 owner that captures settings at construction over its existing storage. The current record changes
 no OpenRaft construction setting: heartbeat and election timing remain prerequisites. Committed
 and running revisions are published together, and delayed observations cannot move them backward.
+
+
+Outward TLS algorithms are ordered-list cluster parameters. Both bootstrap defaults are `fips`:
+`--tls-cipher-suites` (`NERVIX_TLS_CIPHER_SUITES`) and `--tls-key-exchange-groups`
+(`NERVIX_TLS_KEY_EXCHANGE_GROUPS`) take comma-separated exact names or aliases. After bootstrap use
+`ALTER CLUSTER SET TLS_CIPHER_SUITES = ('fips'), TLS_KEY_EXCHANGE_GROUPS = ('fips');`.
+Aliases resolve in place and duplicate algorithms keep their first position. The complete resolved
+pair validates at commit and is installed live for new handshakes; established connections keep
+their negotiation. `DESCRIBE CLUSTER` and the settings log show resolved committed/running lists.
+The [cryptography chapter](cryptography.md#algorithm-policy) owns membership, exact spellings,
+validation and the inventory of TLS stacks the policy governs. Protocol versions and signature
+schemes have no additional cluster parameter.
 
 ## Fixed Values And The Source Ratchet
 

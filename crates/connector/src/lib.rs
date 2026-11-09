@@ -98,6 +98,7 @@ pub use ingestor::{
     IngestorResume, IngestorResumeOutcome, IngestorSettlement, IngestorSettlementOperation,
     IngestorSettlementOutcome, IngestorSuspendCause, PacedIngestorConnector,
 };
+pub use nervix_tls::OutwardTlsPolicy;
 pub use row_requests::{
     ExceededLimit, MeasuredRequest, RowOversize, RowRequest, RowRequestLimits, RowRequests,
 };

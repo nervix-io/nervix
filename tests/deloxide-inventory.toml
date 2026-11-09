@@ -6626,3 +6626,8 @@ invariant = "A descriptor with a foreign branch field is refused before installa
 invocation = "stress-restore-scenarios"
 scenario = "An inferencer descriptor with a foreign branch field is refused by branch name on <cluster_size> nodes"
 selections = ["deloxide-stress-restore"]
+
+[[owner]]
+gap = "The new per-template client/server cache mutex serializes one bounded config clone and provider replacement. Public outward TLS policy scenarios and the production-owner Shuttle check cover policy/capture behavior in ordinary and modeled modes. Diagnostic campaigns are deliberately unrun under the live Task Execution Template's temporary Deloxide CI/local cost policy; no tracked-lock execution evidence is claimed."
+path = "crates/tls/src/lib.rs"
+workloads = []

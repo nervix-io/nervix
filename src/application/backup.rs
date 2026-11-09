@@ -113,6 +113,8 @@ pub(in crate::application) struct CapturedSectionStage {
 /// hashes and payload data, and a diagnostic names only where the failure is.
 #[derive(Debug, Error)]
 pub(in crate::application) enum BackupError {
+    #[error("the cluster has not installed its permanent identity")]
+    NoClusterIdentity,
     #[error("the cluster has applied no configuration to back up yet")]
     NoConfiguration,
     #[error("no active domain selected")]
@@ -442,6 +444,12 @@ impl SessionServiceImpl {
             producer_version: env!("CARGO_PKG_VERSION").to_string(),
             language_version: PLEXUS_LANGUAGE_VERSION.to_string(),
             cluster_id: self.inner.cluster.cluster_id().await,
+            cluster_uid: self
+                .inner
+                .consensus
+                .cluster_identity()
+                .ok_or_else(|| Report::new(BackupError::NoClusterIdentity))?
+                .cluster_uid,
             captured_at,
             scope: planned_scope.scope.clone(),
             resources: backup.resources,

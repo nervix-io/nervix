@@ -88,8 +88,9 @@ impl Fixture {
                 value: "5000".to_string(),
             },
         ];
-        let (client, _) = ClickHouseTableEmitter::client_from_config(&config, self.dns())
-            .expect("the client configuration is valid");
+        let (client, _) =
+            ClickHouseTableEmitter::client_from_config(&config, self.dns(), &Default::default())
+                .expect("the client configuration is valid");
         client
     }
 }
@@ -205,8 +206,9 @@ async fn configured_pool_idle_timeout_controls_connection_reuse() {
                 value: value.into(),
             });
         }
-        let (client, _) = ClickHouseTableEmitter::client_from_config(&config, fixture.dns())
-            .assured("the connection configuration is valid");
+        let (client, _) =
+            ClickHouseTableEmitter::client_from_config(&config, fixture.dns(), &Default::default())
+                .assured("the connection configuration is valid");
         let server = nervix_primitives::task::spawn(async move {
             let (mut first, _) = listener.accept().await.assured("the first insert connects");
             answer_insert(&mut first, &[]).await;
@@ -264,7 +266,11 @@ async fn connection_intervals_preserve_typed_validation_failures() {
                 value: value.into(),
             },
         ];
-        let report = match ClickHouseTableEmitter::client_from_config(&config, fixture.dns()) {
+        let report = match ClickHouseTableEmitter::client_from_config(
+            &config,
+            fixture.dns(),
+            &Default::default(),
+        ) {
             Ok(_) => panic!("an unrepresentable connection interval must fail before dialing"),
             Err(report) => report,
         };

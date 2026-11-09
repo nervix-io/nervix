@@ -265,6 +265,7 @@ fn test_session_service(
         &resource_store,
         &ConfiguredFaultInjection::default(),
         &cluster,
+        runtime.outward_tls().clone(),
     );
     let parameters = consensus
         .observer()
