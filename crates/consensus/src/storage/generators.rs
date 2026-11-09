@@ -1379,6 +1379,8 @@ pub(super) fn state_machine(arbitrary: &mut Arbitrary<'_>) -> StateMachineData {
     let runtime_revision = arbitrary.entropy().any_u64();
 
     let mut state = StateMachineData {
+        cluster_identity: optional(arbitrary, crate::cluster_identity::tests::identity)
+            .map(Arc::new),
         parameters: Some(arbitrary.cluster_parameter_record()),
         last_applied_log_id,
         last_membership,
@@ -1780,6 +1782,7 @@ fn complete_application_command(arbitrary: &mut Arbitrary<'_>) -> ConsensusComma
 /// as any other and a coverage check can name each one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, strum::EnumIter)]
 enum CommandVariant {
+    InstallClusterIdentity,
     SeedClusterParameters,
     AlterClusterParameters,
     AdmitCommandExecution,
@@ -1828,6 +1831,7 @@ impl CommandVariant {
     /// [`command`] is taught to build it.
     fn of(command: &ConsensusCommand) -> Self {
         match command {
+            ConsensusCommand::InstallClusterIdentity { .. } => Self::InstallClusterIdentity,
             ConsensusCommand::SeedClusterParameters { .. } => Self::SeedClusterParameters,
             ConsensusCommand::AlterClusterParameters { .. } => Self::AlterClusterParameters,
             ConsensusCommand::AdmitCommandExecution { .. } => Self::AdmitCommandExecution,
@@ -1908,6 +1912,9 @@ pub(super) fn command(arbitrary: &mut Arbitrary<'_>) -> ConsensusCommand {
 /// lifecycle step with the reports and plans it carries.
 fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> ConsensusCommand {
     match variant {
+        CommandVariant::InstallClusterIdentity => ConsensusCommand::InstallClusterIdentity {
+            identity: Box::new(crate::cluster_identity::tests::identity(arbitrary)),
+        },
         CommandVariant::SeedClusterParameters => ConsensusCommand::SeedClusterParameters {
             values: arbitrary.cluster_parameter_values(),
         },

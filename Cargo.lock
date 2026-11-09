@@ -931,11 +931,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-lc-fips-sys"
+version = "0.14.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b744eed18cd75d814effdf2aba2880f912abe0fe1c327b361341d31aba9a7005"
+dependencies = [
+ "bindgen 0.73.2",
+ "cc",
+ "cmake",
+ "dunce",
+ "fs_extra",
+ "pkg-config",
+ "regex",
+]
+
+[[package]]
 name = "aws-lc-rs"
 version = "1.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faac5829c2b74c28f830747e7818ccfb684261b5f48a1118b1e2a13d36dfab13"
 dependencies = [
+ "aws-lc-fips-sys",
  "aws-lc-sys",
  "untrusted 0.7.1",
  "zeroize",
@@ -6757,6 +6773,7 @@ dependencies = [
  "strum 0.26.3",
  "tar",
  "thiserror 2.0.21",
+ "uuid",
 ]
 
 [[package]]
@@ -7649,9 +7666,11 @@ dependencies = [
  "imbl",
  "meticulous",
  "nervix-arbitrary",
+ "nervix-crypto",
  "nervix-dns",
  "nervix-execution",
  "nervix-interconnect",
+ "nervix-licensing-protocol",
  "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
@@ -7660,6 +7679,7 @@ dependencies = [
  "rcgen",
  "rkyv",
  "serde",
+ "serde_json",
  "sorted-vec",
  "storekey",
  "strum 0.26.3",
@@ -7668,12 +7688,15 @@ dependencies = [
  "tokio",
  "tracing",
  "ubyte",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]
 name = "nervix-crypto"
 version = "0.1.0-dev"
 dependencies = [
+ "aws-lc-fips-sys",
  "aws-lc-rs",
  "aws-lc-sys",
  "bolero",
