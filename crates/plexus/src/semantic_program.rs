@@ -107,6 +107,7 @@ fn parse_scope<'src>(name: &str, span: Span) -> Result<FieldScope, ParseError<'s
         "left" => Ok(FieldScope::Left),
         "right" => Ok(FieldScope::Right),
         "metadata" => Ok(FieldScope::Metadata),
+        "payload" => Ok(FieldScope::Payload),
         "partial_output" => Ok(FieldScope::PartialOutput),
         "error" => Ok(FieldScope::Error),
         _ => Err(Rich::custom(
@@ -1384,6 +1385,31 @@ mod tests {
                 )),
                 "metadata.{name} names a metadata field"
             );
+        }
+    }
+
+    #[test]
+    fn payload_is_a_case_insensitive_typed_scope() {
+        for (scope, field) in [
+            ("payload", "bytes"),
+            ("PAYLOAD", "rows"),
+            ("PaYlOaD", "bytes"),
+        ] {
+            assert_eq!(
+                parsed(&format!("{scope}.{field}")),
+                Expression::Field(FieldReference::scoped(
+                    FieldScope::Payload,
+                    FieldName::parse(field).assured("fixed payload field names are valid"),
+                ))
+            );
+        }
+        for source in [
+            "payload.",
+            "payload.bytes.extra",
+            "payload.rows =",
+            "payload..bytes",
+        ] {
+            assert!(parse_expression(source).is_err(), "{source}");
         }
     }
 

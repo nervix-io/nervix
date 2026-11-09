@@ -421,6 +421,7 @@ impl IngestorDeclaration for MqttTopicIngestor {
         // their names compare exactly.
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         metadata: MQTT_TOPIC_METADATA,
+        payload: crate::IngestorPayloadDeclaration::BYTES,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Mqtt),
         // A persistent session's broker delivers again every publish a lost connection did not

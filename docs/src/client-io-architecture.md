@@ -340,8 +340,9 @@ the supported signatures, errors and examples.
 Every binding calls the same `nervix-client-host` runtime over the Rust client: the C ABI for
 C/C++, pyo3 for Python, magnus for Ruby and JNI for the JVM. [Client Host
 Bindings](client-host-bindings.md) owns the runtime's threads, cancellation and deadline entry,
-host ownership, borrowed views, failure projection and Arrow exchange. The application guides
-and [manual](client-implementation-manual.md#using-the-c-abi) specify each host's calls.
+host ownership, borrowed views, failure projection and Arrow exchange. The
+[Client Libraries](client-libraries.md) guides show each host's calls with tested examples, and the
+[manual](client-implementation-manual.md#using-the-c-abi) states each host's rules.
 
 The C ABI's endpoint operations have these explicit buffer and reference contracts; the native
 host libraries map them into their own object ownership:

@@ -132,7 +132,7 @@ impl PacedIngestorConnector for PrometheusQueryIngestor {
             .await
             .change_context_lazy(read)?;
         let samples = response.samples().change_context_lazy(read)?;
-        let metadata = Self::poll_metadata(&self.query, scheduled_at);
+        let metadata = Self::poll_metadata(&self.query, scheduled_at, response.body.len());
         let mut messages = Vec::with_capacity(samples.len());
         let mut failures = Vec::new();
         for sample in samples {
@@ -166,11 +166,18 @@ impl PrometheusQueryIngestor {
 
     /// The values of the fields a query ingestor declares, in their declared order, for one poll:
     /// the same for every sample of it, so its messages share one copy however many there are.
-    fn poll_metadata(query: &str, evaluated_at: Timestamp) -> RetainedIngestMetadata {
-        RetainedIngestMetadata::from_values(vec![
-            RetainedIngestMetadataValue::String(query.to_string()),
-            RetainedIngestMetadataValue::Datetime(evaluated_at),
-        ])
+    fn poll_metadata(
+        query: &str,
+        evaluated_at: Timestamp,
+        payload_bytes: usize,
+    ) -> RetainedIngestMetadata {
+        RetainedIngestMetadata::from_values(
+            payload_bytes,
+            vec![
+                RetainedIngestMetadataValue::String(query.to_string()),
+                RetainedIngestMetadataValue::Datetime(evaluated_at),
+            ],
+        )
     }
 
     /// The response to this ingestor's query evaluated at `evaluated_at`, its body read within

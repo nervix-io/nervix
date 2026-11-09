@@ -102,6 +102,7 @@ impl GeneratedRequest {
             query,
             Value::String(self.remote_addr.to_string()),
             Value::String(self.host.routed()),
+            Value::String(self.remote_addr.ip().to_string()),
         ]
     }
 }
@@ -121,6 +122,7 @@ impl GeneratedFrame {
             Value::String(self.frame_type.as_ref().to_string()),
             Value::String(self.remote_addr.to_string()),
             Value::String(self.path.clone()),
+            Value::String(self.remote_addr.ip().to_string()),
         ]
     }
 }
@@ -271,7 +273,7 @@ fn assert_retained_and_projected(
         .verified("every name read is one of the declaration's own fields");
     let mut builders = IngestMetadataBuilders::new(projection, 1);
     builders
-        .append(&replayed)
+        .append(&replayed, None)
         .verified("the replayed row hands over one value of each declared field's type");
     let metadata = builders
         .finish()
@@ -303,6 +305,7 @@ fn bolero_endpoint_request_and_frame_metadata_retain_and_project_exactly() {
                 request.query.as_deref(),
                 request.remote_addr,
                 &written_host,
+                19,
             );
             let headers = GeneratedHeaders(request.headers.clone());
             let row = IngestMetadataRow {
@@ -321,6 +324,7 @@ fn bolero_endpoint_request_and_frame_metadata_retain_and_project_exactly() {
 
             let frame = cases.frame();
             let metadata = WebsocketsEndpointFrameMetadata {
+                payload_bytes: 19,
                 frame_type: frame.frame_type,
                 remote_addr: frame.remote_addr,
                 path: &frame.path,

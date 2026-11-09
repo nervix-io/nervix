@@ -277,6 +277,7 @@ pub fn expression_to_plexus(
                     NamePosition::Qualified.spell(relay.as_str())
                 )),
                 FieldScope::Metadata => Some("metadata".to_string()),
+                FieldScope::Payload => Some("payload".to_string()),
                 FieldScope::PartialOutput => Some("partial_output".to_string()),
                 FieldScope::Error => Some("error".to_string()),
             };

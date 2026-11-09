@@ -80,7 +80,8 @@ For connector-specific event counts, including Redis publishes with no subscribe
 and the entity's generated capability reference before interpreting delivery.
 
 For applications submitting Plexus, use [Client Libraries](../../../docs/src/client-libraries.md)
-to select the host guide; Java and JVM programs follow [JVM Client Library](../../../docs/src/client-library-jvm.md),
+to select the host guide; Python programs follow [Python Client Library](../../../docs/src/client-library-python.md),
+Java and JVM programs follow [JVM Client Library](../../../docs/src/client-library-jvm.md),
 Ruby applications follow [Ruby Client Library](../../../docs/src/client-library-ruby.md),
 and C and C++ programs follow [C And C++ Client Library](../../../docs/src/client-library-c.md).
 Read its execution, clock and endpoint sections before choosing application-side lifecycle handling.
@@ -198,6 +199,12 @@ For intake parallelism, read [Ingestors → Instancing](../../../docs/src/ingest
 Check the entity's instancing capability, Pulsar subscription type, Kafka offset mode and constructing
 routes before setting a count or following branch partitions. Use `DESCRIBE INGESTOR` to verify
 the planned instance placement.
+For payload sizes, client batch row counts or peer-address keys, read
+[Ingestors → Payload Facts](../../../docs/src/ingestors.md#payload-facts) and the entity's declaration
+in `Connector Capabilities`. Every ingestor exposes required `payload.bytes: U64`; only
+`CLIENT PRODUCER` exposes required `payload.rows: U64`. Keep these original transport/batch facts
+when filtering or constructing rows. On HTTP, WebSocket and Syslog listeners, use
+`metadata.remote_ip` for an IP without a port, including IPv6.
 
 ## Assemble the graph
 

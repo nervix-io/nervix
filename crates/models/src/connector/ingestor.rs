@@ -558,6 +558,8 @@ pub struct IngestorEntityCapabilities {
     pub headers: Option<HeaderModel>,
     /// The typed `metadata` namespace its messages expose to the ingestor's programs.
     pub metadata: IngestorMetadataDeclaration,
+    /// The required facts of its original transport payload or submitted batch.
+    pub payload: crate::IngestorPayloadDeclaration,
     /// Whether it executes on every live cluster node rather than on one scheduled owner.
     pub executes_on_every_cluster_node: bool,
     /// What its body names to read from.
@@ -622,6 +624,11 @@ impl IngestorEntityCapabilities {
         capabilities.extend(RuntimeCapability::of_options(self.options));
         for field in self.metadata.fields() {
             capabilities.push(RuntimeCapability::Metadata {
+                field: field.name(),
+            });
+        }
+        for field in self.payload.fields() {
+            capabilities.push(RuntimeCapability::Payload {
                 field: field.name(),
             });
         }

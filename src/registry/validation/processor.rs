@@ -748,6 +748,7 @@ pub(in crate::registry) fn validate_filter_where_for_internal_schemas(
         filter_where,
         "FILTER WHERE",
         CompileOptions::default(),
+        &[],
     )
 }
 
@@ -816,7 +817,10 @@ pub(in crate::registry) fn validate_scoped_from_where_for_internal_schemas(
             &source_filter.where_clause,
             "FROM WHERE",
             CompileOptions::default(),
-            input_namespace,
+            WhereProgramScopes {
+                input_namespace,
+                readonly_bindings: &[],
+            },
         )?;
     }
     Ok(())
@@ -829,6 +833,7 @@ pub(in crate::registry) fn validate_where_program_for_internal_schemas(
     where_program: &Expression,
     clause_name: &str,
     compile_options: CompileOptions,
+    readonly_bindings: &[CompileBinding],
 ) -> Result<(), Report<RegistryError>> {
     validate_where_program_for_scoped_internal_schemas(
         context,
@@ -837,8 +842,16 @@ pub(in crate::registry) fn validate_where_program_for_internal_schemas(
         where_program,
         clause_name,
         compile_options,
-        "input",
+        WhereProgramScopes {
+            input_namespace: "input",
+            readonly_bindings,
+        },
     )
+}
+
+struct WhereProgramScopes<'a> {
+    input_namespace: &'static str,
+    readonly_bindings: &'a [CompileBinding],
 }
 
 fn validate_where_program_for_scoped_internal_schemas(
@@ -848,8 +861,12 @@ fn validate_where_program_for_scoped_internal_schemas(
     where_program: &Expression,
     clause_name: &str,
     compile_options: CompileOptions,
-    input_namespace: &'static str,
+    scopes: WhereProgramScopes<'_>,
 ) -> Result<(), Report<RegistryError>> {
+    let WhereProgramScopes {
+        input_namespace,
+        readonly_bindings,
+    } = scopes;
     let ModelValidationContext {
         domain,
         identifier,
@@ -900,6 +917,12 @@ fn validate_where_program_for_scoped_internal_schemas(
         .map(|(relay, _schema)| relay.as_str().to_string())
         .collect::<HashSet<_>>();
     input_relay_names.insert(input_namespace.to_string());
+    input_relay_names.extend(
+        readonly_bindings
+            .iter()
+            .map(|binding| binding.namespace.label()),
+    );
+    bindings.extend_from_slice(readonly_bindings);
     bindings.extend(referenced_materialized_stream_bindings(
         domain,
         identifier,
