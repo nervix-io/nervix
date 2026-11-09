@@ -80,6 +80,7 @@
   - [Cryptography](./cryptography.md)
   - [Shared Licensing Protocol](./licensing-protocol.md)
   - [Client Session Protocol](./client-session-protocol.md)
+  - [Client Host Bindings](./client-host-bindings.md)
   - [Control Plane](./control-plane.md)
   - [Execution Plans](./execution-plans.md)
   - [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md)

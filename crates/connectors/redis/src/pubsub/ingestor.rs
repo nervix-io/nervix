@@ -124,6 +124,7 @@ impl RedisPubSubIngestorPlan {
         config: Vec<ClientConfigEntry>,
         subscription: RedisSubscriptionTarget,
         dns: DnsResolver,
+        tls_policy: &nervix_connector::OutwardTlsPolicy,
     ) -> RedisPubSubIngestorResult<Self> {
         let addr = client_config_value(&config, "addr", "Redis")
             .change_context(RedisPubSubIngestorError::ClientConfig)?;
@@ -143,7 +144,7 @@ impl RedisPubSubIngestorPlan {
         let buffer_messages = Self::buffer_messages(&config)?;
         let tls = match client.get_connection_info().addr() {
             ConnectionAddr::TcpTls { .. } => {
-                let config = RustlsClientConfigProvider::new(&config)
+                let config = RustlsClientConfigProvider::new(&config, tls_policy)
                     .build_with_replacement_ca()
                     .change_context(RedisPubSubIngestorError::BuildClient)?;
                 Some(config)
@@ -552,6 +553,7 @@ mod tests {
             ],
             subscription,
             dns,
+            &Default::default(),
         )
         .expect("the Redis address is valid")
     }
@@ -709,6 +711,7 @@ mod tests {
                 ],
                 events(),
                 fixture.dns.clone(),
+                &Default::default(),
             )
             .expect_err("an invalid deadline cannot plan a subscription");
             assert!(
@@ -746,6 +749,7 @@ mod tests {
             ],
             events(),
             fixture.dns,
+            &Default::default(),
         )
         .expect("the Redis address and deadline are valid");
         let error = nervix_primitives::time::timeout(Duration::from_secs(10), plan.subscribe())
@@ -769,7 +773,7 @@ mod tests {
     async fn the_plan_requires_the_address_before_it_subscribes() {
         let fixture = Fixture::start().await;
         let dns = fixture.dns;
-        let error = RedisPubSubIngestorPlan::new(Vec::new(), events(), dns)
+        let error = RedisPubSubIngestorPlan::new(Vec::new(), events(), dns, &Default::default())
             .expect_err("a missing Redis address must fail");
         assert!(matches!(
             error.current_context(),

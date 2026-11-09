@@ -70,6 +70,7 @@ pub(super) fn EmitterConstructionEditor(
             </Show>
         </section>
     }
+    .into_any()
 }
 
 #[component]

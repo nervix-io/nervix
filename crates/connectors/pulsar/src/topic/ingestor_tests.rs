@@ -1511,6 +1511,7 @@ async fn removing_an_owned_subscription_joins_it_and_unsubscribes() {
     PulsarTopicIngestorPlan::remove_subscription_within(
         removal_settings(&config, &topic),
         DEADLINE,
+        &Default::default(),
     )
     .await
     .expect("the broker removes the subscription");
@@ -1546,6 +1547,7 @@ async fn an_unsubscribe_the_broker_refuses_is_reported_and_closes_the_joined_con
     let error = PulsarTopicIngestorPlan::remove_subscription_within(
         removal_settings(&config, &topic),
         DEADLINE,
+        &Default::default(),
     )
     .await
     .expect_err("the broker refuses the unsubscribe");
@@ -1616,6 +1618,7 @@ async fn a_removal_the_broker_never_answers_ends_at_its_budget() {
     let error = PulsarTopicIngestorPlan::remove_subscription_within(
         removal_settings(&config, &topic),
         budget,
+        &Default::default(),
     )
     .await
     .expect_err("a broker that never answers removes nothing");

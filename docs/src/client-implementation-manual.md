@@ -9,13 +9,15 @@ value, publish batches through producers, upload resources, and download backups
 the system behaves this way. This manual does not repeat those reasons, and the chapter does not
 repeat these rules.
 
-The Rust client, `nervix-client-core`, is the reference implementation. The shared binding exposes
-it through the C ABI of `nervix-client-ffi` to C and C++ hosts, the native Ruby gem `nervix-client` to Ruby hosts, the Python package
-`nervix_client` to CPython hosts, and the JNI library `nervix-client-jvm` to JVM hosts. A host
+The Rust client, `nervix-client-core`, is the reference implementation. The shared host runtime
+exposes it through the C ABI of `nervix-client-ffi` to C and C++ hosts, the native Ruby gem
+`nervix-client` to Ruby hosts, the Python package `nervix_client` to CPython hosts, and the JNI
+library `nervix-client-jvm` to JVM hosts. A host
 that uses a binding inherits every rule below from it except its host-specific rules in
-[Using The Shared Binding](#using-the-shared-binding), [Using The Python Package](#using-the-python-package),
-and [Using The JVM Library](#using-the-jvm-library). An implementation that speaks the protocol
-itself, as the Go and TypeScript conformance clients do, follows all of it.
+[Using The C ABI](#using-the-c-abi), [Using The Python Package](#using-the-python-package),
+[Using The Ruby Gem](#using-the-ruby-gem), and [Using The JVM Library](#using-the-jvm-library).
+An implementation that speaks the protocol itself, as the Go and TypeScript conformance clients
+do, follows all of it.
 
 The Rust reference implementation's execution modes and native/browser capability boundaries are
 specified in [Execution Primitives](./execution-primitives.md). Those repository build and
@@ -148,6 +150,12 @@ archive; see [Restore Streams](#restore-streams).
   authority and verify the TLS certificate against that hostname on every connection, including
   redirects and reconnects. DNS and address attempts MUST fit within the client's connection
   deadline.
+- **T-2a.** Native client-core, the CLI and native bindings use the cryptography boundary's explicit
+  `fips` cipher/group set by default. A cluster's outward policy governs its listeners and shared
+  connector TLS, not a client's offers; an embedding host's process provider does not replace that
+  native default. Trust roots, certificate identity, hostname verification, ALPN and deadlines
+  retain their independent contracts. Read [Algorithm Policy](cryptography.md#algorithm-policy)
+  for membership and the boundary between algorithm selection and a validated deployment.
 - **T-3.** A WebSocket client MUST connect to `/console/ws` on the leader's console endpoint, using
   `ws` for an `http` endpoint and `wss` for an `https` one, and MUST send binary messages only. It
   MUST treat a close with code `1003`, `1007`, `1008`, or `1009` as a defect in what it sent.
@@ -860,10 +868,14 @@ statuses and operator-facing output.
   failed outcome with `Recovered` origin or a restore report remains definitive, with every partial
   step retained.
 
-## Using The Shared Binding
+## Using The C ABI
 
 A host of the C ABI, `nervix-client-ffi`, follows the contract in
-`crates/client-ffi/include/nervix_client.h` and these rules. The
+`crates/client-ffi/include/nervix_client.h` and these C/C++ ownership rules.
+[Client Host Bindings](client-host-bindings.md) owns the shared runtime, call cancellation,
+failure projection, Arrow exchange and native host lifetimes. Python, Ruby and JVM applications
+use their own bindings, whose requirements follow below; they do not declare the C surface or
+manage C handles. The
 [C and C++ Client Library](client-library-c.md) explains them with anchored application-suite
 examples, including explicit C cleanup and C++ custom-deleter ownership:
 
@@ -1222,8 +1234,10 @@ language-level suite is the other instrument: it holds one package to the behavi
 documents, in that host's own test framework, and every code block of the guide is one of its
 tests. A host suite can ask its scenario for the declared subscription-opening refusal through
 the request/confirmation exchange in [Client Suites](integration-test-lifecycle.md#client-suites).
-Python's `test_a_refused_subscription_restoration_reports_its_cause_and_recovers` and the C and
-C++ suites' `test_b7_refused_subscription_restoration_reports_its_cause_and_recovers` observe the
+Python's `test_a_refused_subscription_restoration_reports_its_cause_and_recovers`, the JVM suite's
+`aRefusedSubscriptionRestorationReportsItsCauseAndRecovers`, Ruby's
+`test_refused_restoration_is_observable_and_the_subscription_recovers` and the C and C++ suites'
+`test_b7_refused_subscription_restoration_reports_its_cause_and_recovers` observe the
 interruption, unavailable restoration with its message and retry wait, and later row delivery
 through the live cluster. The Python package's suite is `tests/client_conformance/python/suite`,
 with the [Python Client Library](client-library-python.md) guide; the JVM suite is

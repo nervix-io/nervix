@@ -130,12 +130,14 @@ connector crate.
 The contract may name shared vocabulary types, Arrow, the async and error facilities needed by its
 boundary, the node's bounded executor, and configuration helpers for TLS, HTTP clients, service
 URLs, resource mounts, and physical time. It must not name the registry, runtime, relays, branches, schedules, or a driver.
-TLS provider selection belongs to `nervix-crypto`. Shared connector TLS uses its outward process
-default, keeping the full AWS-LC algorithms and a provider installed by an embedding host. SQS
-projects the boundary's typed outward choice into Smithy's AWS-LC mode, retaining the SDK's cipher
-filtering. The interconnect has an independent fixed provider, so its algorithm restrictions do not
-change connector TLS. [Cryptography](cryptography.md#algorithm-policy) owns this policy; connectors
-still own trust roots, identities and protocol negotiation.
+TLS algorithm implementations belong to `nervix-crypto`; the host supplies the node-owned committed
+outward policy to shared-provider construction. Every new handshake captures its current pair,
+while established connections retain their negotiation and the connector retains its driver.
+SDKs that construct their own provider remain inventoried gaps. SQS projects the boundary's typed
+outward choice into Smithy's AWS-LC mode, retaining the SDK's cipher filtering. The interconnect
+has an independent fixed provider. [Cryptography](cryptography.md#algorithm-policy) owns membership
+and the governed-path inventory; connectors still own trust roots, identities and protocol
+negotiation.
 An integration crate may depend on the contract, vocabulary, Arrow, and its own driver stack. It
 must not depend on the server, another integration crate, or runtime collectors. Driver libraries
 belong in that integration's manifest, with test-harness dependencies kept separately. A
@@ -3814,3 +3816,14 @@ WebSocket upgrade headers use the same committed caps at model admission and par
 transitions. Their canonical subprotocol offer counts as one field, and its comma-joined tokens
 contribute to the byte count. Syntax and plan conversion enforce physical HTTP representation
 bounds; they impose no second fixed default on a model admitted under raised cluster caps.
+
+## Live Outward TLS Algorithms
+
+The host supplies a node-owned `OutwardTlsPolicy` to every shared-provider TLS construction path.
+A connector retains its native client, pool, prepared requests and confirmations across an algorithm
+change. The rustls configuration captures the current complete pair for each new connection,
+including a driver-created reconnect; an established connection keeps its snapshot. Policy changes
+do not re-open the connector or alter its retry, quiesce, finish or acknowledgement contract.
+Trust roots, identity and ALPN remain properties of the concrete client configuration.
+[Cryptography](cryptography.md#algorithm-policy) owns the exact governed-path and driver-owned-gap
+inventory.

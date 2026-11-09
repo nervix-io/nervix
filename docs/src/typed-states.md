@@ -360,8 +360,8 @@ expression scope.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
-Consensus's `raft_payload_identity_` keyspaces and current `ClusterState`
-metadata encoding, 21, identify its stored shapes, including the partition count of every resolved branch
+Consensus's `raft_payload_tls_identity_` keyspaces and current `ClusterState`
+metadata encoding, 22, identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations. The runtime state store's
 `ranked-intake-unit-checkpoint-segments` format identifies the checkpoints it keeps, including the
@@ -1401,3 +1401,13 @@ Normalization sorts and deduplicates within the selected form. Persisted transac
 interconnect requests and runtime holds retain that choice. A held lease must contain the exact
 unit and its exact freeze before it authorizes a handoff checkpoint. Placement groups also carry
 exact unit members, allowing an ingestor instance and a relay partition in the same component.
+
+## Resolved TLS Parameter Pairs
+
+The mandatory `ClusterParameterValues` TLS fields contain bounded, nonempty, unique ordered
+algorithm identifiers. Aliases exist only at input conversion. Individual selection decoding rejects
+gaps and duplicates; complete JSON and archive record decoding applies the same joint validation
+as bootstrap and administrative transitions. The complete candidate includes TLS 1.3 and, when it
+retains a TLS 1.2 suite, a usable TLS 1.2 group. Neither decoding nor installation supplies an omitted
+policy field. Current storage headers and the interconnect contract fingerprint identify this
+complete shape. See [Algorithm Policy](cryptography.md#algorithm-policy).

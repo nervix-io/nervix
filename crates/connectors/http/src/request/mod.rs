@@ -54,6 +54,7 @@ use self::transport::{ClientTransport, RedirectAnswer, Redirects};
 const HTTP: &str = "http";
 
 pub struct HttpRequestIngestorPlan {
+    pub tls_policy: nervix_connector::OutwardTlsPolicy,
     pub config: Vec<ClientConfigEntry>,
     pub dns: DnsResolver,
     pub method: String,
@@ -115,7 +116,7 @@ impl IngestorConnector for HttpRequestIngestor {
             .change_context(IngestorError::Open { connector: HTTP })?;
         let transport = ClientTransport::declared(&plan.config, "HTTP")
             .change_context(IngestorError::Open { connector: HTTP })?;
-        let client = HttpClientConfig::new(&plan.config, "HTTP", &plan.dns)
+        let client = HttpClientConfig::new(&plan.config, "HTTP", &plan.dns, &plan.tls_policy)
             .build()
             .change_context(IngestorError::Open { connector: HTTP })?;
         Ok(Self {
@@ -576,6 +577,7 @@ mod tests {
             },
         ];
         let plan = HttpRequestIngestorPlan {
+            tls_policy: Default::default(),
             config,
             dns: DnsResolver::load(nervix_dns::DnsConfiguration::system())
                 .await

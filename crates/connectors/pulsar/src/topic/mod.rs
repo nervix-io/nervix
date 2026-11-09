@@ -177,6 +177,7 @@ impl From<PulsarError> for PulsarSendFailure {
 
 /// What one Pulsar emitter publishes through: its client entries, topic and publishing mode.
 pub struct PulsarTopicEmitterConfig {
+    pub tls_policy: nervix_connector::OutwardTlsPolicy,
     pub config: Vec<ClientConfigEntry>,
     pub topic: PulsarTopicName,
     pub mode: BrokerPublishingMode,
@@ -482,9 +483,10 @@ impl PulsarTopicEmitter {
             BrokerPublishingMode::NoAck => None,
             BrokerPublishingMode::Ack(settings) => Some(settings.timeout),
         };
-        let connection = PulsarClientConnection::new(&config.config, operation_timeout)
-            .prepare()
-            .map_err(Self::client_error)?;
+        let connection =
+            PulsarClientConnection::new(&config.config, operation_timeout, &config.tls_policy)
+                .prepare()
+                .map_err(Self::client_error)?;
         let topic_name = qualified_topic(&config.config, &config.topic);
         let publishing = match (config.mode, selected) {
             (mode, None) => mode.into(),
@@ -1280,6 +1282,7 @@ mod tests {
 
     async fn connector(broker: &FakeBroker, mode: BrokerPublishingMode) -> PulsarTopicEmitter {
         let config = PulsarTopicEmitterConfig {
+            tls_policy: Default::default(),
             partition_from_branch: false,
             config: vec![entry("addr", &broker.service_url)],
             topic: PulsarTopicName::parse("limited").expect("the test topic is a valid topic name"),
@@ -1402,6 +1405,7 @@ mod tests {
     async fn a_timeout_past_the_clock_range_is_refused_before_the_driver_uses_it() {
         let broker = FakeBroker::start(None, AnswerOrder::OnArrival).await;
         let config = PulsarTopicEmitterConfig {
+            tls_policy: Default::default(),
             partition_from_branch: false,
             config: vec![entry("addr", &broker.service_url)],
             topic: PulsarTopicName::parse("limited").assured("the fixture topic is a valid name"),

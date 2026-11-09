@@ -153,6 +153,8 @@ class InventoryTests(unittest.TestCase):
             "benchmark-metrics-report",
             "crypto-p256-keys",
             "crypto-p256-signatures",
+            "tls-algorithm-selections",
+            "tls-algorithm-unknown-names",
             "runtime-kafka-unit-layouts",
             "password-credentials",
             "password-credentials-malformed",
@@ -512,6 +514,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-dns",
             "nervix-licensing-protocol",
             "nervix-crypto",
+            "nervix-crypto-policy",
         })
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())
@@ -532,27 +535,27 @@ class InventoryTests(unittest.TestCase):
         }
         for target, version in {
             "benchmark-metrics-report": 1,
-            "ingestor-describe-envelope": 10,
-            "plexus-model": 59,
-            "plexus-archive-model": 62,
-            "plexus-statement": 60,
-            "plexus-statement-text": 59,
-            "plexus-format-document": 59,
-            "plexus-format-text": 58,
-            "models-archived-models": 59,
-            "registry-archived-models": 54,
-            "consensus-state-records": 53,
-            "consensus-state-corruption": 53,
-            "consensus-raft-records": 53,
-            "registry-stored-models": 47,
-            "registry-stored-models-corruption": 47,
+            "ingestor-describe-envelope": 11,
+            "plexus-model": 60,
+            "plexus-archive-model": 63,
+            "plexus-statement": 61,
+            "plexus-statement-text": 60,
+            "plexus-format-document": 60,
+            "plexus-format-text": 59,
+            "models-archived-models": 60,
+            "registry-archived-models": 55,
+            "consensus-state-records": 55,
+            "consensus-state-corruption": 55,
+            "consensus-raft-records": 54,
+            "registry-stored-models": 48,
+            "registry-stored-models-corruption": 48,
             "cluster-identity-record-rkyv": 1,
             "inferencer-tensor-columns": 1,
             "inferencer-state-snapshots": 1,
             "inferencer-state-snapshots-malformed": 1,
             "inferencer-native-snapshot-projection": 1,
-            "console-emitter-drafts": 4,
-            "client-requests": 10,
+            "console-emitter-drafts": 5,
+            "client-requests": 11,
         }.items():
             with self.subTest(target=target):
                 self.assertEqual(versions[target], version)
@@ -561,7 +564,7 @@ class InventoryTests(unittest.TestCase):
         targets = {target.id: target for target in bolero.load_inventory().targets}
         for name in ("client-state-inspection", "state-inspection-cursor"):
             with self.subTest(target=name):
-                self.assertEqual(targets[name].domain_version, 4)
+                self.assertEqual(targets[name].domain_version, 5)
                 self.assertEqual(targets[name].max_input_bytes, 512)
                 self.assertEqual(targets[name].random_iterations, 128)
 

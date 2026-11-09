@@ -518,9 +518,11 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_payload_identity_logs`, `raft_payload_identity_meta`, `raft_payload_identity_state`, and
-`raft_payload_identity_snapshots`. Opening it validates the complete keyspace namespace before reading
-any records. This namespace identifies the current Model shape, including the separate JSON
+`raft_payload_tls_identity_logs`, `raft_payload_tls_identity_meta`, `raft_payload_tls_identity_state`, and
+`raft_payload_tls_identity_snapshots`. Opening it validates the complete keyspace namespace before reading
+any records. The committed cluster-parameter record stores ordered typed TLS cipher suites and
+key-exchange groups; recovery validates their complete pair before returning that record.
+This namespace identifies the current Model shape, including the separate JSON
 and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec encoding, a Pulsar
 subscription's required type, an owned Pulsar subscription's required start position, a Kafka
 consumer group's required start position, the serialized Sentry platform field, an ingestor's
@@ -536,7 +538,7 @@ the current statement shape as well, which the statements a transaction keeps ar
 `ALTER BRANCH` among those statements, and an `ALTER INGESTOR` or `ALTER EMITTER` operation that
 changes one part of its entity's body, an envelope clause or the properties, or one part of a
 construction where it stands, including the typed `payload` expression scope. Its state metadata
-requires the current `ClusterState` encoding, 21, including the cluster identity reference,
+requires the current `ClusterState` encoding, 22, including the cluster identity reference,
 committed cluster parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,

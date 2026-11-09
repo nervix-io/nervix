@@ -69,6 +69,7 @@ impl Runtime {
     ) -> error_stack::Result<Self, RuntimePersistenceError> {
         let RuntimeEnvironment {
             executor,
+            outward_tls,
             dns,
             db,
             restore_staging_max_bytes,
@@ -214,6 +215,7 @@ impl Runtime {
                     SnapshotStagingLimits::default(),
                 ),
                 construction_parameters: nervix_primitives::sync::blocking::OnceLock::new(),
+                outward_tls,
                 cluster_parameters: nervix_primitives::publication::ArcSwap::from_pointee(
                     nervix_models::ClusterParameterValues::resolve(
                         nervix_models::ClusterParameterSeedValues {
@@ -341,6 +343,10 @@ impl Runtime {
         self.inner.construction_parameters.get()
     }
 
+    pub(crate) fn outward_tls(&self) -> &nervix_tls::OutwardTlsPolicy {
+        &self.inner.outward_tls
+    }
+
     pub(crate) fn cluster_parameters(&self) -> nervix_models::ClusterParameterValues {
         **self.inner.cluster_parameters.load()
     }
@@ -353,6 +359,9 @@ impl Runtime {
                 max_file_count: values.resource_max_file_count(),
             });
         }
+        self.inner
+            .outward_tls
+            .install(values.tls_cipher_suites(), values.tls_key_exchange_groups());
         self.inner.cluster_parameters.store(StdArc::new(values));
     }
 

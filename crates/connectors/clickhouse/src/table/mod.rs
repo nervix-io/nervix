@@ -67,6 +67,7 @@ const MEASURED_REQUEST: &str = "ClickHouse JSONEachRow body";
 
 /// What one ClickHouse emitter inserts through, from its typed emitter plan.
 pub struct ClickHouseTableEmitterConfig {
+    pub tls_policy: nervix_connector::OutwardTlsPolicy,
     pub config: Vec<ClientConfigEntry>,
     pub table: ClickHouseTableName,
     /// The node resolver every connection of the client resolves the host of `addr` through.
@@ -273,12 +274,13 @@ impl ClickHouseTableEmitter {
         host: EmitterHost,
     ) -> EmitterStartResult<Self> {
         let ClickHouseTableEmitterConfig {
+            tls_policy,
             config,
             table,
             dns,
             batch,
         } = config;
-        let (client, request_timeout) = Self::client_from_config(&config, dns)?;
+        let (client, request_timeout) = Self::client_from_config(&config, dns, &tls_policy)?;
         // ClickHouse streams an insert body without a limit of its own, so the emitter's limits
         // are the only ones an insert keeps to.
         Ok(Self {
@@ -298,6 +300,7 @@ impl ClickHouseTableEmitter {
     pub fn client_from_config(
         config: &[ClientConfigEntry],
         dns: DnsResolver,
+        tls_policy: &nervix_connector::OutwardTlsPolicy,
     ) -> EmitterStartResult<(ClickHouseClient, Duration)> {
         let schema = ConnectorKind::ClickHouse
             .client()
@@ -318,7 +321,7 @@ impl ClickHouseTableEmitter {
             })?
             .ok_or_else(|| invalid().attach_printable("missing ClickHouse timeout_ms"))?
             .bound();
-        let tls_config = RustlsClientConfigProvider::new(config)
+        let tls_config = RustlsClientConfigProvider::new(config, tls_policy)
             .build()
             .map_err(|error| invalid().attach_printable(error.to_string()))?;
         let tcp_keepalive = Self::connection_interval(config, "tcp_keepalive_ms")?;
@@ -839,6 +842,7 @@ mod tests {
             let error = match ClickHouseTableEmitter::client_from_config(
                 &client_config("http://127.0.0.1:8123", value),
                 fixture.dns(),
+                &Default::default(),
             ) {
                 Ok(_) => panic!("invalid ClickHouse timeout should fail client initialization"),
                 Err(error) => error,
@@ -862,6 +866,7 @@ mod tests {
         let (_, request_timeout) = ClickHouseTableEmitter::client_from_config(
             &client_config("http://127.0.0.1:8123", "275"),
             fixture.dns(),
+            &Default::default(),
         )
         .expect("ClickHouse client config should be valid");
 
@@ -880,9 +885,12 @@ mod tests {
                 .local_addr()
                 .expect("test listener should have an address")
         );
-        let (client, request_timeout) =
-            ClickHouseTableEmitter::client_from_config(&client_config(addr, "30"), fixture.dns())
-                .expect("ClickHouse client config should be valid");
+        let (client, request_timeout) = ClickHouseTableEmitter::client_from_config(
+            &client_config(addr, "30"),
+            fixture.dns(),
+            &Default::default(),
+        )
+        .expect("ClickHouse client config should be valid");
 
         let result = nervix_primitives::time::timeout(
             Duration::from_millis(250),
@@ -929,6 +937,7 @@ mod tests {
                 },
             ],
             fixture.dns(),
+            &Default::default(),
         ) {
             Ok(_) => panic!("missing ClickHouse TLS CA should fail"),
             Err(error) => error,
