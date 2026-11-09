@@ -957,16 +957,40 @@ impl Statement {
             Self::ShowIngestors(_) => Ok("SHOW INGESTORS;".to_string()),
             Self::ShowEmitters(_) => Ok("SHOW EMITTERS;".to_string()),
             Self::ShowPlacements(_) => Ok("SHOW PLACEMENTS;".to_string()),
-            Self::ShowRelayMaterializedState(show) => Ok(format!(
-                "SHOW RELAY {} MATERIALIZED STATE{}",
-                show.relay.as_str(),
-                state_inspection_clauses(show.selection.as_ref(), show.page.as_ref(), show.format)?
-            )),
-            Self::ShowWasmProcessorState(show) => Ok(format!(
-                "SHOW WASM PROCESSOR {} STATE{}",
-                show.processor.as_str(),
-                state_inspection_clauses(show.selection.as_ref(), show.page.as_ref(), show.format)?
-            )),
+            Self::ShowRelayMaterializedState(show) => state_inspection_text(
+                format!("SHOW RELAY {} MATERIALIZED STATE", show.relay.as_str()),
+                show.selection.as_ref(),
+                show.page.as_ref(),
+                show.format,
+            ),
+            Self::ShowProcessorState(show) => {
+                let head = match &show.processor {
+                    crate::StateInspectedProcessor::Reorderer(name) => {
+                        format!("SHOW REORDERER {} STATE", name.as_str())
+                    }
+                    crate::StateInspectedProcessor::Correlator(name) => {
+                        format!("SHOW CORRELATOR {} STATE", name.as_str())
+                    }
+                    crate::StateInspectedProcessor::Deduplicator(name) => {
+                        format!("SHOW DEDUPLICATOR {} STATE", name.as_str())
+                    }
+                    crate::StateInspectedProcessor::WindowProcessor(name) => {
+                        format!("SHOW WINDOW PROCESSOR {} STATE", name.as_str())
+                    }
+                };
+                state_inspection_text(
+                    head,
+                    show.selection.as_ref(),
+                    show.page.as_ref(),
+                    show.format,
+                )
+            }
+            Self::ShowWasmProcessorState(show) => state_inspection_text(
+                format!("SHOW WASM PROCESSOR {} STATE", show.processor.as_str()),
+                show.selection.as_ref(),
+                show.page.as_ref(),
+                show.format,
+            ),
             Self::ShowClusterStatus(_) => Ok("SHOW CLUSTER STATUS;".to_string()),
             Self::DescribeCluster(_) => Ok("DESCRIBE CLUSTER;".to_string()),
             Self::ShowTransactions(_) => Ok("SHOW TRANSACTIONS;".to_string()),
@@ -975,13 +999,14 @@ impl Statement {
     }
 }
 
-/// The selector, page and format clauses every state read shares, in their written order.
-fn state_inspection_clauses(
+/// A state inspection statement's head followed by the clauses every such statement takes, in
+/// their declared order, with the format always written.
+fn state_inspection_text(
+    mut text: String,
     selection: Option<&crate::StateBranchSelection>,
     page: Option<&crate::StateInspectionPageRequest>,
     format: InspectionFormat,
 ) -> error_stack::Result<String, CanonicalPlexusError> {
-    let mut text = String::new();
     if let Some(selection) = selection {
         text.push_str(&format!(" FOR {}", selection.to_canonical_plexus()?));
     }

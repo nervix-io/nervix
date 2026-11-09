@@ -1,5 +1,8 @@
 //! Current inspection envelope round trips, exact cells and retained backing storage.
 
+#[path = "published_tests.rs"]
+mod published;
+
 use std::num::NonZeroU64;
 
 use meticulous::{OptionExt as _, ResultExt as _};

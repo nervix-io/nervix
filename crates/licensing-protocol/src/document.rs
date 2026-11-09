@@ -43,6 +43,7 @@ document_types! {
     WorkingKey => "nervix.licensing.trust.working-key",
     Revocation => "nervix.licensing.trust.revocation",
     Succession => "nervix.licensing.trust.succession",
+    ProofOfLife => "nervix.licensing.trust.proof-of-life",
 }
 
 pub trait Document: Serialize + DeserializeOwned {

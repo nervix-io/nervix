@@ -231,7 +231,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    ClusterState = 24,
+    ClusterState = 25,
 }
 
 #[derive(Debug)]

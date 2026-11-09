@@ -239,7 +239,7 @@ producers it opens. A producer is not a statement: clients open, feed, and close
 - Producers belong to the session, not to a transaction: an open is refused while the session holds
   a transaction.
 - A session holds at most 32 producers and 32 MiB of producer credit; the serving node holds at most
-  128 MiB for every producer it serves or retains batches for.
+  its resolved producer node byte capacity for every producer it serves or retains batches for.
 - A submitted batch is handed to its producer without the session's receive loop waiting on it, so
   commands, subscriptions, domain clock frames, and every other request keep moving while batches
   await their graph outcome. Batches are not counted against the session's in-flight request limit;
@@ -267,9 +267,10 @@ producers it opens. A producer is not a statement: clients open, feed, and close
 An application opens a consumer of a `TO CLIENT` emitter by naming its domain, emitter, and the
 exact output fields, including order, optionality, and sensitivity. The open reserves room for
 one maximum-sized Arrow delivery before reporting success. A session holds at most 32 consumers
-and 32 MiB of consumer credit; the serving node reserves at most 128 MiB for this direction,
-independently of its producer budget. Thus one session's producer and consumer ceilings total
-64 MiB and a node's total 256 MiB. No consumer means retained output fills the bounded node
+and 32 MiB of consumer credit by default; the serving node reserves this direction against its
+resolved consumer node capacity independently of producer credit.
+[Execution Capabilities](node-settings.md#execution-capabilities) defines the node capacities and
+their memory-relative defaults. No consumer means retained output fills the bounded node
 budget and backpressures the graph.
 
 `OpenEmitter`, `ReadEmitterBatch`, `SettleEmitterBatch`, and `CloseEmitter` are session operations,

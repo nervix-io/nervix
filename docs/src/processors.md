@@ -250,6 +250,27 @@ CREATE DEDUPLICATOR unique_notifications
 Deduplication state is branch-local. Duplicate details are logged at `debug` or `trace`, never at
 `info`.
 
+### Inspect Remembered Keys
+
+```plexus
+SHOW DEDUPLICATOR unique_notifications STATE
+  FOR BRANCH VALUES { tenant = 'alpha' } LIMIT 100 FORMAT JSON;
+```
+
+`SHOW DEDUPLICATOR <name> STATE` reads one immutable publication per selected branch through the
+[shared inspection envelope](relay.md#inspect-materialized-state). Its `keys` section contains
+`key_1` onwards in `DEDUPLICATE ON` order, with each expression's exact type, followed by
+`seen_at`, the key's ingestion time. A key expression that reads a sensitive input or branch field
+is redacted. Keys are listed oldest first within each branch. Expired keys are excluded using one
+domain-clock reading, including when no new input has caused the branch task to prune them.
+
+The ordered `FOR`, `LIMIT ... AFTER` and `FORMAT` clauses, owner routing and typed refusals are
+shared with materialized-state inspection. A continuation is refused as `stale_continuation` when
+its publication or visible expiry prefix changes. Reading state does not refresh a key's expiry.
+`DESCRIBE DEDUPLICATOR` reports `branches:`, `keys:` and `state bytes:` for each execution unit;
+bytes include key values and their `seen_at` timestamps. Partitioned units prefix these lines with
+the partition. An unavailable owner reports its typed refusal in place of the count.
+
 ### Altering Deduplicators
 
 `ALTER DEDUPLICATOR` applies comma-separated operations in written order:
@@ -321,6 +342,48 @@ entity pause: the old ordering buffers are force-flushed while the input relays 
 node task is replaced with the new ordering program. Structural shared operations also use entity
 pause.
 
+### Inspect Held Rows
+
+```plexus
+SHOW REORDERER ordered_notifications STATE
+  FOR ALL BRANCHES LIMIT 100 FORMAT JSON;
+SHOW REORDERER ordered_notifications STATE
+  FOR BRANCH VALUES { tenant = 'alpha' } FORMAT TEXT;
+```
+
+`SHOW REORDERER <name> STATE` reads the rows the reorderer holds back, as one `pending` section per
+execution unit. It takes the same ordered `FOR`, `LIMIT ... AFTER` and `FORMAT` clauses, typed
+envelope, redaction, continuation and refusals as
+[`SHOW RELAY ... MATERIALIZED STATE`](relay.md#inspect-materialized-state). A row holds the input
+relay's fields, then `output`, the route it waits on numbered from `0` in declaration order as
+`DESCRIBE REORDERER` numbers its outputs; `order_key_1` onwards, one column per `BY` expression in
+the type that expression produces; `received_at`, when the batch holding the row arrived; and
+`release_at`, when the route releases what it holds: `MAX TIME` after its first held row arrived,
+or the route's `FLUSH EACH` deadline when that comes first. Every route holds its own rows, so a row
+waiting on two routes is listed once for each. An order key computed from a sensitive input or
+branch field is redacted like the field. Each branch lists its routes in order and, within a route,
+the rows in the order they arrived; rows are released in key order regardless.
+
+Each branch task answers the read between two of its batches with a bounded copy of the rows it
+holds, so an inspection never sees a partial batch and never changes what the reorderer releases or
+in which order. The read counts every held row and its logical Arrow bytes, the bytes the route
+charges against `MAX BATCH SIZE`. A continuation names every read branch's lifetime and the events
+it handled, so a page resumed after any branch took another batch, released rows or ended is
+refused as `stale_continuation`. A branch that is stopping refuses the read as `owner_unavailable`.
+
+`DESCRIBE REORDERER` reports, for each execution unit, the concrete branches the reorderer runs and
+the rows and bytes they hold, after its placement lines:
+
+```text
+branches: 2
+rows: 4
+state bytes: 2048
+```
+
+A partitioned reorderer prefixes each line with its partition, as in `partition 3 rows: 1`. A unit
+whose owner cannot be read reports the typed refusal in place of each count, as in
+`rows: unavailable (owner_unavailable)`.
+
 ## Window processor
 
 Windows are set-only. Aggregates appear directly in route `SET`; there is no `AGGREGATE` clause.
@@ -380,6 +443,38 @@ restoring a snapshot re-admits its retained rows.
 In a window route, `COUNT`, `SUM`, `FIRST`, `LAST`, `MIN`, and `MAX` always name window aggregates.
 The [array and vector functions](filter-map-functions.md#array-and-vector-functions) with the same
 names apply to one `ARRAY` or `VEC` value everywhere else.
+
+### Inspect Retained Window State
+
+```plexus
+SHOW WINDOW PROCESSOR latency_windows STATE FOR ALL BRANCHES LIMIT 100 FORMAT JSON;
+```
+
+`SHOW WINDOW PROCESSOR <name> STATE` reads one published generation per selected branch. The
+`rows` section contains the retained input fields, followed by `sequence`, `received_at`, and
+`argument_0` onwards: the saved argument columns in flattened aggregate-demand order. Input fields
+and argument expressions retain their declared sensitivity and are redacted before encoding.
+Rows are listed by branch and then sequence. Sealed publications use bounded native decoding under
+bulk admission; a read never changes, emits or steps the live window.
+
+Two additional typed sections describe each selected branch, including an empty published window:
+
+- `header`: `publication_revision`, `rows`, nullable `first_sequence`, `next_sequence`, nullable
+  `incarnation`, nullable `due_at`, and `state_bytes`. The due deadline is the earlier of the oldest
+  retained input's duration-width deadline and any delayed histogram removal. A branch with neither
+  has no due deadline. State bytes use the production `MAX STATE SIZE` charge, including shared
+  Arrow allocations, row handles, branch keys and reserved sketch panes.
+- `accumulators`: `structure`, the demand index starting at zero; `kind`, the VM's storage-kind
+  name; and `count`, the number of contributing retained argument rows, including pending delayed
+  histogram removals. Sketch contents and internal values are never exposed.
+
+`LIMIT`, continuation offsets and complete row counts count only retained input rows. Headers and
+accumulator facts do not advance the row position; they do consume the reply's byte bound and are
+repeated on each page. Metadata that cannot fit is refused as `reply_too_large`. Every section uses
+the same captured publication, and a changed publication or branch lifetime invalidates its
+continuation. Branch selectors, formats and owner routing use the shared inspection contract.
+`DESCRIBE WINDOW PROCESSOR` reports each unit's `branches:`, `rows:` and `state bytes:` without
+returning retained rows; the byte count is the sum of the same per-branch charges in the headers.
 
 ### Window aggregate functions
 
@@ -643,6 +738,25 @@ CREATE CORRELATOR correlate_orders
 Relays on each side share one declared schema; left and right schemas may differ. Correlators reject
 `FILTER WHERE`, `INHERIT`, bare RHS field reads, `input`, and a separate `OUTPUT` block.
 Correlations occur only within one concrete branch.
+
+### Inspect Pending Records
+
+```plexus
+SHOW CORRELATOR correlate_orders STATE FOR ALL BRANCHES LIMIT 100 FORMAT JSON;
+```
+
+`SHOW CORRELATOR <name> STATE` reads the records the correlator holds waiting for a match: a `left`
+section with the left side's fields and a `right` section with the right side's fields, each
+followed by `received_at`, when the record arrived, and `timeout_at`, `MAX TIME` later, when its
+`ON CORRELATION TIMEOUT` action applies unless a match arrives first. A side with no row on a page
+has no section. Each branch lists its left records, then its right records, each side in arrival
+order. The clauses, envelope, counts, redaction, continuation and refusals are those of
+[`SHOW REORDERER ... STATE`](#inspect-held-rows). A pending record keeps the batch it arrived in
+alive, so the byte count is the logical Arrow bytes of the batches the held records belong to, each
+batch counted once however many of its records are pending.
+
+`DESCRIBE CORRELATOR` reports the same `branches:`, `rows:` and `state bytes:` lines as
+`DESCRIBE REORDERER`, counting the records of both sides.
 
 ## Reingestor
 

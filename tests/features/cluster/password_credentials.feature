@@ -31,6 +31,21 @@ Feature: Bounded password credentials
       raft.current_leader:
       """
     And user "credential_user" with password "created-password" is accepted by the HTTP and WebSocket listeners
+    When these Plexus commands are executed through the client on the leader node
+      """
+      ALTER CLUSTER SET PASSWORD_ITERATIONS = 1;
+      CREATE USER changed_policy_user WITH PASSWORD 'changed-policy-password';
+      """
+    When the client connects to the leader node as user "changed_policy_user" with password "changed-policy-password"
+    Then the last command output contains
+      """
+      raft.current_leader:
+      """
+    When the client connects to the leader node as user "credential_user" with password "created-password"
+    Then the last command output contains
+      """
+      raft.current_leader:
+      """
     When the client connects to the leader node as user "credential_user" with password "wrong-password"
     Then the last command error contains
       """

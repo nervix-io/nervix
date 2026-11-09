@@ -80,6 +80,13 @@ pub(super) struct ReplicatedBranchState<C: BranchSnapshotCodec> {
 }
 
 impl<C: BranchSnapshotCodec> ReplicatedBranchState<C> {
+    /// A cold read identifies the exact registered state as well as its published revision.
+    pub(super) fn inspection_identity(&self) -> Option<[u8; 16]> {
+        self.catalog
+            .as_ref()
+            .map(CatalogRegistration::inspection_identity)
+    }
+
     /// Retain the codec's initial publication under its exact placement.
     pub(super) fn from_generations(
         placement: RuntimeStatePlacement,

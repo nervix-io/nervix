@@ -108,9 +108,9 @@ Feature: Node prerequisites
   Scenario Outline: A node whose memory limit cannot hold its memory budgets refuses to start at preflight on a cluster of <cluster_size>
     Given a <cluster_size> node nervix cluster is started
     And node "node-<cluster_size>" is stopped
-    And node-<cluster_size> starts with memory-limit = 1GiB
+    And node-<cluster_size> starts with memory-limit = 32MiB
     When node "node-<cluster_size>" attempts to start
-    Then node "node-<cluster_size>" refused to start because "memory-limit (1GiB) cannot hold the node's memory budgets of 2.66GiB"
+    Then node "node-<cluster_size>" refused to start because "the execution memory budgets of 101.25MiB exceed node memory 32MiB"
     Given node-<cluster_size> starts with memory-limit = 4GiB
     When node "node-<cluster_size>" is started
     Then node "node-<cluster_size>" eventually observes a stable leader

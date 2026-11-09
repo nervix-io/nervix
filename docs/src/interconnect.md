@@ -1980,10 +1980,11 @@ batches continue through the graph with nobody left to answer them, and the batc
 was clearing are dropped unadmitted, releasing their slots of the window. A later producer opens a
 new link.
 
-Each end reserves the producer's granted bytes in its own 128 MiB producer budget: the serving node
+Each end reserves the producer's granted bytes in its own resolved producer node budget: the serving node
 for the batches its session holds, and the owning node again for the batches it retains for another
 node. The link adds no reservation of its own beyond the transport's per-frame charge.
-[Client Session Protocol](./client-session-protocol.md#producers) describes what the client sees.
+[Client Session Protocol](./client-session-protocol.md#producers) describes what the client sees;
+[Execution Capabilities](node-settings.md#execution-capabilities) owns the local capacity derivation.
 
 ## Client Consumer Streams
 
@@ -1991,7 +1992,7 @@ When a session opens a consumer of a `TO CLIENT` emitter executing on another no
 node opens one `client_consumer_stream` duplex stream for that attachment on the relay pool and
 shared subquota. The opening request names the authenticated serving node, domain, emitter, exact
 schema fields and granted credit. The owner checks the peer identity, reserves the grant in its
-own 128 MiB consumer budget and attaches to its local emitter endpoint before replying `Opened`
+own resolved consumer node budget and attaches to its local emitter endpoint before replying `Opened`
 with the endpoint description or `Refused` with a typed cause. The serving node has already
 reserved the same grant against its session and node budgets.
 
@@ -2480,6 +2481,37 @@ so that definition owns the sole default and configured callers retain the same 
 The complete frontend inspection also has that elapsed-time bound. Failed or cancelled reads retain
 no historical cursor or page cache. The existing materialized dependency/generator snapshot request
 and its grouping, confirmation, integrity and admission behavior remain unchanged.
+
+## Processor State Page Operation
+
+`read_processor_state_page` is the process-targeted Bulk stream request, on the Snapshot subquota,
+that reads one execution unit of a stateful processor from the
+unit's owner. It names the domain, the processor's kind and name, the execution unit, the committed
+control revision, the schema fingerprint, the resolved branch selector, the optional branch/offset
+position, the row and byte limits and the exact owner process. The handler verifies the control
+cut, the kind, the schema, the unit owner and the target incarnation, then asks the unit's branch
+tasks for bounded copies, as [Data-Plane
+Concurrency](data-plane-concurrency.md#processor-state-inspection-requests) describes, and gathers
+the returned rows into Arrow columns on the bounded Bulk executor. Deduplicator and window reads
+capture published generations instead of asking branch tasks. Sealed window metadata and columns
+are decoded under bounded admission, with cancellation and storage charges retained through
+encoding. A zero-row request returns only counts for the processor's `DESCRIBE` summary.
+
+The stream frames an eight-byte little-endian descriptor length, a bounded typed rkyv descriptor and
+one native Arrow snapshot section per returned section. The descriptor carries the read origin, the
+complete counts, the returned offset and last branch, the returned rows as runs of one section and
+one branch with the branch's typed key fields, and each section's complete field list, held row
+count and body identity: exact byte length and SHA-256 digest. A descriptor names at most three
+sections, fixed by processor kind: reorderer `pending`; correlator `left` and `right`; deduplicator
+`keys`; or window `rows`, `header` and `accumulators`. Window metadata runs count toward section
+bodies and bytes, while only retained-row runs advance the row offset or consume its limit. The receiver bounds all buffering, verifies every digest before decoding,
+checks each section's payload fields against its own committed schema, decodes each section with
+exactly the declared field list, and checks the run rows, the returned offset and the row counts
+against the descriptor before any row reaches a Row frame. A typed refusal carries no body. No operator payload crosses as Row frames or row maps; the
+coordinator writes Row frames at the session reporting boundary, as for materialized pages.
+The inspection deadline controls stream admission and setup through
+`request_stream_with_timeout`, and the request type's `default_timeout()` reads
+`StateInspectionReadTimeout` like the materialized page operation.
 
 ## WASM State Page Operation
 

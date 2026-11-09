@@ -46,6 +46,12 @@ pub enum SuccessionKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ProofOfLifeKind {
+    ProofOfLife,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WorkingKeyUse {
     Decision,
 }
@@ -102,6 +108,27 @@ pub struct RootSuccession {
 
 impl Document for RootSuccession {
     const TYPE: DocumentType = DocumentType::Succession;
+}
+
+/// A root custodian's dated statement that the custodian still holds a root key (licensing
+/// specification §5.5). One root signs it alone, so it never meets a threshold and grants
+/// nothing: it is no trust document, and a trust state refuses it among the documents it builds
+/// from. It proves only that the named root of the named epoch could sign on `issued_at`, so that
+/// a lost key is discovered before a ceremony needs it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProofOfLife {
+    pub doc: ProofOfLifeKind,
+    pub protocol: u8,
+    pub issued_at: DateTime<Utc>,
+    /// The epoch whose root set holds the signing root.
+    pub root_epoch: u64,
+    /// The signing root's key identity.
+    pub kid: KeyId,
+}
+
+impl Document for ProofOfLife {
+    const TYPE: DocumentType = DocumentType::ProofOfLife;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

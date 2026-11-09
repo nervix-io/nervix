@@ -62,7 +62,8 @@ baseline  Kafka-to-Kafka delivery baseline using the supplied Nervix image
           topologies: one-node (--nodes 1), three-node (--nodes 3, default)
 rolling-restart  Graceful Pumba stops and Docker restarts under Kafka traffic
                  topologies: one-node (--nodes 1), three-node (--nodes 3, default)
-leader-crash  Observed leader SIGKILL, failover, and explicit Docker restart
+leader-crash  Observed leader SIGKILL, failover, and explicit Docker restart; on three nodes also an
+              outward TLS policy change committed during the failover, probed on every node
               topologies: one-node (--nodes 1), three-node (--nodes 3, default)
 follower-crash  Observed follower SIGKILL and recovery (three-node)
 ingestor-owner-crash  Observed ingestor owner SIGKILL and placement recovery (three-node)

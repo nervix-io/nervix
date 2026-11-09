@@ -142,7 +142,9 @@ pub fn statement_parser<'src>()
         crate::show_create::show_create_parser().map(Statement::ShowCreate),
         crate::show_stream_state::show_stream_materialized_state_parser()
             .map(Statement::ShowRelayMaterializedState),
-        crate::show_stream_state::show_wasm_processor_state_parser()
+        crate::show_processor_state::show_processor_state_parser()
+            .map(Statement::ShowProcessorState),
+        crate::show_processor_state::show_wasm_processor_state_parser()
             .map(Statement::ShowWasmProcessorState),
         crate::udf::describe_udf_parser().map(Statement::DescribeUdf),
         crate::udf::show_udfs_parser().map(Statement::ShowUdfs),
@@ -191,7 +193,9 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
             .verified("has_errors returned false above, so this parse produced output");
         if matches!(
             statement,
-            Statement::ShowRelayMaterializedState(_) | Statement::ShowWasmProcessorState(_)
+            Statement::ShowRelayMaterializedState(_)
+                | Statement::ShowProcessorState(_)
+                | Statement::ShowWasmProcessorState(_)
         ) && source.ends_with(char::is_whitespace)
             && !matches!(tokens.last(), Some(Token::Semicolon))
         {

@@ -32,7 +32,7 @@ use nervix_models::{
 };
 use nervix_primitives::time::timeout;
 
-use super::materialized_state::{
+use super::inspection_pages::{
     add_counts, inspection_owner, inspection_refusal, rendered_inspection,
 };
 use crate::{

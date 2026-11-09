@@ -1136,10 +1136,12 @@ The node a session is on serves completion and choice lookups, listing and selec
 subscriptions, domain clock attachments, producers, and the reads its locally applied state can
 answer: `SHOW CLUSTER STATUS`, `DESCRIBE CLUSTER`, `SHOW TRANSACTIONS`, `SHOW CREATE`, `SHOW UDFS`,
 `SHOW INGESTORS`, `SHOW EMITTERS`, `SHOW PLACEMENTS`,
-`SHOW RELAY MATERIALIZED STATE`, `SHOW WASM PROCESSOR STATE`, `LOOKUP`, and the `DESCRIBE`
-statements of domains, resources,
-endpoints, lookups, placements, UDFs, relocations, relays, ingestors, junctions, deduplicators,
-reingestors, correlators, reorderers, window processors, WASM processors, and emitters. Every other
+`SHOW RELAY MATERIALIZED STATE`, `SHOW REORDERER STATE`, `SHOW CORRELATOR STATE`,
+`SHOW DEDUPLICATOR STATE`, `SHOW WINDOW PROCESSOR STATE`, `SHOW WASM PROCESSOR STATE`,
+`LOOKUP`, and
+the `DESCRIBE` statements of domains, resources, endpoints, lookups, placements, UDFs, relocations,
+relays, ingestors, junctions, deduplicators, reingestors, correlators, reorderers, window
+processors, WASM processors, and emitters. Every other
 statement needs the leader, and so do every transaction request, transaction attach and inspection,
 and uploads. A follower answers them with `LeaderRedirect` before anything is admitted, and the
 client reconnects to the leader and repeats the request. Because persistent commands and
@@ -1703,7 +1705,7 @@ the credit it asks for: how many batches and how many bytes it may have outstand
 on the ordered lane. The serving node checks the session's transaction binding, the requested
 limits, the committed domain state and schedule, and the ingestor's kind, reserves room in the
 session's budget of 32 producers and its committed byte cap (32 MiB by default), and in
-its own node budget of 128 MiB, and attaches the
+its own resolved producer node budget, and attaches the
 producer through the node that executes the ingestor, which checks the expected fields against the
 execution it runs. The reply is `ProducerOpened` or a typed `ClientProducerRefusal` with a message;
 a refused open leaves nothing attached and reserves nothing. `ProducerOpened` carries the domain,
@@ -1833,13 +1835,16 @@ current admitted revision on the admission loop's half-second cadence, or sooner
 schedule or domain update. Until installation completes, the endpoint's existing
 temporary-unavailability behavior and the client's restoration backoff continue to apply.
 
+Node byte capacities derive from memory or explicit local overrides;
+[Execution Capabilities](node-settings.md#execution-capabilities) defines those admission ceilings.
+
 ## Emitter Consumers
 
 `OpenEmitterRequest` names the domain and `TO CLIENT` emitter, an exact field list, and requested
 outstanding batch and byte limits. The serving node validates the committed schedule and schema,
 reserves the requested bytes against the session's committed cap (32 MiB by default) and the
-node's separate 128 MiB consumer
-budgets, and attaches to the executing node before sending `OpenEmitterOutcome.Opened`. It
+node's separate resolved consumer
+budget, and attaches to the executing node before sending `OpenEmitterOutcome.Opened`. It
 refuses an open that cannot hold the emitter's maximum IPC batch. At most 32 consumer handles
 belong to one session. The request identity of the open is its `ConsumerId`. The protocol and its
 FlatBuffers shape are identical over native gRPC and the console WebSocket. An opened reply also
@@ -2578,6 +2583,12 @@ process-bound read origin, complete counts and named sections. A section carries
 `RowSchema`, bounded `NXRB` RowBatch frames, omitted-row count and optional positional watermark
 indices. Watermarks are distinct, non-sensitive datetime columns. Frames conform to their section
 schema, keep branch keys and redaction, and share the verified outer reply's backing bytes.
+
+Stateful processor reads use the same envelope. Deduplicators publish `keys`; windows publish
+retained `rows` plus per-branch `header` and `accumulators` sections. Window metadata consumes
+reply bytes and sections, while complete row counts, `LIMIT` and continuation offsets refer only
+to retained inputs. Metadata can therefore be present when no input is retained. The
+[processor inspection sections](./processors.md#inspect-retained-window-state) define their fields.
 
 A `SHOW WASM PROCESSOR ... STATE` page also carries its processor's pinned module as
 `WasmStateBinding` (resource, version and file), and each of its units carries `WasmUnitStateFacts`:

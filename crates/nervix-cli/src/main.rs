@@ -807,6 +807,7 @@ fn is_json_inspection_command(query: &str) -> bool {
     match statement {
         Statement::DescribeTransaction(describe) => describe.format == InspectionFormat::Json,
         Statement::ShowRelayMaterializedState(show) => show.format == InspectionFormat::Json,
+        Statement::ShowProcessorState(show) => show.format == InspectionFormat::Json,
         Statement::ShowWasmProcessorState(show) => show.format == InspectionFormat::Json,
         _ => false,
     }
@@ -1880,9 +1881,16 @@ mod tests {
         assert!(!is_json_inspection_command(
             "SHOW WASM PROCESSOR worker STATE;"
         ));
+        assert!(is_json_inspection_command(
+            "SHOW REORDERER held STATE FOR ALL BRANCHES LIMIT 2 FORMAT JSON;"
+        ));
+        assert!(is_json_inspection_command(
+            "SHOW CORRELATOR settle STATE FORMAT JSON;"
+        ));
         assert!(!is_json_inspection_command(
             "SHOW RELAY events MATERIALIZED STATE FORMAT TEXT;"
         ));
+        assert!(!is_json_inspection_command("SHOW CORRELATOR settle STATE;"));
         assert!(!is_json_inspection_command("DESCRIBE TRANSACTION;"));
         assert!(!is_json_inspection_command(
             "DESCRIBE TRANSACTION FORMAT JSON; SHOW TRANSACTIONS;"

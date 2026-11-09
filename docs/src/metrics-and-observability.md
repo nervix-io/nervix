@@ -387,7 +387,9 @@ identifier.
 `class` is the traffic class on transport series — `management`, `commands`, `replication`, `relay`,
 or `bulk` — and the execution class on admission series — `management`, `commands`, `relay`, `bulk`,
 `state_read`, `state_read_cache`, `bulk_window`, `restore_metadata`, `credentials` for memory, and `control_cpu`, `credentials_cpu`, `data_cpu`, `extension_cpu`,
-`bulk_cpu`, `consensus_storage`, `filesystem_storage` for workers. `operation` is the reserved request subquota: `shared`, `append`, `resource`, `snapshot`,
+`bulk_cpu`, `consensus_storage`, `filesystem_storage`, `connector_storage` for workers. Execution byte-limit
+series use `operation` values `relay_encoded`, `relay_decoded`, `relay_scratch` and `bulk_chunk`.
+On transport series, `operation` is the reserved request subquota: `shared`, `append`, `resource`, `snapshot`,
 `discovery`, `liveness`, `progress`, `admission`, `cancellation`, or `terminal`.
 
 Transport pools:
@@ -459,6 +461,9 @@ a second of flushing; see [Kafka client retirement](./connector-contract.md#kafk
   transient memory reserved for one class, and what it is currently holding
 - `nervix_execution_memory_reservations_total` and `nervix_execution_memory_rejections_total`:
   charges granted and charges refused outright
+- `nervix_execution_operation_limit_bytes` and `nervix_execution_resident_replication_batches`: resolved relay/bulk byte ceilings and replication window.
+- `nervix_execution_queue_capacity`: configured waiting places for each worker class. Workers,
+  queues and memory capacities report the actual [resolved execution settings](node-settings.md#execution-capabilities).
 - `nervix_execution_workers`, `nervix_execution_jobs_running`, `nervix_execution_jobs_pending`: how
   many jobs one class may have on the blocking pool at once, how many it holds, and how many wait
 - `nervix_execution_jobs_total`, `nervix_execution_jobs_completed_total`,
@@ -468,7 +473,7 @@ a second of flushing; see [Kafka client retirement](./connector-contract.md#kafk
 For `state_read_cache`, a rejected charge means the optional retained view had no room. The
 generator can still return a complete uncached read using `state_read` admission. Active decoded
 snapshots hold that class through installation or source evaluation and dispatch. Both read
-classes derive their capacities from the relay budget and count separately in the startup total.
+classes default to the relay budget, accept independent overrides and count separately in the startup total.
 - `nervix_execution_job_queue_seconds_total` and `nervix_execution_job_work_seconds_total`: time
   admitted jobs spent waiting for a worker, and time completed jobs spent holding one
 
