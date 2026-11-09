@@ -137,7 +137,16 @@ def section($heading):
              end),
             (if any(.cleanup.runs[]; .exit_code != 0)
              then "**Cleanup failed** for " + ([.cleanup.runs[] | select(.exit_code != 0) | .run_id | code] | join(", ")) + "."
-             else empty end)
+             else empty end),
+            ((.cleanup.verifier_runs // []) as $verifier_runs
+             | [$verifier_runs[] | select(.leftovers != null)] as $verifier_left
+             | (if ($verifier_left | length) == 0 then empty
+                else "Cleanup removed what the verifier self-check left under " + ([$verifier_left[].run_id | code] | join(", "))
+                     + ", after capturing it under " + ([$verifier_left[].leftovers.evidence | code] | join(", ")) + "."
+                end),
+               (if any($verifier_runs[]; .exit_code != 0)
+                then "**Cleanup failed** for the verifier self-check's " + ([$verifier_runs[] | select(.exit_code != 0) | .run_id | code] | join(", ")) + "."
+                else empty end))
      end);
 
 if length == 1 then

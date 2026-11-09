@@ -87,13 +87,16 @@ done
 bundle="${tmp_dir}/bundle"
 mkdir -p "${bundle}/tests" "${bundle}/bin"
 cp "${chaos_dir}/suite.sh" "${chaos_dir}/suite-report.jq" "${chaos_dir}/require-jq.sh" \
-    "${chaos_dir}/verifier-self-check.sh" "${chaos_dir}/binding-image.sh" "${bundle}/"
+    "${chaos_dir}/verifier-self-check.sh" "${chaos_dir}/sessions.sh" "${chaos_dir}/binding-image.sh" "${bundle}/"
 printf '#!/usr/bin/env bash\nexit 0\n' >"${bundle}/tests/suite-self-test.sh"
 
 # The verifier self-check stand-in records each execution and every signal in the suite directory
-# its --evidence names, and acts out the outcome this file chooses: pass, fail or hold until a
-# signal ends it. The file lives outside the bundle, so choosing an outcome leaves the identity of
-# the scripts the suite checked unchanged.
+# its --evidence names, and acts out the outcome this file chooses: pass, fail, hold until a signal
+# ends it, or leak, a pass that leaves what cleanup cannot remove. Like the full check, it first
+# records the run label of a part that gives Docker resources one, verifier-OUTCOME, and a failed
+# or held check keeps a partial record in its evidence directory; the cleanup stand-in leaves
+# resources behind for the labels ending in -left. The file lives outside the bundle, so choosing an
+# outcome leaves the identity of the scripts the suite checked unchanged.
 verifier_outcome="${tmp_dir}/verifier-outcome"
 printf 'pass\n' >"${verifier_outcome}"
 cat >"${bundle}/tests/self-test.sh" <<EOF
@@ -101,16 +104,32 @@ cat >"${bundle}/tests/self-test.sh" <<EOF
 set -euo pipefail
 [[ "\$#" -eq 2 && "\$1" == --evidence ]] || exit 9
 suite_dir="\${2%/verifier-self-test}"
+export CHAOS_SELF_TEST_EVIDENCE="\$2"
+source "\$(dirname "\$0")/../verifier-self-check.sh"
 printf 'verifier\n' >>"\${suite_dir}/sequence.txt"
 case "\$(cat "${verifier_outcome}")" in
-    pass) printf 'chaos harness self-test passed\n' ;;
-    fail) printf 'self-test failed: a verifier passed a known failure\n' >&2; exit 3 ;;
+    pass)
+        chaos_verifier_register_run verifier-pass
+        printf 'chaos harness self-test passed\n'
+        ;;
+    fail)
+        chaos_verifier_register_run verifier-fail-left
+        printf '{"control": "partial"}\n' >"\$2/partial.probe.json"
+        printf 'self-test failed: a verifier passed a known failure\n' >&2
+        exit 3
+        ;;
     hold)
+        chaos_verifier_register_run verifier-hold-left
+        printf '{"control": "partial"}\n' >"\$2/partial.probe.json"
         trap 'printf "TERM\n" >>"\${suite_dir}/verifier.signals"; exit 143' TERM
         printf '%s\n' "\$\$" >"\${suite_dir}/verifier.pid"
         while true; do
             sleep 0.1
         done
+        ;;
+    leak)
+        chaos_verifier_register_run verifier-leak-stuck
+        printf 'chaos harness self-test passed\n'
         ;;
     *) exit 9 ;;
 esac
@@ -468,6 +487,10 @@ chaos_verifier_record_refusal "${verifier_record}" "${bundle}" >"${tmp_dir}/adop
     || fail "the suite wrote a verifier self-check record its runs cannot adopt: $(cat "${tmp_dir}/adoption.txt")"
 grep -Fq 'chaos harness self-test passed' "${tmp_dir}/runs/outcomes-1/verifier-self-test.txt" \
     || fail 'the suite did not keep the output of its verifier self-check'
+# The suite cleans up the run label its passing check recorded, finds nothing, and forgets it.
+[[ "$(cat "${tmp_dir}/runs/outcomes-1/verifier-self-test/cleanup-calls.txt")" == verifier-pass \
+    && ! -e "${tmp_dir}/runs/outcomes-1/verifier-self-test/run-ids.txt" ]] \
+    || fail 'the suite did not clean up and forget the run label of its passing verifier self-check'
 summary="${tmp_dir}/runs/outcomes-1/summary.md"
 # The summary is Markdown, so its code spans are written with escaped backticks.
 expect_summary() {
@@ -615,6 +638,27 @@ grep -Fq 'a verifier passed a known failure' "${tmp_dir}/runs/unverified-1/verif
     || fail 'the suite did not keep the output of its failed verifier self-check'
 grep -Fq '**CONTROLLER failure:** the verifier self-check exited 3; see verifier-self-test.txt' \
     "${tmp_dir}/runs/unverified-1/summary.md" || fail 'the summary did not name the failed verifier self-check'
+[[ -s "${tmp_dir}/runs/unverified-1/verifier-self-test/cleanup/verifier-fail-left/cleanup.json" \
+    && "$(cat "${tmp_dir}/runs/unverified-1/verifier-self-test/run-ids.txt")" == verifier-fail-left \
+    && -s "${tmp_dir}/runs/unverified-1/verifier-self-test/partial.probe.json" ]] \
+    || fail 'the suite did not remove what its failed verifier self-check left while keeping its records'
+
+# A passing verifier self-check that leaves what cleanup cannot remove fails the suite the same way.
+printf 'leak\n' >"${verifier_outcome}"
+status=0
+suite green --image nervix:local --artifacts "${tmp_dir}/runs" --suite-id leaked-1 \
+    >"${tmp_dir}/leaked.txt" 2>&1 || status=$?
+printf 'pass\n' >"${verifier_outcome}"
+[[ "${status}" -eq 1 ]] || fail "a verifier self-check whose leftovers stayed returned ${status}, expected 1"
+expect_json "${tmp_dir}/runs/leaked-1/suite.json" '.status == "failed"
+    and .verifier_self_check.status == "failed" and .verifier_self_check.exit_code == 0
+    and .error.category == "controller"
+    and .error.message == "cleanup could not remove what the verifier self-check left; see verifier-self-test/cleanup"
+    and all(.entries[]; .status == "not-started" and .reason == "the verifier self-check failed")' \
+    'a verifier self-check whose leftovers cleanup could not remove did not stop the suite'
+[[ ! -e "${tmp_dir}/runs/leaked-1/verifier-self-check.json" && ! -e "${tmp_dir}/runs/leaked-1/stub-calls.txt" \
+    && "$(cat "${tmp_dir}/runs/leaked-1/verifier-self-test/run-ids.txt")" == verifier-leak-stuck ]] \
+    || fail 'a verifier self-check whose leftovers stayed started a run, left a record or lost its run label'
 
 # The runs need jq 1.8: an older or unrecognized jq is refused, and a suite stops before any run.
 real_jq="$(command -v jq)"
@@ -949,6 +993,9 @@ expect_json "${tmp_dir}/runs/held-1/suite.json" '.status == "interrupted" and .s
     || fail "the verifier self-check received $(tr '\n' ' ' <"${tmp_dir}/runs/held-1/verifier.signals"), not one TERM"
 [[ ! -e "${tmp_dir}/runs/held-1/stub-calls.txt" && ! -e "${tmp_dir}/runs/held-1/verifier-self-check.json" ]] \
     || fail 'an interrupted verifier self-check started a run or left a record'
+[[ -s "${tmp_dir}/runs/held-1/verifier-self-test/cleanup/verifier-hold-left/cleanup.json" \
+    && -s "${tmp_dir}/runs/held-1/verifier-self-test/partial.probe.json" ]] \
+    || fail 'the suite did not remove what its interrupted verifier self-check left while keeping its records'
 
 # A verifier self-check whose controller was killed leads its own session; cleanup passes it one
 # TERM, and it ends before the wait does.
@@ -966,19 +1013,26 @@ printf 'pass\n' >"${verifier_outcome}"
 expect_json "${tmp_dir}/runs/held-killed-1/suite.json" '.status == "interrupted"
     and .verifier_self_check.status == "interrupted"
     and .cleanup.verifier_self_check == {terminated: true, killed_processes: 0}
+    and [.cleanup.verifier_runs[] | {run_id, exit_code, evidence: .leftovers.evidence}]
+        == [{run_id: "verifier-hold-left", exit_code: 0, evidence: "cleanup/verifier-hold-left"}]
     and .cleanup.runs == [] and all(.entries[]; .status == "not-started")' \
-    'cleanup did not end the verifier self-check of a killed controller'
+    'cleanup did not end the verifier self-check of a killed controller and remove what it left'
 [[ "$(cat "${tmp_dir}/runs/held-killed-1/verifier.signals")" == TERM ]] \
     || fail 'the verifier self-check of a killed controller did not receive exactly one TERM from cleanup'
 process_gone "$(cat "${tmp_dir}/runs/held-killed-1/verifier.pid")" \
     || fail 'cleanup left the verifier self-check executing'
 grep -Fq 'Cleanup passed TERM to the verifier self-check, which outlived its controller.' \
     "${tmp_dir}/runs/held-killed-1/summary.md" || fail 'the summary did not report the verifier self-check cleanup ended'
+grep -Fq "Cleanup removed what the verifier self-check left under \`verifier-hold-left\`, after capturing it under \`cleanup/verifier-hold-left\`." \
+    "${tmp_dir}/runs/held-killed-1/summary.md" || fail 'the summary did not report what cleanup removed for the verifier self-check'
+[[ -s "${tmp_dir}/runs/held-killed-1/verifier-self-test/partial.probe.json" ]] \
+    || fail 'the verifier self-check of a killed controller lost its partial record'
 
 suite cleanup "${tmp_dir}/runs/outcomes-1" >"${tmp_dir}/cleanup-passed.txt" 2>&1 \
     || fail 'cleanup after a finished suite failed'
 expect_json "${tmp_dir}/runs/outcomes-1/suite.json" '.status == "failed" and all(.cleanup.runs[]; .leftovers == null)
-    and (.cleanup.runs | length) == 10' 'cleanup after a finished suite changed its verdict or found leftovers'
+    and (.cleanup.runs | length) == 10 and .cleanup.verifier_runs == []' \
+    'cleanup after a finished suite changed its verdict or found leftovers'
 suite cleanup "${tmp_dir}/runs/never" >"${tmp_dir}/cleanup-none.txt" 2>&1 \
     || fail 'cleanup of a suite that never started failed'
 
