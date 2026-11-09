@@ -27,8 +27,9 @@ A fresh JVM's packaging check loads the jar without JUnit, an explicit native-li
 
 ## Connect
 
-Use a session URI, an existing domain and credentials. TLS listeners use `https://`. For a private
-certificate authority, pass its PEM bytes to `caCertificate`. `REQUIRED` refuses a plaintext URI;
+Use a session URI, an existing domain and credentials. TLS listeners use `https://`. Pass the
+certificate authority's PEM bytes to `caCertificate`: the client loads no system roots, so every
+TLS connection needs that explicit authority. `REQUIRED` refuses a plaintext URI;
 `PREFERRED` also supports a plaintext listener. Both requirements verify the peer when using TLS.
 
 ```java

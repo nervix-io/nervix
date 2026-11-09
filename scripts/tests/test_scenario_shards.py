@@ -410,7 +410,11 @@ class RecipeTests(unittest.TestCase):
 
     def test_the_prepared_runner_installs_the_instrumented_wheel(self) -> None:
         head = self.recipe("test-scenarios-coverage-run").splitlines()[0]
-        self.assertEqual(head, ": install-paced-simulation-python")
+        self.assertEqual(head, ': install-paced-simulation-python (install-client-python (cargo_target_dir + "/paced-simulation/wheels"))')
+        for name in ("test-scenarios-coverage-run", "test-scenarios-coverage-shard"):
+            body = self.recipe(name)
+            self.assertIn("NERVIX_CLIENT_CONFORMANCE_DIR=", body)
+            self.assertIn("test-client-python-api-run", body)
 
 
 class WorkflowTests(unittest.TestCase):

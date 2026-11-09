@@ -518,8 +518,8 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_payload_credential_logs`, `raft_payload_credential_meta`, `raft_payload_credential_state`, and
-`raft_payload_credential_snapshots`. Opening it validates the complete keyspace namespace before reading
+`raft_payload_inferencer_logs`, `raft_payload_inferencer_meta`, `raft_payload_inferencer_state`, and
+`raft_payload_inferencer_snapshots`. Opening it validates the complete keyspace namespace before reading
 any records. This namespace identifies the current Model shape, including the separate JSON
 and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec encoding, a Pulsar
 subscription's required type, an owned Pulsar subscription's required start position, a Kafka
@@ -535,7 +535,7 @@ resolved branch declaration of the committed schedule carries. It identifies
 the current statement shape as well, which the statements a transaction keeps are stored in:
 `ALTER BRANCH` among those statements, and an `ALTER INGESTOR` or `ALTER EMITTER` operation that
 changes one part of its entity's body, an envelope clause or the properties, or one part of a
-construction where it stands, including the typed `payload` expression scope. Its state metadata requires the current `ClusterState` encoding, 19,
+construction where it stands, including the typed `payload` expression scope. Its state metadata requires the current `ClusterState` encoding, 20,
 including committed cluster parameters, the durable restore installation gate and the unit-keyed
 committed schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,
@@ -737,6 +737,8 @@ same fence; an idempotent retry only rejoins retained progress and never reappli
 The metadata encoding has one current identity. Data from a different stored shape fails decoding
 with a typed error asking for node-state recreation. Parameter durations and numeric bounds are
 validated on archive recovery as well as construction. No migration or second decoder is present.
+
+The current schedule archive includes the inferencer ownership-state component. Native tensor checkpoints remain node-owned runtime state, never consensus records. Their placement combines the schema fingerprint and the decision layer's typed fingerprint of the pinned resource, file and ordered `STATE` declarations. Schedule application removes checkpoints whose model identity was replaced. The interconnect, consensus schedule and runtime storage identifiers name this one current shape; stored state in another shape must be recreated.
 
 ### Credential Publication
 

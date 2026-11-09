@@ -3239,6 +3239,14 @@ digest-mismatched current chunk set or a conflicting publication inventory. `Res
 format marker is missing or invalid. The unit-keyed checkpoint format uses a distinct marker, so
 state written under an earlier key shape fails at open rather than disappearing from a read.
 
+Inferencer checkpoint failures retain `SnapshotError` beneath
+`RuntimePersistenceError::InferencerSnapshot`. An unrecognized signature, invalid tensor layout or
+undecodable frame asks for the stored state to be recreated. Frame and declared-state bounds report
+the required bytes and the configured snapshot section limit; `CREATE INFERENCER` names the refused
+inferencer. Archive lengths are checked before owned tensor allocation. Executor admission and
+cancellation remain their own typed storage outcomes rather than a judgment that tensor data is
+invalid. Checkpoint diagnostics never include tensor values.
+
 `RestoreStagingQuota` carries the node's unpublished checkpoint limit, current usage and incoming
 checkpoint footprint; `RestoreStagingSize` rejects an unrepresentable accounting sum. A quota
 failure remains a storage failure beneath the admitted restore step and leaves its activation gate

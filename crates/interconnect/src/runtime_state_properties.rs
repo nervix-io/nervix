@@ -72,7 +72,7 @@ impl<'a> Messages<'a> {
     }
 
     fn state(&mut self) -> RuntimeState {
-        let variant = self.arbitrary.entropy().byte() % 8;
+        let variant = self.arbitrary.entropy().byte() % 9;
         let schema = SchemaFingerprint::from_digest(self.digest());
         match variant {
             0 => RuntimeState::BranchAggregated,
@@ -89,6 +89,10 @@ impl<'a> Messages<'a> {
                 }
             }
             6 => RuntimeState::WindowProcessor { schema },
+            7 => RuntimeState::Inferencer {
+                schema,
+                model: nervix_models::InferencerModelFingerprint::from_digest(self.digest()),
+            },
             _ => RuntimeState::BranchLru { schema },
         }
     }
@@ -761,6 +765,10 @@ fn runtime_state_wire_variant_boundaries() {
                 .assured("the maximum generation is nonzero"),
         },
         RuntimeState::WindowProcessor { schema },
+        RuntimeState::Inferencer {
+            schema,
+            model: nervix_models::InferencerModelFingerprint::from_digest([0xa5; 32]),
+        },
         RuntimeState::BranchLru { schema },
     ];
     let values = [
