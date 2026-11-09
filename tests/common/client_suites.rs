@@ -58,6 +58,8 @@ pub(crate) enum SuiteHost {
     Cpp,
     /// Java 21 over the JVM library, with the pinned JUnit 5 console launcher.
     Java,
+    /// Ruby 3.3+ over the native gem, with its bundled minitest.
+    Ruby,
 }
 
 impl FromStr for SuiteHost {
@@ -69,6 +71,7 @@ impl FromStr for SuiteHost {
             "c" => Ok(Self::C),
             "cpp" => Ok(Self::Cpp),
             "java" => Ok(Self::Java),
+            "ruby" => Ok(Self::Ruby),
             other => Err(io::Error::other(format!(
                 "unknown client suite host '{other}'"
             ))),
@@ -90,6 +93,7 @@ impl SuiteHost {
             Self::C => "c",
             Self::Cpp => "cpp",
             Self::Java => "java",
+            Self::Ruby => "ruby",
         }
     }
 
@@ -152,6 +156,16 @@ impl SuiteHost {
                          ClassOrderer$OrderAnnotation",
                     ])
                     .env("NERVIX_CLIENT_JVM_JAR", java.join("nervix-client.jar"));
+                Ok(command)
+            }
+            Self::Ruby => {
+                let mut command = Command::new("ruby");
+                command
+                    .arg("-I")
+                    .arg(artifacts.join("ruby/lib"))
+                    .arg(self.suite().join("runner.rb"))
+                    .arg("cluster")
+                    .env(ARTIFACTS_ENV, artifacts);
                 Ok(command)
             }
         }

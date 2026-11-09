@@ -77,6 +77,7 @@ confirm or message durability from routing alone.
 
 For applications submitting Plexus, use [Client Libraries](../../../docs/src/client-libraries.md)
 to select the host guide; Java and JVM programs follow [JVM Client Library](../../../docs/src/client-library-jvm.md),
+Ruby applications follow [Ruby Client Library](../../../docs/src/client-library-ruby.md),
 and C and C++ programs follow [C And C++ Client Library](../../../docs/src/client-library-c.md).
 Read its execution, clock and endpoint sections before choosing application-side lifecycle handling.
 
@@ -110,6 +111,7 @@ does not establish that a user exists.
 Read the Ingestors and Emitters chapters for `SHOW INGESTORS`, `SHOW EMITTERS`, and `DESCRIBE`;
 their inspection contracts distinguish effective options from canonical `SHOW CREATE` configuration.
 For ingestor inspection, follow [Ingestor Source Interactions](../../../docs/src/metrics-and-observability.md#ingestor-source-interactions) before interpreting raw counts, filtered graph traffic or poll duration.
+Before reading an acknowledgement failure, a reconnect loop or a stuck ingestor from `DESCRIBE INGESTOR`, follow [Ingestor Acknowledgement And Lifecycle](../../../docs/src/metrics-and-observability.md#ingestor-acknowledgement-and-lifecycle): an expired `ACK TIMEOUT` is counted as `timed_out`, not as a failed tree.
 For batching inspection, read [Emitter payload preparation](../../../docs/src/metrics-and-observability.md#emitter-payload-preparation)
 alongside Emitters: check the effective container and distinguish encoded payload measurements,
 retained work, retries and confirmed source records before interpreting a throughput figure.
@@ -122,9 +124,9 @@ for record outcomes, retry causes and waits, acquisition, pool waits, finish out
 current failure gauge in `/metrics` and `DESCRIBE EMITTER`.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
-Roto UDFs, ingestors and emitters for every connector and entity pair, junctions, reingestors, and session
-subscriptions; use the same web-console chapter for their typed fields, resource versions, program
-editors, reference lookup, and transaction behavior.
+Roto UDFs, ingestors and emitters for every connector and entity pair, junctions, deduplicators,
+reorderers, reingestors, and session subscriptions; use the same web-console chapter for their typed
+fields, resource versions, program editors, reference lookup, and transaction behavior.
 
 For materialized relay inspection, read [Relay → Inspect Materialized State](../../../docs/src/relay.md#inspect-materialized-state)
 for selector, LIMIT/AFTER and FORMAT clause order, typed rows, sensitivity and stale continuations.

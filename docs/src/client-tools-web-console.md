@@ -138,12 +138,12 @@ it after a leader change. Its `PACED` state and advancing ticks establish restor
 
 The top bar's **Create** menu opens keyboard-accessible forms for domains, users, resource
 catalogs, schemas, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps, Roto UDFs,
-relays, branches, ingestors, junctions, reingestors, emitters, and subscriptions. The resource group in the
-sidebar also provides a contextual create action. A form keeps its unfinished draft when it closes,
-restores focus to the action that opened it, reports validation and server failures inline, and
-shows the canonical Plexus statement before submission. An expression typed into a form, such as a
-filter, a `WHERE` predicate, an assigned value or an invocation argument, reads exactly as it does
-in a typed statement: its [string literals](filter-map-functions.md#literals) are verbatim, so a
+relays, branches, ingestors, junctions, deduplicators, reorderers, reingestors, emitters, and
+subscriptions. The resource group in the sidebar also provides a contextual create action. A form
+keeps its unfinished draft when it closes, restores focus to the action that opened it, reports
+validation and server failures inline, and shows the canonical Plexus statement before submission.
+An expression typed into a form, such as a filter, a `WHERE` predicate, an assigned value or an
+invocation argument, reads exactly as it does in a typed statement: its [string literals](filter-map-functions.md#literals) are verbatim, so a
 backslash is an ordinary character.
 The domain form supports paced and unpaced clocks, period and skew for a paced clock, placement
 policy, and `IF NOT EXISTS`. User and resource forms support their corresponding names and the
@@ -335,6 +335,18 @@ output and error relays to the required branch and offer only materialized relay
 changed domain or dependent reference keeps the draft visible and requires the affected choice to
 be selected again. The preview and durable submission use the completed semantic Model; registry
 validation reports any remaining schema, branch, sensitivity, or graph error inline.
+
+A deduplicator or reorderer form follows the junction form's contracts: it chooses its exact
+unbranched or named branch before its input relays, offers additional inputs and its output, error
+and state relays under the same schema and branch rules, and keeps input predicates, collection
+bounds, materialized dependencies, and routes in visible order. It also edits its ordered
+`DEDUPLICATE ON` or `BY` expressions and its `MAX TIME` duration. Expressions can be added, removed,
+and moved, and their written order is the key or ordering order the preview and the stored Model
+keep. The form requires at least one expression, reads each as a typed expression before the
+preview appears, and requires a duration, which it keeps exactly as typed. The registry reports a
+key or ordering expression that does not compile against the input schema, or a duration it cannot
+read, inline while the draft stays editable. [Deduplicator](processors.md#deduplicator) and
+[Reorderer](processors.md#reorderer) describe the keyspace, ordering, and holding-time semantics.
 
 An emitter form starts with its connector and entity, then selects the configured client or the
 schema a client consumer publishes. Its searchable input list preserves written order and offers

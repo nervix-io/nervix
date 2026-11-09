@@ -28,7 +28,8 @@ use nervix_connector::{
     IngestorBatchAcknowledgement, IngestorBatchRequest, IngestorCapabilities, IngestorConnector,
     IngestorError, IngestorHost, IngestorHostServices, IngestorIntakeError, IngestorIntakeMessage,
     IngestorIntakeResult, IngestorMessage, IngestorPlan, IngestorPoll, IngestorReadOutcome,
-    IngestorResume, IngestorSettlement, PacedIngestorConnector, ParsedRetryPolicy,
+    IngestorResume, IngestorResumeOutcome, IngestorSettlement, IngestorSettlementOperation,
+    IngestorSettlementOutcome, IngestorSuspendCause, PacedIngestorConnector, ParsedRetryPolicy,
     next_retry_delay, physical_time::actual_utc_now,
 };
 use nervix_models::{DomainClockPeriod, IngestAcknowledgement, PositionClass};
@@ -42,7 +43,7 @@ use super::{
     IngestorConnectorStartError, IngestorStartError,
 };
 use crate::{
-    metrics::IngestorInteractionMetrics,
+    metrics::{IngestorInteractionMetrics, TaskFailureBinding},
     runtime::ingestor_quiesce::{IngestorQuiesceObservation, LiveDeliveryEnd},
 };
 
@@ -576,6 +577,9 @@ pub(super) struct RuntimeIngestorHost {
     /// How long a scenario makes this host wait between learning that a batch was acknowledged
     /// through the graph and letting its ingestor confirm the batch, as a slow transport would.
     confirmation_delay: Option<Duration>,
+    /// Publishes this task's transient status as the unit's transient-failure gauge until the
+    /// host ends.
+    _failure_observation: TaskFailureBinding,
 }
 
 impl RuntimeIngestorHost {
@@ -612,6 +616,10 @@ impl RuntimeIngestorHost {
             decode_rejections_counter,
             status.clone(),
         );
+        let failure_status = status.clone();
+        let failure_observation = interactions
+            .acknowledgements
+            .bind_failure_source(move || failure_status.connection.failures().is_some());
         let delivery_stop = spec.shutdown.clone();
         let confirmation_delay = spec
             .runtime
@@ -650,6 +658,7 @@ impl RuntimeIngestorHost {
             interactions,
             decode_rejections,
             confirmation_delay,
+            _failure_observation: failure_observation,
         }
     }
 
@@ -1237,12 +1246,47 @@ impl IngestorHostServices for RuntimeIngestorHost {
         ));
     }
 
-    fn handle_ack_failure(&self, reason: String) {
-        self.runtime.events().report_error(format!(
-            "ingestor ACK chain failed for ingestor '{}' in domain '{}': {reason}",
-            self.ingestor.as_str(),
-            self.domain.as_str(),
-        ));
+    fn record_acknowledgement(&self, outcome: &IngestorAcknowledgementOutcome) {
+        self.interactions.acknowledgements.acknowledgement(outcome);
+        match outcome {
+            IngestorAcknowledgementOutcome::Acknowledged
+            | IngestorAcknowledgementOutcome::Shutdown => {}
+            IngestorAcknowledgementOutcome::Failed { reason } => {
+                self.runtime.events().report_error(format!(
+                    "ingestor ACK chain failed for ingestor '{}' in domain '{}': {reason}",
+                    self.ingestor.as_str(),
+                    self.domain.as_str(),
+                ));
+            }
+            IngestorAcknowledgementOutcome::TimedOut { silence } => {
+                self.runtime.events().report_error(format!(
+                    "ingestor ACK chain for ingestor '{}' in domain '{}' timed out: no \
+                     acknowledgement progress within ACK TIMEOUT {}",
+                    self.ingestor.as_str(),
+                    self.domain.as_str(),
+                    humantime::format_duration(*silence),
+                ));
+            }
+        }
+    }
+
+    fn record_transport_settlement(
+        &self,
+        operation: IngestorSettlementOperation,
+        outcome: IngestorSettlementOutcome,
+        elapsed: Duration,
+    ) {
+        self.interactions
+            .acknowledgements
+            .transport_settlement(operation, outcome, elapsed);
+    }
+
+    fn record_resume(&self, outcome: IngestorResumeOutcome) {
+        self.interactions.acknowledgements.resume(outcome);
+    }
+
+    fn record_suspend(&self, cause: IngestorSuspendCause) {
+        self.interactions.acknowledgements.suspend(cause);
     }
 
     fn record_transport_redeliveries(&self, positions: usize) {
@@ -1264,6 +1308,9 @@ impl IngestorHostServices for RuntimeIngestorHost {
     }
 
     fn record_unconfirmed_stop(&self, positions: usize) {
+        self.interactions
+            .acknowledgements
+            .unconfirmed_stop(positions);
         info!(
             domain = self.domain.as_str(),
             ingestor = self.ingestor.as_str(),
@@ -1431,6 +1478,7 @@ async fn prepare_paced_ingestor<C, H>(
     connector: &mut C,
     host: &mut H,
     ready: &mut bool,
+    failed_poll: &mut bool,
     shutdown: &mut watch::Receiver<bool>,
 ) -> PacedIngestorAction
 where
@@ -1443,6 +1491,7 @@ where
     if host.should_suspend_intake() {
         flush_paced_ingestor(host).await;
         if *ready {
+            host.record_suspend(IngestorSuspendCause::Quiesce);
             if let Err(error) = connector.suspend().await {
                 host.report_error(format!("{error:#}"));
             }
@@ -1461,8 +1510,15 @@ where
     }
 
     if !*ready || connector.needs_resume() {
+        if *ready && *failed_poll {
+            // The failed poll left the ready connector needing a resume.
+            host.record_suspend(IngestorSuspendCause::ReadFailure);
+        }
+        *failed_poll = false;
         flush_paced_ingestor(host).await;
-        match connector.resume().await {
+        let resumed = connector.resume().await;
+        host.record_resume(IngestorResumeOutcome::from(&resumed));
+        match resumed {
             Ok(IngestorResume::Ready) => {
                 *ready = true;
                 host.mark_ready();
@@ -1513,10 +1569,19 @@ async fn run_paced_ingestor<C, H, D>(
 {
     let cadence_cancellation = CancellationToken::new();
     let mut ready = false;
+    let mut failed_poll = false;
 
     loop {
         nervix_primitives::task::consume_budget().await;
-        match prepare_paced_ingestor(&mut connector, &mut host, &mut ready, &mut shutdown).await {
+        let preparation = prepare_paced_ingestor(
+            &mut connector,
+            &mut host,
+            &mut ready,
+            &mut failed_poll,
+            &mut shutdown,
+        )
+        .await;
+        match preparation {
             PacedIngestorAction::Poll => {}
             PacedIngestorAction::Restart => continue,
             PacedIngestorAction::Stop => break,
@@ -1578,11 +1643,13 @@ async fn run_paced_ingestor<C, H, D>(
                     IngestorReadOutcome::Delivered
                 };
                 host.record_poll(outcome, elapsed);
+                failed_poll = false;
                 poll
             }
             Err(error) => {
                 host.record_poll(IngestorReadOutcome::Failed, elapsed);
                 host.record_poll_error(format!("{error:#}"));
+                failed_poll = true;
                 continue;
             }
         };
@@ -1723,6 +1790,8 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
     } = policy;
     let mut retry_delay = retry_policy.backoff;
     let mut ready = false;
+    // Whether the latest read failed, which suspends a connector that then needs a resume.
+    let mut read_failed = false;
     let mut pending_rejection: Option<Vec<C::Position>> = None;
 
     loop {
@@ -1738,6 +1807,7 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
         if host.should_suspend_intake() {
             flush_for_lifecycle(&mut host).await;
             if ready {
+                host.record_suspend(IngestorSuspendCause::Quiesce);
                 if let Err(error) = connector.suspend().await {
                     host.report_error(format!("{error:#}"));
                 }
@@ -1756,6 +1826,11 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
         }
 
         if !ready || connector.needs_resume() {
+            if ready && read_failed {
+                // The failed read left the ready connector needing a resume.
+                host.record_suspend(IngestorSuspendCause::ReadFailure);
+            }
+            read_failed = false;
             flush_for_lifecycle(&mut host).await;
             let resumed = nervix_primitives::select! {
                 biased;
@@ -1768,6 +1843,7 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
                 _ = host.wait_for_quiesce_change() => continue,
                 resumed = connector.resume() => resumed,
             };
+            host.record_resume(IngestorResumeOutcome::from(&resumed));
             match resumed {
                 Ok(IngestorResume::Ready) => {
                     ready = true;
@@ -1816,11 +1892,19 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
         // missing record. Only a replayable ingestor still holds a pending rejection here, because a
         // resume discards a broker-redelivered one and an ingestor without positions never keeps one.
         if let Some(positions) = pending_rejection.take() {
-            if let Err(error) = connector.reject(&positions).await {
+            let started_at = Instant::now();
+            let rejected = connector.reject(&positions).await;
+            host.record_transport_settlement(
+                IngestorSettlementOperation::Reject,
+                IngestorSettlementOutcome::from(&rejected),
+                started_at.elapsed(),
+            );
+            if let Err(error) = rejected {
                 let delay = ingestor_retry_delay(retry_delay);
                 host.record_transient_error(ingestor_failure_reason(&error), delay);
                 host.report_error(format!("{error:#}"));
                 pending_rejection = Some(positions);
+                host.record_suspend(IngestorSuspendCause::Rejection);
                 if let Err(error) = connector.suspend().await {
                     host.report_error(format!("{error:#}"));
                 }
@@ -1839,7 +1923,10 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
         let read = read_batch(&mut connector, &mut host, &mut shutdown, request).await;
         let end = read.end;
         let messages = match read.into_outcome(&host) {
-            ReadOutcome::TakeIn(messages) => messages,
+            ReadOutcome::TakeIn(messages) => {
+                read_failed = false;
+                messages
+            }
             ReadOutcome::ResumeRequired => {
                 ready = false;
                 host.mark_unready();
@@ -1852,6 +1939,7 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
             }
             ReadOutcome::Closed => break,
             ReadOutcome::Failed(error) => {
+                read_failed = true;
                 let delay = ingestor_retry_delay(retry_delay);
                 host.record_transient_error(ingestor_failure_reason(&error), delay);
                 host.report_error(format!("{error:#}"));
@@ -1880,6 +1968,7 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
                 }
                 BatchDisposition::RetryRejection(positions) => {
                     pending_rejection = Some(positions);
+                    host.record_suspend(IngestorSuspendCause::Rejection);
                     if let Err(error) = connector.suspend().await {
                         host.report_error(format!("{error:#}"));
                     }
@@ -2022,12 +2111,13 @@ where
     C: BrokerIngestorConnector,
 {
     let outcome = acknowledgement.wait(timeout).await;
+    host.record_acknowledgement(&outcome);
     let disposition = match outcome {
-        IngestorAcknowledgementOutcome::Ack => {
+        IngestorAcknowledgementOutcome::Acknowledged => {
             confirm_batch(connector, host, settlement, positions).await
         }
-        IngestorAcknowledgementOutcome::NoAck(reason) => {
-            host.handle_ack_failure(reason);
+        IngestorAcknowledgementOutcome::Failed { .. }
+        | IngestorAcknowledgementOutcome::TimedOut { .. } => {
             reject_batch(connector, host, settlement, positions).await
         }
         IngestorAcknowledgementOutcome::Shutdown => {
@@ -2052,7 +2142,13 @@ async fn confirm_batch<C>(
 where
     C: BrokerIngestorConnector,
 {
+    let started_at = Instant::now();
     let confirmed = connector.acknowledge(&positions).await;
+    host.record_transport_settlement(
+        IngestorSettlementOperation::Acknowledge,
+        IngestorSettlementOutcome::from(&confirmed),
+        started_at.elapsed(),
+    );
     let Err(error) = confirmed else {
         host.clear_transient_error();
         return BatchDisposition::Accepted;
@@ -2076,7 +2172,14 @@ async fn reject_batch<C>(
 where
     C: BrokerIngestorConnector,
 {
-    let Err(error) = connector.reject(&positions).await else {
+    let started_at = Instant::now();
+    let rejected = connector.reject(&positions).await;
+    host.record_transport_settlement(
+        IngestorSettlementOperation::Reject,
+        IngestorSettlementOutcome::from(&rejected),
+        started_at.elapsed(),
+    );
+    let Err(error) = rejected else {
         return BatchDisposition::Retry;
     };
     host.record_transient_error(ingestor_failure_reason(&error), settlement.retry_after);
@@ -2123,6 +2226,10 @@ mod shuttle_tests;
 #[cfg(test)]
 #[path = "connector_extension_tests.rs"]
 mod extension_tests;
+
+#[cfg(test)]
+#[path = "connector_observation_tests.rs"]
+mod observation_tests;
 
 #[cfg(test)]
 #[path = "connector_decode_tests.rs"]

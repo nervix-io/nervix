@@ -1,5 +1,43 @@
 @client_wire_pause_recovery
 Feature: Transaction-owned domain pause recovery
+  @client_wire_orphaned_pause @deloxide_stress
+  Scenario Outline: A model command recovers an orphaned pause before preflight on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA pause_event (key I64);
+      CREATE RELAY pause_input SCHEMA pause_event UNBRANCHED;
+      START;
+      """
+    Given the next model command in domain "{{domain}}" finds an orphaned pause after admission
+    When this Plexus command request with execution reference "orphaned-pause-{{test_id}}" is executed on the leader node
+      """
+      CREATE RELAY recovered_input SCHEMA pause_event UNBRANCHED;
+      """
+    Then the orphaned pause in domain "{{domain}}" was delivered to the model command
+    And the last command request succeeded
+    When this Plexus command request with execution reference "orphaned-pause-{{test_id}}" is executed on the leader node
+      """
+      CREATE RELAY recovered_input SCHEMA pause_event UNBRANCHED;
+      """
+    Then the last command request succeeded
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE RELAY after_orphan SCHEMA pause_event UNBRANCHED;
+      SHOW CREATE RELAY after_orphan;
+      """
+    Then the last command output contains
+      """
+      after_orphan
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @client_wire_standalone_preparation @deloxide_stress
   Scenario: A stale standalone preflight recovers the applying command across repeated leadership changes
     Given a 3 node nervix cluster is started

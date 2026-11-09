@@ -68,7 +68,7 @@ fn emitter_outcomes_register_every_child_at_zero_with_only_bounded_dimensions() 
         CONFIRMATION_TIMEOUTS,
         FINISHES,
         UNSENT,
-        status::NAME,
+        status::EMITTER_FAILURE.name(),
     ];
     let mut samples = 0;
     let mut families = 0;
@@ -190,30 +190,31 @@ fn emitter_outcomes_expire_only_the_exact_task_observation_and_retain_history() 
     let source = failed.clone();
     let first = handle.bind_failure_source(move || source.load(Ordering::Acquire));
     handle.record_retried(2);
-    assert_eq!(sample(&metrics, status::NAME, &[]), 1.0);
+    assert_eq!(sample(&metrics, status::EMITTER_FAILURE.name(), &[]), 1.0);
     failed.store(false, Ordering::Release);
-    assert_eq!(sample(&metrics, status::NAME, &[]), 0.0);
+    assert_eq!(sample(&metrics, status::EMITTER_FAILURE.name(), &[]), 0.0);
     failed.store(true, Ordering::Release);
     let replacement_failed = Arc::new(AtomicBool::new(false));
     let source = replacement_failed.clone();
     let replacement = handle.bind_failure_source(move || source.load(Ordering::Acquire));
     drop(first);
-    assert_eq!(sample(&metrics, status::NAME, &[]), 0.0);
+    assert_eq!(sample(&metrics, status::EMITTER_FAILURE.name(), &[]), 0.0);
     replacement_failed.store(true, Ordering::Release);
-    assert_eq!(sample(&metrics, status::NAME, &[]), 1.0);
+    assert_eq!(sample(&metrics, status::EMITTER_FAILURE.name(), &[]), 1.0);
     assert!(
         handle
             .describe_lines()
             .iter()
-            .any(|line| line.starts_with(status::NAME) && line.ends_with("value=1"))
+            .any(|line| line.starts_with(status::EMITTER_FAILURE.name())
+                && line.ends_with("value=1"))
     );
     drop(replacement);
-    assert_eq!(sample(&metrics, status::NAME, &[]), 0.0);
+    assert_eq!(sample(&metrics, status::EMITTER_FAILURE.name(), &[]), 0.0);
     assert_eq!(sample(&metrics, RETRIED, &[]), 2.0);
     let ending_after_replacement = handle.bind_failure_source(|| true);
     let replacement_ending_first = handle.bind_failure_source(|| true);
     drop(replacement_ending_first);
-    assert_eq!(sample(&metrics, status::NAME, &[]), 0.0);
+    assert_eq!(sample(&metrics, status::EMITTER_FAILURE.name(), &[]), 0.0);
     drop(ending_after_replacement);
-    assert_eq!(sample(&metrics, status::NAME, &[]), 0.0);
+    assert_eq!(sample(&metrics, status::EMITTER_FAILURE.name(), &[]), 0.0);
 }

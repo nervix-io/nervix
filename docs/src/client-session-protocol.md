@@ -522,8 +522,8 @@ that `TYPE`. Its decoding-codec target offers codecs that can decode. An unbranc
 target needs a domain; a branched-relay target also needs the selected branch and offers relays
 with exactly that branch. Ingestor error relays use the unbranched target. A branch-field target
 takes a domain and branch reference. Ingestor decoded and output fields use the existing
-codec-field and relay-field targets. A junction or reingestor asks for another input relay with a
-domain and the first relay reference; candidates have that relay's exact named schema and branch.
+codec-field and relay-field targets. A junction, deduplicator, reorderer, or reingestor asks for
+another input relay with a domain and the first relay reference; candidates have that relay's exact named schema and branch.
 The same dependencies with the output-relay target select the input branch, and with the
 materialized-relay target select only relays with materialized state in that branch. Route
 construction of an unbranched or named branch uses the ingestor relay targets, while branch keys
@@ -936,6 +936,15 @@ refusal included. An ordinary command keeps its mutation lease while its interna
 still committing. When its attempt ends on another failure, it answers `OutcomeUnknown` with the
 `StillApplying` cause instead of a terminal result, so the lease that transaction needs to release
 its pause is never given up first.
+
+An admitted model command that encounters an orphaned model-alteration pause may recover it under
+that exact lease after rechecking its internal transaction for progress. Consensus atomically
+checks the lease, the restore activation gate and the absence of any same-domain `COMMITTING`
+transaction. Only then may it resume the domain and let the command plan again. An active local
+alteration prevents recovery. A proposal that cannot be confirmed leaves the command retryable
+under its original execution reference and retains its mutation lease. Recovery changes no start
+version, start mode, clock or schedule, and produces no extra client success result or notice.
+Backup cuts and transaction-owned pause cleanup keep their respective ownership contracts.
 
 Because the lease lives in replicated state rather than in a leader's memory, it survives leadership
 changes and restarts. A new leader resumes the applying record, or the committing transaction, that

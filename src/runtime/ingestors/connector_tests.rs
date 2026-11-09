@@ -51,8 +51,24 @@ impl IngestorBatchAcknowledgementServices for ImmediateAcknowledgement {
             .lock()
             .ack_outcomes
             .pop_front()
-            .unwrap_or(IngestorAcknowledgementOutcome::Ack)
+            .unwrap_or(IngestorAcknowledgementOutcome::Acknowledged)
     }
+}
+
+/// One transport settlement the loop recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RecordedSettlement {
+    operation: IngestorSettlementOperation,
+    outcome: IngestorSettlementOutcome,
+}
+
+/// The acknowledgement and connector lifecycle observations the loop recorded, in order.
+#[derive(Default)]
+struct LifecycleObservations {
+    acknowledgements: Vec<IngestorAcknowledgementOutcome>,
+    settlements: Vec<RecordedSettlement>,
+    resumes: Vec<IngestorResumeOutcome>,
+    suspends: Vec<IngestorSuspendCause>,
 }
 
 #[derive(Default)]
@@ -67,6 +83,7 @@ struct FakeHost {
     expected_oversized: usize,
     /// The test retains metric events independently of the fake driver's observations.
     read_observations: Arc<Mutex<ReadObservations>>,
+    lifecycle: Arc<Mutex<LifecycleObservations>>,
     refused_payload: Option<u8>,
     allow_unconfirmed_stop: bool,
     acknowledgements: BTreeMap<u8, TestAcknowledgementPlan>,
@@ -83,6 +100,7 @@ impl FakeHost {
         Self {
             expected_oversized: 0,
             read_observations: Arc::new(Mutex::new(ReadObservations::default())),
+            lifecycle: Arc::new(Mutex::new(LifecycleObservations::default())),
             refused_payload: None,
             allow_unconfirmed_stop: false,
             acknowledgements: BTreeMap::new(),
@@ -211,8 +229,31 @@ impl IngestorHostServices for FakeHost {
     fn report_error(&self, message: String) {
         self.observations.lock().reported_errors.push(message);
     }
-    fn handle_ack_failure(&self, reason: String) {
-        self.observations.lock().reported_errors.push(reason);
+    fn record_acknowledgement(&self, outcome: &IngestorAcknowledgementOutcome) {
+        self.lifecycle.lock().acknowledgements.push(outcome.clone());
+        if let IngestorAcknowledgementOutcome::Failed { reason } = outcome {
+            self.observations
+                .lock()
+                .reported_errors
+                .push(reason.clone());
+        }
+    }
+    fn record_transport_settlement(
+        &self,
+        operation: IngestorSettlementOperation,
+        outcome: IngestorSettlementOutcome,
+        _elapsed: Duration,
+    ) {
+        self.lifecycle
+            .lock()
+            .settlements
+            .push(RecordedSettlement { operation, outcome });
+    }
+    fn record_resume(&self, outcome: IngestorResumeOutcome) {
+        self.lifecycle.lock().resumes.push(outcome);
+    }
+    fn record_suspend(&self, cause: IngestorSuspendCause) {
+        self.lifecycle.lock().suspends.push(cause);
     }
     fn record_transport_redeliveries(&self, positions: usize) {
         panic!("a replayable test ingestor discarded {positions} positions after a reconnect");
@@ -352,7 +393,14 @@ async fn runtime_report_chain_ingestor_lifecycle() {
     host.wake_suspension = true;
     let mut ready = true;
     assert_eq!(
-        prepare_paced_ingestor(&mut connector, &mut host, &mut ready, &mut shutdown).await,
+        prepare_paced_ingestor(
+            &mut connector,
+            &mut host,
+            &mut ready,
+            &mut false,
+            &mut shutdown
+        )
+        .await,
         PacedIngestorAction::Restart
     );
     host.suspend_intake = false;
@@ -435,7 +483,14 @@ async fn runtime_report_chain_ingestor_resume() {
     let mut ready = false;
 
     assert_eq!(
-        prepare_paced_ingestor(&mut connector, &mut host, &mut ready, &mut shutdown).await,
+        prepare_paced_ingestor(
+            &mut connector,
+            &mut host,
+            &mut ready,
+            &mut false,
+            &mut shutdown
+        )
+        .await,
         PacedIngestorAction::Restart
     );
     let observations = observations.lock();
@@ -568,7 +623,14 @@ async fn paced_ingestor_preparation_suspends_a_ready_ingestor_until_quiesce_rele
     let (_shutdown_tx, mut shutdown) = watch::channel(false);
     let mut ready = true;
 
-    let action = prepare_paced_ingestor(&mut connector, &mut host, &mut ready, &mut shutdown).await;
+    let action = prepare_paced_ingestor(
+        &mut connector,
+        &mut host,
+        &mut ready,
+        &mut false,
+        &mut shutdown,
+    )
+    .await;
 
     assert_eq!(action, PacedIngestorAction::Restart);
     assert!(!ready);
@@ -596,15 +658,36 @@ async fn paced_ingestor_preparation_retries_resume_until_the_ingestor_is_ready()
     let mut ready = false;
 
     assert_eq!(
-        prepare_paced_ingestor(&mut connector, &mut host, &mut ready, &mut shutdown).await,
+        prepare_paced_ingestor(
+            &mut connector,
+            &mut host,
+            &mut ready,
+            &mut false,
+            &mut shutdown
+        )
+        .await,
         PacedIngestorAction::Restart
     );
     assert_eq!(
-        prepare_paced_ingestor(&mut connector, &mut host, &mut ready, &mut shutdown).await,
+        prepare_paced_ingestor(
+            &mut connector,
+            &mut host,
+            &mut ready,
+            &mut false,
+            &mut shutdown
+        )
+        .await,
         PacedIngestorAction::Restart
     );
     assert_eq!(
-        prepare_paced_ingestor(&mut connector, &mut host, &mut ready, &mut shutdown).await,
+        prepare_paced_ingestor(
+            &mut connector,
+            &mut host,
+            &mut ready,
+            &mut false,
+            &mut shutdown
+        )
+        .await,
         PacedIngestorAction::Poll
     );
 
@@ -630,7 +713,14 @@ async fn paced_ingestor_preparation_stops_when_the_host_is_inactive() {
     let mut ready = false;
 
     assert_eq!(
-        prepare_paced_ingestor(&mut connector, &mut host, &mut ready, &mut shutdown).await,
+        prepare_paced_ingestor(
+            &mut connector,
+            &mut host,
+            &mut ready,
+            &mut false,
+            &mut shutdown
+        )
+        .await,
         PacedIngestorAction::Stop
     );
     assert_eq!(observations.lock().resumes, 0);
@@ -647,7 +737,14 @@ async fn paced_ingestor_preparation_stops_suspended_intake_after_shutdown_closes
     let mut ready = false;
 
     assert_eq!(
-        prepare_paced_ingestor(&mut connector, &mut host, &mut ready, &mut shutdown).await,
+        prepare_paced_ingestor(
+            &mut connector,
+            &mut host,
+            &mut ready,
+            &mut false,
+            &mut shutdown
+        )
+        .await,
         PacedIngestorAction::Stop
     );
     assert_eq!(observations.lock().flushes, 1);
@@ -687,9 +784,11 @@ async fn ingestor_loop_waits_and_commits_each_sequential_ack() {
 async fn failed_rewind_cannot_commit_past_an_unacknowledged_kafka_position() {
     let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
     observations.lock().ack_outcomes = VecDeque::from([
-        IngestorAcknowledgementOutcome::NoAck("relay owner crashed".to_string()),
-        IngestorAcknowledgementOutcome::Ack,
-        IngestorAcknowledgementOutcome::Ack,
+        IngestorAcknowledgementOutcome::Failed {
+            reason: "relay owner crashed".to_string(),
+        },
+        IngestorAcknowledgementOutcome::Acknowledged,
+        IngestorAcknowledgementOutcome::Acknowledged,
     ]);
     let mut connector = empty_ingestor(observations.clone());
     connector
@@ -752,17 +851,17 @@ async fn individual_settlement_confirms_successes_and_requeues_only_the_failed_d
     services.acknowledgements = BTreeMap::from([
         (
             0,
-            TestAcknowledgementPlan::Outcome(IngestorAcknowledgementOutcome::Ack),
+            TestAcknowledgementPlan::Outcome(IngestorAcknowledgementOutcome::Acknowledged),
         ),
         (
             1,
-            TestAcknowledgementPlan::Outcome(IngestorAcknowledgementOutcome::NoAck(
-                "refused".into(),
-            )),
+            TestAcknowledgementPlan::Outcome(IngestorAcknowledgementOutcome::Failed {
+                reason: "refused".into(),
+            }),
         ),
         (
             2,
-            TestAcknowledgementPlan::Outcome(IngestorAcknowledgementOutcome::Ack),
+            TestAcknowledgementPlan::Outcome(IngestorAcknowledgementOutcome::Acknowledged),
         ),
     ]);
     let mut host = IngestorHost::new(services);
@@ -795,17 +894,17 @@ async fn individual_settlement_retains_each_unsettled_position_once_after_a_tran
     services.acknowledgements = BTreeMap::from([
         (
             0,
-            TestAcknowledgementPlan::Outcome(IngestorAcknowledgementOutcome::Ack),
+            TestAcknowledgementPlan::Outcome(IngestorAcknowledgementOutcome::Acknowledged),
         ),
         (
             1,
-            TestAcknowledgementPlan::Outcome(IngestorAcknowledgementOutcome::NoAck(
-                "refused".into(),
-            )),
+            TestAcknowledgementPlan::Outcome(IngestorAcknowledgementOutcome::Failed {
+                reason: "refused".into(),
+            }),
         ),
         (
             2,
-            TestAcknowledgementPlan::Outcome(IngestorAcknowledgementOutcome::Ack),
+            TestAcknowledgementPlan::Outcome(IngestorAcknowledgementOutcome::Acknowledged),
         ),
     ]);
     let mut host = IngestorHost::new(services);
@@ -853,9 +952,11 @@ fn shuttle_individual_settlement_preserves_every_delivery_until_its_own_graph_ou
                     .insert(id, TestAcknowledgementPlan::Completion(receiver));
                 completions.push(nervix_primitives::task::spawn(async move {
                     let outcome = if id == 1 {
-                        IngestorAcknowledgementOutcome::NoAck("refused".into())
+                        IngestorAcknowledgementOutcome::Failed {
+                            reason: "refused".into(),
+                        }
                     } else {
-                        IngestorAcknowledgementOutcome::Ack
+                        IngestorAcknowledgementOutcome::Acknowledged
                     };
                     assert!(
                         sender.send(outcome).is_ok(),
@@ -904,12 +1005,12 @@ async fn individual_settlement_confirms_ready_siblings_while_one_graph_wait_rema
     services.acknowledgements = BTreeMap::from([
         (
             0,
-            TestAcknowledgementPlan::Outcome(IngestorAcknowledgementOutcome::Ack),
+            TestAcknowledgementPlan::Outcome(IngestorAcknowledgementOutcome::Acknowledged),
         ),
         (1, TestAcknowledgementPlan::Completion(receiver)),
         (
             2,
-            TestAcknowledgementPlan::Outcome(IngestorAcknowledgementOutcome::Ack),
+            TestAcknowledgementPlan::Outcome(IngestorAcknowledgementOutcome::Acknowledged),
         ),
     ]);
     let completion = nervix_primitives::task::spawn({
@@ -928,7 +1029,9 @@ async fn individual_settlement_confirms_ready_siblings_while_one_graph_wait_rema
             .assured("ready siblings confirm before the pending graph responds");
             assert!(
                 sender
-                    .send(IngestorAcknowledgementOutcome::NoAck("refused".into()))
+                    .send(IngestorAcknowledgementOutcome::Failed {
+                        reason: "refused".into(),
+                    })
                     .is_ok()
             );
         }
@@ -965,20 +1068,22 @@ async fn individual_transport_recovery_keeps_admitted_graph_work() {
     services.acknowledgements = BTreeMap::from([
         (
             0,
-            TestAcknowledgementPlan::Outcome(IngestorAcknowledgementOutcome::Ack),
+            TestAcknowledgementPlan::Outcome(IngestorAcknowledgementOutcome::Acknowledged),
         ),
         (
             1,
-            TestAcknowledgementPlan::Outcome(IngestorAcknowledgementOutcome::NoAck(
-                "refused".into(),
-            )),
+            TestAcknowledgementPlan::Outcome(IngestorAcknowledgementOutcome::Failed {
+                reason: "refused".into(),
+            }),
         ),
         (2, TestAcknowledgementPlan::Completion(receiver)),
     ]);
     let completion = nervix_primitives::task::spawn(async move {
         rejection.notified().await;
         assert!(
-            sender.send(IngestorAcknowledgementOutcome::Ack).is_ok(),
+            sender
+                .send(IngestorAcknowledgementOutcome::Acknowledged)
+                .is_ok(),
             "a failed transport must retain the graph wait of every admitted sibling"
         );
     });
@@ -1068,19 +1173,21 @@ async fn individual_settlement_counts_every_unconfirmed_position_when_shutdown_e
         services.allow_unconfirmed_stop = true;
         let (middle, last) = if transport_failed {
             (
-                IngestorAcknowledgementOutcome::NoAck("refused".into()),
+                IngestorAcknowledgementOutcome::Failed {
+                    reason: "refused".into(),
+                },
                 IngestorAcknowledgementOutcome::Shutdown,
             )
         } else {
             (
                 IngestorAcknowledgementOutcome::Shutdown,
-                IngestorAcknowledgementOutcome::Ack,
+                IngestorAcknowledgementOutcome::Acknowledged,
             )
         };
         services.acknowledgements = BTreeMap::from([
             (
                 0,
-                TestAcknowledgementPlan::Outcome(IngestorAcknowledgementOutcome::Ack),
+                TestAcknowledgementPlan::Outcome(IngestorAcknowledgementOutcome::Acknowledged),
             ),
             (1, TestAcknowledgementPlan::Outcome(middle)),
             (2, TestAcknowledgementPlan::Outcome(last)),
@@ -1283,4 +1390,358 @@ async fn ending_an_inflight_paced_poll_records_interruption_once() {
     let events = events.lock();
     assert_eq!(events.polls.len(), 1);
     assert_eq!(events.polls[0].0, IngestorReadOutcome::Interrupted);
+}
+
+fn settlement(
+    operation: IngestorSettlementOperation,
+    outcome: IngestorSettlementOutcome,
+) -> RecordedSettlement {
+    RecordedSettlement { operation, outcome }
+}
+
+fn sequential_policy() -> IngestorAckPolicy {
+    IngestorAckPolicy::Sequential {
+        timeout: Duration::from_secs(1),
+        retry: retry_policy(),
+    }
+}
+
+/// Runs the broker loop over `connector` with `host` until the connector's input closes, and
+/// answers the lifecycle observations the host recorded.
+async fn run_recording_broker(
+    connector: FakeIngestor,
+    host: FakeHost,
+    policy: IngestorAckPolicy,
+) -> Arc<Mutex<LifecycleObservations>> {
+    let lifecycle = host.lifecycle.clone();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    run_ingestor_instance_with_retry(
+        connector,
+        IngestorHost::new(host),
+        replayable(policy),
+        shutdown_rx,
+    )
+    .await;
+    drop(shutdown_tx);
+    lifecycle
+}
+
+#[nervix_primitives::test]
+async fn every_acknowledgement_wait_is_recorded_once_before_its_positions_settle() {
+    let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
+    observations.lock().ack_outcomes = VecDeque::from([
+        IngestorAcknowledgementOutcome::Failed {
+            reason: "refused".to_string(),
+        },
+        IngestorAcknowledgementOutcome::TimedOut {
+            silence: Duration::from_secs(1),
+        },
+        IngestorAcknowledgementOutcome::Acknowledged,
+        IngestorAcknowledgementOutcome::Acknowledged,
+    ]);
+    let mut connector = empty_ingestor(observations.clone());
+    connector
+        .queued()
+        .extend(three_messages().into_iter().take(2));
+    connector.replay_rejected = true;
+
+    let lifecycle = run_recording_broker(
+        connector,
+        FakeHost::running(observations.clone()),
+        sequential_policy(),
+    )
+    .await;
+
+    let lifecycle = lifecycle.lock();
+    assert_eq!(
+        lifecycle.acknowledgements,
+        vec![
+            IngestorAcknowledgementOutcome::Failed {
+                reason: "refused".to_string(),
+            },
+            IngestorAcknowledgementOutcome::TimedOut {
+                silence: Duration::from_secs(1),
+            },
+            IngestorAcknowledgementOutcome::Acknowledged,
+            IngestorAcknowledgementOutcome::Acknowledged,
+        ]
+    );
+    use IngestorSettlementOperation::{Acknowledge, Reject};
+    use IngestorSettlementOutcome::Succeeded;
+    assert_eq!(
+        lifecycle.settlements,
+        vec![
+            settlement(Reject, Succeeded),
+            settlement(Reject, Succeeded),
+            settlement(Acknowledge, Succeeded),
+            settlement(Acknowledge, Succeeded),
+        ]
+    );
+    assert!(lifecycle.suspends.is_empty());
+    assert_eq!(lifecycle.resumes, vec![IngestorResumeOutcome::Ready]);
+    let observations = observations.lock();
+    assert_eq!(observations.rejected, vec![vec![0], vec![0]]);
+    assert_eq!(observations.acknowledged, vec![vec![0], vec![1]]);
+    assert_eq!(observations.reported_errors, vec!["refused".to_string()]);
+}
+
+#[nervix_primitives::test]
+async fn a_failed_rejection_is_recorded_and_suspends_the_connector_for_its_rejection() {
+    let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
+    observations.lock().ack_outcomes = VecDeque::from([
+        IngestorAcknowledgementOutcome::Failed {
+            reason: "relay owner crashed".to_string(),
+        },
+        IngestorAcknowledgementOutcome::Acknowledged,
+    ]);
+    let mut connector = empty_ingestor(observations.clone());
+    connector
+        .queued()
+        .extend(three_messages().into_iter().take(1));
+    connector.reject_failures_left = 2;
+    connector.replay_rejected = true;
+
+    let lifecycle = run_recording_broker(
+        connector,
+        FakeHost::running(observations.clone()),
+        sequential_policy(),
+    )
+    .await;
+
+    let lifecycle = lifecycle.lock();
+    use IngestorSettlementOperation::{Acknowledge, Reject};
+    use IngestorSettlementOutcome::{Failed, Succeeded};
+    assert_eq!(
+        lifecycle.settlements,
+        vec![
+            settlement(Reject, Failed),
+            settlement(Reject, Failed),
+            settlement(Reject, Succeeded),
+            settlement(Acknowledge, Succeeded),
+        ],
+        "the retried rejection after each resume is a transport settlement of its own"
+    );
+    assert_eq!(
+        lifecycle.suspends,
+        vec![
+            IngestorSuspendCause::Rejection,
+            IngestorSuspendCause::Rejection
+        ]
+    );
+    assert_eq!(
+        lifecycle.resumes,
+        vec![IngestorResumeOutcome::Ready; 3],
+        "the initial resume and the resume after each failed rejection"
+    );
+    assert_eq!(observations.lock().suspends, 2);
+}
+
+#[nervix_primitives::test]
+async fn a_failed_read_that_loses_the_transport_suspends_the_connector_for_its_read_failure() {
+    let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
+    let mut connector = empty_ingestor(observations.clone());
+    connector
+        .queued()
+        .extend(three_messages().into_iter().take(1));
+    connector.failed_reads_left = 1;
+    connector.failure_loses_transport = true;
+
+    let lifecycle = run_recording_broker(
+        connector,
+        FakeHost::running(observations.clone()),
+        sequential_policy(),
+    )
+    .await;
+
+    let lifecycle = lifecycle.lock();
+    assert_eq!(lifecycle.suspends, vec![IngestorSuspendCause::ReadFailure]);
+    assert_eq!(lifecycle.resumes, vec![IngestorResumeOutcome::Ready; 2]);
+    assert_eq!(
+        lifecycle.acknowledgements,
+        vec![IngestorAcknowledgementOutcome::Acknowledged]
+    );
+    assert_eq!(
+        observations.lock().suspends,
+        0,
+        "the connector suspended itself; the host only records it"
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_failed_read_that_keeps_the_transport_and_a_requested_resume_suspend_nothing() {
+    let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
+    let mut connector = empty_ingestor(observations.clone());
+    connector
+        .queued()
+        .extend(three_messages().into_iter().take(1));
+    connector.failed_reads_left = 1;
+    connector.resume_required = true;
+
+    let lifecycle = run_recording_broker(
+        connector,
+        FakeHost::running(observations.clone()),
+        sequential_policy(),
+    )
+    .await;
+
+    let lifecycle = lifecycle.lock();
+    assert!(lifecycle.suspends.is_empty());
+    assert_eq!(
+        lifecycle.resumes,
+        vec![IngestorResumeOutcome::Ready; 2],
+        "the initial resume and the one the connector asked for"
+    );
+}
+
+#[nervix_primitives::test]
+async fn every_completed_broker_resume_is_recorded_with_its_outcome() {
+    let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
+    let mut connector = empty_ingestor(observations.clone());
+    connector.resume_results = VecDeque::from([
+        Ok(IngestorResume::Waiting {
+            retry_after: Duration::from_millis(1),
+        }),
+        Err(Report::new(IngestorError::Resume { connector: "fake" })),
+        Ok(IngestorResume::Ready),
+    ]);
+
+    let lifecycle = run_recording_broker(
+        connector,
+        FakeHost::running(observations.clone()),
+        sequential_policy(),
+    )
+    .await;
+
+    assert_eq!(
+        lifecycle.lock().resumes,
+        vec![
+            IngestorResumeOutcome::Waiting,
+            IngestorResumeOutcome::Failed,
+            IngestorResumeOutcome::Ready,
+        ]
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_stop_during_an_acknowledgement_wait_is_recorded_before_its_unconfirmed_positions() {
+    let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
+    observations.lock().ack_outcomes = VecDeque::from([IngestorAcknowledgementOutcome::Shutdown]);
+    let mut connector = empty_ingestor(observations.clone());
+    connector
+        .queued()
+        .extend(three_messages().into_iter().take(1));
+    let mut host = FakeHost::running(observations.clone());
+    host.allow_unconfirmed_stop = true;
+
+    let lifecycle = run_recording_broker(connector, host, sequential_policy()).await;
+
+    let lifecycle = lifecycle.lock();
+    assert_eq!(
+        lifecycle.acknowledgements,
+        vec![IngestorAcknowledgementOutcome::Shutdown]
+    );
+    assert!(lifecycle.settlements.is_empty());
+    assert_eq!(observations.lock().unconfirmed_stops, vec![1]);
+}
+
+#[nervix_primitives::test]
+async fn a_quiesce_suspends_only_a_ready_connector_and_is_recorded_once() {
+    let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
+    let connector = empty_ingestor(observations.clone());
+    let mut host = FakeHost::running(observations.clone());
+    host.suspend_intake = true;
+    let lifecycle = host.lifecycle.clone();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let run = nervix_primitives::task::spawn(run_ingestor_instance_with_retry(
+        connector,
+        IngestorHost::new(host),
+        replayable(sequential_policy()),
+        shutdown_rx,
+    ));
+
+    // A connector the loop never resumed is not ready, so the quiesce has nothing to suspend.
+    shutdown_tx.send_replace(true);
+    run.await
+        .assured("the loop ends at shutdown without panicking");
+    assert!(lifecycle.lock().suspends.is_empty());
+
+    let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
+    let mut connector = empty_ingestor(observations.clone());
+    let mut host = FakeHost::running(observations.clone());
+    host.suspend_intake = true;
+    host.wake_suspension = true;
+    let mut ready = true;
+    let (_shutdown_tx, mut shutdown) = watch::channel(false);
+    let action = prepare_paced_ingestor(
+        &mut connector,
+        &mut host,
+        &mut ready,
+        &mut false,
+        &mut shutdown,
+    )
+    .await;
+    assert_eq!(action, PacedIngestorAction::Restart);
+    assert_eq!(
+        host.lifecycle.lock().suspends,
+        vec![IngestorSuspendCause::Quiesce]
+    );
+}
+
+#[nervix_primitives::test]
+async fn paced_preparation_records_resume_outcomes_and_a_poll_failure_that_lost_the_transport() {
+    let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
+    let mut connector = empty_ingestor(observations.clone());
+    connector.resume_results = VecDeque::from([
+        Err(Report::new(IngestorError::Resume { connector: "fake" })),
+        Ok(IngestorResume::Ready),
+        Ok(IngestorResume::Ready),
+    ]);
+    connector.failure_loses_transport = true;
+    connector.polls = VecDeque::from([Err(Report::new(IngestorError::Read { connector: "fake" }))]);
+    let mut host = FakeHost::running(observations.clone());
+    let (_shutdown_tx, mut shutdown) = watch::channel(false);
+    let mut ready = false;
+    let mut failed_poll = false;
+
+    let action = prepare_paced_ingestor(
+        &mut connector,
+        &mut host,
+        &mut ready,
+        &mut failed_poll,
+        &mut shutdown,
+    )
+    .await;
+    assert_eq!(action, PacedIngestorAction::Restart);
+    let action = prepare_paced_ingestor(
+        &mut connector,
+        &mut host,
+        &mut ready,
+        &mut failed_poll,
+        &mut shutdown,
+    )
+    .await;
+    assert_eq!(action, PacedIngestorAction::Poll);
+    assert!(connector.poll(Timestamp::from_unix_nanos(0)).await.is_err());
+    failed_poll = true;
+    let action = prepare_paced_ingestor(
+        &mut connector,
+        &mut host,
+        &mut ready,
+        &mut failed_poll,
+        &mut shutdown,
+    )
+    .await;
+    assert_eq!(action, PacedIngestorAction::Poll);
+    assert!(!failed_poll, "the read-failure suspension is recorded once");
+
+    let lifecycle = host.lifecycle.lock();
+    assert_eq!(
+        lifecycle.resumes,
+        vec![
+            IngestorResumeOutcome::Failed,
+            IngestorResumeOutcome::Ready,
+            IngestorResumeOutcome::Ready,
+        ]
+    );
+    assert_eq!(lifecycle.suspends, vec![IngestorSuspendCause::ReadFailure]);
 }

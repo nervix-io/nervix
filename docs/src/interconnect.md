@@ -481,6 +481,8 @@ so a node whose fingerprint differs is refused at join as a wire-contract mismat
 another shape fails as a malformed handshake before its record can be judged. There is no version
 negotiation or alternate decoding path. A wire-contract change therefore requires a coordinated
 cluster stop and start with all nodes on the same version.
+The current fingerprint includes the conditional orphaned model-pause recovery command, its exact
+mutation lease, typed recovery reply and typed mutation-fence and restore-installation conflicts.
 The subscription-interest visibility request includes the advertisement version, and its current
 wire fingerprint fences that request shape during connection setup.
 
@@ -497,7 +499,8 @@ Emitter statements exchanged through the control plane use explicit `KEY` expres
 `WIRE_CONTRACT` fingerprint identifies that archived Model layout, including the typed
 `payload` expression scope, typed materialized relay inspection, ingestor read interactions,
 corridor/domain-wide placement coverage, pace-only domain configuration, exact partition/instance
-relocation selections and the current transaction operation and commit-step alternatives. Peers must
+relocation selections, ingestor acknowledgement and connector lifecycle observations, and the current
+transaction operation and commit-step alternatives. Peers must
 match it exactly.
 
 Execution-unit identities use an eight-byte rank with four-byte archive alignment. Single and

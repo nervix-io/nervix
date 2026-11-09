@@ -785,7 +785,7 @@ async fn an_acknowledged_batch_is_refused_for_redelivery_when_the_extension_work
     );
     assert_eq!(
         acknowledgement.wait(Duration::from_secs(10)).await,
-        IngestorAcknowledgementOutcome::Ack
+        IngestorAcknowledgementOutcome::Acknowledged
     );
     fixture.finish().await;
 }
@@ -811,7 +811,7 @@ async fn an_acknowledged_batch_read_while_suspended_dispatches_with_its_acknowle
     );
     assert_eq!(
         acknowledgement.wait(Duration::from_secs(10)).await,
-        IngestorAcknowledgementOutcome::Ack
+        IngestorAcknowledgementOutcome::Acknowledged
     );
     assert_eq!(quiesce.counters(), IngestorQuiesceCounters::default());
     quiesce.release(IngestorQuiesceCause::EntityHold);
@@ -838,7 +838,7 @@ async fn an_acknowledged_batch_stays_outstanding_until_its_ingestor_settles_it()
     );
     assert_eq!(
         acknowledgement.wait(Duration::from_secs(10)).await,
-        IngestorAcknowledgementOutcome::Ack
+        IngestorAcknowledgementOutcome::Acknowledged
     );
     assert_eq!(
         host.ack_root_trackers

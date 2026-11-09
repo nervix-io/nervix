@@ -1,9 +1,10 @@
 //! The ingestor host's retained interaction counters.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** One registration of the ingestor host's existing counter children.
+//! - **Owns.** One registration of the ingestor host's existing counter children, its read and
+//!   acknowledgement handles included.
 //! - **Depends on.** Vocabulary identities and the node metric registry.
-//! - **Must not know.** Connector drivers, intake lifetimes, decoding policy or acknowledgements.
+//! - **Must not know.** Connector drivers, intake lifetimes, decoding or acknowledgement policy.
 
 #![cfg_attr(
     nervix_lint,
@@ -19,6 +20,9 @@ use super::RuntimeMetrics;
 #[derive(Debug, Clone)]
 pub(crate) struct IngestorInteractionMetrics {
     pub(crate) reads: super::IngestorReadMetrics,
+    /// Acknowledgement outcomes, transport settlements, resumes, suspensions, unconfirmed stops
+    /// and the transient-failure projection of the host's unit.
+    pub(crate) acknowledgements: super::IngestorAcknowledgementMetrics,
     /// Payloads refused because the extension workers had no room to unfold them.
     pub(crate) unfolding_refused: IntCounter,
     /// Positions discarded after a reconnect because their broker redelivers them.
@@ -46,8 +50,10 @@ impl RuntimeMetrics {
         physical_node: Option<&ClusterNodeName>,
         kind: nervix_models::IngestorEntityKind,
     ) -> (IngestorInteractionMetrics, IntCounter) {
+        let reads = self.register_ingestor_reads(domain, ingestor, unit, physical_node, kind);
         let interactions = IngestorInteractionMetrics {
-            reads: self.register_ingestor_reads(domain, ingestor, unit, physical_node, kind),
+            acknowledgements: reads.acknowledgements(),
+            reads,
             unfolding_refused: self.ingestor_unfolding_refused(
                 domain,
                 ingestor,

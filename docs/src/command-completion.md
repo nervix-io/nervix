@@ -101,6 +101,16 @@ and keeps its domain mutation lease, which the committing attempt needs to finis
 and release its pause. Reconciliation, or a repetition under the same reference, finishes the
 attempt before the command records its outcome.
 
+A paused-domain refusal can also reveal an orphaned model-alteration pause before the command's
+transaction begins committing. After rechecking the whole transaction for progress, its
+coordinator may recover that pause under the command's exact mutation lease. One conditional
+consensus operation validates the current lease and restore start gate and checks that no
+transaction in the domain is `COMMITTING` before changing `Paused` to `Running`. A local active
+alteration prevents the attempt; recovery acquires no additional alteration guard. A confirmed
+resume, or confirmation that no pause remains, starts fresh planning under the same execution
+reference. Unconfirmed recovery keeps the command applying and its lease retained. A transaction
+that adopts the pause keeps it until its own step cleanup, including when it belongs to this command.
+
 Resource uploads follow the same replay rule with an upload identity instead. It is scoped to the
 user, domain, and resource, bound to the verified archive digest, and retained without expiry; see
 [Resource Versions And Bindings](./resource-versions.md#assignment). Transaction appends
