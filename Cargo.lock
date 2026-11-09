@@ -6746,6 +6746,7 @@ name = "nervix-arbitrary"
 version = "0.1.0-dev"
 dependencies = [
  "meticulous",
+ "nervix-licensing-vocabulary",
  "nervix-models",
  "nervix-wasm-protocol",
  "rkyv",
@@ -7674,6 +7675,7 @@ dependencies = [
  "nervix-execution",
  "nervix-interconnect",
  "nervix-licensing-protocol",
+ "nervix-licensing-vocabulary",
  "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
@@ -7916,7 +7918,9 @@ dependencies = [
 name = "nervix-licensing-vocabulary"
 version = "0.1.0-dev"
 dependencies = [
+ "rkyv",
  "serde",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -7949,6 +7953,7 @@ dependencies = [
  "nervix-approx-into",
  "nervix-arbitrary",
  "nervix-crypto-policy",
+ "nervix-licensing-vocabulary",
  "nervix-primitives",
  "nervix-simd-kernels",
  "nonzero_ext",
@@ -8312,6 +8317,8 @@ dependencies = [
  "nervix-expiry-map",
  "nervix-interconnect",
  "nervix-jaq",
+ "nervix-licensing-protocol",
+ "nervix-licensing-vocabulary",
  "nervix-model-harness",
  "nervix-models",
  "nervix-plexus",

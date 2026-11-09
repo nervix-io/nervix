@@ -76,6 +76,8 @@ through the same execution and checks the resulting configuration.
 ### Read Materialized State
 
 `SHOW RELAY <relay> MATERIALIZED STATE` returns its typed result with the command's outcome.
+`DESCRIBE LICENSE;` uses the same result for cluster scope. Its JSON has
+`"scope": "cluster_license"`, and its three rows contain the summary and cluster quotas.
 `nx_outcome_inspection` retains that result as an `nx_inspection` you own: it outlives the outcome
 and is released with `nx_inspection_free`. `nx_inspection_counts` reads the branches, rows and bytes
 of the complete selected cut, and returns false for a refused read, whose outcome is a failed

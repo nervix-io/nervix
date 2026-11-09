@@ -3912,3 +3912,19 @@ A consensus namespace/state-encoding mismatch requires recreation before any cre
 read; a user backup record with a different version fails its header check before decoding.
 Executor refusal continues to mean that credentials were not judged, reported as UNAVAILABLE
 or HTTP 503 without changing failure pacing. Wrong passwords remain authentication refusals.
+
+### Licensing Admission Refusals
+
+`LicensingRefusal` retains the quota name, effective limit, current usage, requested amount and
+refusal state. The admission owner adds its domain or membership context with `change_context`;
+it keeps the typed cause until the reporting boundary. Under a bounded quota, checked addition
+refuses an overflowing request rather than wrapping its usage below the limit.
+
+A domain-quota refusal changes no domain record. Concurrent proposals check the committed count
+when they apply, so a stale successful preflight cannot oversubscribe the quota. Restore creation
+uses the same constraint. Existing-domain updates and `IF NOT EXISTS` observations retain their
+ordinary outcomes.
+
+A membership-quota refusal is carried in the leader's typed admission verdict for that node run.
+The joining node's existing supervision reports it and stops the refused newcomer. Licensing never
+removes a committed member, and a returning member does not consume another quota slot.

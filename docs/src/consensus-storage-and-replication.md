@@ -518,8 +518,8 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_identity_capability_tls_inference_reset_logs`, `raft_identity_capability_tls_inference_reset_meta`, `raft_identity_capability_tls_inference_reset_state`, and
-`raft_identity_capability_tls_inference_reset_snapshots`. Opening it validates the complete keyspace namespace before reading
+`raft_identity_licensing_capability_tls_inference_reset_logs`, `raft_identity_licensing_capability_tls_inference_reset_meta`, `raft_identity_licensing_capability_tls_inference_reset_state`, and
+`raft_identity_licensing_capability_tls_inference_reset_snapshots`. Opening it validates the complete keyspace namespace before reading
 any records. The committed cluster-parameter record stores ordered typed TLS cipher suites and
 key-exchange groups; recovery validates their complete pair before returning that record.
 This namespace identifies the current Model shape, including the separate JSON
@@ -539,7 +539,7 @@ the current statement shape as well, which the statements a transaction keeps ar
 changes one part of its entity's body, an envelope clause or the properties, or one part of a
 construction where it stands, and a `RESET WASM PROCESSOR ... STATE` that names its processor and
 scope and takes its domain from the transaction, as the step effect and commit plan step that apply
-it keep it too. The database's state metadata requires the current `ClusterState` encoding, 22,
+it keep it too. The database's state metadata requires the current `ClusterState` encoding, 23,
 including incarnation-bound node capability claims under record-family tag `C`, the cluster identity
 reference, committed cluster parameters, the durable restore installation gate and the unit-keyed
 committed schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
@@ -753,6 +753,32 @@ Backup archives carry the source UUID as display metadata. They carry no private
 state, and restore retains the target cluster's identity. Rebuilding from an archive is a clone;
 recovering a licensed installation requires an administrative transfer to the rebuilt cluster.
 [Backup And Restore](backup-and-restore.md#what-a-restore-recreates) owns that archive contract.
+
+## Free Licensing Record
+
+The first identity installation also creates one `LicensingRecord` at state key `L`, in the same
+applied command and durable batch. Its licensing time is the installed identity's creation time,
+its trust-document list is empty and its mode is `Free`. Repeated identity proposals retain both
+installed singletons. Neither installation changes the graph revision.
+
+The current storage shape requires the identity and licensing record to be absent together before
+initialization or present together afterwards. Load refuses a missing partner or an invalid record;
+it never creates replacement licensing state. The record has explicit load, keyed-record-count
+and incremental-write ownership, and snapshots include it. Snapshot installation follows the same
+record validation as ordinary open.
+
+An observer captures public identity, licensing record, applied revision and `UsageSnapshot` from
+one committed state. Node usage is the number of committed voters and learners, and domain usage
+is the number of committed domain records. These facts require no per-node usage report. A node's
+single policy publisher derives an immutable value from that observation and publishes it through
+the execution-primitive publication boundary. Consumers read that one value without acquiring a
+policy lock or recomputing permissions.
+
+Domain creation includes the captured quota constraint in its durable effect and authoritative
+write. Apply checks the actual committed domain count before inserting a new record; restore's
+domain insertion does the same. Existing records do not spend another slot. Membership admission
+checks the node quota under its existing serialization before adding a member. The shipped free
+policy leaves both quotas unlimited.
 
 ## Cluster Parameter Publication
 

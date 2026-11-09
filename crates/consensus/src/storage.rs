@@ -95,11 +95,12 @@ const KEY_INSTALLING: &[u8] = b"installing";
 const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
-const KEYSPACE_LOGS: &str = "raft_identity_capability_tls_inference_reset_logs";
-const KEYSPACE_META: &str = "raft_identity_capability_tls_inference_reset_meta";
-const KEYSPACE_STATE_MACHINE: &str = "raft_identity_capability_tls_inference_reset_state";
-const KEYSPACE_SNAPSHOT: &str = "raft_identity_capability_tls_inference_reset_snapshots";
+const KEYSPACE_LOGS: &str = "raft_identity_licensing_capability_tls_inference_reset_logs";
+const KEYSPACE_META: &str = "raft_identity_licensing_capability_tls_inference_reset_meta";
+const KEYSPACE_STATE_MACHINE: &str = "raft_identity_licensing_capability_tls_inference_reset_state";
+const KEYSPACE_SNAPSHOT: &str = "raft_identity_licensing_capability_tls_inference_reset_snapshots";
 const KEY_CLUSTER_IDENTITY: &[u8] = b"K";
+const KEY_LICENSING: &[u8] = b"L";
 /// Working memory reserved for ordinary metadata and log storage relative to its operation unit.
 const STORAGE_RESERVATION_MULTIPLIER: u64 = 4;
 
@@ -231,7 +232,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    ClusterState = 22,
+    ClusterState = 23,
 }
 
 #[derive(Debug)]
@@ -345,6 +346,7 @@ impl StateMachineData {
             command_retry_fence,
         } = metadata;
         let identity: Option<crate::ClusterIdentityRecord> = read_key(sm, KEY_CLUSTER_IDENTITY)?;
+        let licensing: Option<crate::LicensingRecord> = read_key(sm, KEY_LICENSING)?;
         if identity
             .as_ref()
             .map(crate::ClusterIdentityRecord::cluster_uid)
@@ -352,8 +354,20 @@ impl StateMachineData {
         {
             return Err(io::Error::other(StorageFailure::InvalidState));
         }
+        match (&identity, &licensing) {
+            (Some(identity), Some(record)) => {
+                record.validate(&identity.public()).map_err(|error| {
+                    crate::durable_batch::storage_report_io(
+                        Report::new(error).change_context(StorageFailure::InvalidState),
+                    )
+                })?
+            }
+            (None, None) => {}
+            _ => return Err(io::Error::other(StorageFailure::InvalidState)),
+        }
         let state = Self {
             cluster_identity: identity.map(Arc::new),
+            licensing: licensing.map(Arc::new),
             last_applied_log_id,
             last_membership,
             runtime_revision,
@@ -422,6 +436,7 @@ impl StateMachineData {
     fn stored_records(&self) -> Option<usize> {
         let families = [
             usize::from(self.cluster_identity.is_some()),
+            usize::from(self.licensing.is_some()),
             self.schedule.domains.len(),
             self.domains.len(),
             self.domain_clock_authorities.len(),
@@ -505,6 +520,12 @@ impl StateMachineData {
             (Some(current), Some(previous)) if Arc::ptr_eq(current, previous) => {}
             (Some(current), _) => batch.insert(sm, KEY_CLUSTER_IDENTITY, current.as_ref())?,
             (None, Some(_)) => batch.remove(sm, KEY_CLUSTER_IDENTITY)?,
+            (None, None) => {}
+        }
+        match (&self.licensing, &preceding.licensing) {
+            (Some(current), Some(previous)) if Arc::ptr_eq(current, previous) => {}
+            (Some(current), _) => batch.insert(sm, KEY_LICENSING, current.as_ref())?,
+            (None, Some(_)) => batch.remove(sm, KEY_LICENSING)?,
             (None, None) => {}
         }
         self.schedule

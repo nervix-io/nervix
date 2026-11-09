@@ -713,6 +713,10 @@ and `frame.batch()` using each section's schema. `counts` describe the complete 
 `continuation` resumes bounded pages. Typed cells preserve sensitivity, integer widths, float bits,
 datetime nanoseconds and bytes. `state.to_json()` and `state.display_text()` render the same value.
 
+`DESCRIBE LICENSE;` returns the same typed envelope with `StateInspectionEntity::ClusterLicense`
+and summary/quota sections, including when no domain is selected. Match `StateInspectionEntity::DomainNode`
+to access the domain and graph-node reference of a materialized-state observation.
+
 The shared host runtime exposes `Outcome::state_inspection()` as an independently owned `Inspection`.
 It retains the envelope, lossless JSON, counts, section schemas and verified frame backing. C and
 C++ hosts read it through `nx_inspection`, which the

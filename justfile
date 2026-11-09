@@ -448,6 +448,16 @@ check-tls-configuration-source source:
 fmt-tls-configuration-source source:
     cargo fmt --manifest-path {{ quote(source / "rustls/Cargo.toml") }} --package rustls
 
+coverage-licensing-protocol output:
+    cargo llvm-cov --package nervix-licensing-protocol --package nervix-licensing-vocabulary --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
+
+# Free-policy and quota checks use the native session client.
+test-licensing-free *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input "$(pwd)/tests/features/licensing/*.feature" {{ quote(args) }}
+
 # Cluster identity, replication and restore checks use the native session client.
 test-cluster-identity *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash
@@ -3605,7 +3615,7 @@ clippy_foundation_packages_2 := [
     "nervix-models",
 ]
 
-clippy_foundation_packages_3 := ["nervix-licensing-protocol", "nervix-simd-kernels", "nervix-wasm-protocol", "nervix-wasm-sdk"]
+clippy_foundation_packages_3 := ["nervix-licensing-vocabulary", "nervix-licensing-protocol", "nervix-simd-kernels", "nervix-wasm-protocol", "nervix-wasm-sdk"]
 
 clippy_cluster_packages := ["nervix-dns", "nervix-test-environment"]
 

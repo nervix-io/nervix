@@ -271,6 +271,10 @@ Typed inspection parity for Python, Ruby and JVM runs in
 `tests/features/runtime/native_binding_inspection.feature`: one and three nodes per host, empty
 and refused reads, two sensitive branches through `LIMIT 1`/`AFTER`, complete counts, unit/origin
 metadata, schemas and read-only frames retained after the originating session and outcomes end.
+The same host probes read `DESCRIBE LICENSE` as a cluster-license page with three typed rows.
+Its domain and model name are absent, its entity kind is `LICENSE`, and its summary/quotas use
+the same Row sections. Go, Node.js and Bun decode the typed entity union in the shared corpus,
+including a cluster-license `NotReady` refusal.
 It is part of `just test-client-conformance` and has the focused
 `just test-native-binding-inspection` runner. The host suites register
 `test_inspection_metadata_and_verified_frames_survive_their_parents` (pytest/minitest) and

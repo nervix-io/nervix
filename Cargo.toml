@@ -177,6 +177,8 @@ nervix-execution = { workspace = true }
 nervix-expiry-map = { workspace = true }
 nervix-interconnect = { workspace = true }
 nervix-jaq = { workspace = true }
+nervix-licensing-protocol = { workspace = true }
+nervix-licensing-vocabulary = { workspace = true }
 nervix-models = { workspace = true, features = ["arrow"] }
 nervix-plexus = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }

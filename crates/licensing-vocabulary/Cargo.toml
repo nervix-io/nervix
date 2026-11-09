@@ -9,4 +9,6 @@ version.workspace = true
 workspace = true
 
 [dependencies]
+rkyv = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }

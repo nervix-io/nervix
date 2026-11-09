@@ -134,6 +134,7 @@ pub enum Identifier {
     If,
     Exists,
     Cluster,
+    License,
     Status,
     Node,
     Version,

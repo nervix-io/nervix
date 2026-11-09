@@ -177,6 +177,8 @@ mod http_endpoint;
 mod interconnect_relay;
 mod join_supervision;
 mod leader_redirect;
+mod license_description;
+mod licensing_admission;
 mod model_mutation;
 mod model_validation;
 mod node_capabilities;
@@ -861,6 +863,16 @@ impl Application {
             consensus.verified("startup assigns this handle before it reaches this point");
         let interconnect =
             interconnect.verified("startup assigns this handle before it reaches this point");
+        let licensing = crate::licensing::PolicyHandle::new(
+            &consensus.observer(),
+            &runtime.metrics(),
+            fault_injection.clone(),
+        );
+        crate::licensing::metrics::register(
+            &runtime.metrics(),
+            licensing.clone(),
+            consensus.observer(),
+        );
         let mut interconnect_rx = interconnect_rx;
         let runtime_admission = Arc::new(runtime_admission::RuntimeAdmission::new(
             cluster.local_node_identity().await,
@@ -876,6 +888,11 @@ impl Application {
             .metrics()
             .install_node_observations(node_observations.clone());
         let mut background_tasks = Vec::new();
+        background_tasks.push(nervix_primitives::task::spawn(
+            licensing
+                .clone()
+                .follow(consensus.observer(), shutdown.clone()),
+        ));
         background_tasks.push(node_capabilities::spawn(
             consensus.proposer(),
             cluster.clone(),
@@ -923,6 +940,8 @@ impl Application {
             .await;
         }));
         let (join_refusal_sender, join_refusal) = watch::channel(None);
+        let bootstrap_refusal_sender = join_refusal_sender.clone();
+        let bootstrap_refusal_coordinator = shutdown_coordinator.clone();
         if has_bootstrap_candidates {
             let supervision = JoinSupervision {
                 transport: interconnect.clone(),
@@ -957,6 +976,7 @@ impl Application {
                 controller.run(memory_runtime, memory_shutdown).await;
             }));
         }
+        let membership_licensing = licensing.clone();
         background_tasks.push(nervix_primitives::task::spawn(async move {
             sleep(Duration::from_millis(500)).await;
             let mut initialized = false;
@@ -967,13 +987,22 @@ impl Application {
                 }
                 if allow_bootstrap && !initialized {
                     match administrator_for_membership_reconcile
-                        .maybe_initialize()
+                        .maybe_initialize(|usage| membership_licensing.admit(
+                            crate::licensing::QuotaName::ClusterNodes, usage, 1, false,
+                        ).map(|_| ()))
                         .await
                     {
                         Ok(did_initialize) => {
                             initialized = did_initialize;
                         }
                         Err(error) => {
+                            if let Some(refusal) = error.downcast_ref::<crate::licensing::LicensingRefusal>() {
+                                bootstrap_refusal_sender.send_replace(Some(join_supervision::JoinRefusedError::Licensing(*refusal)));
+                                match bootstrap_refusal_coordinator.request_stop() {
+                                    ShutdownRequestOutcome::Accepted(_) | ShutdownRequestOutcome::AlreadyRequested(_) => {}
+                                }
+                                break;
+                            }
                             warn!(error = %format_args!("{error:#}"), "raft bootstrap attempt failed");
                         }
                     }
@@ -1010,7 +1039,9 @@ impl Application {
                         .await;
                 }
                 if let Err(error) = administrator_for_membership_reconcile
-                    .reconcile_nodes(cluster_for_membership_reconcile.gossip_state())
+                    .reconcile_nodes(cluster_for_membership_reconcile.gossip_state(), |usage| membership_licensing.admit(
+                        crate::licensing::QuotaName::ClusterNodes, usage, 1, false,
+                    ).map(|_| ()))
                     .await
                 {
                     warn!(error = %format_args!("{error:#}"), "raft membership reconciliation failed");
@@ -1046,6 +1077,7 @@ impl Application {
                 resource_store,
                 https_certificates: certificates,
                 runtime: runtime.clone(),
+                licensing,
                 runtime_admission: runtime_admission.clone(),
                 initialization: Arc::new(node_initialization::NodeInitialization::default()),
                 admission_shutdown: shutdown_coordinator.admission_token(),

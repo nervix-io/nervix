@@ -13,19 +13,20 @@ use nervix_models::{
     AlterWireSchema, AlterWireSchemaOperation, Backup, BackupCapture, BackupResources, BackupScope,
     ClientIngestorEntity, CordonNode, CreateDomain, CreateResource, CreateStatement, CreateUser,
     DescribeClient, DescribeCluster, DescribeCorrelator, DescribeDeduplicator, DescribeDomain,
-    DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction, DescribeLookup,
-    DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource,
-    DescribeTransaction, DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig,
-    DomainPace, DomainTimeRate, DrainNode, DropModel, DropNode, EmitterBatchLegality,
-    EmitterBodyForm, EmitterEntityKind, EmitterEnvelopeAlteration, EmitterReferenceKind,
-    ExistingUserPolicy, FieldName, HttpIngestorEntity, IngestorAlteration, IngestorEntityKind,
-    IngestorEntityModel, IngestorReferenceKind, InspectionFormat, KafkaIngestorEntity, LookupQuery,
-    ModelKind, ModelName, MqttIngestorEntity, NatsIngestorEntity, NodeRef, PlacementPolicy,
-    PrometheusIngestorEntity, PulsarIngestorEntity, RabbitMqIngestorEntity, RebindResource,
-    RebindResourceMembers, RebindResourceSelection, RedisIngestorEntity, RelayBranching, RelayName,
-    Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
-    RelocationSelection, ResetWasmState, Restore, RestoreLifecycle, RestoreMode, RestoreScope,
-    RestoreState, ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowPlacements,
+    DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction, DescribeLicense,
+    DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer,
+    DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
+    DescribeWindowProcessor, DomainConfig, DomainPace, DomainTimeRate, DrainNode, DropModel,
+    DropNode, EmitterBatchLegality, EmitterBodyForm, EmitterEntityKind, EmitterEnvelopeAlteration,
+    EmitterReferenceKind, ExistingUserPolicy, FieldName, HttpIngestorEntity, IngestorAlteration,
+    IngestorEntityKind, IngestorEntityModel, IngestorReferenceKind, InspectionFormat,
+    KafkaIngestorEntity, LookupQuery, ModelKind, ModelName, MqttIngestorEntity, NatsIngestorEntity,
+    NodeRef, PlacementPolicy, PrometheusIngestorEntity, PulsarIngestorEntity,
+    RabbitMqIngestorEntity, RebindResource, RebindResourceMembers, RebindResourceSelection,
+    RedisIngestorEntity, RelayBranching, RelayName, Relocation, RelocationMember,
+    RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
+    ResetWasmState, Restore, RestoreLifecycle, RestoreMode, RestoreScope, RestoreState,
+    ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowPlacements,
     ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SqsIngestorEntity, StartDomain,
     StateBranchField, StateBranchSelection, Statement, StopDomain, SubscriptionBinding,
     SubscriptionLiteral, SyslogIngestorEntity, TransactionInspectionRequest,
@@ -158,6 +159,7 @@ pub enum StatementVariant {
     ShowTransactions,
     DescribeTransaction,
     DescribeCluster,
+    DescribeLicense,
     AlterBranch,
     AlterCluster,
 }
@@ -228,6 +230,7 @@ impl StatementVariant {
             Statement::ShowTransactions(_) => Self::ShowTransactions,
             Statement::DescribeTransaction(_) => Self::DescribeTransaction,
             Statement::DescribeCluster(_) => Self::DescribeCluster,
+            Statement::DescribeLicense(_) => Self::DescribeLicense,
         }
     }
 }
@@ -765,6 +768,7 @@ impl Arbitrary<'_> {
                 })
             }
             StatementVariant::DescribeCluster => Statement::DescribeCluster(DescribeCluster),
+            StatementVariant::DescribeLicense => Statement::DescribeLicense(DescribeLicense),
         }
     }
 

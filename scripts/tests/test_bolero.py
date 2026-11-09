@@ -144,6 +144,7 @@ class InventoryTests(unittest.TestCase):
         inventory = bolero.load_inventory()
         self.assertEqual({target.id for target in inventory.targets}, {
             "cluster-identity-record-rkyv",
+            "licensing-record-rkyv",
             "licensing-protocol-json-roundtrip",
             "licensing-conditions-resolution",
             "licensing-jws-malformed",
@@ -545,15 +546,15 @@ class InventoryTests(unittest.TestCase):
             "ingestor-describe-envelope": 7,
             "plexus-model": 56,
             "plexus-archive-model": 60,
-            "plexus-statement": 60,
-            "plexus-statement-text": 59,
-            "plexus-format-document": 59,
-            "plexus-format-text": 58,
-            "models-archived-models": 59,
+            "plexus-statement": 61,
+            "plexus-statement-text": 60,
+            "plexus-format-document": 60,
+            "plexus-format-text": 59,
+            "models-archived-models": 60,
             "registry-archived-models": 51,
-            "consensus-state-records": 56,
-            "consensus-state-corruption": 56,
-            "consensus-raft-records": 55,
+            "consensus-state-records": 57,
+            "consensus-state-corruption": 57,
+            "consensus-raft-records": 56,
             "registry-stored-models": 44,
             "registry-stored-models-corruption": 44,
             "inferencer-tensor-columns": 1,
@@ -578,9 +579,9 @@ class InventoryTests(unittest.TestCase):
 
     def test_state_inspection_representations_are_bounded_pairs(self) -> None:
         targets = {target.id: target for target in bolero.load_inventory().targets}
-        for name in ("client-state-inspection", "state-inspection-cursor"):
+        for name, version in (("client-state-inspection", 2), ("state-inspection-cursor", 1)):
             with self.subTest(target=name):
-                self.assertEqual(targets[name].domain_version, 1)
+                self.assertEqual(targets[name].domain_version, version)
                 self.assertEqual(targets[name].max_input_bytes, 512)
                 self.assertEqual(targets[name].random_iterations, 128)
 

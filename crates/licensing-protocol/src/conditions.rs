@@ -139,8 +139,8 @@ impl ConditionDefinition {
     }
 }
 
-pub const CLUSTER_NODES: &str = "cluster.nodes";
-pub const CLUSTER_DOMAINS: &str = "cluster.domains";
+pub const CLUSTER_NODES: &str = nervix_licensing_vocabulary::QuotaName::ClusterNodes.as_str();
+pub const CLUSTER_DOMAINS: &str = nervix_licensing_vocabulary::QuotaName::ClusterDomains.as_str();
 pub const PERSISTENT_ACTIVATIONS: &str = "license.activations.persistent";
 pub const EPHEMERAL_ACTIVATIONS: &str = "license.activations.ephemeral";
 pub const ACTIVATION_KINDS: &str = "activation.kinds";

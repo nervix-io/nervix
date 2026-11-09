@@ -192,6 +192,11 @@ Bindings retain this owner for page/refusal, entity, complete counts, unit ident
 replicas, captured origin, section and opaque continuation access. They add no second inspection
 representation and derive no typed value from display text.
 
+An inspection entity is a domain node or the cluster license. Domain and entity-name accessors
+are optional: they retain their values for a domain node and are absent for the cluster license.
+The cluster license's entity kind is `LICENSE`. Its summary and quota sections use the same
+retained schemas and Row frames, and its JSON preserves that typed entity scope.
+
 Python and Ruby metadata objects share one inspection owner. JVM unit and section handles lease
 the same inspection with immutable checked indices, so closing a parent does not invalidate a
 child. `InspectionFrame` retains exactly one verified Row frame and its schema. Its construction

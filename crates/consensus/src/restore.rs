@@ -262,6 +262,7 @@ pub enum RestoreStepEffect {
     Domain {
         state: Box<DomainState>,
         resources: Vec<RestoredResource>,
+        domain_quota: nervix_licensing_vocabulary::Quota,
     },
     /// Records a step whose effects commands of their own applied: the domain's resource versions,
     /// or its models.
@@ -287,6 +288,12 @@ pub struct RestoredResource {
 /// Why the replicated state refused a restore step or an imported resource version.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum RestoreStepConflict {
+    #[error("licensing refused creation of restored domain '{domain}': {refusal}")]
+    Licensing {
+        domain: DomainName,
+        #[source]
+        refusal: nervix_licensing_vocabulary::LicensingRefusal,
+    },
     #[error("command execution '{reference}' is not an applying restore")]
     NotARestore {
         reference: CommandExecutionReference,
@@ -351,9 +358,17 @@ pub(crate) fn apply_restore_step(
             RestoreStepEffect::Domain {
                 state: domain_state,
                 resources,
+                domain_quota,
             },
         ) if domain_state.id == *domain => {
-            create_domain(state, reference, domain_state, resources, changes)?;
+            create_domain(
+                state,
+                reference,
+                domain_state,
+                resources,
+                *domain_quota,
+                changes,
+            )?;
             None
         }
         (RestoreStep::ImportResources(_), RestoreStepEffect::Completion) => None,
@@ -538,6 +553,7 @@ fn create_domain(
     reference: &CommandExecutionReference,
     domain_state: &DomainState,
     resources: &[RestoredResource],
+    domain_quota: nervix_licensing_vocabulary::Quota,
     changes: &mut StateMachineChanges,
 ) -> Result<(), Report<RestoreStepConflict>> {
     let domain = &domain_state.id;
@@ -560,6 +576,12 @@ fn create_domain(
             domain: domain.clone(),
         }));
     }
+    crate::licensing::admit_domain(state, domain_quota).map_err(|refusal| {
+        Report::new(refusal).change_context(RestoreStepConflict::Licensing {
+            domain: domain.clone(),
+            refusal,
+        })
+    })?;
     for declared in resources {
         if state.resources.declares(domain, &declared.resource) {
             return Err(Report::new(RestoreStepConflict::CatalogExists {
@@ -720,12 +742,74 @@ mod tests {
 
     fn domain_effect(name: &str, next_version: u64) -> RestoreStepEffect {
         RestoreStepEffect::Domain {
+            domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
             state: Box::new(stopped(name)),
             resources: vec![RestoredResource {
                 resource: resource("model"),
                 next_version: NonZeroU64::new(next_version).assured("a positive test version"),
             }],
         }
+    }
+
+    #[test]
+    fn licensing_rechecks_restore_domain_usage_without_recording_a_refused_step() {
+        use nervix_licensing_vocabulary::{LicensingRefusal, Quota, QuotaName};
+
+        let mut state = StateMachineData::default();
+        let reference = reference_at(41);
+        admit(
+            &mut state,
+            &reference,
+            cluster_restore(ExistingUserPolicy::Fail),
+            &["prod"],
+        );
+        assert_eq!(
+            step(
+                &mut state,
+                &reference,
+                RestoreStep::Users,
+                users_effect(ExistingUserPolicy::Fail)
+            ),
+            ConsensusResponse::Applied
+        );
+        let mut effect = domain_effect("prod", 1);
+        let RestoreStepEffect::Domain { domain_quota, .. } = &mut effect else {
+            panic!("the fixture is a domain effect");
+        };
+        *domain_quota = Quota::Bounded { value: 1 };
+        // Another command took the slot after this effect's planning.
+        state
+            .domains
+            .insert(domain("occupied"), stopped("occupied"));
+        let create = RestoreStep::CreateDomain(domain("prod"));
+        assert_eq!(
+            step(&mut state, &reference, create.clone(), effect.clone()),
+            ConsensusResponse::Conflict(crate::ConsensusConflict::LicensingQuota {
+                refusal: LicensingRefusal {
+                    condition: QuotaName::ClusterDomains,
+                    limit: 1,
+                    current_usage: 1,
+                    requested: 1
+                },
+            })
+        );
+        assert!(!state.domains.contains_key(&domain("prod")));
+        assert!(
+            !state
+                .resources
+                .declares(&domain("prod"), &resource("model"))
+        );
+        state.domains.remove(&domain("occupied"));
+        assert_eq!(
+            step(&mut state, &reference, create, effect),
+            ConsensusResponse::Applied
+        );
+        assert!(state.domains.contains_key(&domain("prod")));
+        assert!(
+            state
+                .resources
+                .declares(&domain("prod"), &resource("model"))
+        );
     }
 
     fn users_effect(policy: ExistingUserPolicy) -> RestoreStepEffect {

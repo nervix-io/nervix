@@ -145,6 +145,9 @@ impl SessionServiceImpl {
             RestoreStep::CreateDomain(target) => {
                 let domain = planned_domain(plan, target)?;
                 let effect = RestoreStepEffect::Domain {
+                    domain_quota: self
+                        .admit_domain_creation(target, true)
+                        .map_err(|error| StepFailure::Failed(format!("{error:#}")))?,
                     state: Box::new(domain.state.clone()),
                     resources: domain.resources.clone(),
                 };
@@ -729,6 +732,9 @@ impl SessionServiceImpl {
 
     /// The failure a consensus refusal of a restore step stands for.
     async fn consensus_step_failure(&self, error: &Report<ConsensusError>) -> StepFailure {
+        if let Some(refusal) = error.downcast_ref::<crate::licensing::LicensingRefusal>() {
+            self.inner.licensing.record_refusal(*refusal);
+        }
         if let ConsensusError::LeadershipLost { observed } = error.current_context() {
             let redirect = self.not_leader_response("", observed.clone()).await;
             return StepFailure::LeadershipLost(Box::new(redirect));

@@ -130,7 +130,7 @@ impl SessionServiceImpl {
         )
         .await;
         let state = StateInspection {
-            entity,
+            entity: entity.into(),
             result: match result {
                 Ok(Ok(page)) => StateInspectionResult::Page(page),
                 Ok(Err(reason)) => StateInspectionResult::Rejected(reason),

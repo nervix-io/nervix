@@ -905,6 +905,7 @@ SHOW PLACEMENTS;
 SHOW RELAY <name> MATERIALIZED STATE;
 SHOW CLUSTER STATUS;
 DESCRIBE CLUSTER;
+DESCRIBE LICENSE;
 DROP NODE <node_id>;
 CORDON NODE <node_id>;
 UNCORDON NODE <node_id>;
@@ -919,6 +920,11 @@ A relocation `<selection>` is a kind-qualified list, `<kind> <name>[, ...]`, or 
 
 For a wire schema, `<kind>` is the exact multi-word kind: `WIRE JSON SCHEMA`, `WIRE CBOR SCHEMA`,
 or `WIRE AVRO SCHEMA`. The same exact kind is required by `DROP`.
+
+`DESCRIBE LICENSE` reports the cluster's effective licensing policy and committed quota usage.
+It takes no name and works on every node without a selected domain. The embedded free policy
+ships with unlimited node and domain quotas. See
+[Cluster Licensing](node-settings.md#cluster-licensing) for its fields and admission contract.
 
 `DESCRIBE CLUSTER` shows the prerequisites every live node brings to the cluster, as the node the
 session is on sees them. It takes no name and needs neither a selected domain nor the leader: any

@@ -39,6 +39,8 @@ use crate::cluster::{ClockSkew, ClockSkewTolerance, ClusterHandle};
 /// Why a joining node stops instead of joining the cluster.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum JoinRefusedError {
+    #[error("{0}")]
+    Licensing(#[source] crate::licensing::LicensingRefusal),
     /// This node and a member of the cluster cannot run together.
     #[error("{0}")]
     Prerequisite(JoinRefusal),
@@ -159,6 +161,9 @@ impl JoinJudge {
             }
         }
         match view.verdict {
+            Some(AdmissionVerdict::QuotaRefused { refusal }) => {
+                return JoinStep::Ended(JoinOutcome::Refused(JoinRefusedError::Licensing(refusal)));
+            }
             Some(AdmissionVerdict::Refused { voter, mismatch }) => {
                 // The leader judged from the voter's side; the refusal reads from this node's.
                 let refusal = JoinRefusal {

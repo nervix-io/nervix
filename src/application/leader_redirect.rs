@@ -126,6 +126,9 @@ impl SessionServiceImpl {
         report: &Report<ConsensusError>,
         operation: String,
     ) -> CommandResult {
+        if let Some(refusal) = report.downcast_ref::<crate::licensing::LicensingRefusal>() {
+            self.inner.licensing.record_refusal(*refusal);
+        }
         let message = format!("{operation}: {}", ConsensusError::report_message(report));
         self.consensus_error_response(report.current_context(), message)
             .await

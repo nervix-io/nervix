@@ -1,4 +1,4 @@
-//! Shared metadata for bounded reads of graph state.
+//! Shared scope and metadata for bounded state observations.
 //!
 //! Layer: vocabulary.
 //! - **Owns.** Complete state counts, captured owner origins, read selectors, cursor positions and refusals.
@@ -13,7 +13,29 @@
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
-use crate::{BranchKeyFingerprint, ClusterNodeIdentity, Unit};
+use crate::{BranchKeyFingerprint, ClusterNodeIdentity, DomainNodeRef, Unit};
+
+/// A cluster observation has no fabricated domain or graph-node identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StateInspectionEntity {
+    DomainNode(DomainNodeRef),
+    ClusterLicense,
+}
+
+impl From<DomainNodeRef> for StateInspectionEntity {
+    fn from(entity: DomainNodeRef) -> Self {
+        Self::DomainNode(entity)
+    }
+}
+
+impl StateInspectionEntity {
+    pub fn domain_node(&self) -> Option<&DomainNodeRef> {
+        match self {
+            Self::DomainNode(entity) => Some(entity),
+            Self::ClusterLicense => None,
+        }
+    }
+}
 
 /// Counts describe the complete selected state, including rows omitted from this page.
 #[derive(
