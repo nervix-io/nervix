@@ -721,10 +721,10 @@ section of the reference says what each context does with a row error.
 
 | Artifact | Prepared | Held | Bound |
 | --- | --- | --- | --- |
-| Constant regular expression | Once, when the call is lowered (`ConstantPattern`) | Inside the program; one search cache is borrowed from the regex's pool for each batch, so no row takes a lock | 10 MiB compiled size, 2 MiB lazy-DFA search cache |
-| Pattern read from a field | On a miss, on the executing thread | `DynamicPatterns`, one cache per call site per program, shared by clones and across batches. Each batch loads one `ArcSwap` snapshot and publishes a miss copy-on-write. | 64 patterns, oldest compiled evicted first; rows that repeat the previous row's pattern skip the lookup |
+| Constant regular expression | Once, when the call is lowered (`ConstantPattern`) | Inside the program; one search cache is borrowed from the regex's pool for each batch, so no row takes a lock | 10 MiB fixed compiled size; lazy-DFA search cache from `vm-regex-search-cache-bytes` (2 MiB by default) |
+| Pattern read from a field | On a miss, on the executing thread | `DynamicPatterns`, one cache per call site per program, shared by clones and across batches. Each batch loads one `ArcSwap` snapshot and publishes a miss copy-on-write. | `vm-dynamic-pattern-cache-capacity` patterns (64 by default), oldest compiled evicted first; rows that repeat the previous row's pattern skip the lookup |
 | Constant `contains_any` list | Once, as an Aho-Corasick matcher | Inside the program | 128 patterns and 64 KiB; over that, each non-null row fails |
-| Per-row `contains_any` set | On a miss, for each batch | A per-call cache for one batch; a hit borrows the Arrow strings without allocating | 64 sets per batch |
+| Per-row `contains_any` set | On a miss, for each batch | A per-call cache for one batch; a hit borrows the Arrow strings without allocating | `vm-pattern-sets-per-batch` sets (64 by default) |
 | `IN` set | Once, from evaluated constant elements | `MembershipSet` | Up to 8 fixed-width values compared in turn; larger fixed-width sets and every `STRING` set hashed |
 | Constant CIDR network | Once, when the call is lowered | Inside the program | A per-row network is reparsed only when its text differs from the previous row's |
 | Datetime zone and format | Once, when the call is lowered | Inside the resolved call | A 256-byte longest formatted value, checked at compile time |
@@ -775,8 +775,8 @@ The VM's entry point alone decides where a program runs:
 
 | Condition | Where it runs |
 | --- | --- |
-| At most `INLINE_ROW_LIMIT` (1,024) rows, and no injected function whose `FunctionExecutionPolicy` is `Extension` | Inline, on the caller's task |
-| More than 1,024 rows, and no such function | On the node's data workers, admitted through the bounded executor |
+| At most `vm-inline-row-limit` rows (1,024 by default), and no injected function whose `FunctionExecutionPolicy` is `Extension` | Inline, on the caller's task |
+| More than the configured inline row limit, and no such function | On the node's data workers, admitted through the bounded executor |
 | Any `Inject` instruction whose injector's `FunctionExecutionPolicy` is `Extension` | On the node's extension workers, admitted through the bounded executor, whatever the batch size. Every UDF call does this. |
 
 The node resolves worker, queue and memory capacities once at startup;
@@ -793,6 +793,12 @@ Admission can refuse. A class whose wait queue is full refuses the execution wit
 `RuntimeError::ExecutionNotAdmitted`, and a job that panics on its worker returns
 `RuntimeError::ExecutionPanicked`. Both are batch errors, which reach the node's error policy as
 the report of the planned step that ran the program, like any other batch failure.
+
+The compiling node resolves these admission and cache capabilities once and carries them in the
+compiled program. Set `--vm-inline-row-limit 0` to admit every nonempty batch to Data workers;
+Extension calls keep their Extension class. Cache capacities affect reuse and admission affects
+where work runs; neither changes row errors or expression results. See
+[Engine And Connector Host Capabilities](node-settings.md#engine-and-connector-host-capabilities).
 
 An inline execution never yields and has no cancellation point: it runs every instruction over
 its batch to completion, and the batch's size and the limits above bound that work. An admitted

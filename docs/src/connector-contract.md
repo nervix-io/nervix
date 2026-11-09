@@ -3861,3 +3861,19 @@ do not re-open the connector or alter its retry, quiesce, finish or acknowledgem
 Trust roots, identity and ALPN remain properties of the concrete client configuration.
 [Cryptography](cryptography.md#algorithm-policy) owns the exact governed-path and driver-owned-gap
 inventory.
+
+## Local Host Capabilities
+
+The shared host retry law takes a validated positive multiplier and a jitter percentage from
+`NodeCapabilities`. Initial delay and maximum delay continue to come from the declared retry
+policy. Between attempts the host multiplies the delay, optionally adds zero through the selected
+percentage, and clamps it to the policy ceiling, including arithmetic overflow. Defaults preserve
+doubling without jitter. MQTT's event-loop reconnect uses the same law as ingestor and emitter
+host retries. Reset still restores the policy's initial delay.
+
+Kafka's domain-assignment retry and partition watch, and the Syslog stream intake queue and read
+chunk, likewise receive typed node capabilities. The stream queue remains bounded with
+backpressure, and each read remains bounded by the remaining frame allowance. Driver deadlines,
+prefetch, pool lifetimes and keep-alive depend on an external system and belong in that entity's
+declared client keys or Plexus clauses. The complete local options and defaults are in
+[Node Settings](node-settings.md#engine-and-connector-host-capabilities).

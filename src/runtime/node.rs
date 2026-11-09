@@ -207,6 +207,8 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) replicated_branch_aggregated_states:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedBranchAggregatedState>, RandomState>,
     pub(in crate::runtime) wasm_runtime: WasmRuntime,
+    pub(in crate::runtime) connector_host: super::ConnectorHostSettings,
+    pub(in crate::runtime) vm_settings: nervix_vm::VmSettings,
     /// The guest-requested branch state resets this node's branch tasks are waiting for. A branch
     /// fences itself and leaves its request here; the control-plane coordinator drains them.
     pub(in crate::runtime) guest_wasm_state_resets: PendingGuestWasmStateResets,

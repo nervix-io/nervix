@@ -974,6 +974,7 @@ impl Runtime {
                             &assignment.value,
                             Some(&routing.udfs),
                             execution_now,
+                            self.inner.vm_settings,
                         )
                         .await
                         .map_err(|reason| {

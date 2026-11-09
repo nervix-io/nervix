@@ -252,6 +252,7 @@ fn materialize_nodes(
     nodes: &[BranchedProcessorSpec],
     relay_schemas: &HashMap<RelayName, Arc<CompiledSchema>>,
     udfs: Option<&UdfExecutor>,
+    vm_settings: nervix_vm::VmSettings,
 ) -> error_stack::Result<Vec<RelayProcessorTemplate>, PlanningError> {
     let mut out = Vec::new();
     for node in nodes {
@@ -326,6 +327,7 @@ fn materialize_nodes(
                             &output.relay,
                             relay_schemas,
                             udfs,
+                            vm_settings,
                         )
                         .map_err(|reason| {
                             reason.change_context(PlanningError::WindowOutputCompilation {
@@ -488,6 +490,7 @@ fn materialize_nodes(
                                 inputs,
                                 input_schema,
                                 udfs,
+                                vm_settings,
                             )
                             .change_context_lazy(|| {
                                 PlanningError::InferencerInputCompilation {
@@ -517,6 +520,7 @@ fn materialize_nodes(
                             inputs,
                             input_schema,
                             udfs,
+                            vm_settings,
                         )
                         .map_err(|reason| {
                             reason.change_context(PlanningError::InferencerInputCompilation {
@@ -657,6 +661,7 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
     relay_schemas: &HashMap<RelayName, Arc<CompiledSchema>>,
     relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
     udfs: Option<&UdfExecutor>,
+    vm_settings: nervix_vm::VmSettings,
 ) -> error_stack::Result<BranchInstanceTemplate, PlanningError> {
     let spec = &node.spec;
     let Some(root_relay) = spec.input_relays.first().cloned() else {
@@ -671,7 +676,7 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
         spec.output_relays(),
         relay_services,
     )?;
-    let template = materialize_nodes(std::slice::from_ref(spec), relay_schemas, udfs)?
+    let template = materialize_nodes(std::slice::from_ref(spec), relay_schemas, udfs, vm_settings)?
         .pop()
         .verified("materialize_nodes answers one template per spec and this call passes one spec");
     let mut processors = HashMap::default();
@@ -704,6 +709,7 @@ fn bind_processor_template_programs(
     materialized_stream_specs: &HashMap<RelayName, RuntimeMaterializedRelaySpec>,
     lookups: &HashMap<LookupName, Arc<LookupRuntime>>,
     udfs: Option<&UdfExecutor>,
+    vm_settings: nervix_vm::VmSettings,
 ) -> error_stack::Result<(), PlanningError> {
     for processor in template.processors.values_mut() {
         let compilation_error = || PlanningError::ProcessorProgramCompilation {
@@ -774,6 +780,7 @@ fn bind_processor_template_programs(
                 },
             };
             let context = || RuntimeVmCompileContext {
+                settings: vm_settings,
                 available_materialized_streams: materialized_stream_specs,
                 available_lookups: lookups,
                 current_branching: input_branching,
@@ -822,6 +829,7 @@ fn bind_processor_template_programs(
         }
 
         let output_context = || RuntimeVmCompileContext {
+            settings: vm_settings,
             available_materialized_streams: materialized_stream_specs,
             available_lookups: lookups,
             current_branching: primary_branching,
@@ -841,6 +849,7 @@ fn bind_processor_template_programs(
                         deduplicate_on,
                         primary_schema.arrow_schema(),
                         udfs,
+                        vm_settings,
                     )
                     .change_context_lazy(compilation_error)?,
                 );
@@ -871,6 +880,7 @@ fn bind_processor_template_programs(
                         order_by,
                         primary_schema.arrow_schema(),
                         udfs,
+                        vm_settings,
                     )
                     .change_context_lazy(compilation_error)?,
                 );
@@ -1023,7 +1033,13 @@ fn bind_processor_template_programs(
                         left_schema.arrow_schema(),
                         right_relays,
                         right_schema.arrow_schema(),
-                        udfs,
+                        runtime_udf_compile_options(
+                            udfs,
+                            VmCompileOptions {
+                                settings: vm_settings,
+                                ..VmCompileOptions::default()
+                            },
+                        ),
                     )
                     .change_context_lazy(compilation_error)?,
                 );
@@ -1198,6 +1214,7 @@ pub(in crate::runtime) async fn bind_published_processor_plans(
                     relay_schemas,
                     relay_services,
                     udfs,
+                    runtime.inner.vm_settings,
                 )?;
                 bind_processor_template_programs(
                     &mut template,
@@ -1206,9 +1223,14 @@ pub(in crate::runtime) async fn bind_published_processor_plans(
                     materialized_stream_specs,
                     lookups,
                     udfs,
+                    runtime.inner.vm_settings,
                 )?;
                 template
-                    .prepare_stateful_inferencers(runtime.executor(), udfs)
+                    .prepare_stateful_inferencers(
+                        runtime.executor(),
+                        udfs,
+                        runtime.inner.vm_settings,
+                    )
                     .await?;
                 template
                     .prepare_wasm_processors(runtime, domain)

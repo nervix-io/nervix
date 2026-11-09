@@ -43,7 +43,6 @@ use crate::{
 const MAX_SPLIT_PARTS: usize = 65_536;
 const MAX_PATTERNS: usize = 128;
 const MAX_PATTERN_BYTES: usize = 64 * 1024;
-const PATTERN_SETS_PER_BATCH: usize = 64;
 const LIKE_PATTERN_BYTES_LIMIT: usize = 4 * 1024;
 
 /// A borrowed cache query over one Arrow list. Hashing matches `Vec<String>` exactly, including
@@ -128,7 +127,9 @@ pub enum ContainsAnyCall {
         patterns: Vec<String>,
         matcher: Option<Arc<AhoCorasick>>,
     },
-    Dynamic,
+    Dynamic {
+        capacity: NonZeroUsize,
+    },
 }
 
 impl PartialEq for ContainsAnyCall {
@@ -140,7 +141,7 @@ impl PartialEq for ContainsAnyCall {
                     patterns: right, ..
                 },
             ) => left == right,
-            (Self::Dynamic, Self::Dynamic) => true,
+            (Self::Dynamic { .. }, Self::Dynamic { .. }) => true,
             _ => false,
         }
     }
@@ -514,6 +515,9 @@ pub(crate) fn contains_any(
         return Ok(output.finish());
     }
     let lists = lists.verified("a dynamic contains_any call retains its list input");
+    let ContainsAnyCall::Dynamic { capacity } = call else {
+        unreachable!("constant calls return above");
+    };
     let mut cache: IndexMap<Vec<String>, AhoCorasick> = IndexMap::new();
     for row in 0..text.len() {
         if text.is_null(row) {
@@ -567,7 +571,7 @@ pub(crate) fn contains_any(
             continue;
         };
         let matched = matcher.is_match(text.value(row));
-        if cache.len() == PATTERN_SETS_PER_BATCH {
+        if cache.len() == capacity.get() {
             cache.shift_remove_index(0);
         }
         cache.insert(patterns, matcher);
@@ -683,7 +687,9 @@ mod tests {
         let lists = TypedArray::Generic(StdArc::new(builder.finish()));
         let mut errors = RowErrors::new(3);
         let result = contains_any(
-            &ContainsAnyCall::Dynamic,
+            &ContainsAnyCall::Dynamic {
+                capacity: crate::VmSettings::default().pattern_sets_per_batch(),
+            },
             &text,
             Some(&lists),
             &mut errors,
@@ -726,7 +732,9 @@ mod tests {
         let lists = TypedArray::Generic(StdArc::new(builder.finish()));
         let mut errors = RowErrors::new(text.len());
         let result = contains_any(
-            &ContainsAnyCall::Dynamic,
+            &ContainsAnyCall::Dynamic {
+                capacity: crate::VmSettings::default().pattern_sets_per_batch(),
+            },
             &text,
             Some(&lists),
             &mut errors,

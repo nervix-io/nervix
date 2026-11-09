@@ -728,6 +728,16 @@ pub(in crate::application) async fn build_test_service_inner(
         .announce_node_capabilities(nervix_models::NodeCapabilityRecord {
             identity: cluster.local_node_identity().await,
             capabilities: nervix_models::NodeCapabilities {
+                engines: nervix_arbitrary::Arbitrary::new(
+                    &[],
+                    nervix_arbitrary::Domain::Vocabulary,
+                )
+                .node_engine_capabilities(),
+                connector_host: nervix_arbitrary::Arbitrary::new(
+                    &[],
+                    nervix_arbitrary::Domain::Vocabulary,
+                )
+                .node_connector_host_capabilities(),
                 cpu_count: Some(std::num::NonZeroU64::MIN),
                 memory_bytes: Some(std::num::NonZeroU64::MIN),
                 receive: interconnect.local_receive_bounds(),

@@ -387,6 +387,7 @@ fn compile_sql_values_program(
     mapping: &MappedValuesPlan,
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
+    vm_settings: nervix_vm::VmSettings,
 ) -> error_stack::Result<CompiledSqlValuesProgram, MappedValuesError> {
     let parsed = &mapping.program;
     let empty_emitter_schema =
@@ -460,6 +461,7 @@ fn compile_sql_values_program(
         runtime_udf_compile_options(
             udfs,
             VmCompileOptions {
+                settings: vm_settings,
                 output_mode: VmOutputMode::ExplicitOnly,
                 allow_sensitive_output: false,
                 ..VmCompileOptions::default()
@@ -479,6 +481,7 @@ fn compile_sql_values_program(
 
 /// What one emitter's `VALUES` mapping is compiled from.
 pub(in crate::runtime) struct MappedValuesProjectionInit<'a> {
+    pub(in crate::runtime) vm_settings: nervix_vm::VmSettings,
     /// How this emitter names itself in diagnostics, such as `ClickHouse`.
     pub(in crate::runtime) label: &'static str,
     /// The expression scope this emitter's mapped columns are written through, such as `clickhouse`.
@@ -507,6 +510,7 @@ impl MappedValuesProjection {
         init: MappedValuesProjectionInit<'_>,
     ) -> error_stack::Result<Self, MappedValuesError> {
         let MappedValuesProjectionInit {
+            vm_settings,
             label,
             namespace,
             emitter,
@@ -514,8 +518,15 @@ impl MappedValuesProjection {
             input_schema,
             udfs,
         } = init;
-        let program =
-            compile_sql_values_program(label, namespace, emitter, mapping, input_schema, udfs)?;
+        let program = compile_sql_values_program(
+            label,
+            namespace,
+            emitter,
+            mapping,
+            input_schema,
+            udfs,
+            vm_settings,
+        )?;
         let target_columns = mapping.columns.clone();
         let output_fields = program.program.output_schema.fields();
         if output_fields.len() != target_columns.len() {
@@ -835,6 +846,7 @@ mod tests {
             .expect("the mapping should lower");
 
         MappedValuesProjection::compile(MappedValuesProjectionInit {
+            vm_settings: nervix_vm::VmSettings::default(),
             label: "ClickHouse",
             namespace: "clickhouse",
             emitter: &emitter,
@@ -909,6 +921,7 @@ mod tests {
         let mapping = MappedValuesPlan::decide(&emitter, "Iceberg", "iceberg", &values)
             .expect("the mapping should lower");
         let projection = MappedValuesProjection::compile(MappedValuesProjectionInit {
+            vm_settings: nervix_vm::VmSettings::default(),
             label: "Iceberg",
             namespace: "iceberg",
             emitter: &emitter,
@@ -945,6 +958,7 @@ mod tests {
         let mapping = MappedValuesPlan::decide(&emitter, "ClickHouse", "clickhouse", &values)
             .expect("the mapping should lower");
         let projection = MappedValuesProjection::compile(MappedValuesProjectionInit {
+            vm_settings: nervix_vm::VmSettings::default(),
             label: "ClickHouse",
             namespace: "clickhouse",
             emitter: &emitter,
@@ -1107,6 +1121,7 @@ mod tests {
         let mapping = MappedValuesPlan::decide(&emitter, "OTEL", "otel", &values)
             .expect("the mapping should lower");
         MappedValuesProjection::compile(MappedValuesProjectionInit {
+            vm_settings: nervix_vm::VmSettings::default(),
             label: "OTEL",
             namespace: "otel",
             emitter: &emitter,
@@ -1275,6 +1290,7 @@ mod tests {
         let mapping = MappedValuesPlan::decide(&emitter, "ClickHouse", "clickhouse", &values)
             .assured("the syntactically valid fixture mapping lowers before type checking");
         let report = MappedValuesProjection::compile(MappedValuesProjectionInit {
+            vm_settings: nervix_vm::VmSettings::default(),
             label: "ClickHouse",
             namespace: "clickhouse",
             emitter: &emitter,

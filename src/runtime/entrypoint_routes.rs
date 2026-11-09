@@ -154,6 +154,7 @@ impl ExecutionBuildDeps<'_> {
         current_branching: &'b ResolvedBranching,
     ) -> RuntimeVmCompileContext<'b> {
         RuntimeVmCompileContext {
+            settings: self.vm_settings,
             available_materialized_streams: self.materialized_relay_specs,
             available_lookups: self.lookups,
             current_branching,
@@ -586,6 +587,7 @@ mod tests {
 
         fn deps<'a>(&'a self, domain: &'a DomainName) -> ExecutionBuildDeps<'a> {
             ExecutionBuildDeps {
+                vm_settings: nervix_vm::VmSettings::default(),
                 domain,
                 relay_schemas: &self.relay_schemas,
                 relay_branchings: &self.relay_branchings,

@@ -26,6 +26,7 @@
 
 mod backup;
 mod cancellation;
+pub mod capabilities;
 mod client;
 mod connection;
 mod consumer;
@@ -41,6 +42,7 @@ mod subscriptions;
 mod upload;
 
 pub use backup::BackupDownloadError;
+pub use capabilities::ClientCapabilities;
 pub use client::{Client, ExecutionHandle};
 pub use connection::{ConnectDns, ConnectOptions, TlsRequirement};
 #[cfg(feature = "arrow")]

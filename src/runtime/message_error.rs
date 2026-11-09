@@ -1313,6 +1313,7 @@ mod tests {
                 }],
             },
             MessageErrorRouteBindingContext {
+                vm_settings: nervix_vm::VmSettings::default(),
                 relay_services: &relay_services,
                 materialized_stream_specs: &HashMap::default(),
                 lookups: &HashMap::default(),
@@ -1656,6 +1657,7 @@ mod tests {
                 allow_header_reads: false,
             },
             RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &materialized_specs,
                 available_lookups: &HashMap::default(),
                 current_branching: &ResolvedBranching::unbranched(),
@@ -1719,6 +1721,7 @@ mod tests {
                 allow_header_reads: false,
             },
             RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
                 current_branching: &ResolvedBranching::unbranched(),

@@ -75,8 +75,7 @@ use crate::{
     connection::{GrpcConnector, ServerDirectory},
     exchange::{
         EventQueue, EventQueueError, EventTargets, Exchange, ExchangeReader, ExchangeRequests,
-        PendingReplies, ReaderFlow, SERVER_NOTICE_BYTES, SESSION_LIMITS, SUBSCRIPTION_EVENT_BYTES,
-        SUBSCRIPTION_RETAINED_BYTES, SUBSCRIPTIONS_RETAINED_IN_FULL, SessionEvents,
+        PendingReplies, ReaderFlow, SERVER_NOTICE_BYTES, SESSION_LIMITS, SessionEvents,
     },
     outcome::Routing,
     split_query_statements,
@@ -331,7 +330,11 @@ pub(crate) fn test_client(domain_name: &str) -> Client {
     drop(outbound);
     let pending = Arc::new(Mutex::new(PendingReplies::new()));
     client_on(
-        detached_exchange(frames, pending, SessionEvents::new().emitters),
+        detached_exchange(
+            frames,
+            pending,
+            SessionEvents::new(crate::ClientCapabilities::default()).emitters,
+        ),
         Some(domain(domain_name)),
     )
 }
@@ -359,7 +362,11 @@ impl Loopback {
         let (frames, requests) = mpsc::channel(8);
         let pending = Arc::new(Mutex::new(PendingReplies::new()));
         let client = client_reaching(
-            detached_exchange(frames, pending.clone(), SessionEvents::new().emitters),
+            detached_exchange(
+                frames,
+                pending.clone(),
+                SessionEvents::new(crate::ClientCapabilities::default()).emitters,
+            ),
             session_domain,
             servers,
         );
@@ -418,7 +425,12 @@ struct ReaderFixture {
 }
 
 fn reader_fixture(capacity: usize) -> ReaderFixture {
-    let subscriptions = EventQueue::new(capacity, SUBSCRIPTION_EVENT_BYTES);
+    let subscriptions = EventQueue::new(
+        capacity,
+        crate::ClientCapabilities::default()
+            .subscription_limits()
+            .total_bytes,
+    );
     let notices = EventQueue::new(capacity, SERVER_NOTICE_BYTES);
     let (leadership, observed_leadership) = watch::channel(None);
     let (domains, observed_domains) = watch::channel(None);
@@ -918,7 +930,8 @@ async fn overflowing_subscription_rows_cannot_delay_a_command_reply() {
 
 #[test]
 fn one_subscription_overflow_preserves_other_subscription_events() {
-    let queue = EventQueue::for_subscriptions();
+    let queue =
+        EventQueue::for_subscriptions(crate::ClientCapabilities::default().subscription_limits());
     let generation = Arc::new(());
     queue.begin(&generation);
     let full = subscription("full", 1);
@@ -961,8 +974,42 @@ fn one_subscription_overflow_preserves_other_subscription_events() {
 }
 
 #[test]
+fn configured_subscription_limits_preserve_other_subscriptions_on_overflow() {
+    use std::num::NonZeroUsize;
+    let capabilities = crate::ClientCapabilities::from_options(&ConnectOptions {
+        subscription_record_capacity: NonZeroUsize::new(2).assured("two is positive"),
+        subscriptions_retained_in_full: NonZeroUsize::new(2).assured("two is positive"),
+        ..ConnectOptions::default()
+    })
+    .assured("small retention bounds validate");
+    let queue = EventQueue::for_subscriptions(capabilities.subscription_limits());
+    let generation = Arc::new(());
+    queue.begin(&generation);
+    let full = subscription("configured-full", 1);
+    let healthy = subscription("configured-healthy", 1);
+    let lost = |handle: &SubscriptionHandle| {
+        SubscriptionEvent::DeliveryLost(nervix_client_wire::SubscriptionDeliveryLost {
+            subscription: handle.clone(),
+            dropped_rows: NonZeroU64::MIN,
+        })
+    };
+    assert!(!queue.push(&generation, lost(&full), 1));
+    assert!(!queue.push(&generation, lost(&full), 1));
+    assert!(!queue.push(&generation, lost(&healthy), 1));
+    assert!(queue.push(&generation, lost(&full), 1));
+    assert!(
+        matches!(queue.try_next(), Some(SubscriptionEvent::ConsumerOverflow(handle)) if handle == full)
+    );
+    assert!(
+        matches!(queue.try_next(), Some(SubscriptionEvent::DeliveryLost(event)) if event.subscription == healthy)
+    );
+    assert!(queue.try_next().is_none());
+}
+
+#[test]
 fn each_subscription_retains_a_frame_of_the_frame_limit_and_overflows_alone_past_it() {
-    let queue = EventQueue::for_subscriptions();
+    let queue =
+        EventQueue::for_subscriptions(crate::ClientCapabilities::default().subscription_limits());
     let generation = Arc::new(());
     queue.begin(&generation);
     // Rows keep the whole frame that carried them alive, so the largest event a subscription
@@ -1003,7 +1050,8 @@ fn each_subscription_retains_a_frame_of_the_frame_limit_and_overflows_alone_past
 
 #[test]
 fn a_subscription_past_the_exchange_allowance_overflows_without_evicting_full_subscriptions() {
-    let queue = EventQueue::for_subscriptions();
+    let queue =
+        EventQueue::for_subscriptions(crate::ClientCapabilities::default().subscription_limits());
     let generation = Arc::new(());
     queue.begin(&generation);
     let lost = |handle: &SubscriptionHandle| {
@@ -1013,10 +1061,19 @@ fn a_subscription_past_the_exchange_allowance_overflows_without_evicting_full_su
         })
     };
     let mut full = Vec::new();
-    for index in 0..SUBSCRIPTIONS_RETAINED_IN_FULL {
+    for index in 0..crate::ClientCapabilities::default()
+        .subscriptions_retained_in_full()
+        .get()
+    {
         let handle = subscription(&format!("full_{index}"), 1);
         assert!(
-            !queue.push(&generation, lost(&handle), SUBSCRIPTION_RETAINED_BYTES),
+            !queue.push(
+                &generation,
+                lost(&handle),
+                crate::ClientCapabilities::default()
+                    .subscription_limits()
+                    .bytes
+            ),
             "subscription {index} retains its whole allowance"
         );
         full.push(handle);
@@ -1925,7 +1982,11 @@ async fn a_subscription_needs_a_selected_domain() {
     drop(outbound);
     let pending = Arc::new(Mutex::new(PendingReplies::new()));
     let client = client_on(
-        detached_exchange(frames, pending, SessionEvents::new().emitters),
+        detached_exchange(
+            frames,
+            pending,
+            SessionEvents::new(crate::ClientCapabilities::default()).emitters,
+        ),
         None,
     );
 

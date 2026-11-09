@@ -289,7 +289,10 @@ pub use names::{
     SubscriptionName, UdfName, UserName, VhostName, WasmProcessorName, WindowProcessorName,
     WireSchemaName,
 };
-pub use node_capabilities::{NodeCapabilities, NodeCapabilityRecord, PeerReceiveBounds};
+pub use node_capabilities::{
+    ConnectorHostCapabilities, EngineCapabilities, NodeCapabilities, NodeCapabilityRecord,
+    PeerReceiveBounds,
+};
 pub use node_endpoint::{
     NodeEndpoint, NodeEndpointParseError, NodeServiceUrl, NodeServiceUrlParseError,
 };

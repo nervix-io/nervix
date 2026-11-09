@@ -133,18 +133,29 @@ fn header_batch(program: &CompiledProgram, rows: usize) -> TypedBatch {
 }
 
 fn increment_program() -> nervix_primitives::sync::Arc<CompiledProgram> {
+    increment_program_with_settings(crate::VmSettings::default())
+}
+
+fn increment_program_with_settings(
+    settings: crate::VmSettings,
+) -> nervix_primitives::sync::Arc<CompiledProgram> {
+    use meticulous::ResultExt as _;
     let input_schema = StdArc::new(Schema::new(vec![
         Field::new("value", DataType::Int64, false),
         Field::new("next", DataType::Int64, true),
     ]));
-    let parsed = parse_program("SET next = input.value + 1").expect("the program must parse");
+    let parsed = parse_program("SET next = input.value + 1")
+        .assured("the increment program is valid Plexus");
     let compiled = compile_program_with_options_for_bindings(
         &parsed,
         input_schema.clone(),
         [CompileBinding::writable("input", input_schema)],
-        CompileOptions::default(),
+        CompileOptions {
+            settings,
+            ..CompileOptions::default()
+        },
     )
-    .expect("the increment program must compile");
+    .assured("the increment uses exact I64 inputs and outputs");
     nervix_primitives::sync::Arc::new(compiled)
 }
 
@@ -193,7 +204,7 @@ async fn until(mut condition: impl FnMut() -> bool) {
 async fn a_small_batch_without_extension_calls_runs_inline() {
     let executor = Executor::default();
     let program = increment_program();
-    let batch = increment_batch(&program, INLINE_ROW_LIMIT);
+    let batch = increment_batch(&program, crate::VmInlineRowLimit::DEFAULT);
     let context = ExecutionContext::new(Timestamp::from_unix_nanos(1));
 
     execute_program_with_selection_in_context(&executor, &program, &batch, &context)
@@ -209,7 +220,7 @@ async fn a_small_batch_without_extension_calls_runs_inline() {
 async fn a_large_batch_runs_on_the_data_workers_under_a_relay_charge_of_its_columns() {
     let executor = Executor::default();
     let program = two_header_program();
-    let batch = header_batch(&program, INLINE_ROW_LIMIT + 1);
+    let batch = header_batch(&program, crate::VmInlineRowLimit::DEFAULT + 1);
     let expected_charge = batch.payload_bytes().expect("Arrow measures Utf8 columns");
     let (context, mut control) = scripted_injector(FunctionExecutionPolicy::Inline);
 
@@ -354,4 +365,26 @@ async fn an_abandoned_execution_stops_at_its_next_instruction() {
         "the execution ran the instruction after its caller stopped waiting"
     );
     assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
+}
+
+#[nervix_primitives::test]
+async fn a_lowered_inline_limit_admits_a_single_row_to_data_workers() {
+    use meticulous::ResultExt as _;
+    let executor = Executor::default();
+    let settings = crate::VmSettings::resolve(crate::VmSettingOverrides {
+        inline_row_limit: Some(0),
+        ..crate::VmSettingOverrides::default()
+    })
+    .assured("zero is a valid inline threshold");
+    let program = increment_program_with_settings(settings);
+    let batch = increment_batch(&program, 1);
+    let context = ExecutionContext::new(Timestamp::from_unix_nanos(1));
+    let result = execute_program_with_selection_in_context(&executor, &program, &batch, &context)
+        .await
+        .assured("the admitted increment executes");
+    assert_eq!(result.batch.row_count(), 1);
+    let snapshot = executor.snapshot();
+    assert_eq!(snapshot.data_cpu.completed, 1);
+    assert_eq!(snapshot.extension_cpu.admitted, 0);
+    assert_eq!(snapshot.relay_memory.reserved_bytes, 0);
 }

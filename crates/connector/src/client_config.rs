@@ -221,11 +221,12 @@ pub fn optional_bool_client_config_value(
     }
 }
 
-pub fn next_retry_delay(current: Duration, policy: ParsedRetryPolicy) -> Duration {
-    current
-        .checked_mul(2)
-        .unwrap_or(policy.max_backoff)
-        .min(policy.max_backoff)
+pub fn next_retry_delay(
+    current: Duration,
+    policy: ParsedRetryPolicy,
+    settings: crate::RetryBackoffSettings,
+) -> Duration {
+    settings.next_delay(current, policy.max_backoff)
 }
 
 #[cfg(test)]
@@ -244,11 +245,19 @@ mod tests {
         };
 
         assert_eq!(
-            next_retry_delay(policy.backoff, policy),
+            next_retry_delay(
+                policy.backoff,
+                policy,
+                crate::RetryBackoffSettings::default()
+            ),
             Duration::from_millis(200)
         );
         assert_eq!(
-            next_retry_delay(Duration::from_millis(700), policy),
+            next_retry_delay(
+                Duration::from_millis(700),
+                policy,
+                crate::RetryBackoffSettings::default()
+            ),
             Duration::from_secs(1)
         );
     }

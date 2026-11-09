@@ -509,7 +509,10 @@ reset. A genuine reset failure arrives as `RequestFailed` and follows the failur
   `UnsubscribeRequest`, and MUST release its name; a deletion whose session ends before it is
   answered is complete too.
 - **S-8.** A client MUST bound what it retains for subscriptions, per subscription and in total, and
-  SHOULD let one subscription retain at least one frame of the frame limit.
+  SHOULD let one subscription retain at least one frame of the frame limit. Local configurable
+  limits MUST validate positive capacities and every derived record/byte product before opening
+  the transport. The native client uses its typed capabilities for subscription retention and
+  upload/restore queues; see [Connection Capabilities](client-tools-cli.md#connection-capabilities).
 - **S-9.** A client that stops reading a `BLOCKING` subscription holds back the relay it reads. A
   client that cannot keep up SHOULD use `DROPPING` delivery.
 
