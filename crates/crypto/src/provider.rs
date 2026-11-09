@@ -20,3 +20,18 @@ pub fn module_mode() -> ModuleMode {
         Err(_) => ModuleMode::Ordinary,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_linked_module_is_the_one_the_build_selects() {
+        let selected = if cfg!(feature = "fips") {
+            ModuleMode::Fips
+        } else {
+            ModuleMode::Ordinary
+        };
+        assert_eq!(module_mode(), selected);
+    }
+}
