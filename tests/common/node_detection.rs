@@ -53,15 +53,15 @@ pub(crate) fn detection_double(reports: &BTreeMap<String, String>) -> io::Result
     Ok(NodeDetection::Supplied(properties))
 }
 
-/// `count` GPUs of one model, with a driver; none when the count is zero.
+/// `count` GPUs of one model, with a driver; none, and no driver, when the count is zero.
 fn gpus(count: &str) -> io::Result<GpuInventory> {
     let count = count
         .parse::<usize>()
         .map_err(|error| io::Error::other(format!("gpu.count '{count}': {error}")))?;
-    let driver = Detected::Value(text("scenario-driver")?);
     if count == 0 {
-        return Ok(GpuInventory::NoDevice { driver });
+        return Ok(GpuInventory::NoDevice);
     }
+    let driver = Detected::Value(text("scenario-driver")?);
     let memory = NonZeroU64::new(REPORTED_GPU_MEMORY_BYTES)
         .ok_or_else(|| io::Error::other("a reported GPU has memory"))?;
     let mut devices = Vec::new();

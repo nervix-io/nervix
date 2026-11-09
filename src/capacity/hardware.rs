@@ -41,7 +41,8 @@ pub fn detect_cpu_model() -> Detected<PropertyText> {
 }
 
 /// The GPUs NVML reports, in device order, and the driver serving them. Without the NVML library,
-/// or with a library whose driver is not running, the node has none.
+/// or with a library whose driver is not running, the node has none; with no device, it names no
+/// driver.
 pub fn detect_gpus() -> GpuInventory {
     let nvml = match Nvml::builder().lib_path(NVML_LIBRARY.as_ref()).init() {
         Ok(nvml) => nvml,
@@ -49,13 +50,6 @@ pub fn detect_gpus() -> GpuInventory {
             let reason = undetected_by(&error);
             debug!(%error, ?reason, "NVML reports no GPU inventory");
             return GpuInventory::Undetected(reason);
-        }
-    };
-    let driver = match nvml.sys_driver_version() {
-        Ok(version) => detected_text(&version),
-        Err(error) => {
-            debug!(%error, "NVML reports no driver version");
-            Detected::Undetected(undetected_by(&error))
         }
     };
     let count = match nvml.device_count() {
@@ -66,7 +60,7 @@ pub fn detect_gpus() -> GpuInventory {
         }
     };
     if count == 0 {
-        return GpuInventory::NoDevice { driver };
+        return GpuInventory::NoDevice;
     }
     let listed = match usize::try_from(count) {
         Ok(count) => count <= MAX_PROPERTY_LIST_ITEMS,
@@ -75,6 +69,13 @@ pub fn detect_gpus() -> GpuInventory {
     if !listed {
         return GpuInventory::Undetected(UndetectedReason::ExceedsRecordBound);
     }
+    let driver = match nvml.sys_driver_version() {
+        Ok(version) => detected_text(&version),
+        Err(error) => {
+            debug!(%error, "NVML reports no driver version");
+            Detected::Undetected(undetected_by(&error))
+        }
+    };
     let mut devices = Vec::new();
     for index in 0..count {
         devices.push(device(&nvml, index));

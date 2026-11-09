@@ -2157,8 +2157,11 @@ pub(super) fn entry(arbitrary: &mut Arbitrary<'_>) -> EntryOf<TypeConfig> {
     openraft::Entry { log_id, payload }
 }
 
-/// How many seeded inputs a coverage check draws its values from.
-const SEEDS: u64 = 256;
+/// How many seeded inputs a coverage check draws its values from. The rarest record of a revision,
+/// the archive a finished `BACKUP` command recorded, comes from about one command execution in a
+/// hundred, so this many seeds reach it about sixteen times and the check does not depend on how
+/// much entropy the families drawn before it consume.
+const SEEDS: u64 = 1024;
 
 /// How many bytes one seeded input of the command check holds: as many as the longest input the
 /// properties read.

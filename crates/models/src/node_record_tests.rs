@@ -207,7 +207,7 @@ fn cuda_is_available_exactly_with_a_gpu_and_a_registered_provider() {
     let driver = Detected::Value(PropertyText::new("550.54").expect("short text"));
     let one_gpu = GpuInventory::Devices {
         devices: GpuDevices::try_from(vec![device(Some(16 << 30))]).expect("one device"),
-        driver: driver.clone(),
+        driver,
     };
     struct Case {
         gpus: GpuInventory,
@@ -232,9 +232,7 @@ fn cuda_is_available_exactly_with_a_gpu_and_a_registered_provider() {
             available: false,
         },
         Case {
-            gpus: GpuInventory::NoDevice {
-                driver: driver.clone(),
-            },
+            gpus: GpuInventory::NoDevice,
             cuda: CudaProviderRegistration::Registered,
             available: false,
         },
@@ -252,10 +250,7 @@ fn cuda_is_available_exactly_with_a_gpu_and_a_registered_provider() {
     }
     let undetected_runtime = NodeProperties {
         onnx: OnnxRuntimeDetection::Undetected(UndetectedReason::LibraryUnavailable),
-        ..properties(
-            GpuInventory::NoDevice { driver },
-            CudaProviderRegistration::Registered,
-        )
+        ..properties(GpuInventory::NoDevice, CudaProviderRegistration::Registered)
     };
     assert!(!undetected_runtime.onnx.cuda());
 }
@@ -273,10 +268,10 @@ fn the_gpu_inventory_answers_count_smallest_memory_and_driver_by_its_outcome() {
     };
     assert_eq!(inventory.count(), 3);
     assert_eq!(inventory.smallest_memory_bytes(), NonZeroU64::new(16 << 30));
-    assert_eq!(
-        inventory.driver().value().map(|driver| driver.as_str()),
-        Some("550.54")
-    );
+    let Some(Detected::Value(driver)) = inventory.driver() else {
+        panic!("the devices name the driver serving them");
+    };
+    assert_eq!(driver.as_str(), "550.54");
     let unreadable = GpuInventory::Devices {
         devices: GpuDevices::try_from(vec![device(None)]).expect("one device"),
         driver: Detected::Undetected(UndetectedReason::QueryFailed),
@@ -288,8 +283,13 @@ fn the_gpu_inventory_answers_count_smallest_memory_and_driver_by_its_outcome() {
     assert!(without_library.devices().is_empty());
     assert_eq!(
         without_library.driver(),
-        Detected::Undetected(UndetectedReason::LibraryUnavailable)
+        Some(Detected::Undetected(UndetectedReason::LibraryUnavailable))
     );
+    let without_device = GpuInventory::NoDevice;
+    assert_eq!(without_device.count(), 0);
+    assert!(without_device.devices().is_empty());
+    assert_eq!(without_device.smallest_memory_bytes(), None);
+    assert_eq!(without_device.driver(), None, "no device names no driver");
 }
 
 #[test]

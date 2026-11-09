@@ -185,9 +185,7 @@ impl Arbitrary<'_> {
                     driver: self.detected(|arbitrary| arbitrary.property_text()),
                 }
             }
-            1 => nervix_models::GpuInventory::NoDevice {
-                driver: self.detected(|arbitrary| arbitrary.property_text()),
-            },
+            1 => nervix_models::GpuInventory::NoDevice,
             _ => nervix_models::GpuInventory::Undetected(self.undetected_reason()),
         }
     }

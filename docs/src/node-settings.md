@@ -120,7 +120,7 @@ no notice.
 | `gpu.count` | The GPUs NVML reports. Nervix loads NVML dynamically from `libnvidia-ml.so.1`; no library or no device is `0` | `0`, with the reason when NVML did not answer |
 | `gpu.models` | The model of each GPU, in device order | `none` |
 | `gpu.memory` | The memory of the smallest GPU, in bytes | `none` |
-| `gpu.driver` | The driver version NVML reports | `undetected` with the reason |
+| `gpu.driver` | The driver version NVML reports for the node's GPUs | `none` without a GPU; otherwise `undetected` with the reason |
 | `onnx.version` | The version the ONNX Runtime library this process loaded reports | `undetected` with the reason |
 | `onnx.providers` | The execution providers that library reports, in its order | `undetected` with the reason |
 | `onnx.cuda` | Whether the CUDA execution provider registers in this process: its provider library and the CUDA runtime load | `false` with the reason |

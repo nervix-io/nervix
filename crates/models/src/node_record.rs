@@ -643,7 +643,8 @@ where
     }
 }
 
-/// The GPUs of a node. A node whose NVML library is not installed, or reports no device, has none.
+/// The GPUs of a node. A node whose NVML library is not installed, or reports no device, has none,
+/// and names no driver.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -653,8 +654,8 @@ pub enum GpuInventory {
         devices: GpuDevices,
         driver: Detected<PropertyText>,
     },
-    /// NVML loaded and reported no device.
-    NoDevice { driver: Detected<PropertyText> },
+    /// NVML loaded and reported no device, so no driver serves one.
+    NoDevice,
     /// No inventory was read.
     Undetected(UndetectedReason),
 }
@@ -664,7 +665,7 @@ impl GpuInventory {
     pub fn count(&self) -> usize {
         match self {
             Self::Devices { devices, .. } => devices.as_slice().len(),
-            Self::NoDevice { .. } | Self::Undetected(_) => 0,
+            Self::NoDevice | Self::Undetected(_) => 0,
         }
     }
 
@@ -672,7 +673,7 @@ impl GpuInventory {
     pub fn devices(&self) -> &[GpuDevice] {
         match self {
             Self::Devices { devices, .. } => devices.as_slice(),
-            Self::NoDevice { .. } | Self::Undetected(_) => &[],
+            Self::NoDevice | Self::Undetected(_) => &[],
         }
     }
 
@@ -691,11 +692,13 @@ impl GpuInventory {
         smallest
     }
 
-    /// `node.gpu.driver`: the driver version, or why there is none.
-    pub fn driver(&self) -> Detected<&PropertyText> {
+    /// `node.gpu.driver`: the driver serving the devices, or why it was not read; none without a
+    /// device.
+    pub fn driver(&self) -> Option<Detected<&PropertyText>> {
         match self {
-            Self::Devices { driver, .. } | Self::NoDevice { driver } => driver.as_ref(),
-            Self::Undetected(reason) => Detected::Undetected(*reason),
+            Self::Devices { driver, .. } => Some(driver.as_ref()),
+            Self::NoDevice => None,
+            Self::Undetected(reason) => Some(Detected::Undetected(*reason)),
         }
     }
 }

@@ -255,7 +255,7 @@ fn property_lines(properties: &NodeProperties) -> Vec<String> {
         GpuInventory::Undetected(reason) => {
             lines.push(format!("    gpu.count: 0 (undetected: {reason})"));
         }
-        GpuInventory::Devices { .. } | GpuInventory::NoDevice { .. } => {
+        GpuInventory::Devices { .. } | GpuInventory::NoDevice => {
             lines.push(format!("    gpu.count: {}", gpus.count()));
         }
     }
@@ -272,7 +272,10 @@ fn property_lines(properties: &NodeProperties) -> Vec<String> {
         Some(bytes) => lines.push(format!("    gpu.memory: {bytes}")),
         None => lines.push("    gpu.memory: none".to_string()),
     }
-    lines.push(format!("    gpu.driver: {}", detected_line(gpus.driver())));
+    match gpus.driver() {
+        Some(driver) => lines.push(format!("    gpu.driver: {}", detected_line(driver))),
+        None => lines.push("    gpu.driver: none".to_string()),
+    }
     match &properties.onnx {
         OnnxRuntimeDetection::Loaded(runtime) => {
             lines.push(format!(
@@ -666,5 +669,30 @@ mod tests {
         let unannounced = block("node-3");
         assert!(unannounced.contains(&"  prerequisites: not published".to_string()));
         assert!(unannounced.contains(&"  record: not announced".to_string()));
+    }
+
+    #[test]
+    fn a_node_whose_nvml_reports_no_device_has_no_gpu_and_names_no_driver() {
+        use nervix_models::UndetectedReason;
+
+        let properties = NodeProperties {
+            architecture: PropertyText::new("x86_64").expect("short printable text"),
+            cpu_model: Detected::Undetected(UndetectedReason::NotReported),
+            gpus: GpuInventory::NoDevice,
+            onnx: OnnxRuntimeDetection::Undetected(UndetectedReason::LibraryUnavailable),
+        };
+        let lines = property_lines(&properties);
+        for expected in [
+            "    gpu.count: 0",
+            "    gpu.models: none",
+            "    gpu.memory: none",
+            "    gpu.driver: none",
+            "    cuda.available: false",
+        ] {
+            assert!(
+                lines.contains(&expected.to_string()),
+                "{expected} in {lines:?}"
+            );
+        }
     }
 }
