@@ -28,6 +28,7 @@ Feature: NATS ingestion
         CREATE NATS SUBJECT INGESTOR nats_notifications
         FROM nats_main SUBJECT '<subscribe_subject>' QUEUE GROUP 'nats_notifications_group_{{test_id}}' INSTANCES <instances> MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
+        FILTER WHERE payload.bytes > (0 AS U64)
         TO notifications
         INHERIT ALL
         BRANCHED BY by_nats_notifications
@@ -243,6 +244,7 @@ Feature: NATS ingestion
         FROM nats_main STREAM 'orders_{{test_id}}' CONSUMER 'nervix_{{test_id}}'
           MODE <mode>
         ON QUIESCE SUSPEND DECODE USING notification_codec
+        FILTER WHERE payload.bytes > (0 AS U64)
         TO notifications
           INHERIT ALL
           UNBRANCHED

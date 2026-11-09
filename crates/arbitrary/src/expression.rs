@@ -344,7 +344,7 @@ impl Arbitrary<'_> {
 
     /// A reference to a field in any scope.
     pub fn field_reference(&mut self) -> FieldReference {
-        let scope = match self.entropy.byte() % 11 {
+        let scope = match self.entropy.byte() % 12 {
             0 => FieldScope::Bare,
             1 => FieldScope::Message,
             2 => FieldScope::Input,
@@ -356,7 +356,8 @@ impl Arbitrary<'_> {
                 relay: self.expression_name(),
             },
             8 => FieldScope::Metadata,
-            9 => FieldScope::PartialOutput,
+            9 => FieldScope::Payload,
+            10 => FieldScope::PartialOutput,
             _ => FieldScope::Error,
         };
         FieldReference {

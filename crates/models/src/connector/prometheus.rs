@@ -218,6 +218,7 @@ impl IngestorDeclaration for PrometheusQueryIngestor {
         instancing: crate::IngestorInstancingCapability::Single,
         headers: None,
         metadata: PROMETHEUS_QUERY_METADATA,
+        payload: crate::IngestorPayloadDeclaration::BYTES,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Prometheus),
         position_class: PositionClass::None,

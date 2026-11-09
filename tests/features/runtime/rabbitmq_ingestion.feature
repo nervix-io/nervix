@@ -114,6 +114,7 @@ Feature: RabbitMQ ingestion
         CREATE RABBITMQ QUEUE INGESTOR rabbit_notifications
         FROM rabbit_main QUEUE 'notifications_{{test_id}}' INSTANCES <instances> MODE <mode>
         ON QUIESCE SUSPEND DECODE USING notification_codec
+        FILTER WHERE payload.bytes > (0 AS U64)
         TO notifications
         INHERIT ALL
         BRANCHED BY by_rabbit_notifications

@@ -142,6 +142,7 @@ Feature: Prometheus ingestion
         FROM prom_main QUERY 'label_replace(vector(time()), "source", "local", "", "")' EVERY 1s
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING sample_codec
         TIMESTAMP NOW
+        FILTER WHERE payload.bytes > (0 AS U64)
         TO samples
         INHERIT ALL
         BRANCHED BY by_prom_samples

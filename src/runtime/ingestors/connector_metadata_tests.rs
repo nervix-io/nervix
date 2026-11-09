@@ -38,10 +38,12 @@ fn bolero_websockets_retained_metadata_preserves_every_field() {
         ];
         let headers = Arc::new(RetainedIngestHeaders::capture(&Headers(expected.clone())));
         for kind in [WebsocketsFrameType::Text, WebsocketsFrameType::Binary] {
-            let frame =
-                RetainedIngestMetadata::from_values(vec![RetainedIngestMetadataValue::String(
+            let frame = RetainedIngestMetadata::from_values(
+                0,
+                vec![RetainedIngestMetadataValue::String(
                     kind.as_ref().to_string(),
-                )]);
+                )],
+            );
             let original = IngestMetadataRow {
                 fields: &frame,
                 headers: IngestRowHeaders::Shared(&headers),
