@@ -26,15 +26,15 @@ pub(super) struct ReceiveWindows {
     pub(super) connection: u32,
 }
 
-impl TransportOptions {
+impl TransportState {
     /// The windows a client connection of `class` advertises. A bulk connection grants each of
     /// its streams the bulk receive window, and itself room for all of them at once, so no stream
     /// waits for another's credit; every other pool advertises the initial windows.
     pub(super) fn receive_windows(&self, class: PoolClass) -> ReceiveWindows {
         if !class.grants_bulk_receive_window() {
             return ReceiveWindows {
-                stream: self.initial_stream_window_bytes,
-                connection: self.initial_connection_window_bytes,
+                stream: self.options.initial_stream_window_bytes,
+                connection: self.options.initial_connection_window_bytes,
             };
         }
         let stream = u32::try_from(self.bulk_receive_window_bytes()).assured(
@@ -52,7 +52,7 @@ impl TransportOptions {
 
     /// What one bulk stream's window holds, which its lease reserves before the stream opens.
     pub(super) fn bulk_receive_window_bytes(&self) -> u64 {
-        self.bulk_receive_window.value().as_u64()
+        self.peer_receive.bulk_window_bytes.value().as_u64()
     }
 }
 
@@ -60,10 +60,10 @@ impl TransportState {
     /// Refuse a transport whose `bulk_window` budget cannot back even one bulk receive window,
     /// before it binds: every bulk stream would otherwise wait for a window that never comes.
     pub(super) fn validate_bulk_receive_window(
-        options: &TransportOptions,
+        receive: &crate::PeerReceiveSettings,
         executor: &Executor,
     ) -> Result<(), Report<TransportError>> {
-        let window = options.bulk_receive_window_bytes();
+        let window = receive.bulk_window_bytes.value().as_u64();
         let budget = executor.memory(MemoryClass::BulkWindow).capacity_bytes;
         if budget < window {
             return Err(Report::new(TransportError::BulkReceiveWindowUnbacked {
@@ -86,10 +86,7 @@ impl TransportState {
         }
         let window = self
             .executor
-            .reserve(
-                MemoryClass::BulkWindow,
-                self.options.bulk_receive_window_bytes(),
-            )
+            .reserve(MemoryClass::BulkWindow, self.bulk_receive_window_bytes())
             .await
             .map_err(|error| {
                 error.change_context(TransportError::BulkReceiveWindowRefused {
@@ -114,7 +111,7 @@ impl TransportState {
         node_id: &ClusterNodeName,
         deadline: Instant,
     ) -> Result<Reservation, Report<TransportError>> {
-        let window = self.options.bulk_receive_window_bytes();
+        let window = self.bulk_receive_window_bytes();
         nervix_primitives::select! {
             _ = self.admission_closed.cancelled() => {
                 Err(Report::new(TransportError::ShuttingDown))

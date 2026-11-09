@@ -82,6 +82,14 @@ impl RecordMetadataColumns {
         self.high.len()
     }
 
+    /// Retain a contiguous row range with the same Arrow buffers.
+    pub(super) fn slice(&self, offset: usize, length: usize) -> Self {
+        Self {
+            low: self.low.slice(offset, length),
+            high: self.high.slice(offset, length),
+        }
+    }
+
     /// The watermarks of `row`, or `None` past the last row.
     pub(crate) fn row(&self, row: usize) -> Option<RuntimeRecordMetadata> {
         let low = self.low.get(row)?;

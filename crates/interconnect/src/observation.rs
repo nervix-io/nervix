@@ -164,6 +164,7 @@ impl ConnectionFailureReason {
             | TransportError::RelayRejected(_) => Self::Handshake,
             TransportError::PoolExhausted
             | TransportError::IncomingQueueFull
+            | TransportError::RelayBoundsRefused(_)
             | TransportError::BulkReceiveWindowRefused { .. } => Self::Capacity,
             TransportError::ShuttingDown => Self::Closed,
             TransportError::RefusedByPeer { .. } | TransportError::IncompatiblePeer { .. } => {
@@ -194,6 +195,7 @@ impl StreamResetReason {
             | TransportError::IncomingQueueFull
             | TransportError::PayloadTooLarge { .. }
             | TransportError::BulkReceiveWindowRefused { .. }
+            | TransportError::RelayBoundsRefused(_)
             | TransportError::RelayGrant(_) => Self::Capacity,
             TransportError::RelayGrantRefused(refusal) => {
                 if refusal.is_capacity() {

@@ -248,6 +248,7 @@ mod mysql_isolation;
 mod nats_authentication;
 mod nats_delivery;
 mod nats_stream_consumers;
+mod node_capabilities;
 mod outward_tls_policy;
 mod paced_replication;
 mod paced_simulation;
@@ -12849,30 +12850,24 @@ async fn then_leader_records_current_raft_address(world: &mut ScenarioWorld, nod
     }
 }
 
-#[then(expr = "the leader Raft log index remains unchanged for {string}")]
-async fn then_leader_raft_log_stays_still(world: &mut ScenarioWorld, duration: String) {
+#[then(expr = "the leader Raft membership log index remains unchanged for {string}")]
+async fn then_leader_raft_membership_stays_still(world: &mut ScenarioWorld, duration: String) {
     let duration = parse_duration_text(&duration).expect("the observation duration is valid");
     let leader = current_leader_node(world).await;
+    let observer = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&leader));
     let deadline = Instant::now() + duration;
-    let mut initial = None;
+    let initial = observer
+        .membership_log_index()
+        .expect("the leader has an effective Raft membership entry");
     loop {
         nervix_primitives::task::consume_budget().await;
-        let status = run_plexus_commands_on_node(world, &leader, "SHOW CLUSTER STATUS;")
-            .await
-            .expect("leader cluster status must be available");
-        let index = status
-            .lines()
-            .find_map(|line| line.strip_prefix("raft.last_log_index: "))
-            .expect("cluster status reports a Raft log index")
-            .parse::<u64>()
-            .expect("Raft log index is numeric");
-        match initial {
-            Some(initial) => assert_eq!(
-                index, initial,
-                "leader Raft log grew after membership converged; last status: {status}"
-            ),
-            None => initial = Some(index),
-        }
+        assert_eq!(
+            observer.membership_log_index(),
+            Some(initial),
+            "the leader appended another membership entry after its address converged"
+        );
         if Instant::now() >= deadline {
             return;
         }

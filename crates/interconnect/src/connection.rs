@@ -257,6 +257,7 @@ impl OutboundTarget {
             endpoint,
             dial,
             pool: Arc::new(OutboundPool {
+                capabilities: crate::capability_publication::CapabilityPublication::default(),
                 slots,
                 releases: StreamReleases::new(),
             }),
@@ -304,6 +305,7 @@ impl OutboundTarget {
 /// operations waiting for one of their streams. The same endpoint dialled another way keeps both,
 /// so a waiter of the earlier target still hears a later release.
 struct OutboundPool {
+    capabilities: crate::capability_publication::CapabilityPublication,
     slots: [Box<[Arc<SlotControl>]>; PoolClass::COUNT],
     releases: StreamReleases,
 }
@@ -824,6 +826,7 @@ pub(crate) struct TransportState {
 }
 
 pub(crate) struct TransportStateInner {
+    peer_receive: crate::PeerReceiveSettings,
     executor: Executor,
     options: TransportOptions,
     cluster_id: String,
@@ -887,7 +890,22 @@ impl TransportState {
             join_terms,
         } = identity;
         options.validate()?;
-        Self::validate_bulk_receive_window(&options, &executor)?;
+        let peer_receive = match options.peer_receive {
+            Some(receive) => crate::PeerReceiveSettings::resolve(
+                Some(*receive.relay_batch_bytes.value()),
+                Some(*receive.relay_decoded_bytes.value()),
+                Some(*receive.bulk_chunk_bytes.value()),
+                Some(*receive.bulk_window_bytes.value()),
+                executor.limits(),
+            ),
+            None => crate::PeerReceiveSettings::resolve(None, None, None, None, executor.limits()),
+        }
+        .map_err(|error| {
+            error.change_context(TransportError::InvalidOptions {
+                reason: "peer receive bounds exceed the supplied executor".to_string(),
+            })
+        })?;
+        Self::validate_bulk_receive_window(&peer_receive, &executor)?;
         tls.certificate
             .validate_local(&cluster_id, &node_id, &advertised_host)
             .map_err(|error| TransportError::with_cause(error, TransportError::InvalidHandshake))?;
@@ -911,6 +929,7 @@ impl TransportState {
         let observations = Arc::new(TransportObservations::default());
         let state = Self {
             inner: Arc::new(TransportStateInner {
+                peer_receive,
                 executor,
                 cluster_id,
                 node_id,
@@ -1491,7 +1510,7 @@ impl TransportState {
             let certificate_expires_at = session.expires_at;
 
             let mut builder = client::Builder::new();
-            configure_client_builder(&mut builder, &self.options, key.class)?;
+            configure_client_builder(&mut builder, self, key.class)?;
             let (sender, mut connection) = builder
                 .handshake(stream)
                 .await
