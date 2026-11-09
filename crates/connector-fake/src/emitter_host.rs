@@ -5,35 +5,69 @@
 //! - **Depends on.** Connector host services, the bounded executor and selected primitives.
 //! - **Must not know.** Metric registries, graph execution, real drivers or server runtime types.
 
-use std::{path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
 use meticulous::OptionExt as _;
 use nervix_connector::{
-    EmitterBoundedExecution, EmitterEventReporter, EmitterGeneralErrorHandler, EmitterHost,
-    EmitterPayloadMeasurement, EmitterPayloadObserver, EmitterRecordAcknowledgements,
-    EmitterStagingDirectory, EmitterTransientErrorStatus,
+    ConnectorEventCounter, ConnectorEventProvider, EmitterBoundedExecution, EmitterEventReporter,
+    EmitterGeneralErrorHandler, EmitterHost, EmitterPayloadMeasurement, EmitterPayloadObserver,
+    EmitterRecordAcknowledgements, EmitterStagingDirectory, EmitterTransientErrorStatus,
+    UndeclaredConnectorEvent,
 };
 use nervix_execution::Executor;
-use nervix_primitives::sync::{Arc, blocking::Mutex};
+use nervix_models::{ConnectorEvent, DeclaredEvents};
+use nervix_primitives::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+    blocking::Mutex,
+};
 
 #[derive(Debug, Default, Clone)]
 pub struct EmitterHostObservations {
     pub readiness: Vec<bool>,
     pub payloads: Vec<EmitterPayloadMeasurement>,
     pub subdivisions: u64,
+    pub events: BTreeMap<ConnectorEvent, u64>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct FakeEmitterHost {
     executor: Option<Executor>,
     observations: Arc<Mutex<EmitterHostObservations>>,
+    declared_events: DeclaredEvents,
+    events: BTreeMap<ConnectorEvent, Arc<AtomicU64>>,
+}
+
+impl Default for FakeEmitterHost {
+    fn default() -> Self {
+        Self {
+            executor: None,
+            observations: Arc::new(Mutex::new(EmitterHostObservations::default())),
+            declared_events: DeclaredEvents::NONE,
+            events: BTreeMap::new(),
+        }
+    }
 }
 
 impl FakeEmitterHost {
     pub fn on(executor: Executor) -> Self {
         Self {
             executor: Some(executor),
-            observations: Arc::new(Mutex::new(EmitterHostObservations::default())),
+            ..Self::default()
+        }
+    }
+
+    /// A test host whose connector may record exactly these declared identities.
+    pub fn declaring(declared_events: DeclaredEvents) -> Self {
+        let events = declared_events
+            .as_slice()
+            .iter()
+            .map(|event| (*event, Arc::new(AtomicU64::new(0))))
+            .collect();
+        Self {
+            declared_events,
+            events,
+            ..Self::default()
         }
     }
 
@@ -50,7 +84,27 @@ impl FakeEmitterHost {
         )
     )]
     pub fn observations(&self) -> EmitterHostObservations {
-        self.observations.lock().clone()
+        let mut observations = self.observations.lock().clone();
+        observations.events = self
+            .events
+            .iter()
+            .map(|(event, counter)| (*event, counter.load(Ordering::Relaxed)))
+            .collect();
+        observations
+    }
+}
+
+impl ConnectorEventProvider for FakeEmitterHost {
+    fn event_counter(
+        &self,
+        event: ConnectorEvent,
+    ) -> error_stack::Result<ConnectorEventCounter, UndeclaredConnectorEvent> {
+        let Some(counter) = self.events.get(&event).cloned() else {
+            return Err(UndeclaredConnectorEvent { event }.into());
+        };
+        ConnectorEventCounter::new(self.declared_events, event, move || {
+            counter.fetch_add(1, Ordering::Relaxed);
+        })
     }
 }
 

@@ -15,6 +15,7 @@ from scripts import connector_matrix as matrix
 def declarations():
     return {
         "ingest": [{
+            "events": [],
             "entity": "KAFKA TOPIC", "connector": "KAFKA", "reference": "KAFKA client", "instancing": "per_partition",
             "locator": "TOPIC 'orders' (kafka_topic)", "options": [],
             "modes": ["NO ACK", "ACK SEQUENTIAL ACK TIMEOUT 5s"],
@@ -33,6 +34,7 @@ def declarations():
             "template": "CREATE KAFKA TOPIC INGESTOR <name>\n  FROM <client> TOPIC 'orders'\n  MODE <mode> ON QUIESCE <quiesce>\n  DECODE USING <codec> TO <relay> <route>;",
         }],
         "emit": [{
+            "events": [],
             "entity": "KAFKA TOPIC", "connector": "KAFKA", "reference": "KAFKA client",
             "locator": "TOPIC orders (topic)", "options": [],
             "modes": ["NO_ACK RETRY POLICY BACKOFF 1s MAX 30s"],
@@ -69,6 +71,15 @@ def reasons():
 
 
 class ConnectorMatrixTests(unittest.TestCase):
+    def test_connector_events_follow_each_sides_declaration(self):
+        surface = declarations()
+        surface["emit"][0]["events"] = ["published_without_subscribers"]
+        ingest = matrix.manual(surface["ingest"][0], "ingest", reasons())
+        emit = matrix.manual(surface["emit"][0], "emit", reasons())
+        self.assertIn("| Connector events | None declared.", ingest)
+        self.assertIn("| Connector events | `published_without_subscribers`", emit)
+        self.assertIn("`published_without_subscribers`", matrix.render_matrix(surface, reasons()))
+
     def test_value_and_client_constraints_follow_the_compiled_declaration(self):
         surface = declarations()
         surface["emit"][0]["value_contract"] = {

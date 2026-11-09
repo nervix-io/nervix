@@ -75,6 +75,10 @@ the queue/default-exchange and named-exchange choices, `MANDATORY`, persistence,
 `PROPERTIES` types and envelope alterations. Do not promise consumer completion from a publisher
 confirm or message durability from routing alone.
 
+For connector-specific event counts, including Redis publishes with no subscribers, read
+[Connector-declared events](../../../docs/src/metrics-and-observability.md#connector-declared-events)
+and the entity's generated capability reference before interpreting delivery.
+
 For applications submitting Plexus, use [Client Libraries](../../../docs/src/client-libraries.md)
 to select the host guide; Java and JVM programs follow [JVM Client Library](../../../docs/src/client-library-jvm.md),
 Ruby applications follow [Ruby Client Library](../../../docs/src/client-library-ruby.md),

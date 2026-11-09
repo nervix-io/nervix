@@ -39,6 +39,12 @@ impl nervix_connector::EmitterConnector for RedisPubSubEmitter {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod counting_redis;
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "tests remain outside product execution")
+)]
+mod event_tests;
 mod ingestor;
 mod pool_minimum;
 #[cfg(test)]
@@ -562,13 +568,20 @@ pub struct RedisPubSubEmitterConfig {
 pub struct RedisPubSubEmitter {
     pool: RedisPoolHandle,
     channel: RedisChannelName,
+    published_without_subscribers: nervix_connector::ConnectorEventCounter,
 }
 
 impl RedisPubSubEmitter {
-    fn prepare(config: RedisPubSubEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
+    fn prepare(config: RedisPubSubEmitterConfig, host: EmitterHost) -> EmitterStartResult<Self> {
+        let published_without_subscribers = host
+            .event_counter(nervix_models::ConnectorEvent::PublishedWithoutSubscribers)
+            .change_context(nervix_connector::EmitterOpenError::InvalidConfiguration {
+                connector: Self::KIND.connector().keyword(),
+            })?;
         Ok(Self {
             pool: config.pool,
             channel: config.channel,
+            published_without_subscribers,
         })
     }
 
@@ -678,7 +691,12 @@ impl RecordEmitter for RedisPubSubEmitter {
                 .publish(self.channel.as_str(), record.payload.as_slice())
                 .await;
             match published {
-                Ok(_) => outcome.deliver(record.id),
+                Ok(receivers) => {
+                    if receivers == 0 {
+                        self.published_without_subscribers.increment();
+                    }
+                    outcome.deliver(record.id);
+                }
                 Err(error) if Self::is_record_failure(&error) => {
                     outcome
                         .reject(record.rejected(format!("Redis rejected emitted record: {error}")));
