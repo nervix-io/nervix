@@ -1733,6 +1733,23 @@ nothing about host power loss or storage corruption.
 
 ### Stateful
 
+The stateful and lifetimes scenarios read their materialized profiles through
+`SHOW RELAY ... MATERIALIZED STATE FORMAT JSON`. Their shared `materialized-profile` reader
+accepts only a complete page for the requested relay in `chaos_baseline`: every execution unit
+must be present exactly once, section and complete row/branch counts must agree, and no
+continuation or omitted rows may remain. It projects the schema's typed cells into the existing
+key/payload observations, retaining every profile field and both ingestion watermark columns.
+Empty partition units remain part of the completeness check. A complete empty page can establish
+branch absence; missing or unreadable evidence cannot.
+
+Each read keeps the CLI transcript as `.txt`, its public envelope as `.inspection.json`, and the
+verified key/payload rows as `.json`. A malformed or incomplete successful reply ends the
+controller with a reader diagnostic in `.reader-error.txt`, before a profile wait or absence
+predicate can mistake it for product state. A failed CLI attempt remains retryable, restores the
+previous host and discards any prior projected rows at that path. The canonical stateful and
+lifetimes verifier self-tests exercise both production readers with complete single-unit and
+partitioned pages, exact profiles, empty state and unreadable observations.
+
 ```bash
 just chaos run stateful --image nervix:debian
 just chaos run stateful --image nervix:debian --nodes 1

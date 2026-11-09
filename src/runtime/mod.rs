@@ -220,6 +220,11 @@ mod branch_key;
 mod branch_lifecycle_state;
 mod branch_lru_state;
 mod branch_runtime;
+mod client_endpoint_capacity;
+pub use client_endpoint_capacity::{
+    ClientConsumerNodeBytes, ClientEndpointCapacityError, ClientEndpointOverrides,
+    ClientEndpointSettings, ClientProducerNodeBytes,
+};
 mod client_emitter;
 mod client_ingestor;
 mod correlator;
