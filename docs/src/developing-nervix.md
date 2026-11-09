@@ -14,6 +14,10 @@ cd nervix
 
 ## Prerequisites
 
+The [Client Host Bindings](client-host-bindings.md) architecture chapter maps the C ABI, Python
+wheel, Ruby gem and JVM jar to their shared Rust runtime and ownership contracts. The toolchains
+and preparation commands for those native artifacts are listed below.
+
 Nervix is developed on Linux x86_64, Linux aarch64, and macOS arm64. The `just` recipes fetch an
 ONNX Runtime build for the host and stop on any other.
 
@@ -623,7 +627,7 @@ compares it with the workflows.
 | `shuttle` | Check | The Shuttle checks and their replay check |
 | `loom` | Check | The Loom models and their weakening qualification |
 | `turmoil` | Check | The Turmoil simulation suite and its replay check |
-| `client-conformance` | Check | The cross-language client probes and every host suite's cluster tier against one- and three-node clusters, gated by the prepared boundary tiers and packaging smoke. Boundary tiers and Python cluster examples also run in ordinary CI. |
+| `client-conformance` | Check | The [host-binding](client-host-bindings.md#qualification-and-observability) and independent-client probes and every host suite's cluster tier against one- and three-node clusters, gated by the prepared boundary tiers and packaging smoke. Boundary tiers and Python cluster examples also run in ordinary CI. |
 | `bolero-random` | Check, through Bolero | Bolero's randomized properties and corpus replay, which a manual run of the Bolero workflow always runs |
 | `extra-doctests` | Check | Capability doctests |
 | `extra-miri` | Check | Miri over the expiry map |
@@ -1243,7 +1247,7 @@ request without the label still checks the book's structure and its tooling.
 
 ### Credential Storage Release Note
 
-This revision requires the current `raft_identity_inference_reset_*` consensus namespace and `ClusterState`
+This revision requires the current `raft_identity_tls_inference_reset_*` consensus namespace and `ClusterState`
 encoding 19. A stored state with a different namespace or encoding fails with
 `invalid consensus record storage; recreate the node's stored state` before user records or log
 entries are decoded. Recreate the node's stored state; no credential conversion is performed.

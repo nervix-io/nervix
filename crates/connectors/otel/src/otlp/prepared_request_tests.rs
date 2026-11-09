@@ -90,6 +90,7 @@ async fn logs_emitter(
     ]));
     OtlpEncoder::new(
         OtlpEncoderConfig {
+            tls_policy: Default::default(),
             config: config(&entries),
             dns,
             signal: OtlpSignal::Logs,
@@ -711,6 +712,7 @@ async fn a_prepared_grpc_export_reaches_its_receiver_after_a_negative_dns_answer
             ("timeout_ms", "5000"),
         ]),
         &dns,
+        &Default::default(),
     )
     .assured("a named endpoint constructs a lazy gRPC channel");
     let batch = mapped_logs(&[Some("dns-recovery-record")]);
@@ -846,6 +848,7 @@ async fn entity_constructors_keep_their_kind_through_the_lifecycle_contract() {
         .await
         .expect("the host resolver loads");
     let export = || OtelExportConfig {
+        tls_policy: Default::default(),
         config: config(&[
             ("endpoint", "http://127.0.0.1:9"),
             ("protocol", "http/protobuf"),

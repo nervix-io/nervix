@@ -53,6 +53,7 @@ pub(super) fn SchemaEditor(
                 }>"Add field"</button>
         </div>
     }
+    .into_any()
 }
 
 #[component]
@@ -217,6 +218,7 @@ fn SchemaFieldEditor(signals: CreateSignals, index: usize) -> impl IntoView {
             </label>
         </div>
     }
+    .into_any()
 }
 
 #[component]
@@ -268,6 +270,7 @@ pub(super) fn WireSchemaEditor(
                 }>"Add field"</button>
         </div>
     }
+    .into_any()
 }
 
 /// The type choices of a wire field: every JSON and CBOR type, their bare `array` included, or
@@ -398,6 +401,7 @@ fn WireFieldEditor(signals: CreateSignals, format: WireFormat, index: usize) -> 
             </label>
         </div>
     }
+    .into_any()
 }
 
 #[component]
@@ -484,4 +488,5 @@ pub(super) fn BranchEditor(
             </label>
         </Show>
     }
+    .into_any()
 }

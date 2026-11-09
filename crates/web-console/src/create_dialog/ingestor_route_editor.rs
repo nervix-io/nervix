@@ -312,150 +312,217 @@ pub(super) fn IngestorRouteEditor(
                     <button type="button" class="create-ingestor-remove-route" disabled=move || pending() || signals.ingestor.get().routes.len() == 1
                         on:click=move |_| { signals.ingestor.update(|draft| draft.remove_route()); signals.edit(); }>"Remove route"</button>
                 </div>
-                <fieldset class="create-field create-ingestor-branching">
-                    <legend>"Output branch"</legend>
-                    <button type="button" data-branch="unbranched"
-                        class:active=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.branch, RouteBranchDraft::Unbranched))
-                        disabled=pending on:click=move |_| { signals.ingestor.update(|draft| draft.choose_route_unbranched()); signals.edit(); }>"UNBRANCHED"</button>
-                    <button type="button" data-branch="named"
-                        class:active=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.branch, RouteBranchDraft::Branched { .. }))
-                        disabled=pending on:click=move |_| { signals.ingestor.update(|draft| draft.choose_route_branched()); signals.edit(); }>"Named branch"</button>
-                </fieldset>
-                <Show when=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.branch, RouteBranchDraft::Branched { .. })) fallback=|| ()>
-                    <ChoiceGroup class_name="create-ingestor-branch" label="Named branch"
-                        control=ChoiceControl::IngestRouteBranch signals=signals request_tx=request_tx session_generation=session_generation show_detail=true />
-                    <div class="create-ingestor-branch-assignments">
-                        <ChoiceGroup class_name="create-ingestor-branch-fields" label="Add branch key assignment"
-                            control=ChoiceControl::IngestBranchField signals=signals request_tx=request_tx session_generation=session_generation show_detail=true />
-                        <AssignmentRows signals=signals area=AssignmentArea::Branch />
-                    </div>
-                </Show>
+                <IngestorRouteBranchEditor signals=signals request_tx=request_tx session_generation=session_generation />
                 <ChoiceGroup class_name="create-ingestor-relay" label="Output relay"
                     control=ChoiceControl::IngestRouteRelay signals=signals request_tx=request_tx session_generation=session_generation show_detail=true />
-                <fieldset class="create-field create-ingestor-inherit">
-                    <legend>"Inherit decoded fields"</legend>
-                    <For each=|| ["none", "all", "all-except", "fields"].into_iter()
-                        key=|mode| *mode
-                        children=move |mode| view! {
-                            <button type="button" data-inherit=mode
-                                class:active=move || signals.ingestor.get().active_route().is_some_and(|route| route.inherit.key() == mode)
-                                disabled=pending on:click=move |_| {
-                                    signals.ingestor.update(|draft| {
-                                        if let Some(route) = draft.active_route_mut() { route.inherit.choose(mode); }
-                                    });
-                                    signals.edit();
-                                }>{mode.to_ascii_uppercase()}</button>
-                        } />
-                </fieldset>
-                <Show when=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.inherit, InheritDraft::AllExcept(_) | InheritDraft::Fields(_))) fallback=|| ()>
-                    <ChoiceGroup class_name="create-ingestor-input-fields" label="Add decoded field"
-                        control=ChoiceControl::IngestInputField signals=signals request_tx=request_tx session_generation=session_generation show_detail=true />
-                    <For each=move || {
-                        let draft = signals.ingestor.get();
-                        let len = match draft.active_route().map(|route| &route.inherit) {
-                            Some(InheritDraft::AllExcept(fields)) => fields.len(),
-                            Some(InheritDraft::Fields(fields)) => fields.len(),
-                            _ => 0,
-                        };
-                        (0..len).collect::<Vec<_>>()
-                    } key=|index| *index children=move |index| view! {
-                        <div class="create-ingestor-inherited-field" data-field=move || inherited_field_name(signals, index)>
-                            <span>{move || inherited_field_name(signals, index)}</span>
-                            <Show when=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.inherit, InheritDraft::Fields(_))) fallback=|| ()>
-                                <label><input type="checkbox" class="create-ingestor-leak"
-                                    prop:checked=move || signals.ingestor.get().active_route().is_some_and(|route| match &route.inherit {
-                                        InheritDraft::Fields(fields) => fields.get(index).is_some_and(|field| field.leak_sensitive),
-                                        _ => false,
-                                    })
-                                    disabled=pending on:change=move |event| {
-                                        let checked = event_target_checked(&event);
-                                        signals.ingestor.update(|draft| {
-                                            if let Some(route) = draft.active_route_mut()
-                                                && let InheritDraft::Fields(fields) = &mut route.inherit
-                                                && let Some(field) = fields.get_mut(index) { field.leak_sensitive = checked; }
-                                        });
-                                        signals.edit();
-                                    } />"LEAK SENSITIVE"</label>
-                            </Show>
-                            <button type="button" class="create-ingestor-remove-inherited-field" disabled=pending
-                                on:click=move |_| {
-                                    signals.ingestor.update(|draft| {
-                                        if let Some(route) = draft.active_route_mut() {
-                                            match &mut route.inherit {
-                                                InheritDraft::AllExcept(fields) if index < fields.len() => { fields.remove(index); },
-                                                InheritDraft::Fields(fields) if index < fields.len() => { fields.remove(index); },
-                                                _ => {},
-                                            }
-                                        }
-                                    });
-                                    signals.edit();
-                                }>"Remove field"</button>
-                        </div>
-                    } />
-                </Show>
-                <div class="create-ingestor-output-assignments">
-                    <ChoiceGroup class_name="create-ingestor-output-fields" label="Add output assignment"
-                        control=ChoiceControl::IngestOutputField signals=signals request_tx=request_tx session_generation=session_generation show_detail=true />
-                    <AssignmentRows signals=signals area=AssignmentArea::Output />
-                </div>
-                <label class="create-field"><span>"Route WHERE expression (optional)"</span>
-                    <textarea class="create-ingestor-where" prop:value=move || route_where_clause(signals)
-                        disabled=pending on:input=move |event| {
-                            let value = event_target_textarea_value(&event);
-                            signals.ingestor.update(|draft| { if let Some(route) = draft.active_route_mut() { route.where_clause = value; } });
-                            signals.edit();
-                        } />
-                </label>
-                <section class="create-ingestor-invocations"><h4>"Ordered invocations"</h4>
-                    <InvocationRows signals=signals />
-                    <button type="button" class="create-ingestor-add-invocation" disabled=pending
-                        on:click=move |_| {
-                            signals.ingestor.update(|draft| { if let Some(route) = draft.active_route_mut() { route.invocations.push(InvocationDraft::default()); } });
-                            signals.edit();
-                        }>"Add invocation"</button>
-                </section>
-                <fieldset class="create-field create-ingestor-flush"><legend>"Flush policy"</legend>
-                    <button type="button" data-flush="immediate" class:active=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.flush, FlushDraft::Immediate))
-                        disabled=pending on:click=move |_| { signals.ingestor.update(|draft| { if let Some(route) = draft.active_route_mut() { route.flush = FlushDraft::Immediate; } }); signals.edit(); }>"IMMEDIATE"</button>
-                    <button type="button" data-flush="each" class:active=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.flush, FlushDraft::Each { .. }))
-                        disabled=pending on:click=move |_| { signals.ingestor.update(|draft| { if let Some(route) = draft.active_route_mut() { route.flush = FlushDraft::Each { interval: String::new(), max_batch_size: String::new() }; } }); signals.edit(); }>"EACH"</button>
-                </fieldset>
-                <Show when=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.flush, FlushDraft::Each { .. })) fallback=|| ()>
-                    <label class="create-field"><span>"Flush interval"</span><input class="create-ingestor-flush-interval" type="text" autocomplete="off"
-                        prop:value=move || flush_interval(signals)
-                        disabled=pending on:input=move |event| {
-                            let value = event_target_value(&event);
-                            signals.ingestor.update(|draft| { if let Some(route) = draft.active_route_mut() && let FlushDraft::Each { interval, .. } = &mut route.flush { *interval = value; } });
-                            signals.edit();
-                        } /></label>
-                    <label class="create-field"><span>"Maximum batch size"</span><input class="create-ingestor-flush-size" type="text" autocomplete="off"
-                        prop:value=move || flush_max_batch_size(signals)
-                        disabled=pending on:input=move |event| {
-                            let value = event_target_value(&event);
-                            signals.ingestor.update(|draft| { if let Some(route) = draft.active_route_mut() && let FlushDraft::Each { max_batch_size, .. } = &mut route.flush { *max_batch_size = value; } });
-                            signals.edit();
-                        } /></label>
-                </Show>
-                <fieldset class="create-field create-ingestor-message-error"><legend>"On message error"</legend>
-                    <button type="button" data-error="ignore" class:active=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.message_error, MessageErrorDraft::Ignore))
-                        disabled=pending on:click=move |_| { signals.ingestor.update(|draft| { if let Some(route) = draft.active_route_mut() { route.message_error = MessageErrorDraft::Ignore; } }); signals.edit(); }>"IGNORE"</button>
-                    <button type="button" data-error="log" class:active=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.message_error, MessageErrorDraft::Log))
-                        disabled=pending on:click=move |_| { signals.ingestor.update(|draft| { if let Some(route) = draft.active_route_mut() { route.message_error = MessageErrorDraft::Log; } }); signals.edit(); }>"LOG"</button>
-                    <button type="button" data-error="send" class:active=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.message_error, MessageErrorDraft::SendTo { .. }))
-                        disabled=pending on:click=move |_| { signals.ingestor.update(|draft| { if let Some(route) = draft.active_route_mut() { route.message_error = MessageErrorDraft::SendTo { relay: None, assignments: Vec::new() }; } }); signals.edit(); }>"SEND TO"</button>
-                </fieldset>
-                <Show when=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.message_error, MessageErrorDraft::SendTo { .. })) fallback=|| ()>
-                    <div class="create-ingestor-error-assignments">
-                        <ChoiceGroup class_name="create-ingestor-error-relay" label="Error relay"
-                            control=ChoiceControl::IngestErrorRelay signals=signals request_tx=request_tx session_generation=session_generation show_detail=true />
-                        <ChoiceGroup class_name="create-ingestor-error-fields" label="Add error assignment"
-                            control=ChoiceControl::IngestErrorField signals=signals request_tx=request_tx session_generation=session_generation show_detail=true />
-                        <AssignmentRows signals=signals area=AssignmentArea::Error />
-                    </div>
-                </Show>
+                <IngestorRouteInheritanceEditor signals=signals request_tx=request_tx session_generation=session_generation />
+                <IngestorRouteConstructionEditor signals=signals request_tx=request_tx session_generation=session_generation />
+                <IngestorRouteFlushEditor signals=signals />
+                <IngestorRouteMessageErrorEditor signals=signals request_tx=request_tx session_generation=session_generation />
             </div>
         </section>
     }
+    .into_any()
+}
+
+/// The active route's output branch and its branch key assignments.
+#[component]
+fn IngestorRouteBranchEditor(
+    signals: CreateSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    session_generation: RwSignal<u64>,
+) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    view! {
+        <fieldset class="create-field create-ingestor-branching">
+            <legend>"Output branch"</legend>
+            <button type="button" data-branch="unbranched"
+                class:active=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.branch, RouteBranchDraft::Unbranched))
+                disabled=pending on:click=move |_| { signals.ingestor.update(|draft| draft.choose_route_unbranched()); signals.edit(); }>"UNBRANCHED"</button>
+            <button type="button" data-branch="named"
+                class:active=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.branch, RouteBranchDraft::Branched { .. }))
+                disabled=pending on:click=move |_| { signals.ingestor.update(|draft| draft.choose_route_branched()); signals.edit(); }>"Named branch"</button>
+        </fieldset>
+        <Show when=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.branch, RouteBranchDraft::Branched { .. })) fallback=|| ()>
+            <ChoiceGroup class_name="create-ingestor-branch" label="Named branch"
+                control=ChoiceControl::IngestRouteBranch signals=signals request_tx=request_tx session_generation=session_generation show_detail=true />
+            <div class="create-ingestor-branch-assignments">
+                <ChoiceGroup class_name="create-ingestor-branch-fields" label="Add branch key assignment"
+                    control=ChoiceControl::IngestBranchField signals=signals request_tx=request_tx session_generation=session_generation show_detail=true />
+                <AssignmentRows signals=signals area=AssignmentArea::Branch />
+            </div>
+        </Show>
+    }
+    .into_any()
+}
+
+/// The decoded fields the active route inherits, and which of them leak sensitivity.
+#[component]
+fn IngestorRouteInheritanceEditor(
+    signals: CreateSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    session_generation: RwSignal<u64>,
+) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    view! {
+        <fieldset class="create-field create-ingestor-inherit">
+            <legend>"Inherit decoded fields"</legend>
+            <For each=|| ["none", "all", "all-except", "fields"].into_iter()
+                key=|mode| *mode
+                children=move |mode| view! {
+                    <button type="button" data-inherit=mode
+                        class:active=move || signals.ingestor.get().active_route().is_some_and(|route| route.inherit.key() == mode)
+                        disabled=pending on:click=move |_| {
+                            signals.ingestor.update(|draft| {
+                                if let Some(route) = draft.active_route_mut() { route.inherit.choose(mode); }
+                            });
+                            signals.edit();
+                        }>{mode.to_ascii_uppercase()}</button>
+                } />
+        </fieldset>
+        <Show when=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.inherit, InheritDraft::AllExcept(_) | InheritDraft::Fields(_))) fallback=|| ()>
+            <ChoiceGroup class_name="create-ingestor-input-fields" label="Add decoded field"
+                control=ChoiceControl::IngestInputField signals=signals request_tx=request_tx session_generation=session_generation show_detail=true />
+            <For each=move || {
+                let draft = signals.ingestor.get();
+                let len = match draft.active_route().map(|route| &route.inherit) {
+                    Some(InheritDraft::AllExcept(fields)) => fields.len(),
+                    Some(InheritDraft::Fields(fields)) => fields.len(),
+                    _ => 0,
+                };
+                (0..len).collect::<Vec<_>>()
+            } key=|index| *index children=move |index| view! {
+                <div class="create-ingestor-inherited-field" data-field=move || inherited_field_name(signals, index)>
+                    <span>{move || inherited_field_name(signals, index)}</span>
+                    <Show when=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.inherit, InheritDraft::Fields(_))) fallback=|| ()>
+                        <label><input type="checkbox" class="create-ingestor-leak"
+                            prop:checked=move || signals.ingestor.get().active_route().is_some_and(|route| match &route.inherit {
+                                InheritDraft::Fields(fields) => fields.get(index).is_some_and(|field| field.leak_sensitive),
+                                _ => false,
+                            })
+                            disabled=pending on:change=move |event| {
+                                let checked = event_target_checked(&event);
+                                signals.ingestor.update(|draft| {
+                                    if let Some(route) = draft.active_route_mut()
+                                        && let InheritDraft::Fields(fields) = &mut route.inherit
+                                        && let Some(field) = fields.get_mut(index) { field.leak_sensitive = checked; }
+                                });
+                                signals.edit();
+                            } />"LEAK SENSITIVE"</label>
+                    </Show>
+                    <button type="button" class="create-ingestor-remove-inherited-field" disabled=pending
+                        on:click=move |_| {
+                            signals.ingestor.update(|draft| {
+                                if let Some(route) = draft.active_route_mut() {
+                                    match &mut route.inherit {
+                                        InheritDraft::AllExcept(fields) if index < fields.len() => { fields.remove(index); },
+                                        InheritDraft::Fields(fields) if index < fields.len() => { fields.remove(index); },
+                                        _ => {},
+                                    }
+                                }
+                            });
+                            signals.edit();
+                        }>"Remove field"</button>
+                </div>
+            } />
+        </Show>
+    }
+    .into_any()
+}
+
+/// The active route's output assignments, its WHERE expression and its ordered invocations.
+#[component]
+fn IngestorRouteConstructionEditor(
+    signals: CreateSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    session_generation: RwSignal<u64>,
+) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    view! {
+        <div class="create-ingestor-output-assignments">
+            <ChoiceGroup class_name="create-ingestor-output-fields" label="Add output assignment"
+                control=ChoiceControl::IngestOutputField signals=signals request_tx=request_tx session_generation=session_generation show_detail=true />
+            <AssignmentRows signals=signals area=AssignmentArea::Output />
+        </div>
+        <label class="create-field"><span>"Route WHERE expression (optional)"</span>
+            <textarea class="create-ingestor-where" prop:value=move || route_where_clause(signals)
+                disabled=pending on:input=move |event| {
+                    let value = event_target_textarea_value(&event);
+                    signals.ingestor.update(|draft| { if let Some(route) = draft.active_route_mut() { route.where_clause = value; } });
+                    signals.edit();
+                } />
+        </label>
+        <section class="create-ingestor-invocations"><h4>"Ordered invocations"</h4>
+            <InvocationRows signals=signals />
+            <button type="button" class="create-ingestor-add-invocation" disabled=pending
+                on:click=move |_| {
+                    signals.ingestor.update(|draft| { if let Some(route) = draft.active_route_mut() { route.invocations.push(InvocationDraft::default()); } });
+                    signals.edit();
+                }>"Add invocation"</button>
+        </section>
+    }
+    .into_any()
+}
+
+/// The active route's flush policy.
+#[component]
+fn IngestorRouteFlushEditor(signals: CreateSignals) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    view! {
+        <fieldset class="create-field create-ingestor-flush"><legend>"Flush policy"</legend>
+            <button type="button" data-flush="immediate" class:active=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.flush, FlushDraft::Immediate))
+                disabled=pending on:click=move |_| { signals.ingestor.update(|draft| { if let Some(route) = draft.active_route_mut() { route.flush = FlushDraft::Immediate; } }); signals.edit(); }>"IMMEDIATE"</button>
+            <button type="button" data-flush="each" class:active=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.flush, FlushDraft::Each { .. }))
+                disabled=pending on:click=move |_| { signals.ingestor.update(|draft| { if let Some(route) = draft.active_route_mut() { route.flush = FlushDraft::Each { interval: String::new(), max_batch_size: String::new() }; } }); signals.edit(); }>"EACH"</button>
+        </fieldset>
+        <Show when=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.flush, FlushDraft::Each { .. })) fallback=|| ()>
+            <label class="create-field"><span>"Flush interval"</span><input class="create-ingestor-flush-interval" type="text" autocomplete="off"
+                prop:value=move || flush_interval(signals)
+                disabled=pending on:input=move |event| {
+                    let value = event_target_value(&event);
+                    signals.ingestor.update(|draft| { if let Some(route) = draft.active_route_mut() && let FlushDraft::Each { interval, .. } = &mut route.flush { *interval = value; } });
+                    signals.edit();
+                } /></label>
+            <label class="create-field"><span>"Maximum batch size"</span><input class="create-ingestor-flush-size" type="text" autocomplete="off"
+                prop:value=move || flush_max_batch_size(signals)
+                disabled=pending on:input=move |event| {
+                    let value = event_target_value(&event);
+                    signals.ingestor.update(|draft| { if let Some(route) = draft.active_route_mut() && let FlushDraft::Each { max_batch_size, .. } = &mut route.flush { *max_batch_size = value; } });
+                    signals.edit();
+                } /></label>
+        </Show>
+    }
+    .into_any()
+}
+
+/// The active route's message error policy and its error relay assignments.
+#[component]
+fn IngestorRouteMessageErrorEditor(
+    signals: CreateSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    session_generation: RwSignal<u64>,
+) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    view! {
+        <fieldset class="create-field create-ingestor-message-error"><legend>"On message error"</legend>
+            <button type="button" data-error="ignore" class:active=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.message_error, MessageErrorDraft::Ignore))
+                disabled=pending on:click=move |_| { signals.ingestor.update(|draft| { if let Some(route) = draft.active_route_mut() { route.message_error = MessageErrorDraft::Ignore; } }); signals.edit(); }>"IGNORE"</button>
+            <button type="button" data-error="log" class:active=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.message_error, MessageErrorDraft::Log))
+                disabled=pending on:click=move |_| { signals.ingestor.update(|draft| { if let Some(route) = draft.active_route_mut() { route.message_error = MessageErrorDraft::Log; } }); signals.edit(); }>"LOG"</button>
+            <button type="button" data-error="send" class:active=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.message_error, MessageErrorDraft::SendTo { .. }))
+                disabled=pending on:click=move |_| { signals.ingestor.update(|draft| { if let Some(route) = draft.active_route_mut() { route.message_error = MessageErrorDraft::SendTo { relay: None, assignments: Vec::new() }; } }); signals.edit(); }>"SEND TO"</button>
+        </fieldset>
+        <Show when=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.message_error, MessageErrorDraft::SendTo { .. })) fallback=|| ()>
+            <div class="create-ingestor-error-assignments">
+                <ChoiceGroup class_name="create-ingestor-error-relay" label="Error relay"
+                    control=ChoiceControl::IngestErrorRelay signals=signals request_tx=request_tx session_generation=session_generation show_detail=true />
+                <ChoiceGroup class_name="create-ingestor-error-fields" label="Add error assignment"
+                    control=ChoiceControl::IngestErrorField signals=signals request_tx=request_tx session_generation=session_generation show_detail=true />
+                <AssignmentRows signals=signals area=AssignmentArea::Error />
+            </div>
+        </Show>
+    }
+    .into_any()
 }
 
 #[cfg(test)]

@@ -52,7 +52,7 @@ fn hash_map_and_roto_udf_forms_render_current_model_controls() {
                     .connection_state(connection_state)
                     .session_generation(generation)
                     .request_tx(request_tx)
-                    .submit(|_, _, _| {})
+                    .submit(super::ignore_test_submission)
                     .build(),
             );
             any_spawner::Executor::poll_local();
@@ -153,7 +153,7 @@ fn junction_and_reingestor_render_ordered_route_and_state_controls() {
                     .connection_state(RwSignal::new(super::super::ConsoleConnectionState::Waiting))
                     .session_generation(RwSignal::new(1))
                     .request_tx(RwSignal::new(None))
-                    .submit(|_, _, _| {})
+                    .submit(super::ignore_test_submission)
                     .build(),
             );
             any_spawner::Executor::poll_local();
@@ -574,7 +574,7 @@ fn ingestor_form_renders_every_source_and_keeps_its_typed_references_in_scope() 
                 .connection_state(RwSignal::new(super::super::ConsoleConnectionState::Waiting))
                 .session_generation(RwSignal::new(1))
                 .request_tx(RwSignal::new(None))
-                .submit(|_, _, _| {})
+                .submit(super::ignore_test_submission)
                 .build(),
         );
         any_spawner::Executor::poll_local();
@@ -781,7 +781,7 @@ fn ingestor_editor_shows_source_specific_fields_and_route_construction_sections(
                     .connection_state(connection_state)
                     .session_generation(generation)
                     .request_tx(request_tx)
-                    .submit(|_, _, _| {})
+                    .submit(super::ignore_test_submission)
                     .build(),
             );
             any_spawner::Executor::poll_local();
@@ -916,7 +916,7 @@ fn client_vhost_and_endpoint_forms_render_every_transport_and_typed_reference_co
                     .connection_state(connection_state)
                     .session_generation(generation)
                     .request_tx(request_tx)
-                    .submit(|_, _, _| {})
+                    .submit(super::ignore_test_submission)
                     .build(),
             );
             any_spawner::Executor::poll_local();
@@ -1256,7 +1256,7 @@ fn codec_and_signaling_forms_render_every_current_editor_family() {
                     .connection_state(connection_state)
                     .session_generation(generation)
                     .request_tx(request_tx)
-                    .submit(|_, _, _| {})
+                    .submit(super::ignore_test_submission)
                     .build(),
             );
             any_spawner::Executor::poll_local();
@@ -1623,7 +1623,7 @@ fn deduplicator_and_reorderer_forms_edit_ordered_keys_after_their_node_branch() 
                     .connection_state(RwSignal::new(super::super::ConsoleConnectionState::Waiting))
                     .session_generation(RwSignal::new(1))
                     .request_tx(RwSignal::new(None))
-                    .submit(|_, _, _| {})
+                    .submit(super::ignore_test_submission)
                     .build(),
             );
             any_spawner::Executor::poll_local();

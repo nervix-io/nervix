@@ -30,10 +30,12 @@ mod limits;
 mod publication;
 #[cfg(test)]
 mod tests;
+mod tls;
 
 pub use durations::*;
 pub use limits::*;
 pub use publication::*;
+pub use tls::*;
 
 /// One committed parameter publication. Revisions order installations and gossip observations.
 #[derive(
@@ -60,6 +62,7 @@ pub enum ClusterParameterValueKind {
     Duration,
     Count,
     Bytes,
+    AlgorithmNames,
 }
 
 /// A pure parameter construction or assignment refusal.
@@ -101,6 +104,20 @@ pub enum ClusterParameterError {
     Empty,
     #[error("ALTER CLUSTER SET assigns {parameter} more than once")]
     Duplicate { parameter: ClusterParameterKey },
+    #[error("invalid {parameter}")]
+    TlsSelection { parameter: ClusterParameterKey },
+    #[error("tls-cipher-suites ({suites}) must include a TLS 1.3 cipher suite")]
+    NoTls13CipherSuite {
+        suites: nervix_crypto_policy::TlsCipherSuites,
+    },
+    #[error(
+        "tls-key-exchange-groups ({groups}) must include a TLS 1.2 group for tls-cipher-suites \
+         ({suites})"
+    )]
+    NoTls12KeyExchangeGroup {
+        suites: nervix_crypto_policy::TlsCipherSuites,
+        groups: nervix_crypto_policy::TlsKeyExchangeGroups,
+    },
 }
 
 /// One parameter and its printable current value.
@@ -110,10 +127,38 @@ pub struct DescribedClusterParameter {
     pub value: String,
 }
 
+macro_rules! parameter_text {
+    ($value:expr, Duration) => {
+        crate::timing_text(*$value)
+    };
+    ($value:expr, Count) => {
+        $value.to_string()
+    };
+    ($value:expr, Bytes) => {
+        format!("{}B", $value)
+    };
+    ($value:expr, AlgorithmNames) => {{
+        let names: Vec<_> = $value
+            .iter()
+            .map(|algorithm| format!("'{}'", algorithm.name()))
+            .collect();
+        format!("({})", names.join(", "))
+    }};
+}
+
+macro_rules! parameter_cli_text {
+    ($value:expr, AlgorithmNames) => {
+        $value.to_string()
+    };
+    ($value:expr, $kind:ident) => {
+        parameter_text!($value, $kind)
+    };
+}
+
 macro_rules! parameter_values {
     ($($field:ident: $definition:ident($value:ty) => $kind:ident,)+) => {
         /// The complete cluster policy. Each field has one class, default and validation owner.
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Archive, RkyvSerialize)]
         #[serde(deny_unknown_fields)]
         pub struct ClusterParameterValues {
             $(
@@ -121,6 +166,34 @@ macro_rules! parameter_values {
                 #[rkyv(with = archive::ValidatedSetting)]
                 $field: Setting<$definition>,
             )+
+        }
+
+        impl<'de> Deserialize<'de> for ClusterParameterValues {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                use serde::de::Error as _;
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Fields { $(#[serde(with = "archive")] $field: Setting<$definition>,)+ }
+                let fields = Fields::deserialize(deserializer)?;
+                let values = Self {
+                    $($field: fields.$field,)+
+                };
+                values.validate_tls().map_err(|error| D::Error::custom(format_args!("{error:#}")))?;
+                Ok(values)
+            }
+        }
+
+        impl<D> RkyvDeserialize<ClusterParameterValues, D> for ArchivedClusterParameterValues
+        where D: Fallible + ?Sized, D::Error: Source,
+        {
+            fn deserialize(&self, deserializer: &mut D) -> Result<ClusterParameterValues, D::Error> {
+                let values = ClusterParameterValues {
+                    $($field: Setting::new(self.$field.deserialize(deserializer)?, &())
+                        .map_err(|error| D::Error::new(error.into_error()))?,)+
+                };
+                values.validate_tls().map_err(|error| D::Error::new(error.into_error()))?;
+                Ok(values)
+            }
         }
 
         /// Optional first-bootstrap inputs; absence takes the definition's own default.
@@ -152,7 +225,9 @@ macro_rules! parameter_values {
 
         impl ClusterParameterValues {
             pub fn resolve(seed: ClusterParameterSeedValues) -> Result<Self, Report<ClusterParameterError>> {
-                Ok(Self { $($field: Setting::resolve(seed.$field, &())?,)+ })
+                let values = Self { $($field: Setting::resolve(seed.$field, &())?,)+ };
+                values.validate_tls()?;
+                Ok(values)
             }
 
             $(pub fn $field(&self) -> $value { *self.$field.value() })+
@@ -163,6 +238,7 @@ macro_rules! parameter_values {
                 for update in updates.iter() {
                     match update { $(ClusterParameterChange::$definition(value) => { next.$field = Setting::new(*value, &())?; },)+ }
                 }
+                next.validate_tls()?;
                 Ok(next)
             }
 
@@ -174,7 +250,7 @@ macro_rules! parameter_values {
                 vec![$(
                     DescribedClusterParameter {
                         parameter: ClusterParameterKey::$definition,
-                        value: self.$field.value().display_parameter(ClusterParameterValueKind::$kind),
+                        value: parameter_text!(self.$field.value(), $kind),
                     },
                 )+]
             }
@@ -188,8 +264,18 @@ macro_rules! parameter_values {
         }
 
         impl ClusterParameterKey {
+            pub fn default_cli_text(self) -> String {
+                match self { $(Self::$definition => {
+                    let value = $definition::default_value(&());
+                    parameter_cli_text!(&value, $kind)
+                },)+ }
+            }
+
             pub fn default_text(self) -> String {
-                match self { $(Self::$definition => $definition::default_value(&()).display_parameter(ClusterParameterValueKind::$kind),)+ }
+                match self { $(Self::$definition => {
+                    let value = $definition::default_value(&());
+                    parameter_text!(&value, $kind)
+                },)+ }
             }
             pub const fn setting_name(self) -> &'static str {
                 match self { $(Self::$definition => $definition::NAME,)+ }
@@ -206,7 +292,7 @@ macro_rules! parameter_values {
             }
 
             pub fn value_text(&self) -> String {
-                match self { $(Self::$definition(value) => value.display_parameter(ClusterParameterValueKind::$kind),)+ }
+                match self { $(Self::$definition(value) => parameter_text!(value, $kind),)+ }
             }
         }
     };
@@ -235,28 +321,9 @@ parameter_values! {
     http_header_bytes: HttpHeaderBytes(u64) => Bytes,
     http_header_fields: HttpHeaderFields(u64) => Count,
     client_batch_rows: ClientBatchRows(u64) => Count,
+    tls_cipher_suites: TlsCipherSuites(nervix_crypto_policy::TlsCipherSuites) => AlgorithmNames,
+    tls_key_exchange_groups: TlsKeyExchangeGroups(nervix_crypto_policy::TlsKeyExchangeGroups) => AlgorithmNames,
     password_iterations: PasswordIterations(u64) => Count,
-}
-
-trait ParameterDisplay {
-    fn display_parameter(&self, kind: ClusterParameterValueKind) -> String;
-}
-
-impl ParameterDisplay for Duration {
-    fn display_parameter(&self, _: ClusterParameterValueKind) -> String {
-        crate::timing_text(*self)
-    }
-}
-
-impl ParameterDisplay for u64 {
-    fn display_parameter(&self, kind: ClusterParameterValueKind) -> String {
-        match kind {
-            ClusterParameterValueKind::Bytes => format!("{self}B"),
-            ClusterParameterValueKind::Count | ClusterParameterValueKind::Duration => {
-                self.to_string()
-            }
-        }
-    }
 }
 
 impl ClusterParameterKey {

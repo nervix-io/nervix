@@ -296,6 +296,7 @@ test: tests-deps build-client-jvm-tests build-client-ruby build-client-c-suites
         nervix-paced-simulation
         nervix-primitives
         nervix-rate-limit
+        nervix-tls
         nervix-scenarios
         nervix-server
         nervix-wasm
@@ -318,6 +319,7 @@ test: tests-deps build-client-jvm-tests build-client-ruby build-client-c-suites
         --package nervix-model-harness \
         --package nervix-paced-simulation \
         --package nervix-rate-limit \
+        --package nervix-tls \
         --package nervix-wasm
     cargo test --all-targets --features native --package nervix-primitives
     just test-capability-docs
@@ -406,6 +408,38 @@ test-endpoint-heads *args: build-deps build-plexus-format build-test-cli build-d
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/kinded_endpoint_heads.feature {{ quote(args) }}
+
+# Qualify live outward TLS policy without preparing unrelated paced client drivers.
+test-outward-tls-policy *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/outward_tls_policy.feature {{ quote(args) }}
+
+# Exercise TLS seeds and their command-line round trip through the production settings owner.
+test-outward-tls-seeds *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    BOLERO_RANDOM_ITERATIONS=0 cargo test --package nervix-server --features testing --lib -- application::cli:: {{ quote(args) }}
+
+# Check the independent restricted peer's HTTP/2 support without preparing paced drivers.
+test-outward-tls-peer *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test harness_liveness -- a_tls_receiver_offering_http2 {{ quote(args) }}
+
+# Exercise the maintained TLS dependency's connection configuration API from a supplied source tree.
+test-tls-configuration-source source filter="configuration_refresh" *args:
+    cargo test --manifest-path {{ quote(source / "rustls/Cargo.toml") }} --package rustls --no-default-features --features aws_lc_rs,std,tls12 --test api {{ quote(filter) }} {{ quote(args) }}
+
+# Keep the dependency extension usable without std or a selected cryptographic backend.
+check-tls-configuration-source source:
+    cargo check --manifest-path {{ quote(source / "rustls/Cargo.toml") }} --package rustls --lib --no-default-features --features custom-provider
+
+fmt-tls-configuration-source source:
+    cargo fmt --manifest-path {{ quote(source / "rustls/Cargo.toml") }} --package rustls
 
 # Cluster identity, replication and restore checks use the native session client.
 test-cluster-identity *args: build-deps build-plexus-format build-test-cli build-deadlock-report
@@ -1011,6 +1045,23 @@ coverage-client-core output *args:
 coverage-web-console output *args:
     cargo llvm-cov --package nervix-web-console --bin nervix-web-console --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ quote(args) }}
 
+# Keep the codegen-unit objects of the console's unoptimized test build in a target directory of
+# their own and print each object's `.debug_str` size, largest first. These are the debug names the
+# linker merges, which a create form multiplies when its view is not erased at its boundary. The
+# build is not incremental, so its codegen units are partitioned as CI's are.
+measure-web-console-debug-strings target_dir=(cargo_target_dir + "/web-console-debug-strings"):
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export CARGO_TARGET_DIR={{ quote(target_dir) }}
+    export CARGO_INCREMENTAL=0
+    llvm_bin="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin"
+    rm -f "${CARGO_TARGET_DIR}"/debug/deps/nervix_web_console-*.rcgu.o
+    cargo rustc --package nervix-web-console --bin nervix-web-console --profile test -- -C save-temps
+    for object in "${CARGO_TARGET_DIR}"/debug/deps/nervix_web_console-*.rcgu.o; do
+        "${llvm_bin}/llvm-size" -A "${object}" \
+            | awk -v object="${object##*/}" '$1 == ".debug_str" { print $2, object }'
+    done | sort -rn
+
 # Measure one connector crate's unit tests, for a patch confined to it, through the configured
 # compiler cache.
 coverage-connector package output *args:
@@ -1296,7 +1347,7 @@ test-deadlock-probes features="deloxide" *args:
 # The packages whose `shuttle_` checks `test-shuttle` explores, as the Shuttle inventory lists them,
 # and whose test builds `shuttle-clippy-targets` lints. scripts/tests/test_shuttle_checks.py holds
 # this list to the inventory.
-shuttle_test_packages := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-connector", "nervix-connector-kafka", "nervix-connector-mqtt", "nervix-connector-rabbitmq", "nervix-connector-redis", "nervix-connector-sqs", "nervix-connector-syslog", "nervix-connector-websockets", "nervix-consensus", "nervix-server", "nervix-deadlock", "nervix-rate-limit"]
+shuttle_test_packages := ["nervix-tls", "nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-connector", "nervix-connector-kafka", "nervix-connector-mqtt", "nervix-connector-rabbitmq", "nervix-connector-redis", "nervix-connector-sqs", "nervix-connector-syslog", "nervix-connector-websockets", "nervix-consensus", "nervix-server", "nervix-deadlock", "nervix-rate-limit"]
 
 # Explore every registered Shuttle check of a production owner, each in its own process: under the
 # exploration it declares, then under the uncontrolled-nondeterminism detector. The inventory in
@@ -1620,6 +1671,10 @@ test-otel-declarations:
 # Run the cryptography boundary's provider, signing, digest and randomness unit tests.
 test-crypto *args:
     cargo test --package nervix-crypto --lib -- {{ args }}
+
+# Pure TLS vocabulary checks do not compile an engine or prepare server assets.
+test-crypto-policy *args:
+    cargo test --package nervix-crypto-policy --lib -- {{ quote(args) }}
 
 # Run the boundary's registered properties with canonical corpus and case accounting. They have
 # no server or console assets, so this focused owner does not need bolero-deps.
@@ -2103,6 +2158,7 @@ test-coverage-binaries: tests-deps
         nervix-paced-simulation
         nervix-primitives
         nervix-rate-limit
+        nervix-tls
         nervix-scenarios
         nervix-server
         nervix-wasm
@@ -2149,6 +2205,7 @@ test-coverage-binaries: tests-deps
         --package nervix-model-harness \
         --package nervix-paced-simulation \
         --package nervix-rate-limit \
+        --package nervix-tls \
         --package nervix-wasm
     coverage --all-targets --features native --package nervix-primitives
     # Carry the exact instrumented native extension the Ruby host suite loads at run time.
@@ -3429,7 +3486,7 @@ clippy_language_packages_1 := ["nervix-plexus", "nervix-plexus-format", "nervix-
 
 clippy_language_packages_2 := ["nervix-benchmark", "nervix-cli", "nervix-client-ffi", "nervix-client-host", "nervix-client-jvm", "nervix-client-python", "nervix-client-ruby"]
 
-clippy_foundation_packages_1 := ["nervix-approx-into", "nervix-bounded-write", "nervix-crypto", "nervix-dataflow-graph", "nervix-expiry-map", "nervix-primitives-macros", "nervix-recovery"]
+clippy_foundation_packages_1 := ["nervix-approx-into", "nervix-bounded-write", "nervix-crypto", "nervix-crypto-policy", "nervix-dataflow-graph", "nervix-expiry-map", "nervix-primitives-macros", "nervix-recovery"]
 
 clippy_foundation_packages_2 := [
     "nervix-arbitrary",
@@ -3471,11 +3528,11 @@ clippy_shuttle_connector_packages_3 := [
     "nervix-connector-websockets",
 ]
 
-clippy_shuttle_runtime_packages := ["nervix-client-core", "nervix-execution", "nervix-interconnect", "nervix-wasm", "nervix-rate-limit"]
+clippy_shuttle_runtime_packages := ["nervix-tls", "nervix-client-core", "nervix-execution", "nervix-interconnect", "nervix-wasm", "nervix-rate-limit"]
 
 # Every package `test-shuttle` explores, in two lanes: the runtime and server, and the connectors.
 # scripts/tests/test_shuttle_checks.py holds the two to an exact partition of shuttle_test_packages.
-clippy_shuttle_test_packages_1 := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-consensus", "nervix-server", "nervix-deadlock", "nervix-rate-limit"]
+clippy_shuttle_test_packages_1 := ["nervix-tls", "nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-consensus", "nervix-server", "nervix-deadlock", "nervix-rate-limit"]
 
 clippy_shuttle_test_packages_2 := [
     "nervix-connector",
@@ -3526,7 +3583,7 @@ clippy-lane-ordinary-foundation-2: *(clippy-target "ordinary-foundation-2" *clip
 [private]
 clippy-lane-ordinary-foundation-3: \
     *(clippy-target "ordinary-foundation-3" *clippy_foundation_packages_3 ["--all-features", "--all-targets"]) \
-    *(clippy-target "ordinary-foundation-3" *["nervix-execution", "nervix-model-harness", "nervix-rate-limit", "nervix-wasm"] ["--all-targets"]) \
+    *(clippy-target "ordinary-foundation-3" *["nervix-execution", "nervix-model-harness", "nervix-rate-limit", "nervix-tls", "nervix-wasm"] ["--all-targets"]) \
     (clippy-target "ordinary-foundation-3" "nervix-deadlock" ["--all-targets", "--features", "report-tool"])
 
 [private]
@@ -5270,3 +5327,28 @@ coverage-deadlock output="target/deadlock.lcov":
     cat "${reports}/order.lcov" "${reports}/report.lcov" > "${reports}/combined.lcov"
     mkdir -p "$(dirname {{ quote(output) }})"
     mv "${reports}/combined.lcov" {{ quote(output) }}
+
+# Focused live outward TLS publication and configuration-cache checks.
+test-tls-policy *args:
+    cargo test --package nervix-tls --lib {{ quote(args) }}
+
+# Check the narrow maintained Tonic configuration entrypoints on their pinned source.
+test-grpc-tls-source source filter="preconfigured_tls" *args:
+    cargo test --manifest-path {{ quote(source / "tonic/Cargo.toml") }} --package tonic --lib --features tls-aws-lc,tls-ring {{ quote(filter) }} {{ quote(args) }}
+
+fmt-grpc-tls-source source:
+    cargo fmt --manifest-path {{ quote(source / "tonic/Cargo.toml") }} --package tonic
+
+# Explore the registered TLS publication owner with complete canonical execution evidence.
+test-outward-tls-publication:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/outward-tls-models/build") }} python3 -m scripts.tls_policy_checks --target-dir {{ quote(cargo_target_dir + "/outward-tls-models") }}
+
+# Focused ordinary counters for value conversion, validation, parsing and TLS snapshot reuse.
+coverage-outward-tls-values:
+    BOLERO_RANDOM_ITERATIONS=0 cargo llvm-cov --no-report --package nervix-crypto-policy --lib
+    cargo llvm-cov --no-report --package nervix-tls --lib
+    cargo llvm-cov --no-report --package nervix-crypto --lib -- tls::
+    BOLERO_RANDOM_ITERATIONS=0 cargo llvm-cov --no-report --package nervix-models --lib -- cluster_parameters::
+    cargo llvm-cov --no-report --package nervix-plexus --lib -- cluster_parameters::
+    cargo llvm-cov report --package nervix-crypto-policy --package nervix-tls --package nervix-crypto --package nervix-models --package nervix-plexus --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
+    pwd -P > coverage-source-root.txt

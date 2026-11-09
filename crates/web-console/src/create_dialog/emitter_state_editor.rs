@@ -49,4 +49,5 @@ pub(super) fn EmitterStateEditor(
             </Show>
         </section>
     }
+    .into_any()
 }

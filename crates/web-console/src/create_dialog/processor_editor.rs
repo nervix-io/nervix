@@ -74,4 +74,5 @@ pub(super) fn ProcessorEditor(
         <ProcessorStateEditor family=family signals=signals request_tx=request_tx session_generation=session_generation />
         <ProcessorRouteEditor family=family signals=signals request_tx=request_tx session_generation=session_generation />
     }
+    .into_any()
 }

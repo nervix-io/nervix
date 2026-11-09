@@ -59,6 +59,7 @@ pub(super) fn EmitterDestinationEditor(
             <EmitterPayloadEditor signals=signals request_tx=request_tx session_generation=session_generation />
         </Show>
     }
+    .into_any()
 }
 
 #[component]
@@ -111,6 +112,7 @@ fn EmitterOption(
             _ => view! { <p role="alert" class="create-validation">"This declared entity option has no visual editor."</p> }.into_any(),
         }}
     }
+    .into_any()
 }
 
 #[component]
@@ -137,6 +139,7 @@ fn EmitterPayloadEditor(
         </Show>
         <Show when=move || signals.emitter.get().body == Some(BodyChoice::Values) fallback=|| ()><h3>"VALUES"</h3><ValueRows signals=signals area=ValueArea::Values class_name="create-emitter-values" /></Show>
     }
+    .into_any()
 }
 
 #[component]

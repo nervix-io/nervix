@@ -248,6 +248,7 @@ mod mysql_isolation;
 mod nats_authentication;
 mod nats_delivery;
 mod nats_stream_consumers;
+mod outward_tls_policy;
 mod paced_replication;
 mod paced_simulation;
 mod password_credentials;
@@ -458,6 +459,7 @@ struct BlockedConsensusConnectivity {
 
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
+    outward_tls_retained: Vec<outward_tls_policy::RetainedConnection>,
     console_before_command_retry:
         Option<crate::common::console_connections::ConsoleSetupObservation>,
     mqtt_envelope_observer: Option<mqtt_publish_properties::Observer>,
@@ -2109,6 +2111,7 @@ async fn given_https_receiver_is_running(world: &mut ScenarioWorld, name: String
     // The certificate's names may name the scenario, so its identity exists before they expand.
     initialize_scenario_identity(world);
     let options = ReceiverTlsOptions {
+        algorithms: crate::common::http_receiver::ReceiverTlsAlgorithms::Complete,
         certificate_hosts: certificate_hosts(world, &hosts),
         client_certificate: ClientCertificatePolicy::NotRequested,
         protocols: ReceiverProtocols::Http1,
@@ -2134,6 +2137,7 @@ async fn given_https_receiver_requiring_client_certificates_is_running(
     // The certificate's names may name the scenario, so its identity exists before they expand.
     initialize_scenario_identity(world);
     let options = ReceiverTlsOptions {
+        algorithms: crate::common::http_receiver::ReceiverTlsAlgorithms::Complete,
         certificate_hosts: certificate_hosts(world, &hosts),
         client_certificate: ClientCertificatePolicy::Required,
         protocols: ReceiverProtocols::Http1,

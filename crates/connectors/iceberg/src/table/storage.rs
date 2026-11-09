@@ -991,7 +991,7 @@ mod tests {
                 .expect("the token response is writable");
         });
         let root = Url::parse("s3://bucket/").assured("the fixture root is a URL");
-        let tls = nervix_connector::RustlsClientConfigProvider::new(&[])
+        let tls = nervix_connector::RustlsClientConfigProvider::new(&[], &Default::default())
             .build_with_default_roots()
             .assured("a client without TLS files trusts the default roots");
         let factory = DnsStorageFactory::new(IcebergStorageBackend::S3, &dns, &root, None, &tls)
