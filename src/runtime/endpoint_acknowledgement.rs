@@ -1,8 +1,10 @@
 //! The bounded response window of one endpoint intake.
 //!
 //! Layer: data plane.
-//! - **Owns.** Request-window admission, acknowledgement outcomes and their public projection.
-//! - **Depends on.** Validated endpoint plans, shared client outcomes and primitive semaphores.
+//! - **Owns.** Request-window admission, acknowledgement outcomes, their public projection and the
+//!   outcome an ingestor counts them under.
+//! - **Depends on.** Validated endpoint plans, shared client outcomes, the endpoint request outcome
+//!   vocabulary and primitive semaphores.
 //! - **Must not know.** HTTP framing, source registration, configuration Models or graph decisions.
 
 #![cfg_attr(
@@ -20,6 +22,7 @@ use nervix_models::{
 use nervix_primitives::sync::{Semaphore, SemaphorePermit};
 
 use super::EndpointRequestPlan;
+use crate::metrics::EndpointIntakeOutcome;
 
 pub(super) enum EndpointRequestPolicy {
     NoAck,
@@ -78,7 +81,7 @@ impl EndpointRequestWindow {
         dispatch: impl Future<Output = EndpointRequestOutcome>,
     ) -> EndpointRequestOutcome {
         let Some(_permit) = self.try_admit() else {
-            return EndpointRequestOutcome::NotAdmitted(ClientSubmissionRefusal::Busy);
+            return EndpointRequestOutcome::NotAdmitted(EndpointAdmissionRefusal::WindowFull);
         };
         nervix_primitives::select! {
             biased;
@@ -93,19 +96,53 @@ impl EndpointRequestWindow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EndpointRequestOutcome {
     Completed,
-    Refused,
-    NotAdmitted(ClientSubmissionRefusal),
+    Refused(EndpointInputRefusal),
+    NotAdmitted(EndpointAdmissionRefusal),
     ProcessingFailed(ClientProcessingFailure),
     Interrupted,
 }
 
+/// What refused the input of a request before any of it entered the graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EndpointInputRefusal {
+    /// The ingestor's codec refused the payload, which the ingestor consumed as a decode rejection.
+    Codec,
+    /// A route of the ingestor refused the input its codec decoded.
+    Route,
+}
+
+/// Why an acknowledged endpoint ingestor did not admit a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EndpointAdmissionRefusal {
+    /// The ingestor is quiesced and refuses new requests.
+    Suspended,
+    /// Every slot of the ingestor's response window is taken.
+    WindowFull,
+    /// The node's extension workers had no room to unfold the payload.
+    UnfoldingRefused,
+}
+
+impl EndpointAdmissionRefusal {
+    /// The refusal the request's sender learns, in the client outcome vocabulary: the window and
+    /// the extension workers are both capacity the node lacks right now.
+    fn submission(self) -> ClientSubmissionRefusal {
+        match self {
+            Self::Suspended => ClientSubmissionRefusal::Suspended,
+            Self::WindowFull | Self::UnfoldingRefused => ClientSubmissionRefusal::Busy,
+        }
+    }
+}
+
 impl EndpointRequestOutcome {
-    pub(super) fn replies() -> [Self; 7] {
+    /// Every outcome a request can reach, whose replies a signaling protocol must encode.
+    pub(super) fn replies() -> [Self; 9] {
         [
             Self::Completed,
-            Self::Refused,
-            Self::NotAdmitted(ClientSubmissionRefusal::Busy),
-            Self::NotAdmitted(ClientSubmissionRefusal::Suspended),
+            Self::Refused(EndpointInputRefusal::Codec),
+            Self::Refused(EndpointInputRefusal::Route),
+            Self::NotAdmitted(EndpointAdmissionRefusal::Suspended),
+            Self::NotAdmitted(EndpointAdmissionRefusal::WindowFull),
+            Self::NotAdmitted(EndpointAdmissionRefusal::UnfoldingRefused),
             Self::ProcessingFailed(ClientProcessingFailure::AckTimedOut),
             Self::ProcessingFailed(ClientProcessingFailure::Rejected),
             Self::Interrupted,
@@ -115,13 +152,34 @@ impl EndpointRequestOutcome {
     pub(crate) fn submission(self) -> ClientSubmissionOutcome {
         match self {
             Self::Completed => ClientSubmissionOutcome::Completed,
-            Self::Refused => {
+            Self::Refused(_) => {
                 ClientSubmissionOutcome::ProcessingFailed(ClientProcessingFailure::Rejected)
             }
-            Self::NotAdmitted(refusal) => ClientSubmissionOutcome::NotAdmitted(refusal),
+            Self::NotAdmitted(refusal) => {
+                ClientSubmissionOutcome::NotAdmitted(refusal.submission())
+            }
             Self::ProcessingFailed(failure) => ClientSubmissionOutcome::ProcessingFailed(failure),
             Self::Interrupted => {
                 ClientSubmissionOutcome::OutcomeUnknown(ClientOutcomeUncertainty::Interrupted)
+            }
+        }
+    }
+
+    /// The outcome the ingestor counts the request under.
+    pub(super) fn counted(self) -> EndpointIntakeOutcome {
+        match self {
+            Self::Completed => EndpointIntakeOutcome::Accepted,
+            Self::Refused(EndpointInputRefusal::Codec) => EndpointIntakeOutcome::DecodeRejected,
+            Self::Refused(EndpointInputRefusal::Route)
+            | Self::NotAdmitted(EndpointAdmissionRefusal::Suspended) => {
+                EndpointIntakeOutcome::Refused
+            }
+            Self::NotAdmitted(EndpointAdmissionRefusal::WindowFull) => EndpointIntakeOutcome::Busy,
+            Self::NotAdmitted(EndpointAdmissionRefusal::UnfoldingRefused) => {
+                EndpointIntakeOutcome::NotAdmitted
+            }
+            Self::ProcessingFailed(_) | Self::Interrupted => {
+                EndpointIntakeOutcome::ProcessingFailed
             }
         }
     }
