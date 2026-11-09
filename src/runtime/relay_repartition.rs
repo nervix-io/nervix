@@ -116,8 +116,10 @@ impl Runtime {
         };
         let mut repartitioned = Vec::new();
         {
+            // Without an installed execution no relay has services to replace; the swap's later
+            // steps report what each of them could not find.
             let Some(execution) = self.inner.executions.get(domain) else {
-                return Err(execution_unavailable());
+                return Ok(BTreeSet::new());
             };
             for relay in revision.activation.relays.values() {
                 let desired = RelayPartitioning::of(Some(&relay.branching));
