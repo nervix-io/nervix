@@ -359,6 +359,10 @@ impl IngestorMessage for RedisPubSubIngestorMessage {
 /// are not UTF-8 text has no `STRING` value and reads as null, and a channel subscription has no
 /// pattern.
 impl IngestMessageMetadata for RedisPubSubIngestorMessage {
+    fn payload_bytes(&self) -> usize {
+        nervix_connector::IngestorMessage::payload(self).len()
+    }
+
     fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
         match std::str::from_utf8(self.message.channel()) {
             Ok(channel) => values.string(channel),

@@ -74,6 +74,19 @@ fn every_declared_ingestor_completes_its_filter_functions_and_metadata() {
             "{kind}: {input}"
         );
         let input = format!("{prefix}TIMESTAMP AT metadata.");
+        let payload_input = format!("{prefix}FILTER WHERE payload.");
+        let expected_payload: Vec<_> = kind
+            .capabilities()
+            .payload
+            .fields()
+            .iter()
+            .map(|field| CompletionExpectation::Literal(field.name().to_string()))
+            .collect();
+        assert_eq!(
+            suggest_client_expectations(&payload_input, payload_input.len()),
+            expected_payload,
+            "{kind}: {payload_input}"
+        );
         let mut expected = Vec::new();
         for field in kind.capabilities().metadata.fields() {
             if field.ty() == nervix_models::IngestorMetadataType::Datetime {

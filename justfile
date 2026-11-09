@@ -375,6 +375,62 @@ test-node-record *args: build-deps build-test-cli
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/node_record.feature {{ quote(args) }}
 
+# Exercise transport payload facts without unrelated paced client-driver preparation.
+test-ingestor-payload *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input 'tests/features/runtime/ingestor_payload*.feature' {{ quote(args) }}
+
+# Verify payload syntax and declaration-driven completion through the composed Plexus grammar.
+test-ingestor-payload-language:
+    cargo test --package nervix-plexus --lib semantic_program::tests::payload_
+    cargo test --package nervix-plexus --lib client_statement::connector_completion_tests::
+    cargo test --package nervix-plexus --lib lexer::tests::the_generators_spell_a_name_like_every_keyword
+
+# Verify current metadata/capability declarations and every keyword-shaped generated name.
+test-ingestor-payload-declarations:
+    cargo test --package nervix-models --test connectors --features arrow -- --skip bolero
+    cargo test --package nervix-arbitrary --lib a_name_spells_every_keyword
+
+# Verify the complete Syslog message handover through the production retention boundary.
+test-ingestor-payload-syslog:
+    cargo test --package nervix-connector-syslog --lib listener::tests::a_message_hands_over_every_declared_field_and_names_its_peer_position -- --exact
+
+# Qualify this registered handoff owner with package-scoped discovery and both Shuttle runs.
+test-ingestor-payload-syslog-shuttle:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export CARGO_TARGET_DIR="{{ cargo_target_dir }}/shuttle"
+    export SHUTTLE_RANDOM_SEED=8601
+    python3 - <<'PY'
+    import os
+    from pathlib import Path
+    from scripts import shuttle_checks
+
+    root = Path.cwd()
+    inventory = shuttle_checks.parse_inventory((root / shuttle_checks.INVENTORY).read_text())
+    package = "nervix-connector-syslog"
+    scope = shuttle_checks.Inventory(checks={package: inventory.checks[package]})
+    target = Path(os.environ["CARGO_TARGET_DIR"]).resolve()
+    target.mkdir(parents=True, exist_ok=True)
+    report = Path(os.environ.get("NERVIX_MODEL_EVIDENCE", str(target / "ingestor-payload-syslog.json")))
+    raise SystemExit(shuttle_checks.run_checks(
+        shuttle_checks.Commands(root), scope, target,
+        "listener::tests::shuttle_a_decoded_frame_racing_suspension_is_handed_off_once",
+        report=report, jobs=1,
+    ))
+    PY
+
+# Exercise lazy payload projection, registry admission and scalar retention through their owners.
+test-ingestor-payload-owners: download-onnxruntime build-web-console
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-server --features testing --lib -- ingest_payload --skip bolero
+    cargo test --package nervix-server --features testing --lib -- runtime::ingest_metadata::tests:: --skip bolero
+    cargo test --package nervix-connector --lib -- ingest_metadata::tests:: --skip bolero
+
 # Password-policy cases use in-process nodes and the native session client.
 test-password-credentials *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash
@@ -1751,6 +1807,10 @@ test-websockets *args:
 # inventory, completion and nondeterminism gate for qualification.
 test-websockets-shuttle check:
     SHUTTLE_TRACE_DIR={{ quote(cargo_target_dir + "/shuttle-failures/nervix-connector-websockets/" + check) }} cargo test --package nervix-connector-websockets --features shuttle --lib {{ quote(check) }} -- --exact --nocapture --test-threads=1
+
+# Diagnose one Syslog handoff check through its production owner and replayable schedules.
+test-syslog-shuttle check:
+    SHUTTLE_TRACE_DIR={{ quote(cargo_target_dir + "/shuttle-failures/nervix-connector-syslog/" + check) }} cargo test --package nervix-connector-syslog --features shuttle --lib {{ quote(check) }} -- --exact --nocapture --test-threads=1
 
 # Explore one interconnect owner; the complete inventory gate remains test-shuttle in CI.
 test-interconnect-shuttle check:

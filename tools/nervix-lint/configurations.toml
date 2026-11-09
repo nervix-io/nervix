@@ -89,6 +89,8 @@ packages = [
 
 # The fake connector is a test dependency, so product library targets do not compile its owners.
 # Select it directly with the same diagnostic primitive backend its registered owner tests use.
+# Neither package declares `testing`, which only the server and the crates its `testing` forwards
+# to declare, so this is the one diagnostic configuration without it.
 [[configuration]]
 features = ["native", "deloxide"]
 kinds = ["lib"]

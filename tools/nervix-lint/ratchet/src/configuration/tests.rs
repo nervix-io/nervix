@@ -11,6 +11,14 @@ const CONFIGURATION: &str =
     "[[configuration]]\nname='ordinary'\nmanifest='Cargo.toml'\npackages=[]\n";
 const ADMISSION: &str = "[admission]\nthreshold_gib=4\nwait_limit_minutes=30\nreservation=[]\n";
 
+/// The one diagnostic configuration without `testing`. It compiles only the fake connector library
+/// and the primitive boundary, and neither declares `testing`: only the server and the crates its
+/// `testing` forwards to do, so Cargo refuses the feature for this selection. The lane's server
+/// builds compile the fake connector, a dev-dependency, without it too, so the diagnostic backend
+/// alone compiles its owners as the registered owner tests do. The test pins its complete
+/// declaration, so the exception never covers a selection that does declare `testing`.
+const CONNECTOR_HARNESS: &str = "deloxide-connector-harness";
+
 #[test]
 fn cargo_arguments_preserve_packages_modes_kinds_and_cross_targets() {
     let configuration = Configuration {
@@ -71,19 +79,37 @@ fn diagnostic_configurations_keep_testing_and_browser_kinds() {
             "deloxide-stress",
             "deloxide-binaries",
             "deloxide-order-binaries",
-            "deloxide-stress-binaries"
+            "deloxide-stress-binaries",
+            CONNECTOR_HARNESS
         ])
     );
     let mut diagnostic = 0;
     for configuration in &declaration.configurations {
-        if configuration.features.iter().any(|feature| {
+        let selects_diagnostic_mode = configuration.features.iter().any(|feature| {
             matches!(
                 feature.as_str(),
                 "deloxide" | "deloxide-order" | "deloxide-stress"
             )
-        }) {
+        });
+        if selects_diagnostic_mode {
             diagnostic += 1;
-            assert!(configuration.features.contains(&"testing".into()));
+            if configuration.name == CONNECTOR_HARNESS {
+                let harness = Configuration {
+                    name: CONNECTOR_HARNESS.into(),
+                    manifest: "Cargo.toml".into(),
+                    packages: vec!["nervix-connector-fake".into(), "nervix-primitives".into()],
+                    kinds: vec!["lib".into()],
+                    features: vec!["native".into(), "deloxide".into()],
+                    target: None,
+                };
+                assert_eq!(configuration, &harness);
+            } else {
+                assert!(
+                    configuration.features.contains(&"testing".into()),
+                    "{} enables testing, as the lane's server builds do",
+                    configuration.name
+                );
+            }
         }
         if configuration.name == "browser" {
             assert_eq!(
@@ -93,7 +119,7 @@ fn diagnostic_configurations_keep_testing_and_browser_kinds() {
             assert_eq!(configuration.kinds, ["lib", "bin"]);
         }
     }
-    assert_eq!(diagnostic, 6);
+    assert_eq!(diagnostic, 7);
     let policy = declaration
         .policy(root)
         .assured("the admission declaration is valid");

@@ -216,7 +216,10 @@ impl PacedIngestorHostServices for ChannelHost {
             nervix_primitives::task::consume_budget().await;
             messages.push(IngestorIntakeMessage {
                 payload: &message.payload,
-                metadata: IngestMetadataRow::headers(&message.headers),
+                metadata: IngestMetadataRow::headers(
+                    &message.headers,
+                    &nervix_connector::NoIngestMetadata(0),
+                ),
             });
         }
         if messages.is_empty() {

@@ -242,6 +242,10 @@ impl IngestMessageHeaders for NatsMessageHeaders {
 }
 
 impl IngestMessageMetadata for NatsMessageHeaders {
+    fn payload_bytes(&self) -> usize {
+        self.message.payload.len()
+    }
+
     fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
         values.string(self.message.subject.as_str());
         match self.message.reply.as_ref() {

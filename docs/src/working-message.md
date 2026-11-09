@@ -62,6 +62,13 @@ finalize as typed nulls. Direct-emitter `VALUES` is a separate source-row mappin
 Correlators have no default input scope. They expose `left` and `right`, reject bare RHS field
 reads, and do not expose `input` or `message`.
 
+Ingestors also expose immutable `payload` facts in `FILTER WHERE`, route construction and route
+`WHERE`. Every entity declares required `payload.bytes: U64`; `CLIENT PRODUCER` also declares
+required `payload.rows: U64`. These describe the original transport payload or submitted batch,
+so filtering rows and constructing output never change them. They are separate from decoded
+`input` fields, and other node families do not expose them. See
+[Payload Facts](ingestors.md#payload-facts) for the exact byte boundary of each transport.
+
 Generated inferencer and WASM routes are set-only. Bare reads resolve against immutable generated
 state until a same-named output field has been initialized. Generated state is independently
 visible to every route and never initializes route output automatically.

@@ -132,8 +132,16 @@ impl IngestorMessage for ZeroMqPullIngestorMessage {
     }
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
-        IngestMetadataRow::headers(&self.headers)
+        IngestMetadataRow::headers(&self.headers, self)
     }
+}
+
+impl nervix_connector::IngestMessageMetadata for ZeroMqPullIngestorMessage {
+    fn payload_bytes(&self) -> usize {
+        self.payload().len()
+    }
+
+    fn visit_metadata(&self, _values: &mut dyn nervix_connector::IngestMetadataValues) {}
 }
 
 /// One ZeroMQ ingestor instance: its PULL socket, absent until it opens or after a receive failure.

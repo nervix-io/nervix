@@ -302,15 +302,22 @@ impl GeneratedRecord {
         };
         let time_value = self.timestamp.expected_time();
         let kind_value = self.timestamp.expected_kind();
-        let expected = RetainedIngestMetadata::from_values(vec![
-            Value::String(topic.clone()),
-            Value::I32(partition),
-            Value::I64(offset),
-            key_value,
-            time_value,
-            kind_value,
-            Value::Bool(payload.is_none()),
-        ]);
+        let payload_bytes = match &payload {
+            Some(payload) => payload.len(),
+            None => 0,
+        };
+        let expected = RetainedIngestMetadata::from_values(
+            payload_bytes,
+            vec![
+                Value::String(topic.clone()),
+                Value::I32(partition),
+                Value::I64(offset),
+                key_value,
+                time_value,
+                kind_value,
+                Value::Bool(payload.is_none()),
+            ],
+        );
         let source = OwnedMessage::new(
             payload.clone(),
             key,
