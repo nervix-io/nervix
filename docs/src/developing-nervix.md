@@ -192,7 +192,7 @@ NERVIX_INIT_DEFAULT_USER_PASSWORD='nervix' just server
 
 Fresh clusters require an initial password for the `default` user. Set
 `NERVIX_INIT_DEFAULT_USER_PASSWORD` or pass `--init-default-user-password <password>` on the first
-startup. The leader stores the `default` user's Argon2 password hash in the strongly consistent
+startup. The leader stores the `default` user's typed PBKDF2-HMAC-SHA-512 credential in the strongly consistent
 control plane only when that user does not already exist. After the default user has been created,
 remove the environment variable or flag from normal startup. Later users can be created through Plexus:
 
@@ -1230,3 +1230,13 @@ builds and PDF dependencies; its preparation step and pre-build diagnostics repo
 Every pull request's `checks` job runs
 `just test-docs`, the script tests and docs worker tests that `just book` runs first, so a pull
 request without the label still checks the book's structure and its tooling.
+
+### Credential Storage Release Note
+
+This revision requires the current `raft_credential_pause_*` consensus namespace and `ClusterState`
+encoding 17. A stored state with a different namespace or encoding fails with
+`invalid consensus record storage; recreate the node's stored state` before user records or log
+entries are decoded. Recreate the node's stored state; no credential conversion is performed.
+User backup records require version 2 and contain the complete typed credential. A users record
+with another version is refused by its record header before decoding. Backups without a users
+section retain their existing contract. Protect archives as secrets.

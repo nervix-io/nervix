@@ -4688,3 +4688,13 @@ explicitly after node teardown, including when the scenario fails before its res
 and selects only `tests/features/runtime/nats_authentication.feature`. It retains the ordinary
 harness, broker Testcontainers, one-/three-node examples and argument forwarding; it omits unrelated
 CLI, formatter and paced-simulation tool builds. The full scenario entry point remains unchanged.
+
+### Password Policy In Fixtures
+
+Fresh in-process scenario clusters explicitly seed `PASSWORD_ITERATIONS=1` through the real
+bootstrap setting. Joining and returning nodes use the committed record. Service unit fixtures
+seed the same explicit low cost. Product builds retain the setting definition's 210,000 default;
+there is no algorithm-cost branch selected by the testing feature. The password-credential
+acceptance outline raises the policy to 210,000 before creation and verifies real listener,
+browser, restart and restore behavior. `just test-password-credentials` prepares its native
+client/formatter/report dependencies and runs that focused outline.
