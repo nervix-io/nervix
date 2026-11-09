@@ -46,8 +46,8 @@ fn every_create_form_renders_on_three_quarters_of_the_default_test_stack() {
     assert!(
         output.status.success(),
         "the create dialog's render tests fail with \
-         {THREE_QUARTERS_OF_THE_DEFAULT_TEST_STACK_BYTES} bytes of stack per test thread:\n\
-         {report}{errors}"
+         {THREE_QUARTERS_OF_THE_DEFAULT_TEST_STACK_BYTES} bytes of stack per test \
+         thread:\n{report}{errors}"
     );
     for module in RENDER_TEST_MODULES {
         assert!(

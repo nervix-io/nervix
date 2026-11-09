@@ -201,10 +201,7 @@ fn ProcessorRouteConstructionEditor(
 
 /// The active route's flush policy.
 #[component]
-fn ProcessorRouteFlushEditor(
-    family: ProcessorFamily,
-    signals: CreateSignals,
-) -> impl IntoView {
+fn ProcessorRouteFlushEditor(family: ProcessorFamily, signals: CreateSignals) -> impl IntoView {
     let draft = signals.processor(family);
     let pending = move || signals.progress.get().is_pending();
     view! {
