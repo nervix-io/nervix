@@ -103,6 +103,7 @@ pub enum Statement {
     ShowEmitters(ShowEmitters),
     ShowPlacements(ShowPlacements),
     ShowRelayMaterializedState(ShowRelayMaterializedState),
+    ShowProcessorState(ShowProcessorState),
     ShowClusterStatus(ShowClusterStatus),
     ShowTransactions(ShowTransactions),
     DescribeTransaction(DescribeTransaction),
@@ -184,6 +185,7 @@ impl Statement {
             | Self::ShowEmitters(_)
             | Self::ShowPlacements(_)
             | Self::ShowRelayMaterializedState(_)
+            | Self::ShowProcessorState(_)
             | Self::ShowClusterStatus(_)
             | Self::ShowTransactions(_)
             | Self::DescribeTransaction(_)
@@ -445,6 +447,27 @@ pub struct ShowRelayMaterializedState {
     pub selection: Option<crate::StateBranchSelection>,
     pub page: Option<StateInspectionPageRequest>,
     pub format: InspectionFormat,
+}
+
+/// `SHOW REORDERER <name> STATE` or `SHOW CORRELATOR <name> STATE`: a bounded read of the rows a
+/// processor's branch tasks hold, with the clauses every state inspection takes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct ShowProcessorState {
+    pub processor: StateInspectedProcessor,
+    pub selection: Option<crate::StateBranchSelection>,
+    pub page: Option<StateInspectionPageRequest>,
+    pub format: InspectionFormat,
+}
+
+/// A processor whose task-owned state `SHOW <kind> <name> STATE` reads, named with its kind.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum StateInspectedProcessor {
+    Reorderer(ReordererName),
+    Correlator(CorrelatorName),
 }
 
 #[derive(

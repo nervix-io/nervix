@@ -148,7 +148,11 @@ fields, resource versions, program editors, reference lookup, and transaction be
 
 For materialized relay inspection, read [Relay → Inspect Materialized State](../../../docs/src/relay.md#inspect-materialized-state)
 for selector, LIMIT/AFTER and FORMAT clause order, typed rows, sensitivity and stale continuations.
-Read the CLI chapter for one-shot JSON output; programs consume `CommandOutcome.state` directly.
+For the rows a reorderer holds or a correlator's pending records, read
+[Processors → Inspect Held Rows](../../../docs/src/processors.md#inspect-held-rows) and
+[Inspect Pending Records](../../../docs/src/processors.md#inspect-pending-records); they take the
+same clauses and envelope. Read the CLI chapter for one-shot JSON output; programs consume
+`CommandOutcome.state` directly.
 
 ## Gather the configuration contract
 

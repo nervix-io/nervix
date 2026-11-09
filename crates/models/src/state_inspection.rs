@@ -127,6 +127,29 @@ pub enum StateInspectionRejection {
     ReplyTooLarge,
 }
 
+/// A section of the state a reorderer or correlator holds: the rows a reorderer holds back, or the
+/// records one side of a correlator holds waiting for a match.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    strum::AsRefStr,
+)]
+#[strum(serialize_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessorStateSection {
+    Pending,
+    Left,
+    Right,
+}
+
 /// A resolved inspection selector retains no sensitive branch value.
 #[derive(
     Debug,

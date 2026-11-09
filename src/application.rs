@@ -2093,6 +2093,15 @@ impl Application {
             let service = inspection_service.clone();
             async move { service.stream_materialized_inspection_page(request).await }
         }).change_context(AppError::RegisterInterconnectRequestHandler)?;
+        let processor_inspection_service = service.clone();
+        interconnect
+            .register_stream_handler::<nervix_interconnect::ReadProcessorStatePage, _, _>(
+                move |_context, request| {
+                    let service = processor_inspection_service.clone();
+                    async move { service.stream_processor_inspection_page(request).await }
+                },
+            )
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
         service.register_state_replication_interconnect_handlers()?;
 
         let describe_relay_service = service.clone();
