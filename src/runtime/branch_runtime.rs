@@ -338,6 +338,7 @@ impl BranchRuntime {
         for processor in self.processors.values_mut() {
             processor.drop_collected_inputs("processor branch was evicted");
             processor.reset_window_state();
+            processor.evict_inferencer_state();
         }
     }
 

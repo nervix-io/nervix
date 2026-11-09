@@ -84,6 +84,7 @@ mod tests {
             entity.clone(),
             ScheduledStateAssignment {
                 identity: ScheduledStateIdentity {
+                    inferencer_model: None,
                     schema_fingerprint: schema,
                     wasm_state_generations: Some(WasmStateGenerations::first()),
                 },
@@ -114,6 +115,7 @@ mod tests {
             entity,
             ScheduledStateAssignment {
                 identity: ScheduledStateIdentity {
+                    inferencer_model: None,
                     schema_fingerprint: SchemaFingerprint::from_digest([2; 32]),
                     wasm_state_generations: Some(WasmStateGenerations::first()),
                 },

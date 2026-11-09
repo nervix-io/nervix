@@ -50,6 +50,7 @@ mod emitter_execution_plan;
 mod emitter_start_plan;
 #[cfg(feature = "testing")]
 mod fault_injection;
+mod inferencer_state_snapshot;
 pub mod memory_pressure;
 pub mod metrics;
 pub(crate) mod registry;

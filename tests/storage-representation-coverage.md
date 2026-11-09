@@ -52,7 +52,7 @@ datetimes or bytes. JSON, CBOR and AVRO retain their own wire type enums; CBOR c
 native representation types, and an AVRO array nests its item type, arrays included, to a
 bounded depth. The Model/archive, registry and consensus properties preserve those complete
 values, including inferencer state bindings and their initial expressions.
-The `NERVIX KIND KEYS` registry signature and `raft_session_reset_` consensus namespace
+The `NERVIX KIND KEYS` registry signature and `raft_identity_inference_reset_` consensus namespace
 identify the current Model layout before decoding.
 
 `ALTER INGESTOR` and `ALTER EMITTER` statement generators draw, for every entity, each change its
@@ -61,7 +61,7 @@ Kafka's and Pulsar's `SET START AT`, a declared quiesce mode and `SET CLIENT` wh
 or writes through a client. They mix them with the shared operations, the in-place construction
 changes of a route or an emitter, and an emitter's envelope clauses and properties. The
 Model/archive, consensus and canonical Plexus properties preserve the complete operations in order,
-and the `raft_session_reset_` consensus namespace identifies the statement layout the
+and the `raft_identity_inference_reset_` consensus namespace identifies the statement layout the
 transactions it keeps are stored in before decoding.
 
 `RESET WASM PROCESSOR ... STATE` statement generators draw a processor and an unbranched,
@@ -257,3 +257,5 @@ round trips cover these fields, their SET/DROP operations, and each connector de
 The registry and consensus current-shape signatures and the interconnect fingerprint advance
 with this archived Model layout. Textual backup documents continue to use the current Plexus
 reader under the existing archive-format contract.
+
+Inferencer tensor state uses the registered `inferencer-state-snapshots` lossless frame/size property, `inferencer-state-snapshots-malformed` rejection property and `inferencer-native-snapshot-projection` native conversion property. The placement/key and runtime-state wire generators include the schema and typed model fingerprint. The frame carries its exact revision, optional branch incarnation, shapes and F32 bits.

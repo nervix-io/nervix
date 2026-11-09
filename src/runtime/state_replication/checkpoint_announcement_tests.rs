@@ -93,6 +93,7 @@ fn publish_current_assignment(runtime: &Runtime, placement: &RuntimeStatePlaceme
         placement.entity(),
         ScheduledStateAssignment {
             identity: ScheduledStateIdentity {
+                inferencer_model: None,
                 schema_fingerprint: schema(),
                 wasm_state_generations: match placement.state {
                     RuntimeState::WasmProcessor { .. } => {
@@ -124,6 +125,7 @@ async fn branch_lifecycle_confirmation_keeps_its_replica_minimum_and_generation(
             placement.entity(),
             ScheduledStateAssignment {
                 identity: ScheduledStateIdentity {
+                    inferencer_model: None,
                     schema_fingerprint: fingerprint,
                     wasm_state_generations: None,
                 },
@@ -207,6 +209,7 @@ fn a_replaced_assignment_fences_acknowledgements_for_the_retained_state() {
         entity.clone(),
         ScheduledStateAssignment {
             identity: ScheduledStateIdentity {
+                inferencer_model: None,
                 schema_fingerprint: schema(),
                 wasm_state_generations: None,
             },
@@ -226,6 +229,7 @@ fn a_replaced_assignment_fences_acknowledgements_for_the_retained_state() {
         entity,
         ScheduledStateAssignment {
             identity: ScheduledStateIdentity {
+                inferencer_model: None,
                 schema_fingerprint: SchemaFingerprint::from_digest([8; 32]),
                 wasm_state_generations: None,
             },
@@ -523,6 +527,7 @@ async fn runtime_shutdown_cancels_an_in_flight_checkpoint_announcement() {
         kafka.entity(),
         ScheduledStateAssignment {
             identity: ScheduledStateIdentity {
+                inferencer_model: None,
                 schema_fingerprint: schema(),
                 wasm_state_generations: None,
             },
@@ -893,6 +898,7 @@ fn assignment_replacement_purges_superseded_passive_guest_generations() {
             guest.entity(),
             ScheduledStateAssignment {
                 identity: ScheduledStateIdentity {
+                    inferencer_model: None,
                     schema_fingerprint: schema(),
                     wasm_state_generations: Some(generations),
                 },

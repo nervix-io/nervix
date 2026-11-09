@@ -105,6 +105,10 @@ the interconnect uses its fixed provider, while native sessions and connectors u
 provider and each connector's declared trust and identity keys.
 For backend validation claims, follow that chapter's P-256 signing and backend-status guidance;
 selecting an approved algorithm does not establish a validated deployment.
+For cluster continuity and public identity inspection, read
+[Node Settings → Permanent Cluster Identity](../../../docs/src/node-settings.md#permanent-cluster-identity).
+For source UUID inspection and restore behavior, read
+[Backup And Restore](../../../docs/src/backup-and-restore.md#what-a-restore-recreates).
 For authentication refusals and retry behavior, follow
 [Authentication](../../../docs/src/client-session-protocol.md#authentication); a response delay
 does not establish that a user exists.
@@ -153,7 +157,9 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   WASM fuel and linear-memory budgets, correlation, materialized state, lookup, generation, or
   repartitioning.
 - For inference with model-carried state, read `Runtime Nodes` → `Inferencer` → `State tensors`
-  before choosing port bindings, initialization, branch isolation or recovery guarantees.
+  and `Shutdown And Recovery` → `What Survives` before choosing port bindings, initialization,
+  branch isolation or recovery guarantees. Check the snapshot-section bound and branch retention;
+  distinguish a completed graceful stop from recovery of the last periodic snapshot.
 - Placement: latency-critical or heavy corridors, colocation enforcement, rule precedence, and
   whether ordinary scheduler heuristics should remain neutral.
 - Operations: batching/flush, error routes, credentials/TLS resources, observability, session

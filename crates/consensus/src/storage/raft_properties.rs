@@ -154,6 +154,11 @@ fn bolero_consensus_raft_records_round_trip_through_the_storage_codec() {
             assert_eq!(restored, index);
 
             let metadata = StateMetadata {
+                cluster_identity: if arbitrary.entropy().flag() {
+                    Some(crate::cluster_identity::tests::identity(&mut arbitrary).cluster_uid())
+                } else {
+                    None
+                },
                 parameters: Some(arbitrary.cluster_parameter_record()),
                 password_work: Some(
                     nervix_models::PasswordCost::try_from(
@@ -180,6 +185,7 @@ fn bolero_consensus_raft_records_round_trip_through_the_storage_codec() {
             assert_eq!(restored.last_membership, metadata.last_membership);
             assert_eq!(restored.runtime_revision, metadata.runtime_revision);
             assert_eq!(restored.parameters, metadata.parameters);
+            assert_eq!(restored.cluster_identity, metadata.cluster_identity);
             assert_eq!(restored.password_work, metadata.password_work);
             assert_eq!(restored.command_retry_fence, metadata.command_retry_fence);
 

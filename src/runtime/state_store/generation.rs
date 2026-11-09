@@ -41,7 +41,7 @@ const _: () = assert!(StoredCheckpoint::SEGMENTED_BYTES <= RESTORE_STATE_CHUNK_B
 /// key or payload changes shape, such as the unit every branch-aggregated metric series carries or
 /// the one revision-index entry a placement keeps for its selected checkpoint, so a store written
 /// in an earlier shape fails to open instead of being read as the current one.
-pub(super) const STORAGE_FORMAT: &[u8] = b"ranked-intake-unit-current-checkpoint-index";
+pub(super) const STORAGE_FORMAT: &[u8] = b"inferencer-model-unit-checkpoint-index";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StateNamespace {
@@ -139,6 +139,55 @@ pub(super) fn index_key(placement_key: &[u8], lsm: u64) -> Vec<u8> {
     key
 }
 
+/// Decode only the revision belonging to this exact placement's current index entry.
+pub(super) fn indexed_revision(
+    placement_key: &[u8],
+    key: &[u8],
+) -> error_stack::Result<u64, RuntimePersistenceError> {
+    let Some([0, revision @ ..]) = key.strip_prefix(placement_key) else {
+        return Err(Report::new(RuntimePersistenceError::InvalidStorageFormat));
+    };
+    let revision = <[u8; 8]>::try_from(revision)
+        .change_context(RuntimePersistenceError::InvalidStorageFormat)?;
+    Ok(u64::from_be_bytes(revision))
+}
+
+/// One current checkpoint has exactly one revision-index entry in the same database view.
+/// Comparing revisions never loads or decodes the retained payload.
+pub(super) fn latest_indexed_revision(
+    view: &fjall::Snapshot,
+    latest: &Keyspace,
+    index: &Keyspace,
+    placement_key: &[u8],
+) -> error_stack::Result<Option<u64>, RuntimePersistenceError> {
+    let mut prefix = placement_key.to_vec();
+    prefix.push(0);
+    let mut entries = view.prefix(index, prefix);
+    let revision = match entries.next() {
+        Some(item) => {
+            let key = item
+                .key()
+                .change_context(RuntimePersistenceError::ReadValue)?;
+            Some(indexed_revision(placement_key, &key)?)
+        }
+        None => None,
+    };
+    if let Some(item) = entries.next() {
+        item.key()
+            .change_context(RuntimePersistenceError::ReadValue)?;
+        return Err(Report::new(RuntimePersistenceError::InvalidStorageFormat));
+    }
+    if view
+        .size_of(latest, placement_key)
+        .change_context(RuntimePersistenceError::ReadValue)?
+        .is_some()
+        != revision.is_some()
+    {
+        return Err(Report::new(RuntimePersistenceError::InvalidStorageFormat));
+    }
+    Ok(revision)
+}
+
 pub(super) fn chunk_prefix(placement_key: &[u8], lsm: u64) -> Vec<u8> {
     let mut prefix = index_key(placement_key, lsm);
     prefix.push(0);
@@ -175,6 +224,25 @@ impl StoredCheckpoint {
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(self)
             .change_context(RuntimePersistenceError::EncodeState)?;
         Ok(bytes.to_vec())
+    }
+
+    /// Serialize an owned inline payload into one output buffer without cloning its contents.
+    pub(super) fn encode_owned(
+        entry: PersistedRuntimeStateEntry,
+    ) -> error_stack::Result<Vec<u8>, RuntimePersistenceError> {
+        let capacity = entry
+            .payload
+            .len()
+            .checked_add(
+                std::mem::size_of::<ArchivedStoredCheckpoint>()
+                    + std::mem::align_of::<ArchivedStoredCheckpoint>(),
+            )
+            .ok_or(RuntimePersistenceError::RestoreStagingSize)?;
+        rkyv::api::high::to_bytes_in::<_, rkyv::rancor::Error>(
+            &Self::Inline(entry),
+            Vec::with_capacity(capacity),
+        )
+        .change_context(RuntimePersistenceError::EncodeState)
     }
 
     pub(super) fn lsm(&self) -> u64 {
