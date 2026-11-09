@@ -16,9 +16,17 @@ const _: () = assert!(
     "command state storage splits its reservation evenly between payload and journal",
 );
 
-/// The working memory one password hash or verification allocates: Argon2id's default memory cost,
-/// which a node hashes every password with.
-const CREDENTIAL_WORKING_BYTES: ByteUnit = ByteUnit::Mebibyte(19);
+/// AWS-LC's constant-time verifier allocates one buffer for the profile's 512-bit digest.
+/// Native PBKDF2 HMAC scratch is fixed stack state on the already bounded credentials worker.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the PBKDF2-HMAC-SHA-512 credential profile has one 64-byte digest and aws-lc-rs \
+                  verification allocates exactly that output length"
+    )
+)]
+const CREDENTIAL_WORKING_BYTES: ByteUnit = ByteUnit::Byte(64);
 
 /// A bounded share of CPU admission onto the blocking pool in production, or onto the simulated
 /// scheduler in the Turmoil test build.
@@ -236,6 +244,7 @@ pub struct MemoryBudgets {
     /// The receive windows of the bulk streams a node has open at once.
     pub bulk_window: ByteUnit,
     pub restore_metadata: ByteUnit,
+    /// Shared capacity for password operations and mounted credentials files.
     pub credentials: ByteUnit,
 }
 
@@ -276,9 +285,9 @@ impl Default for MemoryBudgets {
     /// 675 MiB of execution buffers and materialized reads plus 2 GiB of restore metadata:
     /// 8 MiB reserved for management, 24 MiB for commands and replication,
     /// 192 MiB each for relay work, active state reads and optional retention, 32 MiB for bulk buffers,
-    /// 16 MiB for the receive windows of bulk
-    /// streams, sixteen of the default 1 MiB windows, and 19 MiB for the one password hash a node
-    /// computes at a time.
+    /// 16 MiB for the receive windows of bulk streams, and 19 MiB shared by password operations and
+    /// mounted credentials files. Each password operation charges its own fixed verifier buffer;
+    /// a mounted file charges its complete length until its temporary bytes have been cleared.
     fn default() -> Self {
         Self {
             management: ByteUnit::Mebibyte(8),
@@ -287,7 +296,7 @@ impl Default for MemoryBudgets {
             bulk: ByteUnit::Mebibyte(32),
             bulk_window: ByteUnit::Mebibyte(16),
             restore_metadata: ByteUnit::Gibibyte(2),
-            credentials: CREDENTIAL_WORKING_BYTES,
+            credentials: ByteUnit::Mebibyte(19),
         }
     }
 }

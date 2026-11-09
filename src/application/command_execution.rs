@@ -30,7 +30,7 @@ use nervix_consensus::{
     CommandExecutionState, CommandExecutionStatementDisposition, CommandExecutionStatementResult,
     CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
     CommandExecutionTransactionStatus, CommandExecutionTransactionTarget, ConsensusConflict,
-    ConsensusError, RecordedBackupArchive, RestoreExecution,
+    ConsensusError, RecordedBackupArchive, RestoreExecution, TransactionStatementRequest,
 };
 use nervix_models::{
     Backup, BackupCapture, BackupResources, BackupScope, ClusterNodeIdentity,
@@ -48,7 +48,7 @@ use thiserror::Error;
 use tracing::warn;
 
 use super::{
-    authentication::{user_credentials, verify_password_hash},
+    authentication::{user_credentials, verify_password_credential},
     command_result::{CommandDiagnostic, CommandDisposition, CommandResult, OutcomeUnknownCause},
     domain_clock::current_timestamp,
     model_mutation::command_error,
@@ -57,6 +57,9 @@ use super::{
     subscription::{PendingSessionCommand, SessionCommandOperation, SessionSubscriptions},
     transaction::is_queueable_transaction_statement,
 };
+
+#[cfg(feature = "testing")]
+mod orphaned_pause;
 
 /// The server's capture inputs. The destination belongs exclusively to the client's download.
 #[derive(rkyv::Archive, rkyv::Serialize)]
@@ -598,16 +601,16 @@ impl SessionServiceImpl {
                 )));
             }
             if let (
-                Some(password_hash),
+                Some(password_credential),
                 PersistentCommandRequestBody::Statement {
                     statement: Statement::CreateUser(create),
                     ..
                 },
-            ) = (existing.password_hash(), &request.body)
+            ) = (existing.password_credential(), &request.body)
             {
-                let verified = verify_password_hash(
+                let verified = verify_password_credential(
                     self.inner.runtime.executor(),
-                    password_hash.to_string(),
+                    password_credential.clone(),
                     create.body.password.clone(),
                 )
                 .await;
@@ -679,13 +682,14 @@ impl SessionServiceImpl {
                     self.inner.runtime.executor(),
                     create.body.name.clone(),
                     create.body.password.clone(),
+                    self.password_creation_cost(),
                 )
                 .await
                 .map_err(|error| Box::new(command_error(error.to_string())))?;
                 CommandExecutionEffect::CreateUser {
                     if_not_exists: create.if_not_exists,
                     name: user.name,
-                    password_hash: user.password_hash,
+                    password_credential: user.password_credential,
                 }
             }
             PersistentCommandRequestBody::Statement {
@@ -837,17 +841,54 @@ impl SessionServiceImpl {
                         "durable configuration application lost its domain".to_string(),
                     );
                 };
+                #[cfg(feature = "testing")]
+                let domain = if self
+                    .inner
+                    .runtime
+                    .fault_injection()
+                    .take_orphaned_model_command_pause(&domain)
+                {
+                    let Some(mutation) = execution.domain_mutation(&domain) else {
+                        return command_error(
+                            "the orphaned-pause fixture requires an admitted mutation lease"
+                                .to_string(),
+                        );
+                    };
+                    match orphaned_pause::inject(
+                        &self.inner.consensus,
+                        self.inner.runtime.fault_injection(),
+                        domain,
+                        mutation,
+                    )
+                    .await
+                    {
+                        Ok(domain) => domain,
+                        Err(report) => {
+                            return command_error(format!(
+                                "failed to inject the admitted command's orphaned pause: {}",
+                                ConsensusError::report_message(&report),
+                            ));
+                        }
+                    }
+                } else {
+                    domain
+                };
+                let mutation = execution.domain_mutation(&domain);
                 Box::pin(
                     self.execute_standalone_transaction(
                         transaction_id,
-                        execution.reference.clone(),
                         execution
                             .owner()
                             .verified("an applying execution retains its owner")
                             .clone(),
                         domain,
-                        source,
-                        *statement,
+                        TransactionStatementRequest {
+                            request_reference: execution.reference.clone(),
+                            expected_position: 0,
+                            source,
+                            statement: *statement,
+                        },
+                        mutation,
                     ),
                 )
                 .await
@@ -907,13 +948,13 @@ impl SessionServiceImpl {
             CommandExecutionEffect::CreateUser {
                 if_not_exists,
                 name,
-                password_hash,
+                password_credential,
             } => {
                 Box::pin(self.apply_persistent_user_creation(
                     if_not_exists,
                     nervix_consensus::UserCredentials {
                         name,
-                        password_hash,
+                        password_credential,
                     },
                 ))
                 .await

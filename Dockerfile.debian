@@ -255,6 +255,60 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     esac \
     && python3 scripts/kache_remote.py publish --job-status success /tmp/kache-report
 
+FROM builder AS chaos-client-build
+
+# This image is external test tooling. Its wheel uses the same source and compiler boundary as
+# the product image; the released runtime targets never copy it or its Python interpreter.
+ARG TARGETARCH
+
+COPY LICENSE.md ./
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/app/target,sharing=locked \
+    --mount=type=cache,target=/root/.cache/kache,sharing=locked \
+    test "${TARGETARCH}" = amd64 \
+    && export KACHE_CONFIG=/tmp/kache.toml KACHE_NAMESPACE=docker-amd64 KACHE_MANIFEST_KEY=docker-amd64 \
+    && kache daemon start \
+    && trap 'build_status=$?; python3 scripts/publish_kache_report.py /tmp/kache-report || true; kache stats || true; kache daemon stop >/dev/null 2>&1 || true; exit "${build_status}"' EXIT \
+    && cargo install --locked maturin --version 1.16.0 \
+    && maturin build --manifest-path crates/client-python/Cargo.toml --interpreter python3 \
+        --target x86_64-unknown-linux-gnu --release --auditwheel skip --out /artifacts/chaos-client \
+    && python3 scripts/kache_remote.py publish --job-status success /tmp/kache-report
+
+FROM ${DEBIAN_IMAGE} AS chaos-client-runtime
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY scripts/chaos/install_binding.py /opt/install-binding.py
+
+ENV PATH=/opt/nervix-client/bin:$PATH
+ENV PYTHONDONTWRITEBYTECODE=1
+
+FROM chaos-client-runtime AS chaos-client
+
+ARG NERVIX_SOURCE_REVISION
+
+COPY --from=chaos-client-build /artifacts/chaos-client /wheels
+RUN python3 /opt/install-binding.py --wheels /wheels --destination /opt/nervix-client \
+    --revision "${NERVIX_SOURCE_REVISION}" && rm -rf /wheels
+
+LABEL io.nervix.chaos.client=python
+
+# Local preparation uses the canonical host-built wheel as a named BuildKit context. The run
+# itself sees only the resulting immutable image, with the same interpreter and provenance.
+FROM chaos-client-runtime AS chaos-client-local
+
+ARG NERVIX_SOURCE_REVISION
+
+COPY --from=chaos-wheels / /wheels
+RUN python3 /opt/install-binding.py --wheels /wheels --destination /opt/nervix-client \
+    --revision "${NERVIX_SOURCE_REVISION}" && rm -rf /wheels
+
+LABEL io.nervix.chaos.client=python
+
 FROM --platform=$BUILDPLATFORM ${DEBIAN_IMAGE} AS onnxruntime-base
 
 ARG TARGETARCH

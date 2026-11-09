@@ -87,7 +87,7 @@ done
 bundle="${tmp_dir}/bundle"
 mkdir -p "${bundle}/tests" "${bundle}/bin"
 cp "${chaos_dir}/suite.sh" "${chaos_dir}/suite-report.jq" "${chaos_dir}/require-jq.sh" \
-    "${chaos_dir}/verifier-self-check.sh" "${bundle}/"
+    "${chaos_dir}/verifier-self-check.sh" "${chaos_dir}/binding-image.sh" "${bundle}/"
 printf '#!/usr/bin/env bash\nexit 0\n' >"${bundle}/tests/suite-self-test.sh"
 
 # The verifier self-check stand-in records each execution and every signal in the suite directory

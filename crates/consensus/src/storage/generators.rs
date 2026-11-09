@@ -158,10 +158,10 @@ fn leader_tenure(arbitrary: &mut Arbitrary<'_>) -> LeaderTenure {
 /// A user and the password hash it signs in with.
 fn user_credentials(arbitrary: &mut Arbitrary<'_>) -> UserCredentials {
     let name = arbitrary.rule_name::<UserName>();
-    let password_hash = arbitrary.string();
+    let password_credential = arbitrary.password_credential();
     UserCredentials {
         name,
-        password_hash,
+        password_credential,
     }
 }
 
@@ -1136,7 +1136,7 @@ fn command_execution_effect(
         4 => CommandExecutionEffect::CreateUser {
             if_not_exists: arbitrary.entropy().flag(),
             name: arbitrary.rule_name(),
-            password_hash: arbitrary.string(),
+            password_credential: arbitrary.password_credential(),
         },
         5 => CommandExecutionEffect::DropNode {
             identity: arbitrary.node_identity(),
@@ -1402,8 +1402,18 @@ pub(super) fn state_machine(arbitrary: &mut Arbitrary<'_>) -> StateMachineData {
     }
     for _ in 0..arbitrary.entropy().count(RECORDS) {
         let user = user_credentials(arbitrary);
+        state.raise_password_work(user.password_credential.cost());
         state.users.insert(user.name.clone(), user);
     }
+    let cost = nervix_models::PasswordCost::try_from(
+        state
+            .parameters
+            .assured("the generator set the parameter record")
+            .values
+            .password_iterations(),
+    )
+    .assured("generated policy has a bounded cost");
+    state.raise_password_work(cost);
     state.resources = resource_records(arbitrary);
     for _ in 0..arbitrary.entropy().count(RECORDS) {
         let node = arbitrary.rule_name::<ClusterNodeName>();
@@ -1810,6 +1820,7 @@ enum CommandVariant {
     RevertTransaction,
     ExpireTransaction,
     RemoveFinishedTransactions,
+    RecoverOrphanedModelPause,
 }
 
 impl CommandVariant {
@@ -1877,6 +1888,7 @@ impl CommandVariant {
             ConsensusCommand::RevertTransaction { .. } => Self::RevertTransaction,
             ConsensusCommand::ExpireTransaction { .. } => Self::ExpireTransaction,
             ConsensusCommand::RemoveFinishedTransactions { .. } => Self::RemoveFinishedTransactions,
+            ConsensusCommand::RecoverOrphanedModelPause { .. } => Self::RecoverOrphanedModelPause,
         }
     }
 }
@@ -2000,6 +2012,10 @@ fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> Consens
         CommandVariant::ResumeDomain => ConsensusCommand::ResumeDomain {
             domain_id: arbitrary.rule_name(),
             mutation: optional_lease(arbitrary),
+        },
+        CommandVariant::RecoverOrphanedModelPause => ConsensusCommand::RecoverOrphanedModelPause {
+            domain_id: arbitrary.rule_name(),
+            mutation: Box::new(domain_mutation_lease(arbitrary)),
         },
         CommandVariant::ReconcileDomainClockAuthority => {
             let domain_id = arbitrary.rule_name();
