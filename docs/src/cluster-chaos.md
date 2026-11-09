@@ -422,7 +422,7 @@ The focused checks run parts of the runner on their own:
 | `just test-chaos-network-preflight [CASE]` | The real network-fault preflight and its refusal controls; a case name runs one control with the live installation, effect and healing check |
 | `just test-chaos-rate-probe` | The production link transfer and ICMP probes, with delayed Docker launches and starts, stalled, partial, lost and refused transfers, failed log reads and cleanup, and invalid clocks |
 | `just test-chaos-degraded-evidence` | The degraded-link controller, parser and effect limits at 40 and 400 packets |
-| `just test-chaos-outward-tls` | The [outward TLS verdict](#crash-scenarios) against observations that pass and that contradict the policy: committed lists that name or omit the probed members, a stale, different or unreported running record, a revision that did not advance, a target that answered against expectation, failed or is missing, an unrestricted offer, and malformed descriptions. Also the probe against local servers that admit both members, exclude the suite, exclude the group or present another name's certificate, against a port that refuses the connection, and without its OpenSSL configuration |
+| `just test-chaos-outward-tls` | The [outward TLS verdict](#crash-scenarios) against observations that pass and that contradict the policy: committed lists that name or omit the probed members, a stale, different or unreported running record, a revision that did not advance, a console target that answered against expectation, failed or is missing, an interconnect that admitted the probe or is missing, an unrestricted offer, and malformed descriptions. Also the probe against local servers that admit both members, exclude the suite, exclude the group or present another name's certificate, against a port that refuses the connection, and without its OpenSSL configuration |
 | `just test-chaos-hold-quorum` | The mixed-instability hold check for a degraded link that leaves every voter in a quorum |
 | `just test-chaos-pause-delivery` | A failover-length pause's emitter check on the retained leader and relay-owner pause timelines: the ingestor consumer group's handoff from a paused ingestor owner, read before the relocated consumer joins and after the handoff deadline; a handoff that never comes or comes after the unpause; a stalled emitter; the window that opens at placement when the consumer stayed in place; and emitter progress sampled after the unpause |
 | `just test-chaos-output-boundary [SELECTION]` | The suite preparation and baseline execution budgets and the Kafka end-offset observations, without Docker |
@@ -1394,8 +1394,11 @@ every node also serves the web console over HTTPS on 47421 with its run certific
 `tls-probe.py`, in the pinned Python image, offers each node only TLS 1.3 with
 `TLS_CHACHA20_POLY1305_SHA256` and `X25519`, the members the `fips` alias excludes. The probe takes
 its TLS 1.3 cipher suites from `tls-probe-openssl.cnf`, reads its offer back and refuses to judge
-when the offer is anything else. `verify-outward-tls-evidence.sh` judges each observation, a public
-`DESCRIBE CLUSTER` and one probe of the nodes it names:
+when the offer is anything else. `verify-outward-tls-evidence.sh` judges each observation: a public
+`DESCRIBE CLUSTER`, and one probe of the web console and one of the interconnect, on 47395, of every
+node it names. The interconnect's algorithms are fixed and never follow the outward policy, so every
+observation requires it to refuse the probe with a `handshake_failure` alert, also while the
+committed policy admits both members. The observations are:
 
 1. Before the kill, every node refuses the probe with a `handshake_failure` alert under the
    bootstrap `fips` policy, within 60 seconds.
@@ -1415,8 +1418,8 @@ when the offer is anything else. `verify-outward-tls-evidence.sh` judges each ob
 
 Each observation also requires every named node's running record to equal the committed lists at
 the committed revision. The observations stay in `crash/outward-tls/`, and
-`results/outward-tls.json` summarizes the revisions, the commit attempts and how long after the kill
-the change was acknowledged. A one-node run and the other crash scenarios start no HTTPS listener
+`results/outward-tls.json` summarizes the revisions, the nodes whose interconnect refused in each
+observation, the commit attempts and how long after the kill the change was acknowledged. A one-node run and the other crash scenarios start no HTTPS listener
 and make no TLS observation.
 
 `results/crash-progress.json` measures election, placement, outage, listener and settlement times;
@@ -3150,7 +3153,7 @@ from the fixed source tree onto the same official image, and then requalified on
 | [Backup 07](https://app.clickup.com/t/86bc8dbxv) | Backup cycles with exact deduplicator and window verdicts; quiesced backups under an owner crash, a leader crash, an owner partition and a rolling restart of the download; a restore into a fresh three-node cluster; and soak shards 10 and 11, which run them |
 | [Backup: Qualify restores through a leader crash, a partitioned coordinator, an owner restart and concurrent staging volume](https://app.clickup.com/t/86bckvq84) | Restores held in staging through a leader crash, an isolation of the coordinating leader from its peers and the client, a state owner's crash, and a state owner's crash while a failed restore awaits reclamation; the measured staging volume of three concurrent restores; and their entries in soak shards 10 and 11 |
 | [Typed Ratchet 10](https://app.clickup.com/t/86bc9etg7) | The [endpoints](#endpoints) and [lifetimes](#lifetimes) scenarios, which run the workloads that Typed Ratchet 04, 09, 11 and 12 handed to external qualification, and their smoke shards 2 and 3 and soak shards 12 to 14 |
-| [FIPS Prep 08](https://app.clickup.com/t/86bcwmb4r) | The outward TLS observations of the three-node [leader crash](#crash-scenarios): a policy change committed while the killed leader is down, judged by real handshakes on every node before the fault, during the outage, after the restart and after the `fips` policy returns |
+| [FIPS Prep 08](https://app.clickup.com/t/86bcwmb4r) | The outward TLS observations of the three-node [leader crash](#crash-scenarios): a policy change committed while the killed leader is down, judged by real handshakes on every node's console and fixed interconnect before the fault, during the outage, after the restart and after the `fips` policy returns |
 
 **Product defects.** The suite found these product defects. Each was fixed through its own task
 and requalified with the scenario that found it:

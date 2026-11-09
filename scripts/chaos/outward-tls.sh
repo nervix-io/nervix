@@ -3,7 +3,9 @@
 # TLS policy through the failover: every node serves the web console over HTTPS on 47421
 # (compose.outward-tls.yaml), and tls-probe.py offers each one only TLS_CHACHA20_POLY1305_SHA256 and
 # X25519, the members the `fips` alias excludes. The run judges five observations, each a public
-# DESCRIBE CLUSTER and a probe of the nodes it names, with verify-outward-tls-evidence.sh:
+# DESCRIBE CLUSTER and a probe of the console and of the interconnect of every node it names, with
+# verify-outward-tls-evidence.sh. The interconnect's algorithms are fixed, so it refuses the probe in
+# every observation, also while the committed outward policy admits both members:
 #
 #   before     every node refuses the probe under the bootstrap `fips` policy
 #   commit     a policy that adds both members is committed through a survivor while the killed
@@ -23,10 +25,25 @@ outward_tls_qualified() {
     [[ "${scenario}" == leader-crash && "${node_count}" == 3 ]]
 }
 
+# outward_tls_probe OUTPUT PORT HOST...: one tls-probe.py document for PORT on every HOST. Exit
+# status 1 means a target failed, which the verifier judges; anything else left no judgeable
+# document.
+outward_tls_probe() {
+    local output="$1"
+    local port="$2"
+    shift 2
+    local probe_status=0
+    compose run --rm --no-deps -T tls-probe --port "${port}" "$@" \
+        >"${output}.json" 2>"${output}.stderr" </dev/null \
+        || probe_status=$?
+    [[ "${probe_status}" -eq 0 || "${probe_status}" -eq 1 ]]
+}
+
 # outward_tls_observe DIRECTORY POLICY DESCRIBING_HOST AFTER_REVISION HOST...
-# One observation attempt: DESCRIBE CLUSTER through DESCRIBING_HOST, then one probe of every HOST,
-# judged against POLICY (permits or excludes). AFTER_REVISION is empty or the revision the committed
-# one must exceed. The judged attempt replaces the directory's previous observation.
+# One observation attempt: DESCRIBE CLUSTER through DESCRIBING_HOST, then one probe of every HOST's
+# console, judged against POLICY (permits or excludes), and one of every HOST's interconnect, which
+# must refuse whatever the policy. AFTER_REVISION is empty or the revision the committed one must
+# exceed. The judged attempt replaces the directory's previous observation.
 outward_tls_observe() {
     local directory="$1"
     local policy="$2"
@@ -36,16 +53,12 @@ outward_tls_observe() {
     mkdir -p "${directory}"
     cli_host="${describing_host}"
     cli_command 'DESCRIBE CLUSTER;' >"${directory}/description.attempt.txt" 2>&1 || return 1
-    local probe_status=0
-    compose run --rm --no-deps -T tls-probe "$@" \
-        >"${directory}/probe.attempt.json" 2>"${directory}/probe.attempt.stderr" </dev/null \
-        || probe_status=$?
-    # 1 means a target failed, which the verifier judges; anything else left no judgeable document.
-    if [[ "${probe_status}" -ne 0 && "${probe_status}" -ne 1 ]]; then
-        return 1
-    fi
+    outward_tls_probe "${directory}/probe.attempt" 47421 "$@" || return 1
+    outward_tls_probe "${directory}/interconnect-probe.attempt" 47395 "$@" || return 1
     local verifier_args=(--policy "${policy}" --description "${directory}/description.attempt.txt"
-        --probe "${directory}/probe.attempt.json" --result "${directory}/verdict.attempt.json")
+        --probe "${directory}/probe.attempt.json"
+        --interconnect-probe "${directory}/interconnect-probe.attempt.json"
+        --result "${directory}/verdict.attempt.json")
     if [[ -n "${after_revision}" ]]; then
         verifier_args+=(--after-revision "${after_revision}")
     fi
@@ -56,7 +69,8 @@ outward_tls_observe() {
     "${script_dir}/verify-outward-tls-evidence.sh" "${verifier_args[@]}" \
         2>"${directory}/verdict.attempt.stderr" || return 1
     local name
-    for name in description.txt probe.json probe.stderr verdict.json verdict.stderr; do
+    for name in description.txt probe.json probe.stderr interconnect-probe.json interconnect-probe.stderr \
+        verdict.json verdict.stderr; do
         mv "${directory}/${name%.*}.attempt.${name##*.}" "${directory}/${name}"
     done
 }
@@ -218,8 +232,12 @@ outward_tls_result() {
         --slurpfile survivors_verdict "${crash_dir}/outward-tls/survivors/verdict.json" \
         --slurpfile recovered_verdict "${crash_dir}/outward-tls/recovered/verdict.json" \
         --slurpfile reverted_verdict "${crash_dir}/outward-tls/reverted/verdict.json" \
-        '{target_node:$target,
-          probe:{port:47421,version:"TLSv1.3",cipher_suites:["TLS_CHACHA20_POLY1305_SHA256"],groups:["X25519"]},
+        'def refused: [.nodes[] | select(.interconnect_probe.outcome == "refused") | .node];
+         {target_node:$target,
+          probe:{ports:{console:47421,interconnect:47395},version:"TLSv1.3",
+                 cipher_suites:["TLS_CHACHA20_POLY1305_SHA256"],groups:["X25519"]},
+          interconnect_refused:{before:($before_verdict[0] | refused),survivors:($survivors_verdict[0] | refused),
+                                recovered:($recovered_verdict[0] | refused),reverted:($reverted_verdict[0] | refused)},
           before:{policy:"excludes",revision:$before,committed:$before_verdict[0].committed},
           commit:{attempts:$attempts,acknowledged_after_kill_ms:$acknowledged_ms,target_running:false,
                   transcripts:"crash/outward-tls/commit"},

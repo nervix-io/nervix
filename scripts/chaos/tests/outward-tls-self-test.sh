@@ -91,8 +91,10 @@ probe_document() {
              | select($selected != "missing") | result($host; $selected)]}' >"${file}"
 }
 
+# Every case judges the interconnect probe this names, by default one every node refused.
+interconnect_probe="${tmp_dir}/interconnect-refused.json"
 verify() {
-    "${verifier}" "$@" \
+    "${verifier}" "$@" --interconnect-probe "${interconnect_probe}" \
         --node node-1=nervix-1 --node node-2=nervix-2 --node node-3=nervix-3
 }
 
@@ -118,6 +120,7 @@ result="${tmp_dir}/result.json"
 
 description "${tmp_dir}/fips.txt" 7 "${fips_suites}" "${fips_groups}"
 probe_document "${tmp_dir}/refused.json" refused
+cp "${tmp_dir}/refused.json" "${tmp_dir}/interconnect-refused.json"
 expect_pass fips-refused --policy excludes --description "${tmp_dir}/fips.txt" \
     --probe "${tmp_dir}/refused.json" --result "${result}"
 jq -e '.verdict == "pass" and .revision == "7" and (.nodes | length) == 3
@@ -164,6 +167,20 @@ expect_contradiction missing-target 'nervix-1 has 0 probe results, not one' \
 jq '.client.cipher_suites += ["TLS_AES_128_GCM_SHA256"]' "${tmp_dir}/accepted.json" >"${tmp_dir}/open-client.json"
 expect_contradiction unrestricted-client 'the probe did not record the restricted client offer' \
     --policy permits --description "${tmp_dir}/open.txt" --probe "${tmp_dir}/open-client.json" --result "${result}"
+
+# The interconnect's algorithms are fixed: it must refuse the probe whatever the outward policy.
+probe_document "${tmp_dir}/interconnect-one-accepted.json" refused nervix-2=accepted
+interconnect_probe="${tmp_dir}/interconnect-one-accepted.json"
+expect_contradiction interconnect-accepted 'the interconnect of nervix-2 did not refuse the restricted client' \
+    --policy permits --description "${tmp_dir}/open.txt" --probe "${tmp_dir}/accepted.json" --result "${result}"
+probe_document "${tmp_dir}/interconnect-one-missing.json" refused nervix-3=missing
+interconnect_probe="${tmp_dir}/interconnect-one-missing.json"
+expect_contradiction interconnect-missing 'nervix-3 has 0 interconnect probe results, not one' \
+    --policy excludes --description "${tmp_dir}/fips.txt" --probe "${tmp_dir}/refused.json" --result "${result}"
+interconnect_probe="${tmp_dir}/open-client.json"
+expect_contradiction interconnect-unrestricted-client 'the probe did not record the restricted client offer' \
+    --policy excludes --description "${tmp_dir}/fips.txt" --probe "${tmp_dir}/refused.json" --result "${result}"
+interconnect_probe="${tmp_dir}/interconnect-refused.json"
 
 { cat "${tmp_dir}/fips.txt"; printf "tls-cipher-suites committed=%s revision=8\n" "${fips_suites}"; } \
     >"${tmp_dir}/two-committed.txt"
