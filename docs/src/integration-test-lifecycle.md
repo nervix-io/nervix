@@ -3636,6 +3636,16 @@ and keeps the same 5-minute reserve.
 
 ## Client Suites
 
+Every boundary tier runs in the ordinary `tests` job from prepared artifacts. Python's
+`@client_suite_python` cluster examples also join the ordinary scenario shards, whose archive
+already carries the wheel. Restoration installs pytest, pyarrow and polars beside the package and
+keeps a separate package-only environment for its packaging smoke. The JVM, Ruby, C and C++ cluster
+examples retain `@client_conformance_toolchain`, since the ordinary scenario archive does not
+prepare their runtimes and host artifacts. `just test-client-conformance` still selects every host
+and the unchanged probes. Its prepared runner and each host-specific cluster recipe check the
+boundary tier before starting scenarios; a failed packaging check ends the run there. The ordinary
+Python scenario runners do the same.
+
 `client_suites.feature` runs a host binding's own test suite, in its host's test framework, against
 a scenario's cluster: the cluster tier of the suite under `tests/client_conformance/<host>/suite`.
 Each example names HTTP or HTTPS for its session listener. The step that starts a suite waits for every node
@@ -3840,9 +3850,17 @@ executable stays out, because the shards run it.
 The workspace's all-features build includes the JVM binding's embedded tests. Before compiling
 them, `test-coverage-binaries` prepares the Java 21 jar with its native library and the boundary
 fixtures. The unit archive includes the jar and every compiled fixture class, including nested
-classes; packing refuses a missing jar or fixture entry class. Both the build and unit-test jobs
+classes, the JUnit launcher and its result-listener service metadata; packing refuses a missing
+required input. The jar's native library is built under the unit collection's instrumentation.
+Both the build and unit-test jobs
 install Java 21, and the restored runner uses those packaged inputs without compiling. The
 scenario archive has no JVM fixture dependency.
+
+The unit archive also carries the instrumented Python wheel and its matching coverage object.
+Restoration installs it into the host suite's full and package-only environments through uv.
+After the Cargo-owned tests, `test-coverage-run` runs the inventory-checked JUnit and pytest
+boundary tiers before exporting the same ordinary coverage report. Ruby and C/C++ boundary tiers
+remain Cargo-owned integration tests. The restored job needs no compiler for any host tier.
 
 The same build prepares the C11 and C++17 application boundary programs against the instrumented
 shared binding, in ordinary and ASan/UBSan variants. The native integration target needs all four

@@ -1234,7 +1234,10 @@ the Ruby minitest suite is `tests/client_conformance/ruby/suite`, with the
 [Ruby Client Library](client-library-ruby.md) guide;
 and the C11 and C++17 programs under `tests/client_conformance/{c,cpp}/suite` supply the
 [C and C++ guide](client-library-c.md), including explicit cleanup and typed RAII ownership.
-`tests/client-suites-inventory.toml` registers every suite test. The Go and TypeScript probes
+`tests/client-suites-inventory.toml` registers every suite test. Every host boundary tier runs in
+ordinary CI, and the Python cluster tier runs in ordinary scenario shards. The `client-conformance` lane additionally runs
+every host's cluster tier; its boundary and packaging checks pass before it starts the scenarios.
+The Go and TypeScript probes
 each keep one request in flight. They use a harness-supplied UUIDv7 reference for the leader-only
 schema creation that proves redirect handling, and a separate reference for each later read or
 deliberately malformed request.
