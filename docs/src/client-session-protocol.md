@@ -937,6 +937,15 @@ still committing. When its attempt ends on another failure, it answers `OutcomeU
 `StillApplying` cause instead of a terminal result, so the lease that transaction needs to release
 its pause is never given up first.
 
+An admitted model command that encounters an orphaned model-alteration pause may recover it under
+that exact lease after rechecking its internal transaction for progress. Consensus atomically
+checks the lease, the restore activation gate and the absence of any same-domain `COMMITTING`
+transaction. Only then may it resume the domain and let the command plan again. An active local
+alteration prevents recovery. A proposal that cannot be confirmed leaves the command retryable
+under its original execution reference and retains its mutation lease. Recovery changes no start
+version, start mode, clock or schedule, and produces no extra client success result or notice.
+Backup cuts and transaction-owned pause cleanup keep their respective ownership contracts.
+
 Because the lease lives in replicated state rather than in a leader's memory, it survives leadership
 changes and restarts. A new leader resumes the applying record, or the committing transaction, that
 holds the lease and continues under it; a deposed leader can no longer propose, and a stale

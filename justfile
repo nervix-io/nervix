@@ -360,6 +360,13 @@ test-scenarios *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
 
+# Exercise domain pause recovery with ordinary assets and the shared native tool graph.
+test-client-wire-pause-recovery *args: build-deps build-codec-tools
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/client_wire_pause_recovery.feature {{ quote(args) }}
+
 # Read/poll interaction regressions use in-process nodes and native transport fixtures.
 test-ingestor-read-metrics *args: build-deps
     #!/usr/bin/env bash
@@ -1551,6 +1558,10 @@ test-wasm-protocol *args:
 # Run the consensus unit tests, which live in the nervix-consensus crate rather than the server lib.
 test-consensus *args:
     cargo test --package nervix-consensus --lib -- {{ args }}
+
+# Explore one registered consensus owner without unrelated inventory packages.
+test-consensus-shuttle check:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/shuttle") }} SHUTTLE_TRACE_DIR={{ quote(cargo_target_dir + "/shuttle-failures/nervix-consensus/" + check) }} cargo test --package nervix-consensus --features shuttle --lib {{ quote(check) }} -- --exact --nocapture --test-threads=1
 
 # Run vocabulary unit tests and representation properties.
 test-models *args:

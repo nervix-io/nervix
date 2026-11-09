@@ -122,8 +122,19 @@ pub(crate) enum DomainMutationAdmission {
 }
 
 /// A replicated mutation request that does not hold the domain's authoritative lease.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub(crate) enum DomainMutationError {
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Error,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum DomainMutationError {
     #[error("domain '{domain}' mutation is owned by {owner}")]
     Conflict {
         domain: DomainName,

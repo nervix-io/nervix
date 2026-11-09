@@ -19,11 +19,12 @@
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
-    ConsensusError, ConsensusTransactionError, ReplicatedTransaction, TransactionMutationError,
-    TransactionOutcome, TransactionQueueAdmission, TransactionQueueLimits, TransactionQueueRequest,
-    TransactionState, TransactionStatement, TransactionStatementRequest,
+    ConsensusConflict, ConsensusError, ConsensusTransactionError, DomainMutationLease,
+    OrphanedPauseRecovery, ReplicatedTransaction, TransactionMutationError, TransactionOutcome,
+    TransactionQueueAdmission, TransactionQueueLimits, TransactionQueueRequest, TransactionState,
+    TransactionStatement, TransactionStatementRequest,
 };
-use nervix_models::{CommandExecutionReference, DomainName, Statement, UserName};
+use nervix_models::{DomainName, UserName};
 
 use super::{
     super::{
@@ -79,6 +80,7 @@ struct StandaloneCommand<'a> {
     owner: &'a UserName,
     domain: &'a DomainName,
     request: &'a TransactionStatementRequest,
+    mutation: Option<&'a DomainMutationLease>,
     limits: TransactionQueueLimits,
 }
 
@@ -86,15 +88,38 @@ struct StandaloneCommand<'a> {
 enum StandaloneSetback {
     /// Refused against this coordinator's observation of the transaction, so the refusal stands
     /// only while the transaction has not moved since.
-    Refused(Box<CommandResult>),
+    Refused(StandaloneRefusal),
     /// Ended in an outcome no later observation of the transaction changes, such as lost
     /// leadership or a transaction bound to another owner.
     Ended(Box<CommandResult>),
 }
 
+/// A planning report keeps its typed cause until progress and pause recovery have been checked.
+enum StandaloneRefusal {
+    Preflight(Report<super::TransactionPreflightError>),
+    Outcome(Box<CommandResult>),
+}
+
+impl StandaloneRefusal {
+    fn into_result(self) -> Box<CommandResult> {
+        match self {
+            Self::Preflight(report) => Box::new(command_error(
+                super::TransactionPreflightError::public_message(&report),
+            )),
+            Self::Outcome(result) => result,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StandalonePauseRecovery {
+    Replan,
+    RetainRefusal,
+}
+
 impl StandaloneSetback {
     fn refused(result: CommandResult) -> Self {
-        Self::Refused(Box::new(result))
+        Self::Refused(StandaloneRefusal::Outcome(Box::new(result)))
     }
 
     fn ended(result: CommandResult) -> Self {
@@ -106,23 +131,21 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn execute_standalone_transaction(
         &self,
         transaction_id: String,
-        request_reference: CommandExecutionReference,
         owner: UserName,
         domain: DomainName,
-        source: String,
-        statement: Statement,
+        request: TransactionStatementRequest,
+        mutation: Option<&DomainMutationLease>,
     ) -> CommandResult {
         let root_transaction_id = transaction_id;
         let mut attempt_transaction_id = root_transaction_id.clone();
         loop {
             nervix_primitives::task::consume_budget().await;
             let result = Box::pin(self.execute_standalone_transaction_attempt(
-                attempt_transaction_id.clone(),
-                request_reference.clone(),
-                owner.clone(),
-                domain.clone(),
-                source.clone(),
-                statement.clone(),
+                &attempt_transaction_id,
+                &owner,
+                &domain,
+                &request,
+                mutation,
             ))
             .await;
             let attempt = self
@@ -150,30 +173,24 @@ impl SessionServiceImpl {
 
     async fn execute_standalone_transaction_attempt(
         &self,
-        transaction_id: String,
-        request_reference: CommandExecutionReference,
-        owner: UserName,
-        domain: DomainName,
-        source: String,
-        statement: Statement,
+        transaction_id: &str,
+        owner: &UserName,
+        domain: &DomainName,
+        request: &TransactionStatementRequest,
+        mutation: Option<&DomainMutationLease>,
     ) -> CommandResult {
-        if !is_queueable_transaction_statement(&statement) {
+        if !is_queueable_transaction_statement(&request.statement) {
             return command_error(format!(
                 "{} cannot use durable transaction application",
-                transaction_statement_label(&statement)
+                transaction_statement_label(&request.statement)
             ));
         }
-        let request = TransactionStatementRequest {
-            request_reference,
-            expected_position: 0,
-            source,
-            statement,
-        };
         let command = StandaloneCommand {
-            transaction_id: &transaction_id,
-            owner: &owner,
-            domain: &domain,
-            request: &request,
+            transaction_id,
+            owner,
+            domain,
+            request,
+            mutation,
             limits: TransactionQueueLimits {
                 max_statements: usize::try_from(
                     self.cluster_parameters().transaction_max_statements(),
@@ -185,14 +202,14 @@ impl SessionServiceImpl {
         let observed = self
             .inner
             .consensus
-            .current_transaction(&transaction_id)
+            .current_transaction(transaction_id)
             .await;
         #[cfg(feature = "testing")]
         self.inner
             .runtime
             .pause_standalone_transaction_if_armed(
                 self.inner.consensus.local_node_id(),
-                &domain,
+                domain,
                 crate::fault_injection::StandaloneTransactionBoundary::Lookup,
             )
             .await;
@@ -207,7 +224,7 @@ impl SessionServiceImpl {
         let finished = if matches!(committing.state, TransactionState::Finished(_)) {
             Ok(committing)
         } else {
-            Box::pin(self.execute_replicated_commit(&transaction_id)).await
+            Box::pin(self.execute_replicated_commit(transaction_id)).await
         };
         let error = match finished {
             Ok(transaction) => return standalone_transaction_result(&transaction),
@@ -218,7 +235,7 @@ impl SessionServiceImpl {
             .runtime
             .pause_standalone_transaction_if_armed(
                 self.inner.consensus.local_node_id(),
-                &domain,
+                domain,
                 crate::fault_injection::StandaloneTransactionBoundary::CommitFailure,
             )
             .await;
@@ -231,7 +248,7 @@ impl SessionServiceImpl {
         let attempt = self
             .inner
             .consensus
-            .current_transaction(&transaction_id)
+            .current_transaction(transaction_id)
             .await;
         if let Some(attempt) = attempt {
             match &attempt.state {
@@ -286,13 +303,20 @@ impl SessionServiceImpl {
                 Err(StandaloneSetback::Ended(result)) => return Err(result),
                 Err(StandaloneSetback::Refused(result)) => result,
             };
-            let Some(progressed) = self
+            if let Some(progressed) = self
                 .standalone_transaction_progress(command, observed.as_ref())
                 .await
-            else {
-                return Err(refusal);
-            };
-            observed = Some(progressed);
+            {
+                observed = Some(progressed);
+                continue;
+            }
+            if let StandaloneRefusal::Preflight(report) = &refusal
+                && self.recover_standalone_pause(command, report).await?
+                    == StandalonePauseRecovery::Replan
+            {
+                continue;
+            }
+            return Err(refusal.into_result());
         }
     }
 
@@ -332,8 +356,8 @@ impl SessionServiceImpl {
         let prepared = match preflight {
             Ok(prepared) => prepared,
             Err(error) => {
-                return Err(StandaloneSetback::refused(command_error(
-                    super::TransactionPreflightError::public_message(&error),
+                return Err(StandaloneSetback::Refused(StandaloneRefusal::Preflight(
+                    error,
                 )));
             }
         };
@@ -409,8 +433,8 @@ impl SessionServiceImpl {
                 match preflight {
                     Ok(prepared) => prepared,
                     Err(error) => {
-                        return Err(StandaloneSetback::refused(command_error(
-                            super::TransactionPreflightError::public_message(&error),
+                        return Err(StandaloneSetback::Refused(StandaloneRefusal::Preflight(
+                            error,
                         )));
                     }
                 }
@@ -469,6 +493,11 @@ impl SessionServiceImpl {
                         .await;
                     if let Some(progressed) = progressed {
                         current = progressed;
+                        continue;
+                    }
+                    if self.recover_standalone_pause(command, &refusal).await?
+                        == StandalonePauseRecovery::Replan
+                    {
                         continue;
                     }
                     let result = self
@@ -532,6 +561,75 @@ impl SessionServiceImpl {
                     let result = self.transaction_consensus_error_response(error).await;
                     return Err(Box::new(result));
                 }
+            }
+        }
+    }
+
+    /// Recover only a typed paused-domain refusal after the caller rechecked durable progress.
+    /// The local observation filters attempts; consensus checks ownership and adoption atomically.
+    async fn recover_standalone_pause<C: error_stack::Context>(
+        &self,
+        command: &StandaloneCommand<'_>,
+        refusal: &Report<C>,
+    ) -> Result<StandalonePauseRecovery, Box<CommandResult>> {
+        let Some(crate::registry::TransactionPlanningError::DomainPaused { domain }) =
+            refusal.downcast_ref::<crate::registry::TransactionPlanningError>()
+        else {
+            return Ok(StandalonePauseRecovery::RetainRefusal);
+        };
+        if domain != command.domain || self.inner.runtime.domain_alter_is_active(domain) {
+            return Ok(StandalonePauseRecovery::RetainRefusal);
+        }
+        let Some(mutation) = command.mutation else {
+            return Ok(StandalonePauseRecovery::RetainRefusal);
+        };
+        let recovered = self
+            .inner
+            .consensus
+            .recover_orphaned_model_pause(domain.clone(), mutation)
+            .await;
+        match recovered {
+            Ok(OrphanedPauseRecovery::Resumed) => {
+                tracing::info!(domain = domain.as_str(), "resumed orphaned ALTER pause");
+                if let Err(error) = self.apply_current_cluster_state().await {
+                    return Err(Box::new(CommandResult::new(
+                        CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::StillApplying),
+                        format!(
+                            "orphaned pause recovery is committed but runtime application is \
+                             incomplete: {error:#}; retry with the same execution reference"
+                        ),
+                    )));
+                }
+                Ok(StandalonePauseRecovery::Replan)
+            }
+            Ok(OrphanedPauseRecovery::Unchanged) => Ok(StandalonePauseRecovery::Replan),
+            Ok(OrphanedPauseRecovery::TransactionActive { transaction }) => {
+                Err(Box::new(CommandResult::new(
+                    CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::StillApplying),
+                    format!(
+                        "transaction '{transaction}' owns the domain pause; retry with the same \
+                         execution reference"
+                    ),
+                )))
+            }
+            Err(error) => {
+                if let ConsensusError::Conflict(ConsensusConflict::RestoreInstallation { .. }) =
+                    error.current_context()
+                {
+                    return Ok(StandalonePauseRecovery::RetainRefusal);
+                }
+                let mut response = self
+                    .consensus_error_response(error.current_context(), format!("{error:#}"))
+                    .await;
+                if let CommandDisposition::Failed = response.disposition {
+                    response.disposition =
+                        CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::StillApplying);
+                    response.message.push_str(
+                        "; orphaned pause recovery was not confirmed; retry with the same \
+                         execution reference",
+                    );
+                }
+                Err(Box::new(response))
             }
         }
     }

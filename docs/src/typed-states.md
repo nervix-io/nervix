@@ -351,8 +351,8 @@ that header state, and inferencer state bindings with their initial expressions.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
-Consensus's `raft_hop_rule_` keyspaces and current `ClusterState`
-metadata encoding, 15, identify its stored shapes, including the partition count of every resolved branch
+Consensus's `raft_cmd_rule_` keyspaces and current `ClusterState`
+metadata encoding, 16, identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations. The runtime state store's
 `ranked-intake-unit-checkpoint-segments` format identifies the checkpoints it keeps, including the
