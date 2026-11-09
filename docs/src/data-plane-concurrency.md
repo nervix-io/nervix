@@ -2901,13 +2901,17 @@ delegates the comparison to `nervix-ratchet applicability`, which consumes the s
 `MatrixReport` and finding types; Python never decodes the compiler catalog. It reports how many owners registered
 workloads reach and how many record a path the lane does not reach. The catalog is the compiler's
 resolution of the Deloxide adapters' operations, not a search for lock names. Every diagnostic
-library and binary configuration enables `testing`, as the lane's server builds do, so acquisitions
-in testing-only fault controls require owner records too. This includes the server's scheduling,
-drain and executor-occupancy controls and the consensus storage fault controls. Ordinary and
-modeled configurations retain their own feature selections. A record is a reviewed declaration:
-the lane's coverage report is evidence about it, not a proof of ownership. Format
-equality, malformed and out-of-bounds rejection, normalized-cycle deduplication and the summary's
-counts are registered Bolero properties with the same assertion in ordinary and sanitizer execution.
+library and binary configuration that selects the server enables `testing`, as the lane's server
+builds do, so acquisitions in testing-only fault controls require owner records too. This includes
+the server's scheduling, drain and executor-occupancy controls and the consensus storage fault
+controls. The `deloxide-connector-harness` configuration selects only the fake connector library and
+the primitive boundary. Neither declares `testing`, and the lane's server builds compile that
+dev-dependency without it as well, so the configuration compiles its owners as the registered
+workloads do. Ordinary and modeled configurations retain their own feature selections. A record is a
+reviewed declaration: the lane's coverage report is evidence about it, not a proof of ownership.
+Format equality, malformed and out-of-bounds rejection, normalized-cycle deduplication and the
+summary's counts are registered Bolero properties with the same assertion in ordinary and sanitizer
+execution.
 
 The command transaction retention workloads reach tracked consensus state and report ownership
 while cleanup runs with an execution held before finalization. Ordinary and stressed cases cover

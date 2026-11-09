@@ -298,7 +298,7 @@ the complete reported cause; do not parse it to choose recovery.
 | `UncertainOutcomeException` | Recover the same prepared execution; do not infer whether it had effects. |
 | `RejectedException` | Inspect `openRefusal()` where present, or the rejected operation's message. |
 | `DeadlineException`, `CancelledException` | The wait ended; retain the identity of any operation already accepted. |
-| `OverflowException`, `ProtocolException` | Handle the overflow or invalid server data without inventing missing values. |
+| `EventOverflowException`, `ProtocolException` | Handle the overflow or invalid server data without inventing missing values. |
 | `ClosedException` | Obtain a live handle before calling it. |
 | `ConsumerInterruptedException`, `ReopenRequiredException` | Restore the desired attachment or explicitly open one with the current contract. |
 
@@ -361,6 +361,11 @@ The JVM library runs the shared session state machine; it does not expose its na
 spawn callbacks on Rust runtime threads, add a Java retry policy or convert arbitrary Java objects
 into rows. It is a blocking API used from application threads. A binding's typed outcomes and
 optional fields are described by the [implementation manual](client-implementation-manual.md#using-the-jvm-library).
+
+It does not expose these parts of the [Rust client](client-library.md): the typed transaction
+status, transaction attach and transaction inspection; the typed domain list, structured choice
+lookups, server notices and the leadership view; upload progress and upload identities of your
+choosing; and `DESCRIBE BACKUP`, which reads an archive without a server.
 
 ## A Complete Application
 

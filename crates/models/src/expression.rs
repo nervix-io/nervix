@@ -510,6 +510,7 @@ pub enum FieldScope {
     Right,
     RelayState { relay: RelayName },
     Metadata,
+    Payload,
     PartialOutput,
     Error,
 }

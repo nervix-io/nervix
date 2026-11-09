@@ -1332,7 +1332,7 @@ async fn paced_reads_record_one_outcome_and_one_duration_for_each_poll_answer() 
             poll.messages.push(nervix_connector::IngestorPollMessage {
                 payload: vec![7],
                 headers: nervix_connector::RetainedIngestHeaders::none(),
-                metadata: nervix_connector::RetainedIngestMetadata::none(),
+                metadata: nervix_connector::RetainedIngestMetadata::none(1),
             });
         }
         connector

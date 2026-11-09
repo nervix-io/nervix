@@ -1,3 +1,15 @@
+//! Projecting typed runtime carriers and immutable context into VM inputs.
+//!
+//! Layer: data plane.
+//! - **Owns.** Borrowed carrier columns and shared projection of branch, metadata and payload inputs.
+//! - **Depends on.** Typed runtime batches, compiled input schemas and the VM array boundary.
+//! - **Must not know.** Plexus parsing, Models, connector drivers or graph decisions.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the VM input projection boundary")
+)]
+
 use arrow_buffer::BooleanBufferBuilder;
 use error_stack::ResultExt as _;
 
@@ -201,11 +213,16 @@ pub(super) fn project_vm_input_column(
         };
     }
     if let Some((namespace, field_name)) = field.name().split_once('.') {
-        if namespace == INGEST_METADATA_NAMESPACE {
+        if namespace == INGEST_METADATA_NAMESPACE || namespace == INGEST_PAYLOAD_NAMESPACE {
+            let column_name = if namespace == INGEST_PAYLOAD_NAMESPACE {
+                field.name().as_str()
+            } else {
+                field_name
+            };
             let build = || {
                 if let Some(column) = sources
                     .ingest_metadata
-                    .map(|metadata| metadata.field_column(field_name))
+                    .map(|metadata| metadata.field_column(column_name))
                     .transpose()
                     .map_err(|cause| {
                         cause.change_context(RuntimeSchemaError::VmProjection {
@@ -230,6 +247,11 @@ pub(super) fn project_vm_input_column(
                             data_type: field.data_type().clone(),
                         })
                     });
+                }
+                if namespace == INGEST_PAYLOAD_NAMESPACE && !field.is_nullable() {
+                    return Err(Report::new(RuntimeSchemaError::MissingField {
+                        field: field.name().clone(),
+                    }));
                 }
                 null_input_column(field, row_count)
             };
@@ -259,6 +281,7 @@ pub(super) fn project_vm_input_column(
             }));
         }
         if namespace != INGEST_METADATA_NAMESPACE
+            && namespace != INGEST_PAYLOAD_NAMESPACE
             && let Ok(index) = carrier_schema.index_of(field_name)
         {
             return carrier_input_column(sources.carrier, index, field);

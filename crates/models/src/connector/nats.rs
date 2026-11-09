@@ -262,6 +262,7 @@ impl IngestorDeclaration for NatsSubjectIngestor {
         events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::PerPartition,
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+        payload: crate::IngestorPayloadDeclaration::BYTES,
         metadata: IngestorMetadataDeclaration::new(&[
             IngestorMetadataField::new("subject", IngestorMetadataType::String),
             IngestorMetadataField::new("reply", IngestorMetadataType::String),
@@ -436,6 +437,7 @@ impl IngestorDeclaration for NatsStreamIngestor {
         events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::Single,
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+        payload: crate::IngestorPayloadDeclaration::BYTES,
         metadata: IngestorMetadataDeclaration::new(&[
             IngestorMetadataField::new("subject", IngestorMetadataType::String),
             IngestorMetadataField::new("reply", IngestorMetadataType::String),
