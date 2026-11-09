@@ -2423,6 +2423,7 @@ test-coverage-feature +features: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    LLVM_PROFILE_FILE=/dev/null just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-python-api-run
     cargo llvm-cov clean --workspace
     just coverage-cli-binary
     just coverage-deadlock-report-binary
@@ -2463,6 +2464,7 @@ test-coverage-scenario-filter feature filter:
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    LLVM_PROFILE_FILE=/dev/null just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-python-api-run
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
     cargo llvm-cov --no-report --package nervix-scenarios \
         --test scenarios -- --input {{ quote(feature) }} --name {{ quote(filter) }} \
@@ -2729,6 +2731,8 @@ coverage-scenarios output *args: tests-deps
     export NERVIX_DEADLOCK_REPORT_TOOL={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-deadlock-report") }}
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
     just coverage-paced-simulation-binaries
+    # The packaging prerequisite writes no profiles into this scenario-only collection.
+    LLVM_PROFILE_FILE=/dev/null just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-python-api-run
     export NERVIX_PACED_SIMULATION_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-paced-simulation") }}
     export NERVIX_PACED_SIMULATION_PYTHON={{ quote(cargo_target_dir + "/paced-simulation/python/bin/python") }}
     export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/llvm-cov-target/debug/libnervix_client_ffi.so") }}
@@ -2746,6 +2750,7 @@ coverage-scenarios-append output *args: tests-deps
     export NERVIX_DEADLOCK_REPORT_TOOL={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-deadlock-report") }}
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
     just coverage-paced-simulation-binaries
+    LLVM_PROFILE_FILE=/dev/null just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-python-api-run
     export NERVIX_PACED_SIMULATION_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-paced-simulation") }}
     export NERVIX_PACED_SIMULATION_PYTHON={{ quote(cargo_target_dir + "/paced-simulation/python/bin/python") }}
     export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/llvm-cov-target/debug/libnervix_client_ffi.so") }}
