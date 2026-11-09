@@ -143,6 +143,7 @@ impl ArrowBodyCarriage {
 /// What one caller accepts from an untrusted body, checked before the bytes it describes are
 /// turned into columns.
 struct BodyContract {
+    decoded_limit: u64,
     /// The exact schema the body must declare, when the caller already knows it.
     schema: Option<StdArc<ArrowSchema>>,
     /// How many Arrow sections the body may carry.
@@ -254,6 +255,7 @@ impl RuntimeRecordBatch {
             body,
             BodyContract {
                 schema: None,
+                decoded_limit: executor.limits().relay_decoded_bytes.as_u64(),
                 max_sections: NonZeroUsize::MAX,
                 carriage: ArrowBodyCarriage::Relay,
             },
@@ -274,6 +276,7 @@ impl RuntimeRecordBatch {
             body,
             BodyContract {
                 schema: Some(expected_schema),
+                decoded_limit: executor.limits().snapshot_section_bytes.as_u64(),
                 max_sections: NonZeroUsize::MIN,
                 carriage: ArrowBodyCarriage::SnapshotSection,
             },
@@ -334,12 +337,14 @@ impl CompiledSchema {
         &self,
         executor: &Executor,
         body: ChargedBytes,
+        decoded_limit: u64,
     ) -> Result<RuntimeRecordBatch, Report<ArrowBodyError>> {
         let decoded = decode_body(
             executor,
             body,
             BodyContract {
                 schema: Some(StdArc::clone(&self.arrow_schema)),
+                decoded_limit,
                 max_sections: NonZeroUsize::MIN,
                 carriage: ArrowBodyCarriage::Relay,
             },
@@ -371,7 +376,9 @@ async fn decode_body(
             limit: encoded_limit,
         }));
     }
-    let decoded_limit = contract.carriage.decoded_limit(executor);
+    let decoded_limit = contract
+        .decoded_limit
+        .min(contract.carriage.decoded_limit(executor));
     // Charge the data the decoder will produce and the scratch its conversion overlaps with, both
     // before it allocates either. Uncompressed Arrow decodes to about the size it was encoded at,
     // so one encoded size covers the decoded columns and a second covers the overlap. The charge

@@ -579,6 +579,12 @@ connection begins with a 256 KiB receive window, and request headers are limited
 receiver releases more HTTP/2 credit only as it accepts and accounts for more data. Large streamed
 objects can therefore cross the cluster without either endpoint holding the whole object in memory.
 
+A streamed request carries its receiver's positive chunk bound outside the join handshake. The
+responder intersects it with that peer's committed claim when available and splits writes to that
+chunk limit; the receiver independently rejects a larger frame. This operation bound also permits
+a joining node to receive a consensus snapshot before its own claim commits. HTTP/2's actual
+stream and connection credit continues to govern progress and backpressure.
+
 A bulk connection grants more, on the side that opened it and receives its responses. Each of its
 four streams gets the bulk receive window, 1 MiB by default (the `interconnect-bulk-receive-window`
 node capability), and the connection gets room for all four at once. A sender moves at most one
@@ -861,6 +867,25 @@ unit receives only its partition's batches; a shared consumer retains one bounde
 partitions. A handoff fences the selected unit's delivery while sibling units keep their channels
 and consumers.
 
+The node's committed `PeerReceiveBounds` cap its encoded and decoded relay body independently.
+The sender reads the claim through its already leased peer pool, without another routing-map
+lookup. Publication retains connection slots and stream-release waiters. An absent claim does not
+prevent bootstrap transport; the receiver still enforces its actual local limits.
+
+Before creating an attempt, a receiver answers an oversized new grant with `Resize` and its typed
+bounds. Existing attempts and terminal positions are resolved first. A definitive refusal advances
+no sequence: the sender can re-encode a smaller contiguous row prefix at that unused position.
+Each admitted prefix advances the channel once and transfers only its own row registrations to
+the admission owner. Later refusals shrink only the remaining suffix; they never resend an admitted
+prefix. A single row above the bound has a typed capacity failure. Until an admission attempt takes
+ownership, the held channel gate returns an abandoned unused position, so a failed encode, an
+unsendable row or cancellation during sizing cannot leave a sequence gap for the next batch.
+It never returns an admitted position or a position of a different channel incarnation.
+Ordinary unchanged-bound fanout
+keeps its one shared encoded allocation. If an earlier attempt had an uncertain outcome, the sender
+uses its existing cancellation/reconciliation path instead of treating a later refusal as proof
+that the delivery was unused. These cursors, attempts and acknowledgement prefixes remain in memory.
+
 A delivery proceeds as follows:
 
 1. A delivery that carries record acknowledgements first stores them on the sender, charged to its
@@ -870,7 +895,7 @@ A delivery proceeds as follows:
 2. The sender leases a relay-body stream before requesting receiver capacity. This prevents a
    saturated body pool from holding a remote reservation that it cannot use.
 3. The sender requests a grant over the reserved management admission quota. The request identifies
-   the delivery process, channel, sequence, payload length, branch, relay, and acknowledgement shape.
+   the delivery process, channel, sequence, encoded and logical decoded lengths, branch, relay, and acknowledgement shape.
 4. The receiver verifies the sender process epoch and delivery order. Before issuing a grant, it
    reserves the encoded body, maximum decoded batch and scratch memory, an incoming queue item, and
    capacity for the eventual terminal admission outcome. A grant it cannot issue is answered with a

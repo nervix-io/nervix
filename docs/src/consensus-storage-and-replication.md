@@ -518,8 +518,8 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_payload_tls_identity_reset_logs`, `raft_payload_tls_identity_reset_meta`, `raft_payload_tls_identity_reset_state`, and
-`raft_payload_tls_identity_reset_snapshots`. Opening it validates the complete keyspace namespace before reading
+`raft_payload_identity_capability_tls_inference_reset_logs`, `raft_payload_identity_capability_tls_inference_reset_meta`, `raft_payload_identity_capability_tls_inference_reset_state`, and
+`raft_payload_identity_capability_tls_inference_reset_snapshots`. Opening it validates the complete keyspace namespace before reading
 any records. The committed cluster-parameter record stores ordered typed TLS cipher suites and
 key-exchange groups; recovery validates their complete pair before returning that record.
 This namespace identifies the current Model shape, including the separate JSON
@@ -539,7 +539,8 @@ the current statement shape as well, which the statements a transaction keeps ar
 changes one part of its entity's body, an envelope clause or the properties, or one part of a
 construction where it stands, including the typed `payload` expression scope and a
 `RESET WASM PROCESSOR ... STATE` that names its processor and scope and takes its domain from
-the transaction, as the step effect and commit plan step keep it too. Its state metadata
+the transaction, as the step effect and commit plan step keep it too. The database also stores
+incarnation-bound node capability claims under record-family tag `C`. Its state metadata
 requires the current `ClusterState` encoding, 22, including the cluster identity reference,
 committed cluster parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.

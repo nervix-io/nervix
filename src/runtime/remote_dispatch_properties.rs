@@ -141,6 +141,7 @@ impl RoutedCase {
             .await
             .assured("a bounded batch encodes");
         routed_payload(RoutedDelivery {
+            decoded_bytes: crate::runtime_schema::batch_payload_bytes(self.batch.batch.batch()),
             delivery: self.delivery,
             domain: &self.domain,
             unit: self.unit,

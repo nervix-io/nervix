@@ -191,6 +191,22 @@ fn bolero_protocol_json_roundtrip() {
                 trust: fixture.documents(),
                 server_time: now(),
             });
+            let single_root = fixture.roots[2]
+                .sign(&authorization, limits())
+                .assured("bounded current root document");
+            round_trip(&TrustBundleResponse {
+                epochs: fixture.embedded().epochs,
+                successions: vec![SignedTrustDocument::Signatures(
+                    fixture.root_sign(&succession),
+                )],
+                authorizations: vec![
+                    SignedTrustDocument::Signatures(fixture.root_sign(&authorization)),
+                    SignedTrustDocument::Compact(single_root),
+                ],
+                revocations: vec![SignedTrustDocument::Signatures(
+                    fixture.root_sign(&revocation),
+                )],
+            });
             round_trip(&fixture.embedded());
             round_trip(&ChallengeRequest {
                 cluster_uid: id(u128::from(value)),

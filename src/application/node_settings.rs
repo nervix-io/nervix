@@ -45,6 +45,7 @@ pub struct NodeSettings {
     pub shutdown: ShutdownSettings,
     pub resources: ResourceSettings,
     pub capacity: CapacitySettings,
+    pub peer_receive: nervix_interconnect::PeerReceiveSettings,
 }
 
 impl NodeSettings {

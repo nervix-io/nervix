@@ -4,7 +4,9 @@ use std::collections::BTreeSet;
 
 use meticulous::{OptionExt as _, ResultExt as _};
 
-use crate::{conditions::*, document::*, documents::*, test_fixture::*, trust::*, validation::*};
+use crate::{
+    conditions::*, document::*, documents::*, requests::*, test_fixture::*, trust::*, validation::*,
+};
 
 fn validate(
     fixture: &Fixture,
@@ -611,4 +613,388 @@ fn nonactive_statuses_carry_free_usage_and_preserve_operating_conditions() {
         );
         assert!(validate(&fixture, &decision, &decision.activation, None).is_err());
     }
+}
+
+fn sign_request(signer: &DocumentSigner, request: &Request) -> String {
+    signer
+        .sign(request, limits())
+        .assured("bounded current request")
+}
+
+fn flip_signature_bit(compact: &str) -> String {
+    let mut framing: jose_jws::Flattened = compact.parse().assured("maintained framing");
+    let mut signature = framing.signature.signature.as_ref().to_vec();
+    signature[0] ^= 1;
+    framing.signature.signature = signature.into();
+    framing.to_string()
+}
+
+fn verification_failure(compact: &str, signer: RequestSigner<'_>) -> RequestVerificationError {
+    let failure = Request::verify(compact, signer, limits())
+        .err()
+        .assured("the request must be refused");
+    *failure.current_context()
+}
+
+#[test]
+fn self_signed_creation_verifies_only_under_its_carried_cluster_key() {
+    let fixture = Fixture::new();
+    let mut requests = fixture.requests();
+    let refresh = requests.remove(2);
+    let creation = requests.remove(0);
+    let compact = sign_request(&fixture.cluster, &creation);
+    assert_eq!(
+        Request::verify(&compact, RequestSigner::CarriedClusterKey, limits())
+            .assured("a creation signed by the key it carries"),
+        creation
+    );
+    // A creation carrying one key and signed by another proves possession of neither.
+    let mut foreign = creation.clone();
+    let Request::Create { cluster_key, .. } = &mut foreign else {
+        panic!("the fixture's first operation is a creation");
+    };
+    *cluster_key = fixture.working.public_key().clone();
+    assert!(matches!(
+        verification_failure(
+            &sign_request(&fixture.cluster, &foreign),
+            RequestSigner::CarriedClusterKey
+        ),
+        RequestVerificationError::Signer
+    ));
+    assert!(matches!(
+        verification_failure(
+            &flip_signature_bit(&compact),
+            RequestSigner::CarriedClusterKey
+        ),
+        RequestVerificationError::Signature
+    ));
+    // Only a creation carries its own signer.
+    assert!(matches!(
+        verification_failure(
+            &sign_request(&fixture.cluster, &refresh),
+            RequestSigner::CarriedClusterKey
+        ),
+        RequestVerificationError::Payload
+    ));
+    assert!(matches!(
+        verification_failure("no compact serialization", RequestSigner::CarriedClusterKey),
+        RequestVerificationError::Envelope
+    ));
+    // A decision is not a request, whoever signed it.
+    assert!(matches!(
+        verification_failure(
+            &fixture.sign(&fixture.decision()),
+            RequestSigner::CarriedClusterKey
+        ),
+        RequestVerificationError::Envelope
+    ));
+}
+
+#[test]
+fn bound_requests_verify_only_under_the_bound_key_and_report_payload_failures_apart() {
+    let fixture = Fixture::new();
+    let refresh = fixture.requests().remove(2);
+    let compact = sign_request(&fixture.cluster, &refresh);
+    let bound = RequestSigner::Bound(fixture.cluster.public_key());
+    assert_eq!(
+        Request::verify(&compact, bound, limits()).assured("a refresh signed by its binding"),
+        refresh
+    );
+    assert!(matches!(
+        verification_failure(&compact, RequestSigner::Bound(fixture.working.public_key())),
+        RequestVerificationError::Signer
+    ));
+    assert!(matches!(
+        verification_failure(&flip_signature_bit(&compact), bound),
+        RequestVerificationError::Signature
+    ));
+    // A valid signature over a payload that is no current request.
+    let private = nervix_crypto::ecdsa::EcdsaP256KeyPair::generate_pkcs8()
+        .assured("AWS-LC generates a fixture key");
+    let signer = DocumentSigner::from_pkcs8(private.as_ref())
+        .assured("the generated key has the P-256 PKCS#8 profile");
+    let raw = nervix_crypto::jws::SigningKey::from_pkcs8(private.as_ref())
+        .assured("the generated key imports");
+    let mut payload = serde_json::to_value(&refresh).assured("current request");
+    payload["unexpected"] = serde_json::json!(true);
+    let extended = raw
+        .sign(
+            DocumentType::Request.as_str(),
+            signer.key_id().as_ref(),
+            &payload,
+        )
+        .assured("the maintained signer signs any JSON payload");
+    let failure = Request::verify(
+        &extended,
+        RequestSigner::Bound(signer.public_key()),
+        limits(),
+    )
+    .err()
+    .assured("an extra member is refused");
+    assert!(matches!(
+        failure.current_context(),
+        RequestVerificationError::Payload
+    ));
+    assert!(matches!(
+        failure.downcast_ref::<DocumentError>(),
+        Some(DocumentError::Payload)
+    ));
+    let array = raw
+        .sign(
+            DocumentType::Request.as_str(),
+            signer.key_id().as_ref(),
+            &serde_json::json!([1, 2]),
+        )
+        .assured("the maintained signer signs any JSON payload");
+    assert!(matches!(
+        verification_failure(&array, RequestSigner::Bound(signer.public_key())),
+        RequestVerificationError::Payload
+    ));
+}
+
+struct SuppliedTrust {
+    documents: TrustDocuments,
+    authorization: WorkingKeyAuthorization,
+    revocation: WorkingKeyRevocation,
+    succession: RootSuccession,
+    next_roots: Vec<crate::keys::PublicKey>,
+}
+
+/// A revocation of another key, the working key's authorization and a succession to epoch 1,
+/// supplied in that order, which is not the order the state verifies them in.
+fn supplied_trust(fixture: &Fixture) -> SuppliedTrust {
+    let next = [signer(), signer(), signer()];
+    let next_roots: Vec<crate::keys::PublicKey> = next
+        .iter()
+        .map(|signer| signer.public_key().clone())
+        .collect();
+    let revocation = WorkingKeyRevocation {
+        doc: RevocationKind::WorkingKeyRevocation,
+        protocol: 1,
+        serial: 2,
+        issued_at: at(-50),
+        root_epoch: 0,
+        kid: fixture.cluster.key_id().clone(),
+        revoked_at: at(-50),
+        reason: "retired by the ceremony".to_owned(),
+    };
+    let succession = RootSuccession {
+        doc: SuccessionKind::RootSuccession,
+        protocol: 1,
+        serial: 3,
+        issued_at: at(-40),
+        from_epoch: 0,
+        to_epoch: 1,
+        roots: next_roots.clone(),
+        threshold: std::num::NonZeroUsize::new(2).assured("nonzero threshold"),
+        effective_at: at(-30),
+    };
+    let authorization = fixture.authorization();
+    let documents = TrustDocuments {
+        documents: vec![
+            SignedTrustDocument::Signatures(fixture.root_sign(&revocation)),
+            SignedTrustDocument::Signatures(fixture.root_sign(&authorization)),
+            SignedTrustDocument::Signatures(fixture.root_sign(&succession)),
+        ],
+    };
+    SuppliedTrust {
+        documents,
+        authorization,
+        revocation,
+        succession,
+        next_roots,
+    }
+}
+
+#[test]
+fn verified_trust_documents_state_their_payloads_in_supplied_order() {
+    let fixture = Fixture::new();
+    let supplied = supplied_trust(&fixture);
+    let trust = TrustState::build(&fixture.embedded(), &supplied.documents, limits())
+        .assured("every supplied document verifies under epoch 0");
+    let mut signed = Vec::new();
+    let mut contents = Vec::new();
+    for document in trust.documents() {
+        signed.push(document.signed().clone());
+        contents.push(document.content().clone());
+    }
+    assert_eq!(signed, supplied.documents.documents);
+    assert_eq!(
+        contents,
+        vec![
+            TrustDocumentContent::Revocation(supplied.revocation.clone()),
+            TrustDocumentContent::Authorization(supplied.authorization.clone()),
+            TrustDocumentContent::Succession(supplied.succession.clone()),
+        ]
+    );
+    let facts: Vec<(DocumentType, u64, u64)> = contents
+        .iter()
+        .map(|content| {
+            (
+                content.document_type(),
+                content.serial(),
+                content.root_epoch(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        facts,
+        vec![
+            (DocumentType::Revocation, 2, 0),
+            (DocumentType::WorkingKey, 1, 0),
+            (DocumentType::Succession, 3, 0),
+        ]
+    );
+    let epochs: Vec<RootSet> = trust.root_sets().cloned().collect();
+    let mut expected = fixture.embedded().epochs;
+    expected.push(RootSet {
+        epoch: 1,
+        roots: supplied.next_roots.clone(),
+        threshold: supplied.succession.threshold,
+    });
+    assert_eq!(epochs, expected);
+    let working = fixture.working.key_id();
+    assert_eq!(
+        trust.authorization(working, now()),
+        Some(&supplied.authorization)
+    );
+    assert_eq!(trust.authorization(working, at(-10_001)), None);
+    assert_eq!(trust.authorization(fixture.cluster.key_id(), now()), None);
+    assert!(trust.is_revoked(fixture.cluster.key_id()));
+    assert!(!trust.is_revoked(working));
+}
+
+#[test]
+fn missing_documents_are_what_the_holder_lacks_for_the_signing_key() {
+    let fixture = Fixture::new();
+    let supplied = supplied_trust(&fixture);
+    let trust = TrustState::build(&fixture.embedded(), &supplied.documents, limits())
+        .assured("every supplied document verifies under epoch 0");
+    let working = fixture.working.key_id();
+    let nothing = TrustHeld {
+        working_keys: Vec::new(),
+        revocation_serials: Vec::new(),
+        succession_serials: Vec::new(),
+    };
+    assert_eq!(trust.missing(&nothing, working), supplied.documents);
+    let everything = TrustHeld {
+        working_keys: vec![working.clone()],
+        revocation_serials: vec![2],
+        succession_serials: vec![3],
+    };
+    assert_eq!(
+        trust.missing(&everything, working),
+        TrustDocuments {
+            documents: Vec::new()
+        }
+    );
+    // Another key's decision needs no authorization of the working key.
+    let documents = &supplied.documents.documents;
+    assert_eq!(
+        trust.missing(&nothing, fixture.cluster.key_id()),
+        TrustDocuments {
+            documents: vec![documents[0].clone(), documents[2].clone()]
+        }
+    );
+    // A succession the build embeds is lacking too, and it comes first.
+    let mut embedded = fixture.embedded();
+    let SignedTrustDocument::Signatures(succession) = documents[2].clone() else {
+        panic!("the supplied succession is a signature set");
+    };
+    embedded.successions.push(succession);
+    let authorization_only = TrustDocuments {
+        documents: vec![documents[1].clone()],
+    };
+    let trust = TrustState::build(&embedded, &authorization_only, limits())
+        .assured("the embedded succession and the authorization verify");
+    assert_eq!(
+        trust.missing(&nothing, working),
+        TrustDocuments {
+            documents: vec![documents[2].clone(), documents[1].clone()]
+        }
+    );
+    assert_eq!(trust.root_sets().count(), 2);
+}
+
+#[test]
+fn publication_lists_root_sets_and_every_signed_document_by_kind() {
+    let fixture = Fixture::new();
+    let supplied = supplied_trust(&fixture);
+    let trust = TrustState::build(&fixture.embedded(), &supplied.documents, limits())
+        .assured("every supplied document verifies under epoch 0");
+    let publication = trust.publication();
+    let documents = &supplied.documents.documents;
+    let mut epochs = fixture.embedded().epochs;
+    epochs.push(RootSet {
+        epoch: 1,
+        roots: supplied.next_roots.clone(),
+        threshold: supplied.succession.threshold,
+    });
+    assert_eq!(
+        publication,
+        TrustBundleResponse {
+            epochs,
+            successions: vec![documents[2].clone()],
+            authorizations: vec![documents[1].clone()],
+            revocations: vec![documents[0].clone()],
+        }
+    );
+    round_trip(&publication);
+    // A receiver verifies the signed members against its own anchors and derives the same facts.
+    let received = TrustState::build(&fixture.embedded(), &publication.documents(), limits())
+        .assured("the published members verify under the receiver's anchors");
+    assert_eq!(
+        received.authorization(fixture.working.key_id(), now()),
+        Some(&supplied.authorization)
+    );
+    assert!(received.is_revoked(fixture.cluster.key_id()));
+    assert_eq!(received.root_sets().count(), 2);
+}
+
+#[test]
+fn a_serial_conflicts_only_between_documents_with_different_signed_bytes() {
+    let fixture = Fixture::new();
+    let authorization =
+        SignedTrustDocument::Signatures(fixture.root_sign(&fixture.authorization()));
+    // The same signed document twice is one document, not a conflict.
+    let repeated = TrustDocuments {
+        documents: vec![authorization.clone(), authorization.clone()],
+    };
+    let trust = TrustState::build(&fixture.embedded(), &repeated, limits())
+        .assured("an identical repeated document verifies");
+    assert_eq!(trust.documents().len(), 2);
+    // Another document of the same type under the same serial is refused.
+    let mut renewed = fixture.authorization();
+    renewed.not_after = at(20_000);
+    let conflicting = TrustDocuments {
+        documents: vec![
+            authorization.clone(),
+            SignedTrustDocument::Signatures(fixture.root_sign(&renewed)),
+        ],
+    };
+    assert!(matches!(
+        TrustState::build(&fixture.embedded(), &conflicting, limits())
+            .err()
+            .assured("one serial cannot name two documents")
+            .current_context(),
+        TrustError::SerialConflict
+    ));
+    // A document of another type may share the serial.
+    let revocation = WorkingKeyRevocation {
+        doc: RevocationKind::WorkingKeyRevocation,
+        protocol: 1,
+        serial: fixture.authorization().serial,
+        issued_at: at(-50),
+        root_epoch: 0,
+        kid: fixture.cluster.key_id().clone(),
+        revoked_at: at(-50),
+        reason: "another type".to_owned(),
+    };
+    let distinct_types = TrustDocuments {
+        documents: vec![
+            authorization,
+            SignedTrustDocument::Signatures(fixture.root_sign(&revocation)),
+        ],
+    };
+    assert!(TrustState::build(&fixture.embedded(), &distinct_types, limits()).is_ok());
 }

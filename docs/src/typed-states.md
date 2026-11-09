@@ -210,6 +210,13 @@ typed validation report on failure, and provides no mutable access around that b
 class is a compile-time error. [Node Settings](node-settings.md) owns their operational meaning,
 carriers, defaults, change procedures and source ratchet.
 
+`NodeCapabilities` also holds resolved optional positive CPU/memory measurements and positive
+`PeerReceiveBounds`. `NodeCapabilityRecord` binds those values to the shared `ClusterNodeIdentity`.
+The committed node-name key must match its identity. Schedule topology and transaction planning
+fences include the captured records; data-plane payload attempts and row admission prefixes remain
+volatile. A peer-pool publication retains the committed claim without replacing its connection
+slots, and `RelaySliceCursor` advances a contiguous prefix only after confirmed admission.
+
 Redis subscription plans carry a nonzero bounded message capacity and a validated idle deadline.
 The ingestor's absent subscription means it needs a resume. An installed subscription owns its
 bounded receiver and exact reader task; close and suspend join that task before replacing it.
@@ -360,7 +367,7 @@ expression scope.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
-Consensus's `raft_payload_tls_identity_reset_` keyspaces and current `ClusterState`
+Consensus's `raft_payload_identity_capability_tls_inference_reset_` keyspaces and current `ClusterState`
 metadata encoding, 22, identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations and a `RESET WASM PROCESSOR ... STATE` that takes

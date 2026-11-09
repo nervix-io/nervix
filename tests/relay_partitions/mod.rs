@@ -72,6 +72,21 @@ fn last_status_partitions(world: &ScenarioWorld, relay: &str) -> Vec<PartitionPl
     relay_partition_placements(output, &world.domain, relay)
 }
 
+#[then(expr = "the last cluster status places {int} partitions of relay {string} on node {string}")]
+fn partitions_on_node(world: &mut ScenarioWorld, expected: usize, relay: String, node: String) {
+    let relay = expand_placeholders(world, &relay);
+    let node = expand_placeholders(world, &node);
+    let placements = last_status_partitions(world, &relay);
+    let observed = placements
+        .iter()
+        .filter(|placement| placement.owner == node)
+        .count();
+    assert_eq!(
+        observed, expected,
+        "partition count for relay '{relay}' on node '{node}'"
+    );
+}
+
 /// The placeholder a partition owner is saved under.
 fn partition_owner_placeholder(prefix: &str, partition: u32) -> String {
     format!("{prefix}_{partition}")
