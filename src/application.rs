@@ -179,9 +179,9 @@ mod join_supervision;
 mod leader_redirect;
 mod model_mutation;
 mod model_validation;
-mod node_capabilities;
 mod node_identity;
 mod node_initialization;
+mod node_records;
 mod node_settings;
 mod observability_http;
 mod observation;
@@ -876,7 +876,7 @@ impl Application {
             .metrics()
             .install_node_observations(node_observations.clone());
         let mut background_tasks = Vec::new();
-        background_tasks.push(node_capabilities::spawn(
+        background_tasks.push(node_records::spawn(
             consensus.proposer(),
             cluster.clone(),
             interconnect.clone(),

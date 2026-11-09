@@ -4754,7 +4754,7 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/consensus/src/__fuzz__/node_capabilities__tests__bolero_node_capability_records_preserve_every_committed_value/corpus"
+corpus = "crates/consensus/src/__fuzz__/node_records__tests__bolero_node_capability_records_preserve_every_committed_value/corpus"
 domain_version = 1
 features = []
 id = "node-capability-records"
@@ -4763,8 +4763,8 @@ manifest = "Cargo.toml"
 max_input_bytes = 256
 package = "nervix-consensus"
 random_iterations = 128
-source = "crates/consensus/src/node_capabilities.rs"
-test = "node_capabilities::tests::bolero_node_capability_records_preserve_every_committed_value"
+source = "crates/consensus/src/node_records.rs"
+test = "node_records::tests::bolero_node_capability_records_preserve_every_committed_value"
 test_target = "lib"
 
 [[target]]

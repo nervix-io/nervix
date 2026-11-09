@@ -100,7 +100,7 @@ mod archive_count_tests;
 mod cluster_identity;
 mod cluster_parameters;
 mod command_execution;
-mod node_capabilities;
+mod node_records;
 #[cfg(any(test, feature = "testing"))]
 pub use append_submission_fault::AppendSubmissionFailure;
 use append_submission_fault::AppendSubmissionFault;
@@ -5777,7 +5777,7 @@ fn apply_consensus_command_at(
     let mut changes = StateMachineChanges::default();
     match command {
         ConsensusCommand::AnnounceNodeCapabilities { record } => {
-            return node_capabilities::announce(state, record);
+            return node_records::announce(state, record);
         }
         ConsensusCommand::InstallClusterIdentity { identity } => {
             return cluster_identity::install(state, identity);
