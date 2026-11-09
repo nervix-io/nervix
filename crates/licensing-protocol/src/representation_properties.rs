@@ -135,6 +135,14 @@ fn bolero_protocol_json_roundtrip() {
                 effective_at: now(),
             };
             signed_round_trip(&fixture.roots[0], &succession);
+            let proof_of_life = ProofOfLife {
+                doc: ProofOfLifeKind::ProofOfLife,
+                protocol: 1,
+                issued_at: now(),
+                root_epoch: value,
+                kid: fixture.roots[0].key_id().clone(),
+            };
+            signed_round_trip(&fixture.roots[0], &proof_of_life);
             for mut request in fixture.requests() {
                 let common = request.common_mut();
                 common.display_name = text.clone();

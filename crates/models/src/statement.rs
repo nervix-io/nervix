@@ -461,13 +461,15 @@ pub struct ShowProcessorState {
     pub format: InspectionFormat,
 }
 
-/// A processor whose task-owned state `SHOW <kind> <name> STATE` reads, named with its kind.
+/// A stateful processor that `SHOW <kind> <name> STATE` reads, named with its kind.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum StateInspectedProcessor {
     Reorderer(ReordererName),
     Correlator(CorrelatorName),
+    Deduplicator(DeduplicatorName),
+    WindowProcessor(WindowProcessorName),
 }
 
 #[derive(

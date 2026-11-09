@@ -739,10 +739,11 @@ impl Arbitrary<'_> {
                 })
             }
             StatementVariant::ShowProcessorState => {
-                let processor = if self.entropy.flag() {
-                    StateInspectedProcessor::Reorderer(self.name())
-                } else {
-                    StateInspectedProcessor::Correlator(self.name())
+                let processor = match self.entropy.byte() % 4 {
+                    0 => StateInspectedProcessor::Reorderer(self.name()),
+                    1 => StateInspectedProcessor::Correlator(self.name()),
+                    2 => StateInspectedProcessor::Deduplicator(self.name()),
+                    _ => StateInspectedProcessor::WindowProcessor(self.name()),
                 };
                 let clauses = self.state_inspection_clauses();
                 Statement::ShowProcessorState(ShowProcessorState {

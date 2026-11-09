@@ -27,7 +27,7 @@ use thiserror::Error;
 pub use self::route::{
     CompiledWindowAssignment, CompiledWindowDemand, CompiledWindowExpr, CompiledWindowInvocation,
     CompiledWindowRoute, WINDOW_ARGUMENT_NAMESPACE, WindowArgumentColumn, WindowRouteCompileError,
-    WindowRouteSchemas, argument_snapshot_schema,
+    WindowRouteSchemas, argument_snapshot_column, argument_snapshot_schema,
 };
 pub use crate::program::{WindowAggregateFunction, WindowAggregateInvocation};
 use crate::{
@@ -145,7 +145,8 @@ impl WindowPaneLayout {
 
 /// The shared structure a window keeps for one demand. Functions that can be answered from the
 /// same structure over the same arguments share one demand.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::AsRefStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum WindowAggregateStorageKind {
     /// HyperLogLog registers for approximate distinct counting.
     DistinctSketch,

@@ -978,6 +978,10 @@ elif [[ "${scenario}" == lifetimes ]]; then
 elif [[ "${scenario}" == domain-time ]]; then
     compose_args+=(--profile paced)
 fi
+# A three-node leader crash also qualifies the committed outward TLS policy through its failover.
+if [[ "${scenario}" == leader-crash && "${node_count}" == "3" ]]; then
+    compose_args+=(--file "${script_dir}/compose.outward-tls.yaml" --profile outward-tls)
+fi
 
 compose() {
     run_bounded "${compose_call_timeout:-120}" docker compose "${compose_args[@]}" "$@"
@@ -1305,6 +1309,9 @@ finish() {
         kill "${cluster_restart_sampler_pid}" 2>/dev/null
         wait "${cluster_restart_sampler_pid}" 2>/dev/null
     fi
+    if declare -F outward_tls_stop_commit >/dev/null; then
+        outward_tls_stop_commit
+    fi
     if [[ "${fault}" == *-pause || "${scenario}" == mixed-instability ]]; then
         # A pause fault ends with its injector; one that outlived the controller is removed, and
         # every run-owned node it left paused runs again before anything else is captured.
@@ -1539,7 +1546,7 @@ finish() {
             crash/control-results.json traffic/accepted-input.ndjson \
             diagnostics/target-before-unpause.json diagnostics/target-unpause.txt \
             results/pause-progress.json \
-            traffic/observed-output.ndjson results/crash-progress.json \
+            traffic/observed-output.ndjson results/crash-progress.json results/outward-tls.json \
             results/ledger.json results/ledger.txt results/load-pacing.json \
             results/output-boundary.json traffic/output-boundary.ndjson \
             results/state-load-pacing.json results/paced-load-pacing.json \
@@ -1581,6 +1588,13 @@ finish() {
         while IFS= read -r evidence_path; do
             evidence_paths+=("${evidence_path#"${artifact_dir}/"}")
         done < <(find "${artifact_dir}" -type f -name '*.recording.json' -size +0c 2>/dev/null | sort)
+        # The outward TLS observations of a three-node leader crash: transcripts, probe documents,
+        # verdicts and the commit attempts, judged or not.
+        if [[ -d "${artifact_dir}/crash/outward-tls" ]]; then
+            while IFS= read -r evidence_path; do
+                evidence_paths+=("${evidence_path#"${artifact_dir}/"}")
+            done < <(find "${artifact_dir}/crash/outward-tls" -type f -size +0c 2>/dev/null | sort)
+        fi
         if [[ "${scenario}" == pause-resume ]]; then
             while IFS= read -r evidence_path; do
                 evidence_paths+=("${evidence_path#"${artifact_dir}/"}")
@@ -2090,7 +2104,7 @@ if [[ "${uses_pumba}" == true ]]; then
     resolve_tool_image pumba "${CHAOS_PUMBA_IMAGE}"
     pumba_image_id="${tool_image_ids[pumba]}"
 fi
-if [[ "${scenario}" == endpoints ]]; then
+if [[ "${scenario}" == endpoints || ( "${scenario}" == leader-crash && "${node_count}" == "3" ) ]]; then
     resolve_tool_image python "${CHAOS_PYTHON_IMAGE}"
 fi
 if [[ -n "${binding_image_ref}" ]]; then

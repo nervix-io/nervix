@@ -2488,23 +2488,26 @@ and its grouping, confirmation, integrity and admission behavior remain unchange
 ## Processor State Page Operation
 
 `read_processor_state_page` is the process-targeted Bulk stream request, on the Snapshot subquota,
-that reads one execution unit of a reorderer's held rows or a correlator's pending records from the
+that reads one execution unit of a stateful processor from the
 unit's owner. It names the domain, the processor's kind and name, the execution unit, the committed
 control revision, the schema fingerprint, the resolved branch selector, the optional branch/offset
 position, the row and byte limits and the exact owner process. The handler verifies the control
 cut, the kind, the schema, the unit owner and the target incarnation, then asks the unit's branch
 tasks for bounded copies, as [Data-Plane
 Concurrency](data-plane-concurrency.md#processor-state-inspection-requests) describes, and gathers
-the returned rows into Arrow columns on the bounded Bulk executor. A zero-row request returns only
-the counts, which `DESCRIBE REORDERER` and `DESCRIBE CORRELATOR` use.
+the returned rows into Arrow columns on the bounded Bulk executor. Deduplicator and window reads
+capture published generations instead of asking branch tasks. Sealed window metadata and columns
+are decoded under bounded admission, with cancellation and storage charges retained through
+encoding. A zero-row request returns only counts for the processor's `DESCRIBE` summary.
 
 The stream frames an eight-byte little-endian descriptor length, a bounded typed rkyv descriptor and
 one native Arrow snapshot section per returned section. The descriptor carries the read origin, the
 complete counts, the returned offset and last branch, the returned rows as runs of one section and
 one branch with the branch's typed key fields, and each section's complete field list, held row
-count and body identity: exact byte length and SHA-256 digest. A descriptor names at most two
-sections, as a processor's kind fixes them: a reorderer's `pending` rows, or a correlator's `left`
-and `right` records. The receiver bounds all buffering, verifies every digest before decoding,
+count and body identity: exact byte length and SHA-256 digest. A descriptor names at most three
+sections, fixed by processor kind: reorderer `pending`; correlator `left` and `right`; deduplicator
+`keys`; or window `rows`, `header` and `accumulators`. Window metadata runs count toward section
+bodies and bytes, while only retained-row runs advance the row offset or consume its limit. The receiver bounds all buffering, verifies every digest before decoding,
 checks each section's payload fields against its own committed schema, decodes each section with
 exactly the declared field list, and checks the run rows, the returned offset and the row counts
 against the descriptor before any row reaches a Row frame. A typed refusal carries no body. No operator payload crosses as Row frames or row maps; the
