@@ -109,7 +109,7 @@ fn endpoint_dispatch_response(
     };
     let status = match reply.outcome {
         EndpointRequestOutcome::Completed => StatusCode::OK,
-        EndpointRequestOutcome::Refused => StatusCode::BAD_REQUEST,
+        EndpointRequestOutcome::Refused(_) => StatusCode::BAD_REQUEST,
         EndpointRequestOutcome::NotAdmitted(_)
         | EndpointRequestOutcome::ProcessingFailed(_)
         | EndpointRequestOutcome::Interrupted => StatusCode::SERVICE_UNAVAILABLE,

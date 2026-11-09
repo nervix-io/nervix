@@ -1018,15 +1018,26 @@ impl IngestorQuiesceControl {
         IngestorQuiesceIntake::Buffered
     }
 
-    pub(super) fn endpoint_admission(&self) -> Result<(), Option<Duration>> {
+    /// Whether this ingestor's quiesce lets a new endpoint request in now, or the retry delay its
+    /// refusal names. Nothing is counted, so a request answered elsewhere is not counted twice.
+    pub(super) fn endpoint_availability(&self) -> Result<(), Option<Duration>> {
         let IngestorQuiesceDecision::Quiesced { handling, .. } = self.decision() else {
             return Ok(());
         };
         if let IngestorQuiesceHandling::EndpointBuffer { .. } = handling {
             return Ok(());
         }
-        self.record_rejected(1);
         Err(handling.retry_after())
+    }
+
+    /// Admits a new endpoint request as [`Self::endpoint_availability`] decides, counting a
+    /// refusal as rejected.
+    pub(super) fn endpoint_admission(&self) -> Result<(), Option<Duration>> {
+        let availability = self.endpoint_availability();
+        if availability.is_err() {
+            self.record_rejected(1);
+        }
+        availability
     }
 
     /// Waits until this ingestor is quiesced, which a delivery of a retained payload must not

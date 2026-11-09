@@ -1050,7 +1050,10 @@ complete acknowledgement window on `mode:`, and `quiesce: SUSPEND`. Its runtime 
 `schema:`, `owner:`, `admission:`, `producers:`, `forwarded producers:`, `outstanding batches:`,
 `outstanding bytes:`, and `admitted batches:`. The
 node that executes the ingestor also exports the same counts and every answered batch as metrics;
-see [Metrics And Observability](metrics-and-observability.md#client-ingestors).
+see [Metrics And Observability](metrics-and-observability.md#client-ingestors). An `HTTP ENDPOINT`
+or `WEBSOCKETS ENDPOINT` ingestor answers an acknowledged request in this vocabulary too, and counts
+every request and frame it answers in `nervix_ingestor_endpoint_requests_total` by outcome; see
+[`HTTP ENDPOINT` And `WEBSOCKETS ENDPOINT`](#http-endpoint-and-websockets-endpoint).
 
 ## External Names
 
@@ -3327,6 +3330,14 @@ WebSocket upgrades with 503. A stopped or absent intake refuses new requests too
 by unacknowledged ingestors accepts when at least one accepts; it includes `Retry-After` only when
 all refusals supply a delay. When an acknowledged binding participates, success waits for its root;
 a failure after any binding admitted the input is not reported as `not_admitted`.
+
+Each node counts every request and WebSocket data frame it receives once for each ingestor bound to
+the route, in `nervix_ingestor_endpoint_requests_total` under the outcome that ingestor reached:
+`accepted`, `busy`, `refused`, `not_admitted`, `decode_rejected` or `processing_failed`. An
+ingestor that refuses the requests of a route it shares with an available ingestor counts each of
+them once. `DESCRIBE INGESTOR` shows the family under `source:` for the node that answers it;
+[Ingestor Source Interactions](metrics-and-observability.md#ingestor-source-interactions) defines
+each outcome.
 
 A WebSocket endpoint in `MODE ACK` requires an explicit signaling protocol. Its outbound wire
 format encodes the same `outcome` / `cause` object for each data frame, both during `ACCEPT DATA`

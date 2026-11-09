@@ -412,6 +412,13 @@ test-ingestor-read-metrics *args: build-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/ingestor_read_metrics.feature {{ quote(args) }}
 
+# Endpoint request outcome regressions use in-process nodes and the public HTTP listener.
+test-endpoint-request-metrics *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/endpoint_request_metrics.feature {{ quote(args) }}
+
 # Exercise retained interaction metrics and the native ingestor owners without client fixtures.
 test-ingestor-interactions filter="runtime::ingestors::connector::" *args: build-deps
     #!/usr/bin/env bash
