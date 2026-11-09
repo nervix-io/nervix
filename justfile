@@ -407,6 +407,14 @@ test-endpoint-heads *args: build-deps build-plexus-format build-test-cli build-d
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/kinded_endpoint_heads.feature {{ quote(args) }}
 
+# Cluster identity, replication and restore checks use the native session client.
+test-cluster-identity *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    # Absolute globs keep Cucumber's file walk within the feature directory.
+    cargo test --package nervix-scenarios --test scenarios -- --input "$(pwd)/tests/features/runtime/cluster_identity*.feature" {{ quote(args) }}
+
 # Placement and console scenarios use native nodes and public clients, without paced simulation.
 test-partition-placement feature="tests/features/cluster/partition_placement.feature" *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash

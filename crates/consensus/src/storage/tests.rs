@@ -1,5 +1,7 @@
 //! Recovery and publication checks through the Raft storage traits.
 
+mod cluster_identity_tests;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroU64,
