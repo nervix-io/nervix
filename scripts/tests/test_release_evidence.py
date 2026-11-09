@@ -132,6 +132,7 @@ class InventoryTests(unittest.TestCase):
                 "turmoil": "turmoil",
                 "deloxide": "deloxide",
                 "client-conformance": "client-conformance",
+                "client-suites": None,
                 "chaos-smoke": "chaos",
                 "chaos-soak": "chaos-soak",
             },

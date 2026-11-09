@@ -1162,6 +1162,7 @@ pub trait EmitterHostServices:
     + EmitterGeneralErrorHandler
     + EmitterBoundedExecution
     + EmitterPayloadObserver
+    + crate::ConnectorEventProvider
     + Send
     + Sync
     + 'static
@@ -1176,6 +1177,7 @@ impl<T> EmitterHostServices for T where
         + EmitterGeneralErrorHandler
         + EmitterBoundedExecution
         + EmitterPayloadObserver
+        + crate::ConnectorEventProvider
         + Send
         + Sync
         + 'static
@@ -1203,6 +1205,21 @@ impl EmitterReadiness for EmitterHost {
 }
 
 impl EmitterHost {
+    /// Resolves one declared observation at connector construction.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "resolves a declared event once before publication"
+        )
+    )]
+    pub fn event_counter(
+        &self,
+        event: nervix_models::ConnectorEvent,
+    ) -> error_stack::Result<crate::ConnectorEventCounter, crate::UndeclaredConnectorEvent> {
+        self.inner.services.event_counter(event)
+    }
+
     pub fn new(services: impl EmitterHostServices) -> Self {
         Self {
             inner: Arc::new(EmitterHostInner {

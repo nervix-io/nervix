@@ -27,8 +27,9 @@ A fresh JVM's packaging check loads the jar without JUnit, an explicit native-li
 
 ## Connect
 
-Use a session URI, an existing domain and credentials. TLS listeners use `https://`. For a private
-certificate authority, pass its PEM bytes to `caCertificate`. `REQUIRED` refuses a plaintext URI;
+Use a session URI, an existing domain and credentials. TLS listeners use `https://`. Pass the
+certificate authority's PEM bytes to `caCertificate`: the client loads no system roots, so every
+TLS connection needs that explicit authority. `REQUIRED` refuses a plaintext URI;
 `PREFERRED` also supports a plaintext listener. Both requirements verify the peer when using TLS.
 
 ```java
@@ -76,6 +77,29 @@ Other dispositions include leadership or transaction changes, an unknown outcome
 conflict or expiry, and a stale preview. Follow the
 [command completion contract](command-completion.md) for their recovery rules.
 
+### Inspect Materialized State
+
+`Outcome.stateInspection()` returns an independently retained inspection, or `null` when the
+command returned no inspection. Check `rejection()` against `InspectionRejection` before using
+page fields. A refusal has no counts or units; a successful empty page has zero counts.
+`json()` preserves the complete typed envelope.
+
+Complete `counts()` cover the selected cut. Units carry their own counts, owner, ordered
+replicas, captured origin, `InspectionUnitKind` and `index()`. `InspectionStage` distinguishes live and stored
+state. Sections expose schemas, omitted rows and positional watermark columns. Resume the opaque
+`continuation()` with `AFTER` and the same selection; `STALE_CONTINUATION` requires a new read.
+
+Each `InspectionFrame` retains one verified Row frame and schema. Inspection, unit, section, frame and schema handles close independently. A frame's read-only `ByteBuffer` and derived slices keep their native lease after every parent handle closes, including the frame itself.
+These are exact session Row/Cell bytes, including types, nulls and redaction; they are not Arrow IPC.
+
+Counts, origin coordinates and unit indices preserve unsigned 64-bit values in Java `long` bits;
+use `Long.toUnsignedString` when displaying them.
+
+```java
+{{#include ../../tests/client_conformance/java/suite/cluster/InspectionTests.java:inspection}}
+```
+
+
 ## Complete A Statement
 
 `suggest` returns a `Suggestions` page. Check its status, then apply each candidate's replacement
@@ -112,10 +136,19 @@ Use the handle the new event carries. Restoration sees subsequent rows and does 
 {{#include ../../tests/client_conformance/java/suite/cluster/RecoveryTests.java:subscription_interrupted}}
 ```
 
+`RESTORATION_FAILED` says the new server session refused for now to open the subscription again.
+Its `restorationFailure()` carries the typed `RestorationCause`, the server's message and
+`waitNanos`, how long the client waits before it tries again; read it only for that event kind.
+The subscription stays and the client keeps trying. The suite asks its scenario to refuse one
+restoration, checks those details, then reads rows after a later attempt succeeds:
+
+```java
+{{#include ../../tests/client_conformance/java/suite/cluster/RecoveryTests.java:restoration_failed}}
+```
+
 `ENDED` is terminal for that generation. Its reason distinguishes a removed relay from a changed
 relay. Delete a subscription with `DELETE SUBSCRIPTION <name>;`; creating that name again obtains
-a new generation. `RESTORATION_FAILED` carries a typed cause, message and retry wait; read it only
-for that event kind. `DELIVERY_LOST`, `ROWS_SKIPPED` and `CONSUMER_OVERFLOW` report delivery gaps.
+a new generation. `DELIVERY_LOST`, `ROWS_SKIPPED` and `CONSUMER_OVERFLOW` report delivery gaps.
 
 ```java
 {{#include ../../tests/client_conformance/java/suite/cluster/RecoveryTests.java:subscription_ended}}

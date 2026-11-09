@@ -216,13 +216,6 @@ pub(crate) enum TransactionPlanningError {
         node: NodeRef,
         resource: ResourceName,
     },
-    #[error(
-        "WASM state reset names domain '{requested}', but the transaction is bound to '{domain}'"
-    )]
-    ResetDomainMismatch {
-        domain: DomainName,
-        requested: DomainName,
-    },
     #[error("WASM processor '{processor}' does not exist in domain '{domain}'")]
     ResetProcessorNotFound {
         domain: DomainName,
@@ -297,7 +290,6 @@ impl TransactionPlanningError {
             | Self::ResourceNotFound { .. }
             | Self::RebindMemberNotFound { .. }
             | Self::RebindMemberDoesNotBind { .. }
-            | Self::ResetDomainMismatch { .. }
             | Self::ResetProcessorNotFound { .. }
             | Self::ResetProcessorNotRunning { .. }
             | Self::ResetInvalidScope { .. }

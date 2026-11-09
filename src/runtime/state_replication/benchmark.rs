@@ -64,6 +64,7 @@ impl StateReplicationBenchmark {
             offsets_placement.entity(),
             ScheduledStateAssignment {
                 identity: ScheduledStateIdentity {
+                    inferencer_model: None,
                     schema_fingerprint: SchemaFingerprint::from_digest([7; 32]),
                     wasm_state_generations: None,
                 },
@@ -98,6 +99,7 @@ impl StateReplicationBenchmark {
             ),
             ScheduledStateAssignment {
                 identity: ScheduledStateIdentity {
+                    inferencer_model: None,
                     schema_fingerprint: SchemaFingerprint::from_digest([7; 32]),
                     wasm_state_generations: None,
                 },
@@ -283,6 +285,7 @@ impl ReplicaCatchUpBenchmark {
                 identity.clone(),
                 ScheduledStateAssignment {
                     identity: ScheduledStateIdentity {
+                        inferencer_model: None,
                         schema_fingerprint: SchemaFingerprint::from_digest([7; 32]),
                         wasm_state_generations: None,
                     },

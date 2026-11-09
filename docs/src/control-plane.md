@@ -315,6 +315,14 @@ the first attempt and a resuming leader apply this rule. Repeating the outstandi
 this execution and waits for the retained terminal result. Atomicity still does not span the whole
 transaction.
 
+Before its internal transaction commits, a model command may encounter an orphaned alteration
+pause. After its whole-transaction progress recheck, a typed paused-domain refusal triggers a
+conditional recovery under its admitted mutation lease. The applied consensus operation checks
+that exact fence, the restore activation gate and the absence of a same-domain `COMMITTING`
+transaction atomically. An active local alteration prevents the attempt; no new alteration guard
+is acquired. A confirmed recovery replans the command; an unconfirmed one keeps its identity and
+lease available for retry. This leaves ordinary transaction cleanup and backup cuts unchanged.
+
 Finished transactions remain as small tombstones containing the outcome, step progress, errors,
 and executed quiesce levels. A tombstone also keeps the request identity, position, source digest
 and admitted result of every statement the transaction accepted, without the statement itself. An
@@ -906,6 +914,16 @@ one Raft operation. The leader rolls back an unpublished local registry candidat
 every node synchronizes its registry cache from the committed schedule across leadership changes.
 
 What it does not do is provide transactional semantics for the actual records flowing through the graph. Message batches and ACK state are data-plane hot-path state and are never persisted by the control plane.
+
+## Cluster Identity Bootstrap
+
+The membership loop asks the local leader to install a permanent cluster identity whenever applied
+state has none. It samples creation time once, submits a generated candidate, and waits for the
+commit before seeding initial cluster parameters. Generation or executor admission failures remain
+retryable. A later leader can finish an interrupted bootstrap without replacing an installed
+identity. First-commit-wins application needs no graph notification or new coordination protocol.
+[Consensus Storage](consensus-storage-and-replication.md#permanent-cluster-identity) owns persistence
+and recovery; [Node Settings](node-settings.md#permanent-cluster-identity) owns public inspection.
 
 ## Cluster Policy Administration
 

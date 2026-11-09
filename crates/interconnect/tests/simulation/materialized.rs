@@ -1,6 +1,6 @@
 //! Layer: test harness outside the product layer order.
-//! Owns: typed materialized branch state transfer across a partition, repair and transport-owner
-//!   replacement.
+//! Owns: typed materialized and inferencer branch state transfer across a partition, repair and transport-owner
+//!   replacement. Inferencer bytes are opaque; native frame properties qualify their representation.
 //! May depend on: the production interconnect, shared simulation driver and Arrow fixtures.
 //! Must not know: server graphs, materialized snapshot decoding or disk durability.
 
@@ -50,20 +50,60 @@ fn placement(tenant: &str) -> StatePlacementEnvelope {
     }
 }
 
-fn serve(transport: &Transport, revision: u64) {
+/// Transport qualification treats checkpoint bytes as opaque. Native framing has its own
+/// production-owner codec properties; this fixture distinguishes both branch and revision.
+#[derive(Clone, Copy)]
+enum CheckpointFixture {
+    Materialized,
+    MaterializedPage,
+    Inferencer,
+}
+impl CheckpointFixture {
+    fn placement(self, tenant: &str) -> StatePlacementEnvelope {
+        let mut placement = placement(tenant);
+        if let Self::Inferencer = self {
+            placement.state = RuntimeState::Inferencer {
+                schema: SchemaFingerprint::from_digest([7; 32]),
+                model: nervix_models::InferencerModelFingerprint::from_digest([9; 32]),
+            };
+            placement.kind = ModelKind::Inferencer;
+            placement.identifier = ModelName::parse("running").assured("valid inferencer name");
+        }
+        placement
+    }
+    fn payload(self, tenant: &str, revision: u64) -> Vec<u8> {
+        match self {
+            Self::Materialized | Self::MaterializedPage => large_arrow_batch(),
+            Self::Inferencer => {
+                let branch = if tenant == "acme" { 11_u8 } else { 110_u8 };
+                let mut payload = vec![branch; 3 * 1024 * 1024];
+                payload[..size_of::<u64>()].copy_from_slice(&revision.to_le_bytes());
+                payload
+            }
+        }
+    }
+}
+
+fn serve(transport: &Transport, revision: u64, fixture: CheckpointFixture) {
     transport
         .register_handler::<StateSyncRequest, _, _>(move |context, request| async move {
             assert_eq!(context.peer_node_id().as_str(), "client");
             assert!(
-                request.placement == placement("acme") || request.placement == placement("beta")
+                request.placement == fixture.placement("acme")
+                    || request.placement == fixture.placement("beta")
             );
             assert_eq!(request.after_lsm, Some(revision - 1));
+            let tenant = if request.placement == fixture.placement("acme") {
+                "acme"
+            } else {
+                "beta"
+            };
+            let payload = fixture.payload(tenant, revision);
             StateSyncResponse {
                 result: Ok(Some(StateSnapshotEnvelope {
                     lsm: revision,
-                    length: u64::try_from(large_arrow_batch().len())
-                        .assured("batch length fits u64"),
-                    digest: *blake3::hash(&large_arrow_batch()).as_bytes(),
+                    length: u64::try_from(payload.len()).assured("batch length fits u64"),
+                    digest: *blake3::hash(&payload).as_bytes(),
                 })),
             }
         })
@@ -76,10 +116,15 @@ fn serve(transport: &Transport, revision: u64) {
                 assert_eq!(context.peer_node_id().as_str(), "client");
                 assert_eq!(request.lsm, revision);
                 assert!(
-                    request.placement == placement("acme")
-                        || request.placement == placement("beta")
+                    request.placement == fixture.placement("acme")
+                        || request.placement == fixture.placement("beta")
                 );
-                let payload = large_arrow_batch();
+                let tenant = if request.placement == fixture.placement("acme") {
+                    "acme"
+                } else {
+                    "beta"
+                };
+                let payload = fixture.payload(tenant, revision);
                 let length = u64::try_from(payload.len()).assured("batch length fits u64");
                 let bytes = executor
                     .charge_owned(MemoryClass::RestoreMetadata, payload)
@@ -176,7 +221,7 @@ fn materialized_branch_state_transfers_reconnect_to_the_replacement_owner() {
 }
 
 fn exchange(run: ScenarioRun) -> Result<(), SimulationError> {
-    exchange_operation(run, false)
+    exchange_fixture(run, CheckpointFixture::Materialized)
 }
 
 #[test]
@@ -187,7 +232,9 @@ fn materialized_inspection_pages_recover_after_partition_and_lost_stream_chunks(
                      transport, then read a bounded page again",
         seeds: &[51],
     }
-    .check(checkpoint_config, |run| exchange_operation(run, true));
+    .check(checkpoint_config, |run| {
+        exchange_fixture(run, CheckpointFixture::MaterializedPage)
+    });
 }
 
 async fn open_state_stream(
@@ -195,9 +242,9 @@ async fn open_state_stream(
     peer: &ClusterNodeName,
     revision: u64,
     tenant: &str,
-    page: bool,
+    fixture: CheckpointFixture,
 ) -> Result<IncomingByteStream, Report<RequestError>> {
-    if page {
+    if let CheckpointFixture::MaterializedPage = fixture {
         client
             .request_stream_with_timeout(
                 peer,
@@ -224,7 +271,7 @@ async fn open_state_stream(
             .request_stream(
                 peer,
                 FetchStateCheckpoint {
-                    placement: placement(tenant),
+                    placement: fixture.placement(tenant),
                     lsm: revision,
                     read: StateCheckpointRead::Published,
                 },
@@ -233,7 +280,7 @@ async fn open_state_stream(
     }
 }
 
-fn exchange_operation(run: ScenarioRun, page: bool) -> Result<(), SimulationError> {
+fn exchange_fixture(run: ScenarioRun, fixture: CheckpointFixture) -> Result<(), SimulationError> {
     let seed = run.seed();
     let authority = Authority::new();
     let server_credentials = authority.issue("server");
@@ -258,13 +305,13 @@ fn exchange_operation(run: ScenarioRun, page: bool) -> Result<(), SimulationErro
             async move {
                 let result = HostSupervisor::run(async move {
                     let first = bind("server", credentials.clone(), seed).await;
-                    serve(&first, 1);
+                    serve(&first, 1, fixture);
                     ready.send_replace(true);
                     wait_for_transfer(&mut replace).await;
                     first.shutdown().await;
                     trace.record("server", "first materialized transport owner ended");
                     let current = bind("server", credentials, seed + 2).await;
-                    serve(&current, 2);
+                    serve(&current, 2, fixture);
                     replaced.send_replace(true);
                     wait_for_transfer(&mut done).await;
                     current.shutdown().await;
@@ -304,7 +351,7 @@ fn exchange_operation(run: ScenarioRun, page: bool) -> Result<(), SimulationErro
                                             .request(
                                                 &peer,
                                                 StateSyncRequest {
-                                                    placement: placement(tenant),
+                                                    placement: fixture.placement(tenant),
                                                     after_lsm: Some(revision - 1),
                                                 },
                                             )
@@ -341,7 +388,7 @@ fn exchange_operation(run: ScenarioRun, page: bool) -> Result<(), SimulationErro
                                 nervix_primitives::time::timeout(Duration::from_secs(90), async {
                                     loop {
                                         let opened = open_state_stream(
-                                            &client, &peer, revision, tenant, page,
+                                            &client, &peer, revision, tenant, fixture,
                                         )
                                         .await;
                                         match opened {
@@ -368,11 +415,15 @@ fn exchange_operation(run: ScenarioRun, page: bool) -> Result<(), SimulationErro
                                 payload.extend_from_slice(chunk.as_ref());
                             }
                             assert!(
-                                payload == large_arrow_batch(),
+                                payload == fixture.payload(tenant, revision),
                                 "the typed state payload transfers unchanged"
                             );
                             assert_eq!(*blake3::hash(&payload).as_bytes(), snapshot.digest);
-                            assert_eq!(decode_arrow(&payload), 3);
+                            if let CheckpointFixture::Materialized
+                            | CheckpointFixture::MaterializedPage = fixture
+                            {
+                                assert_eq!(decode_arrow(&payload), 3);
+                            }
                         }
                         trace.record(
                             "client",
@@ -386,7 +437,7 @@ fn exchange_operation(run: ScenarioRun, page: bool) -> Result<(), SimulationErro
                             let snapshot =
                                 fault_snapshot.assured("the first branch was transferred");
                             let mut interrupted =
-                                open_state_stream(&client, &peer, snapshot.lsm, "acme", page)
+                                open_state_stream(&client, &peer, snapshot.lsm, "acme", fixture)
                                     .await
                                     .assured("the checkpoint stream opens before the fault");
                             let first = interrupted
@@ -432,4 +483,18 @@ fn exchange_operation(run: ScenarioRun, page: bool) -> Result<(), SimulationErro
             Ok(())
         });
     })
+}
+
+#[test]
+fn inferencer_branch_state_transfers_reconnect_to_the_replacement_owner() {
+    Scenario {
+        name: "inferencer state owner replacement",
+        fault_plan: "lose a multi-chunk inference checkpoint stream under partition, repair, \
+                     replace the transport owner, and verify complete distinct branch and \
+                     revision bytes",
+        seeds: &[51, 53],
+    }
+    .check(checkpoint_config, |run| {
+        exchange_fixture(run, CheckpointFixture::Inferencer)
+    });
 }

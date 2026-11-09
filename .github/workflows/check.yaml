@@ -703,6 +703,10 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      # Install the archived wheel; the restored test job never builds it.
+      - name: Setup uv for Python host suites
+        uses: astral-sh/setup-uv@v6
+
       # The tests sync their storage below /tmp and the checkout. A single-use runner needs no crash
       # consistency, so those volumes drop their write barriers, as the build job's kache start step
       # drops them for its store.
@@ -1703,21 +1707,8 @@ jobs:
       - name: Publish kache report after the build
         run: python3 scripts/publish_kache_report.py --phase build "${RUNNER_TEMP}/kache-build-report"
 
-      - name: JVM binding boundary and embedded properties
-        run: just test-client-jvm
-
-      - name: Test the native Ruby boundary and bounded representations
-        run: just test-client-ruby
-
-      # The Python package's suite on its boundary tier, from the environment the build prepared.
-      - name: Python package boundary tier
-        run: just test-client-python-api-run
-
-      - name: C and C++ boundary tiers with and without sanitizers
-        run: |
-          just test-client-native-api-run c
-          just test-client-native-api-run cpp
-
+      # The runner gates every cluster on the prepared boundary tiers. Ordinary tests also run
+      # them and the embedded JNI/Ruby properties from the instrumented unit archive.
       - name: Client conformance and host suites
         run: just test-client-conformance-run
 
@@ -1999,6 +1990,10 @@ jobs:
         if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
         run: just coverage-wasm-bindgen
 
+      - name: External Python binding chaos controls
+        if: contains(github.event.pull_request.labels.*.name, 'extra-runners')
+        run: just coverage-chaos-binding
+
       # The collector that the steps below run their checks through, including its refusal of
       # every incomplete collection.
       - name: Native coverage collector
@@ -2162,6 +2157,7 @@ jobs:
             target/connector-matrix/python.lcov
             target/ci-selection/python.lcov
             target/wasm-bindgen-coverage/python.lcov
+            target/chaos-binding-coverage/python.lcov
             target/client-suites/python.lcov
             target/coverage-source-root.txt
             target/typed-ratchet/cache-qualification/**/qualification.json

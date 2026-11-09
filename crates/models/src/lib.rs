@@ -41,6 +41,7 @@ mod emitter_envelope;
 mod execution_unit;
 mod expression;
 mod http_request;
+mod inferencer_model_fingerprint;
 mod ingestor_input;
 mod json_path;
 mod message_error;
@@ -50,8 +51,10 @@ mod names;
 mod node_endpoint;
 mod node_ref;
 mod partition_epoch;
+mod password_credential;
 mod placement;
 mod prerequisites;
+pub use password_credential::{PasswordCost, PasswordCredential};
 mod processor;
 mod quiesce;
 mod rebind_resource;
@@ -120,26 +123,26 @@ pub use connector::{
     ClientDeclaration, ClientEmitter, ClientEmitterChange, ClientEmitterEntity, ClientEmitterMode,
     ClientIngestMode, ClientIngestorAlteration, ClientIngestorEntity, ClientPoolBounds,
     ClientPoolBoundsError, ClientPooling, ClientProducerIngestor, ClientProducerIngestorChange,
-    ClientResourceMount, ConfiguredClientRef, ConnectorKind, CreateClientAzureBlob,
+    ClientResourceMount, ConfiguredClientRef, ConnectorEvent, ConnectorKind, CreateClientAzureBlob,
     CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
     CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
     CreateClientOtel, CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar,
     CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
     CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq, DEFAULT_CONNECT_TIMEOUT,
-    DeadlineKey, DeclaredBounds, DeclaredBuffer, DeclaredDelivery, DeclaredPublishing,
-    DeclaredQuiesce, DeclaredValueMapping, DeclaredWait, DriverUrl, EmitterBodyForm, EmitterChange,
-    EmitterClientReference, EmitterDeclaration, EmitterEntity, EmitterEntityBody,
-    EmitterEntityCapabilities, EmitterEntityChange, EmitterEntityKind, EmitterEntityMetadata,
-    EmitterEntityModel, EmitterModeChange, EmitterPayloadFormat, EmitterPublication,
-    EmitterReference, EmitterReferenceKind, EmitterValueMapping, EmitterValueMappings,
-    EndpointIngestMode, EnvelopeClauseForm, EnvelopeClauseKind, EnvelopeValueType, ExternalName,
-    ExternalNameDeclaration, ExternalNameError, GcsConfigEntry, HTTP_CLIENT_SECRET_KEY_PREFIX,
-    HTTP_DEFAULT_MAX_BODY_SIZE, HeaderLayout, HeaderModel, HeaderNames, HeaderPair,
-    HeaderPairsError, HeaderValueType, HeaderValues, HostPort, HostPortError, HttpConfigEntry,
-    HttpEmitter, HttpEmitterChange, HttpEmitterEntity, HttpEndpointIngestor,
-    HttpEndpointIngestorChange, HttpIngestor, HttpIngestorEntity, HttpRequestEmitter,
-    HttpRequestEmitterChange, HttpRequestEmitterMode, HttpRequestHeader, HttpRequestHeaderValue,
-    HttpRequestHeadersError, HttpRequestIngestMode, HttpRequestIngestor,
+    DeadlineKey, DeclaredBounds, DeclaredBuffer, DeclaredDelivery, DeclaredEvents,
+    DeclaredPublishing, DeclaredQuiesce, DeclaredValueMapping, DeclaredWait, DriverUrl,
+    EmitterBodyForm, EmitterChange, EmitterClientReference, EmitterDeclaration, EmitterEntity,
+    EmitterEntityBody, EmitterEntityCapabilities, EmitterEntityChange, EmitterEntityKind,
+    EmitterEntityMetadata, EmitterEntityModel, EmitterModeChange, EmitterPayloadFormat,
+    EmitterPublication, EmitterReference, EmitterReferenceKind, EmitterValueMapping,
+    EmitterValueMappings, EndpointIngestMode, EnvelopeClauseForm, EnvelopeClauseKind,
+    EnvelopeValueType, ExternalName, ExternalNameDeclaration, ExternalNameError, GcsConfigEntry,
+    HTTP_CLIENT_SECRET_KEY_PREFIX, HTTP_DEFAULT_MAX_BODY_SIZE, HeaderLayout, HeaderModel,
+    HeaderNames, HeaderPair, HeaderPairsError, HeaderValueType, HeaderValues, HostPort,
+    HostPortError, HttpConfigEntry, HttpEmitter, HttpEmitterChange, HttpEmitterEntity,
+    HttpEndpointIngestor, HttpEndpointIngestorChange, HttpIngestor, HttpIngestorEntity,
+    HttpRequestEmitter, HttpRequestEmitterChange, HttpRequestEmitterMode, HttpRequestHeader,
+    HttpRequestHeaderValue, HttpRequestHeadersError, HttpRequestIngestMode, HttpRequestIngestor,
     HttpRequestIngestorAlteration, HttpRequestIngestorChange, HttpRequestPublishingMode,
     IcebergCatalog, IcebergCatalogProperties, IcebergEmitter, IcebergEmitterChange,
     IcebergEmitterEntity, IcebergFileIoEntry, IcebergLocationError, IcebergNamespace,
@@ -270,6 +273,7 @@ pub use http_request::{
     HttpApplicationHeaders, HttpBodyMode, HttpHeaderLimits, HttpHeaderName, HttpHeaderValue,
     HttpMethod, HttpOrigin, HttpRequestFieldError, HttpTarget,
 };
+pub use inferencer_model_fingerprint::InferencerModelFingerprint;
 pub use ingestor_input::{IngestorInput, TransportIngestorInput};
 pub use json_path::{JsonPath, JsonPathError, JsonPathStep};
 pub use message_error::{

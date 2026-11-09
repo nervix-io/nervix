@@ -108,7 +108,7 @@ async fn an_acknowledged_batch_consumes_a_payload_its_codec_refuses_and_delivers
     );
     assert_eq!(
         acknowledgement.wait(Duration::from_secs(10)).await,
-        IngestorAcknowledgementOutcome::Ack,
+        IngestorAcknowledgementOutcome::Acknowledged,
         "the batch is acknowledged with its refused payload"
     );
     assert_rejected(&fixture, &report, 1);
@@ -133,7 +133,7 @@ async fn an_acknowledged_batch_its_codec_refuses_whole_is_acknowledged() {
     let second = next_error(&mut errors).await;
     assert_eq!(
         acknowledgement.wait(Duration::from_secs(10)).await,
-        IngestorAcknowledgementOutcome::Ack
+        IngestorAcknowledgementOutcome::Acknowledged
     );
     assert!(first.starts_with(REJECTION), "{first}");
     assert_rejected(&fixture, &second, 2);

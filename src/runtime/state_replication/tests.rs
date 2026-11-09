@@ -1837,6 +1837,7 @@ fn runtime_state_store_purges_only_stale_schema_fingerprints() {
                     nervix_models::Unit::SINGLE,
                 ),
                 ScheduledStateIdentity {
+                    inferencer_model: None,
                     schema_fingerprint: current_schema,
                     wasm_state_generations: None,
                 },
@@ -2314,6 +2315,9 @@ fn an_owner_lists_the_branch_checkpoints_of_the_states_it_owns(#[case] kind: Mod
     );
 
     let revision = match &state {
+        PublishedBranchState::Inferencer(_) => {
+            unreachable!("this fixture constructs deduplicator and window publications")
+        }
         PublishedBranchState::Deduplicator(state) => {
             let mut keyspace = ReplicatedDeduplicatorState::keyspace(state);
             assert!(keyspace.reserve_new_key(
@@ -2924,6 +2928,7 @@ async fn evicting_a_window_branch_withdraws_the_state_of_the_unit_that_evicts_it
         ScheduledStateAssignment {
             identity: ScheduledStateIdentity {
                 schema_fingerprint: SchemaFingerprint::from_digest([7; 32]),
+                inferencer_model: None,
                 wasm_state_generations: None,
             },
             checkpoint_owners: None,

@@ -75,7 +75,10 @@ impl ModelArchive {
             Some(UsersRecord {
                 users: vec![UserRecord {
                     name: UserName::parse("synthetic").assured("the synthetic user is valid"),
-                    password_hash: "$argon2id$v=19$m=8,t=1,p=1$c3ludGhldGlj$c3ludGhldGlj".into(),
+                    password_credential: nervix_models::PasswordCredential::from_parts(
+                        210000, [54; 16], [54; 64],
+                    )
+                    .assured("the fixed credential has a bounded iteration count"),
                 }],
             })
         } else {
@@ -86,6 +89,9 @@ impl ModelArchive {
                 producer_version: "property".into(),
                 language_version: nervix_models::PLEXUS_LANGUAGE_VERSION.into(),
                 cluster_id: arbitrary.string(),
+                cluster_uid: "72f3a93e-64f0-40a5-b95d-790c8a738fee"
+                    .parse()
+                    .assured("the archive fixture UID is version four"),
                 captured_at: Timestamp::from_unix_nanos(arbitrary.entropy().any_i64()),
                 scope: ArchiveScope::Cluster,
                 resources: BackupResources::Included,

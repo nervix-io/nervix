@@ -9,6 +9,13 @@
 //!   choice contract, and the console request dispatcher owned by the parent module.
 //! - **Must not know.** Registry state, command execution internals, subscription tabs, or how the
 //!   server resolves a choice.
+//!
+//! Every form editor, and every large section of one, returns its view erased with `into_any` at
+//! its component boundary. The dialog renders every form in one view, so an editor that returned
+//! its concrete view would spell that whole nested type in the name of every generic the dialog
+//! instantiates over it, and in the debug information of each, while an unoptimized server-side
+//! render would move the complete view value through every enclosing frame. Erased at its
+//! boundary, a section is named once and rendered from the frames of the component that owns it.
 
 #![cfg_attr(
     nervix_lint,
@@ -75,10 +82,19 @@ mod processor_editor;
 mod processor_inheritance_editor;
 mod processor_input_editor;
 mod processor_invocation_editor;
+mod processor_key_editor;
+#[cfg(test)]
+mod processor_model_tests;
 mod processor_route_editor;
 mod processor_state_editor;
 mod relay_draft;
 mod relay_editor;
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod render_stack_tests;
 mod resource_binding_draft;
 mod resource_binding_editor;
 mod resource_pin_draft;
@@ -154,6 +170,8 @@ pub(crate) enum CreateKind {
     Ingestor,
     Emitter,
     Junction,
+    Deduplicator,
+    Reorderer,
     Reingestor,
 }
 
@@ -181,6 +199,8 @@ impl CreateKind {
             Self::Ingestor => "ingestor",
             Self::Emitter => "emitter",
             Self::Junction => "junction",
+            Self::Deduplicator => "deduplicator",
+            Self::Reorderer => "reorderer",
             Self::Reingestor => "reingestor",
         }
     }
@@ -218,7 +238,39 @@ impl CreateKind {
             | Self::Ingestor
             | Self::Emitter
             | Self::Junction
+            | Self::Deduplicator
+            | Self::Reorderer
             | Self::Reingestor => None,
+        }
+    }
+
+    /// The processor family the shared processor form creates for this kind.
+    fn processor_family(self) -> Option<ProcessorFamily> {
+        match self {
+            Self::Junction => Some(ProcessorFamily::Junction),
+            Self::Deduplicator => Some(ProcessorFamily::Deduplicator),
+            Self::Reorderer => Some(ProcessorFamily::Reorderer),
+            Self::Reingestor => Some(ProcessorFamily::Reingestor),
+            Self::Domain
+            | Self::Placement
+            | Self::User
+            | Self::Resource
+            | Self::Schema
+            | Self::WireJsonSchema
+            | Self::WireCborSchema
+            | Self::WireAvroSchema
+            | Self::Branch
+            | Self::Relay
+            | Self::Subscription
+            | Self::Codec
+            | Self::SignalingProtocol
+            | Self::Client
+            | Self::Vhost
+            | Self::Endpoint
+            | Self::HashMap
+            | Self::Udf
+            | Self::Ingestor
+            | Self::Emitter => None,
         }
     }
 }
@@ -343,7 +395,7 @@ impl ChoiceControl {
         if self.form() == kind {
             return true;
         }
-        kind == CreateKind::Reingestor && self.form() == CreateKind::Junction
+        self.form() == CreateKind::Junction && kind.processor_family().is_some()
     }
 }
 
@@ -1013,6 +1065,8 @@ pub(crate) struct CreateSignals {
     ingestor: RwSignal<IngestorDraft>,
     emitter: RwSignal<EmitterDraft>,
     junction: RwSignal<ProcessorDraft>,
+    deduplicator: RwSignal<ProcessorDraft>,
+    reorderer: RwSignal<ProcessorDraft>,
     reingestor: RwSignal<ProcessorDraft>,
     /// The number the next generated subscription name carries. Numbers only increase, so no two
     /// generated names of one console coincide.
@@ -1024,16 +1078,29 @@ impl CreateSignals {
     fn processor(self, family: ProcessorFamily) -> RwSignal<ProcessorDraft> {
         match family {
             ProcessorFamily::Junction => self.junction,
+            ProcessorFamily::Deduplicator => self.deduplicator,
+            ProcessorFamily::Reorderer => self.reorderer,
             ProcessorFamily::Reingestor => self.reingestor,
         }
     }
 
     fn active_processor(self) -> Option<RwSignal<ProcessorDraft>> {
-        match self.open.get_untracked() {
-            Some(CreateKind::Junction) => Some(self.junction),
-            Some(CreateKind::Reingestor) => Some(self.reingestor),
-            _ => None,
-        }
+        let family = self.open.get_untracked()?.processor_family()?;
+        Some(self.processor(family))
+    }
+
+    /// The submission of one processor form: its complete Model in the captured domain.
+    fn processor_submission(
+        self,
+        kind: CreateKind,
+        family: ProcessorFamily,
+        captured_domain: Option<DomainName>,
+    ) -> error_stack::Result<CreateSubmission, CreateDraftError> {
+        let scope =
+            captured_domain.ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+        let draft = self.processor(family).get_untracked();
+        let model = draft.build().map_err(draft_error)?;
+        CreateSubmission::domain_model(kind, model, draft.if_not_exists, scope)
     }
 
     pub(crate) fn new() -> Self {
@@ -1067,6 +1134,8 @@ impl CreateSignals {
             ingestor: RwSignal::new(IngestorDraft::default()),
             emitter: RwSignal::new(EmitterDraft::default()),
             junction: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Junction)),
+            deduplicator: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Deduplicator)),
+            reorderer: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Reorderer)),
             reingestor: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Reingestor)),
             next_subscription_name: RwSignal::new(2),
             choices: ChoiceControls::new(),
@@ -1181,6 +1250,12 @@ impl CreateSignals {
                 CreateKind::Ingestor => self.ingestor.update(IngestorDraft::invalidate_references),
                 CreateKind::Emitter => self.emitter.update(EmitterDraft::invalidate_references),
                 CreateKind::Junction => self.junction.update(ProcessorDraft::invalidate_references),
+                CreateKind::Deduplicator => self
+                    .deduplicator
+                    .update(ProcessorDraft::invalidate_references),
+                CreateKind::Reorderer => {
+                    self.reorderer.update(ProcessorDraft::invalidate_references)
+                }
                 CreateKind::Reingestor => self
                     .reingestor
                     .update(ProcessorDraft::invalidate_references),
@@ -1842,28 +1917,16 @@ impl CreateSignals {
                 )
             }
             CreateKind::Junction => {
-                let scope = captured_domain
-                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
-                let draft = self.junction.get_untracked();
-                let junction = draft.build_junction().map_err(draft_error)?;
-                CreateSubmission::domain_model(
-                    kind,
-                    Model::Junction(junction),
-                    draft.if_not_exists,
-                    scope,
-                )
+                self.processor_submission(kind, ProcessorFamily::Junction, captured_domain)
+            }
+            CreateKind::Deduplicator => {
+                self.processor_submission(kind, ProcessorFamily::Deduplicator, captured_domain)
+            }
+            CreateKind::Reorderer => {
+                self.processor_submission(kind, ProcessorFamily::Reorderer, captured_domain)
             }
             CreateKind::Reingestor => {
-                let scope = captured_domain
-                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
-                let draft = self.reingestor.get_untracked();
-                let reingestor = draft.build_reingestor().map_err(draft_error)?;
-                CreateSubmission::domain_model(
-                    kind,
-                    Model::Reingestor(reingestor),
-                    draft.if_not_exists,
-                    scope,
-                )
+                self.processor_submission(kind, ProcessorFamily::Reingestor, captured_domain)
             }
             CreateKind::Subscription => {
                 let scope = captured_domain
@@ -1891,10 +1954,12 @@ pub(crate) fn CreateMenu(
     active_domain: RwSignal<Option<DomainName>>,
 ) -> impl IntoView {
     let menu_open = RwSignal::new(false);
-    let choose = move |kind| {
+    // Every menu item's click handler holds this callback, a handle to one stored closure, rather
+    // than its own copy of a closure that carries all of the dialog's signals.
+    let choose = Callback::new(move |kind| {
         signals.open(kind, active_domain.get_untracked(), "global-create-button");
         menu_open.set(false);
-    };
+    });
     view! {
         <div
             class="menu-wrap create-menu-wrap"
@@ -1916,70 +1981,76 @@ pub(crate) fn CreateMenu(
                 <span>"Create"</span>
             </button>
             <div class="popup-menu create-menu" class:open=move || menu_open.get() role="menu">
-                <button type="button" role="menuitem" data-create-kind="domain" on:click=move |_| choose(CreateKind::Domain)>
+                <button type="button" role="menuitem" data-create-kind="domain" on:click=move |_| choose.run(CreateKind::Domain)>
                     <span>"Domain"</span><em>"Clock and lifecycle"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="placement" on:click=move |_| choose(CreateKind::Placement)>
+                <button type="button" role="menuitem" data-create-kind="placement" on:click=move |_| choose.run(CreateKind::Placement)>
                     <span>"Placement"</span><em>"Domain-wide policy"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="user" on:click=move |_| choose(CreateKind::User)>
+                <button type="button" role="menuitem" data-create-kind="user" on:click=move |_| choose.run(CreateKind::User)>
                     <span>"User"</span><em>"Login credential"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="resource" on:click=move |_| choose(CreateKind::Resource)>
+                <button type="button" role="menuitem" data-create-kind="resource" on:click=move |_| choose.run(CreateKind::Resource)>
                     <span>"Resource"</span><em>"Catalog and upload"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="schema" on:click=move |_| choose(CreateKind::Schema)>
+                <button type="button" role="menuitem" data-create-kind="schema" on:click=move |_| choose.run(CreateKind::Schema)>
                     <span>"Schema"</span><em>"Internal record fields"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="wire-json-schema" on:click=move |_| choose(CreateKind::WireJsonSchema)>
+                <button type="button" role="menuitem" data-create-kind="wire-json-schema" on:click=move |_| choose.run(CreateKind::WireJsonSchema)>
                     <span>"Wire JSON schema"</span><em>"JSON payload fields"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="wire-cbor-schema" on:click=move |_| choose(CreateKind::WireCborSchema)>
+                <button type="button" role="menuitem" data-create-kind="wire-cbor-schema" on:click=move |_| choose.run(CreateKind::WireCborSchema)>
                     <span>"Wire CBOR schema"</span><em>"CBOR payload fields"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="wire-avro-schema" on:click=move |_| choose(CreateKind::WireAvroSchema)>
+                <button type="button" role="menuitem" data-create-kind="wire-avro-schema" on:click=move |_| choose.run(CreateKind::WireAvroSchema)>
                     <span>"Wire AVRO schema"</span><em>"AVRO payload fields"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="branch" on:click=move |_| choose(CreateKind::Branch)>
+                <button type="button" role="menuitem" data-create-kind="branch" on:click=move |_| choose.run(CreateKind::Branch)>
                     <span>"Branch"</span><em>"Key schema and lifetime"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="relay" on:click=move |_| choose(CreateKind::Relay)>
+                <button type="button" role="menuitem" data-create-kind="relay" on:click=move |_| choose.run(CreateKind::Relay)>
                     <span>"Relay"</span><em>"Schema, branching and capacity"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="subscription" on:click=move |_| choose(CreateKind::Subscription)>
+                <button type="button" role="menuitem" data-create-kind="subscription" on:click=move |_| choose.run(CreateKind::Subscription)>
                     <span>"Subscription"</span><em>"Read-only relay tab"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="codec" on:click=move |_| choose(CreateKind::Codec)>
+                <button type="button" role="menuitem" data-create-kind="codec" on:click=move |_| choose.run(CreateKind::Codec)>
                     <span>"Codec"</span><em>"Wire format and schema mapping"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="signaling-protocol" on:click=move |_| choose(CreateKind::SignalingProtocol)>
+                <button type="button" role="menuitem" data-create-kind="signaling-protocol" on:click=move |_| choose.run(CreateKind::SignalingProtocol)>
                     <span>"Signaling protocol"</span><em>"Ordered connection handshake"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="client" on:click=move |_| choose(CreateKind::Client)>
+                <button type="button" role="menuitem" data-create-kind="client" on:click=move |_| choose.run(CreateKind::Client)>
                     <span>"Client"</span><em>"External transport configuration"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="vhost" on:click=move |_| choose(CreateKind::Vhost)>
+                <button type="button" role="menuitem" data-create-kind="vhost" on:click=move |_| choose.run(CreateKind::Vhost)>
                     <span>"VHOST"</span><em>"Hostnames and optional TLS"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="endpoint" on:click=move |_| choose(CreateKind::Endpoint)>
+                <button type="button" role="menuitem" data-create-kind="endpoint" on:click=move |_| choose.run(CreateKind::Endpoint)>
                     <span>"Endpoint"</span><em>"HTTP or WebSocket path"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="hash-map" on:click=move |_| choose(CreateKind::HashMap)>
+                <button type="button" role="menuitem" data-create-kind="hash-map" on:click=move |_| choose.run(CreateKind::HashMap)>
                     <span>"Hash map"</span><em>"Resource-backed lookup"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="udf" on:click=move |_| choose(CreateKind::Udf)>
+                <button type="button" role="menuitem" data-create-kind="udf" on:click=move |_| choose.run(CreateKind::Udf)>
                     <span>"Roto UDF"</span><em>"Typed function and source tests"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="ingestor" on:click=move |_| choose(CreateKind::Ingestor)>
+                <button type="button" role="menuitem" data-create-kind="ingestor" on:click=move |_| choose.run(CreateKind::Ingestor)>
                     <span>"Ingestor"</span><em>"External source and ordered routes"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="emitter" on:click=move |_| choose(CreateKind::Emitter)>
+                <button type="button" role="menuitem" data-create-kind="emitter" on:click=move |_| choose.run(CreateKind::Emitter)>
                     <span>"Emitter"</span><em>"External publication and client output"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="junction" on:click=move |_| choose(CreateKind::Junction)>
+                <button type="button" role="menuitem" data-create-kind="junction" on:click=move |_| choose.run(CreateKind::Junction)>
                     <span>"Junction"</span><em>"Transform and fan out relay records"</em>
                 </button>
-                <button type="button" role="menuitem" data-create-kind="reingestor" on:click=move |_| choose(CreateKind::Reingestor)>
+                <button type="button" role="menuitem" data-create-kind="deduplicator" on:click=move |_| choose.run(CreateKind::Deduplicator)>
+                    <span>"Deduplicator"</span><em>"Suppress repeated keys in each branch"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="reorderer" on:click=move |_| choose.run(CreateKind::Reorderer)>
+                    <span>"Reorderer"</span><em>"Release each branch in key order"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="reingestor" on:click=move |_| choose.run(CreateKind::Reingestor)>
                     <span>"Reingestor"</span><em>"Transform records across branch boundaries"</em>
                 </button>
             </div>
@@ -2161,7 +2232,10 @@ fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceCon
             controls
         }
         CreateKind::Emitter => signals.emitter_open_controls(),
-        CreateKind::Junction | CreateKind::Reingestor => {
+        CreateKind::Junction
+        | CreateKind::Deduplicator
+        | CreateKind::Reorderer
+        | CreateKind::Reingestor => {
             let Some(processor) = signals.active_processor() else {
                 return Vec::new();
             };
@@ -2170,10 +2244,10 @@ fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceCon
                 ChoiceControl::ProcessorInputRelay,
                 ChoiceControl::ProcessorRouteRelay,
             ];
-            if kind == CreateKind::Junction
+            if draft.family().declares_node_branch()
                 && matches!(
                     draft.branching,
-                    processor_draft::JunctionBranchDraft::Branched(_)
+                    processor_draft::NodeBranchDraft::Branched(_)
                 )
             {
                 controls.push(ChoiceControl::ProcessorBranch);
@@ -2330,222 +2404,9 @@ pub(crate) fn CreateDialog(
                             </Show>
                         </div>
 
-                        <Show when=move || signals.open.get() == Some(CreateKind::Domain) fallback=|| ()>
-                            <label class="create-field">
-                                <span>"Domain name"</span>
-                                <input
-                                    node_ref=name_input
-                                    class="create-name"
-                                    type="text"
-                                    autocomplete="off"
-                                    prop:value=move || signals.domain.get().name
-                                    disabled=move || signals.progress.get().is_pending()
-                                    on:input=move |event| {
-                                        signals.domain.update(|draft| draft.name = event_target_value(&event));
-                                        signals.edit();
-                                    }
-                                />
-                            </label>
-                            <ChoiceGroup
-                                class_name="create-pace-options"
-                                label="Pace"
-                                control=ChoiceControl::DomainPace
-                                signals=signals
-                                request_tx=request_tx
-                                session_generation=session_generation
-                            />
-                            <Show when=move || signals.domain.get().pace == DomainPaceChoice::Paced fallback=|| ()>
-                                <div class="create-field-row">
-                                    <label class="create-field">
-                                        <span>"Period"</span>
-                                        <input class="create-period" type="text" prop:value=move || signals.domain.get().period on:input=move |event| {
-                                            signals.domain.update(|draft| draft.period = event_target_value(&event));
-                                            signals.edit();
-                                        } />
-                                    </label>
-                                    <label class="create-field">
-                                        <span>"Skew"</span>
-                                        <input class="create-skew" type="text" prop:value=move || signals.domain.get().skew on:input=move |event| {
-                                            signals.domain.update(|draft| draft.skew = event_target_value(&event));
-                                            signals.edit();
-                                        } />
-                                    </label>
-                                </div>
-                            </Show>
-                        </Show>
+                        <CreateKindFields signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
 
-                        <Show when=move || signals.open.get() == Some(CreateKind::Placement) fallback=|| ()>
-                            <label class="create-field">
-                                <span>"Placement name"</span>
-                                <input node_ref=name_input class="create-name" type="text" autocomplete="off"
-                                    prop:value=move || signals.placement.get().name
-                                    disabled=move || signals.progress.get().is_pending()
-                                    on:input=move |event| { signals.placement.update(|draft| draft.name = event_target_value(&event)); signals.edit(); }
-                                />
-                            </label>
-                            <div class="create-field"><span>"Coverage"</span><strong class="create-placement-coverage">"Entire domain"</strong></div>
-                            <ChoiceGroup
-                                class_name="create-placement-options"
-                                label="Placement"
-                                control=ChoiceControl::PlacementPolicy
-                                signals=signals
-                                request_tx=request_tx
-                                session_generation=session_generation
-                            />
-                            <label class="create-field">
-                                <span>"Rank (optional)"</span>
-                                <input class="create-placement-rank" type="text" inputmode="numeric"
-                                    prop:value=move || signals.placement.get().rank
-                                    disabled=move || signals.progress.get().is_pending()
-                                    on:input=move |event| { signals.placement.update(|draft| draft.rank = event_target_value(&event)); signals.edit(); }
-                                />
-                            </label>
-                        </Show>
-
-                        <Show when=move || signals.open.get() == Some(CreateKind::User) fallback=|| ()>
-                            <label class="create-field">
-                                <span>"User name"</span>
-                                <input node_ref=name_input class="create-name" type="text" autocomplete="off" prop:value=move || signals.user.get().name disabled=move || signals.progress.get().is_pending() on:input=move |event| {
-                                    signals.user.update(|draft| draft.name = event_target_value(&event));
-                                    signals.edit();
-                                } />
-                            </label>
-                            <label class="create-field">
-                                <span>"Password"</span>
-                                <input class="create-password" type="password" autocomplete="new-password" prop:value=move || signals.user.get().password disabled=move || signals.progress.get().is_pending() on:input=move |event| {
-                                    signals.user.update(|draft| draft.password = event_target_value(&event));
-                                    signals.edit();
-                                } />
-                            </label>
-                        </Show>
-
-                        <Show when=move || signals.open.get() == Some(CreateKind::Resource) fallback=|| ()>
-                            <label class="create-field">
-                                <span>"Resource name"</span>
-                                <input node_ref=name_input class="create-name" type="text" autocomplete="off" prop:value=move || signals.resource.get().name disabled=move || signals.progress.get().is_pending() on:input=move |event| {
-                                    signals.resource.update(|draft| draft.name = event_target_value(&event));
-                                    signals.edit();
-                                } />
-                            </label>
-                        </Show>
-
-                        <Show when=move || signals.open.get() == Some(CreateKind::Schema) fallback=|| ()>
-                            <SchemaEditor signals=signals name_input=name_input />
-                        </Show>
-                        <Show when=move || signals.open.get() == Some(CreateKind::WireJsonSchema) fallback=|| ()>
-                            <WireSchemaEditor signals=signals name_input=name_input format=WireFormat::Json />
-                        </Show>
-                        <Show when=move || signals.open.get() == Some(CreateKind::WireCborSchema) fallback=|| ()>
-                            <WireSchemaEditor signals=signals name_input=name_input format=WireFormat::Cbor />
-                        </Show>
-                        <Show when=move || signals.open.get() == Some(CreateKind::WireAvroSchema) fallback=|| ()>
-                            <WireSchemaEditor signals=signals name_input=name_input format=WireFormat::Avro />
-                        </Show>
-                        <Show when=move || signals.open.get() == Some(CreateKind::Branch) fallback=|| ()>
-                            <BranchEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
-                        </Show>
-                        <Show when=move || signals.open.get() == Some(CreateKind::Relay) fallback=|| ()>
-                            <RelayEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
-                        </Show>
-                        <Show when=move || signals.open.get() == Some(CreateKind::Subscription) fallback=|| ()>
-                            <SubscriptionEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
-                        </Show>
-                        <Show when=move || signals.open.get() == Some(CreateKind::Codec) fallback=|| ()>
-                            <CodecEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
-                        </Show>
-                        <Show when=move || signals.open.get() == Some(CreateKind::SignalingProtocol) fallback=|| ()>
-                            <SignalingEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
-                        </Show>
-                        <Show when=move || signals.open.get() == Some(CreateKind::Client) fallback=|| ()>
-                            <ClientEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
-                        </Show>
-                        <Show when=move || signals.open.get() == Some(CreateKind::Vhost) fallback=|| ()>
-                            <VhostEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
-                        </Show>
-                        <Show when=move || signals.open.get() == Some(CreateKind::Endpoint) fallback=|| ()>
-                            <EndpointEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
-                        </Show>
-                        <Show when=move || signals.open.get() == Some(CreateKind::HashMap) fallback=|| ()>
-                            <HashMapEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
-                        </Show>
-                        <Show when=move || signals.open.get() == Some(CreateKind::Udf) fallback=|| ()>
-                            <UdfEditor signals=signals name_input=name_input />
-                        </Show>
-                        <Show when=move || signals.open.get() == Some(CreateKind::Ingestor) fallback=|| ()>
-                            <IngestorEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
-                        </Show>
-                        <Show when=move || signals.open.get() == Some(CreateKind::Emitter) fallback=|| ()>
-                            <EmitterEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
-                        </Show>
-                        <Show when=move || signals.open.get() == Some(CreateKind::Junction) fallback=|| ()>
-                            <ProcessorEditor family=ProcessorFamily::Junction signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
-                        </Show>
-                        <Show when=move || signals.open.get() == Some(CreateKind::Reingestor) fallback=|| ()>
-                            <ProcessorEditor family=ProcessorFamily::Reingestor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
-                        </Show>
-
-                        <Show when=move || signals.open.get().is_some_and(CreateKind::takes_if_not_exists) fallback=|| ()>
-                            <label class="create-check">
-                                <input
-                                    class="create-if-not-exists"
-                                    type="checkbox"
-                                    prop:checked=move || match signals.open.get() {
-                                        Some(CreateKind::Domain) => signals.domain.get().if_not_exists,
-                                        Some(CreateKind::Placement) => signals.placement.get().if_not_exists,
-                                        Some(CreateKind::User) => signals.user.get().if_not_exists,
-                                        Some(CreateKind::Resource) => signals.resource.get().if_not_exists,
-                                        Some(CreateKind::Schema) => signals.structured.get().schema.if_not_exists,
-                                        Some(CreateKind::WireJsonSchema) => signals.structured.get().wire_json.if_not_exists,
-                                        Some(CreateKind::WireCborSchema) => signals.structured.get().wire_cbor.if_not_exists,
-                                        Some(CreateKind::WireAvroSchema) => signals.structured.get().wire_avro.if_not_exists,
-                                        Some(CreateKind::Branch) => signals.structured.get().branch.if_not_exists,
-                                        Some(CreateKind::Relay) => signals.relay.get().if_not_exists,
-                                        Some(CreateKind::Codec) => signals.codec.get().if_not_exists,
-                                        Some(CreateKind::SignalingProtocol) => signals.signaling.get().if_not_exists,
-                                        Some(CreateKind::Client) => signals.client.get().if_not_exists,
-                                        Some(CreateKind::Vhost) => signals.vhost.get().if_not_exists,
-                                        Some(CreateKind::Endpoint) => signals.endpoint.get().if_not_exists,
-                                        Some(CreateKind::HashMap) => signals.hash_map.get().if_not_exists,
-                                        Some(CreateKind::Udf) => signals.udf.get().if_not_exists,
-                                        Some(CreateKind::Ingestor) => signals.ingestor.get().if_not_exists,
-                                        Some(CreateKind::Emitter) => signals.emitter.get().if_not_exists,
-                                        Some(CreateKind::Junction) => signals.junction.get().if_not_exists,
-                                        Some(CreateKind::Reingestor) => signals.reingestor.get().if_not_exists,
-                                        Some(CreateKind::Subscription) | None => false,
-                                    }
-                                    disabled=move || signals.progress.get().is_pending()
-                                    on:change=move |event| {
-                                        let checked = event_target_checked(&event);
-                                        match signals.open.get_untracked() {
-                                            Some(CreateKind::Domain) => signals.domain.update(|draft| draft.if_not_exists = checked),
-                                            Some(CreateKind::Placement) => signals.placement.update(|draft| draft.if_not_exists = checked),
-                                            Some(CreateKind::User) => signals.user.update(|draft| draft.if_not_exists = checked),
-                                            Some(CreateKind::Resource) => signals.resource.update(|draft| draft.if_not_exists = checked),
-                                            Some(CreateKind::Schema) => signals.structured.update(|draft| draft.schema.if_not_exists = checked),
-                                            Some(CreateKind::WireJsonSchema) => signals.structured.update(|draft| draft.wire_json.if_not_exists = checked),
-                                            Some(CreateKind::WireCborSchema) => signals.structured.update(|draft| draft.wire_cbor.if_not_exists = checked),
-                                            Some(CreateKind::WireAvroSchema) => signals.structured.update(|draft| draft.wire_avro.if_not_exists = checked),
-                                            Some(CreateKind::Branch) => signals.structured.update(|draft| draft.branch.if_not_exists = checked),
-                                            Some(CreateKind::Relay) => signals.relay.update(|draft| draft.if_not_exists = checked),
-                                            Some(CreateKind::Codec) => signals.codec.update(|draft| draft.if_not_exists = checked),
-                                            Some(CreateKind::SignalingProtocol) => signals.signaling.update(|draft| draft.if_not_exists = checked),
-                                            Some(CreateKind::Client) => signals.client.update(|draft| draft.if_not_exists = checked),
-                                            Some(CreateKind::Vhost) => signals.vhost.update(|draft| draft.if_not_exists = checked),
-                                            Some(CreateKind::Endpoint) => signals.endpoint.update(|draft| draft.if_not_exists = checked),
-                                            Some(CreateKind::HashMap) => signals.hash_map.update(|draft| draft.if_not_exists = checked),
-                                            Some(CreateKind::Udf) => signals.udf.update(|draft| draft.if_not_exists = checked),
-                                            Some(CreateKind::Ingestor) => signals.ingestor.update(|draft| draft.if_not_exists = checked),
-                                            Some(CreateKind::Emitter) => signals.emitter.update(|draft| draft.if_not_exists = checked),
-                                            Some(CreateKind::Junction) => signals.junction.update(|draft| draft.if_not_exists = checked),
-                                            Some(CreateKind::Reingestor) => signals.reingestor.update(|draft| draft.if_not_exists = checked),
-                                            Some(CreateKind::Subscription) | None => {}
-                                        }
-                                        signals.edit();
-                                    }
-                                />
-                                <span>"If not exists"</span>
-                            </label>
-                        </Show>
+                        <IfNotExistsField signals=signals />
 
                         <div class="create-preview-block">
                             <span>"Canonical Plexus preview"</span>
@@ -2578,6 +2439,252 @@ pub(crate) fn CreateDialog(
     }
 }
 
+/// The fields of the form the dialog has open: each kind's fields render only while it is open.
+#[component]
+fn CreateKindFields(
+    signals: CreateSignals,
+    name_input: NodeRef<leptos::html::Input>,
+    request_tx: RwSignal<Option<RequestSender>>,
+    session_generation: RwSignal<u64>,
+) -> impl IntoView {
+    view! {
+        <Show when=move || signals.open.get() == Some(CreateKind::Domain) fallback=|| ()>
+            <label class="create-field">
+                <span>"Domain name"</span>
+                <input
+                    node_ref=name_input
+                    class="create-name"
+                    type="text"
+                    autocomplete="off"
+                    prop:value=move || signals.domain.get().name
+                    disabled=move || signals.progress.get().is_pending()
+                    on:input=move |event| {
+                        signals.domain.update(|draft| draft.name = event_target_value(&event));
+                        signals.edit();
+                    }
+                />
+            </label>
+            <ChoiceGroup
+                class_name="create-pace-options"
+                label="Pace"
+                control=ChoiceControl::DomainPace
+                signals=signals
+                request_tx=request_tx
+                session_generation=session_generation
+            />
+            <Show when=move || signals.domain.get().pace == DomainPaceChoice::Paced fallback=|| ()>
+                <div class="create-field-row">
+                    <label class="create-field">
+                        <span>"Period"</span>
+                        <input class="create-period" type="text" prop:value=move || signals.domain.get().period on:input=move |event| {
+                            signals.domain.update(|draft| draft.period = event_target_value(&event));
+                            signals.edit();
+                        } />
+                    </label>
+                    <label class="create-field">
+                        <span>"Skew"</span>
+                        <input class="create-skew" type="text" prop:value=move || signals.domain.get().skew on:input=move |event| {
+                            signals.domain.update(|draft| draft.skew = event_target_value(&event));
+                            signals.edit();
+                        } />
+                    </label>
+                </div>
+            </Show>
+        </Show>
+
+        <Show when=move || signals.open.get() == Some(CreateKind::Placement) fallback=|| ()>
+            <label class="create-field">
+                <span>"Placement name"</span>
+                <input node_ref=name_input class="create-name" type="text" autocomplete="off"
+                    prop:value=move || signals.placement.get().name
+                    disabled=move || signals.progress.get().is_pending()
+                    on:input=move |event| { signals.placement.update(|draft| draft.name = event_target_value(&event)); signals.edit(); }
+                />
+            </label>
+            <div class="create-field"><span>"Coverage"</span><strong class="create-placement-coverage">"Entire domain"</strong></div>
+            <ChoiceGroup
+                class_name="create-placement-options"
+                label="Placement"
+                control=ChoiceControl::PlacementPolicy
+                signals=signals
+                request_tx=request_tx
+                session_generation=session_generation
+            />
+            <label class="create-field">
+                <span>"Rank (optional)"</span>
+                <input class="create-placement-rank" type="text" inputmode="numeric"
+                    prop:value=move || signals.placement.get().rank
+                    disabled=move || signals.progress.get().is_pending()
+                    on:input=move |event| { signals.placement.update(|draft| draft.rank = event_target_value(&event)); signals.edit(); }
+                />
+            </label>
+        </Show>
+
+        <Show when=move || signals.open.get() == Some(CreateKind::User) fallback=|| ()>
+            <label class="create-field">
+                <span>"User name"</span>
+                <input node_ref=name_input class="create-name" type="text" autocomplete="off" prop:value=move || signals.user.get().name disabled=move || signals.progress.get().is_pending() on:input=move |event| {
+                    signals.user.update(|draft| draft.name = event_target_value(&event));
+                    signals.edit();
+                } />
+            </label>
+            <label class="create-field">
+                <span>"Password"</span>
+                <input class="create-password" type="password" autocomplete="new-password" prop:value=move || signals.user.get().password disabled=move || signals.progress.get().is_pending() on:input=move |event| {
+                    signals.user.update(|draft| draft.password = event_target_value(&event));
+                    signals.edit();
+                } />
+            </label>
+        </Show>
+
+        <Show when=move || signals.open.get() == Some(CreateKind::Resource) fallback=|| ()>
+            <label class="create-field">
+                <span>"Resource name"</span>
+                <input node_ref=name_input class="create-name" type="text" autocomplete="off" prop:value=move || signals.resource.get().name disabled=move || signals.progress.get().is_pending() on:input=move |event| {
+                    signals.resource.update(|draft| draft.name = event_target_value(&event));
+                    signals.edit();
+                } />
+            </label>
+        </Show>
+
+        <Show when=move || signals.open.get() == Some(CreateKind::Schema) fallback=|| ()>
+            <SchemaEditor signals=signals name_input=name_input />
+        </Show>
+        <Show when=move || signals.open.get() == Some(CreateKind::WireJsonSchema) fallback=|| ()>
+            <WireSchemaEditor signals=signals name_input=name_input format=WireFormat::Json />
+        </Show>
+        <Show when=move || signals.open.get() == Some(CreateKind::WireCborSchema) fallback=|| ()>
+            <WireSchemaEditor signals=signals name_input=name_input format=WireFormat::Cbor />
+        </Show>
+        <Show when=move || signals.open.get() == Some(CreateKind::WireAvroSchema) fallback=|| ()>
+            <WireSchemaEditor signals=signals name_input=name_input format=WireFormat::Avro />
+        </Show>
+        <Show when=move || signals.open.get() == Some(CreateKind::Branch) fallback=|| ()>
+            <BranchEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+        </Show>
+        <Show when=move || signals.open.get() == Some(CreateKind::Relay) fallback=|| ()>
+            <RelayEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+        </Show>
+        <Show when=move || signals.open.get() == Some(CreateKind::Subscription) fallback=|| ()>
+            <SubscriptionEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+        </Show>
+        <Show when=move || signals.open.get() == Some(CreateKind::Codec) fallback=|| ()>
+            <CodecEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+        </Show>
+        <Show when=move || signals.open.get() == Some(CreateKind::SignalingProtocol) fallback=|| ()>
+            <SignalingEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+        </Show>
+        <Show when=move || signals.open.get() == Some(CreateKind::Client) fallback=|| ()>
+            <ClientEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+        </Show>
+        <Show when=move || signals.open.get() == Some(CreateKind::Vhost) fallback=|| ()>
+            <VhostEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+        </Show>
+        <Show when=move || signals.open.get() == Some(CreateKind::Endpoint) fallback=|| ()>
+            <EndpointEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+        </Show>
+        <Show when=move || signals.open.get() == Some(CreateKind::HashMap) fallback=|| ()>
+            <HashMapEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+        </Show>
+        <Show when=move || signals.open.get() == Some(CreateKind::Udf) fallback=|| ()>
+            <UdfEditor signals=signals name_input=name_input />
+        </Show>
+        <Show when=move || signals.open.get() == Some(CreateKind::Ingestor) fallback=|| ()>
+            <IngestorEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+        </Show>
+        <Show when=move || signals.open.get() == Some(CreateKind::Emitter) fallback=|| ()>
+            <EmitterEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+        </Show>
+        <Show when=move || signals.open.get() == Some(CreateKind::Junction) fallback=|| ()>
+            <ProcessorEditor family=ProcessorFamily::Junction signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+        </Show>
+        <Show when=move || signals.open.get() == Some(CreateKind::Deduplicator) fallback=|| ()>
+            <ProcessorEditor family=ProcessorFamily::Deduplicator signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+        </Show>
+        <Show when=move || signals.open.get() == Some(CreateKind::Reorderer) fallback=|| ()>
+            <ProcessorEditor family=ProcessorFamily::Reorderer signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+        </Show>
+        <Show when=move || signals.open.get() == Some(CreateKind::Reingestor) fallback=|| ()>
+            <ProcessorEditor family=ProcessorFamily::Reingestor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+        </Show>
+    }
+    .into_any()
+}
+
+/// Whether the open form's statement creates its entity only if it does not exist yet.
+#[component]
+fn IfNotExistsField(signals: CreateSignals) -> impl IntoView {
+    view! {
+        <Show when=move || signals.open.get().is_some_and(CreateKind::takes_if_not_exists) fallback=|| ()>
+            <label class="create-check">
+                <input
+                    class="create-if-not-exists"
+                    type="checkbox"
+                    prop:checked=move || match signals.open.get() {
+                        Some(CreateKind::Domain) => signals.domain.get().if_not_exists,
+                        Some(CreateKind::Placement) => signals.placement.get().if_not_exists,
+                        Some(CreateKind::User) => signals.user.get().if_not_exists,
+                        Some(CreateKind::Resource) => signals.resource.get().if_not_exists,
+                        Some(CreateKind::Schema) => signals.structured.get().schema.if_not_exists,
+                        Some(CreateKind::WireJsonSchema) => signals.structured.get().wire_json.if_not_exists,
+                        Some(CreateKind::WireCborSchema) => signals.structured.get().wire_cbor.if_not_exists,
+                        Some(CreateKind::WireAvroSchema) => signals.structured.get().wire_avro.if_not_exists,
+                        Some(CreateKind::Branch) => signals.structured.get().branch.if_not_exists,
+                        Some(CreateKind::Relay) => signals.relay.get().if_not_exists,
+                        Some(CreateKind::Codec) => signals.codec.get().if_not_exists,
+                        Some(CreateKind::SignalingProtocol) => signals.signaling.get().if_not_exists,
+                        Some(CreateKind::Client) => signals.client.get().if_not_exists,
+                        Some(CreateKind::Vhost) => signals.vhost.get().if_not_exists,
+                        Some(CreateKind::Endpoint) => signals.endpoint.get().if_not_exists,
+                        Some(CreateKind::HashMap) => signals.hash_map.get().if_not_exists,
+                        Some(CreateKind::Udf) => signals.udf.get().if_not_exists,
+                        Some(CreateKind::Ingestor) => signals.ingestor.get().if_not_exists,
+                        Some(CreateKind::Emitter) => signals.emitter.get().if_not_exists,
+                        Some(CreateKind::Junction) => signals.junction.get().if_not_exists,
+                        Some(CreateKind::Deduplicator) => signals.deduplicator.get().if_not_exists,
+                        Some(CreateKind::Reorderer) => signals.reorderer.get().if_not_exists,
+                        Some(CreateKind::Reingestor) => signals.reingestor.get().if_not_exists,
+                        Some(CreateKind::Subscription) | None => false,
+                    }
+                    disabled=move || signals.progress.get().is_pending()
+                    on:change=move |event| {
+                        let checked = event_target_checked(&event);
+                        match signals.open.get_untracked() {
+                            Some(CreateKind::Domain) => signals.domain.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Placement) => signals.placement.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::User) => signals.user.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Resource) => signals.resource.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Schema) => signals.structured.update(|draft| draft.schema.if_not_exists = checked),
+                            Some(CreateKind::WireJsonSchema) => signals.structured.update(|draft| draft.wire_json.if_not_exists = checked),
+                            Some(CreateKind::WireCborSchema) => signals.structured.update(|draft| draft.wire_cbor.if_not_exists = checked),
+                            Some(CreateKind::WireAvroSchema) => signals.structured.update(|draft| draft.wire_avro.if_not_exists = checked),
+                            Some(CreateKind::Branch) => signals.structured.update(|draft| draft.branch.if_not_exists = checked),
+                            Some(CreateKind::Relay) => signals.relay.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Codec) => signals.codec.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::SignalingProtocol) => signals.signaling.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Client) => signals.client.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Vhost) => signals.vhost.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Endpoint) => signals.endpoint.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::HashMap) => signals.hash_map.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Udf) => signals.udf.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Ingestor) => signals.ingestor.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Emitter) => signals.emitter.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Junction) => signals.junction.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Deduplicator) => signals.deduplicator.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Reorderer) => signals.reorderer.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Reingestor) => signals.reingestor.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Subscription) | None => {}
+                        }
+                        signals.edit();
+                    }
+                />
+                <span>"If not exists"</span>
+            </label>
+        </Show>
+    }
+    .into_any()
+}
+
 fn event_target_value(event: &ev::Event) -> String {
     event_target::<web_sys::HtmlInputElement>(event).value()
 }
@@ -2589,6 +2696,12 @@ fn event_target_textarea_value(event: &ev::Event) -> String {
 fn event_target_checked(event: &ev::Event) -> bool {
     event_target::<web_sys::HtmlInputElement>(event).checked()
 }
+
+/// The submission handler of every test that renders the dialog and ignores what it submits. The
+/// dialog is generic over its handler and each closure written in a test is a type of its own, so
+/// one named function lets all of those tests render a single instantiation of the dialog's views.
+#[cfg(test)]
+fn ignore_test_submission(_submission: CreateSubmission, _attempt: u64, _revision: u64) {}
 
 #[cfg(test)]
 #[cfg_attr(

@@ -180,10 +180,7 @@ impl<'a> Values<'a> {
             users.push(UserRecord {
                 name: UserName::parse(&format!("user_{index}"))
                     .assured("indexed synthetic user names are valid"),
-                password_hash: format!(
-                    "$argon2id$v=19$m=8,t=1,p=1$c3ludGhldGlj$c3ludGhldGlj{}",
-                    self.0.entropy().byte(),
-                ),
+                password_credential: self.0.password_credential(),
             });
         }
         UsersRecord { users }
@@ -524,6 +521,10 @@ impl<'a> Values<'a> {
             producer_version: self.0.string(),
             language_version: nervix_models::PLEXUS_LANGUAGE_VERSION.into(),
             cluster_id: self.0.string(),
+            cluster_uid: uuid::Builder::from_random_bytes(std::array::from_fn(|_| {
+                self.0.entropy().byte()
+            }))
+            .into_uuid(),
             captured_at: self.timestamp(),
             scope,
             resources,

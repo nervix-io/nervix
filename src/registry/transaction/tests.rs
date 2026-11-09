@@ -222,7 +222,6 @@ fn wasm_reset_fixture() -> (
         .assured("the fixed reference satisfies the command identity grammar");
     captured.operation_references.push(request.clone());
     let statement = Statement::ResetWasmState(ResetWasmState {
-        domain: named("default"),
         processor: named("filter_events"),
         scope: StateBranchSelection::Branch(vec![StateBranchField {
             name: named("tenant"),
@@ -243,6 +242,14 @@ fn reset_is_an_ordered_effect_and_replanning_the_same_identity_keeps_its_generat
         preserve_schedule,
     )
     .assured("the captured schedule has the selected WASM processor");
+    assert_eq!(
+        plan.operations()[0].operation,
+        TransactionOperation::ResetWasmState {
+            domain: captured.domain.id.clone(),
+            processor: named("filter_events"),
+        },
+        "a reset acts on the domain its transaction is bound to"
+    );
     let step = plan
         .first_step()
         .verified("one reset forms one ordered execution step");

@@ -11,6 +11,7 @@ workspace = true
 [features]
 default = []
 shuttle = [
+  "nervix-tls/shuttle",
   "dep:shuttle",
   "nervix-execution/shuttle",
   "nervix-model-harness/shuttle",
@@ -31,6 +32,7 @@ nervix-execution = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }
+nervix-tls = { workspace = true }
 percent-encoding = { workspace = true }
 reqwest = { workspace = true }
 rustls = { workspace = true }

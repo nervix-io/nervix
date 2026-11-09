@@ -16,12 +16,12 @@ use ahash::HashMap;
 use error_stack::{Report, ResultExt as _};
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode, Readable};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{Executor, MemoryClass, StorageClass};
+use nervix_execution::{Executor, MemoryClass, QueueAdmission, Reservation, StorageClass};
 pub(crate) use nervix_interconnect::{RuntimeState, RuntimeStateKind, StateSchema};
 use nervix_models::{
     BranchKeyFingerprint, ClusterNodeIncarnation, ClusterNodeName, CoordinationIdentity,
-    DomainName, DomainNodeRef, ModelKind, ModelName, NodeRef, NodeUnitRef, SchemaFingerprint, Unit,
-    WasmStateGeneration, WasmStateGenerations,
+    DomainName, DomainNodeRef, InferencerModelFingerprint, ModelKind, ModelName, NodeRef,
+    NodeUnitRef, SchemaFingerprint, Unit, WasmStateGeneration, WasmStateGenerations,
 };
 use nervix_primitives::{
     publication::{ArcSwap, ArcSwapOption, Guard},
@@ -78,9 +78,17 @@ pub(crate) use maintenance::DEFAULT_RESTORE_STAGING_MAX_BYTES;
 /// written in the current shape and fails to decode instead of addressing the current lifetime.
 const STATE_GENERATION_KEY_MARKER: u8 = b'g';
 
-/// The byte that opens the schema fingerprint segment of a schema-bound state key. Every key of
-/// schema-bound state carries it and no other key does, so a key without it fails to decode as
-/// schema-bound state instead of addressing state laid out by some schema.
+/// The byte that opens the pinned model fingerprint segment of an inferencer state key.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the stored inferencer key format prefixes its model with m"
+    )
+)]
+const STATE_MODEL_KEY_MARKER: u8 = b'm';
+
+/// The byte that opens the schema fingerprint segment of every schema-bound state key.
 const STATE_SCHEMA_KEY_MARKER: u8 = b's';
 /// The current key's unit segment. A missing marker is an invalid stored shape.
 #[cfg_attr(
@@ -152,6 +160,7 @@ impl fmt::Display for RuntimeStatePlacement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::runtime) struct ScheduledStateIdentity {
     pub(in crate::runtime) schema_fingerprint: SchemaFingerprint,
+    pub(in crate::runtime) inferencer_model: Option<InferencerModelFingerprint>,
     pub(in crate::runtime) wasm_state_generations: Option<WasmStateGenerations>,
 }
 
@@ -172,6 +181,9 @@ impl ScheduledStateIdentity {
         {
             return false;
         }
+        if let RuntimeState::Inferencer { model, .. } = state {
+            return self.inferencer_model == Some(model);
+        }
         let RuntimeState::WasmProcessor { generation, .. } = state else {
             return true;
         };
@@ -190,6 +202,10 @@ impl ScheduledStateIdentity {
     ) -> Option<RuntimeState> {
         let schema = self.schema_fingerprint;
         let state = match kind {
+            RuntimeStateKind::Inferencer => RuntimeState::Inferencer {
+                schema,
+                model: self.inferencer_model?,
+            },
             RuntimeStateKind::BranchAggregated => RuntimeState::BranchAggregated,
             RuntimeStateKind::KafkaOffset => RuntimeState::KafkaOffset,
             RuntimeStateKind::Correlator => RuntimeState::Correlator { schema },
@@ -793,6 +809,8 @@ pub(crate) enum RuntimePersistenceError {
     RestoreGeneration { requested: u64, published: u64 },
     #[error("failed to seal or restore a window snapshot")]
     WindowSnapshot,
+    #[error("failed to seal or restore an inferencer snapshot")]
+    InferencerSnapshot,
     #[error("deduplicator snapshot has an invalid format header")]
     InvalidDeduplicatorSnapshotHeader,
     #[error("prepared ownership handoff state is unavailable")]
@@ -852,6 +870,8 @@ pub(crate) enum StoredStateIssue {
     KeyBranchScope,
     #[error("runtime state key has no schema fingerprint")]
     KeySchemaFingerprint,
+    #[error("runtime state key has an invalid inferencer model fingerprint")]
+    KeyModelFingerprint,
     #[error("runtime state key has a truncated schema fingerprint")]
     KeySchemaFingerprintTruncated,
     #[error("runtime state key has no schema fingerprint separator")]
@@ -923,6 +943,46 @@ struct LatestSnapshotWriter {
 }
 
 impl LatestSnapshotWriter {
+    fn write_owned_snapshot(
+        &self,
+        placement: &RuntimeStatePlacement,
+        snapshot: PersistedRuntimeStateEntry,
+    ) -> error_stack::Result<bool, RuntimePersistenceError> {
+        self.with_installation(|| {
+            let namespace = backup::active_namespace(
+                &self.namespace_view,
+                &self.restore_publications,
+                &placement.domain,
+            )?;
+            let view = self.db.snapshot();
+            if namespace
+                != backup::active_namespace(&view, &self.restore_publications, &placement.domain)?
+            {
+                return Ok(false);
+            }
+            let key = namespace.key(placement)?;
+            let current =
+                generation::latest_indexed_revision(&view, &self.latest, &self.lsm_index, &key)?;
+            if current.is_some_and(|revision| revision > snapshot.lsm) {
+                return Ok(false);
+            }
+            let revision = snapshot.lsm;
+            let encoded = StoredCheckpoint::encode_owned(snapshot)?;
+            let mut batch = self.db.batch();
+            batch.insert(&self.latest, key.clone(), encoded);
+            if let Some(previous) = current
+                && previous != revision
+            {
+                batch.remove(&self.lsm_index, index_key(&key, previous));
+            }
+            batch.insert(&self.lsm_index, index_key(&key, revision), key);
+            batch
+                .commit()
+                .change_context(RuntimePersistenceError::WriteValue)?;
+            Ok(true)
+        })
+    }
+
     fn write_latest_snapshot(
         &self,
         placement: &RuntimeStatePlacement,
@@ -1232,6 +1292,11 @@ impl RuntimeStatePlacement {
         if let StateSchema::Fingerprinted(schema) = self.state.schema() {
             key.push(STATE_SCHEMA_KEY_MARKER);
             key.extend_from_slice(schema.as_digest());
+            key.push(0);
+        }
+        if let RuntimeState::Inferencer { model, .. } = self.state {
+            key.push(STATE_MODEL_KEY_MARKER);
+            key.extend_from_slice(model.as_digest());
             key.push(0);
         }
         if let RuntimeState::WasmProcessor { generation, .. } = self.state {
@@ -1976,6 +2041,37 @@ impl RuntimeStateStore {
         writer.persist(PersistMode::Buffer)
     }
 
+    /// Keep the caller's complete snapshot reservation until its owned payload and storage write
+    /// finish. This periodic/final work may wait for a storage queue place; dropping the caller
+    /// cancels admission or the next bounded unit of an admitted job.
+    pub(in crate::runtime) async fn persist_owned_snapshot(
+        &self,
+        placement: &RuntimeStatePlacement,
+        snapshot: PersistedRuntimeStateEntry,
+        reservation: Reservation,
+    ) -> error_stack::Result<bool, RuntimePersistenceError> {
+        let writer = self.latest_snapshot_writer();
+        let placement = placement.clone();
+        self.executor
+            .run_storage_with(
+                StorageClass::Filesystem,
+                QueueAdmission::WaitForPlace,
+                reservation,
+                move |_charge, cancellation| {
+                    cancellation
+                        .check()
+                        .change_context(RuntimePersistenceError::Cancelled)?;
+                    let written = writer.write_owned_snapshot(&placement, snapshot)?;
+                    if written {
+                        writer.persist(PersistMode::Buffer)?;
+                    }
+                    Ok(written)
+                },
+            )
+            .await
+            .change_context(RuntimePersistenceError::StorageExecution)?
+    }
+
     /// Write the guest state a WASM processor branch checkpointed under `placement`, and return
     /// once it is on stable storage.
     ///
@@ -2171,6 +2267,101 @@ impl RuntimeStateStore {
         };
         let decoded = read_checkpoint(&view, &self.checkpoint_chunks, &key, &raw)?;
         Ok(Some(decoded))
+    }
+
+    /// Memory for the two bounded copies of a stored envelope while a checkpoint is opened.
+    pub(in crate::runtime) fn bounded_snapshot_working_bytes(
+        limit: u64,
+    ) -> error_stack::Result<u64, RuntimePersistenceError> {
+        let overhead = u64::try_from(
+            std::mem::size_of::<generation::ArchivedStoredCheckpoint>()
+                + std::mem::align_of::<generation::ArchivedStoredCheckpoint>(),
+        )
+        .verified("the fixed archive header size fits u64");
+        let encoded = limit
+            .checked_add(overhead)
+            .ok_or_else(|| Report::new(RuntimePersistenceError::RestoreStagingSize))?;
+        encoded
+            .checked_mul(2)
+            .ok_or_else(|| Report::new(RuntimePersistenceError::RestoreStagingSize))
+    }
+
+    /// Select the newest transferred or stored checkpoint from one fixed view. A superseded
+    /// transfer is released before reading the stored bytes, keeping the same two-buffer bound.
+    /// Inline bytes are copied from validated archived storage once; their owned envelope is never
+    /// decoded just to count them. Segmented payloads retain the same view through chunk reading.
+    pub(in crate::runtime) fn select_latest_snapshot(
+        &self,
+        placement: &RuntimeStatePlacement,
+        transferred: Option<PersistedRuntimeStateEntry>,
+        limit: u64,
+    ) -> error_stack::Result<Option<PersistedRuntimeStateEntry>, RuntimePersistenceError> {
+        let view = self.db.snapshot();
+        let namespace =
+            backup::active_namespace(&view, &self.restore_publications, &placement.domain)?;
+        let key = namespace.key(placement)?;
+        let revision =
+            generation::latest_indexed_revision(&view, &self.latest, &self.lsm_index, &key)?;
+        if transferred
+            .as_ref()
+            .is_some_and(|snapshot| revision.is_none_or(|stored| stored <= snapshot.lsm))
+        {
+            if let Some(snapshot) = &transferred {
+                crate::inferencer_state_snapshot::check_bound(
+                    u64::try_from(snapshot.payload.len())
+                        .verified("a transferred payload length fits u64"),
+                    limit,
+                )
+                .change_context(RuntimePersistenceError::InferencerSnapshot)?;
+            }
+            return Ok(transferred);
+        }
+        drop(transferred);
+        let Some(revision) = revision else {
+            return Ok(None);
+        };
+        let size = view
+            .size_of(&self.latest, &key)
+            .change_context(RuntimePersistenceError::ReadValue)?
+            .ok_or(RuntimePersistenceError::InvalidStorageFormat)?;
+        let encoded_limit = Self::bounded_snapshot_working_bytes(limit)? / 2;
+        if u64::from(size) > encoded_limit {
+            return Err(Report::new(RuntimePersistenceError::InferencerSnapshot));
+        }
+        let raw = view
+            .get(&self.latest, &key)
+            .change_context(RuntimePersistenceError::ReadValue)?
+            .ok_or(RuntimePersistenceError::ReadValue)?;
+        let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(raw.len());
+        aligned.extend_from_slice(&raw);
+        drop(raw);
+        let header =
+            rkyv::access::<generation::ArchivedStoredCheckpoint, rkyv::rancor::Error>(&aligned)
+                .change_context(RuntimePersistenceError::DecodeState)?;
+        match header {
+            generation::ArchivedStoredCheckpoint::Inline(entry) => {
+                if entry.lsm.to_native() != revision {
+                    return Err(Report::new(RuntimePersistenceError::InvalidStorageFormat));
+                }
+                crate::inferencer_state_snapshot::check_bound(
+                    u64::try_from(entry.payload.len()).verified("a stored payload length fits u64"),
+                    limit,
+                )
+                .change_context(RuntimePersistenceError::InferencerSnapshot)?;
+                Ok(Some(PersistedRuntimeStateEntry {
+                    lsm: entry.lsm.to_native(),
+                    payload: entry.payload.as_slice().to_vec(),
+                }))
+            }
+            generation::ArchivedStoredCheckpoint::Segmented(metadata) => {
+                if metadata.lsm.to_native() != revision {
+                    return Err(Report::new(RuntimePersistenceError::InvalidStorageFormat));
+                }
+                crate::inferencer_state_snapshot::check_bound(metadata.length.to_native(), limit)
+                    .change_context(RuntimePersistenceError::InferencerSnapshot)?;
+                read_checkpoint(&view, &self.checkpoint_chunks, &key, &aligned).map(Some)
+            }
+        }
     }
 
     /// The units with a current checkpoint for this exact entity and state kind. Reading only
@@ -2553,6 +2744,26 @@ fn stored_runtime_state(
             state: RuntimeState::KafkaOffset,
             branch_start: start,
         },
+        RuntimeStateKind::Inferencer => {
+            let (schema, model_start) = stored_schema_fingerprint(key, start)?;
+            let digest_start = model_start + 1;
+            let end = digest_start + 32;
+            if key.get(model_start) != Some(&STATE_MODEL_KEY_MARKER) || key.get(end) != Some(&0) {
+                return Err(StoredStateIssue::KeyModelFingerprint.decode_failure());
+            }
+            let digest = key
+                .get(digest_start..end)
+                .ok_or_else(|| StoredStateIssue::KeyModelFingerprint.decode_failure())?;
+            let digest = <[u8; 32]>::try_from(digest)
+                .verified("the checked range contains exactly one model fingerprint");
+            StoredRuntimeState {
+                state: RuntimeState::Inferencer {
+                    schema,
+                    model: InferencerModelFingerprint::from_digest(digest),
+                },
+                branch_start: end + 1,
+            }
+        }
         RuntimeStateKind::Correlator => {
             let (schema, branch_start) = stored_schema_fingerprint(key, start)?;
             StoredRuntimeState {

@@ -50,6 +50,27 @@ without a committed capability record receives no placements. If an advertised b
 a peer can refuse an operation with a typed answer so the sender slices it again while retaining
 the row acknowledgement accounting.
 
+## Permanent Cluster Identity
+
+The first leader commits a permanent UUID and signing key for the cluster. `DESCRIBE CLUSTER;`
+prints their public identity immediately after the leader line:
+
+```text
+leader: node-1
+cluster uid: 72f3a93e-64f0-40a5-b95d-790c8a738fee
+cluster key: <key thumbprint>
+cluster created: 2026-11-08T12:00:00Z
+```
+
+The key value is its RFC 7638 SHA-256 thumbprint in canonical base64url. Every node reports the same
+UUID, key and creation instant after it applies the record. Restart, leadership transfer and
+membership changes preserve them. The private key is never included in this description.
+
+`--cluster-id` remains the operator's display name and interconnect/gossip prerequisite. The
+indented `cluster identity` prerequisite names that configured value; the unindented `cluster uid`
+names the permanent generated identity. [Backup And Restore](backup-and-restore.md#what-a-restore-recreates)
+explains why a fresh cluster restored from an archive keeps its own UUID and key.
+
 ## The Prerequisite List Is Closed
 
 The prerequisites are cluster identity; the trust root; the node-to-node wire contract; the
@@ -299,6 +320,8 @@ describes, defaults included.
 | `--raft-snapshot-entry-threshold`, `--raft-snapshot-byte-threshold`, `--raft-covered-log-entries-retained`, `--raft-covered-log-bytes-retained`, `--raft-retained-log-cap` | node capability | Raft retention |
 | `--node-unavailability-timeout` | cluster parameter | membership |
 | `--replica-count` | cluster parameter | scheduling |
+| `--tls-cipher-suites`, `--tls-key-exchange-groups` | cluster parameter | outward TLS algorithm policy |
+| `--password-iterations` | cluster parameter | password creation policy |
 | `--state-snapshot-interval` | cluster parameter | runtime |
 | `--domain-drain-timeout`, `--entity-gate-deadline` | cluster parameter | cluster policy |
 | `--max-batch-messages`, `--client-producer-session-bytes`, `--client-consumer-session-bytes`, `--udf-code-bytes`, `--http-header-bytes`, `--http-header-fields`, `--client-batch-rows` | cluster parameter | model and session policy |
@@ -462,6 +485,18 @@ owner that captures settings at construction over its existing storage. The curr
 no OpenRaft construction setting: heartbeat and election timing remain prerequisites. Committed
 and running revisions are published together, and delayed observations cannot move them backward.
 
+
+Outward TLS algorithms are ordered-list cluster parameters. Both bootstrap defaults are `fips`:
+`--tls-cipher-suites` (`NERVIX_TLS_CIPHER_SUITES`) and `--tls-key-exchange-groups`
+(`NERVIX_TLS_KEY_EXCHANGE_GROUPS`) take comma-separated exact names or aliases. After bootstrap use
+`ALTER CLUSTER SET TLS_CIPHER_SUITES = ('fips'), TLS_KEY_EXCHANGE_GROUPS = ('fips');`.
+Aliases resolve in place and duplicate algorithms keep their first position. The complete resolved
+pair validates at commit and is installed live for new handshakes; established connections keep
+their negotiation. `DESCRIBE CLUSTER` and the settings log show resolved committed/running lists.
+The [cryptography chapter](cryptography.md#algorithm-policy) owns membership, exact spellings,
+validation and the inventory of TLS stacks the policy governs. Protocol versions and signature
+schemes have no additional cluster parameter.
+
 ## Fixed Values And The Source Ratchet
 
 A wire format, RFC, persisted layout, ABI or invariant can fix a value. Its exact constant
@@ -587,6 +622,17 @@ Resource-volume checks use the chosen seed before the first commit, and the live
 a joining or returning node. Local default resource limits do not refuse a node before it can
 learn that policy. The local preflight still measures and validates the restore-staging capability
 before opening the database or binding listeners.
+
+### Password Creation Policy
+
+`ALTER CLUSTER SET PASSWORD_ITERATIONS = 210000;` changes the cost of newly created user
+credentials. The setting defaults to 210,000 and accepts positive counts through 1,000,000.
+`--password-iterations` (`NERVIX_PASSWORD_ITERATIONS`) seeds it only at first bootstrap.
+The value is cluster policy, because every node must honor the same creation promise.
+Existing users and admitted CREATE USER command executions retain their exact credential.
+Verification uses a persisted common work count that never falls below any cost the cluster has
+admitted, preserving equal work for known and unknown names across changes, restart and restore.
+[Cryptography](cryptography.md#password-credentials) owns the credential and workload contract.
 
 ## State Inspection Capabilities
 

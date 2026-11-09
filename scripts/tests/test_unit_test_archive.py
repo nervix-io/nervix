@@ -70,7 +70,7 @@ class Recorded(Checkout):
             archive.plan(resolved)
 
     def pack_tests(self, path: Path) -> shards.Manifest:
-        with mock.patch.object(shards, "workspace_targets", return_value=TARGETS), redirect_stdout(io.StringIO()):
+        with mock.patch.object(shards, "workspace_targets", return_value=TARGETS | {"host_suite"}), redirect_stdout(io.StringIO()):
             return archive.pack(self.root.resolve(), path)
 
 
@@ -127,12 +127,14 @@ class ArchiveTests(unittest.TestCase):
         build = Recorded(self.directory / "checkout")
         package = build.root / "crates/client-jvm"
         package.mkdir(parents=True)
-        java = Path("target/client-conformance/java")
+        java = archive.JVM_ARTIFACTS
         inputs = {
             java / "nervix-client.jar": b"packaged JNI library",
             java / "tests/io/nervix/client/Properties.class": b"property fixture",
             java / "tests/io/nervix/client/BoundaryTests.class": b"boundary fixture",
             java / "tests/io/nervix/client/Properties$Input.class": b"nested fixture",
+            java / "junit-platform-console-standalone.jar": b"JUnit launcher",
+            java / "tests/META-INF/services/org.junit.platform.launcher.TestExecutionListener": b"suite reporter",
         }
         for path, content in inputs.items():
             write(build.root / path, content)
@@ -154,13 +156,116 @@ class ArchiveTests(unittest.TestCase):
         build = Recorded(self.directory / "checkout")
         program = archive.TestProgram(UNIT_EXECUTABLE.as_posix(), "crates/client-jvm")
         write(build.root / archive.PROGRAMS, json.dumps([program.to_json()]).encode())
-        java = Path("target/client-conformance/java")
+        java = archive.JVM_ARTIFACTS
         for path in (java / "nervix-client.jar", java / "tests/io/nervix/client/Properties.class",
-                     java / "tests/io/nervix/client/BoundaryTests.class"):
+                     java / "tests/io/nervix/client/BoundaryTests.class",
+                     java / "junit-platform-console-standalone.jar",
+                     java / "tests/META-INF/services/org.junit.platform.launcher.TestExecutionListener"):
             with self.assertRaisesRegex(shards.ShardError, "just build-client-jvm-tests") as failure:
                 build.pack_tests(self.directory / "unit-tests.tar.zst")
             self.assertIn(path.as_posix(), str(failure.exception))
             write(build.root / path, b"prepared input")
+
+    def test_python_tests_carry_one_wheel_and_its_coverage_object(self) -> None:
+        build = Recorded(self.directory / "checkout")
+        program = archive.TestProgram(UNIT_EXECUTABLE.as_posix(), "crates/client-python")
+        wheel = shards.PYTHON_WHEELS / "nervix_client-0.1.0-cp312-abi3-linux_x86_64.whl"
+        library = shards.COVERAGE_DEBUG / "libnervix_client_python.so"
+        write(build.root / library, b"instrumented extension", executable=True)
+        self.assertEqual(archive.python_inputs(build.root, [program]), [wheel, library])
+        (build.root / library).unlink()
+        with self.assertRaisesRegex(shards.ShardError, "just test-coverage-binaries"):
+            archive.python_inputs(build.root, [program])
+        write(build.root / library, b"instrumented extension", executable=True)
+        second = wheel.with_name("nervix_client-0.2.0-cp312-abi3-linux_x86_64.whl")
+        write(build.root / second, b"another wheel")
+        with self.assertRaisesRegex(shards.ShardError, "exactly one"):
+            archive.python_inputs(build.root, [program])
+        (build.root / second).unlink()
+        (build.root / wheel).unlink()
+        with self.assertRaisesRegex(shards.ShardError, "exactly one"):
+            archive.python_inputs(build.root, [program])
+        self.assertEqual(archive.python_inputs(build.root, []), [])
+
+    def test_restoring_python_tests_keeps_the_wheel_and_its_measured_library(self) -> None:
+        build = Recorded(self.directory / "checkout")
+        program = archive.TestProgram(UNIT_EXECUTABLE.as_posix(), "crates/client-python")
+        write(build.root / archive.PROGRAMS, json.dumps([program.to_json()]).encode())
+        library = shards.COVERAGE_DEBUG / "libnervix_client_python.so"
+        content = (build.root / shards.COVERAGE_DEBUG / "deps/libnervix_client_ffi.so").read_bytes()
+        write(build.root / library, content, executable=True)
+        packed = build.pack_tests(self.directory / "unit-tests.tar.zst")
+        self.assertEqual([file.path for file in packed.files].count(library.as_posix()), 1)
+        (build.root / "target").rename(self.directory / "saved")
+        tools = fake_ldd(self.directory / "tools", "nothing")
+        with (
+            mock.patch.dict(os.environ, {"PATH": f"{tools}:{os.environ['PATH']}"}),
+            mock.patch.object(archive, "library_path", return_value="/toolchain"),
+            redirect_stdout(io.StringIO()),
+        ):
+            archive.unpack(build.root.resolve(), self.directory / "unit-tests.tar.zst")
+        wheel = shards.PYTHON_WHEELS / "nervix_client-0.1.0-cp312-abi3-linux_x86_64.whl"
+        self.assertEqual((build.root / wheel).read_bytes(), b"wheel")
+        self.assertEqual((build.root / library).read_bytes(), content)
+
+    def ruby_program(self, build: Recorded) -> archive.TestProgram:
+        source = build.root / UNIT_EXECUTABLE
+        executable = UNIT_EXECUTABLE.with_name("host_suite-0123456789")
+        write(build.root / executable, source.read_bytes(), executable=True)
+        program = archive.TestProgram(executable.as_posix(), "crates/client-ruby")
+        write(build.root / archive.PROGRAMS, json.dumps([program.to_json()]).encode())
+        return program
+
+    def ruby_artifacts(self, build: Recorded) -> dict[Path, bytes]:
+        ruby = archive.RUBY_ARTIFACTS
+        inputs = {}
+        for library in (ruby / "ruby/lib", ruby / "ruby-fresh/gems/nervix-client-0.1.0/lib"):
+            inputs[library / "nervix_client.rb"] = b"native gem loader"
+            inputs[library / "nervix_client/build.rb"] = b"selected Ruby ABI"
+            inputs[library / "nervix_client_ruby.so"] = b"the prepared shared object"
+        inputs[ruby / "ruby-fresh/specifications/nervix-client-0.1.0.gemspec"] = b"local gem specification"
+        for path, content in inputs.items():
+            write(build.root / path, content)
+        return inputs
+
+    def test_restored_ruby_host_tests_have_both_package_forms(self) -> None:
+        build = Recorded(self.directory / "checkout")
+        self.ruby_program(build)
+        inputs = self.ruby_artifacts(build)
+        build.pack_tests(self.directory / "unit-tests.tar.zst")
+        (build.root / "target").rename(self.directory / "saved")
+        tools = fake_ldd(self.directory / "tools", "nothing")
+        with (
+            mock.patch.dict(os.environ, {"PATH": f"{tools}:{os.environ['PATH']}"}),
+            mock.patch.object(archive, "library_path", return_value="/toolchain"),
+            redirect_stdout(io.StringIO()),
+        ):
+            archive.unpack(build.root.resolve(), self.directory / "unit-tests.tar.zst")
+        for path, content in inputs.items():
+            self.assertEqual((build.root / path).read_bytes(), content)
+
+    def test_ruby_host_test_packing_refuses_missing_package_inputs(self) -> None:
+        build = Recorded(self.directory / "checkout")
+        program = self.ruby_program(build)
+        inputs = self.ruby_artifacts(build)
+        for path, content in inputs.items():
+            (build.root / path).unlink()
+            with self.assertRaises(shards.ShardError):
+                archive.ruby_inputs(build.root, [program])
+            write(build.root / path, content)
+
+    def test_ruby_host_test_run_selects_its_instrumented_package(self) -> None:
+        build = Recorded(self.directory / "checkout")
+        self.ruby_program(build)
+        with (
+            mock.patch.object(archive, "library_path", return_value="/toolchain"),
+            mock.patch.object(archive.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run,
+            redirect_stdout(io.StringIO()),
+        ):
+            archive.run(build.root.resolve())
+        environment = run.call_args.kwargs["env"]
+        self.assertEqual(str(build.root.resolve() / archive.RUBY_ARTIFACTS),
+                         environment["NERVIX_CLIENT_RUBY_TEST_ARTIFACTS"])
 
     def test_native_boundary_inputs_are_complete_and_retained(self) -> None:
         root = self.directory / "native"
@@ -178,14 +283,17 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(archive.native_inputs(root, [program]), expected)
         self.assertEqual(archive.native_inputs(root, [archive.TestProgram("ffi-unit", "crates/client-ffi")]), [])
 
-    def test_a_restored_native_boundary_test_keeps_both_programs_and_the_library(self) -> None:
+    def test_a_restored_archive_keeps_c_cpp_and_ruby_suite_inputs(self) -> None:
         build = Recorded(self.directory / "checkout")
+        ruby_program = self.ruby_program(build)
+        inputs = self.ruby_artifacts(build)
         native = shards.COVERAGE_DEBUG / "deps/native_suites-abcd"
         write(build.root / native, (build.root / UNIT_EXECUTABLE).read_bytes(), executable=True)
         program = archive.TestProgram(native.as_posix(), "crates/client-ffi")
-        write(build.root / archive.PROGRAMS, json.dumps([program.to_json()]).encode())
-        inputs = {archive.NATIVE_ARTIFACTS / f"{host}-suite{suffix}": f"{host}{suffix}".encode()
-                  for host in ("c", "cpp") for suffix in ("", "-sanitized")}
+        write(build.root / archive.PROGRAMS,
+              json.dumps([ruby_program.to_json(), program.to_json()]).encode())
+        inputs.update({archive.NATIVE_ARTIFACTS / f"{host}-suite{suffix}": f"{host}{suffix}".encode()
+                       for host in ("c", "cpp") for suffix in ("", "-sanitized")})
         library = shards.COVERAGE_DEBUG / "libnervix_client_ffi.so"
         inputs[library] = (build.root / shards.COVERAGE_DEBUG / "deps/libnervix_client_ffi.so").read_bytes()
         for path, content in inputs.items():
@@ -272,6 +380,21 @@ class RunTests(unittest.TestCase):
             f"first {self.root}/crates/first {self.root}/crates/first /toolchain",
             f"second {self.root} {self.root} /toolchain",
         ])
+
+    def test_host_executables_find_their_restored_inputs_over_inherited_paths(self) -> None:
+        for host, artifacts in (("JVM", archive.JVM_ARTIFACTS), ("RUBY", archive.RUBY_ARTIFACTS)):
+            with self.subTest(host=host):
+                program = self.program(host.lower(), f"crates/client-{host.lower()}")
+                write(self.root / artifacts / "prepared-input", b"restored fixture")
+                script = (f'#!/bin/sh\ntest "$(cat "$NERVIX_CLIENT_{host}_TEST_ARTIFACTS/prepared-input")" '
+                          '= "restored fixture"\n')
+                write(self.root / program.executable, script.encode(), executable=True)
+                self.plan([program])
+                with (
+                    mock.patch.dict(os.environ, {f"NERVIX_CLIENT_{host}_TEST_ARTIFACTS": "/absent-build"}),
+                    redirect_stdout(io.StringIO()),
+                ):
+                    archive.run(self.root)
 
     def test_a_run_goes_on_after_a_failure_and_names_every_one_that_failed(self) -> None:
         self.plan([
@@ -385,8 +508,10 @@ class RecipeTests(unittest.TestCase):
         self.assertIn(archive.MESSAGES.as_posix(), self.recipe("test-coverage-binaries:"))
 
     def test_workspace_tests_prepare_the_embedded_jvm_inputs_before_running(self) -> None:
-        for name in ("test:", "test-coverage-binaries:"):
-            self.assertIn("build-client-jvm-tests", self.recipe(name).splitlines()[0])
+        self.assertIn("build-client-jvm-tests", self.recipe("test:").splitlines()[0])
+        build = self.recipe("test-coverage-binaries:")
+        self.assertLess(build.index("cargo llvm-cov show-env"), build.index("build-client-jvm-tests"))
+        self.assertLess(build.index("build-client-jvm-tests"), build.index("coverage --all-targets"))
 
 
 if __name__ == "__main__":

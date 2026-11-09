@@ -510,11 +510,20 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
+The archived command and response shapes include conditional orphaned model-pause recovery under
+an exact mutation lease, its typed outcome and its mutation-fence and restore-installation
+conflicts. The operation checks lease authority, the restore start gate and all same-domain
+committing transactions before resuming a pause in one applied revision. It changes only domain
+status, keeping the start version, start mode, clock, schedule and incremental storage unchanged.
+
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_part_epoch_logs`, `raft_part_epoch_meta`, `raft_part_epoch_state`, and
-`raft_part_epoch_snapshots`. Opening it validates the complete keyspace namespace before reading
-any records. This namespace identifies the current Model shape, including the separate JSON
+`raft_identity_tls_inference_reset_epoch_logs`, `raft_identity_tls_inference_reset_epoch_meta`,
+`raft_identity_tls_inference_reset_epoch_state`, and
+`raft_identity_tls_inference_reset_epoch_snapshots`. Opening it validates the complete keyspace
+namespace before reading any records. The committed cluster-parameter record stores ordered typed
+TLS cipher suites and key-exchange groups; recovery validates their complete pair before returning
+that record. This namespace identifies the current Model shape, including the separate JSON
 and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec encoding, a Pulsar
 subscription's required type, an owned Pulsar subscription's required start position, a Kafka
 consumer group's required start position, the serialized Sentry platform field, an ingestor's
@@ -528,10 +537,12 @@ whose signaling data exists only on its WebSockets variant, the branch partition
 resolved branch declaration of the committed schedule carries, and the partition epoch the
 committed schedule records for every branch whose count changed. It identifies
 the current statement shape as well, which the statements a transaction keeps are stored in:
-`ALTER BRANCH` among those statements, and an `ALTER INGESTOR` or `ALTER EMITTER` operation that
+`ALTER BRANCH` among those statements, an `ALTER INGESTOR` or `ALTER EMITTER` operation that
 changes one part of its entity's body, an envelope clause or the properties, or one part of a
-construction where it stands. Its state metadata requires the current `ClusterState` encoding, 15,
-including committed cluster parameters, the durable restore installation gate and the unit-keyed
+construction where it stands, and a `RESET WASM PROCESSOR ... STATE` that names its processor and
+scope and takes its domain from the transaction, as the step effect and commit plan step that apply
+it keep it too. The database's state metadata requires the current `ClusterState` encoding, 20,
+including the cluster identity reference, committed cluster parameters, the durable restore installation gate and the unit-keyed
 committed schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,
 typed ingestor instancing, exact-unit placement-group members
@@ -716,6 +727,34 @@ whose encoding does not match, requiring recreation under the alpha persistence 
 installed-state effect's clock. RESUME changes the domain to running and removes its complete-set
 installation gate in that single applied effect; it preserves the archived generation and mapping.
 
+## Permanent Cluster Identity
+
+The applied state owns one `ClusterIdentityRecord`: a version-4 `cluster_uid`, one leader-sampled
+creation timestamp, a nonzero key generation, the current key, and optional retired and pending
+keys with their lifecycle timestamps. Every key holds its shared protocol `kid`, public P-256 JWK
+and private PKCS#8 DER. Its private allocation clears on drop and diagnostics show only public
+identity fields. The data directory remains sensitive; this record adds no encryption at rest.
+
+The local leader generates a candidate through `nervix-crypto` on the bounded control executor and
+proposes `InstallClusterIdentity` before initial parameter publication. The first committed
+candidate wins. Later proposals leave the complete installed record and graph revision unchanged;
+their unused candidates are discarded. Ordinary observations expose only the public projection.
+The leader coordinator obtains a separate signing-only handle and owns that handle's leadership
+lifetime.
+
+The singleton lives at state key `K`. Metadata carries its expected UUID, and both are written in
+the same durable batch. Only an absent reference together with an absent record denotes an
+uninitialized cluster. A missing or disagreeing record fails as invalid consensus record storage;
+it cannot trigger generation of a replacement identity. Recovery validates the UUID and re-derives
+each key's public JWK and RFC 7638 `kid` from its private key before publishing state. Normal open
+and snapshot installation use this same validation. Snapshots include the complete singleton, so
+restart, leader transfer and membership changes preserve its identity and signing key.
+
+Backup archives carry the source UUID as display metadata. They carry no private key or licensing
+state, and restore retains the target cluster's identity. Rebuilding from an archive is a clone;
+recovering a licensed installation requires an administrative transfer to the rebuilt cluster.
+[Backup And Restore](backup-and-restore.md#what-a-restore-recreates) owns that archive contract.
+
 ## Cluster Parameter Publication
 
 Current state metadata includes the optional committed cluster parameter record; absence is only
@@ -732,3 +771,16 @@ same fence; an idempotent retry only rejoins retained progress and never reappli
 The metadata encoding has one current identity. Data from a different stored shape fails decoding
 with a typed error asking for node-state recreation. Parameter durations and numeric bounds are
 validated on archive recovery as well as construction. No migration or second decoder is present.
+
+The current schedule archive includes the inferencer ownership-state component. Native tensor checkpoints remain node-owned runtime state, never consensus records. Their placement combines the schema fingerprint and the decision layer's typed fingerprint of the pinned resource, file and ordered `STATE` declarations. Schedule application removes checkpoints whose model identity was replaced. The interconnect, consensus schedule and runtime storage identifiers name this one current shape; stored state in another shape must be recreated.
+
+### Credential Publication
+
+Users, admitted CREATE USER effects and finished-command password evidence hold the same typed
+credential, with its validated cost and fixed salt/digest arrays. Metadata also persists the
+largest admitted verification cost. A policy change, user creation or user import raises it in
+the same state publication; a login captures the optional user and that cost together, with one
+keyed lookup and no user scan. Recovery validates that the count covers both the committed
+creation policy and every recovered user before publishing the state. Snapshot metadata and
+user records preserve the complete values. The namespace and state-encoding checks above fence
+this shape before rkyv reads any user record or log entry.

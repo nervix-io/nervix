@@ -344,18 +344,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03918c3dbd7701a85c6b9887732e2921175f26c350b4563841d0958c21d57e6d"
 
 [[package]]
-name = "argon2"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c3610892ee6e0cbce8ae2700349fcf8f98adb0dbfbee85aec3c9179d29cc072"
-dependencies = [
- "base64ct",
- "blake2",
- "cpufeatures 0.2.17",
- "password-hash",
-]
-
-[[package]]
 name = "ariadne"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -943,11 +931,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-lc-fips-sys"
+version = "0.14.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b744eed18cd75d814effdf2aba2880f912abe0fe1c327b361341d31aba9a7005"
+dependencies = [
+ "bindgen 0.73.2",
+ "cc",
+ "cmake",
+ "dunce",
+ "fs_extra",
+ "pkg-config",
+ "regex",
+]
+
+[[package]]
 name = "aws-lc-rs"
 version = "1.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faac5829c2b74c28f830747e7818ccfb684261b5f48a1118b1e2a13d36dfab13"
 dependencies = [
+ "aws-lc-fips-sys",
  "aws-lc-sys",
  "untrusted 0.7.1",
  "zeroize",
@@ -1514,15 +1518,6 @@ dependencies = [
  "radium",
  "tap",
  "wyz",
-]
-
-[[package]]
-name = "blake2"
-version = "0.10.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
-dependencies = [
- "digest 0.10.7",
 ]
 
 [[package]]
@@ -6778,6 +6773,7 @@ dependencies = [
  "strum 0.26.3",
  "tar",
  "thiserror 2.0.21",
+ "uuid",
 ]
 
 [[package]]
@@ -6988,6 +6984,7 @@ name = "nervix-client-python"
 version = "0.1.0-dev"
 dependencies = [
  "arrow-array",
+ "bolero",
  "bytes",
  "meticulous",
  "nervix-client-core",
@@ -7018,6 +7015,8 @@ dependencies = [
  "nervix-recovery",
  "rb-sys",
  "rb-sys-env",
+ "tempfile",
+ "tokio",
  "tonic 0.13.1",
  "url",
 ]
@@ -7088,6 +7087,7 @@ dependencies = [
  "nervix-models",
  "nervix-primitives",
  "nervix-recovery",
+ "nervix-tls",
  "percent-encoding",
  "rcgen",
  "reqwest 0.13.5",
@@ -7508,6 +7508,7 @@ dependencies = [
  "futures-util",
  "meticulous",
  "nervix-connector",
+ "nervix-connector-fake",
  "nervix-dns",
  "nervix-model-harness",
  "nervix-models",
@@ -7668,9 +7669,11 @@ dependencies = [
  "imbl",
  "meticulous",
  "nervix-arbitrary",
+ "nervix-crypto",
  "nervix-dns",
  "nervix-execution",
  "nervix-interconnect",
+ "nervix-licensing-protocol",
  "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
@@ -7679,6 +7682,7 @@ dependencies = [
  "rcgen",
  "rkyv",
  "serde",
+ "serde_json",
  "sorted-vec",
  "storekey",
  "strum 0.26.3",
@@ -7687,12 +7691,15 @@ dependencies = [
  "tokio",
  "tracing",
  "ubyte",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]
 name = "nervix-crypto"
 version = "0.1.0-dev"
 dependencies = [
+ "aws-lc-fips-sys",
  "aws-lc-rs",
  "aws-lc-sys",
  "bolero",
@@ -7700,11 +7707,26 @@ dependencies = [
  "faster-hex",
  "jsonwebtoken",
  "meticulous",
+ "nervix-crypto-policy",
  "nervix-primitives",
  "nervix-recovery",
  "rustls",
  "serde",
  "sha2 0.10.9",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "nervix-crypto-policy"
+version = "0.1.0-dev"
+dependencies = [
+ "bolero",
+ "error-stack",
+ "meticulous",
+ "rkyv",
+ "serde",
+ "serde_json",
+ "strum 0.26.3",
  "thiserror 2.0.21",
 ]
 
@@ -7918,6 +7940,7 @@ dependencies = [
  "meticulous",
  "nervix-approx-into",
  "nervix-arbitrary",
+ "nervix-crypto-policy",
  "nervix-primitives",
  "nervix-simd-kernels",
  "nonzero_ext",
@@ -7925,6 +7948,7 @@ dependencies = [
  "rkyv",
  "rstest",
  "serde",
+ "serde-big-array",
  "serde_json",
  "sorted-vec",
  "strum 0.26.3",
@@ -8200,7 +8224,6 @@ dependencies = [
  "anyhow",
  "apache-avro",
  "arch-into",
- "argon2",
  "arrow-arith",
  "arrow-array",
  "arrow-buffer",
@@ -8273,6 +8296,7 @@ dependencies = [
  "nervix-connector-zeromq",
  "nervix-consensus",
  "nervix-crypto",
+ "nervix-crypto-policy",
  "nervix-dataflow-graph",
  "nervix-deadlock",
  "nervix-dns",
@@ -8288,6 +8312,7 @@ dependencies = [
  "nervix-roto",
  "nervix-simd-kernels",
  "nervix-test-environment",
+ "nervix-tls",
  "nervix-vm",
  "nervix-wasm",
  "nix",
@@ -8380,6 +8405,18 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "nervix-tls"
+version = "0.1.0-dev"
+dependencies = [
+ "meticulous",
+ "nervix-crypto",
+ "nervix-crypto-policy",
+ "nervix-model-harness",
+ "nervix-primitives",
+ "rustls",
 ]
 
 [[package]]
@@ -9380,17 +9417,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f2a05b18d44e2957b88f96ba460715e295bc1d7510468a2f3d3b44535d26c24"
 dependencies = [
  "regex",
-]
-
-[[package]]
-name = "password-hash"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "346f04948ba92c43e8469c1ee6736c7563d71012b17d40745260fe106aac2166"
-dependencies = [
- "base64ct",
- "rand_core 0.6.4",
- "subtle",
 ]
 
 [[package]]
@@ -11347,8 +11373,7 @@ dependencies = [
 [[package]]
 name = "rustls"
 version = "0.23.46"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
+source = "git+https://github.com/nervix-io/rustls.git?rev=3a454c70e431a25b88cd117e8f7458fb74f7e0b3#3a454c70e431a25b88cd117e8f7458fb74f7e0b3"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -13396,8 +13421,7 @@ checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 [[package]]
 name = "tonic"
 version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e581ba15a835f4d9ea06c55ab1bd4dce26fc53752c69a04aac00703bfb49ba9"
+source = "git+https://github.com/nervix-io/grpc-rust.git?rev=90b5289e691815f26ec6a89fed89c8c370674aaa#90b5289e691815f26ec6a89fed89c8c370674aaa"
 dependencies = [
  "async-trait",
  "axum",

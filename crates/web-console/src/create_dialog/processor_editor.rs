@@ -1,9 +1,9 @@
-//! Shared visual editor for junction and reingestor creation.
+//! Shared visual editor for junction, deduplicator, reorderer and reingestor creation.
 //!
 //! Layer: edges.
 //!
 //! - **Owns.** Browser controls for node-wide processor options and composition of ordered input,
-//!   state, and route editors for both processor families.
+//!   key, state, and route editors for every processor family.
 //! - **Depends on.** Processor drafts, typed choice controls, and Leptos signals.
 //! - **Must not know.** Registry validation, runtime placement, or session transport internals.
 
@@ -18,7 +18,8 @@ use nervix_models::AckMode;
 use super::{
     CreateSignals, RequestSender, event_target_textarea_value, event_target_value,
     processor_draft::ProcessorFamily, processor_input_editor::ProcessorInputEditor,
-    processor_route_editor::ProcessorRouteEditor, processor_state_editor::ProcessorStateEditor,
+    processor_key_editor::ProcessorKeyEditor, processor_route_editor::ProcessorRouteEditor,
+    processor_state_editor::ProcessorStateEditor,
 };
 
 pub(super) fn indices(len: usize) -> Vec<usize> {
@@ -35,12 +36,11 @@ pub(super) fn ProcessorEditor(
 ) -> impl IntoView {
     let draft = signals.processor(family);
     let pending = move || signals.progress.get().is_pending();
-    let label = match family {
-        ProcessorFamily::Junction => "Junction name",
-        ProcessorFamily::Reingestor => "Reingestor name",
-    };
+    let keys = family.key_clause().map(|clause| {
+        view! { <ProcessorKeyEditor family=family clause=clause signals=signals /> }
+    });
     view! {
-        <label class="create-field"><span>{label}</span>
+        <label class="create-field"><span>{family.name_label()}</span>
             <input node_ref=name_input class="create-name" type="text" autocomplete="off"
                 prop:value=move || draft.get().name
                 disabled=pending
@@ -70,7 +70,9 @@ pub(super) fn ProcessorEditor(
                     signals.edit();
                 } />
         </label>
+        {keys}
         <ProcessorStateEditor family=family signals=signals request_tx=request_tx session_generation=session_generation />
         <ProcessorRouteEditor family=family signals=signals request_tx=request_tx session_generation=session_generation />
     }
+    .into_any()
 }

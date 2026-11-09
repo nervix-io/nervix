@@ -275,6 +275,10 @@ impl Arbitrary<'_> {
     /// A bounded cluster transition naming each parameter once, with independently drawn values.
     fn alter_cluster(&mut self) -> nervix_models::AlterCluster {
         let assignments = vec![
+            nervix_models::ClusterParameterChange::PasswordIterations(
+                self.entropy
+                    .boundary_biased(1..=nervix_models::PasswordIterations::MAXIMUM),
+            ),
             nervix_models::ClusterParameterChange::NodeUnavailabilityTimeout(
                 std::time::Duration::from_millis(self.entropy.between(1..=1000)),
             ),
@@ -406,7 +410,6 @@ impl Arbitrary<'_> {
             StatementVariant::ResetWasmState => {
                 let scope = self.state_branch_selection();
                 Statement::ResetWasmState(ResetWasmState {
-                    domain: self.name(),
                     processor: self.name(),
                     scope,
                 })

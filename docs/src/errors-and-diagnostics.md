@@ -870,6 +870,11 @@ error the route's policy receives.
 [Failure and observation](./connector-contract.md#failure-and-observation) owns the contract, and
 the paragraphs below record what each integration keeps beneath it.
 
+Resolving an event counter during connector construction returns `UndeclaredConnectorEvent` if
+the entity declares no such event. The typed event identity stays beneath the connector's open
+context; this refuses construction and answers for no record. Successfully recording a declared
+event changes no publish, intake or acknowledgement outcome.
+
 An Iceberg object-store failure retains its OpenDAL cause beneath the external Iceberg error.
 When the storage client sets `timeout_ms`, that error also names the configured millisecond bound
 as configuration context. The host reports the failed commit and its declared reconnect backoff; one
@@ -1445,6 +1450,19 @@ failure and its growing retry delay across successful reconnects until a batch i
 broker ingestor's acknowledgement that its transport fails to confirm, and a rejection it fails to
 take back, become the ingestor's transient status with the innermost context of the ingestor's
 report as the reason, and only a later confirmed acknowledgement clears it.
+
+An ingestor's acknowledgement wait ends with a typed `IngestorAcknowledgementOutcome`:
+`Acknowledged`, `Failed` with the reason the failing share of its tree gave, `TimedOut` with the
+`ACK TIMEOUT` the tree stayed silent for, or `Shutdown`. The timeout is a property of the bounded
+wait, which `AckWaitOutcome::TimedOut` carries as a `Duration`; a root itself resolves only as
+acknowledged or failed, and no text encodes a timeout. The host reports a failed tree as `ingestor
+ACK chain failed for ingestor '<name>' in domain '<domain>': <reason>`, and an expired wait as a
+timeout naming its bound, `ingestor ACK chain for ingestor '<name>' in domain '<domain>' timed out:
+no acknowledgement progress within ACK TIMEOUT <duration>`. Both reject the batch, and both are
+counted by outcome; see [Ingestor Acknowledgement And
+Lifecycle](metrics-and-observability.md#ingestor-acknowledgement-and-lifecycle). The
+`nervix_ingestor_transient_failure` gauge projects the same transient status `DESCRIBE INGESTOR`
+shows, for the task that currently runs the unit.
 
 A WebSockets connection's idle expiry keeps `DeadlineElapsed` with the explicit
 `idle_timeout_ms` key, or `WebsocketsConnectionIngestorFailure::IdleTimeout` with its derived effective budget,
@@ -2734,7 +2752,14 @@ refusal reached against a transaction that another coordinator has since opened 
 as `TransactionPlanningError::DomainPaused` caused by the same command's own pause, is not that
 command's failure:
 the coordinator recovers the recorded progress under the same execution reference instead. A
-refusal against an unchanged transaction keeps its report, message, and disposition.
+refusal against an unchanged transaction keeps its report, message, and disposition, except for a
+typed paused-domain refusal eligible for orphaned-pause recovery. That recovery presents the
+command's current mutation lease to a conditional consensus operation; typed mutation-fence or
+restore-installation causes survive to the reporting boundary. A refused restore gate preserves
+the original refusal. An unconfirmed recovery, a lost fence or a transaction that now owns the
+pause keeps the admitted command retryable under the same reference. A confirmed resume emits
+the lifecycle log `resumed orphaned ALTER pause`; an unchanged status emits no such log. Neither
+outcome adds a client notice or a second success result.
 
 ### Domain Clock Attachment
 
@@ -3215,6 +3240,14 @@ digest-mismatched current chunk set or a conflicting publication inventory. `Res
 `InvalidStorageFormat` requires recreation of the node state directory when the required current
 format marker is missing or invalid. The unit-keyed checkpoint format uses a distinct marker, so
 state written under an earlier key shape fails at open rather than disappearing from a read.
+
+Inferencer checkpoint failures retain `SnapshotError` beneath
+`RuntimePersistenceError::InferencerSnapshot`. An unrecognized signature, invalid tensor layout or
+undecodable frame asks for the stored state to be recreated. Frame and declared-state bounds report
+the required bytes and the configured snapshot section limit; `CREATE INFERENCER` names the refused
+inferencer. Archive lengths are checked before owned tensor allocation. Executor admission and
+cancellation remain their own typed storage outcomes rather than a judgment that tensor data is
+invalid. Checkpoint diagnostics never include tensor values.
 
 `RestoreStagingQuota` carries the node's unpublished checkpoint limit, current usage and incoming
 checkpoint footprint; `RestoreStagingSize` rejects an unrepresentable accounting sum. A quota
@@ -3873,3 +3906,13 @@ preserves the cause under `WireDecodeError::InvalidValue`, and a stored tagged k
 under `StoredStateIssue::KeyUnitInvalid` and `RuntimePersistenceError::DecodeState`.
 Allocation-layout validation rejects unaddressable count declarations before materializing units;
 every addressable index fits the identity range.
+
+### Credential Cost Refusals
+
+Password credential construction, JSON decoding and archive decoding validate the positive
+iteration count against the password policy definition's 1,000,000 maximum before executor
+admission. A refusal identifies the cost and bound, never password, salt or digest bytes.
+A consensus namespace/state-encoding mismatch requires recreation before any credential is
+read; a user backup record with a different version fails its header check before decoding.
+Executor refusal continues to mean that credentials were not judged, reported as UNAVAILABLE
+or HTTP 503 without changing failure pacing. Wrong passwords remain authentication refusals.

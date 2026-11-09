@@ -97,6 +97,7 @@ use tracing::{debug, error, info, warn};
 mod append_submission_fault;
 #[cfg(test)]
 mod archive_count_tests;
+mod cluster_identity;
 mod cluster_parameters;
 mod command_execution;
 #[cfg(any(test, feature = "testing"))]
@@ -104,9 +105,13 @@ pub use append_submission_fault::AppendSubmissionFailure;
 use append_submission_fault::AppendSubmissionFault;
 #[cfg(feature = "testing")]
 use append_submission_fault::AppendSubmissionFaults;
+pub use cluster_identity::{
+    ClusterIdentity, ClusterIdentityError, ClusterIdentityRecord, ClusterSigner,
+};
 pub use cluster_parameters::ClusterParameterPlanningInputs;
 mod connectivity_fault;
 mod domain_mutation;
+mod domain_pause_recovery;
 mod durable_batch;
 mod leadership;
 mod lease_refusal;
@@ -133,7 +138,10 @@ pub use command_execution::{
     CommandExecutionTransactionStatus, CommandExecutionTransactionTarget, DiagnosticSpan,
     RecordedBackupArchive,
 };
-pub use domain_mutation::{DomainMutationLease, DomainMutationOwner, DomainMutationRecoveryFence};
+pub use domain_mutation::{
+    DomainMutationError, DomainMutationLease, DomainMutationOwner, DomainMutationRecoveryFence,
+};
+pub use domain_pause_recovery::OrphanedPauseRecovery;
 pub use leadership::LeadershipObservation;
 #[cfg(any(test, feature = "testing"))]
 pub use lease_refusal::CommandWrite;
@@ -165,7 +173,7 @@ mod transaction_retention;
 #[cfg(test)]
 mod transaction_retention_tests;
 use connectivity_fault::ConnectivityFault;
-use domain_mutation::{DomainMutationAdmission, DomainMutationError};
+use domain_mutation::DomainMutationAdmission;
 #[cfg(any(test, feature = "testing"))]
 pub use storage_fault::{StorageBoundary, StorageFault, StoragePause};
 use transaction_report::TransactionReportRecords;
@@ -402,6 +410,9 @@ pub struct TransactionControlSnapshot {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum ConsensusCommand {
+    InstallClusterIdentity {
+        identity: Box<ClusterIdentityRecord>,
+    },
     SeedClusterParameters {
         values: ClusterParameterValues,
     },
@@ -605,6 +616,12 @@ pub enum ConsensusCommand {
     RemoveFinishedTransactions {
         finished_before: nervix_models::Timestamp,
     },
+    /// Recovers a pause only while this exact command lease still owns the domain and no
+    /// committing transaction has adopted it. Ordinary transaction/backup resume is separate.
+    RecoverOrphanedModelPause {
+        domain_id: DomainName,
+        mutation: Box<DomainMutationLease>,
+    },
 }
 
 #[derive(
@@ -614,6 +631,7 @@ pub enum ConsensusResponse {
     Applied,
     Conflict(ConsensusConflict),
     Transaction(Box<TransactionMutationResponse>),
+    OrphanedPauseRecovery(OrphanedPauseRecovery),
 }
 
 /// Why the replicated state machine refused a proposed change.
@@ -652,6 +670,12 @@ pub enum ConsensusConflict {
         reference: nervix_models::CommandExecutionReference,
         kind: CommandExecutionRequestConflict,
     },
+    #[error("{cause}")]
+    DomainMutation { cause: Box<DomainMutationError> },
+    #[error("{cause}")]
+    RestoreInstallation {
+        cause: Box<RestoreStateInstallationError>,
+    },
 }
 
 impl From<String> for ConsensusConflict {
@@ -665,7 +689,22 @@ impl From<String> for ConsensusConflict {
 )]
 pub struct UserCredentials {
     pub name: UserName,
-    pub password_hash: String,
+    pub password_credential: nervix_models::PasswordCredential,
+}
+
+/// The credential and uniform work admitted by one state publication.
+#[derive(Debug, Clone)]
+pub struct AuthenticationInput {
+    user: Option<UserCredentials>,
+    work: nervix_models::PasswordCost,
+}
+impl AuthenticationInput {
+    pub fn work(&self) -> nervix_models::PasswordCost {
+        self.work
+    }
+    pub fn into_user(self) -> Option<UserCredentials> {
+        self.user
+    }
 }
 
 /// The replicated configuration of the cluster as one applied revision left it.
@@ -691,6 +730,7 @@ pub struct AppliedLogPosition {
 impl std::fmt::Display for ConsensusCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InstallClusterIdentity { .. } => f.write_str("install-cluster-identity"),
             Self::SeedClusterParameters { .. } => f.write_str("seed-cluster-parameters"),
             Self::AlterClusterParameters { reference, .. } => {
                 write!(f, "alter-cluster-parameters:{reference}")
@@ -758,6 +798,9 @@ impl std::fmt::Display for ConsensusCommand {
             Self::PauseDomain { domain_id, .. } => write!(f, "pause-domain:{}", domain_id.as_str()),
             Self::ResumeDomain { domain_id, .. } => {
                 write!(f, "resume-domain:{}", domain_id.as_str())
+            }
+            Self::RecoverOrphanedModelPause { domain_id, .. } => {
+                write!(f, "recover-orphaned-model-pause:{}", domain_id.as_str())
             }
             Self::ReconcileDomainClockAuthority { domain_id, .. } => {
                 write!(f, "reconcile-domain-clock-authority:{}", domain_id.as_str())
@@ -875,6 +918,9 @@ impl std::fmt::Display for ConsensusResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Applied => f.write_str("ok"),
+            Self::OrphanedPauseRecovery(recovery) => {
+                write!(f, "orphaned-pause-recovery:{recovery:?}")
+            }
             Self::Conflict(reason) => write!(f, "conflict:{reason}"),
             Self::Transaction(response) => match &response.result {
                 Ok(transaction) => write!(f, "transaction:{}", transaction.id),
@@ -1450,7 +1496,9 @@ impl ReportedAdmissionRefusals {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct StateMachineData {
+    cluster_identity: Option<Arc<ClusterIdentityRecord>>,
     parameters: Option<ClusterParameterRecord>,
+    password_work: Option<nervix_models::PasswordCost>,
     last_applied_log_id: Option<LogIdOf>,
     // Independently retained revisions share unchanged membership.
     last_membership: Arc<StoredMembershipOf>,
@@ -1471,6 +1519,15 @@ struct StateMachineData {
 }
 
 impl StateMachineData {
+    fn raise_password_work(&mut self, cost: nervix_models::PasswordCost) {
+        if self
+            .password_work
+            .is_none_or(|current| cost.get() > current.get())
+        {
+            self.password_work = Some(cost);
+        }
+    }
+
     fn domain_resource_planning_inputs(&self, domain: &DomainName) -> DomainResourcePlanningInputs {
         let status = ResourceVersionStatus::from(&self.resources);
         let resources = status
@@ -1851,6 +1908,8 @@ enum SnapshotTransferError {
 
 #[derive(Debug, Error)]
 pub enum ConsensusError {
+    #[error("cluster identity operation failed")]
+    ClusterIdentity,
     #[error("consensus storage failed")]
     Storage,
     #[error("consensus storage failed")]
@@ -3252,6 +3311,16 @@ impl Observer {
     pub async fn current_users(&self) -> BTreeMap<UserName, UserCredentials> {
         (&self.inner.store.inner.state().users).into()
     }
+    /// Capture the user and common work count from the same immutable publication.
+    pub fn authentication_input(&self, user: Option<&UserName>) -> Option<AuthenticationInput> {
+        let state = self.inner.store.inner.state();
+        let work = state.password_work?;
+        let user = match user {
+            Some(name) => state.users.get(name).cloned(),
+            None => None,
+        };
+        Some(AuthenticationInput { user, work })
+    }
     pub async fn current_user(&self, user: &UserName) -> Option<UserCredentials> {
         self.inner.store.inner.state().users.get(user).cloned()
     }
@@ -3460,7 +3529,7 @@ impl Proposer {
             ConsensusResponse::Conflict(reason) => {
                 Err(Report::new(ConsensusError::Conflict(reason)))
             }
-            ConsensusResponse::Transaction(_) => {
+            ConsensusResponse::Transaction(_) | ConsensusResponse::OrphanedPauseRecovery(_) => {
                 Err(Report::new(ConsensusError::UnexpectedResponse))
             }
         }
@@ -3492,7 +3561,7 @@ impl Proposer {
             ConsensusResponse::Conflict(reason) => {
                 Err(Report::new(ConsensusError::Conflict(reason)))
             }
-            ConsensusResponse::Transaction(_) => {
+            ConsensusResponse::Transaction(_) | ConsensusResponse::OrphanedPauseRecovery(_) => {
                 Err(Report::new(ConsensusError::UnexpectedResponse))
             }
         }
@@ -3522,7 +3591,7 @@ impl Proposer {
             ConsensusResponse::Conflict(reason) => {
                 Err(Report::new(ConsensusError::Conflict(reason)))
             }
-            ConsensusResponse::Transaction(_) => {
+            ConsensusResponse::Transaction(_) | ConsensusResponse::OrphanedPauseRecovery(_) => {
                 Err(Report::new(ConsensusError::UnexpectedResponse))
             }
         }
@@ -3552,7 +3621,7 @@ impl Proposer {
             ConsensusResponse::Conflict(reason) => {
                 Err(Report::new(ConsensusError::Conflict(reason)))
             }
-            ConsensusResponse::Transaction(_) => {
+            ConsensusResponse::Transaction(_) | ConsensusResponse::OrphanedPauseRecovery(_) => {
                 Err(Report::new(ConsensusError::UnexpectedResponse))
             }
         }
@@ -3584,7 +3653,7 @@ impl Proposer {
             ConsensusResponse::Conflict(reason) => {
                 Err(Report::new(ConsensusError::Conflict(reason)))
             }
-            ConsensusResponse::Transaction(_) => {
+            ConsensusResponse::Transaction(_) | ConsensusResponse::OrphanedPauseRecovery(_) => {
                 Err(Report::new(ConsensusError::UnexpectedResponse))
             }
         }
@@ -3627,7 +3696,7 @@ impl Proposer {
             ConsensusResponse::Conflict(reason) => {
                 Err(Report::new(ConsensusError::Conflict(reason)))
             }
-            ConsensusResponse::Transaction(_) => {
+            ConsensusResponse::Transaction(_) | ConsensusResponse::OrphanedPauseRecovery(_) => {
                 Err(Report::new(ConsensusError::UnexpectedResponse))
             }
         }
@@ -3877,7 +3946,7 @@ impl Proposer {
             ConsensusResponse::Conflict(reason) => {
                 Err(Report::new(ConsensusError::Conflict(reason)))
             }
-            ConsensusResponse::Transaction(_) => {
+            ConsensusResponse::Transaction(_) | ConsensusResponse::OrphanedPauseRecovery(_) => {
                 Err(Report::new(ConsensusError::UnexpectedResponse))
             }
         }
@@ -4009,7 +4078,7 @@ impl Proposer {
             ConsensusResponse::Conflict(reason) => {
                 Err(Report::new(ConsensusError::Conflict(reason)))
             }
-            ConsensusResponse::Transaction(_) => {
+            ConsensusResponse::Transaction(_) | ConsensusResponse::OrphanedPauseRecovery(_) => {
                 Err(Report::new(ConsensusError::UnexpectedResponse))
             }
         }
@@ -4070,7 +4139,7 @@ impl Proposer {
             ConsensusResponse::Conflict(reason) => {
                 Err(Report::new(ConsensusError::Conflict(reason)))
             }
-            ConsensusResponse::Transaction(_) => {
+            ConsensusResponse::Transaction(_) | ConsensusResponse::OrphanedPauseRecovery(_) => {
                 Err(Report::new(ConsensusError::UnexpectedResponse))
             }
         }
@@ -5663,6 +5732,9 @@ fn apply_consensus_command_at(
 ) -> AppliedConsensusCommand {
     let mut changes = StateMachineChanges::default();
     match command {
+        ConsensusCommand::InstallClusterIdentity { identity } => {
+            return cluster_identity::install(state, identity);
+        }
         ConsensusCommand::SeedClusterParameters { values } => {
             return cluster_parameters::seed(state, *values);
         }
@@ -5972,6 +6044,10 @@ fn apply_consensus_command_at(
                 changes.domains_changed = true;
             }
         }
+        ConsensusCommand::RecoverOrphanedModelPause {
+            domain_id,
+            mutation,
+        } => return state.recover_orphaned_model_pause(domain_id, mutation),
         ConsensusCommand::ReconcileDomainClockAuthority {
             domain_id,
             expected_start_version,
@@ -5990,6 +6066,7 @@ fn apply_consensus_command_at(
         }
         ConsensusCommand::CreateUser { user } => {
             if !state.users.contains_key(&user.name) {
+                state.raise_password_work(user.password_credential.cost());
                 state.users.insert(user.name.clone(), user.as_ref().clone());
             }
         }
@@ -9210,7 +9287,10 @@ mod tests {
             &ConsensusCommand::CreateUser {
                 user: Box::new(UserCredentials {
                     name: UserName::parse("unrelated_user").assured("the test user name is valid"),
-                    password_hash: "hash".to_string(),
+                    password_credential: nervix_models::PasswordCredential::from_parts(
+                        210000, [171; 16], [171; 64],
+                    )
+                    .assured("the fixed credential has a bounded iteration count"),
                 }),
             },
         );
@@ -9286,7 +9366,10 @@ mod tests {
             &ConsensusCommand::CreateUser {
                 user: Box::new(UserCredentials {
                     name: UserName::parse("app_user").expect("valid user name"),
-                    password_hash: "argon2-hash".to_string(),
+                    password_credential: nervix_models::PasswordCredential::from_parts(
+                        210000, [51; 16], [51; 64],
+                    )
+                    .assured("the fixed credential has a bounded iteration count"),
                 }),
             },
         );
@@ -9326,7 +9409,10 @@ mod tests {
                     if_not_exists: false,
                     name: UserName::parse("created_user")
                         .assured("the created test user is an identifier-shaped literal"),
-                    password_hash: "argon2-hash".to_string(),
+                    password_credential: nervix_models::PasswordCredential::from_parts(
+                        210000, [51; 16], [51; 64],
+                    )
+                    .assured("the fixed credential has a bounded iteration count"),
                 },
             )
         }
@@ -9557,7 +9643,10 @@ mod tests {
                     if_not_exists: false,
                     name: UserName::parse("created_user")
                         .assured("the created test user is an accepted literal"),
-                    password_hash: "argon2-hash".to_string(),
+                    password_credential: nervix_models::PasswordCredential::from_parts(
+                        210000, [51; 16], [51; 64],
+                    )
+                    .assured("the fixed credential has a bounded iteration count"),
                 },
             )
         }
@@ -9762,7 +9851,10 @@ mod tests {
                 if_not_exists: false,
                 name: UserName::parse("created_user")
                     .assured("the created user is an accepted literal"),
-                password_hash: "argon2-hash".to_string(),
+                password_credential: nervix_models::PasswordCredential::from_parts(
+                    210000, [51; 16], [51; 64],
+                )
+                .assured("the fixed credential has a bounded iteration count"),
             },
         );
         let mut state = StateMachineData {
@@ -11274,7 +11366,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_consensus_command_tracks_users_without_overwriting_existing_password_hash() {
+    fn apply_consensus_command_tracks_users_without_overwriting_existing_password_credential() {
         let mut state = StateMachineData::default();
         let name = UserName::parse("app_user").expect("valid user name");
 
@@ -11283,7 +11375,10 @@ mod tests {
             &ConsensusCommand::CreateUser {
                 user: Box::new(UserCredentials {
                     name: name.clone(),
-                    password_hash: "argon2-hash-v1".to_string(),
+                    password_credential: nervix_models::PasswordCredential::from_parts(
+                        210000, [13; 16], [13; 64],
+                    )
+                    .assured("the fixed credential has a bounded iteration count"),
                 }),
             },
         );
@@ -11292,7 +11387,10 @@ mod tests {
             &ConsensusCommand::CreateUser {
                 user: Box::new(UserCredentials {
                     name: name.clone(),
-                    password_hash: "argon2-hash-v2".to_string(),
+                    password_credential: nervix_models::PasswordCredential::from_parts(
+                        210000, [14; 16], [14; 64],
+                    )
+                    .assured("the fixed credential has a bounded iteration count"),
                 }),
             },
         );
@@ -11301,8 +11399,11 @@ mod tests {
             state
                 .users
                 .get(&name)
-                .map(|user| user.password_hash.as_str()),
-            Some("argon2-hash-v1")
+                .map(|user| user.password_credential.clone()),
+            Some(
+                nervix_models::PasswordCredential::from_parts(210000, [13; 16], [13; 64])
+                    .assured("the fixture cost is bounded")
+            )
         );
     }
 

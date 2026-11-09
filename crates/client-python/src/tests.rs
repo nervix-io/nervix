@@ -10,6 +10,8 @@
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 
+#[path = "inspection_tests.rs"]
+mod inspection;
 mod server;
 
 use std::{

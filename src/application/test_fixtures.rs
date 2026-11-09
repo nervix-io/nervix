@@ -265,6 +265,7 @@ fn test_session_service(
         &resource_store,
         &ConfiguredFaultInjection::default(),
         &cluster,
+        runtime.outward_tls().clone(),
     );
     let parameters = consensus
         .observer()
@@ -682,7 +683,15 @@ pub(in crate::application) async fn build_test_service_inner(
     );
     consensus
         .proposer()
-        .seed_cluster_parameters(nervix_models::ClusterParameterValues::default())
+        .seed_cluster_parameters(
+            nervix_models::ClusterParameterValues::resolve(
+                nervix_models::ClusterParameterSeedValues {
+                    password_iterations: Some(1),
+                    ..Default::default()
+                },
+            )
+            .assured("the fixture's explicit password cost is within the declared bound"),
+        )
         .await
         .assured("the elected fixture leader commits its initial policy");
     if create_default_domain_flag {

@@ -481,16 +481,33 @@ so a node whose fingerprint differs is refused at join as a wire-contract mismat
 another shape fails as a malformed handshake before its record can be judged. There is no version
 negotiation or alternate decoding path. A wire-contract change therefore requires a coordinated
 cluster stop and start with all nodes on the same version.
+The contract includes `InstallClusterIdentity` and the complete validated identity record in Raft
+commands and snapshots. Its private key travels only over the authenticated interconnect. Public
+identity observation and backup source metadata use their separate public projections.
+The current fingerprint includes the conditional orphaned model-pause recovery command, its exact
+mutation lease, typed recovery reply and typed mutation-fence and restore-installation conflicts.
 The subscription-interest visibility request includes the advertisement version, and its current
 wire fingerprint fences that request shape during connection setup.
 
+The fingerprint also fences typed PBKDF2-HMAC-SHA-512 credentials in consensus commands and the persisted uniform verification-work count in snapshot metadata. Cost validation occurs during decoding before any authentication work is admitted.
+
 The fingerprint covers endpoint kinds whose WebSockets variant alone carries an optional signaling
-reference, both in Models and in queued transaction statements.
+reference, both in Models and in queued transaction statements. It also covers a queued
+`RESET WASM PROCESSOR ... STATE`, which names its processor and scope and takes its domain from its
+transaction.
 It also covers fixed-width 64-bit counts in Models, transaction commands and records,
 and WASM inspection results. These fields use the vocabulary's `CountAsU64` adapter and checked
 native decoding; an unrepresentable count fails decoding. Window processor state has current
 runtime-state kind tag `8`, and its bulk snapshot codec validates the `NVXWIN64` frame signature
 before decoding histogram delayed-removal bucket indices in the same count representation.
+
+Stateful inferencer checkpoints use branch-local runtime-state kind tag `6`. Their placement
+carries both the schema fingerprint and an `InferencerModelFingerprint`; checkpoint descriptions,
+catalog pages, fetches and acknowledgements retain that exact identity. The native frame records
+the revision, branch incarnation, tensor shapes and float bits. The interconnect moves the opaque
+bounded frame through the existing snapshot bulk quota; the inferencer codec validates its shape.
+The current fingerprint also covers materialized inspection page requests and their typed
+descriptors, so checkpoint identity and inspection operations advance as one wire contract.
 
 Emitter statements exchanged through the control plane use explicit `KEY` expressions and
 `PARTITION FROM BRANCH`, and SQS FIFO groups have one expression shape. The current

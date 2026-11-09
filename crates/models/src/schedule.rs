@@ -348,6 +348,7 @@ pub enum OwnershipStateComponent {
     MaterializedRelay,
     WasmProcessor,
     WindowProcessor,
+    Inferencer,
 }
 
 impl OwnershipStateComponent {
@@ -355,7 +356,7 @@ impl OwnershipStateComponent {
     /// never archived: a restored entity starts its metrics afresh.
     pub fn is_archived(self) -> bool {
         match self {
-            Self::BranchAggregated => false,
+            Self::BranchAggregated | Self::Inferencer => false,
             Self::BranchLifecycle
             | Self::Deduplicator
             | Self::KafkaOffsets
@@ -1060,6 +1061,11 @@ impl ScheduledNode {
                 components.push(OwnershipStateComponent::WindowProcessor);
             }
             _ => {}
+        }
+        if let Model::Inferencer(model) = self.config.as_ref()
+            && !model.state.is_empty()
+        {
+            components.push(OwnershipStateComponent::Inferencer);
         }
         components.sort();
         components

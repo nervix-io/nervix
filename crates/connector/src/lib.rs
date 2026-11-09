@@ -45,6 +45,7 @@
 mod client_config;
 mod client_deadline;
 mod confirmation_window;
+mod connector_events;
 mod http_client;
 mod ingest_metadata;
 // Reached through its own path rather than re-exported here, so the owner the clock-boundary check
@@ -66,6 +67,9 @@ pub use client_config::{
 pub use client_deadline::{ConfiguredDeadline, DeadlineElapsed};
 pub use confirmation_window::{
     BrokerAnswer, BrokerVerdict, ConfirmationWindow, ConfirmationWindowError,
+};
+pub use connector_events::{
+    ConnectorEventCounter, ConnectorEventProvider, UndeclaredConnectorEvent,
 };
 pub use emitter::{
     AckConfirmation, BrokerPublishingMode, EmitterBoundedExecution, EmitterCommitReport,
@@ -95,8 +99,10 @@ pub use ingestor::{
     IngestorConnector, IngestorError, IngestorHost, IngestorHostServices, IngestorIntakeError,
     IngestorIntakeMessage, IngestorIntakeResult, IngestorMessage, IngestorPlan, IngestorPoll,
     IngestorPollMessage, IngestorReadCancellation, IngestorReadOutcome, IngestorResult,
-    IngestorResume, IngestorSettlement, PacedIngestorConnector,
+    IngestorResume, IngestorResumeOutcome, IngestorSettlement, IngestorSettlementOperation,
+    IngestorSettlementOutcome, IngestorSuspendCause, PacedIngestorConnector,
 };
+pub use nervix_tls::OutwardTlsPolicy;
 pub use row_requests::{
     ExceededLimit, MeasuredRequest, RowOversize, RowRequest, RowRequestLimits, RowRequests,
 };

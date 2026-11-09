@@ -151,6 +151,23 @@ jobs:
               "${push_image}"
           fi
 
+      - name: Build and push Python binding chaos image
+        if: >-
+          matrix.arch == 'amd64' && matrix.image == 'debian' &&
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          (contains(github.event.pull_request.labels.*.name, 'chaos') ||
+           contains(github.event.pull_request.labels.*.name, 'chaos-soak'))
+        env:
+          KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_EU_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_EU_BUCKET_SECRET_ACCESS_KEY }}
+        run: |
+          just docker-build-chaos-client "${{ matrix.llvm }}" \
+            "ghcr.io/nervix-io/nervix:${{ needs.meta.outputs.build_id }}-chaos-client-amd64" true
+
   # The Deloxide diagnostic image of the same revision, for the chaos runs that qualify its tracked
   # locks under process, pause and network faults. It is pushed under its own tag, carries its
   # selection in a label, and never enters a published manifest.
@@ -515,6 +532,7 @@ jobs:
     uses: ./.github/workflows/chaos.yaml
     with:
       image: ghcr.io/nervix-io/nervix:${{ needs.meta.outputs.build_id }}-debian-amd64
+      binding-image: ghcr.io/nervix-io/nervix:${{ needs.meta.outputs.build_id }}-chaos-client-amd64
       image-kind: ordinary
       revision: ${{ github.sha }}
       suite: smoke
@@ -530,6 +548,7 @@ jobs:
     uses: ./.github/workflows/chaos.yaml
     with:
       image: ghcr.io/nervix-io/nervix:${{ needs.meta.outputs.build_id }}-debian-amd64-deloxide-order
+      binding-image: ghcr.io/nervix-io/nervix:${{ needs.meta.outputs.build_id }}-chaos-client-amd64
       image-kind: deloxide-order
       revision: ${{ github.sha }}
       suite: smoke
@@ -547,6 +566,7 @@ jobs:
     uses: ./.github/workflows/chaos.yaml
     with:
       image: ghcr.io/nervix-io/nervix:${{ needs.meta.outputs.build_id }}-debian-amd64
+      binding-image: ghcr.io/nervix-io/nervix:${{ needs.meta.outputs.build_id }}-chaos-client-amd64
       image-kind: ordinary
       revision: ${{ github.sha }}
       suite: soak
@@ -562,6 +582,7 @@ jobs:
     uses: ./.github/workflows/chaos.yaml
     with:
       image: ghcr.io/nervix-io/nervix:${{ needs.meta.outputs.build_id }}-debian-amd64-deloxide-order
+      binding-image: ghcr.io/nervix-io/nervix:${{ needs.meta.outputs.build_id }}-chaos-client-amd64
       image-kind: deloxide-order
       revision: ${{ github.sha }}
       suite: soak

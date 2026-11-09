@@ -27,22 +27,24 @@ It owns the scope of:
 - password and key derivation.
 
 The crate owns TLS provider selection, SHA-256 and SHA-512 digests, secure randomness, ECDSA
-P-256/SHA-256 and Ed25519 signing. Password derivation and the unclassified hashes still have the
-counted call sites below.
+P-256/SHA-256 and Ed25519 signing, and PBKDF2-HMAC-SHA-512 password derivation. Unclassified hashes
+still have the counted call sites below.
 The one-shot digests use `aws_lc_rs::digest`. Incremental SHA-256 wraps the maintained native
 `SHA256_CTX` from the same AWS-LC module, keeping its state on the stack; the EVP context used by
 `aws_lc_rs::digest::Context` allocates algorithm state. The direct `aws-lc-sys` pin moves together
-with `aws-lc-rs` and librdkafka, preserving the single-module rule.
+with `aws-lc-rs` and librdkafka, preserving the single-module rule. With the boundary's `fips`
+feature the context comes from `aws-lc-fips-sys`, the module `aws-lc-rs` then runs on, so such a
+build references the ordinary module nowhere.
 
 | Purpose | Where Nervix obtains it today |
 | --- | --- |
-| TLS provider | `nervix-crypto` installs the outward provider through rustls's process-default installation and supplies an independent checked interconnect provider. Connector TLS, native sessions and TLS VHOSTs retain the outward provider; SQS projects the boundary's typed outward choice into Smithy's mode, preserving the SDK's cipher filtering. |
+| TLS provider | `nervix-crypto` installs the outward provider through rustls's process-default installation and supplies an independent checked interconnect provider. Shared connector TLS, native sessions and TLS VHOSTs use the committed outward policy; SQS projects the boundary's typed outward choice into Smithy's mode, preserving the SDK's cipher filtering. |
 | Security digests | `nervix_crypto::digest` obtains SHA-256 and SHA-512 from AWS-LC. The interconnect trust-root fingerprint and the expression function `sha256()` use this boundary. |
 | Digest comparison | `nervix_crypto::digest::equal` compares equal-width digest arrays through AWS-LC's constant-time comparison. |
 | ECDSA signatures and keys | `nervix_crypto::ecdsa` owns P-256/SHA-256 fixed `r‖s` signing and verification, PKCS#8 v1 key generation/import/export, and uncompressed public-point coordinates. |
 | Backend status | `nervix_crypto::provider::module_mode` reports the linked AWS-LC module's runtime FIPS status as `ModuleMode`, independently of TLS algorithm selection. |
 | Secure randomness | `nervix_crypto::random` obtains bytes and unsigned 64-bit values from AWS-LC's operating-system-seeded generator, for interconnect entropy and password salts. |
-| Password derivation | Argon2, for user passwords. |
+| Password derivation | `nervix_crypto::password` uses AWS-LC PBKDF2-HMAC-SHA-512 and its constant-time verifier. |
 | NATS user authentication | `nervix-crypto` prepares the Ed25519 signing key and signs the nonce with AWS-LC. The NATS connector owns seed and credentials decoding, public-key encoding and the driver callback. |
 | Other digests | BLAKE3, for the non-security content checks, identities, fingerprints, sampling and sketches in the classification register below. |
 
@@ -52,7 +54,7 @@ The boundary's random fill returns only a complete value. AWS-LC's `RAND_bytes` 
 if sufficient entropy cannot be obtained, and otherwise returns success; it provides no partial,
 default or deterministic substitute. The transport still accepts an environment-owned entropy
 callback for deterministic simulation, without changing the production cryptographic generator.
-Password salts retain the password-hash library's recommended length and base64 representation.
+Password credentials carry a 128-bit salt and a 64-byte digest as fixed byte arrays, with a typed algorithm and validated iteration count. No text password-hash format is stored.
 
 The interconnect uses TLS 1.3 with `TLS_AES_256_GCM_SHA384` and
 `TLS_AES_128_GCM_SHA256`, and the `secp256r1`, `secp384r1` and `X25519MLKEM768` key
@@ -62,12 +64,75 @@ standalone X25519 and ChaCha20 are outside this set. Every client/server bundle 
 against the fixed set and keeps TLS 1.3, mutual certificate authentication and its certificate clock.
 This selects algorithms; the ordinary AWS-LC build is not a validated FIPS module.
 
-Outward TLS keeps the full AWS-LC default algorithm set. Rustls installs that process default
-once and retains a provider installed by the embedding host. The interconnect's independent
-immutable provider is cached once per process, so neither install order nor outward host policy
-changes its algorithm set. SQS retains Smithy's existing AWS-LC mode and its additional cipher
-filter, rather than using a custom-provider hook that bypasses that filter. Protocol negotiation,
-trust roots and client identities remain with their existing TLS owners.
+Outward TLS is a committed cluster policy. `TLS_CIPHER_SUITES` and
+`TLS_KEY_EXCHANGE_GROUPS` each default to `fips`. Bootstrap flags are
+`--tls-cipher-suites` / `NERVIX_TLS_CIPHER_SUITES` and
+`--tls-key-exchange-groups` / `NERVIX_TLS_KEY_EXCHANGE_GROUPS`; their values are comma-separated
+names. After bootstrap, change them through Plexus:
+
+```plexus
+ALTER CLUSTER SET
+  TLS_CIPHER_SUITES = ('fips', 'TLS13_CHACHA20_POLY1305_SHA256'),
+  TLS_KEY_EXCHANGE_GROUPS = ('fips', 'X25519');
+```
+
+Each list contains exact IANA/rustls names or aliases, matched case-insensitively. An alias expands
+at its position; repeated algorithms keep their first position. This order is preference order.
+The record, `DESCRIBE CLUSTER` and resolved-settings logs contain typed resolved lists, never an
+alias. An unknown or empty selection is refused with the setting and offending input. The complete
+candidate must contain a TLS 1.3 suite; retaining any TLS 1.2 suite requires a TLS 1.2-capable group.
+Changing both lists validates their final pair atomically, without judging an intermediate pair.
+
+`nervix-crypto-policy`, beneath the native crypto implementation, owns the catalog and alias
+membership once. `nervix-crypto` projects those identifiers to AWS-LC implementations in the same
+order. The full catalog is:
+
+| Selection | Exact rustls names, in catalog order |
+| --- | --- |
+| Cipher suites | `TLS13_AES_256_GCM_SHA384`, `TLS13_AES_128_GCM_SHA256`, `TLS13_CHACHA20_POLY1305_SHA256`, `TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384`, `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256`, `TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256`, `TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384`, `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`, `TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256` |
+| Key exchange groups | `X25519MLKEM768`, `X25519`, `secp256r1`, `secp384r1`, `secp256r1MLKEM768`, `MLKEM768`, `MLKEM1024` |
+
+Alias expansion starts with `X25519MLKEM768` to preserve the product's post-quantum preference.
+Explicit names before an alias can select another preference. Preference ranks are declared with
+the catalog and remain independent of serialized enum identities.
+
+The TLS 1.3 suites also accept their IANA spellings `TLS_AES_256_GCM_SHA384`,
+`TLS_AES_128_GCM_SHA256` and `TLS_CHACHA20_POLY1305_SHA256`. `default` expands to the complete
+catalog, including AWS-LC's non-default post-quantum groups. `fips` expands to the same catalog with
+ChaCha20 suites and standalone X25519 excluded. Its hybrid classification follows rustls
+0.23.46's post-quantum-first construction, just as the fixed interconnect does. `secp256r1`,
+`secp384r1` and `X25519` support TLS 1.2; the other groups support TLS 1.3.
+
+Protocol versions remain TLS 1.2 and TLS 1.3 as the TLS stack supports them, without a third
+parameter. Operators can exclude TLS 1.2 by selecting only TLS 1.3 suites. Signature schemes remain
+with the signature/FIPS migration. Approved membership selects algorithms; it does not certify an
+ordinary AWS-LC build or a deployment.
+
+The native `nervix-tls` engine publishes one node-owned immutable cipher/group pair. Listeners and
+shared-provider connectors resolve it once at new connection construction, including SDK-created
+reconnections. Each configuration template caches at most one resolved snapshot; unchanged policy
+reuses it. A cloned template gets an independent cache so changed ALPN, trust or identity cannot
+borrow another template's configuration. Existing connections retain their negotiated parameters,
+trust and driver lifecycle. A policy installation changes no certificate, pool, task, buffer,
+retry, acknowledgement or connection lifetime. HTTPS `DYNAMIC` certificate publication retains its
+own revision barrier and receives the same algorithm resolver. Running settings are published only
+after the node installs the complete policy. Before live parameter initialization, observation
+listeners use the explicit `fips` bootstrap policy; graph admission retains its normal initialization
+gate.
+
+The maintained rustls connection-resolution seam and Tonic prebuilt-configuration entrypoint
+preserve the dependencies' handshake, protocol and connection machinery. The interconnect retains
+its independent fixed provider and TLS 1.3 mutual authentication under every outward policy.
+Client tools, client-core and native bindings use the boundary's explicit `fips` provider, independent
+of a provider an embedding host installed. Rustls's process default remains AWS-LC's default
+provider for SDKs that construct their own configurations; its first-installation ownership stays
+unchanged.
+
+The governed shared-provider paths are HTTP requests, ClickHouse, Iceberg catalog/object storage,
+Pulsar, Redis Pub/Sub, WebSocket connections, Syslog, Prometheus, Sentry and OTEL HTTP. Driver-owned
+TLS configurations are known gaps: Kafka/librdkafka, MQTT, NATS, RabbitMQ, Postgres/MySQL pools,
+MongoDB, SQS/Smithy, Redis command pools and OTEL gRPC. Their existing AWS-LC/provider and driver
+filtering contracts remain in place; the cluster policy does not claim to govern them.
 
 Anything that protects confidentiality, integrity or authenticity uses an algorithm AWS-LC provides
 and FIPS 140-3 approves, such as the SHA-2 family, HMAC, AES-GCM, PBKDF2, RSA and ECDSA signatures,
@@ -90,6 +155,10 @@ Nervix's fork of `rust-rdkafka` builds librdkafka's TLS against the `aws-lc-sys`
 links, with that crate's `ssl` feature, so an upgrade of `aws-lc-rs` that moves to another
 `aws-lc-sys` moves the fork in the same change. A second `aws-lc-*-sys` crate, or a second version
 of one, is a defect, and [the gate](#the-count) refuses it.
+
+The Credentials memory class has 19 MiB shared by password work and mounted NATS credentials
+files. Each password operation charges its 64-byte verifier buffer; a file charges its complete
+length until the temporary contents are cleared.
 
 ## Classification Register
 
@@ -145,6 +214,11 @@ authenticated command ownership, and transport security retain their own contrac
 establish the provenance of files they restore. No current BLAKE3 operation requires a
 security-digest migration under this trust model.
 
+The inferencer model identity in `src/registry/execution_revision.rs` uses the boundary's SHA-256
+over the resource, pinned version, file and ordered `STATE` declarations. This is a non-security
+cache and placement identity; it neither authenticates model contents nor authorizes a resource.
+The vocabulary carries only the resulting `InferencerModelFingerprint` bytes.
+
 The expression function `md5()` in `crates/nervix-vm/src/runtime.rs` is a non-security checksum
 over UTF-8 text. It establishes no authenticity, authorization or collision-resistance guarantee;
 expressions needing collision resistance use the boundary-backed `sha256()` function.
@@ -171,7 +245,6 @@ Nervix's own crates bring:
 
 | Crates | Path | Use | Purpose |
 | --- | --- | --- | --- |
-| `argon2`, with `blake2` | `nervix-server` | User password hashing | Security |
 | `md5` | `nervix-vm` | The expression function `md5()` | Non-security checksum |
 | `blake3` | `nervix-server`, `nervix-backup`, `nervix-consensus`, `nervix-models`, `nervix-roto` | Content checks, identities, fingerprints, sampling and sketches recorded above | Non-security |
 
@@ -306,7 +379,12 @@ does not depend on which digest byte differs; the width is public. `provider::mo
 the linked module with AWS-LC's runtime FIPS check. An approved algorithm or selected TLS suite
 does not establish a validated backend or deployment. The ordinary Nervix build reports
 `ModuleMode::Ordinary`. A service's FIPS qualification must select one consistent FIPS module
-throughout its dependency graph and run these same vectors there.
+throughout its dependency graph and run these same vectors there. The boundary's `fips` feature
+makes that selection beneath it: `aws-lc-rs` on `aws-lc-fips-sys`, the rustls FIPS provider, and
+the native SHA-256 context on the same module, so the build links that module alone and
+`module_mode` reports `ModuleMode::Fips`, which the boundary's own test asserts for each
+configuration. The licensing service's FIPS configuration enables the feature; no Nervix build
+does.
 
 The boundary tests retain the complete P-256/SHA-256 section of the
 [NIST CAVP FIPS 186-4 verification vectors](https://csrc.nist.gov/projects/cryptographic-algorithm-validation-program/digital-signatures),
@@ -325,11 +403,22 @@ error beneath its context and disables generic JWT time/audience policy; callers
 own document validation. The protocol's `jose-jws`/`jose-b64` edges are format-only and enable no
 cryptographic backend.
 
+The consensus cluster identity stores its private DER in an owner that zeroizes on drop, alongside
+the shared protocol's `PublicKey` and `KeyId`. Recovery re-derives both public values from each
+private key. Observers receive a public projection. A leader coordinator receives `ClusterSigner`,
+which wraps the existing `DocumentSigner`, exposes signing without key export, and prints only its
+`kid` in `Debug`. The coordinator owns its leadership lifetime and supplies document limits and a
+working-set reservation; signing runs on the bounded control executor with cancellation checks.
+The maintained signer clears its owned private material. Raft persistence and replication carry
+the identity; public backup archives carry only its source UUID as display metadata.
+
 ## What The FIPS Migration Will Refuse
 
 The migration enables the FIPS module underneath the boundary: `aws-lc-rs` with its FIPS feature on
 `aws-lc-fips-sys`, librdkafka built against that same `aws-lc-fips-sys`, and the rustls FIPS
-provider. The fork's build reads the metadata of whichever AWS-LC crate its backend selects, so
+provider. The boundary's `fips` feature already makes its own part of that selection, for
+`aws-lc-rs`, rustls and its native digest; the migration enables it for `nervix-server` beside
+librdkafka's backend. The fork's build reads the metadata of whichever AWS-LC crate its backend selects, so
 building librdkafka on the FIPS crate is a backend the fork adds, not a rewrite of its build. A
 FIPS build refuses to start, and refuses a commit, when a resolved TLS policy names an algorithm
 FIPS 140-3 does not approve. It refuses each security path of the inventory until that path moves
@@ -342,3 +431,26 @@ Runtime checkpoint digests also identify retained Kafka start offers and immutab
 projections. Their purpose is non-security content checking: detecting changed, truncated or
 mismatched transfer bodies inside authenticated node requests. The existing checkpoint digest
 owner computes and verifies them under bounded execution and memory admission.
+
+## Password Credentials
+
+`PASSWORD_ITERATIONS` is a committed cluster parameter: it promises the cost used when a new
+user is created, rather than describing one node's capacity or a prerequisite for joining.
+Its definition supplies the single default, 210,000, and accepts 1 through 1,000,000 iterations.
+`PasswordCost` validates the same bound during construction, JSON decoding and archive decoding,
+before the credentials executor can receive work. `PasswordCredential` has one current profile,
+PBKDF2-HMAC-SHA-512, with the complete salt, digest and cost. Its debug representation excludes
+salt and digest. Passwords themselves are never persisted.
+
+The consensus publication retains the largest admitted verification cost. Creation-policy changes,
+new users and restored users raise it; lowering the creation policy does not lower verification
+work. An authentication captures that count and its optional user from one immutable publication.
+Known, unknown and invalid names perform two native calls with the same total iteration work:
+verification followed by padding, including one padding iteration. Padding protects users created
+at a smaller cost. Command replay compares the exact credential admitted with its CREATE USER,
+without replacing its salt or digest. Credential work keeps its isolated CPU class and reserves
+the 64-byte allocation of the maintained verifier; native HMAC scratch lives on the worker's
+bounded stack. Cancellation is checked before work and between the two authentication operations.
+
+The ordinary build remains preparation for FIPS, not a validated FIPS module. The cryptographic
+profile does not impose a new minimum password length.

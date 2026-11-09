@@ -6745,9 +6745,15 @@ mod http_receiver_tests {
         assert_eq!(stop.faults, 2, "{stop}");
     }
 
+    #[rstest::rstest]
+    #[case(crate::http_receiver::ReceiverTlsAlgorithms::Complete)]
+    #[case(crate::http_receiver::ReceiverTlsAlgorithms::ChaCha20AndX25519)]
     #[nervix_primitives::test]
-    async fn a_tls_receiver_offering_http2_captures_and_answers_requests_over_http2() {
+    async fn a_tls_receiver_offering_http2_captures_and_answers_requests_over_http2(
+        #[case] algorithms: crate::http_receiver::ReceiverTlsAlgorithms,
+    ) {
         let receiver = start(ReceiverTransport::Tls(ReceiverTlsOptions {
+            algorithms,
             certificate_hosts: vec!["127.0.0.1".to_string()],
             client_certificate: ClientCertificatePolicy::NotRequested,
             protocols: ReceiverProtocols::Http2AndHttp1,
@@ -6806,6 +6812,7 @@ mod http_receiver_tests {
     #[nervix_primitives::test]
     async fn a_tls_receiver_accepts_the_client_certificate_it_issued_and_refuses_others() {
         let receiver = start(ReceiverTransport::Tls(ReceiverTlsOptions {
+            algorithms: crate::http_receiver::ReceiverTlsAlgorithms::Complete,
             certificate_hosts: vec!["127.0.0.1".to_string()],
             client_certificate: ClientCertificatePolicy::Required,
             protocols: ReceiverProtocols::Http1,
@@ -6857,6 +6864,7 @@ mod http_receiver_tests {
     #[nervix_primitives::test]
     async fn a_tls_receiver_is_refused_by_a_client_that_dials_a_name_its_certificate_lacks() {
         let receiver = start(ReceiverTransport::Tls(ReceiverTlsOptions {
+            algorithms: crate::http_receiver::ReceiverTlsAlgorithms::Complete,
             certificate_hosts: vec!["localhost".to_string()],
             client_certificate: ClientCertificatePolicy::NotRequested,
             protocols: ReceiverProtocols::Http1,

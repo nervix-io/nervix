@@ -237,8 +237,15 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    fn connect(args: &[Value]) -> Result<Self, Error> {
-        Connection::parse(args)?.connect()
+    fn connect(args: &[Value]) -> Result<Value, Error> {
+        let ruby = Ruby::get().assured("a native Ruby callback holds the GVL");
+        let session = ruby.obj_wrap(Connection::parse(args)?.connect()?);
+        if !ruby.block_given() {
+            return Ok(session.as_value());
+        }
+        let result = ruby.yield_value(session);
+        session.close()?;
+        result
     }
     pub(crate) fn held(&self) -> Result<host::Session, Error> {
         let session = self
@@ -326,6 +333,12 @@ struct Outcome {
 }
 
 impl Outcome {
+    fn state_inspection(&self) -> Option<crate::inspection::Inspection> {
+        self.outcome
+            .state_inspection()
+            .map(crate::inspection::Inspection::new)
+    }
+
     fn disposition(&self) -> i32 {
         enums::Disposition::code(self.outcome.disposition())
     }
@@ -540,6 +553,7 @@ impl Outcome {
     fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
         let outcome = crate::class(ruby, module, "Outcome")?;
         outcome.define_method("disposition", method!(Outcome::disposition, 0))?;
+        outcome.define_method("state_inspection", method!(Outcome::state_inspection, 0))?;
         outcome.define_method("message", method!(Outcome::message, 0))?;
         outcome.define_method(
             "execution_reference",

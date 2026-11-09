@@ -630,6 +630,9 @@ impl Runtime {
             ModelKind::Deduplicator => Some(RuntimeStateKind::Deduplicator),
             ModelKind::WasmProcessor => Some(RuntimeStateKind::WasmProcessor),
             ModelKind::WindowProcessor => Some(RuntimeStateKind::WindowProcessor),
+            ModelKind::Inferencer if node.inferencer_model.is_some() => {
+                Some(RuntimeStateKind::Inferencer)
+            }
             ModelKind::Ingestor
             | ModelKind::Reingestor
             | ModelKind::Inferencer
@@ -910,6 +913,7 @@ impl Runtime {
                     ScheduledStateAssignment {
                         identity: ScheduledStateIdentity {
                             schema_fingerprint: Self::state_schema_fingerprint(node, start_version),
+                            inferencer_model: node.inferencer_model,
                             wasm_state_generations: execution.wasm_state_generations.clone(),
                         },
                         checkpoint_owners: Some(CheckpointOwners {
@@ -969,12 +973,14 @@ impl Runtime {
                     None => ScheduledStateAssignment {
                         identity: ScheduledStateIdentity {
                             schema_fingerprint,
+                            inferencer_model: node.inferencer_model,
                             wasm_state_generations: None,
                         },
                         checkpoint_owners: None,
                     },
                 };
                 assignment.identity.schema_fingerprint = schema_fingerprint;
+                assignment.identity.inferencer_model = node.inferencer_model;
                 slot.store(Some(StdArc::new(assignment)));
                 active.insert(key);
             }
@@ -1091,6 +1097,7 @@ impl Runtime {
             | RuntimeStateKind::MaterializedRelay
             | RuntimeStateKind::WasmProcessor
             | RuntimeStateKind::WindowProcessor
+            | RuntimeStateKind::Inferencer
             | RuntimeStateKind::BranchLru => {
                 let node = DomainNodeUnitRef::new(
                     DomainNodeRef::node_in(domain.clone(), kind, identifier.clone()),

@@ -72,7 +72,8 @@ use connector::ConnectorInteractionMetrics;
 pub(crate) use connector::{
     EmitterAttemptOperation, EmitterAttemptOutcome, EmitterFinishOutcome,
     EmitterInteractionMetrics, EmitterOpenOutcome, EmitterRejectionCode, EmitterRetryCause,
-    EmitterWork, EmitterWorkKind, IngestorInteractionMetrics,
+    EmitterWork, EmitterWorkKind, EndpointIntakeOutcome, IngestorEndpointMetrics,
+    IngestorInteractionMetrics, TaskFailureBinding,
 };
 pub use interconnection::NodeObservations;
 use interconnection::{InterconnectionCollector, InterconnectionCollectorHandle};
@@ -1350,6 +1351,24 @@ impl Default for CounterSeries {
 }
 
 impl CounterSeries {
+    /// Inspection samples a cumulative counter without adding work to its recorder.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            observer,
+            reason = "claims each cumulative event delta once outside publication"
+        )
+    )]
+    fn observe_total(&self, total: u64) {
+        let previous = self.value.fetch_max(total, AtomicOrdering::Relaxed);
+        if total >= previous {
+            let delta = total
+                .checked_sub(previous)
+                .assured("the sampled total does not precede its previously claimed value");
+            self.rolling.observe(delta, None);
+        }
+    }
+
     #[cfg_attr(
         nervix_lint,
         nervix::context(

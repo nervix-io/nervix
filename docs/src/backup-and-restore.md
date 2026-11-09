@@ -277,7 +277,8 @@ DESCRIBE BACKUP './cluster.nvxb' FORMAT JSON;
 
 `DESCRIBE BACKUP` runs in `nervix-cli` against a file on its own machine and contacts no server. It
 reads the whole archive and verifies every section's length and digest before it prints anything.
-The description names the archive format, the Nervix and Plexus releases that wrote it, the cluster,
+The description names the archive format, the Nervix and Plexus releases that wrote it, the source
+cluster's configured name and permanent UUID,
 the capture time, the scope, whether resource bytes are included, and the users of a cluster
 archive. For each domain it names the revision and Raft log entry the domain was read at, its
 status, pace and start count, its latest start point, the clock mapping and logical frontier when
@@ -296,10 +297,11 @@ deduplicator keys.
 
 ```text
 backup: ./cluster.nvxb
-format: 3
+format: 5
 producer_version: 0.1.0
 language_version: 0.1.0
 cluster: nervix-3f1c
+cluster uid: 72f3a93e-64f0-40a5-b95d-790c8a738fee
 captured_at: 2026-09-27 12:00:00 UTC
 scope: cluster
 resources: included
@@ -339,8 +341,8 @@ RESTORE DOMAIN payments FROM './payments.nvxb' WITHOUT SOURCE OFFSETS;
   copied beside its original in the same cluster.
 - `ON EXISTING USER` decides what a cluster restore does with an archived user the cluster already
   has. `FAIL`, the default, refuses the restore before it changes anything. `SKIP` keeps the
-  existing user and its password. `REPLACE` gives the existing user the archived password hash.
-  Every other archived user is created with its archived password hash, so its original password
+  existing user and its password. `REPLACE` gives the existing user the archived credential.
+  Every other archived user is created with its archived credential, so its original password
   authenticates.
 - `DRY RUN` receives and verifies the archive and plans the whole restore, and changes nothing.
 - `RESUME` makes each restored domain running after its complete state set is published on every
@@ -380,7 +382,13 @@ sent alone: not in a batch with other statements and not while a transaction is 
 
 ### What A Restore Recreates
 
-- **Users.** Each archived user, with its password hash exactly as the archive holds it.
+A restore retains the target cluster's permanent identity and signing key. The source `cluster_uid`
+in the manifest is display metadata: text inspection prints `cluster uid`, and JSON inspection
+prints `cluster_uid`. Archives carry no cluster private key, identity record or licensing state.
+Restoring into a fresh cluster is a clone with that cluster's own UUID and key. Recovering a
+licensed installation requires an administrative transfer to the rebuilt cluster.
+
+- **Users.** Each archived user, with its complete credential exactly as the archive holds it.
 - **Domains.** Each restored domain is initially created stopped, with its archived pace,
   start generation and latest start point. Named placement rules are restored with the Models.
   Complete publication releases its installation
@@ -854,8 +862,8 @@ its format version, each a little-endian 16-bit integer. The rest is an
 
 | Kind | Tag | Format version | Holds |
 | --- | --- | --- | --- |
-| Manifest | 1 | 2 | Archive format major version, producer and Plexus releases, cluster id, capture time, scope, whether resource bytes are included, each domain's revision, Raft log entry and cut kind, with a quiesced cut's engagement and release times and quiesce counters, and each section's path, content kind, length and BLAKE3 digest |
-| Users | 2 | 1 | Every user's name and password hash as a PHC string |
+| Manifest | 1 | 3 | Archive format major version, producer and Plexus releases, cluster id and source cluster UID, capture time, scope, whether resource bytes are included, each domain's revision, Raft log entry and cut kind, with a quiesced cut's engagement and release times and quiesce counters, and each section's path, content kind, length and BLAKE3 digest |
+| Users | 2 | 2 | Every user's name and typed PBKDF2-HMAC-SHA-512 credential: validated iterations, 128-bit salt and 64-byte digest |
 | Domain | 3 | 2 | Pace, lifecycle status, start count, the point the latest start began from, the committed clock mapping, the logical instant the clock had reached, and each declared resource with its next version number |
 | Resource version | 4 | 1 | The version's domain, resource and number, its upload state, and for a published version its checksums, file count, sizes, creation time and creating node |
 | WASM guest state descriptor | 5 | 4 | The scheduled unit, saved branch key, schema fingerprint, guest state generation and checkpoint revision |
@@ -866,7 +874,7 @@ its format version, each a little-endian 16-bit integer. The rest is an
 | Deduplicator keyspace descriptor | 10 | 4 | Domain and deduplicator names, scheduled unit, schema fingerprint, branch fingerprint and typed branch fields, revision, key count and group count |
 | Window state descriptor | 11 | 4 | Domain and window processor names, scheduled unit, schema fingerprint, window model digest, branch fingerprint and typed branch fields, revision, branch incarnation, first and next admission sequence, each retained row's low/high ingestion watermarks, group count, and each aggregate's structure: rebuilt from the retained rows, or a linear histogram with its delayed removals as expiry time and bucket |
 
-The archive format major version is `6`. An archive with another major version fails before any
+The archive format major version is `7`. An archive with another major version fails before any
 state section can be skipped or installed; capture a new archive in the current instance-unit format. A reader refuses invalid record magic, an unsupported
 manifest or required configuration record, an unknown record kind in the manifest, a first entry
 other than the manifest, and any section whose place, length or digest differs from what the

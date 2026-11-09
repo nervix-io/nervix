@@ -1141,6 +1141,61 @@ def run_upload(session, report):
     report("CONFLICT IdentityConflict")
 
 
+def run_inspection(session, report):
+    import gc
+
+    outcome = execute(session, "SHOW RELAY events MATERIALIZED STATE FOR UNBRANCHED LIMIT 1 FORMAT JSON;")
+    inspection = outcome.state_inspection
+    assert inspection is not None
+    assert inspection.domain == os.environ["NERVIX_PROBE_DOMAIN"]
+    assert inspection.entity_name == "events"
+    assert inspection.counts.rows == 0
+    assert inspection.rejection is None
+    report("INSPECTION page rows=0")
+    refused_outcome = execute(session, "SHOW RELAY plain MATERIALIZED STATE FORMAT JSON;")
+    refused = refused_outcome.state_inspection
+    assert refused is not None
+    assert refused.rejection == nx.InspectionRejection.NOT_MATERIALIZED
+    assert refused.counts is None
+    report("INSPECTION refused not_materialized")
+    query = "SHOW RELAY populated MATERIALIZED STATE FOR ALL BRANCHES LIMIT 1"
+    first = execute(session, query + " FORMAT JSON;").state_inspection
+    assert first is not None and first.counts.rows == 2 and first.counts.branches == 2
+    assert first.continuation and len(first.units) == 1
+    unit = first.units[0]
+    assert unit.kind == nx.InspectionUnitKind.SINGLE and unit.index is None
+    assert unit.owner == unit.origin_node and unit.origin_incarnation > 0
+    assert len(unit.origin_fingerprint) == 32 and unit.origin_stage == nx.InspectionStage.LIVE
+    section = unit.sections[0]
+    schema = section.schema
+    assert schema.branch == "by_tenant" and schema.key_fields[0].sensitive
+    assert [field.name for field in schema.fields[:3]] == ["tenant", "secret", "sequence"]
+    assert schema.fields[0].sensitive and schema.fields[1].sensitive
+    assert schema.fields[2].type == nx.FieldType.I64
+    assert section.omitted_rows == 1 and section.watermark_low != section.watermark_high
+    frame = section.frames[0]
+    assert frame.row_count == 1 and frame.schema.branch == schema.branch
+    view = frame.frame
+    expected = bytes(view)
+    assert view.readonly and expected
+    token = first.continuation.replace("'", "''")
+    second = execute(session, query + f" AFTER '{token}' FORMAT JSON;").state_inspection
+    assert second is not None and second.continuation is None and second.counts.rows == 2
+    assert second.units[0].sections[0].frames[0].row_count == 1
+    assert first.json != second.json
+    assert "alpha-private" not in first.json and "first-private" not in first.json
+    report("INSPECTION branched rows=2 pages=2")
+    session.__exit__(None, None, None)
+    del outcome, refused_outcome, first, second, unit, section, frame
+    gc.collect()
+    assert inspection.counts.rows == 0
+    assert inspection.json
+    assert refused.rejection == nx.InspectionRejection.NOT_MATERIALIZED
+    assert bytes(view) == expected and schema.fields[2].name == "sequence"
+    view.release()
+    report("INSPECTION retained")
+
+
 def main():
     environment = os.environ
     domain = environment["NERVIX_PROBE_DOMAIN"]
@@ -1151,6 +1206,10 @@ def main():
         password=environment["NERVIX_PROBE_PASSWORD"],
     )
     report = lambda line: print(line, flush=True)
+    if sys.argv[1:] == ["inspection"]:
+        run_inspection(session, report)
+        report("PASS")
+        return
     if sys.argv[1:] == ["upload"]:
         run_upload(session, report)
         report("PASS")

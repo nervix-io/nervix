@@ -136,8 +136,12 @@ tensors before publishing the processor template. Each concrete branch starts wi
 initial generation and exclusively owns its successors. Stateful admission runs the model once per
 row before output-route buffering; native state outputs become the next invocation's inputs without
 an Arrow round trip. Route flushes dispatch already-computed output. The stateless inferencer keeps
-its existing flush-time execution. These tensor generations are volatile and are recreated from
-the prepared initial generation after restart, owner change or eviction.
+its existing flush-time execution. A stateful branch publishes its native tensor generation after
+each admitted batch through the shared periodic branch-state owner. Its placement includes the
+schema fingerprint and the typed fingerprint of its resource, pinned version, file and state
+declarations. Restore selects the newest snapshot for that exact identity and branch incarnation;
+eviction publishes an empty final generation. Node-local binding retains the validated snapshot
+footprint and rejects a declaration exceeding the section bound before allocating INITIAL.
 
 Emitter planning reads the concrete destination's own publishing enum. Broker, MQTT and SQS
 alternatives lower exhaustively into their connector policies; request-only and unconfirmed-only
@@ -572,3 +576,12 @@ Emitter task installation consumes its decided configuration and pooled leases o
 connector's open boundary. Transient recovery suspends and resumes that retained instance; it does
 not lower another plan, rebind programs or acquire a second lease. Connection acquisition is a
 resume operation and never changes the plan or the ownership of retained records and commits.
+
+## Outward TLS Construction
+
+A committed TLS policy is a validated pair of resolved algorithm selections. Runtime installation
+projects the pair once into the node-owned TLS engine; connector composition passes that engine's
+handle as a construction input, alongside its existing DNS and execution handles. A connector reads
+no Model and reparses no algorithm text. Its retained rustls template resolves an immutable crypto
+snapshot when a new connection is constructed. Certificate/trust/ALPN owners and driver lifetimes
+stay independent of that publication. See [Algorithm Policy](cryptography.md#algorithm-policy).

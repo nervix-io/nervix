@@ -161,6 +161,7 @@ mod client_description;
 mod client_producers;
 mod client_traffic;
 mod cluster_description;
+mod cluster_identity;
 mod cluster_parameters;
 mod cluster_status;
 mod command_execution;
@@ -428,6 +429,7 @@ impl Application {
         let shutdown_coordinator = self.shutdown.clone();
         let shutdown = shutdown_coordinator.drain_support_token();
         let fault_injection = self.fault_injection.clone();
+        let outward_tls = nervix_tls::OutwardTlsPolicy::default();
         let grpc_tls_server_config = match &self.identity.grpc_transport {
             GrpcTransport::Http => None,
             GrpcTransport::Https {
@@ -435,16 +437,18 @@ impl Application {
                 private_key,
                 ..
             } => {
-                let config = match load_grpc_tls_server_config(certificate, private_key).await {
-                    Ok(config) => config,
-                    Err(error) => {
-                        error!(
-                            error = format!("{error:#}"),
-                            "failed to build grpc tls server config"
-                        );
-                        return Err(error);
-                    }
-                };
+                let config =
+                    match load_grpc_tls_server_config(certificate, private_key, &outward_tls).await
+                    {
+                        Ok(config) => config,
+                        Err(error) => {
+                            error!(
+                                error = format!("{error:#}"),
+                                "failed to build grpc tls server config"
+                            );
+                            return Err(error);
+                        }
+                    };
                 Some(config)
             }
         };
@@ -456,13 +460,14 @@ impl Application {
                 let Some(_) = web_console_https_listen_addr else {
                     return Err(Report::new(AppError::MissingWebConsoleHttpsListenAddress));
                 };
-                let config = match load_web_console_tls_server_config(cert_path, key_path) {
-                    Ok(config) => config,
-                    Err(error) => {
-                        error!(?error, "failed to build web console tls server config");
-                        return Err(error);
-                    }
-                };
+                let config =
+                    match load_web_console_tls_server_config(cert_path, key_path, &outward_tls) {
+                        Ok(config) => config,
+                        Err(error) => {
+                            error!(?error, "failed to build web console tls server config");
+                            return Err(error);
+                        }
+                    };
                 Some(config)
             }
             (Some(_), None) => {
@@ -593,6 +598,7 @@ impl Application {
             let mapping_input = Runtime::with_environment(
                 RuntimeEnvironment {
                     executor,
+                    outward_tls: outward_tls.clone(),
                     dns: Some(dns.clone()),
                     db: Some(db.clone()),
                     restore_staging_max_bytes,
@@ -887,6 +893,8 @@ impl Application {
         let cluster_for_membership_reconcile = cluster.clone();
         let administrator_for_membership_reconcile = consensus.administrator();
         let proposer_for_parameter_seeding = consensus.proposer();
+        #[cfg(feature = "testing")]
+        let fault_for_identity_seeding = fault_injection.clone();
         let membership_reconcile_shutdown = shutdown.clone();
         let interconnect_tls_transport = interconnect.clone();
         let interconnect_tls_shutdown = shutdown.clone();
@@ -957,7 +965,15 @@ impl Application {
                         }
                     }
                 }
+                if let Err(error) = cluster_identity::seed(
+                    &proposer_for_parameter_seeding,
+                    #[cfg(feature = "testing")]
+                    &fault_for_identity_seeding,
+                ).await {
+                    warn!(error = %format_args!("{error:#}"), "failed to seed cluster identity");
+                }
                 if allow_bootstrap
+                    && proposer_for_parameter_seeding.cluster_identity().is_some()
                     && proposer_for_parameter_seeding
                         .cluster_parameters()
                         .is_none()
@@ -998,8 +1014,12 @@ impl Application {
                 }
             }
         }));
-        let certificates =
-            HttpsListenerCertificates::new(&resource_store, &fault_injection, &cluster);
+        let certificates = HttpsListenerCertificates::new(
+            &resource_store,
+            &fault_injection,
+            &cluster,
+            outward_tls.clone(),
+        );
         certificates
             .register_installation_handler(&interconnect)
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
@@ -1328,6 +1348,7 @@ impl Application {
                                         runtime_for_reconcile.executor(),
                                         default_user_id.clone(),
                                         password,
+                                        nervix_models::PasswordCost::try_from(consensus_for_reconcile.cluster_parameters().assured("reconciliation starts after cluster policy initialization").values.password_iterations()).assured("committed policy validates the password cost"),
                                     )
                                     .await
                                     {

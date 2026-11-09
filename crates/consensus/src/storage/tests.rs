@@ -1,5 +1,7 @@
 //! Recovery and publication checks through the Raft storage traits.
 
+mod cluster_identity_tests;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroU64,
@@ -29,6 +31,62 @@ use crate::{
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+#[nervix_primitives::test]
+async fn password_work_and_complete_credentials_survive_recovery() -> TestResult {
+    let mut harness = Harness::new().await?;
+    let parameters = nervix_models::ClusterParameterValues::resolve(
+        nervix_models::ClusterParameterSeedValues {
+            password_iterations: Some(1),
+            ..Default::default()
+        },
+    )?;
+    harness
+        .apply(
+            1,
+            ConsensusCommand::SeedClusterParameters { values: parameters },
+        )
+        .await?;
+    let mut expected = BTreeMap::new();
+    for (index, name, iterations, seed) in [(2, "first", 10, 1), (3, "second", 20, 2)] {
+        let user = crate::UserCredentials {
+            name: nervix_models::UserName::parse(name)?,
+            password_credential: nervix_models::PasswordCredential::from_parts(
+                iterations, [seed; 16], [seed; 64],
+            )?,
+        };
+        expected.insert(user.name.clone(), user.clone());
+        harness
+            .apply(
+                index,
+                ConsensusCommand::CreateUser {
+                    user: Box::new(user),
+                },
+            )
+            .await?;
+    }
+    let unchanged = crate::UserCredentials {
+        name: nervix_models::UserName::parse("first")?,
+        password_credential: nervix_models::PasswordCredential::from_parts(30, [3; 16], [3; 64])?,
+    };
+    harness
+        .apply(
+            4,
+            ConsensusCommand::CreateUser {
+                user: Box::new(unchanged),
+            },
+        )
+        .await?;
+    let harness = harness.reopen().await?;
+    let state = harness.store.inner.state();
+    assert_eq!(state.password_work.map(|cost| cost.get().get()), Some(20));
+    assert_eq!(BTreeMap::from(&state.users), expected);
+    assert_eq!(
+        state.parameters.map(|record| record.values),
+        Some(parameters)
+    );
+    Ok(())
+}
 
 #[nervix_primitives::test]
 async fn restore_installation_authority_and_start_gate_survive_restart() -> TestResult {
@@ -335,7 +393,7 @@ impl Harness {
             payload: EntryPayload::Normal(command),
         }
     }
-    /// Admit one command execution whose stored record carries `bytes` of password hash, so the
+    /// Admit one command execution whose stored statement carries `bytes` of source, so the
     /// write that stores it charges a known share of its batch.
     fn admission(index: u64, bytes: usize) -> Result<ConsensusCommand, Box<dyn std::error::Error>> {
         let owner = nervix_models::UserName::parse("operator")?;
@@ -346,10 +404,11 @@ impl Harness {
                 None,
                 [0; 32],
                 nervix_models::Timestamp::from_unix_nanos(1_700_000_010_000_000_000),
-                crate::CommandExecutionEffect::CreateUser {
-                    if_not_exists: false,
-                    name: owner,
-                    password_hash: "x".repeat(bytes),
+                crate::CommandExecutionEffect::Statement {
+                    source: "x".repeat(bytes),
+                    statement: Box::new(nervix_models::Statement::ShowClusterStatus(
+                        nervix_models::ShowClusterStatus,
+                    )),
                 },
             )),
             mutation_domains: BTreeSet::new(),
@@ -483,7 +542,10 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
                     crate::CommandExecutionEffect::CreateUser {
                         if_not_exists: false,
                         name: owner,
-                        password_hash: "argon2-hash".to_string(),
+                        password_credential: nervix_models::PasswordCredential::from_parts(
+                            210000, [51; 16], [51; 64],
+                        )
+                        .assured("the fixed credential has a bounded iteration count"),
                     },
                 )),
                 mutation_domains: BTreeSet::from([domain.id.clone()]),

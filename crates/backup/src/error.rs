@@ -10,6 +10,8 @@ use crate::section::RecordKind;
 /// Why an archive could not be laid out or a record encoded.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ArchiveWriteError {
+    #[error("the backup manifest's cluster UID is not a version-4 RFC 4122 UUID")]
+    InvalidClusterUid,
     #[error("the {kind} record could not be encoded")]
     Encode { kind: RecordKind },
     #[error("writing the {kind} record was interrupted by its writer's caller")]

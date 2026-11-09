@@ -135,7 +135,7 @@ class InventoryTests(unittest.TestCase):
     def test_local_producers_are_registered_without_adding_ci_work(self) -> None:
         self.assertEqual(
             [producer.name for producer in native_coverage.LOCAL_PRODUCERS],
-            ["test-client-c-api", "test-client-cpp-api", "test-rabbitmq-publish-benchmark"],
+            ["test-client-ruby-api", "test-client-c-api", "test-client-cpp-api", "test-rabbitmq-publish-benchmark"],
         )
         self.assertEqual(
             native_coverage.PRODUCERS,
@@ -153,12 +153,17 @@ class InventoryTests(unittest.TestCase):
         self.assertIn("run: just test-coverage-run\n", job_section(workflow, "tests"))
         self.assertIn("cargo test --package nervix-client-ffi --test native_suites", justfile)
         conformance = job_section(workflow, "client-conformance")
+        self.assertIn("run: just test-client-conformance-run\n", conformance)
+        gate = justfile.split("\ntest-client-suites-api-run:\n", 1)[1].split("\n\n", 1)[0]
+        runner = justfile.split("\ntest-client-conformance-run ", 1)[1].split("\n\n", 1)[0]
+        self.assertLess(runner.index("test-client-suites-api-run"), runner.index("test-client-conformance-scenarios"))
         for host in ("c", "cpp"):
             producer = next(p for p in native_coverage.LOCAL_PRODUCERS
                             if p.name == f"test-client-{host}-api")
             self.assertEqual(producer.instrumented, producer.name)
             self.assertIn(f"\n{producer.name}:\n", justfile)
-            self.assertIn(f"just test-client-native-api-run {host}\n", conformance)
+            self.assertIn("    just cargo_target_dir={{ quote(cargo_target_dir) }} "
+                          f"test-client-native-api-run {host}", gate.splitlines())
 
     def test_a_check_composed_otherwise_than_its_producer_is_refused(self) -> None:
         producer = Producer("check", "ordinary", ("prepare",), "body", ("finish",))
@@ -240,10 +245,11 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(
             native_coverage.select_producers([], producers), list(native_coverage.CI_PRODUCERS)
         )
-        self.assertEqual(
-            native_coverage.select_producers(["test-rabbitmq-publish-benchmark"], producers),
-            [next(producer for producer in producers if producer.name == "test-rabbitmq-publish-benchmark")],
-        )
+        for producer in native_coverage.LOCAL_PRODUCERS:
+            self.assertEqual(
+                native_coverage.select_producers([producer.name], producers),
+                [producer],
+            )
         self.assertEqual(
             native_coverage.select_producers(["plexus-completion-walk", "bench-smoke"], producers),
             [next(producer for producer in producers if producer.name == "plexus-completion-walk"), next(producer for producer in producers if producer.name == "bench-smoke")],

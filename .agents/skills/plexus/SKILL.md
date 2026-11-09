@@ -75,10 +75,18 @@ the queue/default-exchange and named-exchange choices, `MANDATORY`, persistence,
 `PROPERTIES` types and envelope alterations. Do not promise consumer completion from a publisher
 confirm or message durability from routing alone.
 
+For connector-specific event counts, including Redis publishes with no subscribers, read
+[Connector-declared events](../../../docs/src/metrics-and-observability.md#connector-declared-events)
+and the entity's generated capability reference before interpreting delivery.
+
 For applications submitting Plexus, use [Client Libraries](../../../docs/src/client-libraries.md)
 to select the host guide; Java and JVM programs follow [JVM Client Library](../../../docs/src/client-library-jvm.md),
+Ruby applications follow [Ruby Client Library](../../../docs/src/client-library-ruby.md),
 and C and C++ programs follow [C And C++ Client Library](../../../docs/src/client-library-c.md).
 Read its execution, clock and endpoint sections before choosing application-side lifecycle handling.
+For typed state inspection in Python, Ruby or JVM applications, read that host guide's
+`Inspect Materialized State` section for page/refusal metadata, opaque continuation and retained
+schema/frame lifetimes before suggesting application code.
 
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
@@ -100,16 +108,24 @@ commits, read [Signing In](../../../docs/src/client-tools-web-console.md#signing
 Read [Layout](../../../docs/src/client-tools-web-console.md#layout) before interpreting footer totals.
 Listener certificates are node provisioning, configured outside Plexus statements.
 For TLS algorithm choices, read [Cryptography](../../../docs/src/cryptography.md#algorithm-policy):
-the interconnect uses its fixed provider, while native sessions and connectors use the outward
-provider and each connector's declared trust and identity keys.
+use ordered string lists with `ALTER CLUSTER SET TLS_CIPHER_SUITES = ('fips'),
+TLS_KEY_EXCHANGE_GROUPS = ('fips');`. Read that chapter before choosing exact names or aliases,
+changing both lists, or promising which connector handshakes are governed. The interconnect keeps
+its fixed provider; existing connections retain their negotiation and connector trust/identity
+remain with their declared client keys.
 For backend validation claims, follow that chapter's P-256 signing and backend-status guidance;
 selecting an approved algorithm does not establish a validated deployment.
+For cluster continuity and public identity inspection, read
+[Node Settings → Permanent Cluster Identity](../../../docs/src/node-settings.md#permanent-cluster-identity).
+For source UUID inspection and restore behavior, read
+[Backup And Restore](../../../docs/src/backup-and-restore.md#what-a-restore-recreates).
 For authentication refusals and retry behavior, follow
 [Authentication](../../../docs/src/client-session-protocol.md#authentication); a response delay
 does not establish that a user exists.
 Read the Ingestors and Emitters chapters for `SHOW INGESTORS`, `SHOW EMITTERS`, and `DESCRIBE`;
 their inspection contracts distinguish effective options from canonical `SHOW CREATE` configuration.
-For ingestor inspection, follow [Ingestor Source Interactions](../../../docs/src/metrics-and-observability.md#ingestor-source-interactions) before interpreting raw counts, filtered graph traffic or poll duration.
+For ingestor inspection, follow [Ingestor Source Interactions](../../../docs/src/metrics-and-observability.md#ingestor-source-interactions) before interpreting raw counts, filtered graph traffic, poll duration or endpoint request outcomes.
+Before reading an acknowledgement failure, a reconnect loop or a stuck ingestor from `DESCRIBE INGESTOR`, follow [Ingestor Acknowledgement And Lifecycle](../../../docs/src/metrics-and-observability.md#ingestor-acknowledgement-and-lifecycle): an expired `ACK TIMEOUT` is counted as `timed_out`, not as a failed tree.
 For batching inspection, read [Emitter payload preparation](../../../docs/src/metrics-and-observability.md#emitter-payload-preparation)
 alongside Emitters: check the effective container and distinguish encoded payload measurements,
 retained work, retries and confirmed source records before interpreting a throughput figure.
@@ -122,9 +138,9 @@ for record outcomes, retry causes and waits, acquisition, pool waits, finish out
 current failure gauge in `/metrics` and `DESCRIBE EMITTER`.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
-Roto UDFs, ingestors and emitters for every connector and entity pair, junctions, reingestors, and session
-subscriptions; use the same web-console chapter for their typed fields, resource versions, program
-editors, reference lookup, and transaction behavior.
+Roto UDFs, ingestors and emitters for every connector and entity pair, junctions, deduplicators,
+reorderers, reingestors, and session subscriptions; use the same web-console chapter for their typed
+fields, resource versions, program editors, reference lookup, and transaction behavior.
 
 For materialized relay inspection, read [Relay → Inspect Materialized State](../../../docs/src/relay.md#inspect-materialized-state)
 for selector, LIMIT/AFTER and FORMAT clause order, typed rows, sensitivity and stale continuations.
@@ -151,7 +167,9 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   WASM fuel and linear-memory budgets, correlation, materialized state, lookup, generation, or
   repartitioning.
 - For inference with model-carried state, read `Runtime Nodes` → `Inferencer` → `State tensors`
-  before choosing port bindings, initialization, branch isolation or recovery guarantees.
+  and `Shutdown And Recovery` → `What Survives` before choosing port bindings, initialization,
+  branch isolation or recovery guarantees. Check the snapshot-section bound and branch retention;
+  distinguish a completed graceful stop from recovery of the last periodic snapshot.
 - Placement: latency-critical or heavy corridors, colocation enforcement, rule precedence, and
   whether ordinary scheduler heuristics should remain neutral.
 - Operations: batching/flush, error routes, credentials/TLS resources, observability, session
@@ -825,7 +843,8 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   the policy discards state for none of those under either value. Only an owner loss whose forced
   recovery cannot prepare the new owner recreates guest state without the guest's verdict.
 - To intentionally replace an existing WASM processor's guest state, use
-  `RESET WASM PROCESSOR <processor> STATE IN DOMAIN <domain> FOR UNBRANCHED|ALL BRANCHES|BRANCH VALUES { <field> = <literal>, ... };`.
+  `RESET WASM PROCESSOR <processor> STATE FOR UNBRANCHED|ALL BRANCHES|BRANCH VALUES { <field> = <literal>, ... };`.
+  It acts on the session's active domain, so `USE` that domain first.
   Choose the explicit scope that matches its declared branch, and supply every branch-key field
   with an exact typed literal for one selected branch. The processor must be running and the
   selected branch must already exist. This command loses the selected computation state; a fresh
@@ -887,3 +906,7 @@ Before returning the configuration, trace every reference to its declaration and
 branch, construction, flush, error, sensitivity, transaction, and external-provisioning contracts.
 If the public docs do not establish a requested capability, say it is not documented as supported
 instead of inventing syntax.
+
+For password creation policy, read [Node Settings → Password Creation Policy](../../../docs/src/node-settings.md#password-creation-policy)
+and [Cryptography → Password Credentials](../../../docs/src/cryptography.md#password-credentials).
+Use the committed cluster setting for creation cost; preserve the documented startup, replay and restore rules.

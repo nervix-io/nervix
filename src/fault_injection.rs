@@ -51,6 +51,7 @@ mod backup_cut;
 #[cfg(test)]
 mod backup_cut_tests;
 mod client_inspection;
+mod cluster_identity;
 mod command_pause_point;
 mod command_reconciliation;
 mod command_reply;
@@ -73,6 +74,7 @@ mod live_view_gap_tests;
 mod materialized_fetch_hold;
 mod materialized_reads;
 mod model_publication;
+mod orphaned_domain_pause;
 mod pause;
 mod relay_memory;
 mod relay_partition_fanout;
@@ -107,6 +109,7 @@ pub(crate) use application_progress::ApplicationProgressQuery;
 pub use application_progress::ApplicationProgressQueryError;
 pub use backup_cut::BackupCutBoundary;
 use backup_cut::{BackupCutGate, BackupCutGateKey};
+use cluster_identity::BootstrapProposals;
 use command_pause_point::CommandPausePoint;
 use command_reply::CommandReplyScript;
 pub use command_reply::ForeignExecutionObservation;
@@ -181,6 +184,7 @@ pub struct FaultInjection {
 
 #[derive(Debug)]
 struct FaultInjectionState {
+    orphaned_domain_pauses: orphaned_domain_pause::OrphanedDomainPauses,
     /// One bounded command-reply script per scenario domain, absent from ordinary builds.
     command_reply_scripts: DashMap<DomainName, CommandReplyScript, RandomState>,
     emitter_faults: DashMap<String, EmitterFaultMode, RandomState>,
@@ -426,6 +430,7 @@ struct ConsensusProbeState {
     /// Running nodes register their observer; stopped nodes retain the test probe and its controls.
     probe: Option<ConsensusProbe>,
     test_probe: nervix_consensus::ConsensusTestProbe,
+    cluster_identity_proposals: Option<BootstrapProposals>,
 }
 
 impl std::fmt::Debug for ConsensusProbe {
@@ -523,6 +528,7 @@ impl Default for FaultInjection {
         let (startup_observation_end, _) = watch::channel(StartupObservationEnd::Unarmed);
         Self {
             inner: Arc::new(FaultInjectionState {
+                orphaned_domain_pauses: orphaned_domain_pause::OrphanedDomainPauses::default(),
                 command_reply_scripts: DashMap::default(),
                 emitter_faults: DashMap::default(),
                 observed_emitter_opens: DashMap::default(),

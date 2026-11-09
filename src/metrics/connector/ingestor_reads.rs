@@ -1,5 +1,7 @@
 //! Layer: engines and infrastructure.
-//! - **Owns.** Retained read counters, paced poll durations and exact-unit inspection history.
+//! - **Owns.** Retained read counters, paced poll durations and exact-unit inspection history,
+//!   which also retains each unit's acknowledgement and lifecycle children and the endpoint
+//!   request children of an endpoint ingestor's unit.
 //! - **Depends on.** Vocabulary identities, the existing rate owner and Prometheus.
 //! - **Must not know.** Drivers, graph admission, decoding or acknowledgement policy.
 
@@ -11,17 +13,22 @@
 use std::{collections::hash_map::Entry, time::Duration};
 
 use arch_into::ArchInto as _;
+use meticulous::OptionExt as _;
 use nervix_connector::IngestorReadOutcome;
 use nervix_models::{DomainNodeUnitRef, IngestorEntityKind, IngestorName, Unit};
 use strum::IntoEnumIterator as _;
 
-use super::*;
+use super::{
+    endpoint_requests::{EndpointRequestFamily, IngestorEndpointMetrics},
+    ingestor_acknowledgements::{AcknowledgementFamilies, IngestorAcknowledgementMetrics},
+    *,
+};
 
 const READS: &str = "nervix_ingestor_reads_total";
 const PAYLOADS: &str = "nervix_ingestor_read_payloads_total";
 const BYTES: &str = "nervix_ingestor_read_bytes_total";
 const POLL_DURATION: &str = "nervix_ingestor_poll_duration_seconds";
-const LABELS: &[&str] = &[
+pub(super) const LABELS: &[&str] = &[
     "domain",
     "ingestor",
     "physical_node_id",
@@ -31,19 +38,21 @@ const LABELS: &[&str] = &[
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ReadSeriesKey {
-    node: Option<ClusterNodeName>,
-    kind: IngestorEntityKind,
+pub(super) struct IngestorSeriesKey {
+    pub(super) node: Option<ClusterNodeName>,
+    pub(super) kind: IngestorEntityKind,
 }
 
 #[derive(Debug)]
 pub(super) struct IngestorReadFamilies {
     /// Registration, withdrawal and observers alone reach this map; read loops retain children.
-    scopes: DashMap<DomainNodeUnitRef, HashMap<ReadSeriesKey, IngestorReadMetrics>>,
+    scopes: DashMap<DomainNodeUnitRef, HashMap<IngestorSeriesKey, IngestorReadMetrics>>,
     reads: IntCounterVec,
     payloads: IntCounterVec,
     bytes: IntCounterVec,
     duration: HistogramVec,
+    acknowledgements: AcknowledgementFamilies,
+    endpoint_requests: EndpointRequestFamily,
 }
 
 impl IngestorReadFamilies {
@@ -90,6 +99,8 @@ impl IngestorReadFamilies {
             payloads,
             bytes,
             duration,
+            acknowledgements: AcknowledgementFamilies::register(registry, LABELS),
+            endpoint_requests: EndpointRequestFamily::register(registry, LABELS),
         }
     }
 
@@ -119,7 +130,7 @@ impl IngestorReadFamilies {
         node: Option<&ClusterNodeName>,
         kind: IngestorEntityKind,
     ) -> IngestorReadMetrics {
-        let key = ReadSeriesKey {
+        let key = IngestorSeriesKey {
             node: node.cloned(),
             kind,
         };
@@ -174,6 +185,8 @@ impl IngestorReadFamilies {
                         payloads: ReadCounter::new(&self.payloads, &values, None),
                         bytes: ReadCounter::new(&self.bytes, &values, None),
                         duration: self.duration.with_label_values(&values),
+                        acknowledgements: self.acknowledgements.unit(&values),
+                        endpoint_requests: self.endpoint_requests.unit(kind, &values),
                     }),
                 };
                 entry.insert(metrics.clone());
@@ -245,7 +258,12 @@ impl IngestorReadFamilies {
             self.duration
                 .remove_label_values(&labels)
                 .assured("registration installs the duration histogram");
-            scopes.remove(&key);
+            let removed = scopes
+                .remove(&key)
+                .verified("the key was read from this scope's own entries");
+            self.acknowledgements
+                .withdraw(&removed.series.acknowledgements, &labels);
+            self.endpoint_requests.withdraw(key.kind, &labels);
             kinds.push(key.kind);
         }
         let empty = scopes.is_empty();
@@ -273,10 +291,16 @@ struct ReadSeries {
     payloads: ReadCounter,
     bytes: ReadCounter,
     duration: Histogram,
+    /// The same unit's acknowledgement and lifecycle children, which its hosts also retain.
+    acknowledgements: IngestorAcknowledgementMetrics,
+    /// The request children of an endpoint ingestor's unit, which its endpoint bindings retain.
+    endpoint_requests: Option<IngestorEndpointMetrics>,
 }
 
+/// One retained counter child beside its rate summaries, which every interaction family of an
+/// ingestor unit that reports wall rates records through.
 #[derive(Debug)]
-struct ReadCounter {
+pub(super) struct ReadCounter {
     prometheus: IntCounter,
     rate: CounterSeries,
 }
@@ -295,6 +319,15 @@ impl ReadCounter {
             }
             None => family.with_label_values(labels),
         };
+        Self::retained(prometheus)
+    }
+
+    /// Retains the resolved child `prometheus` beside rate summaries that start at zero.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(lifecycle, reason = "wraps one child resolved at unit preparation")
+    )]
+    pub(super) fn retained(prometheus: IntCounter) -> Self {
         Self {
             prometheus,
             rate: CounterSeries::default(),
@@ -305,7 +338,7 @@ impl ReadCounter {
         nervix_lint,
         nervix::context(recurring, reason = "updates retained atomic children only")
     )]
-    fn record(&self, count: u64) {
+    pub(super) fn record(&self, count: u64) {
         self.prometheus.inc_by(count);
         self.rate.increment(count, None);
     }
@@ -314,7 +347,7 @@ impl ReadCounter {
         nervix_lint,
         nervix::context(observer, reason = "projects one counter and its rate summaries")
     )]
-    fn describe(&self, name: &str, selector: &str) -> String {
+    pub(super) fn describe(&self, name: &str, selector: &str) -> String {
         let summary = self.rate.summary();
         format!(
             "{name}{{{selector}}} total={} wall_rate_per_sec={} domain_rate_per_sec=- \
@@ -328,7 +361,19 @@ impl ReadCounter {
     }
 }
 
+impl ReadCounter {
+    /// The child's count so far.
+    #[cfg(test)]
+    pub(super) fn total(&self) -> u64 {
+        self.prometheus.get()
+    }
+}
+
 impl IngestorReadMetrics {
+    pub(super) fn selector(&self) -> &str {
+        &self.series.selector
+    }
+
     #[cfg_attr(
         nervix_lint,
         nervix::context(recurring, reason = "selects only a retained read counter")
@@ -393,7 +438,31 @@ impl IngestorReadMetrics {
             self.series.duration.get_sample_count(),
             format_number(self.series.duration.get_sample_sum())
         ));
+        if let Some(endpoint_requests) = &self.series.endpoint_requests {
+            endpoint_requests.describe_lines(&self.series.selector, &mut lines);
+        }
+        self.series
+            .acknowledgements
+            .describe_lines(&self.series.selector, &mut lines);
         lines
+    }
+
+    /// The acknowledgement and lifecycle children of the same unit, for its host to retain.
+    pub(crate) fn acknowledgements(&self) -> IngestorAcknowledgementMetrics {
+        self.series.acknowledgements.clone()
+    }
+
+    /// The request children of an endpoint ingestor's unit, for its endpoint bindings to retain,
+    /// and nothing for a unit of an entity that reads no endpoint.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "an endpoint binding retains its unit's request children when it is bound"
+        )
+    )]
+    pub(crate) fn endpoint_requests(&self) -> Option<IngestorEndpointMetrics> {
+        self.series.endpoint_requests.clone()
     }
 }
 
@@ -405,7 +474,8 @@ impl RuntimeMetrics {
         ingestor: &IngestorName,
         node: Option<&ClusterNodeName>,
     ) -> Vec<Unit> {
-        self.series
+        let mut units: Vec<_> = self
+            .series
             .connector
             .reads
             .scopes
@@ -417,7 +487,13 @@ impl RuntimeMetrics {
                     && scope.value().keys().any(|key| key.node.as_ref() == node)
             })
             .map(|scope| scope.key().unit)
-            .collect()
+            .collect();
+        let event_units = self.series.connector.events.units(domain, ingestor, node);
+        if !event_units.is_empty() {
+            let mut seen: std::collections::BTreeSet<_> = units.iter().copied().collect();
+            units.extend(event_units.into_iter().filter(|unit| seen.insert(*unit)));
+        }
+        units
     }
 
     #[cfg_attr(
@@ -462,7 +538,10 @@ impl RuntimeMetrics {
         )
     )]
     pub(crate) fn describe_ingestor_interactions(&self, entity: &DomainNodeUnitRef) -> Vec<String> {
-        self.series.connector.reads.describe(entity)
+        let mut lines = self.series.connector.reads.describe(entity);
+        let events = self.series.connector.events.describe_ingestor(entity);
+        lines.extend(events);
+        lines
     }
 }
 
@@ -500,7 +579,8 @@ mod tests {
             metrics
                 .describe_ingestor_interactions(&entity(units[0]))
                 .len(),
-            7
+            25,
+            "seven read lines and eighteen acknowledgement and lifecycle lines"
         );
         metrics.remove_ingestor_unit(&domain, &name, units[0], Some(&node));
         assert!(
@@ -514,7 +594,7 @@ mod tests {
             metrics
                 .describe_ingestor_interactions(&entity(units[1]))
                 .len(),
-            7
+            25
         );
         let recreated =
             metrics.register_ingestor_reads(&domain, &name, units[0], Some(&node), kind);
@@ -567,7 +647,16 @@ mod tests {
                 assert_eq!(labels["ingestor"], "input");
                 assert_eq!(labels["physical_node_id"], "node-1");
                 assert!(labels.contains_key("instance"));
-                assert_eq!(labels.len(), if family.name() == READS { 7 } else { 6 });
+                let bounded_labels = match family.name() {
+                    "nervix_ingestor_transport_acknowledgements_total" => 2,
+                    READS
+                    | "nervix_ingestor_ack_outcomes_total"
+                    | "nervix_ingestor_transport_acknowledgement_duration_seconds"
+                    | "nervix_ingestor_resumes_total"
+                    | "nervix_ingestor_suspends_total" => 1,
+                    _ => 0,
+                };
+                assert_eq!(labels.len(), 6 + bounded_labels, "{}", family.name());
                 match family.get_field_type() {
                     prometheus::proto::MetricType::COUNTER => {
                         assert_eq!(sample.get_counter().value(), 0.0)
@@ -582,6 +671,6 @@ mod tests {
                 }
             }
         }
-        assert_eq!(count, 14);
+        assert_eq!(count, 21);
     }
 }

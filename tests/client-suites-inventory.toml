@@ -8,6 +8,21 @@
 
 [[test]]
 host = "python"
+identity = "cluster/test_inspection.py::test_inspection_metadata_and_verified_frames_survive_their_parents"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::InspectionTest#test_inspection_metadata_and_verified_frames_survive_their_parents"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.InspectionTests#inspectionMetadataAndVerifiedFramesSurviveTheirParents"
+tier = "cluster"
+
+[[test]]
+host = "python"
 identity = "boundary/test_cancellation.py::test_a_token_refuses_a_deadline_that_is_not_a_finite_number_of_seconds"
 tier = "boundary"
 
@@ -523,6 +538,11 @@ tier = "cluster"
 
 [[test]]
 host = "java"
+identity = "io.nervix.client.suite.RecoveryTests#aRefusedSubscriptionRestorationReportsItsCauseAndRecovers"
+tier = "cluster"
+
+[[test]]
+host = "java"
 identity = "io.nervix.client.suite.RecoveryTests#cancellationAfterAnObservedEffectRecoversTheSamePreparedExecution"
 tier = "cluster"
 
@@ -534,6 +554,201 @@ tier = "cluster"
 [[test]]
 host = "java"
 identity = "io.nervix.client.suite.RecoveryTests#creditWaitsWithoutSubmittingAndResolvedReleaseHandsOverTheOutcome"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::BoundaryPackagingTest#test_00_packaged_gem_loads_in_a_fresh_gem_home"
+tier = "boundary"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::ClocksTest#test_attached_clock_projections_ticks_generations_and_detach"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::ClocksTest#test_clock_interruption_restores_attachment_and_detach_stops_following"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::ClocksTest#test_clock_waits_have_cancellation_and_deadlines"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::ClusterPackagingTest#test_00_packaged_gem_loads_in_a_fresh_gem_home"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::ColumnsTest#test_a_builder_copies_inputs_and_ipc_preserves_typed_nested_columns"
+tier = "boundary"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::ColumnsTest#test_an_ipc_slice_keeps_its_owner_until_the_last_view_is_collected"
+tier = "boundary"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::ColumnsTest#test_every_scalar_width_preserves_its_exact_bits"
+tier = "boundary"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::ColumnsTest#test_fields_describe_every_level_and_keep_flags_and_order"
+tier = "boundary"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::ColumnsTest#test_invalid_field_and_builder_inputs_are_typed_failures"
+tier = "boundary"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::CommandsTest#test_backup_restore_and_reexecution_keep_their_outcomes"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::CommandsTest#test_commands_diagnostics_cancellation_and_recovery"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::CommandsTest#test_completion_spans_are_utf8_bytes_and_pages_continue"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::CommandsTest#test_connection_options_authentication_tls_and_seeds"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::CommandsTest#test_one_session_serves_threads_while_an_event_wait_is_cancelled"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::CommandsTest#test_session_block_closes_on_normal_return_and_exception"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::CommandsTest#test_upload_identity_conflicts_are_typed_outcome_fields"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::ConnectionTest#test_a_silent_connection_ends_at_its_deadline"
+tier = "boundary"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::ConnectionTest#test_a_silent_connection_releases_the_gvl_and_another_thread_cancels_it"
+tier = "boundary"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::ConnectionTest#test_invalid_options_fail_before_a_connection_is_opened"
+tier = "boundary"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::EndpointsTest#test_a_consumer_gap_invalidates_delivery_references_and_recovers_identity"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::EndpointsTest#test_a_session_gap_keeps_a_submission_unknown_and_restores_the_producer"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::EndpointsTest#test_built_batches_delivery_metadata_retry_and_ack"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::EndpointsTest#test_contract_changes_require_reopen"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::EndpointsTest#test_endpoint_descriptions_and_value_objects"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::EndpointsTest#test_ipc_submissions_rejections_and_every_outcome_cause"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::EndpointsTest#test_open_refusals_keep_their_typed_cause"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::EndpointsTest#test_pending_release_and_credit_waits"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::EndpointsTest#test_suspended_admission_and_an_admitted_command_cancelled_from_another_thread"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::LifetimesTest#test_a_delivery_outlives_session_and_consumer_references"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::LifetimesTest#test_a_producer_outlives_its_ruby_session_and_keeps_native_runtime"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::LifetimesTest#test_an_application_publishes_and_settles_its_output_with_ensure"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::LifetimesTest#test_an_endpoint_open_takes_the_complete_field_snapshot"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::SubscriptionsTest#test_dropping_a_relay_ends_its_subscription"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::SubscriptionsTest#test_refused_restoration_is_observable_and_the_subscription_recovers"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::SubscriptionsTest#test_rows_have_typed_values_bulk_columns_and_retained_frames"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::VocabularyTest#test_every_declared_enum_member_has_its_stable_value_and_integer_semantics"
+tier = "boundary"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::VocabularyTest#test_every_exception_class_is_under_the_shared_base_class"
+tier = "boundary"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::EndpointsTest#test_endpoint_blocks_close_on_normal_return_and_exception"
 tier = "cluster"
 
 # C: checked native programs over the shared C ABI.

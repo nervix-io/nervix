@@ -26,9 +26,11 @@ mod endpoints;
 mod enums;
 mod errors;
 mod gvl;
+mod inspection;
 mod schema;
 mod sessions;
 mod subscriptions;
+mod value_object;
 mod values;
 
 use magnus::{Error, RClass, RModule, Ruby, prelude::*};
@@ -42,6 +44,7 @@ pub fn register(ruby: &Ruby) -> Result<(), Error> {
     schema::register(ruby, client)?;
     batches::register(ruby, client)?;
     sessions::register(ruby, client)?;
+    inspection::register(ruby, client)?;
     subscriptions::register(ruby, client)?;
     clocks::register(ruby, client)?;
     endpoints::register(ruby, client)?;

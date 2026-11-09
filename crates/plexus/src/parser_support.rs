@@ -1018,6 +1018,25 @@ pub fn string_lit<'src>()
     .boxed()
 }
 
+/// A string literal with declaration-owned expected values. The caller validates its semantics;
+/// known literal expectations let completion insert a complete valid value at a missing literal.
+pub fn string_lit_with_values<'src>(
+    choices: impl IntoIterator<Item = &'static str>,
+) -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    let choices: Vec<_> = choices.into_iter().collect();
+    string_lit()
+        .map_err(move |error: ParseError<'src>| {
+            let expected = choices.iter().map(|choice| RichPattern::Token(
+                MaybeRef::Val(Token::StringLiteral((*choice).to_owned()))
+            ));
+            let found = error.found().map(|token| MaybeRef::Val(token.clone()));
+            <ParseError<'src> as LabelError<'src, &'src [Token], RichPattern<'src, Token>>>::expected_found(
+                expected, found, *error.span(),
+            )
+        })
+        .boxed()
+}
+
 /// A path on the client's own filesystem, written as a quoted literal.
 ///
 /// Client-local statements name the file or directory they read or write this way, and the server

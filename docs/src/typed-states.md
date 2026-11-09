@@ -74,6 +74,14 @@ driver TLS options from a complete split-file identity awaiting preparation; a p
 is a configuration error. Preparation returns native options together with their private combined
 PEM guard. One shared client owner retains both driver and guard until its last handle ends.
 
+The consensus identity record validates a version-4 UUID and nonzero key generation, and derives
+all current, retired and pending public keys and key IDs from their actual private keys at each
+read boundary. Its secret-clearing DER owner never enters the public observer projection.
+Metadata's optional UUID is a required consistency reference to the optional singleton: only both
+absent denotes an uninitialized cluster. A missing or disagreeing record fails recovery. The
+[consensus identity contract](consensus-storage-and-replication.md#permanent-cluster-identity)
+owns installation and preservation.
+
 Nervix represents absence and distinct semantic states in its types. A zero, empty string,
 empty collection, maximum integer, or all-zero digest is a value in its own right; it does not
 stand for a missing value or a different state. The owner of each state decides when a value is
@@ -351,11 +359,12 @@ that header state, and inferencer state bindings with their initial expressions.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
-Consensus's `raft_part_epoch_` keyspaces and current `ClusterState`
-metadata encoding, 16, identify its stored shapes, including the partition count of every resolved branch
-declaration in the committed schedule, the partition epoch the schedule records for each branch whose
-count changed, and the statements a transaction keeps, including per-entity
-`ALTER INGESTOR` and `ALTER EMITTER` operations. The runtime state store's
+Consensus's `raft_identity_tls_inference_reset_epoch_` keyspaces and current `ClusterState`
+metadata encoding, 20, identify its stored shapes, including the partition count of every resolved
+branch declaration in the committed schedule, the partition epoch the schedule records for each
+branch whose count changed, and the statements a transaction keeps, including per-entity
+`ALTER INGESTOR` and `ALTER EMITTER` operations and a `RESET WASM PROCESSOR ... STATE` that takes
+its domain from the transaction. The runtime state store's
 `ranked-intake-unit-checkpoint-segments` format identifies the checkpoints it keeps, including the
 unsigned 64-bit instance identity and the unit every branch-aggregated metric series carries.
 Fixed intake counts remain `NonZeroU64`; branch partition counts remain `NonZeroU16`. The
@@ -363,7 +372,7 @@ registry's instancing boundary checks native count conversion and the layout of 
 unit entries before materialization. An unaddressable declaration is a typed validation failure;
 its full-width Model remains representable independently of the target's execution capacity. The
 client placement union carries an instance index as an unsigned 64-bit value. Backup format
-major `6` and its unit-bearing record versions own an eight-byte primitive unit rank. The native
+major `7` and its unit-bearing record versions own an eight-byte primitive unit rank. The native
 `NervixKafkaState` checkpoint contains
 positions and an optional applied explicit-start generation. Pending canonical starts and
 subsequent unit-owned progress use that current shape. An unrecognized signature, namespace or
@@ -709,6 +718,12 @@ independence explicitly. No fingerprint byte pattern means “missing” or “i
 fingerprint is accepted for its identity even if its bytes happen to be zero. Scheduling must
 publish the required fingerprint before schema-bound state can be loaded or replicated. Missing
 required identity is an error, not a default digest.
+
+Stateful inferencer placement also requires an `InferencerModelFingerprint` naming the resource,
+pinned version, file and complete ordered state declarations. Stateless inference has no such
+identity. The decision boundary computes it once; the runtime receives the typed value and never
+reads the inferencer Model to reconstruct it. Snapshot restoration accepts tensors only under that
+identity and the same branch incarnation, and validates their shapes before installation.
 
 The runtime Kafka offset key remains schema-independent. A backup archive also records the
 ingestor's scheduled fingerprint with those offsets, so restore applies them only to the same
@@ -1387,3 +1402,13 @@ Normalization sorts and deduplicates within the selected form. Persisted transac
 interconnect requests and runtime holds retain that choice. A held lease must contain the exact
 unit and its exact freeze before it authorizes a handoff checkpoint. Placement groups also carry
 exact unit members, allowing an ingestor instance and a relay partition in the same component.
+
+## Resolved TLS Parameter Pairs
+
+The mandatory `ClusterParameterValues` TLS fields contain bounded, nonempty, unique ordered
+algorithm identifiers. Aliases exist only at input conversion. Individual selection decoding rejects
+gaps and duplicates; complete JSON and archive record decoding applies the same joint validation
+as bootstrap and administrative transitions. The complete candidate includes TLS 1.3 and, when it
+retains a TLS 1.2 suite, a usable TLS 1.2 group. Neither decoding nor installation supplies an omitted
+policy field. Current storage headers and the interconnect contract fingerprint identify this
+complete shape. See [Algorithm Policy](cryptography.md#algorithm-policy).

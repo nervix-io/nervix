@@ -349,6 +349,7 @@ const HTTP_REQUEST_METADATA: IngestorMetadataDeclaration = IngestorMetadataDecla
 
 impl IngestorDeclaration for HttpRequestIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::Single,
         // An HTTP response's fields, as the client's header map keeps them: names in lowercase, every
         // value of a repeated field together under its name.
@@ -456,6 +457,7 @@ const HTTP_ENDPOINT_METADATA: IngestorMetadataDeclaration = IngestorMetadataDecl
 
 impl IngestorDeclaration for HttpEndpointIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::Single,
         // An HTTP request's fields, as the server's header map keeps them: names in lowercase, every
         // value of a repeated field together under its name.
@@ -631,6 +633,7 @@ pub struct HttpRequestEmitter {
 
 impl EmitterDeclaration for HttpRequestEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         // A request's application fields: names in lowercase, a later write of a name replacing the
         // earlier one, written in ascending order of name.
         headers: Some(HeaderModel::lowercase(HeaderLayout::SortedByName)),

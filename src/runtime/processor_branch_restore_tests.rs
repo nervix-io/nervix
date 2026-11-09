@@ -514,6 +514,7 @@ async fn a_retired_transition_runs_the_input_its_processor_unit_parked() {
         ScheduledStateAssignment {
             identity: ScheduledStateIdentity {
                 schema_fingerprint: nervix_models::SchemaFingerprint::from_digest([7; 32]),
+                inferencer_model: None,
                 wasm_state_generations: None,
             },
             checkpoint_owners: None,

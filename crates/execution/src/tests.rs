@@ -413,7 +413,7 @@ async fn a_management_budget_below_one_event_fails_to_start() {
 async fn a_credentials_budget_below_one_password_hash_fails_to_start() {
     let error = Executor::new(ExecutionConfig {
         budgets: MemoryBudgets {
-            credentials: ByteUnit::Mebibyte(16),
+            credentials: ByteUnit::Byte(63),
             ..MemoryBudgets::default()
         },
         ..ExecutionConfig::default()
@@ -424,8 +424,8 @@ async fn a_credentials_budget_below_one_password_hash_fails_to_start() {
         ExecutionConfigError::BudgetBelowOperation {
             class: "credentials",
             operation: "password hash",
-            budget: ByteUnit::Mebibyte(16).as_u64(),
-            required: ByteUnit::Mebibyte(19).as_u64(),
+            budget: ByteUnit::Byte(63).as_u64(),
+            required: ByteUnit::Byte(64).as_u64(),
         }
     );
 }

@@ -1,4 +1,5 @@
-//! Ordered transforming routes shared by visual junctions and reingestors.
+//! Ordered transforming routes shared by visual junctions, deduplicators, reorderers and
+//! reingestors.
 //!
 //! Layer: edges.
 //!
@@ -55,7 +56,7 @@ pub(super) fn ProcessorRouteEditor(
 ) -> impl IntoView {
     let draft = signals.processor(family);
     let pending = move || signals.progress.get().is_pending();
-    view! {
+    let section = view! {
         <section class="create-processor-routes">
             <h3>"Ordered output routes"</h3>
             <div class="create-processor-route-list">
@@ -83,158 +84,221 @@ pub(super) fn ProcessorRouteEditor(
                         disabled=move || { pending() || draft.get().routes.len() == 1 }
                         on:click=move |_| { draft.update(|state| state.remove_route()); signals.edit(); }>"Remove route"</button>
                 </div>
-                <Show when=move || family == ProcessorFamily::Reingestor fallback=|| ()>
-                    <fieldset class="create-field create-processor-route-branching">
-                        <legend>"Route branch"</legend>
-                        <button type="button" data-branch="preserve"
-                            class:active=move || draft.get().active_route().is_some_and(|route| matches!(route.branch, RouteBranchDraft::Preserve))
-                            disabled=pending
-                            on:click=move |_| { draft.update(|state| {
-                                if let Some(route) = state.active_route_mut() {
-                                    route.branch.choose_preserve();
-                                    if let Some(relay) = &mut route.relay { relay.invalidate(); }
-                                }
-                            }); signals.edit(); }>"Preserve incoming branch"</button>
-                        <button type="button" data-branch="unbranched"
-                            class:active=move || draft.get().active_route().is_some_and(|route| matches!(route.branch, RouteBranchDraft::Unbranched))
-                            disabled=pending
-                            on:click=move |_| { draft.update(|state| {
-                                if let Some(route) = state.active_route_mut() {
-                                    route.branch.choose_unbranched();
-                                    if let Some(relay) = &mut route.relay { relay.invalidate(); }
-                                }
-                            }); signals.edit(); }>"UNBRANCHED"</button>
-                        <button type="button" data-branch="named"
-                            class:active=move || draft.get().active_route().is_some_and(|route| matches!(route.branch, RouteBranchDraft::Branched { .. }))
-                            disabled=pending
-                            on:click=move |_| { draft.update(|state| {
-                                if let Some(route) = state.active_route_mut() {
-                                    route.branch.choose_branched();
-                                    if let Some(relay) = &mut route.relay { relay.invalidate(); }
-                                }
-                            }); signals.edit(); }>"Named branch"</button>
-                    </fieldset>
-                    <Show when=move || draft.get().active_route().is_some_and(|route| matches!(route.branch, RouteBranchDraft::Branched { .. })) fallback=|| ()>
-                        <ChoiceGroup class_name="create-processor-route-branch" label="Named route branch"
-                            control=ChoiceControl::ProcessorRouteBranch signals=signals request_tx=request_tx
-                            session_generation=session_generation show_detail=true />
-                        <div class="create-processor-branch-assignments">
-                            <ChoiceGroup class_name="create-processor-branch-fields" label="Add branch key assignment"
-                                control=ChoiceControl::ProcessorBranchField signals=signals request_tx=request_tx
-                                session_generation=session_generation show_detail=true />
-                            <ProcessorAssignmentRows family=family area=AssignmentArea::Branch signals=signals />
-                        </div>
-                    </Show>
-                </Show>
+                <ProcessorRouteBranchEditor family=family signals=signals request_tx=request_tx session_generation=session_generation />
                 <ChoiceGroup class_name="create-processor-route-relay" label="Output relay"
                     control=ChoiceControl::ProcessorRouteRelay signals=signals request_tx=request_tx
                     session_generation=session_generation show_detail=true />
                 <ProcessorInheritanceEditor family=family signals=signals request_tx=request_tx session_generation=session_generation />
-                <div class="create-processor-output-assignments">
-                    <ChoiceGroup class_name="create-processor-output-fields" label="Add output assignment"
-                        control=ChoiceControl::ProcessorOutputField signals=signals request_tx=request_tx
-                        session_generation=session_generation show_detail=true />
-                    <ProcessorAssignmentRows family=family area=AssignmentArea::Output signals=signals />
-                </div>
-                <label class="create-field"><span>"Route WHERE expression (optional)"</span>
-                    <textarea class="create-processor-route-where"
-                        prop:value=move || {
-                            let state = draft.get();
-                            match state.active_route() {
-                                Some(route) => route.where_clause.clone(),
-                                None => String::new(),
-                            }
-                        }
-                        disabled=pending
-                        on:input=move |event| {
-                            let value = event_target_textarea_value(&event);
-                            draft.update(|state| {
-                                if let Some(route) = state.active_route_mut() { route.where_clause = value; }
-                            });
-                            signals.edit();
-                        } />
-                </label>
-                <ProcessorInvocationEditor family=family signals=signals />
-                <fieldset class="create-field create-processor-flush">
-                    <legend>"Flush policy"</legend>
-                    <button type="button" data-flush="immediate"
-                        class:active=move || draft.get().active_route().is_some_and(|route| matches!(route.flush, FlushDraft::Immediate))
-                        disabled=pending
-                        on:click=move |_| { draft.update(|state| {
-                            if let Some(route) = state.active_route_mut() { route.flush = FlushDraft::Immediate; }
-                        }); signals.edit(); }>"IMMEDIATE"</button>
-                    <button type="button" data-flush="each"
-                        class:active=move || draft.get().active_route().is_some_and(|route| matches!(route.flush, FlushDraft::Each { .. }))
-                        disabled=pending
-                        on:click=move |_| { draft.update(|state| {
-                            if let Some(route) = state.active_route_mut() {
-                                route.flush = FlushDraft::Each { interval: String::new(), max_batch_size: String::new() };
-                            }
-                        }); signals.edit(); }>"EACH"</button>
-                </fieldset>
-                <Show when=move || draft.get().active_route().is_some_and(|route| matches!(route.flush, FlushDraft::Each { .. })) fallback=|| ()>
-                    <label class="create-field"><span>"Flush interval"</span>
-                        <input class="create-processor-flush-interval" type="text" autocomplete="off"
-                            prop:value=move || route_flush_interval(signals, family)
-                            disabled=pending
-                            on:input=move |event| {
-                                let value = event_target_value(&event);
-                                draft.update(|state| {
-                                    if let Some(route) = state.active_route_mut()
-                                        && let FlushDraft::Each { interval, .. } = &mut route.flush { *interval = value; }
-                                });
-                                signals.edit();
-                            } />
-                    </label>
-                    <label class="create-field"><span>"Maximum batch size"</span>
-                        <input class="create-processor-flush-size" type="text" autocomplete="off"
-                            prop:value=move || route_flush_size(signals, family)
-                            disabled=pending
-                            on:input=move |event| {
-                                let value = event_target_value(&event);
-                                draft.update(|state| {
-                                    if let Some(route) = state.active_route_mut()
-                                        && let FlushDraft::Each { max_batch_size, .. } = &mut route.flush { *max_batch_size = value; }
-                                });
-                                signals.edit();
-                            } />
-                    </label>
-                </Show>
-                <fieldset class="create-field create-processor-message-error">
-                    <legend>"On message error"</legend>
-                    <button type="button" data-error="ignore"
-                        class:active=move || draft.get().active_route().is_some_and(|route| matches!(route.message_error, MessageErrorDraft::Ignore))
-                        disabled=pending
-                        on:click=move |_| { draft.update(|state| {
-                            if let Some(route) = state.active_route_mut() { route.message_error = MessageErrorDraft::Ignore; }
-                        }); signals.edit(); }>"IGNORE"</button>
-                    <button type="button" data-error="log"
-                        class:active=move || draft.get().active_route().is_some_and(|route| matches!(route.message_error, MessageErrorDraft::Log))
-                        disabled=pending
-                        on:click=move |_| { draft.update(|state| {
-                            if let Some(route) = state.active_route_mut() { route.message_error = MessageErrorDraft::Log; }
-                        }); signals.edit(); }>"LOG"</button>
-                    <button type="button" data-error="send"
-                        class:active=move || draft.get().active_route().is_some_and(|route| matches!(route.message_error, MessageErrorDraft::SendTo { .. }))
-                        disabled=pending
-                        on:click=move |_| { draft.update(|state| {
-                            if let Some(route) = state.active_route_mut() {
-                                route.message_error = MessageErrorDraft::SendTo { relay: None, assignments: Vec::new() };
-                            }
-                        }); signals.edit(); }>"SEND TO"</button>
-                </fieldset>
-                <Show when=move || draft.get().active_route().is_some_and(|route| matches!(route.message_error, MessageErrorDraft::SendTo { .. })) fallback=|| ()>
-                    <div class="create-processor-error-assignments">
-                        <ChoiceGroup class_name="create-processor-error-relay" label="Error relay"
-                            control=ChoiceControl::ProcessorErrorRelay signals=signals request_tx=request_tx
-                            session_generation=session_generation show_detail=true />
-                        <ChoiceGroup class_name="create-processor-error-fields" label="Add error assignment"
-                            control=ChoiceControl::ProcessorErrorField signals=signals request_tx=request_tx
-                            session_generation=session_generation show_detail=true />
-                        <ProcessorAssignmentRows family=family area=AssignmentArea::Error signals=signals />
-                    </div>
-                </Show>
+                <ProcessorRouteConstructionEditor family=family signals=signals request_tx=request_tx session_generation=session_generation />
+                <ProcessorRouteFlushEditor family=family signals=signals />
+                <ProcessorRouteMessageErrorEditor family=family signals=signals request_tx=request_tx session_generation=session_generation />
             </div>
         </section>
+    };
+    // Erased at the section boundary: the processor editor composing this section then holds and
+    // names a boxed view, so neither its rendering frames nor the debug names of every form that
+    // embeds it repeat this section's complete nested view.
+    section.into_any()
+}
+
+/// The active route's branch and its branch key assignments, for the families whose routes choose one.
+#[component]
+fn ProcessorRouteBranchEditor(
+    family: ProcessorFamily,
+    signals: CreateSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    session_generation: RwSignal<u64>,
+) -> impl IntoView {
+    let draft = signals.processor(family);
+    let pending = move || signals.progress.get().is_pending();
+    view! {
+        <Show when=move || !family.declares_node_branch() fallback=|| ()>
+            <fieldset class="create-field create-processor-route-branching">
+                <legend>"Route branch"</legend>
+                <button type="button" data-branch="preserve"
+                    class:active=move || draft.get().active_route().is_some_and(|route| matches!(route.branch, RouteBranchDraft::Preserve))
+                    disabled=pending
+                    on:click=move |_| { draft.update(|state| {
+                        if let Some(route) = state.active_route_mut() {
+                            route.branch.choose_preserve();
+                            if let Some(relay) = &mut route.relay { relay.invalidate(); }
+                        }
+                    }); signals.edit(); }>"Preserve incoming branch"</button>
+                <button type="button" data-branch="unbranched"
+                    class:active=move || draft.get().active_route().is_some_and(|route| matches!(route.branch, RouteBranchDraft::Unbranched))
+                    disabled=pending
+                    on:click=move |_| { draft.update(|state| {
+                        if let Some(route) = state.active_route_mut() {
+                            route.branch.choose_unbranched();
+                            if let Some(relay) = &mut route.relay { relay.invalidate(); }
+                        }
+                    }); signals.edit(); }>"UNBRANCHED"</button>
+                <button type="button" data-branch="named"
+                    class:active=move || draft.get().active_route().is_some_and(|route| matches!(route.branch, RouteBranchDraft::Branched { .. }))
+                    disabled=pending
+                    on:click=move |_| { draft.update(|state| {
+                        if let Some(route) = state.active_route_mut() {
+                            route.branch.choose_branched();
+                            if let Some(relay) = &mut route.relay { relay.invalidate(); }
+                        }
+                    }); signals.edit(); }>"Named branch"</button>
+            </fieldset>
+            <Show when=move || draft.get().active_route().is_some_and(|route| matches!(route.branch, RouteBranchDraft::Branched { .. })) fallback=|| ()>
+                <ChoiceGroup class_name="create-processor-route-branch" label="Named route branch"
+                    control=ChoiceControl::ProcessorRouteBranch signals=signals request_tx=request_tx
+                    session_generation=session_generation show_detail=true />
+                <div class="create-processor-branch-assignments">
+                    <ChoiceGroup class_name="create-processor-branch-fields" label="Add branch key assignment"
+                        control=ChoiceControl::ProcessorBranchField signals=signals request_tx=request_tx
+                        session_generation=session_generation show_detail=true />
+                    <ProcessorAssignmentRows family=family area=AssignmentArea::Branch signals=signals />
+                </div>
+            </Show>
+        </Show>
     }
+    .into_any()
+}
+
+/// The active route's output assignments, its WHERE expression and its ordered invocations.
+#[component]
+fn ProcessorRouteConstructionEditor(
+    family: ProcessorFamily,
+    signals: CreateSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    session_generation: RwSignal<u64>,
+) -> impl IntoView {
+    let draft = signals.processor(family);
+    let pending = move || signals.progress.get().is_pending();
+    view! {
+        <div class="create-processor-output-assignments">
+            <ChoiceGroup class_name="create-processor-output-fields" label="Add output assignment"
+                control=ChoiceControl::ProcessorOutputField signals=signals request_tx=request_tx
+                session_generation=session_generation show_detail=true />
+            <ProcessorAssignmentRows family=family area=AssignmentArea::Output signals=signals />
+        </div>
+        <label class="create-field"><span>"Route WHERE expression (optional)"</span>
+            <textarea class="create-processor-route-where"
+                prop:value=move || {
+                    let state = draft.get();
+                    match state.active_route() {
+                        Some(route) => route.where_clause.clone(),
+                        None => String::new(),
+                    }
+                }
+                disabled=pending
+                on:input=move |event| {
+                    let value = event_target_textarea_value(&event);
+                    draft.update(|state| {
+                        if let Some(route) = state.active_route_mut() { route.where_clause = value; }
+                    });
+                    signals.edit();
+                } />
+        </label>
+        <ProcessorInvocationEditor family=family signals=signals />
+    }
+    .into_any()
+}
+
+/// The active route's flush policy.
+#[component]
+fn ProcessorRouteFlushEditor(family: ProcessorFamily, signals: CreateSignals) -> impl IntoView {
+    let draft = signals.processor(family);
+    let pending = move || signals.progress.get().is_pending();
+    view! {
+        <fieldset class="create-field create-processor-flush">
+            <legend>"Flush policy"</legend>
+            <button type="button" data-flush="immediate"
+                class:active=move || draft.get().active_route().is_some_and(|route| matches!(route.flush, FlushDraft::Immediate))
+                disabled=pending
+                on:click=move |_| { draft.update(|state| {
+                    if let Some(route) = state.active_route_mut() { route.flush = FlushDraft::Immediate; }
+                }); signals.edit(); }>"IMMEDIATE"</button>
+            <button type="button" data-flush="each"
+                class:active=move || draft.get().active_route().is_some_and(|route| matches!(route.flush, FlushDraft::Each { .. }))
+                disabled=pending
+                on:click=move |_| { draft.update(|state| {
+                    if let Some(route) = state.active_route_mut() {
+                        route.flush = FlushDraft::Each { interval: String::new(), max_batch_size: String::new() };
+                    }
+                }); signals.edit(); }>"EACH"</button>
+        </fieldset>
+        <Show when=move || draft.get().active_route().is_some_and(|route| matches!(route.flush, FlushDraft::Each { .. })) fallback=|| ()>
+            <label class="create-field"><span>"Flush interval"</span>
+                <input class="create-processor-flush-interval" type="text" autocomplete="off"
+                    prop:value=move || route_flush_interval(signals, family)
+                    disabled=pending
+                    on:input=move |event| {
+                        let value = event_target_value(&event);
+                        draft.update(|state| {
+                            if let Some(route) = state.active_route_mut()
+                                && let FlushDraft::Each { interval, .. } = &mut route.flush { *interval = value; }
+                        });
+                        signals.edit();
+                    } />
+            </label>
+            <label class="create-field"><span>"Maximum batch size"</span>
+                <input class="create-processor-flush-size" type="text" autocomplete="off"
+                    prop:value=move || route_flush_size(signals, family)
+                    disabled=pending
+                    on:input=move |event| {
+                        let value = event_target_value(&event);
+                        draft.update(|state| {
+                            if let Some(route) = state.active_route_mut()
+                                && let FlushDraft::Each { max_batch_size, .. } = &mut route.flush { *max_batch_size = value; }
+                        });
+                        signals.edit();
+                    } />
+            </label>
+        </Show>
+    }
+    .into_any()
+}
+
+/// The active route's message error policy and its error relay assignments.
+#[component]
+fn ProcessorRouteMessageErrorEditor(
+    family: ProcessorFamily,
+    signals: CreateSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    session_generation: RwSignal<u64>,
+) -> impl IntoView {
+    let draft = signals.processor(family);
+    let pending = move || signals.progress.get().is_pending();
+    view! {
+        <fieldset class="create-field create-processor-message-error">
+            <legend>"On message error"</legend>
+            <button type="button" data-error="ignore"
+                class:active=move || draft.get().active_route().is_some_and(|route| matches!(route.message_error, MessageErrorDraft::Ignore))
+                disabled=pending
+                on:click=move |_| { draft.update(|state| {
+                    if let Some(route) = state.active_route_mut() { route.message_error = MessageErrorDraft::Ignore; }
+                }); signals.edit(); }>"IGNORE"</button>
+            <button type="button" data-error="log"
+                class:active=move || draft.get().active_route().is_some_and(|route| matches!(route.message_error, MessageErrorDraft::Log))
+                disabled=pending
+                on:click=move |_| { draft.update(|state| {
+                    if let Some(route) = state.active_route_mut() { route.message_error = MessageErrorDraft::Log; }
+                }); signals.edit(); }>"LOG"</button>
+            <button type="button" data-error="send"
+                class:active=move || draft.get().active_route().is_some_and(|route| matches!(route.message_error, MessageErrorDraft::SendTo { .. }))
+                disabled=pending
+                on:click=move |_| { draft.update(|state| {
+                    if let Some(route) = state.active_route_mut() {
+                        route.message_error = MessageErrorDraft::SendTo { relay: None, assignments: Vec::new() };
+                    }
+                }); signals.edit(); }>"SEND TO"</button>
+        </fieldset>
+        <Show when=move || draft.get().active_route().is_some_and(|route| matches!(route.message_error, MessageErrorDraft::SendTo { .. })) fallback=|| ()>
+            <div class="create-processor-error-assignments">
+                <ChoiceGroup class_name="create-processor-error-relay" label="Error relay"
+                    control=ChoiceControl::ProcessorErrorRelay signals=signals request_tx=request_tx
+                    session_generation=session_generation show_detail=true />
+                <ChoiceGroup class_name="create-processor-error-fields" label="Add error assignment"
+                    control=ChoiceControl::ProcessorErrorField signals=signals request_tx=request_tx
+                    session_generation=session_generation show_detail=true />
+                <ProcessorAssignmentRows family=family area=AssignmentArea::Error signals=signals />
+            </div>
+        </Show>
+    }
+    .into_any()
 }

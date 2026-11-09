@@ -74,6 +74,13 @@ window rows travel as Arrow IPC under the user's own schemas beside an rkyv desc
 JSON in an archive. [Archive Format](./backup-and-restore.md#archive-format) lists every section and
 record.
 
+The manifest records the source cluster's configured `cluster_id` and permanent `cluster_uid` for
+display. The UID is a version-4 UUID in manifest record version `3`. The archive carries no cluster
+private key, identity record or licensing state. A restore is a clone: it retains the target's own
+identity, including when the source cluster still runs. Recovery of a licensed installation
+requires an administrative transfer to the rebuilt cluster. Consensus snapshots preserve identity
+independently of this archive format.
+
 ### Records Mirror The Contract
 
 Archive records embed vocabulary types, such as names, timestamps, typed scalar values, branch keys
@@ -104,7 +111,7 @@ selection, adoption and seed release. Restore retains the pending cut, so a dela
 resume it after the lifecycle advances. Count redistribution prepares the newest canonical
 generation and each actual owner's progress on every target primary and replica.
 
-The current archive uses format major `6`. Its domain record is version `2` and carries the
+The current archive uses format major `7`. Its domain record is version `2` and carries the
 domain pace and lifecycle; named placement rules are canonical Models in the model document. Each unit-bearing record owns an eight-byte primitive
 rank with four-byte alignment. Rank zero is `Single`, ranks one through `2^32` select the full
 32-bit partition range, and subsequent ranks select instance indices from zero. Every rank is a
@@ -125,7 +132,7 @@ A reader verifies an archive as a stream, without seeking:
 
 1. The first header must be the regular `manifest.rkyv` entry within the 64 MiB record limit;
    anything else is refused before the manifest is read.
-2. The manifest must hold archive format major version `6`, valid domain names, no duplicate path,
+2. The manifest must hold archive format major version `7`, valid domain names, no duplicate path,
    and a known record kind for every record section.
 3. Every following entry must be the next section the manifest names, with that exact length,
    within its content kind's bound, and with that digest once its bytes are drained. A missing,
@@ -1260,3 +1267,12 @@ therefore contribute checkpoints from several owners. Restore retains the global
 when staging and publishing those generations; final placement does not renumber it. The current
 archive major also identifies this interpretation of canonical fixed-count and per-partition
 Models. Manifest and individual state-record versions retain their own current contracts.
+
+### User Credential Records
+
+A users record has version 2, checked before its payload is decoded. It carries the complete
+current typed password credential, including algorithm, bounded iteration count, salt and digest.
+Restore preserves those values without re-deriving a password. Importing users raises the
+consensus verification-work count in the same publication, so restored costs and local users
+share one uniform authentication workload. Header or cost validation failures occur before
+installation, and diagnostics never include salt, digest or password values.

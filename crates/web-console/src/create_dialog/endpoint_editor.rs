@@ -76,4 +76,5 @@ pub(super) fn EndpointEditor(
             </Show>
         </Show>
     }
+    .into_any()
 }

@@ -23,11 +23,13 @@ humantime = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }
 meticulous = { workspace = true }
 nervix-approx-into = { workspace = true }
+nervix-crypto-policy = { workspace = true }
 nervix-primitives = { workspace = true }
 nonzero_ext = { workspace = true }
 percent-encoding = { workspace = true }
 rkyv = { workspace = true }
 serde = { workspace = true }
+serde-big-array = { workspace = true }
 serde_json = { workspace = true }
 sorted-vec = { workspace = true, features = ["serde"] }
 strum = { workspace = true, features = ["derive"] }
