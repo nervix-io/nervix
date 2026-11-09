@@ -76,6 +76,29 @@ Other dispositions include leadership or transaction changes, an unknown outcome
 conflict or expiry, and a stale preview. Follow the
 [command completion contract](command-completion.md) for their recovery rules.
 
+## Inspect Materialized State
+
+`Outcome.stateInspection()` returns an independently retained inspection, or `null` when the
+command returned no inspection. Check `rejection()` against `InspectionRejection` before using
+page fields. A refusal has no counts or units; a successful empty page has zero counts.
+`json()` preserves the complete typed envelope.
+
+Complete `counts()` cover the selected cut. Units carry their own counts, owner, ordered
+replicas, captured origin, `InspectionUnitKind` and `index()`. `InspectionStage` distinguishes live and stored
+state. Sections expose schemas, omitted rows and positional watermark columns. Resume the opaque
+`continuation()` with `AFTER` and the same selection; `STALE_CONTINUATION` requires a new read.
+
+Each `InspectionFrame` retains one verified Row frame and schema. Inspection, unit, section, frame and schema handles close independently. A frame's read-only `ByteBuffer` and derived slices keep their native lease after every parent handle closes, including the frame itself.
+These are exact session Row/Cell bytes, including types, nulls and redaction; they are not Arrow IPC.
+
+Counts, origin coordinates and unit indices preserve unsigned 64-bit values in Java `long` bits;
+use `Long.toUnsignedString` when displaying them.
+
+```java
+{{#include ../../tests/client_conformance/java/suite/cluster/InspectionTests.java:inspection}}
+```
+
+
 ## Complete A Statement
 
 `suggest` returns a `Suggestions` page. Check its status, then apply each candidate's replacement

@@ -138,6 +138,7 @@ fn buffer<'local>(
 ) -> Result<jni::objects::JObject<'local>, crate::error::Error> {
     let bytes = match value!(handle) {
         Value::Event(event) => event.frame()?,
+        Value::InspectionFrame(frame) => frame.bytes(),
         Value::Batch(batch) => batch.ipc()?,
         Value::Delivery(delivery) => delivery.ipc(),
         _ => {

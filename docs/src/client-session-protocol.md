@@ -2714,6 +2714,12 @@ process-bound read origin, complete counts and named sections. A section carries
 indices. Watermarks are distinct, non-sensitive datetime columns. Frames conform to their section
 schema, keep branch keys and redaction, and share the verified outer reply's backing bytes.
 
+The shared host runtime keeps this envelope in `Inspection`. Python, Ruby and JVM applications
+read its typed metadata and lossless JSON through their native binding, using the host guides'
+`Inspect Materialized State` sections. Metadata views retain the inspection independently; each
+frame view retains its exact verified bytes and schema. Host buffer lifetimes do not depend on
+the outcome or session, and no binding parses the display message to recover inspection data.
+
 Embedded frames use the session transfer bound; transport frames still obey the smaller frame
 bound and the ordinary reply-transfer protocol. The service checks the complete typed outcome plus
 its requested rendering against the actual session limits before publication. Bound overflow yields

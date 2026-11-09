@@ -16,3 +16,4 @@
 
 mod arrow;
 mod fields;
+mod inspection;

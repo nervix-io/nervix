@@ -977,10 +977,60 @@ module Probe
     report('CONFLICT IdentityConflict')
   end
 
+  def self.run_inspection(session)
+    execution = session.native.prepare('SHOW RELAY events MATERIALIZED STATE FOR UNBRANCHED LIMIT 1 FORMAT JSON;')
+    outcome = session.native.execute(execution)
+    inspection = outcome.state_inspection
+    raise 'inspection domain' unless inspection.domain == ENV.fetch('NERVIX_PROBE_DOMAIN')
+    raise 'inspection identity' unless inspection.entity_name == 'events'
+    raise 'empty page counts' unless inspection.counts.rows.zero? && inspection.rejection.nil?
+    report('INSPECTION page rows=0')
+    refused_outcome = session.native.execute(session.native.prepare('SHOW RELAY plain MATERIALIZED STATE FORMAT JSON;'))
+    refused = refused_outcome.state_inspection
+    unless refused.rejection == NX::InspectionRejection::NOT_MATERIALIZED && refused.counts.nil?
+      raise 'typed inspection refusal'
+    end
+    report('INSPECTION refused not_materialized')
+    query = 'SHOW RELAY populated MATERIALIZED STATE FOR ALL BRANCHES LIMIT 1'
+    first = session.native.execute(session.native.prepare(query + ' FORMAT JSON;')).state_inspection
+    raise 'complete page counts' unless first.counts.rows == 2 && first.counts.branches == 2 && first.continuation
+    unit = first.units.fetch(0)
+    raise 'unit identity' unless unit.kind == NX::InspectionUnitKind::SINGLE && unit.index.nil?
+    raise 'read origin' unless unit.owner == unit.origin_node && unit.origin_incarnation.positive? && unit.origin_fingerprint.bytesize == 32 && unit.origin_stage == NX::InspectionStage::LIVE
+    section = unit.sections.fetch(0)
+    schema = section.schema
+    raise 'branch sensitivity' unless schema.branch == 'by_tenant' && schema.key_fields.fetch(0).sensitive
+    raise 'schema order' unless schema.fields.first(3).map(&:name) == %w[tenant secret sequence]
+    raise 'field metadata' unless schema.fields.fetch(0).sensitive && schema.fields.fetch(1).sensitive && schema.fields.fetch(2).type == NX::FieldType::I64
+    raise 'section metadata' unless section.omitted_rows == 1 && section.watermark_low != section.watermark_high
+    frame = section.frames.fetch(0)
+    raise 'frame schema' unless frame.row_count == 1 && frame.schema.branch == schema.branch
+    buffer = frame.frame
+    expected = buffer.get_string
+    raise 'verified read-only bytes' unless buffer.readonly? && !expected.empty?
+    token = first.continuation.gsub("'", "''")
+    second = session.native.execute(session.native.prepare(query + " AFTER '#{token}' FORMAT JSON;")).state_inspection
+    raise 'continuation page' unless second.continuation.nil? && second.counts.rows == 2 && second.units.fetch(0).sections.fetch(0).frames.fetch(0).row_count == 1
+    raise 'distinct redacted pages' unless first.json != second.json && !first.json.include?('alpha-private') && !first.json.include?('first-private')
+    report('INSPECTION branched rows=2 pages=2')
+    session.close
+    outcome = refused_outcome = first = second = unit = section = frame = nil
+    GC.start
+    raise 'retained inspection' unless inspection.counts.rows.zero? && !inspection.json.empty?
+    raise 'retained refusal' unless refused.rejection == NX::InspectionRejection::NOT_MATERIALIZED
+    raise 'retained verified frame and schema' unless buffer.get_string == expected && schema.fields.fetch(2).name == 'sequence'
+    report('INSPECTION retained')
+  end
+
   def self.main
     domain = ENV.fetch('NERVIX_PROBE_DOMAIN')
     session = Session.new(ENV.fetch('NERVIX_PROBE_GRPC_URI'), domain,
                           ENV.fetch('NERVIX_PROBE_USERNAME'), ENV.fetch('NERVIX_PROBE_PASSWORD'))
+    if ARGV == ['inspection']
+      run_inspection(session)
+      report('PASS')
+      return
+    end
     if ARGV == ['upload']
       run_upload(session)
       session.close

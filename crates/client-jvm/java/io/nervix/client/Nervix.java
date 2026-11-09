@@ -4,6 +4,7 @@ import java.lang.ref.Cleaner;
 import java.lang.ref.Reference;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.LongConsumer;
@@ -82,6 +83,29 @@ public final class Nervix {
         public int code() { return code; }
         static EventKind of(int code) { return decode(values(), code); }
     }
+    /** A typed refusal to read graph state; an empty page has no refusal. */
+    public enum InspectionRejection implements Coded {
+        UNKNOWN_ENTITY(1), NOT_MATERIALIZED(2), INVALID_SELECTION(3), INVALID_LIMIT(4), STALE_CONTINUATION(5), OWNER_UNAVAILABLE(6), NOT_READY(7), DEADLINE(8), REPLY_TOO_LARGE(9);
+        private final int code;
+        InspectionRejection(int code) { this.code = code; }
+        public int code() { return code; }
+    }
+    public enum InspectionStage implements Coded {
+        LIVE(1), STORED(2);
+        private final int code;
+        InspectionStage(int code) { this.code = code; }
+        public int code() { return code; }
+        static InspectionStage of(int code) { return decode(values(), code); }
+    }
+    public enum InspectionUnitKind implements Coded {
+        SINGLE(1), PARTITION(2), INSTANCE(3);
+        private final int code;
+        InspectionUnitKind(int code) { this.code = code; }
+        public int code() { return code; }
+        static InspectionUnitKind of(int code) { return decode(values(), code); }
+    }
+    /** Complete selected-state counts, including rows omitted from this page; longs retain unsigned bits. */
+    public record InspectionCounts(long branches, long rows, long bytes) {}
     public enum ClockEventKind implements Coded {
         STATE(1), TICK(2), ENDED(3), INTERRUPTED(4), RESTORATION_FAILED(5);
         private final int code;
@@ -619,6 +643,78 @@ public final class Nervix {
         public Schema schema() { return read(p -> { long handle = Native.outcomeSchema(p); return handle == 0 ? null : new Schema(handle); }); }
         public Backup backup() { return read(p -> (Backup) Native.outcomeBackup(p)); }
         public Restore restore() { return read(p -> (Restore) Native.outcomeRestore(p)); }
+        public Inspection stateInspection() {
+            return read(p -> { long handle = Native.outcomeInspection(p); return handle == 0 ? null : new Inspection(handle); });
+        }
+    }
+    /** An independently owned typed state page or refusal, with the complete lossless JSON view. */
+    public static final class Inspection extends Handle {
+        private Inspection(long pointer) { super(pointer); }
+        public String domain() { return read(Native::inspectionDomain); }
+        public String entityKind() { return read(Native::inspectionEntityKind); }
+        public String entityName() { return read(Native::inspectionEntityName); }
+        public String json() { return read(Native::inspectionJson); }
+        public InspectionRejection rejection() { return read(p -> optional(InspectionRejection.values(), Native.inspectionRejection(p))); }
+        public InspectionCounts counts() { return read(p -> (InspectionCounts) Native.inspectionCounts(p)); }
+        public Long unitCount() { return read(p -> (Long) Native.inspectionUnitCount(p)); }
+        public String continuation() { return read(Native::inspectionContinuation); }
+        public List<InspectionUnit> units() {
+            return read(p -> {
+                int count = Native.inspectionUnitsLen(p);
+                var units = new ArrayList<InspectionUnit>(count);
+                for (int index = 0; index < count; index++) units.add(new InspectionUnit(Native.retain(p), index));
+                return List.copyOf(units);
+            });
+        }
+    }
+    /** A unit metadata view owns its inspection independently of the originating handle. */
+    public static final class InspectionUnit extends Handle {
+        private final int unit;
+        private InspectionUnit(long pointer, int unit) { super(pointer); this.unit = unit; }
+        public InspectionUnitKind kind() { return read(p -> InspectionUnitKind.of(Native.inspectionUnitKind(p, unit))); }
+        public Long index() { return read(p -> (Long) Native.inspectionUnitIndex(p, unit)); }
+        public String owner() { return read(p -> Native.inspectionUnitOwner(p, unit)); }
+        public List<String> replicas() { return read(p -> values(Native.inspectionUnitReplicas(p, unit), String.class)); }
+        public String originNode() { return read(p -> Native.inspectionUnitOriginNode(p, unit)); }
+        public long originIncarnation() { return read(p -> Native.inspectionUnitOriginIncarnation(p, unit)); }
+        public byte[] originFingerprint() { return read(p -> Native.inspectionUnitOriginFingerprint(p, unit)); }
+        public long originGeneration() { return read(p -> Native.inspectionUnitOriginGeneration(p, unit)); }
+        public long originRevision() { return read(p -> Native.inspectionUnitOriginRevision(p, unit)); }
+        public InspectionStage originStage() { return read(p -> InspectionStage.of(Native.inspectionUnitOriginStage(p, unit))); }
+        public InspectionCounts counts() { return read(p -> (InspectionCounts) Native.inspectionUnitCounts(p, unit)); }
+        public List<InspectionSection> sections() {
+            return read(p -> {
+                int count = Native.inspectionSectionsLen(p, unit);
+                var sections = new ArrayList<InspectionSection>(count);
+                for (int index = 0; index < count; index++) sections.add(new InspectionSection(Native.retain(p), unit, index));
+                return List.copyOf(sections);
+            });
+        }
+    }
+    public static final class InspectionSection extends Handle {
+        private final int unit;
+        private final int section;
+        private InspectionSection(long pointer, int unit, int section) { super(pointer); this.unit = unit; this.section = section; }
+        public String name() { return read(p -> Native.inspectionSectionName(p, unit, section)); }
+        public long omittedRows() { return read(p -> Native.inspectionSectionOmittedRows(p, unit, section)); }
+        public Long watermarkLow() { return read(p -> { long[] columns = Native.inspectionSectionWatermarks(p, unit, section); return columns == null ? null : columns[0]; }); }
+        public Long watermarkHigh() { return read(p -> { long[] columns = Native.inspectionSectionWatermarks(p, unit, section); return columns == null ? null : columns[1]; }); }
+        public Schema schema() { return read(p -> new Schema(Native.inspectionSectionSchema(p, unit, section))); }
+        public List<InspectionFrame> frames() {
+            return read(p -> {
+                int count = Native.inspectionFramesLen(p, unit, section);
+                var frames = new ArrayList<InspectionFrame>(count);
+                for (int index = 0; index < count; index++) frames.add(new InspectionFrame(Native.inspectionFrame(p, unit, section, index)));
+                return List.copyOf(frames);
+            });
+        }
+    }
+    /** The verified frame and its schema survive their inspection; buffers also survive this handle's close. */
+    public static final class InspectionFrame extends Handle {
+        private InspectionFrame(long pointer) { super(pointer); }
+        public long rowCount() { return read(Native::inspectionFrameRows); }
+        public Schema schema() { return read(p -> new Schema(Native.inspectionFrameSchema(p))); }
+        public ByteBuffer frame() { return directBuffer(); }
     }
     public static final class Event extends Handle {
         private Event(long pointer) { super(pointer); }

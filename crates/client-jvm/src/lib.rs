@@ -77,6 +77,7 @@ mod clocks;
 mod completion;
 mod endpoints;
 mod events;
+mod inspection;
 mod sessions;
 
 use jni::sys::jlong;

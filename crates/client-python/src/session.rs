@@ -525,6 +525,13 @@ impl Restore {
 #[pymethods]
 impl Outcome {
     #[getter]
+    fn state_inspection(&self) -> Option<crate::inspection::Inspection> {
+        self.outcome
+            .state_inspection()
+            .map(crate::inspection::Inspection::new)
+    }
+
+    #[getter]
     fn disposition(&self) -> Disposition {
         Disposition::from(self.outcome.disposition())
     }

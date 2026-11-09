@@ -55,6 +55,8 @@ objects! {
     Cancel => cancel: host::Cancel,
     Execution => execution: host::Execution,
     Outcome => outcome: host::Outcome,
+    Inspection => inspection: host::Inspection,
+    InspectionFrame => inspection_frame: host::InspectionFrame,
     Event => event: host::Event,
     ClockEvent => clock_event: host::ClockEvent,
     Clock => clock: host::DomainClock,

@@ -1957,6 +1957,39 @@ build-client-conformance-tests: tests-deps build-client-conformance
 test-client-conformance tags="@client_conformance_toolchain" *args: build-client-conformance-tests
     just test-client-conformance-run {{ quote(tags) }} {{ args }}
 
+# Verify typed inspection through the three native libraries, preparing only their artifacts.
+test-native-inspection-host:
+    cargo test --package nervix-client-host --lib -- tests::inspection::inspection_views_preserve_boundary_values --exact --nocapture
+
+# Discover only the changed owners' compiled property targets; execute no generated cases.
+validate-native-inspection-properties:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    uv run --locked python - <<'PY'
+    from pathlib import Path
+    from scripts.bolero import discover_package, load_inventory, package_manifests
+    inventory = load_inventory()
+    manifests = package_manifests()
+    for package in ("nervix-client-host", "nervix-client-python"):
+        targets = tuple(target for target in inventory.targets if target.package == package)
+        compiled = discover_package(package, manifests[package], targets)
+        observed = {(kind, item["test_name"], Path(item["work_dir"]).resolve()) for kind, item in compiled}
+        expected = {(target.test_target, target.test, target.work_dir.resolve()) for target in targets}
+        assert observed == expected, (package, observed, expected)
+        print(f"{package}: discovered={len(compiled)} executed=0 completed=0")
+    PY
+
+# Focused ordinary counters for native inspection owners; prepared JVM fixtures stay unchanged.
+coverage-native-inspection output="lcov-workspace.info":
+    cargo llvm-cov --package nervix-client-host --package nervix-client-python --package nervix-client-ruby --package nervix-client-jvm --features nervix-client-ruby/ruby-tests,nervix-client-jvm/jvm-tests --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- --skip bolero_
+
+test-native-inspection-python:
+    cargo test --package nervix-client-python --lib -- inspection:: --skip bolero_ --nocapture
+
+test-native-binding-inspection *args: tests-deps build-client-python build-client-ruby build-client-jvm
+    cargo test --no-run --package nervix-scenarios --test scenarios
+    just test-client-conformance-run '@native_binding_inspection' {{ args }}
+
 # Exercise upload completion, retained retries and typed identity conflicts in every binding host.
 test-client-upload-conflict-conformance: build-web-console wasm-processor-guests download-onnxruntime build-client-conformance
     just test-client-conformance-run '@client_upload_failure' --concurrency 2 --retry 0
@@ -1971,7 +2004,7 @@ test-client-conformance-run tags="@client_conformance_toolchain" *args:
     export NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }}
     export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/debug/libnervix_client_ffi.so") }}
     cargo test --package nervix-scenarios --test scenarios -- \
-        --input {{ quote(justfile_directory() / "tests/features/runtime/client_{conformance,suites}.feature") }} \
+        --input {{ quote(justfile_directory() / "tests/features/runtime/{client_conformance,client_suites,native_binding_inspection}.feature") }} \
         --tags {{ quote(tags) }} {{ quote(args) }}
 
 test-runtime-state-capabilities: tests-deps

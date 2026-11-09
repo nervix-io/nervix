@@ -12,6 +12,67 @@ public final class Properties {
     private static void require(boolean condition, String message) {
         if (!condition) throw new AssertionError(message);
     }
+    public static void inspectionPage(Nervix.Inspection inspection, String json, byte[] expectedFrame, long expectedIndex) {
+        require(inspection.domain().equals("sales") && inspection.entityKind().equals("RELAY") && inspection.entityName().equals("events"), "entity identity");
+        require(inspection.json().equals(json), "complete lossless JSON");
+        require(inspection.rejection() == null && inspection.unitCount() == 1, "page metadata");
+        require(inspection.continuation().equals("opaque\0position"), "opaque continuation");
+        require(inspection.counts().equals(new Nervix.InspectionCounts(2, 2, 80)), "complete counts");
+        var units = inspection.units();
+        require(units.size() == 1, "all units");
+        var unit = units.getFirst();
+        inspection.close();
+        require(unit.kind() == Nervix.InspectionUnitKind.INSTANCE && unit.index() == expectedIndex, "unit kind and full index");
+        require(unit.owner().equals("node_a") && unit.replicas().equals(List.of("node_b", "node_c")), "owner and replica order");
+        require(unit.originNode().equals("node_a") && unit.originIncarnation() == -1L, "origin identity");
+        byte[] fingerprint = new byte[32]; Arrays.fill(fingerprint, (byte) 37);
+        require(Arrays.equals(unit.originFingerprint(), fingerprint), "origin fingerprint");
+        require(unit.originGeneration() == -1L && unit.originRevision() == -1L && unit.originStage() == Nervix.InspectionStage.STORED, "origin coordinates");
+        require(unit.counts().equals(new Nervix.InspectionCounts(2, 2, 80)), "unit counts");
+        var sections = unit.sections();
+        require(sections.size() == 1, "all sections");
+        var section = sections.getFirst();
+        unit.close();
+        require(section.name().equals("records") && section.omittedRows() == 1, "section metadata");
+        require(section.watermarkLow() == 3 && section.watermarkHigh() == 4, "watermark columns");
+        var schema = section.schema();
+        require(schema.branch().equals("by_tenant") && schema.fields(Nervix.Part.BRANCH).getFirst().sensitive(), "branch schema");
+        var fields = schema.fields(Nervix.Part.ROWS);
+        require(fields.stream().map(Nervix.Field::name).toList().equals(List.of("sequence", "secret", "sample", "low", "high", "note", "raw", "text")), "field order");
+        require(fields.getFirst().type() == Nervix.FieldType.U64 && fields.get(1).sensitive() && fields.get(5).nullable(), "field metadata");
+        var frames = section.frames();
+        require(frames.size() == 1, "all frames");
+        var frame = frames.getFirst();
+        section.close();
+        require(frame.rowCount() == 1, "frame rows");
+        try (var frameSchema = frame.schema()) { require(descriptions(frameSchema.fields(Nervix.Part.ROWS)).equals(descriptions(fields)), "frame/schema identity"); }
+        var buffer = frame.frame();
+        require(buffer.isReadOnly(), "read-only verified frame");
+        require(Arrays.equals(bytes(buffer), expectedFrame), "exact original frame bytes");
+        var slice = buffer.slice(3, buffer.remaining() - 3);
+        frame.close();
+        System.gc();
+        require(Arrays.equals(bytes(buffer), expectedFrame), "frame buffer survives close and GC");
+        buffer = null;
+        System.gc();
+        require(Arrays.equals(bytes(slice), Arrays.copyOfRange(expectedFrame, 3, expectedFrame.length)), "slice retains the native lease");
+        require(descriptions(schema.fields(Nervix.Part.ROWS)).equals(descriptions(fields)), "schema survives parent close");
+        schema.close();
+    }
+    private static byte[] bytes(ByteBuffer source) {
+        byte[] result = new byte[source.remaining()]; source.duplicate().get(result); return result;
+    }
+    private static List<Expected> descriptions(List<Nervix.Field> fields) {
+        return fields.stream().map(field -> new Expected(field.name(), field.levels(), field.nullable(), field.sensitive())).toList();
+    }
+    public static void inspectionRefused(Nervix.Inspection inspection, String json, int code) {
+        try (inspection) {
+            require(inspection.rejection().code() == code, "exact refusal kind");
+            require(inspection.domain().equals("sales") && inspection.entityName().equals("plain"), "refused identity");
+            require(inspection.counts() == null && inspection.unitCount() == null && inspection.continuation() == null && inspection.units().isEmpty(), "a refusal is distinct from an empty page");
+            require(inspection.json().equals(json), "complete refused JSON");
+        }
+    }
     private static final class Input {
         private final byte[] bytes;
         private int cursor;
