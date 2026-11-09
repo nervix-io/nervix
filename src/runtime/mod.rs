@@ -314,6 +314,7 @@ pub mod relay_interaction_benchmark;
 mod relay_memory_hold;
 mod relay_processor_node;
 mod relay_send_attempts;
+mod relay_state_task;
 mod relay_subscription;
 mod relay_transit;
 mod remote_ack_owner;
@@ -602,8 +603,7 @@ use relay_boundary::{
     BranchRelayDispatchGateLease, ConcreteRelayRuntime, ConcreteRelayRuntimeBuild,
     RelayBoundaryBuilder, RelayBoundaryFanout, RelayBoundaryFanoutMap, RelayBoundaryServices,
     RelayBranchPresence, RelayBranchPresences, RelayOutboundSlot, RelayOwnerRoutes, RelayOwnerTask,
-    RelayRuntimeFanIn, RelayStateTask, RelayStateTaskSpec, RemoteRuntimeConsumer,
-    addressable_count,
+    RelayRuntimeFanIn, RemoteRuntimeConsumer, addressable_count,
 };
 pub(in crate::runtime) use relay_channel::{
     OwnedRelayDispatchPermit, RelayDispatchGate, RelayDispatchGateLease, RelayTryRecv,
@@ -613,6 +613,7 @@ use relay_interaction::{
 };
 use relay_processor_node::RelayProcessorError;
 use relay_send_attempts::GrantCapacityRefusals;
+use relay_state_task::{RelayStateTask, RelayStateTaskSpec};
 use relay_transit::{
     RelayAdmissions, RelayOwnerAdmission, RelayOwnerBatchCompletion, RelayRoutedAdmission,
     RelayTransit,
