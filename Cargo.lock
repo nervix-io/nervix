@@ -6984,6 +6984,7 @@ name = "nervix-client-python"
 version = "0.1.0-dev"
 dependencies = [
  "arrow-array",
+ "bolero",
  "bytes",
  "meticulous",
  "nervix-client-core",

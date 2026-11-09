@@ -560,6 +560,10 @@ public interface issues one.
 
 ### Admission
 
+A Plexus reset names its processor and scope, and acts on the domain its transaction is bound to:
+the session's active domain, or the domain `BEGIN` bound. A guest request and a rejected-state
+recovery start on the owner, where there is no session, and carry their domain with them.
+
 The leader admits a reset only when the domain exists and is running, the processor is scheduled
 with an owner, and the scope matches the processor's declaration: `UNBRANCHED` only for an
 unbranched processor, and a concrete branch or every branch only for a branched one. A concrete

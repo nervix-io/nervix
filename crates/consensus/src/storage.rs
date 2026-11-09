@@ -95,11 +95,10 @@ const KEY_INSTALLING: &[u8] = b"installing";
 const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
-const KEYSPACE_LOGS: &str = "raft_identity_capability_tls_inference_credential_pause_logs";
-const KEYSPACE_META: &str = "raft_identity_capability_tls_inference_credential_pause_meta";
-const KEYSPACE_STATE_MACHINE: &str =
-    "raft_identity_capability_tls_inference_credential_pause_state";
-const KEYSPACE_SNAPSHOT: &str = "raft_identity_capability_tls_inference_credential_pause_snapshots";
+const KEYSPACE_LOGS: &str = "raft_identity_capability_tls_inference_reset_logs";
+const KEYSPACE_META: &str = "raft_identity_capability_tls_inference_reset_meta";
+const KEYSPACE_STATE_MACHINE: &str = "raft_identity_capability_tls_inference_reset_state";
+const KEYSPACE_SNAPSHOT: &str = "raft_identity_capability_tls_inference_reset_snapshots";
 const KEY_CLUSTER_IDENTITY: &[u8] = b"K";
 /// Working memory reserved for ordinary metadata and log storage relative to its operation unit.
 const STORAGE_RESERVATION_MULTIPLIER: u64 = 4;
@@ -232,7 +231,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    ClusterState = 21,
+    ClusterState = 22,
 }
 
 #[derive(Debug)]

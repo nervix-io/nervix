@@ -121,6 +121,26 @@ for a different one.
 {{#include ../../tests/client_conformance/python/suite/cluster/test_execute.py:upload_conflict}}
 ```
 
+### Inspect Materialized State
+
+`outcome.state_inspection` returns an independently retained inspection, or `None` when the
+command returned no inspection. Check `rejection` against `InspectionRejection` before using
+page fields. A refusal has no counts or units; a successful empty page has zero counts.
+`json` preserves the complete typed envelope.
+
+Complete `counts` cover the selected cut. Units carry their own counts, owner, ordered
+replicas, captured origin, `InspectionUnitKind` and `index`. `InspectionStage` distinguishes live and stored
+state. Sections expose schemas, omitted rows and positional watermark columns. Resume the opaque
+`continuation` with `AFTER` and the same selection; `STALE_CONTINUATION` requires a new read.
+
+Each `InspectionFrame` retains one verified Row frame and schema. Its `frame` memoryview and `memoryview(frame)` are read-only. They and their derived slices keep the native frame alive after parent objects are collected.
+These are exact session Row/Cell bytes, including types, nulls and redaction; they are not Arrow IPC.
+
+```python
+{{#include ../../tests/client_conformance/python/suite/cluster/test_inspection.py:inspection}}
+```
+
+
 ## Complete A Statement
 
 `Session.suggest` asks the cluster what may follow the cursor in a partial statement, from the
@@ -538,7 +558,7 @@ reads a withheld value as a null, so read `states` to tell a withheld value from
 ## What The Library Does Not Expose
 
 The package exposes sessions, Plexus execution with resource uploads, completion, subscriptions,
-domain clocks, client endpoints, backup and restore. It does not expose these parts of the Rust
+domain clocks, client endpoints, typed state inspection, backup and restore. It does not expose these parts of the Rust
 client:
 
 - the typed transaction status, transaction attach and transaction inspection; `BEGIN`, `COMMIT` and

@@ -503,18 +503,15 @@ fn applied_results(
     results
 }
 
-/// A reset of any WASM processor of `domain`, as a `RESET WASM PROCESSOR ... STATE` requests it.
-fn wasm_state_reset(arbitrary: &mut Arbitrary<'_>, domain: &DomainName) -> ResetWasmState {
+/// A reset of any WASM processor, as a `RESET WASM PROCESSOR ... STATE` requests it in the domain
+/// of the transaction that keeps it.
+fn wasm_state_reset(arbitrary: &mut Arbitrary<'_>) -> ResetWasmState {
     let statement = arbitrary.statement_of(StatementVariant::ResetWasmState);
     let reset = match statement {
         Statement::ResetWasmState(reset) => Some(reset),
         _ => None,
     };
-    let reset = reset.assured("statement_of builds the statement form it is asked for");
-    ResetWasmState {
-        domain: domain.clone(),
-        ..reset
-    }
+    reset.assured("statement_of builds the statement form it is asked for")
 }
 
 /// The authoritative change a successful step of a transaction of `domain` made, with the inputs
@@ -547,7 +544,7 @@ fn transaction_step_effect(
         },
         _ => TransactionStepEffect::ResetWasmState {
             inputs,
-            reset: Box::new(wasm_state_reset(arbitrary, domain)),
+            reset: Box::new(wasm_state_reset(arbitrary)),
             request: arbitrary.retry_reference(),
             schedule: Box::new(arbitrary.domain_schedule_of(domain.clone())),
         },
