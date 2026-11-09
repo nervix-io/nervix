@@ -74,4 +74,5 @@ pub(super) fn HashMapEditor(
                 } />
         </label>
     }
+    .into_any()
 }

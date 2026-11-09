@@ -150,6 +150,7 @@ fn UdfTypeEditor(
             </div>
         </fieldset>
     }
+    .into_any()
 }
 
 #[component]
@@ -290,6 +291,7 @@ pub(super) fn UdfEditor(
                 }></textarea>
         </label>
     }
+    .into_any()
 }
 
 #[cfg(test)]

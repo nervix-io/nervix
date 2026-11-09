@@ -150,6 +150,7 @@ pub(super) fn ProcessorInvocationEditor(
                 on:click=move |_| with_invocations(signals, family, |items| items.push(InvocationDraft::default()))>"Add invocation"</button>
         </section>
     }
+    .into_any()
 }
 
 #[cfg(test)]
