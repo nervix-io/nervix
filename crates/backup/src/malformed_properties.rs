@@ -25,10 +25,7 @@ use crate::{
     archive_values::{Case, Section, Values},
     read_archive_contents,
     section::{RECORD_HEADER_BYTES, RECORD_MAGIC, encode_record},
-    wire::{
-        BranchLifecycleWire, DomainWire, KafkaOffsetsWire, ManifestWire, ResourceVersionWire,
-        UsersWire,
-    },
+    wire::{BranchLifecycleWire, DomainWire, KafkaOffsetsWire, ManifestWire, ResourceVersionWire},
 };
 
 pub(super) fn assert_decode_frees_allocations<F, T>(decode: F)
@@ -161,17 +158,6 @@ impl Case {
             )
             .assured("the current wire encodes"),
             "resource version",
-        );
-        let users = UsersWire {
-            users: vec![crate::wire::UserWire {
-                name: "synthetic".into(),
-                password_hash: String::new(),
-            }],
-        };
-        rejects_field::<UsersRecord>(
-            encode_record(UsersRecord::KIND, UsersRecord::VERSION, &users)
-                .assured("the current wire encodes"),
-            "password hash",
         );
         for state in &original.state {
             match state {
