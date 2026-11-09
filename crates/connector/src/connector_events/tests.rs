@@ -3,6 +3,7 @@
 //! - **Depends on.** The connector event handle and selected atomic observations.
 //! - **Must not know.** Metrics, graph execution or transport delivery decisions.
 
+use meticulous::ResultExt as _;
 use nervix_primitives::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -21,7 +22,7 @@ fn a_counter_keeps_the_resolved_recorder_without_recording_at_construction() {
             observation.fetch_add(1, Ordering::Relaxed);
         },
     )
-    .expect("the host declares this event");
+    .assured("the host declares this event");
     assert_eq!(recorded.load(Ordering::Relaxed), 0);
     for _ in 0..3 {
         counter.increment();

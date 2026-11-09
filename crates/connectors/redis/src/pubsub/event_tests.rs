@@ -3,6 +3,7 @@
 //! - **Depends on.** The connector contract, counting RESP peer and retained host double.
 //! - **Must not know.** The server's metrics, graph, retries or acknowledgement maps.
 
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     EmitterConnector as _, EmitterRecord, EmitterRecordId, UndeclaredConnectorEvent,
 };
@@ -28,14 +29,16 @@ async fn config(fixture: &Fixture, redis: &CountingRedis) -> RedisPubSubEmitterC
             key: "addr".into(),
             value: redis.url(),
         }],
-        ClientPoolBounds::new(1, std::num::NonZeroU32::MIN).expect("one command connection"),
+        ClientPoolBounds::new(1, std::num::NonZeroU32::MIN)
+            .assured("both fixture pool bounds are one"),
         fixture.dns.clone(),
     )
     .await
-    .expect("the counting peer accepts command connections");
+    .assured("the fixture peer accepts the configured local command connection");
     RedisPubSubEmitterConfig {
         pool: RedisPoolHandle::new(Pool(pool)),
-        channel: RedisChannelName::parse("declared_events").expect("valid channel"),
+        channel: RedisChannelName::parse("declared_events")
+            .assured("the fixed fixture channel name is valid"),
     }
 }
 
@@ -57,7 +60,7 @@ async fn successful_publish_counts_only_zero_receivers_and_keeps_every_record_de
         let host = FakeEmitterHost::declaring(RedisPubSubEmitter::KIND.capabilities().events);
         let mut emitter = RedisPubSubEmitter::open(config(&fixture, &redis).await, host.host())
             .await
-            .expect("a declared event can be retained at construction");
+            .assured("the fixture host declares the event this emitter resolves");
         assert_eq!(
             host.observations().events[&ConnectorEvent::PublishedWithoutSubscribers],
             0
@@ -86,7 +89,7 @@ async fn a_failed_publish_contributes_no_successful_zero_receiver_event() {
     let host = FakeEmitterHost::declaring(RedisPubSubEmitter::KIND.capabilities().events);
     let mut emitter = RedisPubSubEmitter::open(config(&fixture, &redis).await, host.host())
         .await
-        .expect("the counting peer accepts the emitter");
+        .assured("the fixture host declares the event this emitter resolves");
     let result = emitter.publish(vec![record(0)]).await.into_parts();
     assert!(result.delivered.is_empty());
     assert!(result.rejected.is_empty());
@@ -109,7 +112,7 @@ async fn a_host_refuses_an_undeclared_event_during_emitter_construction() {
     let cause = error
         .frames()
         .find_map(|frame| frame.downcast_ref::<UndeclaredConnectorEvent>())
-        .expect("construction keeps the typed undeclared-event cause");
+        .assured("the refused construction retains its typed event cause");
     assert_eq!(cause.event, ConnectorEvent::PublishedWithoutSubscribers);
     assert!(host.observations().events.is_empty());
 }

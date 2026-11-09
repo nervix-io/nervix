@@ -3,6 +3,8 @@
 //! - **Depends on.** Production metric registration and typed connector handles.
 //! - **Must not know.** Brokers, publication policy or graph execution.
 
+use meticulous::OptionExt as _;
+
 use super::*;
 
 fn redis() -> EmitterEntityKind {
@@ -16,9 +18,13 @@ fn emitter(
     kind: EmitterEntityKind,
 ) -> EmitterInteractionMetrics {
     metrics.register_emitter_interactions(
-        &DomainName::parse("event_metrics").expect("valid domain"),
-        &EmitterName::parse(name).expect("valid emitter"),
-        Some(&ClusterNodeName::parse(node).expect("valid node")),
+        &DomainName::parse("event_metrics")
+            .assured("the fixed fixture domain is a valid identifier"),
+        &EmitterName::parse(name).assured("the fixed fixture emitter name is a valid identifier"),
+        Some(
+            &ClusterNodeName::parse(node)
+                .assured("the fixed fixture node name is a valid identifier"),
+        ),
         kind,
     )
 }
@@ -47,7 +53,7 @@ fn emitter_events_register_at_zero_and_refuse_undeclared_identities() {
     let family = families
         .iter()
         .find(|family| family.name() == EMITTER_EVENTS)
-        .expect("declared zero child exists");
+        .assured("registration installs the fixture event at zero");
     assert_eq!(family.get_metric().len(), 1);
     let sample = &family.get_metric()[0];
     assert_eq!(sample.get_counter().value(), 0.0);
@@ -89,7 +95,9 @@ fn emitter_events_register_at_zero_and_refuse_undeclared_identities() {
 fn recording_keeps_rates_off_publication_and_repeated_inspection_cannot_recount() {
     let metrics = RuntimeMetrics::default();
     let handle = emitter(&metrics, "output", "node-1", redis());
-    let counter = handle.event_counter(EVENT).expect("declared event");
+    let counter = handle
+        .event_counter(EVENT)
+        .assured("the Redis fixture declares this event");
     counter.increment();
     counter.increment();
     let series = handle
@@ -97,7 +105,7 @@ fn recording_keeps_rates_off_publication_and_repeated_inspection_cannot_recount(
         .events
         .series
         .as_ref()
-        .expect("declared event series");
+        .assured("the Redis fixture declaration installs its event series");
     assert_eq!(series.counters[&EVENT].prometheus.get(), 2);
     assert_eq!(
         series.counters[&EVENT].rate.summary().value,
@@ -109,7 +117,7 @@ fn recording_keeps_rates_off_publication_and_repeated_inspection_cannot_recount(
         let event = lines
             .iter()
             .find(|line| line.starts_with(EMITTER_EVENTS))
-            .expect("event inspection");
+            .assured("the registered event has an inspection row");
         assert!(
             event.contains("event=\"published_without_subscribers\"} total=2 wall_rate_per_sec="),
             "{event}"
@@ -126,13 +134,15 @@ fn recording_keeps_rates_off_publication_and_repeated_inspection_cannot_recount(
 fn emitter_event_history_survives_task_restart_and_isolates_names_and_nodes() {
     let metrics = RuntimeMetrics::default();
     let first = emitter(&metrics, "output", "node-1", redis());
-    let retained = first.event_counter(EVENT).expect("declared event");
+    let retained = first
+        .event_counter(EVENT)
+        .assured("the Redis fixture declares this event");
     drop(first);
     retained.increment();
     let restarted = emitter(&metrics, "output", "node-1", redis());
     restarted
         .event_counter(EVENT)
-        .expect("same scope")
+        .assured("the restarted fixture keeps its declared event scope")
         .increment();
     for other in [
         emitter(&metrics, "other", "node-1", redis()),
@@ -144,7 +154,7 @@ fn emitter_event_history_survives_task_restart_and_isolates_names_and_nodes() {
                 .events
                 .series
                 .as_ref()
-                .expect("event series")
+                .assured("the fixture declaration installs its event series")
                 .counters[&EVENT]
                 .prometheus
                 .get(),
@@ -157,7 +167,7 @@ fn emitter_event_history_survives_task_restart_and_isolates_names_and_nodes() {
             .events
             .series
             .as_ref()
-            .expect("retained series")
+            .assured("the registration retains its event series")
             .counters[&EVENT]
             .prometheus
             .get(),
@@ -169,8 +179,10 @@ fn emitter_event_history_survives_task_restart_and_isolates_names_and_nodes() {
 fn current_ingestor_declarations_create_no_event_children() {
     let metrics = RuntimeMetrics::default();
     let (handle, _) = metrics.register_ingestor_interactions(
-        &DomainName::parse("event_metrics").expect("valid domain"),
-        &IngestorName::parse("input").expect("valid ingestor"),
+        &DomainName::parse("event_metrics")
+            .assured("the fixed fixture domain is a valid identifier"),
+        &IngestorName::parse("input")
+            .assured("the fixed fixture ingestor name is a valid identifier"),
         Unit::SINGLE,
         None,
         IngestorEntityKind::Redis(nervix_models::RedisIngestorEntity::PubSub),
@@ -191,9 +203,12 @@ fn current_ingestor_declarations_create_no_event_children() {
 #[test]
 fn ingestor_event_engine_keeps_exact_unit_history_after_read_retirement() {
     let metrics = RuntimeMetrics::default();
-    let domain = DomainName::parse("event_metrics").expect("valid domain");
-    let name = IngestorName::parse("input").expect("valid ingestor");
-    let node = ClusterNodeName::parse("node-1").expect("valid node");
+    let domain = DomainName::parse("event_metrics")
+        .assured("the fixed fixture domain is a valid identifier");
+    let name = IngestorName::parse("input")
+        .assured("the fixed fixture ingestor name is a valid identifier");
+    let node = ClusterNodeName::parse("node-1")
+        .assured("the fixed fixture node name is a valid identifier");
     let kind = IngestorEntityKind::Redis(nervix_models::RedisIngestorEntity::PubSub);
     let entity = |unit| {
         DomainNodeUnitRef::new(
@@ -217,7 +232,7 @@ fn ingestor_event_engine_keeps_exact_unit_history_after_read_retirement() {
     let sibling = register(Unit::FIRST_INSTANCE);
     first
         .counter(EVENT)
-        .expect("supplied declaration")
+        .assured("the supplied fixture declaration includes this event")
         .increment();
     assert_eq!(
         metrics.remove_ingestor_read_metrics(&entity(Unit::SINGLE), Some(&node)),
@@ -239,16 +254,24 @@ fn ingestor_event_engine_keeps_exact_unit_history_after_read_retirement() {
     let restarted = register(Unit::SINGLE);
     restarted
         .counter(EVENT)
-        .expect("retained scope")
+        .assured("the restarted unit retains its declared event scope")
         .increment();
     assert_eq!(
-        first.series.as_ref().expect("event series").counters[&EVENT]
+        first
+            .series
+            .as_ref()
+            .assured("the fixture declaration installs its event series")
+            .counters[&EVENT]
             .prometheus
             .get(),
         2
     );
     assert_eq!(
-        sibling.series.as_ref().expect("sibling series").counters[&EVENT]
+        sibling
+            .series
+            .as_ref()
+            .assured("the sibling unit has its own declared event series")
+            .counters[&EVENT]
             .prometheus
             .get(),
         0
@@ -257,7 +280,7 @@ fn ingestor_event_engine_keeps_exact_unit_history_after_read_retirement() {
     let events = families
         .iter()
         .find(|family| family.name() == INGESTOR_EVENTS)
-        .expect("registered event family");
+        .assured("registration installs the supplied event family");
     assert_eq!(events.get_metric().len(), 2);
     assert!(
         events
