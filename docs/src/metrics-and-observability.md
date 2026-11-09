@@ -521,6 +521,35 @@ Restore](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics) def
 
 ## Connector Interactions
 
+### Connector-declared events
+
+An entity's generated [capability reference](connector-capabilities.md) names its closed set of
+connector events. The host registers one counter at zero for each declared event when its task
+starts. Emitters export `nervix_emitter_connector_events_total` with `domain`, `emitter`,
+`physical_node_id`, `connector`, `entity` and `event`; ingestors export
+`nervix_ingestor_connector_events_total` with `ingestor` instead of `emitter` and their existing
+`instance` label. An entity with no declared events creates no event children. Event labels never
+contain payloads, external names or driver error text.
+
+The connector resolves a typed counter from its host during construction and retains it while
+recording. Event counters appear with their wall rates under `destination:` or `source:` in
+owner-routed inspection. They retain process-local history across task restarts with the same
+labels; a new process starts at zero. They are not replicated or restored.
+
+Recording performs one retained counter increment. Inspection computes the lifetime wall average
+and samples the cumulative total into one-minute and fifteen-minute wall EMA estimates. Their
+sampling interval is the time between inspections; an unchanged total contributes no further
+events. The first inspection establishes the EMA time baseline; a later inspection with elapsed
+wall time supplies its first rate sample. Domain rates are unavailable. No clock read or rate
+update is added to publication.
+
+`REDIS PUBSUB` emission declares `published_without_subscribers`. It counts each successful
+`PUBLISH` whose receiver count is zero. Such a record is still delivered: Redis accepted it, as
+`MODE NO ACK` promises. A positive receiver count leaves the event counter unchanged and does not
+prove subscriber processing. An unanswered or failed publish does not count this event.
+
+### Publish attempts
+
 Emitter destination observations describe the host's interaction with a connector, separately
 from delivered graph traffic. Both interaction families carry `domain`, `emitter`,
 `physical_node_id`, `connector` and `entity`. Connector names use the vocabulary's display form,

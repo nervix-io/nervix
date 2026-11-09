@@ -53,6 +53,7 @@ const SYSLOG: &str = "syslog";
 
 /// What one Syslog emitter sends through: the entries its client declares its transport with.
 pub struct SyslogCollectorEmitterConfig {
+    pub tls_policy: nervix_connector::OutwardTlsPolicy,
     pub config: Vec<ClientConfigEntry>,
     pub dns: DnsResolver,
 }
@@ -115,7 +116,10 @@ impl SyslogCollectorEmitter {
                 }
             };
             Some((
-                TlsConnector::from(tls_client_config(&config.config).map_err(Self::config_error)?),
+                TlsConnector::from(
+                    tls_client_config(&config.config, &config.tls_policy)
+                        .map_err(Self::config_error)?,
+                ),
                 name,
             ))
         } else {
@@ -139,7 +143,8 @@ impl SyslogCollectorEmitter {
         Self::connect_timeout(config)?;
         Self::write_timeout(config)?;
         if client.transport == SyslogCollectorTransport::Tls {
-            tls_client_config(config).map_err(Self::config_error)?;
+            tls_client_config(config, &nervix_connector::OutwardTlsPolicy::default())
+                .map_err(Self::config_error)?;
         }
         Ok(())
     }
@@ -907,7 +912,9 @@ mod tests {
         let connect_timeout =
             SyslogCollectorEmitter::connect_timeout(&entries).assured("200 ms is a valid deadline");
         let tls = Some((
-            TlsConnector::from(tls_client_config(&entries).assured("fixture TLS prepares")),
+            TlsConnector::from(
+                tls_client_config(&entries, &Default::default()).assured("fixture TLS prepares"),
+            ),
             ServerName::try_from(config.target.host()).assured("fixture server name is valid"),
         ));
         let failure = nervix_primitives::time::timeout(

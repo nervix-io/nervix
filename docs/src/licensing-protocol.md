@@ -14,8 +14,8 @@ own boundaries; a verified signature alone never authorizes a graph operation.
 ## Documents And Bounds
 
 The current payloads include decisions, operation-specific activation requests, stream tickets,
-key-possession proofs, working-key authorizations, revocations, root successions, response envelopes,
-challenge exchanges and the closed problem-details catalog. Fixed structures reject unknown fields;
+key-possession proofs, working-key authorizations, revocations, root successions, the decision and
+trust-bundle response envelopes, challenge exchanges and the closed problem-details catalog. Fixed structures reject unknown fields;
 timestamps use RFC 3339 `DateTime<Utc>`. Requests have one exact flat shape per operation. Create
 and adoption refresh omit committed state; the three committed revision/time fields are present
 together for an established refresh, release, rotation or stream ticket. Secret strings zeroize
@@ -47,10 +47,20 @@ RFC 7638 SHA-256 thumbprint, never a caller-selected label.
 
 The format-only maintained `jose-jws`/`jose-b64` decoder exposes the original protected JSON so the
 engine can enforce the exact header. It does not interpret payload JSON. `jsonwebtoken` with
-only its AWS-LC backend verifies the original received signing input before deserializing that
-payload. Expiry, not-before and audience claim checks are disabled there: licensing owns their
-distinct typed fields and supplies their policy explicitly, without a hidden clock read.
-Reformatting equal JSON invalidates an existing signature; verification never reserializes it.
+only its AWS-LC backend verifies the original received signing input before anything decodes the
+payload; the engine then decodes the typed document from the same received bytes, so a payload that
+is not the expected document is reported apart from a signature that does not verify. Expiry,
+not-before and audience claim checks are disabled there: licensing owns their distinct typed fields
+and supplies their policy explicitly, without a hidden clock read. Reformatting equal JSON
+invalidates an existing signature; verification never reserializes it.
+
+A received request verifies under the key it must be signed by. An established refresh, release,
+rotation or stream ticket verifies under the cluster key its activation is bound to. An
+`activation.create` request is self-signed: its payload carries the cluster key, which is the one
+payload member read before the signature verifies, and only to be the key that must verify it. The
+protected `kid` must be that key's thumbprint and the signature must verify under it over the
+received bytes before the request is decoded, and only a creation carries its signer. A refusal
+names the envelope, the signer, the signature or the payload.
 
 A signature set contains compact members with exactly equal payload segments and distinct key
 identifiers. Canonical unpadded base64url makes decoded-payload byte equality equivalent to segment
@@ -68,7 +78,20 @@ Revocation is an independent forward-looking check. Applying a new decision refu
 signing key. Reload verifies the committed signature and authorization, preserves the decision,
 and reports `signing_key_revoked`; `revoked_at` is informational. Trust state retains the original
 accepted signed documents so its owner can store and reverify them, together with the embedded
-bundle. A conflicting serial or root epoch fails closed.
+bundle. A conflicting serial or root epoch fails closed; serials are compared from what each
+document verified to, without verifying it again.
+
+The verified state reports what each supplied document states, in supplied order, with its exact
+signed form: an authorization's key, use, window, serial and root epoch, a revocation's key and
+serial, a succession's epochs and roots. It answers which authorization of a key covers an instant,
+whether a key is revoked and which root sets are trusted. For a holder that lists the working keys,
+revocation serials and succession serials it stores, it selects the documents that holder lacks to
+verify a decision a given key signed: that key's authorizations when the holder holds none of
+them, and every revocation and succession it does not hold, the build's own embedded successions
+first. Its publication is the trust bundle a service serves: the trusted root sets by epoch and
+every verified succession, authorization and revocation in its signed form. Only those signed
+members are authoritative; a receiver verifies them against its own embedded bundle and never
+learns an anchor from the published root sets.
 
 `PRODUCTION_TRUST_BUNDLE` explicitly represents unprovisioned anchors until the production ceremony
 supplies its reviewed output. An empty bundle grants no trust. This crate embeds no artificial
@@ -153,10 +176,11 @@ removing transitions, and feature owners decide what an over-limit state permits
 
 ## Evidence
 
-Focused tests cover positive and negative trust/decision rules, original-byte signature checks,
-strict fixed structures, operation shapes and checked grant arithmetic. Six registered bounded
-properties cover complete representations, resolution, malformed JWS, trust chains, impact and
-request digests; their budgets and corpora are in the [property register](./property-testing-and-fuzzing.md).
+Focused tests cover positive and negative trust/decision rules, request signers, verified trust
+facts, lacking-document selection and publication, original-byte signature checks, strict fixed
+structures, operation shapes and checked grant arithmetic. Six registered bounded properties cover
+complete representations, resolution, malformed JWS and self-signed requests, trust chains, impact
+and request digests; their budgets and corpora are in the [property register](./property-testing-and-fuzzing.md).
 The cryptographic boundary retains the NIST and cross-build P-256 vectors. These checks do not
 claim a FIPS-qualified deployment. The shared engine has no product endpoint or concurrent state
 machine, so Cucumber and concurrency-model execution belong to its later integration owners.

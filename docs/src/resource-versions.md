@@ -461,7 +461,7 @@ highest level among the usages it changes:
 | Protobuf `CODEC`, `SIGNALING PROTOCOL` | `DOMAIN_PAUSE` | The domain pauses and rebuilds with descriptors compiled from the new version. |
 | `HASH MAP` | `DOMAIN_PAUSE` | The domain pauses and every live node builds the index of the new version before the command succeeds. |
 | `CLIENT` mount | `DOMAIN_PAUSE` | The domain pauses and rebuilds; its ingestors and emitters instantiate their clients with a mount of the new version. |
-| `INFERENCER` | `ENTITY_PAUSE` | The inferencer and its downstream pause. The replacement's branch instances load new inference sessions from the new model file. |
+| `INFERENCER` | `ENTITY_PAUSE` | The inferencer and its downstream pause. The replacement's branch instances load new inference sessions from the new model file. With `STATE`, every branch starts from its declared `INITIAL` tensors under the replacement model fingerprint; applying the running domain's schedule removes snapshots under the replaced fingerprint. |
 | `WASM PROCESSOR` | `ENTITY_PAUSE` | The processor and its downstream pause, and each branch is flushed. Every branch starts a new guest-state generation, so the replacement instances, created from the new module, initialize without guest state. The candidate module is compiled before the statement commits. |
 
 [Control Plane](./control-plane.md#alter-lock-and-quiesce-classification) defines what each level
@@ -471,6 +471,14 @@ every node, and its VHOSTs in every listener, so those move to the new version b
 returns; signaling protocols, inferencers, WASM processors, and client mounts load it when the
 domain starts. A WASM processor's new guest-state generations are published with the rebinding
 even while the domain is stopped, so the processor starts without guest state.
+
+An inferencer's state fingerprint includes its resource, pinned version, file and complete `STATE`
+declaration. Changing the pinned version starts fresh state even when both resource versions hold
+identical ONNX bytes. An upload alone changes no binding or tensors. A rebinding to the version
+already pinned writes no model and retains every branch's state; a candidate rejected by ONNX
+binding validation likewise leaves the previous binding and state in place. Dropping and recreating
+the inferencer with another `STATE` declaration initializes its branches from that declaration,
+without reusing snapshots of the preceding fingerprint.
 
 The shared impact report records the rebinding as one operation. It contributes one rebinding
 reason, carrying the previous and the target number, for every selected usage, including unchanged

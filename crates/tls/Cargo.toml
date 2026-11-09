@@ -1,0 +1,26 @@
+[package]
+description = "Node-owned live outward TLS algorithm publication"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-tls"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+deloxide = ["nervix-primitives/deloxide"]
+loom = ["nervix-primitives/loom", "nervix-model-harness/loom"]
+shuttle = ["nervix-primitives/shuttle", "nervix-model-harness/shuttle"]
+turmoil = ["nervix-primitives/turmoil"]
+
+[dependencies]
+meticulous = { workspace = true }
+nervix-crypto = { workspace = true }
+nervix-crypto-policy = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
+rustls = { workspace = true }
+
+[dev-dependencies]
+nervix-model-harness = { workspace = true }

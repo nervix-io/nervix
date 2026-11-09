@@ -98,6 +98,7 @@ const HTTP1_PROTOCOL: &[u8] = b"http/1.1";
 
 /// The emitter's resolved client settings and its node-owned resolver.
 pub struct HttpRequestEmitterConfig {
+    pub tls_policy: nervix_connector::OutwardTlsPolicy,
     pub config: Vec<ClientConfigEntry>,
     pub dns: DnsResolver,
 }
@@ -219,12 +220,17 @@ impl HttpRequestEmitter {
                 connector: HTTP_EMITTER,
             },
         )?;
-        let proxy = HttpClientConfig::new(&config.config, HTTP_EMITTER, &config.dns)
-            .proxy()
-            .change_context(EmitterOpenError::InvalidConfiguration {
-                connector: HTTP_EMITTER,
-            })?;
-        let tls = RustlsClientConfigProvider::new(&config.config)
+        let proxy = HttpClientConfig::new(
+            &config.config,
+            HTTP_EMITTER,
+            &config.dns,
+            &config.tls_policy,
+        )
+        .proxy()
+        .change_context(EmitterOpenError::InvalidConfiguration {
+            connector: HTTP_EMITTER,
+        })?;
+        let tls = RustlsClientConfigProvider::new(&config.config, &config.tls_policy)
             .build_with_default_roots()
             .change_context(EmitterOpenError::InvalidConfiguration {
                 connector: HTTP_EMITTER,

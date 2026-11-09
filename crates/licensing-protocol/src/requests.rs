@@ -1,7 +1,8 @@
-//! Exact operation payloads and retry identity for signed cluster requests.
+//! Exact operation payloads, their signers and retry identity for signed cluster requests.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** Current request shapes, secret ownership and challenge-independent request digests.
+//! - **Owns.** Current request shapes, which key a received request must verify under, secret
+//!   ownership and challenge-independent request digests.
 //! - **Depends on.** Typed protocol values, maintained serde JSON and the cryptography boundary.
 //! - **Must not know.** HTTP, challenge storage, idempotency tables, Models or clocks.
 
@@ -19,7 +20,9 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
     conditions::ActivationKind,
-    document::{Document, DocumentType, encode_json},
+    document::{
+        Document, DocumentError, DocumentLimits, DocumentType, UnverifiedDocument, encode_json,
+    },
     documents::Transition,
     keys::{KeyId, PublicKey},
 };
@@ -260,6 +263,97 @@ pub enum RequestError {
     DocumentType,
     #[error("failed to compute request identity")]
     Encoding,
+}
+
+/// The key a received request must verify under (licensing specification §9.2).
+#[derive(Clone, Copy, Debug)]
+pub enum RequestSigner<'a> {
+    /// `activation.create`, self-signed by the cluster key its payload carries: the signature
+    /// proves possession of that key, and the license key in the payload authorizes the request.
+    CarriedClusterKey,
+    /// Every other operation, signed by the cluster key the activation is bound to.
+    Bound(&'a PublicKey),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub enum RequestVerificationError {
+    #[error("the signed request is malformed, exceeds its bound or breaks the JWS profile")]
+    Envelope,
+    #[error("the request is signed by a key other than the one it must verify under")]
+    Signer,
+    #[error("the request signature is invalid")]
+    Signature,
+    #[error("the signed payload is not a current request of the expected kind")]
+    Payload,
+}
+
+/// The one member of a self-signed request read before its signature verifies.
+#[derive(Deserialize)]
+struct CarriedClusterKey {
+    cluster_key: PublicKey,
+}
+
+impl Request {
+    /// Verifies a received compact request under `signer` and returns its payload. Nothing of the
+    /// payload is interpreted before the signature verifies, except the carried cluster key of a
+    /// self-signed request, which is read only to be the key that must verify it: the protected
+    /// header's `kid` must be that key's thumbprint and the signature must verify under it over
+    /// the received bytes before the request as a whole is decoded.
+    pub fn verify(
+        compact: &str,
+        signer: RequestSigner<'_>,
+        limits: DocumentLimits,
+    ) -> Result<Self, Report<RequestVerificationError>> {
+        let document = UnverifiedDocument::parse(compact, DocumentType::Request, limits)
+            .change_context(RequestVerificationError::Envelope)?;
+        match signer {
+            RequestSigner::Bound(key) => Self::verify_under(&document, key),
+            RequestSigner::CarriedClusterKey => {
+                let carried: CarriedClusterKey = serde_json::from_slice(document.payload())
+                    .change_context(RequestVerificationError::Payload)?;
+                let request = Self::verify_under(&document, &carried.cluster_key)?;
+                // Only a creation carries the key that signed it; the verified creation's own
+                // cluster key is the carried one, read from the same verified bytes.
+                let Self::Create { .. } = &request else {
+                    return Err(Report::new(RequestVerificationError::Payload));
+                };
+                Ok(request)
+            }
+        }
+    }
+
+    fn verify_under(
+        document: &UnverifiedDocument,
+        key: &PublicKey,
+    ) -> Result<Self, Report<RequestVerificationError>> {
+        match document.verify::<Self>(key) {
+            Ok(request) => Ok(request),
+            Err(report) => {
+                let context = RequestVerificationError::of(report.current_context());
+                Err(report.change_context(context))
+            }
+        }
+    }
+}
+
+impl RequestVerificationError {
+    /// What a failed verification of a parsed request means. Parsing already refused every
+    /// framing, header and size failure, so they remain envelope failures here.
+    const fn of(failure: &DocumentError) -> Self {
+        match failure {
+            DocumentError::KeyIdentity => Self::Signer,
+            DocumentError::Verification => Self::Signature,
+            DocumentError::Payload => Self::Payload,
+            DocumentError::Size { .. }
+            | DocumentError::Compact
+            | DocumentError::Header
+            | DocumentError::Encoding
+            | DocumentError::SigningKey
+            | DocumentError::SignatureCount { .. }
+            | DocumentError::PayloadMismatch
+            | DocumentError::RepeatedSigner => Self::Envelope,
+        }
+    }
 }
 
 impl Request {

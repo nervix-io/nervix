@@ -259,6 +259,7 @@ const NATS_STREAM_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl IngestorDeclaration for NatsSubjectIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::PerPartition,
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         metadata: IngestorMetadataDeclaration::new(&[
@@ -432,6 +433,7 @@ const NATS_STREAM_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl IngestorDeclaration for NatsStreamIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::Single,
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         metadata: IngestorMetadataDeclaration::new(&[
@@ -611,6 +613,7 @@ pub struct NatsSubjectEmitter {
 
 impl EmitterDeclaration for NatsSubjectEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         reference: EmitterReferenceKind::Client(ConnectorKind::Nats),
         body: EmitterBodyForm::Codec,
@@ -645,6 +648,7 @@ pub struct NatsStreamEmitter {
 
 impl EmitterDeclaration for NatsStreamEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        events: crate::DeclaredEvents::NONE,
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         reference: EmitterReferenceKind::Client(ConnectorKind::Nats),
         body: EmitterBodyForm::Codec,

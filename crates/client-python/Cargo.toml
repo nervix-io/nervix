@@ -22,6 +22,7 @@ pyo3 = { workspace = true, features = ["abi3-py312"] }
 url = { workspace = true }
 
 [dev-dependencies]
+bolero = { workspace = true }
 bytes = { workspace = true }
 tonic = { workspace = true }
 uuid = { workspace = true }

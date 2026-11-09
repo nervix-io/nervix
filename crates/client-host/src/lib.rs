@@ -87,4 +87,6 @@ pub use suggestions::{CompletionKind, CompletionStatus, Suggestions};
 #[cfg(test)]
 mod tests;
 
-pub use inspection::Inspection;
+pub use inspection::{
+    Inspection, InspectionFrame, InspectionRejection, InspectionStage, InspectionUnitKind,
+};

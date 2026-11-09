@@ -245,6 +245,9 @@ pub(crate) enum ProbeExercise {
     Endpoints { ingestor: String, emitter: String },
     /// Repeats a prepared local upload, then changes its source file under the same identity.
     ResourceUpload { query: String, payload: PathBuf },
+    /// Reads a typed state page and refusal through a native host library and retains them
+    /// independently of the session and command outcome.
+    StateInspection,
     /// Connects through a live seed after an unavailable initial address, then checks that
     /// session-local execution is a new request rather than durable outcome recovery.
     Connection,
@@ -262,6 +265,7 @@ impl ProbeExercise {
             Self::DomainClock => Some("clock"),
             Self::Endpoints { .. } => Some("io"),
             Self::ResourceUpload { .. } => Some("upload"),
+            Self::StateInspection => Some("inspection"),
             Self::Connection => Some("connection"),
             Self::Restoration { .. } => Some("restoration"),
         }
@@ -274,6 +278,7 @@ impl ProbeExercise {
             Self::DomainClock
             | Self::Endpoints { .. }
             | Self::ResourceUpload { .. }
+            | Self::StateInspection
             | Self::Connection
             | Self::Restoration { .. } => true,
         }
@@ -311,6 +316,7 @@ impl ProbeTarget {
                 environment.insert("NERVIX_PROBE_ROWS", rows.to_string());
             }
             ProbeExercise::DomainClock => {}
+            ProbeExercise::StateInspection => {}
             ProbeExercise::Connection => {}
             ProbeExercise::Restoration {
                 relay,

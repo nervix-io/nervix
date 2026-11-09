@@ -203,7 +203,7 @@ items = ["sync::LazyLock"]
 limit = "Provider construction and process initialization stay outside every model; no protocol assertion relies on this cache's ordering."
 owner = "The cryptography boundary's immutable interconnect provider."
 path = "crates/crypto/src/tls.rs"
-reason = "Every TLS bundle shares the same fixed provider for the process lifetime, including across reloads and model executions; rustls owns default installation."
+reason = "Every interconnect bundle and native client channel shares its purpose's fixed immutable provider for the process lifetime, including across model executions; rustls owns SDK process-default installation."
 
 [[permission]]
 items = ["sync::OnceLock"]

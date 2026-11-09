@@ -296,6 +296,7 @@ test: tests-deps build-client-jvm-tests build-client-ruby build-client-c-suites
         nervix-paced-simulation
         nervix-primitives
         nervix-rate-limit
+        nervix-tls
         nervix-scenarios
         nervix-server
         nervix-wasm
@@ -318,6 +319,7 @@ test: tests-deps build-client-jvm-tests build-client-ruby build-client-c-suites
         --package nervix-model-harness \
         --package nervix-paced-simulation \
         --package nervix-rate-limit \
+        --package nervix-tls \
         --package nervix-wasm
     cargo test --all-targets --features native --package nervix-primitives
     just test-capability-docs
@@ -393,6 +395,13 @@ test-endpoint-request-metrics *args: build-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/endpoint_request_metrics.feature {{ quote(args) }}
 
+# Declared connector events use the real Redis fixture and native client producers.
+test-connector-events *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/connector_events*.feature") }} {{ quote(args) }}
+
 # Exercise retained interaction metrics and the native ingestor owners without client fixtures.
 test-ingestor-interactions filter="runtime::ingestors::connector::" *args: build-deps
     #!/usr/bin/env bash
@@ -406,6 +415,38 @@ test-endpoint-heads *args: build-deps build-plexus-format build-test-cli build-d
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/kinded_endpoint_heads.feature {{ quote(args) }}
+
+# Qualify live outward TLS policy without preparing unrelated paced client drivers.
+test-outward-tls-policy *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/outward_tls_policy.feature {{ quote(args) }}
+
+# Exercise TLS seeds and their command-line round trip through the production settings owner.
+test-outward-tls-seeds *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    BOLERO_RANDOM_ITERATIONS=0 cargo test --package nervix-server --features testing --lib -- application::cli:: {{ quote(args) }}
+
+# Check the independent restricted peer's HTTP/2 support without preparing paced drivers.
+test-outward-tls-peer *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test harness_liveness -- a_tls_receiver_offering_http2 {{ quote(args) }}
+
+# Exercise the maintained TLS dependency's connection configuration API from a supplied source tree.
+test-tls-configuration-source source filter="configuration_refresh" *args:
+    cargo test --manifest-path {{ quote(source / "rustls/Cargo.toml") }} --package rustls --no-default-features --features aws_lc_rs,std,tls12 --test api {{ quote(filter) }} {{ quote(args) }}
+
+# Keep the dependency extension usable without std or a selected cryptographic backend.
+check-tls-configuration-source source:
+    cargo check --manifest-path {{ quote(source / "rustls/Cargo.toml") }} --package rustls --lib --no-default-features --features custom-provider
+
+fmt-tls-configuration-source source:
+    cargo fmt --manifest-path {{ quote(source / "rustls/Cargo.toml") }} --package rustls
 
 # Cluster identity, replication and restore checks use the native session client.
 test-cluster-identity *args: build-deps build-plexus-format build-test-cli build-deadlock-report
@@ -442,6 +483,13 @@ test-inferencer-state *args: build-deps
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input 'tests/features/runtime/inferencer_state*.feature' {{ quote(args) }}
+
+# Verify inference resource replacement without traversing unrelated features or build artifacts.
+test-inferencer-rebinding *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/inferencer_state_rebinding*.feature") }} {{ quote(args) }}
 
 # Inspect materialized relay pages through the native client and in-process cluster.
 test-state-inspection *args: build-deps build-test-cli
@@ -947,6 +995,16 @@ test-wire-schema-lists *args: build-web-console wasm-processor-guests download-o
     cargo test --package nervix-scenarios --test scenarios -- \
         --input tests/features/runtime/wire_schema_lists.feature "$@"
 
+# Exercise coordinated WASM guest-state resets through in-process nodes: the RESET statement on the
+# session's active domain, its retries and refusals, and the operator and guest-requested resets.
+[positional-arguments]
+test-wasm-state-reset *args: build-web-console wasm-processor-guests download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/runtime/wasm_state_reset.feature "$@"
+
 # Verify every processor/emitter acknowledgement clause through public CREATE and SHOW CREATE.
 [positional-arguments]
 test-acknowledgement-clauses *args: generate-test-onnx download-onnxruntime build-web-console wasm-processor-guests build-test-cli
@@ -1303,7 +1361,7 @@ test-deadlock-probes features="deloxide" *args:
 # The packages whose `shuttle_` checks `test-shuttle` explores, as the Shuttle inventory lists them,
 # and whose test builds `shuttle-clippy-targets` lints. scripts/tests/test_shuttle_checks.py holds
 # this list to the inventory.
-shuttle_test_packages := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-connector", "nervix-connector-kafka", "nervix-connector-mqtt", "nervix-connector-rabbitmq", "nervix-connector-redis", "nervix-connector-sqs", "nervix-connector-syslog", "nervix-connector-websockets", "nervix-consensus", "nervix-server", "nervix-deadlock", "nervix-rate-limit"]
+shuttle_test_packages := ["nervix-tls", "nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-connector", "nervix-connector-kafka", "nervix-connector-mqtt", "nervix-connector-rabbitmq", "nervix-connector-redis", "nervix-connector-sqs", "nervix-connector-syslog", "nervix-connector-websockets", "nervix-consensus", "nervix-server", "nervix-deadlock", "nervix-rate-limit"]
 
 # Explore every registered Shuttle check of a production owner, each in its own process: under the
 # exploration it declares, then under the uncontrolled-nondeterminism detector. The inventory in
@@ -1627,6 +1685,10 @@ test-otel-declarations:
 # Run the cryptography boundary's provider, signing, digest and randomness unit tests.
 test-crypto *args:
     cargo test --package nervix-crypto --lib -- {{ args }}
+
+# Pure TLS vocabulary checks do not compile an engine or prepare server assets.
+test-crypto-policy *args:
+    cargo test --package nervix-crypto-policy --lib -- {{ quote(args) }}
 
 # Run the boundary's registered properties with canonical corpus and case accounting. They have
 # no server or console assets, so this focused owner does not need bolero-deps.
@@ -2031,6 +2093,42 @@ build-client-conformance-tests: tests-deps build-client-conformance
 test-client-conformance tags="@client_conformance_toolchain or @client_suite_python" *args: build-client-conformance-tests
     just test-client-conformance-run {{ quote(tags) }} {{ args }}
 
+# Verify typed inspection through the three native libraries, preparing only their artifacts.
+test-native-inspection-host:
+    cargo test --package nervix-client-host --lib -- tests::inspection::inspection_views_preserve_boundary_values --exact --nocapture
+
+# Discover only the changed owners' compiled property targets; execute no generated cases.
+validate-native-inspection-properties:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    uv run --locked python - <<'PY'
+    from pathlib import Path
+    from scripts.bolero import discover_package, load_inventory, package_manifests
+    inventory = load_inventory()
+    manifests = package_manifests()
+    for package in ("nervix-client-host", "nervix-client-python"):
+        targets = tuple(target for target in inventory.targets if target.package == package)
+        compiled = discover_package(package, manifests[package], targets)
+        observed = {(kind, item["test_name"], Path(item["work_dir"]).resolve()) for kind, item in compiled}
+        expected = {(target.test_target, target.test, target.work_dir.resolve()) for target in targets}
+        assert observed == expected, (package, observed, expected)
+        print(f"{package}: discovered={len(compiled)} executed=0 completed=0")
+    PY
+
+# Focused ordinary counters for native inspection owners; prepared JVM fixtures stay unchanged.
+coverage-native-inspection output="lcov-workspace.info":
+    cargo llvm-cov --package nervix-client-host --package nervix-client-python --package nervix-client-ruby --package nervix-client-jvm --features nervix-client-ruby/ruby-tests,nervix-client-jvm/jvm-tests --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- --skip bolero_
+
+test-native-inspection-python:
+    cargo test --package nervix-client-python --lib -- inspection:: --skip bolero_ --nocapture
+
+test-native-binding-inspection *args: tests-deps build-client-python build-client-ruby build-client-jvm-tests
+    cargo test --no-run --package nervix-scenarios --test scenarios
+    just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-python-api-run
+    just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-ruby-api-run
+    just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-jvm-api-run
+    just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-conformance-scenarios '@native_binding_inspection' {{ quote(args) }}
+
 # Exercise upload completion, retained retries and typed identity conflicts in every binding host.
 test-client-upload-conflict-conformance: build-web-console wasm-processor-guests download-onnxruntime build-client-conformance
     just test-client-conformance-run '@client_upload_failure' --concurrency 2 --retry 0
@@ -2051,7 +2149,7 @@ test-client-conformance-scenarios tags="@client_conformance_toolchain or @client
     export NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }}
     export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/debug/libnervix_client_ffi.so") }}
     cargo test --package nervix-scenarios --test scenarios -- \
-        --input {{ quote(justfile_directory() / "tests/features/runtime/client_{conformance,suites}.feature") }} \
+        --input {{ quote(justfile_directory() / "tests/features/runtime/{client_conformance,client_suites,native_binding_inspection}.feature") }} \
         --tags {{ quote(tags) }} {{ quote(args) }}
 
 test-runtime-state-capabilities: tests-deps
@@ -2110,6 +2208,7 @@ test-coverage-binaries: tests-deps
         nervix-paced-simulation
         nervix-primitives
         nervix-rate-limit
+        nervix-tls
         nervix-scenarios
         nervix-server
         nervix-wasm
@@ -2156,6 +2255,7 @@ test-coverage-binaries: tests-deps
         --package nervix-model-harness \
         --package nervix-paced-simulation \
         --package nervix-rate-limit \
+        --package nervix-tls \
         --package nervix-wasm
     coverage --all-targets --features native --package nervix-primitives
     # Carry the exact instrumented native extension the Ruby host suite loads at run time.
@@ -2754,6 +2854,36 @@ coverage-archive-counts-server-append output="target/archive-counts.lcov": downl
 # Measure the server owner regressions with the same dependencies and environment as test-runtime.
 coverage-runtime output="target/task-handles-runtime.lcov" *args: build-web-console wasm-processor-guests download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo llvm-cov --package nervix-server --features testing --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} {{ args }}
+
+# Start ordinary coverage with the declared-event owners; the append recipe adds the public path.
+coverage-connector-events output="lcov-workspace.info": build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    just coverage-clean-workspace
+    cargo llvm-cov --no-report --package nervix-models --lib -- \
+        connector::declaration::events::tests::every_entity_declares_unique_event_identities
+    cargo llvm-cov --no-report --package nervix-connector --lib -- connector_events::tests
+    cargo llvm-cov --no-report --package nervix-connector-redis --lib -- pubsub::event_tests
+    cargo llvm-cov --no-report --package nervix-server --features testing --lib -- \
+        metrics::connector::events::tests
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} \
+        --package nervix-models --package nervix-connector --package nervix-connector-redis \
+        --package nervix-server
+
+# Continue event owner and public-path coverage without discarding the current ordinary profiles.
+coverage-connector-events-append output="lcov-workspace.info": build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov --no-clean --package nervix-server --features testing --lib \
+        --lcov --output-path {{ quote(output) }} -- metrics::connector::events::tests
+    cargo llvm-cov --no-clean --package nervix-scenarios --test scenarios \
+        --lcov --output-path {{ quote(output) }} -- \
+        --input {{ quote(justfile_directory() / "tests/features/runtime/connector_events*.feature") }} --concurrency 2 --retry 0
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} \
+        --package nervix-models --package nervix-connector --package nervix-connector-redis \
+        --package nervix-server
 
 # Ordinary coverage for delivery correlations, membership publication and authenticated relay owners.
 coverage-remote-owners output="target/remote-owners.lcov": build-web-console wasm-processor-guests download-onnxruntime
@@ -3436,7 +3566,7 @@ clippy_language_packages_1 := ["nervix-plexus", "nervix-plexus-format", "nervix-
 
 clippy_language_packages_2 := ["nervix-benchmark", "nervix-cli", "nervix-client-ffi", "nervix-client-host", "nervix-client-jvm", "nervix-client-python", "nervix-client-ruby"]
 
-clippy_foundation_packages_1 := ["nervix-approx-into", "nervix-bounded-write", "nervix-crypto", "nervix-dataflow-graph", "nervix-expiry-map", "nervix-primitives-macros", "nervix-recovery"]
+clippy_foundation_packages_1 := ["nervix-approx-into", "nervix-bounded-write", "nervix-crypto", "nervix-crypto-policy", "nervix-dataflow-graph", "nervix-expiry-map", "nervix-primitives-macros", "nervix-recovery"]
 
 clippy_foundation_packages_2 := [
     "nervix-arbitrary",
@@ -3478,11 +3608,11 @@ clippy_shuttle_connector_packages_3 := [
     "nervix-connector-websockets",
 ]
 
-clippy_shuttle_runtime_packages := ["nervix-client-core", "nervix-execution", "nervix-interconnect", "nervix-wasm", "nervix-rate-limit"]
+clippy_shuttle_runtime_packages := ["nervix-tls", "nervix-client-core", "nervix-execution", "nervix-interconnect", "nervix-wasm", "nervix-rate-limit"]
 
 # Every package `test-shuttle` explores, in two lanes: the runtime and server, and the connectors.
 # scripts/tests/test_shuttle_checks.py holds the two to an exact partition of shuttle_test_packages.
-clippy_shuttle_test_packages_1 := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-consensus", "nervix-server", "nervix-deadlock", "nervix-rate-limit"]
+clippy_shuttle_test_packages_1 := ["nervix-tls", "nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-consensus", "nervix-server", "nervix-deadlock", "nervix-rate-limit"]
 
 clippy_shuttle_test_packages_2 := [
     "nervix-connector",
@@ -3533,7 +3663,7 @@ clippy-lane-ordinary-foundation-2: *(clippy-target "ordinary-foundation-2" *clip
 [private]
 clippy-lane-ordinary-foundation-3: \
     *(clippy-target "ordinary-foundation-3" *clippy_foundation_packages_3 ["--all-features", "--all-targets"]) \
-    *(clippy-target "ordinary-foundation-3" *["nervix-execution", "nervix-model-harness", "nervix-rate-limit", "nervix-wasm"] ["--all-targets"]) \
+    *(clippy-target "ordinary-foundation-3" *["nervix-execution", "nervix-model-harness", "nervix-rate-limit", "nervix-tls", "nervix-wasm"] ["--all-targets"]) \
     (clippy-target "ordinary-foundation-3" "nervix-deadlock" ["--all-targets", "--features", "report-tool"])
 
 [private]
@@ -5277,3 +5407,28 @@ coverage-deadlock output="target/deadlock.lcov":
     cat "${reports}/order.lcov" "${reports}/report.lcov" > "${reports}/combined.lcov"
     mkdir -p "$(dirname {{ quote(output) }})"
     mv "${reports}/combined.lcov" {{ quote(output) }}
+
+# Focused live outward TLS publication and configuration-cache checks.
+test-tls-policy *args:
+    cargo test --package nervix-tls --lib {{ quote(args) }}
+
+# Check the narrow maintained Tonic configuration entrypoints on their pinned source.
+test-grpc-tls-source source filter="preconfigured_tls" *args:
+    cargo test --manifest-path {{ quote(source / "tonic/Cargo.toml") }} --package tonic --lib --features tls-aws-lc,tls-ring {{ quote(filter) }} {{ quote(args) }}
+
+fmt-grpc-tls-source source:
+    cargo fmt --manifest-path {{ quote(source / "tonic/Cargo.toml") }} --package tonic
+
+# Explore the registered TLS publication owner with complete canonical execution evidence.
+test-outward-tls-publication:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/outward-tls-models/build") }} python3 -m scripts.tls_policy_checks --target-dir {{ quote(cargo_target_dir + "/outward-tls-models") }}
+
+# Focused ordinary counters for value conversion, validation, parsing and TLS snapshot reuse.
+coverage-outward-tls-values:
+    BOLERO_RANDOM_ITERATIONS=0 cargo llvm-cov --no-report --package nervix-crypto-policy --lib
+    cargo llvm-cov --no-report --package nervix-tls --lib
+    cargo llvm-cov --no-report --package nervix-crypto --lib -- tls::
+    BOLERO_RANDOM_ITERATIONS=0 cargo llvm-cov --no-report --package nervix-models --lib -- cluster_parameters::
+    cargo llvm-cov --no-report --package nervix-plexus --lib -- cluster_parameters::
+    cargo llvm-cov report --package nervix-crypto-policy --package nervix-tls --package nervix-crypto --package nervix-models --package nervix-plexus --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
+    pwd -P > coverage-source-root.txt

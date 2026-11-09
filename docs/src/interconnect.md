@@ -492,7 +492,9 @@ wire fingerprint fences that request shape during connection setup.
 The fingerprint also fences typed PBKDF2-HMAC-SHA-512 credentials in consensus commands and the persisted uniform verification-work count in snapshot metadata. Cost validation occurs during decoding before any authentication work is admitted.
 
 The fingerprint covers endpoint kinds whose WebSockets variant alone carries an optional signaling
-reference, both in Models and in queued transaction statements.
+reference, both in Models and in queued transaction statements. It also covers a queued
+`RESET WASM PROCESSOR ... STATE`, which names its processor and scope and takes its domain from its
+transaction.
 It also covers fixed-width 64-bit counts in Models, transaction commands and records,
 and WASM inspection results. These fields use the vocabulary's `CountAsU64` adapter and checked
 native decoding; an unrepresentable count fails decoding. Window processor state has current

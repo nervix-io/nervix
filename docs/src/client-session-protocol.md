@@ -283,11 +283,15 @@ cause; TLS files supplied in HTTP mode are refused. Certificates are loaded once
 requires restarting the node. A running listener retains the loaded identity. Client trust remains
 explicit: the native client uses the supplied CA, while the browser uses its own trust store.
 
-Native session clients and the server's certificate/key constructors obtain their outward rustls
-provider from `nervix-crypto`. It keeps the full AWS-LC default algorithm set and a process default
-already installed by an embedding host. The interconnect's fixed algorithm set is an independent
-provider and does not restrict public session TLS. [Cryptography](cryptography.md#algorithm-policy)
-owns these provider choices; certificate trust and the listener's configuration remain as above.
+Native listeners, console TLS and HTTPS VHOSTs capture the committed outward cipher/group policy
+for each new handshake. Changes apply without restarting them; established sessions retain their
+negotiation and loaded identity. `DESCRIBE CLUSTER` exposes resolved committed and running lists.
+Native client-core, the CLI and native bindings use `nervix-crypto`'s explicit `fips` provider by
+default, independently of an embedding host's process provider. They are clients rather than members
+of the cluster's policy authority. Browser TLS remains the browser's choice. The interconnect has
+its independent fixed provider, unaffected by outward algorithm changes.
+[Cryptography](cryptography.md#algorithm-policy) owns exact names, aliases, defaults and governed
+connector paths; certificate trust and provisioning remain as above.
 
 ### Console WebSocket
 
@@ -2340,7 +2344,9 @@ The C ABI's public contract is `crates/client-ffi/include/nervix_client.h`.
 
 The C ABI also exposes an independently retained typed state-inspection envelope through
 `nx_outcome_inspection`: JSON, counts, section schemas and verified Row frames outlive the
-originating outcome. That projection currently has no Python, Ruby or JVM counterpart. Typed
+originating outcome. Python, Ruby and JVM project that same shared owner through typed metadata,
+JSON, section schemas and retained Row frames; [Typed Inspection](client-host-bindings.md#typed-inspection)
+owns their lifetime contract. Typed
 transaction status/inspection, choice lookups, server notices and leadership observation are
 outside the shared binding surface. The architecture chapter's
 [guarantees and limits](client-host-bindings.md#guarantees-and-limits) and the ledger distinguish
@@ -2578,6 +2584,12 @@ process-bound read origin, complete counts and named sections. A section carries
 `RowSchema`, bounded `NXRB` RowBatch frames, omitted-row count and optional positional watermark
 indices. Watermarks are distinct, non-sensitive datetime columns. Frames conform to their section
 schema, keep branch keys and redaction, and share the verified outer reply's backing bytes.
+
+The shared host runtime keeps this envelope in `Inspection`. Python, Ruby and JVM applications
+read its typed metadata and lossless JSON through their native binding, using the host guides'
+`Inspect Materialized State` sections. Metadata views retain the inspection independently; each
+frame view retains its exact verified bytes and schema. Host buffer lifetimes do not depend on
+the outcome or session, and no binding parses the display message to recover inspection data.
 
 Embedded frames use the session transfer bound; transport frames still obey the smaller frame
 bound and the ordinary reply-transfer protocol. The service checks the complete typed outcome plus

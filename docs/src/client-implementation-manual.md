@@ -150,6 +150,12 @@ archive; see [Restore Streams](#restore-streams).
   authority and verify the TLS certificate against that hostname on every connection, including
   redirects and reconnects. DNS and address attempts MUST fit within the client's connection
   deadline.
+- **T-2a.** Native client-core, the CLI and native bindings use the cryptography boundary's explicit
+  `fips` cipher/group set by default. A cluster's outward policy governs its listeners and shared
+  connector TLS, not a client's offers; an embedding host's process provider does not replace that
+  native default. Trust roots, certificate identity, hostname verification, ALPN and deadlines
+  retain their independent contracts. Read [Algorithm Policy](cryptography.md#algorithm-policy)
+  for membership and the boundary between algorithm selection and a validated deployment.
 - **T-3.** A WebSocket client MUST connect to `/console/ws` on the leader's console endpoint, using
   `ws` for an `http` endpoint and `wss` for an `https` one, and MUST send binary messages only. It
   MUST treat a close with code `1003`, `1007`, `1008`, or `1009` as a defect in what it sent.
@@ -1392,3 +1398,12 @@ Resume the opaque continuation with the same domain, relay and selector. On `Sta
 start a new read; do not combine it with rows from the abandoned sequence. Complete counts describe
 the whole selected cut. An empty page has no row sections or continuation. See
 [Materialized State Inspection Envelope](./client-session-protocol.md#materialized-state-inspection-envelope).
+
+The native Python, Ruby and JVM bindings expose this envelope through
+`Outcome.state_inspection` (Python property and Ruby method) and `Outcome.stateInspection()`
+(JVM). Their inspection, unit and section views retain the shared host `Inspection`; each frame
+retains only its verified Row bytes and schema. A Python memoryview, Ruby `IO::Buffer`, or JVM
+direct `ByteBuffer` and its derived slices MUST keep that frame alive independently of every
+parent object or closed handle. The JSON view is the existing envelope's lossless serializer,
+never a reconstruction from display text. Native enums preserve the distinct refusal, stage and
+unit-kind values. The host guides' `Inspect Materialized State` sections are executable examples.

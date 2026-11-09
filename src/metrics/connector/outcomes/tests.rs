@@ -102,7 +102,7 @@ fn emitter_outcomes_register_every_child_at_zero_with_only_bounded_dimensions() 
     }
     assert_eq!(families, 12);
     assert_eq!(samples, 21);
-    assert_eq!(handle.describe_lines().len(), 35);
+    assert_eq!(handle.describe_lines().len(), 36);
 }
 
 #[test]

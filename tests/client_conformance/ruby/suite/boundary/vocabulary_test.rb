@@ -4,6 +4,26 @@ module RubySuite
   class VocabularyTest < Boundary
     def test_every_declared_enum_member_has_its_stable_value_and_integer_semantics
       expected = {
+        NX::InspectionRejection => {
+          NX::InspectionRejection::UNKNOWN_ENTITY => 1,
+          NX::InspectionRejection::NOT_MATERIALIZED => 2,
+          NX::InspectionRejection::INVALID_SELECTION => 3,
+          NX::InspectionRejection::INVALID_LIMIT => 4,
+          NX::InspectionRejection::STALE_CONTINUATION => 5,
+          NX::InspectionRejection::OWNER_UNAVAILABLE => 6,
+          NX::InspectionRejection::NOT_READY => 7,
+          NX::InspectionRejection::DEADLINE => 8,
+          NX::InspectionRejection::REPLY_TOO_LARGE => 9,
+        },
+        NX::InspectionStage => {
+          NX::InspectionStage::LIVE => 1,
+          NX::InspectionStage::STORED => 2,
+        },
+        NX::InspectionUnitKind => {
+          NX::InspectionUnitKind::SINGLE => 1,
+          NX::InspectionUnitKind::PARTITION => 2,
+          NX::InspectionUnitKind::INSTANCE => 3,
+        },
         NX::FailureKind => {
           NX::FailureKind::INVALID_ARGUMENT => 1,
           NX::FailureKind::CONNECT => 2,

@@ -44,6 +44,10 @@ pub(crate) struct CountingRedis {
 
 impl CountingRedis {
     pub(crate) async fn start() -> Self {
+        Self::start_with_publish_response(b":0\r\n").await
+    }
+
+    pub(crate) async fn start_with_publish_response(response: &'static [u8]) -> Self {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .assured("a loopback port is available to tests");
@@ -69,7 +73,7 @@ impl CountingRedis {
                 });
                 let closed = counter.clone();
                 spawn(async move {
-                    Self::answer(connection).await;
+                    Self::answer(connection, response).await;
                     closed.send_modify(|counts| {
                         counts.open = counts
                             .open
@@ -115,7 +119,7 @@ impl CountingRedis {
     }
 
     /// Answer every command `connection` sends until the client closes it.
-    async fn answer(connection: TcpStream) {
+    async fn answer(connection: TcpStream, publish_response: &'static [u8]) {
         let (mut input, mut output) = tokio::io::split(connection);
         let mut decoder: Decoder<AnySendSyncPartialState, PointerOffset<[u8]>> = Decoder::new();
         loop {
@@ -123,7 +127,7 @@ impl CountingRedis {
             let Ok(request) = redis::parse_redis_value_async(&mut decoder, &mut input).await else {
                 return;
             };
-            let answer = Self::answer_to(&request);
+            let answer = Self::answer_to(&request, publish_response);
             if output.write_all(answer).await.is_err() {
                 return;
             }
@@ -132,7 +136,7 @@ impl CountingRedis {
 
     /// The answer to one command, by its name: the setup's `CLIENT SETINFO`, the checkout's
     /// `PING` and a publisher's `PUBLISH`.
-    fn answer_to(request: &Value) -> &'static [u8] {
+    fn answer_to(request: &Value, publish_response: &'static [u8]) -> &'static [u8] {
         let Value::Array(arguments) = request else {
             return b"-ERR the request is not a command\r\n";
         };
@@ -142,7 +146,7 @@ impl CountingRedis {
         if name.eq_ignore_ascii_case(b"PING") {
             b"+PONG\r\n"
         } else if name.eq_ignore_ascii_case(b"PUBLISH") {
-            b":0\r\n"
+            publish_response
         } else if name.eq_ignore_ascii_case(b"CLIENT") {
             b"+OK\r\n"
         } else {
