@@ -67,11 +67,16 @@ mod ingestor_editor;
 mod ingestor_route_draft;
 mod ingestor_route_editor;
 mod ingestor_source_draft;
+mod inserted_reference;
 mod placement_draft;
 mod processor_assignment_editor;
 mod processor_choices;
+mod processor_correlation_editor;
+mod processor_correlator_draft;
 mod processor_draft;
 mod processor_editor;
+#[cfg(test)]
+mod processor_family_form_tests;
 mod processor_inheritance_editor;
 mod processor_input_draft;
 mod processor_input_editor;
@@ -80,7 +85,10 @@ mod processor_key_editor;
 #[cfg(test)]
 mod processor_model_tests;
 mod processor_route_editor;
+mod processor_route_references;
 mod processor_state_editor;
+mod processor_window_draft;
+mod processor_window_editor;
 mod relay_draft;
 mod relay_editor;
 mod resource_binding_draft;
@@ -160,6 +168,8 @@ pub(crate) enum CreateKind {
     Junction,
     Deduplicator,
     Reorderer,
+    WindowProcessor,
+    Correlator,
     Reingestor,
 }
 
@@ -189,6 +199,8 @@ impl CreateKind {
             Self::Junction => "junction",
             Self::Deduplicator => "deduplicator",
             Self::Reorderer => "reorderer",
+            Self::WindowProcessor => "window processor",
+            Self::Correlator => "correlator",
             Self::Reingestor => "reingestor",
         }
     }
@@ -228,6 +240,8 @@ impl CreateKind {
             | Self::Junction
             | Self::Deduplicator
             | Self::Reorderer
+            | Self::WindowProcessor
+            | Self::Correlator
             | Self::Reingestor => None,
         }
     }
@@ -238,6 +252,8 @@ impl CreateKind {
             Self::Junction => Some(ProcessorFamily::Junction),
             Self::Deduplicator => Some(ProcessorFamily::Deduplicator),
             Self::Reorderer => Some(ProcessorFamily::Reorderer),
+            Self::WindowProcessor => Some(ProcessorFamily::Window),
+            Self::Correlator => Some(ProcessorFamily::Correlator),
             Self::Reingestor => Some(ProcessorFamily::Reingestor),
             Self::Domain
             | Self::Placement
@@ -321,6 +337,19 @@ pub(crate) enum ChoiceControl {
     ProcessorBranchField,
     ProcessorErrorRelay,
     ProcessorErrorField,
+    ProcessorRightInputRelay,
+    ProcessorLeftTimeoutRelay,
+    ProcessorRightTimeoutRelay,
+    /// Inserts a window input field as the argument of the window's aggregate.
+    ProcessorAggregateField,
+    /// Inserts a field of the left side's record into `CORRELATE WHERE`.
+    ProcessorCorrelateLeftField,
+    /// Inserts a field of the right side's record into `CORRELATE WHERE`.
+    ProcessorCorrelateRightField,
+    /// Inserts a field of the left side's record into the last output assignment.
+    ProcessorRouteLeftField,
+    /// Inserts a field of the right side's record into the last output assignment.
+    ProcessorRouteRightField,
 }
 
 impl ChoiceControl {
@@ -375,7 +404,15 @@ impl ChoiceControl {
             | Self::ProcessorOutputField
             | Self::ProcessorBranchField
             | Self::ProcessorErrorRelay
-            | Self::ProcessorErrorField => CreateKind::Junction,
+            | Self::ProcessorErrorField
+            | Self::ProcessorRightInputRelay
+            | Self::ProcessorLeftTimeoutRelay
+            | Self::ProcessorRightTimeoutRelay
+            | Self::ProcessorAggregateField
+            | Self::ProcessorCorrelateLeftField
+            | Self::ProcessorCorrelateRightField
+            | Self::ProcessorRouteLeftField
+            | Self::ProcessorRouteRightField => CreateKind::Junction,
         }
     }
 
@@ -483,6 +520,14 @@ struct ChoiceControls {
     processor_branch_field: ChoiceControlSignals,
     processor_error_relay: ChoiceControlSignals,
     processor_error_field: ChoiceControlSignals,
+    processor_right_input_relay: ChoiceControlSignals,
+    processor_left_timeout_relay: ChoiceControlSignals,
+    processor_right_timeout_relay: ChoiceControlSignals,
+    processor_aggregate_field: ChoiceControlSignals,
+    processor_correlate_left_field: ChoiceControlSignals,
+    processor_correlate_right_field: ChoiceControlSignals,
+    processor_route_left_field: ChoiceControlSignals,
+    processor_route_right_field: ChoiceControlSignals,
 }
 
 impl ChoiceControls {
@@ -543,6 +588,14 @@ impl ChoiceControls {
             processor_branch_field: ChoiceControlSignals::new(),
             processor_error_relay: ChoiceControlSignals::new(),
             processor_error_field: ChoiceControlSignals::new(),
+            processor_right_input_relay: ChoiceControlSignals::new(),
+            processor_left_timeout_relay: ChoiceControlSignals::new(),
+            processor_right_timeout_relay: ChoiceControlSignals::new(),
+            processor_aggregate_field: ChoiceControlSignals::new(),
+            processor_correlate_left_field: ChoiceControlSignals::new(),
+            processor_correlate_right_field: ChoiceControlSignals::new(),
+            processor_route_left_field: ChoiceControlSignals::new(),
+            processor_route_right_field: ChoiceControlSignals::new(),
         }
     }
 
@@ -603,6 +656,14 @@ impl ChoiceControls {
             ChoiceControl::ProcessorBranchField => self.processor_branch_field,
             ChoiceControl::ProcessorErrorRelay => self.processor_error_relay,
             ChoiceControl::ProcessorErrorField => self.processor_error_field,
+            ChoiceControl::ProcessorRightInputRelay => self.processor_right_input_relay,
+            ChoiceControl::ProcessorLeftTimeoutRelay => self.processor_left_timeout_relay,
+            ChoiceControl::ProcessorRightTimeoutRelay => self.processor_right_timeout_relay,
+            ChoiceControl::ProcessorAggregateField => self.processor_aggregate_field,
+            ChoiceControl::ProcessorCorrelateLeftField => self.processor_correlate_left_field,
+            ChoiceControl::ProcessorCorrelateRightField => self.processor_correlate_right_field,
+            ChoiceControl::ProcessorRouteLeftField => self.processor_route_left_field,
+            ChoiceControl::ProcessorRouteRightField => self.processor_route_right_field,
         }
     }
 }
@@ -1055,6 +1116,8 @@ pub(crate) struct CreateSignals {
     junction: RwSignal<ProcessorDraft>,
     deduplicator: RwSignal<ProcessorDraft>,
     reorderer: RwSignal<ProcessorDraft>,
+    window: RwSignal<ProcessorDraft>,
+    correlator: RwSignal<ProcessorDraft>,
     reingestor: RwSignal<ProcessorDraft>,
     /// The number the next generated subscription name carries. Numbers only increase, so no two
     /// generated names of one console coincide.
@@ -1077,6 +1140,8 @@ impl CreateSignals {
             ProcessorFamily::Junction => self.junction,
             ProcessorFamily::Deduplicator => self.deduplicator,
             ProcessorFamily::Reorderer => self.reorderer,
+            ProcessorFamily::Window => self.window,
+            ProcessorFamily::Correlator => self.correlator,
             ProcessorFamily::Reingestor => self.reingestor,
         }
     }
@@ -1133,6 +1198,8 @@ impl CreateSignals {
             junction: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Junction)),
             deduplicator: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Deduplicator)),
             reorderer: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Reorderer)),
+            window: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Window)),
+            correlator: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Correlator)),
             reingestor: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Reingestor)),
             next_subscription_name: RwSignal::new(2),
             choices: StoredValue::new(ChoiceControls::new()),
@@ -1253,6 +1320,12 @@ impl CreateSignals {
                 CreateKind::Reorderer => {
                     self.reorderer.update(ProcessorDraft::invalidate_references)
                 }
+                CreateKind::WindowProcessor => {
+                    self.window.update(ProcessorDraft::invalidate_references)
+                }
+                CreateKind::Correlator => self
+                    .correlator
+                    .update(ProcessorDraft::invalidate_references),
                 CreateKind::Reingestor => self
                     .reingestor
                     .update(ProcessorDraft::invalidate_references),
@@ -1723,7 +1796,15 @@ impl CreateSignals {
             | ChoiceControl::ProcessorOutputField
             | ChoiceControl::ProcessorBranchField
             | ChoiceControl::ProcessorErrorRelay
-            | ChoiceControl::ProcessorErrorField => self.processor_choice_query(control),
+            | ChoiceControl::ProcessorErrorField
+            | ChoiceControl::ProcessorRightInputRelay
+            | ChoiceControl::ProcessorLeftTimeoutRelay
+            | ChoiceControl::ProcessorRightTimeoutRelay
+            | ChoiceControl::ProcessorAggregateField
+            | ChoiceControl::ProcessorCorrelateLeftField
+            | ChoiceControl::ProcessorCorrelateRightField
+            | ChoiceControl::ProcessorRouteLeftField
+            | ChoiceControl::ProcessorRouteRightField => self.processor_choice_query(control),
         }
     }
 
@@ -1921,6 +2002,12 @@ impl CreateSignals {
             CreateKind::Reorderer => {
                 self.processor_submission(kind, ProcessorFamily::Reorderer, captured_domain)
             }
+            CreateKind::WindowProcessor => {
+                self.processor_submission(kind, ProcessorFamily::Window, captured_domain)
+            }
+            CreateKind::Correlator => {
+                self.processor_submission(kind, ProcessorFamily::Correlator, captured_domain)
+            }
             CreateKind::Reingestor => {
                 self.processor_submission(kind, ProcessorFamily::Reingestor, captured_domain)
             }
@@ -2043,6 +2130,12 @@ pub(crate) fn CreateMenu(
                 </button>
                 <button type="button" role="menuitem" data-create-kind="reorderer" on:click=move |_| choose(CreateKind::Reorderer)>
                     <span>"Reorderer"</span><em>"Release each branch in key order"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="window-processor" on:click=move |_| choose(CreateKind::WindowProcessor)>
+                    <span>"Window processor"</span><em>"Aggregate each branch over WIDTH and STEP"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="correlator" on:click=move |_| choose(CreateKind::Correlator)>
+                    <span>"Correlator"</span><em>"Match left and right records in each branch"</em>
                 </button>
                 <button type="button" role="menuitem" data-create-kind="reingestor" on:click=move |_| choose(CreateKind::Reingestor)>
                     <span>"Reingestor"</span><em>"Transform records across branch boundaries"</em>
@@ -2229,48 +2322,9 @@ fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceCon
         CreateKind::Junction
         | CreateKind::Deduplicator
         | CreateKind::Reorderer
-        | CreateKind::Reingestor => {
-            let Some(processor) = signals.active_processor() else {
-                return Vec::new();
-            };
-            let draft = processor.get_untracked();
-            let mut controls = vec![
-                ChoiceControl::ProcessorInputRelay,
-                ChoiceControl::ProcessorRouteRelay,
-            ];
-            if draft.family().declares_node_branch()
-                && matches!(
-                    draft.branching,
-                    processor_draft::NodeBranchDraft::Branched(_)
-                )
-            {
-                controls.push(ChoiceControl::ProcessorBranch);
-            }
-            if let Some(state) = draft.active_state() {
-                controls.push(ChoiceControl::ProcessorStateRelay);
-                if matches!(state.policy, processor_draft::StatePolicyDraft::Default(_)) {
-                    controls.push(ChoiceControl::ProcessorStateField);
-                }
-            }
-            if let Some(route) = draft.active_route() {
-                if matches!(
-                    route.inherit,
-                    InheritDraft::AllExcept(_) | InheritDraft::Fields(_)
-                ) {
-                    controls.push(ChoiceControl::ProcessorInputField);
-                }
-                if matches!(route.branch, RouteBranchDraft::Branched { .. }) {
-                    controls.push(ChoiceControl::ProcessorRouteBranch);
-                    controls.push(ChoiceControl::ProcessorBranchField);
-                }
-                controls.push(ChoiceControl::ProcessorOutputField);
-                if matches!(route.message_error, MessageErrorDraft::SendTo { .. }) {
-                    controls.push(ChoiceControl::ProcessorErrorRelay);
-                    controls.push(ChoiceControl::ProcessorErrorField);
-                }
-            }
-            controls
-        }
+        | CreateKind::WindowProcessor
+        | CreateKind::Correlator
+        | CreateKind::Reingestor => signals.processor_open_controls(),
         CreateKind::Udf => Vec::new(),
         CreateKind::User
         | CreateKind::Resource
@@ -2557,6 +2611,12 @@ pub(crate) fn CreateDialog(
                         <Show when=move || signals.open.get() == Some(CreateKind::Reorderer) fallback=|| ()>
                             <ProcessorEditor family=ProcessorFamily::Reorderer signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
                         </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::WindowProcessor) fallback=|| ()>
+                            <ProcessorEditor family=ProcessorFamily::Window signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::Correlator) fallback=|| ()>
+                            <ProcessorEditor family=ProcessorFamily::Correlator signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
                         <Show when=move || signals.open.get() == Some(CreateKind::Reingestor) fallback=|| ()>
                             <ProcessorEditor family=ProcessorFamily::Reingestor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
                         </Show>
@@ -2589,6 +2649,8 @@ pub(crate) fn CreateDialog(
                                         Some(CreateKind::Junction) => signals.junction.get().if_not_exists,
                                         Some(CreateKind::Deduplicator) => signals.deduplicator.get().if_not_exists,
                                         Some(CreateKind::Reorderer) => signals.reorderer.get().if_not_exists,
+                                        Some(CreateKind::WindowProcessor) => signals.window.get().if_not_exists,
+                                        Some(CreateKind::Correlator) => signals.correlator.get().if_not_exists,
                                         Some(CreateKind::Reingestor) => signals.reingestor.get().if_not_exists,
                                         Some(CreateKind::Subscription) | None => false,
                                     }
@@ -2618,6 +2680,8 @@ pub(crate) fn CreateDialog(
                                             Some(CreateKind::Junction) => signals.junction.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::Deduplicator) => signals.deduplicator.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::Reorderer) => signals.reorderer.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::WindowProcessor) => signals.window.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Correlator) => signals.correlator.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::Reingestor) => signals.reingestor.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::Subscription) | None => {}
                                         }

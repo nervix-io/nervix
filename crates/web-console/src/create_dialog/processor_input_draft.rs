@@ -2,8 +2,9 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** The browser order of one `FROM` list's relays, their source predicates, the active
-//!   input, the list's optional collection bounds, and their conversion to current input Models.
+//! - **Owns.** The browser order of one `FROM`, `LEFT FROM` or `RIGHT FROM` list's relays, their
+//!   source predicates, the active input, the list's optional collection bounds, how its
+//!   refusals name it, and their conversion to current input Models.
 //! - **Depends on.** Typed vocabulary, expression parsing, and selected browser references.
 //! - **Must not know.** Registry state, runtime input collection, or session transport.
 
@@ -48,7 +49,45 @@ impl InputDraft {
     }
 }
 
-/// The ordered relays one `FROM` list reads, the input being edited, and the list's collection.
+/// Which input list of a processor a draft list is, as its refusals name it: the `FROM` list of
+/// most processors, or one side of a correlator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum InputList {
+    From,
+    Left,
+    Right,
+}
+
+impl InputList {
+    /// The list's relays as a refusal names them.
+    pub(super) fn relays(self) -> &'static str {
+        match self {
+            Self::From => "input",
+            Self::Left => "LEFT FROM",
+            Self::Right => "RIGHT FROM",
+        }
+    }
+
+    /// One input of the list as a refusal names it.
+    pub(super) fn input(self) -> &'static str {
+        match self {
+            Self::From => "Input",
+            Self::Left => "LEFT FROM input",
+            Self::Right => "RIGHT FROM input",
+        }
+    }
+
+    /// The list's collection clause as a refusal names it.
+    pub(super) fn collection(self) -> &'static str {
+        match self {
+            Self::From => "COLLECT FOR",
+            Self::Left => "LEFT FROM COLLECT FOR",
+            Self::Right => "RIGHT FROM COLLECT FOR",
+        }
+    }
+}
+
+/// The ordered relays one input list reads, the input being edited, and the list's collection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct InputListDraft {
     pub(super) relays: Vec<InputDraft>,
@@ -136,10 +175,13 @@ impl InputListDraft {
     }
 
     /// The ordered relays with their predicates and collection, or the first missing, stale,
-    /// repeated or unreadable input in list order.
-    pub(super) fn build(&self) -> error_stack::Result<ProcessorInputs, ProcessorDraftError> {
+    /// repeated or unreadable input in list order, named as `list`.
+    pub(super) fn build(
+        &self,
+        list: InputList,
+    ) -> error_stack::Result<ProcessorInputs, ProcessorDraftError> {
         if self.relays.is_empty() {
-            return Err(Report::new(ProcessorDraftError::Inputs));
+            return Err(Report::new(ProcessorDraftError::Inputs { list }));
         }
         let mut from = Vec::new();
         let mut input_where = Vec::new();
@@ -148,12 +190,21 @@ impl InputListDraft {
             let number = index + 1;
             let relay = match &input.relay {
                 Some(relay) => relay.current_name().ok_or_else(|| {
-                    Report::new(ProcessorDraftError::InputChanged { index: number })
+                    Report::new(ProcessorDraftError::InputChanged {
+                        list,
+                        index: number,
+                    })
                 })?,
-                None => return Err(Report::new(ProcessorDraftError::Input { index: number })),
+                None => {
+                    return Err(Report::new(ProcessorDraftError::Input {
+                        list,
+                        index: number,
+                    }));
+                }
             };
             if !seen_inputs.insert(relay.clone()) {
                 return Err(Report::new(ProcessorDraftError::DuplicateInput {
+                    list,
                     relay: relay.clone(),
                 }));
             }
@@ -161,15 +212,19 @@ impl InputListDraft {
             if !input.where_clause.trim().is_empty() {
                 input_where.push(ProcessorInputWhere {
                     relay: relay.clone(),
-                    where_clause: parse_expression(input.where_clause.trim())
-                        .change_context(ProcessorDraftError::InputWhere { index: number })?,
+                    where_clause: parse_expression(input.where_clause.trim()).change_context(
+                        ProcessorDraftError::InputWhere {
+                            list,
+                            index: number,
+                        },
+                    )?,
                 });
             }
         }
         let mut inputs = ProcessorInputs::new(from, input_where);
         if let Some(collect) = &self.collect {
             if collect.collect_for.trim().is_empty() {
-                return Err(Report::new(ProcessorDraftError::CollectFor));
+                return Err(Report::new(ProcessorDraftError::CollectFor { list }));
             }
             inputs.collect_policy = Some(InputCollectPolicy {
                 collect_for: collect.collect_for.trim().to_string(),

@@ -1634,7 +1634,7 @@ fn deduplicator_and_reorderer_forms_edit_ordered_keys_after_their_node_branch() 
             signals
                 .choice_query(ChoiceControl::ProcessorInputRelay)
                 .err(),
-            Some("Open a junction, deduplicator, reorderer or reingestor form first")
+            Some("Open a processor form first")
         );
         assert!(!ChoiceControl::ProcessorBranch.applies_to(CreateKind::Emitter));
         assert_eq!(CreateKind::Emitter.processor_family(), None);

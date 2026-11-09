@@ -340,6 +340,12 @@ pub(super) fn selected_choice(
                 })
             })
         }
+        (
+            ChoiceControl::ProcessorRightInputRelay
+            | ChoiceControl::ProcessorLeftTimeoutRelay
+            | ChoiceControl::ProcessorRightTimeoutRelay,
+            value,
+        ) => signals.processor_scope_selected(control, value),
         (ChoiceControl::ProcessorErrorRelay, ChoiceValue::Model(node)) => {
             signals.active_processor().is_some_and(|signal| {
                 signal.get().active_route().is_some_and(|route| {
@@ -623,6 +629,17 @@ pub(super) fn select_choice(signals: CreateSignals, control: ChoiceControl, valu
                 });
             }
         }
+        (
+            ChoiceControl::ProcessorRightInputRelay
+            | ChoiceControl::ProcessorLeftTimeoutRelay
+            | ChoiceControl::ProcessorRightTimeoutRelay
+            | ChoiceControl::ProcessorAggregateField
+            | ChoiceControl::ProcessorCorrelateLeftField
+            | ChoiceControl::ProcessorCorrelateRightField
+            | ChoiceControl::ProcessorRouteLeftField
+            | ChoiceControl::ProcessorRouteRightField,
+            value,
+        ) => signals.select_processor_scope_choice(control, value),
         (ChoiceControl::ProcessorErrorField, ChoiceValue::Field(field)) => {
             if let Some(signal) = signals.active_processor() {
                 signal.update(|draft| {

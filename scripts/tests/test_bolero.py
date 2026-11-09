@@ -542,6 +542,7 @@ class InventoryTests(unittest.TestCase):
             "registry-stored-models-corruption": 44,
             "inferencer-tensor-columns": 1,
             "console-emitter-drafts": 2,
+            "console-processor-drafts": 2,
             "client-requests": 8,
         }.items():
             with self.subTest(target=target):

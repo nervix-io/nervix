@@ -29,6 +29,7 @@ nervix-primitives = { workspace = true }
 nervix-recovery = { workspace = true }
 strum = { workspace = true }
 thiserror = { workspace = true }
+ubyte = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["js", "v7"] }
 

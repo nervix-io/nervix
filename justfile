@@ -913,6 +913,16 @@ test-wire-schema-lists *args: build-web-console wasm-processor-guests download-o
     cargo test --package nervix-scenarios --test scenarios -- \
         --input tests/features/runtime/wire_schema_lists.feature "$@"
 
+# Create window processors and correlators through the web console's visual forms on in-process
+# one- and three-node clusters, with only the in-process server's prerequisites.
+[positional-arguments]
+test-visual-window-correlator *args: build-web-console wasm-processor-guests download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/web-console/visual_create_window_correlator.feature "$@"
+
 # Verify every processor/emitter acknowledgement clause through public CREATE and SHOW CREATE.
 [positional-arguments]
 test-acknowledgement-clauses *args: generate-test-onnx download-onnxruntime build-web-console wasm-processor-guests build-test-cli

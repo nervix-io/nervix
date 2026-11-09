@@ -1,10 +1,10 @@
-//! Ordered transforming routes shared by visual junctions, deduplicators, reorderers and
-//! reingestors.
+//! Ordered output routes shared by every visual processor family.
 //!
 //! Layer: edges.
 //!
 //! - **Owns.** Browser route order, reingestor branch choices, construction, flush and message
-//!   error controls until each route is complete.
+//!   error controls until each route is complete, showing only the construction and flush
+//!   controls the family's route contract admits.
 //! - **Depends on.** Shared route drafts, typed choices, and the ordered construction editors.
 //! - **Must not know.** Data-plane routing, buffering, or error execution.
 
@@ -25,6 +25,7 @@ use super::{
     processor_editor::indices,
     processor_inheritance_editor::ProcessorInheritanceEditor,
     processor_invocation_editor::ProcessorInvocationEditor,
+    processor_route_references::ProcessorRouteReferences,
 };
 
 fn route_flush_interval(signals: CreateSignals, family: ProcessorFamily) -> String {
@@ -56,6 +57,60 @@ pub(super) fn ProcessorRouteEditor(
 ) -> impl IntoView {
     let draft = signals.processor(family);
     let pending = move || signals.progress.get().is_pending();
+    let contract = family.route_contract();
+    let inheritance = contract.transforms().then(|| {
+        view! { <ProcessorInheritanceEditor family=family signals=signals request_tx=request_tx session_generation=session_generation /> }
+    });
+    let invocations = contract
+        .transforms()
+        .then(|| view! { <ProcessorInvocationEditor family=family signals=signals /> });
+    let flush = contract.flushes().then(|| view! {
+        <fieldset class="create-field create-processor-flush">
+            <legend>"Flush policy"</legend>
+            <button type="button" data-flush="immediate"
+                class:active=move || draft.get().active_route().is_some_and(|route| matches!(route.flush, FlushDraft::Immediate))
+                disabled=pending
+                on:click=move |_| { draft.update(|state| {
+                    if let Some(route) = state.active_route_mut() { route.flush = FlushDraft::Immediate; }
+                }); signals.edit(); }>"IMMEDIATE"</button>
+            <button type="button" data-flush="each"
+                class:active=move || draft.get().active_route().is_some_and(|route| matches!(route.flush, FlushDraft::Each { .. }))
+                disabled=pending
+                on:click=move |_| { draft.update(|state| {
+                    if let Some(route) = state.active_route_mut() {
+                        route.flush = FlushDraft::Each { interval: String::new(), max_batch_size: String::new() };
+                    }
+                }); signals.edit(); }>"EACH"</button>
+        </fieldset>
+        <Show when=move || draft.get().active_route().is_some_and(|route| matches!(route.flush, FlushDraft::Each { .. })) fallback=|| ()>
+            <label class="create-field"><span>"Flush interval"</span>
+                <input class="create-processor-flush-interval" type="text" autocomplete="off"
+                    prop:value=move || route_flush_interval(signals, family)
+                    disabled=pending
+                    on:input=move |event| {
+                        let value = event_target_value(&event);
+                        draft.update(|state| {
+                            if let Some(route) = state.active_route_mut()
+                                && let FlushDraft::Each { interval, .. } = &mut route.flush { *interval = value; }
+                        });
+                        signals.edit();
+                    } />
+            </label>
+            <label class="create-field"><span>"Maximum batch size"</span>
+                <input class="create-processor-flush-size" type="text" autocomplete="off"
+                    prop:value=move || route_flush_size(signals, family)
+                    disabled=pending
+                    on:input=move |event| {
+                        let value = event_target_value(&event);
+                        draft.update(|state| {
+                            if let Some(route) = state.active_route_mut()
+                                && let FlushDraft::Each { max_batch_size, .. } = &mut route.flush { *max_batch_size = value; }
+                        });
+                        signals.edit();
+                    } />
+            </label>
+        </Show>
+    });
     let section = view! {
         <section class="create-processor-routes">
             <h3>"Ordered output routes"</h3>
@@ -130,11 +185,12 @@ pub(super) fn ProcessorRouteEditor(
                 <ChoiceGroup class_name="create-processor-route-relay" label="Output relay"
                     control=ChoiceControl::ProcessorRouteRelay signals=signals request_tx=request_tx
                     session_generation=session_generation show_detail=true />
-                <ProcessorInheritanceEditor family=family signals=signals request_tx=request_tx session_generation=session_generation />
+                {inheritance}
                 <div class="create-processor-output-assignments">
                     <ChoiceGroup class_name="create-processor-output-fields" label="Add output assignment"
                         control=ChoiceControl::ProcessorOutputField signals=signals request_tx=request_tx
                         session_generation=session_generation show_detail=true />
+                    <ProcessorRouteReferences family=family signals=signals request_tx=request_tx session_generation=session_generation />
                     <ProcessorAssignmentRows family=family area=AssignmentArea::Output signals=signals />
                 </div>
                 <label class="create-field"><span>"Route WHERE expression (optional)"</span>
@@ -155,52 +211,8 @@ pub(super) fn ProcessorRouteEditor(
                             signals.edit();
                         } />
                 </label>
-                <ProcessorInvocationEditor family=family signals=signals />
-                <fieldset class="create-field create-processor-flush">
-                    <legend>"Flush policy"</legend>
-                    <button type="button" data-flush="immediate"
-                        class:active=move || draft.get().active_route().is_some_and(|route| matches!(route.flush, FlushDraft::Immediate))
-                        disabled=pending
-                        on:click=move |_| { draft.update(|state| {
-                            if let Some(route) = state.active_route_mut() { route.flush = FlushDraft::Immediate; }
-                        }); signals.edit(); }>"IMMEDIATE"</button>
-                    <button type="button" data-flush="each"
-                        class:active=move || draft.get().active_route().is_some_and(|route| matches!(route.flush, FlushDraft::Each { .. }))
-                        disabled=pending
-                        on:click=move |_| { draft.update(|state| {
-                            if let Some(route) = state.active_route_mut() {
-                                route.flush = FlushDraft::Each { interval: String::new(), max_batch_size: String::new() };
-                            }
-                        }); signals.edit(); }>"EACH"</button>
-                </fieldset>
-                <Show when=move || draft.get().active_route().is_some_and(|route| matches!(route.flush, FlushDraft::Each { .. })) fallback=|| ()>
-                    <label class="create-field"><span>"Flush interval"</span>
-                        <input class="create-processor-flush-interval" type="text" autocomplete="off"
-                            prop:value=move || route_flush_interval(signals, family)
-                            disabled=pending
-                            on:input=move |event| {
-                                let value = event_target_value(&event);
-                                draft.update(|state| {
-                                    if let Some(route) = state.active_route_mut()
-                                        && let FlushDraft::Each { interval, .. } = &mut route.flush { *interval = value; }
-                                });
-                                signals.edit();
-                            } />
-                    </label>
-                    <label class="create-field"><span>"Maximum batch size"</span>
-                        <input class="create-processor-flush-size" type="text" autocomplete="off"
-                            prop:value=move || route_flush_size(signals, family)
-                            disabled=pending
-                            on:input=move |event| {
-                                let value = event_target_value(&event);
-                                draft.update(|state| {
-                                    if let Some(route) = state.active_route_mut()
-                                        && let FlushDraft::Each { max_batch_size, .. } = &mut route.flush { *max_batch_size = value; }
-                                });
-                                signals.edit();
-                            } />
-                    </label>
-                </Show>
+                {invocations}
+                {flush}
                 <fieldset class="create-field create-processor-message-error">
                     <legend>"On message error"</legend>
                     <button type="button" data-error="ignore"
