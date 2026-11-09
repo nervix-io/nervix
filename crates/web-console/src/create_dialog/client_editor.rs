@@ -42,6 +42,7 @@ pub(super) fn ClientEditor(
         <ClientSignalingEditor signals=signals request_tx=request_tx session_generation=session_generation />
         <ClientConfigEditor signals=signals />
     }
+    .into_any()
 }
 
 /// The client's connector and the bounds of its connection pool.
@@ -86,6 +87,7 @@ fn ClientTransportEditor(signals: CreateSignals) -> impl IntoView {
             </div>
         </Show>
     }
+    .into_any()
 }
 
 /// The resource version the client mounts.
@@ -112,6 +114,7 @@ fn ClientMountEditor(
                 session_generation=session_generation />
         </Show>
     }
+    .into_any()
 }
 
 /// The signaling protocol a WebSockets client runs on connect.
@@ -136,6 +139,7 @@ fn ClientSignalingEditor(
             </Show>
         </Show>
     }
+    .into_any()
 }
 
 /// The client's connector CONFIG entries and which of them are secret.
@@ -220,4 +224,5 @@ fn ClientConfigEditor(signals: CreateSignals) -> impl IntoView {
                 }>"Add configuration"</button>
         </div>
     }
+    .into_any()
 }
