@@ -731,6 +731,14 @@ identity. The decision boundary computes it once; the runtime receives the typed
 reads the inferencer Model to reconstruct it. Snapshot restoration accepts tensors only under that
 identity and the same branch incarnation, and validates their shapes before installation.
 
+`InferencerStateDescriptor` is the archive-owned projection of that identity: domain/entity/unit,
+schema and model fingerprints, paired optional typed branch fields/fingerprint, nonzero incarnation,
+revision, ordered shapes and exact raw length/digest. Decoding validates names, field order,
+branch presence, positive axes and checked products before tensor allocation. Scalar shape `[]`
+is one element. The manifest reader binds the descriptor to its exact `state.bin` path, length and
+digest. Restore admits the branch under the restored declaration and model plan, then wraps identical
+F32 bits in the current snapshot frame; the archive never adopts a native snapshot representation.
+
 The runtime Kafka offset key remains schema-independent. A backup archive also records the
 ingestor's scheduled fingerprint with those offsets, so restore applies them only to the same
 ingestor contract after publishing its target schedule.

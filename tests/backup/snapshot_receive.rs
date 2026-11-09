@@ -15,6 +15,74 @@ use nervix_models::ModelKind;
 
 use super::*;
 
+#[then(
+    expr = "in a multi-node cluster backup {string} inferencer {string} is installed on its \
+            scheduled owner and replicas"
+)]
+async fn restored_inferencer_replicas(world: &mut ScenarioWorld, file: String, inferencer: String) {
+    if world.cluster().node_ids().len() == 1 {
+        return;
+    }
+    let archive = described_archive(archive_path(world, &file)).await;
+    let mut placements = Vec::new();
+    for state in archive.domains.iter().flat_map(|domain| &domain.state) {
+        if let DescribedRuntimeState::Inferencer { descriptor, .. } = state {
+            if descriptor.entity.as_str() != inferencer {
+                continue;
+            }
+            placements.push((
+                StatePlacementEnvelope {
+                    domain: scenario_domain(world, &world.domain),
+                    state: RuntimeState::Inferencer {
+                        schema: descriptor.schema,
+                        model: descriptor.model,
+                    },
+                    kind: ModelKind::Inferencer,
+                    identifier: descriptor.entity.clone(),
+                    unit: descriptor.unit,
+                    branch_key: descriptor.branch.as_ref().map(|fields| {
+                        fields
+                            .iter()
+                            .cloned()
+                            .map(nervix_backup::StateField::into_remote)
+                            .collect()
+                    }),
+                },
+                descriptor.revision,
+            ));
+        }
+    }
+    assert_eq!(
+        placements.len(),
+        2,
+        "the source archive names both inference tensor frames"
+    );
+    let leader = current_leader_node(world).await;
+    let status = world
+        .cluster()
+        .run_command(&leader, &world.domain, "SHOW CLUSTER STATUS;")
+        .await
+        .assured("the restored schedule is publicly visible");
+    let (owner, replicas) =
+        scheduled_node_placement_from_status(&status, &world.domain, "inferencer", &inferencer)
+            .assured("the restored inference unit is scheduled");
+    assert!(
+        !replicas.is_empty(),
+        "the three-node restore installs a replica"
+    );
+    assert_ne!(
+        owner, leader,
+        "the restore coordinator installs on a remote owner"
+    );
+    world
+        .cluster()
+        .verify_installed_inferencer_checkpoints(owner, &replicas, placements)
+        .await
+        .assured(
+            "the installed owner and replicas contain both complete archived frames before START",
+        );
+}
+
 #[given(expr = "two snapshot tenant placeholders contain {int} bytes each")]
 fn snapshot_tenant_placeholders(world: &mut ScenarioWorld, bytes: usize) {
     assert!((1000..=3000).contains(&bytes));
