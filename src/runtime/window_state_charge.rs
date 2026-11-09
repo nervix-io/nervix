@@ -99,6 +99,11 @@ impl<'plan> WindowStateCharge<'plan> {
         Ok(self.required)
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "Arrow arrays supply allocation and slice sizes for the \
+                                   immutable retained batch; no callback executes operator code")
+    )]
     fn admission_bytes(
         message: &RelayMessage,
         arguments: &Arc<WindowArgumentColumns>,
