@@ -307,10 +307,13 @@ a version is never transaction content, so reverting the transaction could not t
 origin and call count, and optional typed `UploadFailure`. `IdentityConflict` means the identity
 already names another archive; its `version` is the version bound to that identity. Preserve the
 original identity and bytes when recovering that upload, and use a fresh identity for a different
-logical upload. The host outcome exposes the failure through `Outcome::upload_failure()`, Python's
-`Outcome.upload_failure`, Java's `Outcome.uploadFailure()` and the C ABI's
-`nx_outcome_upload_failure`. The optional result is absent for a successful upload or any other
-command. These accessors return the typed cause directly, without matching the diagnostic text.
+logical upload. The failure is absent for a successful upload, and `resource_upload` is absent for
+any other command; read the typed cause from it, never from the diagnostic text.
+
+The other libraries read the same typed failure from their outcomes, which each guide shows with
+a tested example: [Python](client-library-python.md#execute-plexus),
+[Ruby](client-library-ruby.md#execute-plexus), [JVM](client-library-jvm.md#execute-plexus) and
+[C and C++](client-library-c.md#execute-plexus).
 
 ## Following A Domain Clock
 
