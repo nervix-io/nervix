@@ -4741,6 +4741,11 @@ test-chaos-output-boundary selection="all":
 test-chaos-verifier-self-check:
     exec bash scripts/chaos/tests/verifier-self-check-self-test.sh
 
+# End a verifier self-check at its deadline and by its controller while the production rate probe
+# holds its namespace owners, and prove nothing of the check outlives it. Needs Docker.
+test-chaos-verifier-cancellation:
+    exec bash scripts/chaos/tests/verifier-cancellation-self-test.sh
+
 # Preserve the package probe's native refusal and exact retained container lifetime.
 test-chaos-image-package:
     exec bash scripts/chaos/tests/image-package-self-test.sh
