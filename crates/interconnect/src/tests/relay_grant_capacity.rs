@@ -16,6 +16,99 @@
 
 use super::*;
 
+#[nervix_primitives::test]
+async fn receive_bound_refusal_creates_no_attempt_and_a_revised_claim_is_adopted() {
+    let receive = PeerReceiveSettings::resolve(
+        Some(ubyte::ByteUnit::Byte(8)),
+        None,
+        None,
+        None,
+        &nervix_execution::OperationLimits::default(),
+    )
+    .expect("positive bounded claim");
+    let mut pair = connected_transports_with_options(TransportOptions {
+        peer_receive: Some(receive),
+        ..TransportOptions::default()
+    })
+    .await;
+    let executor = Executor::default();
+    let mut payload = RelayPayload {
+        decoded_bytes: 0,
+        delivery: RelayDelivery {
+            channel_incarnation: [91; 16],
+            sequence: 0,
+        },
+        kind: RelayPayloadKind::Routed,
+        domain: DomainName::parse("test").expect("domain"),
+        relay: RelayName::parse("records").expect("relay"),
+        unit: nervix_models::Unit::SINGLE,
+        key: None,
+        batch_ipc: executor
+            .try_charge_owned(MemoryClass::Relay, vec![1; 16])
+            .expect("body charge"),
+        metadata: Vec::new(),
+        acks: Vec::new(),
+        admission: Some(RemoteAckRegistration {
+            registrar: ClusterNodeIdentity::new(
+                pair.node_a.clone(),
+                ClusterNodeIncarnation::new(1),
+            ),
+            ack_id: 91,
+        }),
+    };
+    let refusal = pair
+        .transport_a
+        .send(&pair.node_b, Envelope::RelayPayload(payload.clone()))
+        .await
+        .expect_err("the receiver cannot accept sixteen bytes");
+    assert!(
+        matches!(refusal.current_context(), TransportError::RelayBoundsRefused(bounds) if bounds.relay_batch_bytes.get() == 8)
+    );
+    assert!(matches!(
+        pair.incoming_b.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    payload.batch_ipc = executor
+        .try_charge_owned(MemoryClass::Relay, vec![1; 8])
+        .expect("smaller body charge");
+    let mut record = nervix_models::NodeCapabilityRecord {
+        identity: ClusterNodeIdentity::new(pair.node_b.clone(), ClusterNodeIncarnation::new(1)),
+        capabilities: nervix_models::NodeCapabilities {
+            cpu_count: None,
+            memory_bytes: None,
+            receive: receive.bounds(),
+        },
+    };
+    record.capabilities.receive.relay_batch_bytes = std::num::NonZeroU64::new(4).expect("positive");
+    pair.transport_a
+        .publish_peer_capabilities(&BTreeMap::from([(pair.node_b.clone(), record.clone())]));
+    let refusal = pair
+        .transport_a
+        .send(&pair.node_b, Envelope::RelayPayload(payload.clone()))
+        .await
+        .expect_err("the committed four-byte claim governs this sender");
+    assert!(
+        matches!(refusal.current_context(), TransportError::RelayBoundsRefused(bounds) if bounds.relay_batch_bytes.get() == 4)
+    );
+    record.identity = ClusterNodeIdentity::new(pair.node_b.clone(), ClusterNodeIncarnation::new(2));
+    record.capabilities.receive = receive.bounds();
+    pair.transport_a
+        .publish_peer_capabilities(&BTreeMap::from([(pair.node_b.clone(), record)]));
+    pair.transport_a
+        .send(&pair.node_b, Envelope::RelayPayload(payload))
+        .await
+        .expect("the raised committed bound admits the same unused delivery sequence");
+    let received = timeout(Duration::from_secs(2), pair.incoming_b.recv())
+        .await
+        .expect("bounded receive")
+        .expect("open intake");
+    assert!(
+        matches!(received.envelope, Envelope::RelayPayload(payload) if payload.batch_ipc.len() == 8)
+    );
+    pair.transport_a.shutdown().await;
+    pair.transport_b.shutdown().await;
+}
+
 /// A receiver whose relay budget has no room left at all still answers a grant request with the
 /// typed capacity refusal, rather than waiting on that budget to read the request, and grants the
 /// same delivery once the room returns.
@@ -31,6 +124,7 @@ async fn a_grant_asked_while_the_relay_budget_is_full_is_refused_for_capacity() 
         ..
     } = connected_transports().await;
     let payload = RelayPayload {
+        decoded_bytes: 0,
         delivery: RelayDelivery {
             channel_incarnation: [4; 16],
             sequence: 0,
@@ -100,6 +194,7 @@ async fn a_grant_request_larger_than_the_free_relay_room_is_refused_for_capacity
     let records = 4096;
     let ingested_at = Timestamp::from_unix_nanos(1_000);
     let payload = RelayPayload {
+        decoded_bytes: 0,
         delivery: RelayDelivery {
             channel_incarnation: [5; 16],
             sequence: 0,
@@ -189,6 +284,7 @@ async fn a_free_room_decode_reports_a_full_class_instead_of_waiting() {
         },
         body_bytes: 1,
         metadata: wire::RelayMetadata {
+            decoded_bytes: 0,
             kind: RelayPayloadKind::Routed,
             domain: DomainName::parse("test").expect("test domain should be valid"),
             relay: RelayName::parse("relay").expect("test relay should be valid"),

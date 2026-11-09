@@ -169,7 +169,7 @@ fn bolero_consensus_state_records_recover_every_stored_value() {
 
 /// The tag every keyed state-machine record family's keys begin with, in the order recovery loads
 /// them.
-const RECORD_TAGS: [u8; 23] = *b"sdaucvronfxItPphijyklqe";
+const RECORD_TAGS: [u8; 24] = *b"sdaucvronfCxItPphijyklqe";
 
 impl StateKeyspace {
     /// Every record the state-machine keyspace holds, keyed by its raw key.
@@ -304,6 +304,9 @@ fn assert_readers_can_rely_on(state: &StateMachineData) {
     }
     for (name, user) in state.users.iter() {
         assert_eq!(&user.name, name);
+    }
+    for (node, record) in state.node_capabilities.iter() {
+        assert_eq!(record.identity.node_id(), node);
     }
     for (id, version) in state.resources.versions.iter() {
         assert_eq!(&version.id, id);

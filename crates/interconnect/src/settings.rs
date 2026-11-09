@@ -1,8 +1,8 @@
-//! The receive window a node grants the streams of its bulk connections, declared as a setting.
+//! Receiver-owned relay, bulk chunk and flow-control capacity settings.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The setting definition of the bulk receive window, its single default, and the
+//! - **Owns.** Peer receive setting definitions and their executor-relative limits, and the
 //!   HTTP/2 bound that window and the connection window derived from it must fit.
 //! - **Depends on.** The vocabulary's setting classes and byte quantities, and the bulk pool's
 //!   stream partition.
@@ -18,11 +18,117 @@
 
 use error_stack::Report;
 use meticulous::ResultExt as _;
-use nervix_models::{NodeCapabilities, Setting, SettingDefinition};
+use nervix_execution::OperationLimits;
+use nervix_models::{NodeCapabilities, PeerReceiveBounds, Setting, SettingDefinition};
 use thiserror::Error;
 use ubyte::ByteUnit;
 
 use crate::PoolClass;
+
+/// Why the receiver cannot enforce an advertised capacity claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum PeerReceiveSettingsError {
+    #[error("{setting} must be greater than zero and at most the executor's {maximum} bytes")]
+    Operation { setting: &'static str, maximum: u64 },
+    #[error("the bulk receive window cannot be advertised")]
+    Window,
+}
+
+macro_rules! operation_bound {
+    ($definition:ident, $name:literal, $field:ident) => {
+        pub struct $definition;
+        impl SettingDefinition for $definition {
+            type Class = NodeCapabilities;
+            type Value = ByteUnit;
+            type Context = OperationLimits;
+            type Error = PeerReceiveSettingsError;
+            const NAME: &'static str = $name;
+            const DERIVATION: Option<&'static str> =
+                Some("the executor's corresponding operation limit");
+            fn default_value(limits: &OperationLimits) -> ByteUnit {
+                limits.$field
+            }
+            fn validate(
+                value: &ByteUnit,
+                limits: &OperationLimits,
+            ) -> Result<(), Report<Self::Error>> {
+                if value.as_u64() == 0 || *value > limits.$field {
+                    return Err(Report::new(PeerReceiveSettingsError::Operation {
+                        setting: Self::NAME,
+                        maximum: limits.$field.as_u64(),
+                    }));
+                }
+                Ok(())
+            }
+        }
+    };
+}
+
+operation_bound!(
+    RelayBatchBytes,
+    "interconnect-relay-batch-bytes",
+    relay_encoded_bytes
+);
+operation_bound!(
+    RelayDecodedBytes,
+    "interconnect-relay-decoded-bytes",
+    relay_decoded_bytes
+);
+operation_bound!(
+    BulkChunkBytes,
+    "interconnect-bulk-chunk-bytes",
+    bulk_chunk_bytes
+);
+
+/// The receiver's declared bounds, validated independently of public client admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerReceiveSettings {
+    pub relay_batch_bytes: Setting<RelayBatchBytes>,
+    pub relay_decoded_bytes: Setting<RelayDecodedBytes>,
+    pub bulk_chunk_bytes: Setting<BulkChunkBytes>,
+    pub bulk_window_bytes: Setting<BulkReceiveWindow>,
+}
+
+impl PeerReceiveSettings {
+    pub fn resolve(
+        relay: Option<ByteUnit>,
+        decoded: Option<ByteUnit>,
+        chunk: Option<ByteUnit>,
+        window: Option<ByteUnit>,
+        limits: &OperationLimits,
+    ) -> Result<Self, Report<PeerReceiveSettingsError>> {
+        Ok(Self {
+            relay_batch_bytes: Setting::resolve(relay, limits)?,
+            relay_decoded_bytes: Setting::resolve(decoded, limits)?,
+            bulk_chunk_bytes: Setting::resolve(chunk, limits)?,
+            bulk_window_bytes: BulkReceiveWindow::resolve(window)
+                .map_err(|error| error.change_context(PeerReceiveSettingsError::Window))?,
+        })
+    }
+
+    pub fn bounds(&self) -> PeerReceiveBounds {
+        use std::num::NonZeroU64;
+
+        use meticulous::OptionExt as _;
+        PeerReceiveBounds {
+            relay_batch_bytes: NonZeroU64::new(self.relay_batch_bytes.value().as_u64())
+                .assured("validated positive relay bound"),
+            relay_decoded_bytes: NonZeroU64::new(self.relay_decoded_bytes.value().as_u64())
+                .assured("validated positive decoded bound"),
+            bulk_chunk_bytes: NonZeroU64::new(self.bulk_chunk_bytes.value().as_u64())
+                .assured("validated positive chunk bound"),
+            bulk_window_bytes: NonZeroU64::new(self.bulk_window_bytes.value().as_u64())
+                .assured("validated positive window"),
+        }
+    }
+}
+
+impl Default for PeerReceiveSettings {
+    fn default() -> Self {
+        Self::resolve(None, None, None, None, &OperationLimits::default())
+            .assured("default receive settings fit their operation limits")
+    }
+}
 
 /// The largest flow-control window HTTP/2 can advertise, for one stream or a whole connection.
 #[cfg_attr(
@@ -98,11 +204,6 @@ impl SettingDefinition for BulkReceiveWindow {
 }
 
 impl BulkReceiveWindow {
-    /// The window a node grants when nothing overrides it.
-    pub(crate) fn default_window() -> Setting<Self> {
-        Self::resolve(None).assured("the default bulk receive window satisfies its own validation")
-    }
-
     /// Resolve the default or a local capacity claim through the same validation boundary.
     pub fn resolve(
         value: Option<ByteUnit>,

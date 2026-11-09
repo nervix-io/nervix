@@ -41,17 +41,10 @@ pub(super) const REMOTE_RELAY_INSTANTIATION_POLL: Duration = Duration::from_mill
 
 pub(super) const REMOTE_ACK_ALIVE_INTERVAL: Duration = Duration::from_millis(100);
 
-/// How long a node that forwarded a record acknowledgement with an admitted relay delivery waits
-/// without a report about it from the receiver before it fails the acknowledgement.
-///
-/// The receiver reports an acknowledgement it holds `REMOTE_ACK_ALIVE_INTERVAL` after its previous
-/// report was delivered or given up, and gives a report up after
-/// `RemoteDispatcher::DISPATCH_TIMEOUT`. Two consecutive reports that each exhaust that deadline
-/// stay inside this bound, so only a receiver that stopped reporting the acknowledgement altogether
-/// is silent this long: its terminal outcome was lost on the way back, its run ended, or its live
-/// view has missed this node's run for this long. A receiver holds its reports while this node's
-/// run is briefly missing from its live view, and gives the acknowledgement up only once the run
-/// has been missing past this bound and one sweep.
+/// Silence bound for a forwarded record ACK after admission. The next report starts
+/// `REMOTE_ACK_ALIVE_INTERVAL` after delivery or giving up at `DISPATCH_TIMEOUT`; two exhausted
+/// reports fit this bound. Longer silence means a lost outcome, ended run or missing registrar.
+/// A live-view gap ends held reports only after this bound plus one sweep.
 pub(super) const REMOTE_ACK_SILENCE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How often a node looks for forwarded record acknowledgements whose receiver fell silent.
@@ -91,6 +84,13 @@ enum FailedRelayAdmissionResolution {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub(super) enum RemoteDispatchError {
+    #[error("node '{target}' requires a smaller relay batch")]
+    ReceiveBounds {
+        target: ClusterNodeName,
+        bounds: nervix_models::PeerReceiveBounds,
+    },
+    #[error("one relay row exceeds node '{target}' receive bounds")]
+    RowAboveReceiveBounds { target: ClusterNodeName },
     #[error("remote correlation capacity ({capacity}) is exhausted")]
     CorrelationCapacity { capacity: usize },
     #[error("remote correlation identity space is exhausted")]
@@ -312,12 +312,7 @@ pub(super) struct RemoteDispatcher {
 pub(super) struct PendingRemoteAckDelivery {
     registry: Arc<RemoteDispatchRegistry>,
     registrations: Vec<Option<RemoteAckRegistration>>,
-    state: PendingRemoteAckDeliveryState,
-}
-
-enum PendingRemoteAckDeliveryState {
-    Registering,
-    Admitted,
+    admitted_rows: usize,
 }
 
 /// How storing the acknowledgement records of an outbound delivery ended.
@@ -334,20 +329,28 @@ impl PendingRemoteAckDelivery {
     }
 
     pub(super) fn admit(&mut self) {
-        self.registry.admit_acks(&self.registrations);
-        self.state = PendingRemoteAckDeliveryState::Admitted;
+        self.admit_prefix(self.registrations.len());
+    }
+
+    pub(super) fn admitted_rows(&self) -> usize {
+        self.admitted_rows
+    }
+
+    pub(super) fn admit_prefix(&mut self, rows: usize) {
+        assert!(rows >= self.admitted_rows && rows <= self.registrations.len());
+        self.registry
+            .admit_acks(&self.registrations[self.admitted_rows..rows]);
+        self.admitted_rows = rows;
     }
 }
 
 impl Drop for PendingRemoteAckDelivery {
     fn drop(&mut self) {
-        if matches!(self.state, PendingRemoteAckDeliveryState::Registering) {
-            for registration in self.registrations.iter().flatten() {
-                self.registry.resolve_ack(
-                    registration.ack_id,
-                    AckOutcome::NoAck("remote delivery ended before admission".to_string()),
-                );
-            }
+        for registration in self.registrations[self.admitted_rows..].iter().flatten() {
+            self.registry.resolve_ack(
+                registration.ack_id,
+                AckOutcome::NoAck("remote delivery ended before admission".to_string()),
+            );
         }
     }
 }
@@ -455,7 +458,7 @@ impl RemoteDispatcher {
         Ok(RemoteAckStorage::Stored(PendingRemoteAckDelivery {
             registry: self.registry.clone(),
             registrations,
-            state: PendingRemoteAckDeliveryState::Registering,
+            admitted_rows: 0,
         }))
     }
 
@@ -515,7 +518,7 @@ impl RemoteDispatcher {
     pub(super) async fn dispatch_admitted_relay_payload(
         &self,
         node_id: &ClusterNodeName,
-        mut payload: RelayPayload,
+        payload: &mut RelayPayload,
         branch_channel: &RelayOutboundSlot,
         deadline: Instant,
         capacity_refusals: GrantCapacityRefusals,
@@ -546,6 +549,13 @@ impl RemoteDispatcher {
         };
         if let Err(error) = dispatch_result {
             self.clear_pending_relay_admission(&registration);
+            if matches!(
+                error.current_context(),
+                RemoteDispatchError::ReceiveBounds { .. }
+            ) {
+                cancellation_guard.disarm();
+                return Err(error);
+            }
             let resolution = self
                 .resolve_failed_relay_admission(node_id, delivery, error, &mut cancellation_guard)
                 .await;
@@ -772,7 +782,7 @@ impl RemoteDispatcher {
         // and the first one serializes it inside its own outbound slot: the slot is what orders
         // the batches a node receives, so an encode performed ahead of it lets a later batch
         // overtake an earlier one.
-        let mut encoded_body: Option<ChargedBytes> = None;
+        let mut encoded_body: Option<(ChargedBytes, u64)> = None;
         for node_id in interested_nodes.keys() {
             nervix_primitives::task::consume_budget().await;
             if node_id == local_node_id || excluded_nodes.contains(node_id) {
@@ -784,10 +794,11 @@ impl RemoteDispatcher {
             let Some(_slot) = outbound_slot.lock_for_delivery().await else {
                 continue;
             };
-            let batch_ipc = match encoded_body.clone() {
+            let (batch_ipc, decoded_bytes) = match encoded_body.clone() {
                 Some(bytes) => bytes,
                 None => match batch.batch.encode_arrow_ipc(self.executor()).await {
                     Ok(bytes) => {
+                        let bytes = (bytes, batch_payload_bytes(batch.batch.batch()));
                         encoded_body = Some(bytes.clone());
                         bytes
                     }
@@ -806,9 +817,10 @@ impl RemoteDispatcher {
             // A session subscription never holds the relay owner's fan-out longer than the
             // dispatch bound, so a grant refused for capacity is retried only within it.
             if let Err(error) = self
-                .dispatch_admitted_relay_payload(
+                .dispatch_sliced_relay_payload(
                     node_id,
                     RelayPayload {
+                        decoded_bytes,
                         delivery,
                         kind: RelayPayloadKind::SubscriptionFanout,
                         domain: domain.clone(),
@@ -820,9 +832,11 @@ impl RemoteDispatcher {
                         acks: vec![None; batch.acks.len()],
                         admission: None,
                     },
+                    &batch.batch,
                     &outbound_slot,
                     Self::delivery_deadline(),
                     GrantCapacityRefusals::GiveUp,
+                    None,
                 )
                 .await
             {
@@ -837,21 +851,18 @@ impl RemoteDispatcher {
         }
     }
 
-    /// Sends `payload` to `node_id`, holding the delivery back, under
-    /// [`GrantCapacityRefusals::Hold`], while the receiver refuses its grant for capacity.
-    ///
-    /// [`RelaySendAttempts`] decides after every failed attempt whether and when to send again:
-    /// a capacity refusal is the receiver answering, so it does not count toward the stall bound,
-    /// and a held delivery asks again until it is granted or `deadline` passes. A permanent refusal
-    /// ends the delivery at once.
+    /// Retry policy belongs to [`RelaySendAttempts`]. Under [`GrantCapacityRefusals::Hold`], an
+    /// answered capacity refusal preserves the stall budget until grant or the total deadline.
+    /// A definitive sizing refusal returns to the slice owner; uncertain attempts still reconcile.
     async fn dispatch_relay_payload(
         &self,
         node_id: &ClusterNodeName,
-        payload: RelayPayload,
+        payload: &RelayPayload,
         deadline: Instant,
         capacity_refusals: GrantCapacityRefusals,
     ) -> error_stack::Result<(), RemoteDispatchError> {
         let mut attempts = RelaySendAttempts::new(Instant::now(), deadline, capacity_refusals);
+        let mut unresolved_attempt = false;
         loop {
             nervix_primitives::task::consume_budget().await;
             let sent = nervix_primitives::time::timeout_at(
@@ -869,8 +880,23 @@ impl RemoteDispatcher {
                 }
             };
             let failure = match error.current_context() {
+                TransportError::RelayBoundsRefused(bounds) => {
+                    if unresolved_attempt {
+                        return Err(error.change_context(RemoteDispatchError::Send {
+                            target: node_id.clone(),
+                        }));
+                    }
+                    let bounds = *bounds;
+                    return Err(error.change_context(RemoteDispatchError::ReceiveBounds {
+                        target: node_id.clone(),
+                        bounds,
+                    }));
+                }
                 TransportError::RelayGrantRefused(refusal) => RelaySendFailure::Refused(*refusal),
-                _ => RelaySendFailure::Transport,
+                _ => {
+                    unresolved_attempt = true;
+                    RelaySendFailure::Transport
+                }
             };
             match attempts.after_failure(failure, Instant::now()) {
                 RelaySendStep::RetryAt(retry_at) => sleep_until(retry_at).await,
@@ -1214,7 +1240,17 @@ impl Runtime {
         remote: &mut RelayPayload,
     ) -> error_stack::Result<DecodedRemoteRows, RemoteRelayDecodeError> {
         let batch = schema
-            .decode_arrow_body(self.executor(), remote.batch_ipc.clone())
+            .decode_arrow_body(self.executor(), remote.batch_ipc.clone(), {
+                let dispatcher = self.inner.remote_dispatcher.load();
+                match dispatcher.as_ref() {
+                    Some(dispatcher) => dispatcher
+                        .interconnect
+                        .local_receive_bounds()
+                        .relay_decoded_bytes
+                        .get(),
+                    None => self.executor().limits().relay_decoded_bytes.as_u64(),
+                }
+            })
             .await
             .change_context(RemoteRelayDecodeError::Body)?;
         remote
@@ -1595,12 +1631,9 @@ impl Runtime {
             }
             while let Some((mut watch, progress)) = pending.next().await {
                 let registrar = watch.registration.registrar.node_id();
-                let live = if fault_injection.misses_live_run(dispatcher.local_node_id(), registrar)
-                {
-                    None
-                } else {
-                    dispatcher.cluster.live_node_incarnation(registrar)
-                };
+                let live = fault_injection
+                    .registrar_live_view_override(dispatcher.local_node_id(), registrar)
+                    .unwrap_or_else(|| dispatcher.cluster.live_node_incarnation(registrar));
                 let report = watch.next_report(progress, live, Instant::now());
                 let outcome = match report {
                     RemoteAckWatchReport::Send(outcome) => outcome,

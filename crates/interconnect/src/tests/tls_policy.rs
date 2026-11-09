@@ -1,7 +1,7 @@
-//! The interconnect's TLS algorithm policy through the production bundle and real rustls peers.
+//! The interconnect's TLS identity, application protocol and algorithm policy through real peers.
 //!
 //! Layer: test harness.
-//! - **Owns.** ClientHello refusal assertions for the interconnect's fixed algorithm set.
+//! - **Owns.** Certificate identity, HTTP/2-only negotiation and fixed-algorithm assertions.
 //! - **Depends on.** The production TLS bundle, test certificates and rustls connections.
 //! - **Must not know.** Graph execution, request routing or connector policy.
 
@@ -14,7 +14,7 @@ use rustls::{
     crypto::{CryptoProvider, aws_lc_rs},
 };
 
-use super::TestCertificateAuthority;
+use super::{ClusterNodeName, TestCertificateAuthority, test_tls};
 
 struct TlsPeer {
     client: ClientConnection,
@@ -135,4 +135,27 @@ fn interconnect_accepts_every_approved_cipher_and_group() {
             TlsPeer::new(provider).assert_handshake();
         }
     }
+}
+
+#[test]
+fn internal_tls_negotiates_only_http2() {
+    let tls = test_tls();
+
+    assert_eq!(tls.client_config.alpn_protocols, [b"h2".to_vec()]);
+    assert_eq!(tls.server_config.alpn_protocols, [b"h2".to_vec()]);
+}
+
+#[test]
+fn certificate_binds_cluster_node_and_endpoint() {
+    let tls = test_tls();
+    let node = ClusterNodeName::parse("node-1").expect("valid node name");
+
+    tls.certificate
+        .validate_local("default", &node, "localhost")
+        .expect("certificate identity should match");
+    assert!(
+        tls.certificate
+            .validate_local("another-cluster", &node, "localhost")
+            .is_err()
+    );
 }

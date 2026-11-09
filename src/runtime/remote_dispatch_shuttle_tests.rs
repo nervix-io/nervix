@@ -2,7 +2,8 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** The single-resolution and reported-share invariants the production registry of
-//!   forwarded acknowledgements is held to while its sweep races reports and terminal outcomes.
+//!   forwarded acknowledgements is held to while its sweep races reports and terminal outcomes,
+//!   and reporting to a newly admitted registrar before its live view catches up.
 //! - **Depends on.** The remote dispatch registry, acknowledgement roots, and the server Shuttle
 //!   runner.
 //! - **Must not know.** Relays, deliveries, the interconnect, or what the acknowledged records are.
@@ -28,6 +29,52 @@ use crate::{
 
 const JOINED: &str =
     "a modeled thread's panic fails the Shuttle execution before its joiner resumes";
+
+#[test]
+fn shuttle_a_new_registrar_keeps_its_terminal_ack_while_its_live_view_publication_catches_up() {
+    use nervix_models::{
+        ClusterNodeIdentity, ClusterNodeIncarnation, RemoteAckOutcome, RemoteAckRegistration,
+    };
+    use nervix_primitives::{publication::ArcSwapOption, sync::StdArc, time::Instant};
+
+    use super::{RemoteAckWatch, RemoteAckWatchReport};
+
+    nervix_model_harness::shuttle::check_dfs(
+        || {
+            let prior = ClusterNodeIncarnation::new(6);
+            let current = ClusterNodeIncarnation::new(7);
+            let view = Arc::new(ArcSwapOption::from(Some(StdArc::new(prior))));
+            let writing = view.clone();
+            let publish = thread::spawn(move || writing.store(Some(StdArc::new(current))));
+            let reading = view.clone();
+            let report = thread::spawn(move || {
+                let (acks, mut completion) = AckSet::root();
+                acks.ack_success();
+                let progress = completion
+                    .wait_for_progress()
+                    .now_or_never()
+                    .assured("the actual root is complete");
+                let registration = RemoteAckRegistration {
+                    ack_id: 1,
+                    registrar: ClusterNodeIdentity::new(receiver(), current),
+                };
+                let mut watch = RemoteAckWatch::new(completion, registration);
+                let live = reading.load().as_deref().copied();
+                assert!(
+                    matches!(
+                        watch.next_report(Some(progress), live, Instant::now()),
+                        RemoteAckWatchReport::Send(RemoteAckOutcome::Ack)
+                    ),
+                    "a delayed preceding incarnation never retires the admitted registrar's \
+                     terminal ACK"
+                );
+            });
+            publish.join().assured(JOINED);
+            report.join().assured(JOINED);
+        },
+        Some(1000),
+    );
+}
 
 fn receiver() -> ClusterNodeName {
     ClusterNodeName::parse("node-3").assured("the fixture node name is valid")

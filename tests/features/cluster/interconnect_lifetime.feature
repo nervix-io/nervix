@@ -4,7 +4,7 @@ Feature: Interconnect connection lifetime
     Given a 3 node nervix cluster is started
     When node "node-3" is restarted 1 times with a new interconnect address
     Then the leader eventually records node "node-3" at its current interconnect address in Raft membership
-    And the leader Raft log index remains unchanged for "3s"
+    And the leader Raft membership log index remains unchanged for "3s"
 
   Scenario: Peer churn and silent handshakes leave the node responsive
     Given a 3 node nervix cluster is started

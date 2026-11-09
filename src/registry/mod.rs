@@ -32,6 +32,7 @@ pub(crate) use inferencer_archive_plan::InferencerArchivePlan;
 mod ingestor_units;
 mod message_error_plan;
 mod mutation;
+mod node_capacity;
 mod placement;
 mod processor_plan;
 mod reingestor_plan;
@@ -40,6 +41,8 @@ mod resource_plan;
 mod restore_plan;
 mod schedule_delta;
 mod scheduler;
+#[cfg(test)]
+pub(crate) use scheduler::uniform_capabilities;
 mod unit_placement;
 pub(crate) use scheduler::assign_server_listener_nodes;
 mod storage;

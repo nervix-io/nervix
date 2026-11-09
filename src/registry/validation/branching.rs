@@ -2082,6 +2082,9 @@ mod tests {
                 &domain,
                 &[ClusterNodeName::parse("node-1").expect("valid name")],
                 0,
+                &crate::registry::uniform_capabilities(&[
+                    ClusterNodeName::parse("node-1").expect("valid name")
+                ]),
             );
         let deduped = scheduled_node(&schedule, ModelKind::Relay, "deduped");
         assert_eq!(

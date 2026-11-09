@@ -319,6 +319,7 @@ pub mod relay_interaction_benchmark;
 mod relay_memory_hold;
 mod relay_processor_node;
 mod relay_send_attempts;
+mod relay_slicing;
 mod relay_subscription;
 mod relay_transit;
 mod remote_ack_owner;
