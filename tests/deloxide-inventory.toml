@@ -673,6 +673,7 @@ tags = [
   "@wasm_reset_publication_failure",
   "@client_wire_pause_leadership",
   "@client_wire_pause_lapsed_publication",
+  "@client_wire_orphaned_pause",
   "@client_wire_standalone_preparation",
   "@client_wire_tombstone_retention",
   "@client_wire_tombstone_recovery",
@@ -3654,6 +3655,26 @@ scenario = "A partition a surviving node keeps goes on applying its materialized
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "An admitted model command encounters a confirmed one-shot orphaned domain pause on one and three nodes, then reaches tracked model application, transaction impact recording and pause release. Async consensus proposals and the test-fault registry remain outside Deloxide."
+examples = 2
+feature = "tests/features/runtime/client_wire_pause_recovery.feature"
+id = "scenario.command-orphaned-pause"
+invariant = "The command holding the domain mutation lease recovers an orphaned pause before preflight, succeeds under one execution reference, replays that outcome and admits a dependent mutation."
+invocation = "scenarios"
+scenario = "A model command recovers an orphaned pause before preflight on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: an admitted command encounters a confirmed orphaned pause on one and three nodes before tracked model application, transaction impact recording and pause release. Async consensus proposals and the test-fault registry remain untracked."
+examples = 2
+feature = "tests/features/runtime/client_wire_pause_recovery.feature"
+id = "stress.command-orphaned-pause"
+invariant = "The command holding the domain mutation lease recovers an orphaned pause before preflight, succeeds under one execution reference, replays that outcome and admits a dependent mutation."
+invocation = "stress-scenarios"
+scenario = "A model command recovers an orphaned pause before preflight on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Transaction model application, tracked impact recording and domain pause release across two controlled leadership transfers. Async proposal waits and fault barriers remain untracked."
 examples = 1
 feature = "tests/features/runtime/client_wire_pause_recovery.feature"
@@ -4145,6 +4166,8 @@ workloads = [
 [[owner]]
 path = "src/application/model_mutation.rs"
 workloads = [
+  "scenario.command-orphaned-pause",
+  "stress.command-orphaned-pause",
   "scenario.syslog-suspend-handoff",
   "stress.syslog-suspend-handoff",
   "scenario.standalone-preflight",
@@ -4253,6 +4276,8 @@ workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 [[owner]]
 path = "src/application/transaction.rs"
 workloads = [
+  "scenario.command-orphaned-pause",
+  "stress.command-orphaned-pause",
   "scenario.wasm-reset-authority-recovery",
   "stress.wasm-reset-authority-recovery",
   "scenario.wasm-reset-publication-failure",
@@ -4274,6 +4299,8 @@ workloads = [
 [[owner]]
 path = "src/application/transaction/impact.rs"
 workloads = [
+  "scenario.command-orphaned-pause",
+  "stress.command-orphaned-pause",
   "scenario.standalone-preflight",
   "stress.standalone-preflight",
   "scenario.transaction-pause-release",

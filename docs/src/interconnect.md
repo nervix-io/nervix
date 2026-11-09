@@ -481,6 +481,8 @@ so a node whose fingerprint differs is refused at join as a wire-contract mismat
 another shape fails as a malformed handshake before its record can be judged. There is no version
 negotiation or alternate decoding path. A wire-contract change therefore requires a coordinated
 cluster stop and start with all nodes on the same version.
+The current fingerprint includes the conditional orphaned model-pause recovery command, its exact
+mutation lease, typed recovery reply and typed mutation-fence and restore-installation conflicts.
 The subscription-interest visibility request includes the advertisement version, and its current
 wire fingerprint fences that request shape during connection setup.
 

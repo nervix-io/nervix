@@ -30,7 +30,7 @@ use nervix_consensus::{
     CommandExecutionState, CommandExecutionStatementDisposition, CommandExecutionStatementResult,
     CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
     CommandExecutionTransactionStatus, CommandExecutionTransactionTarget, ConsensusConflict,
-    ConsensusError, RecordedBackupArchive, RestoreExecution,
+    ConsensusError, RecordedBackupArchive, RestoreExecution, TransactionStatementRequest,
 };
 use nervix_models::{
     Backup, BackupCapture, BackupResources, BackupScope, ClusterNodeIdentity,
@@ -57,6 +57,9 @@ use super::{
     subscription::{PendingSessionCommand, SessionCommandOperation, SessionSubscriptions},
     transaction::is_queueable_transaction_statement,
 };
+
+#[cfg(feature = "testing")]
+mod orphaned_pause;
 
 /// The server's capture inputs. The destination belongs exclusively to the client's download.
 #[derive(rkyv::Archive, rkyv::Serialize)]
@@ -838,17 +841,54 @@ impl SessionServiceImpl {
                         "durable configuration application lost its domain".to_string(),
                     );
                 };
+                #[cfg(feature = "testing")]
+                let domain = if self
+                    .inner
+                    .runtime
+                    .fault_injection()
+                    .take_orphaned_model_command_pause(&domain)
+                {
+                    let Some(mutation) = execution.domain_mutation(&domain) else {
+                        return command_error(
+                            "the orphaned-pause fixture requires an admitted mutation lease"
+                                .to_string(),
+                        );
+                    };
+                    match orphaned_pause::inject(
+                        &self.inner.consensus,
+                        self.inner.runtime.fault_injection(),
+                        domain,
+                        mutation,
+                    )
+                    .await
+                    {
+                        Ok(domain) => domain,
+                        Err(report) => {
+                            return command_error(format!(
+                                "failed to inject the admitted command's orphaned pause: {}",
+                                ConsensusError::report_message(&report),
+                            ));
+                        }
+                    }
+                } else {
+                    domain
+                };
+                let mutation = execution.domain_mutation(&domain);
                 Box::pin(
                     self.execute_standalone_transaction(
                         transaction_id,
-                        execution.reference.clone(),
                         execution
                             .owner()
                             .verified("an applying execution retains its owner")
                             .clone(),
                         domain,
-                        source,
-                        *statement,
+                        TransactionStatementRequest {
+                            request_reference: execution.reference.clone(),
+                            expected_position: 0,
+                            source,
+                            statement: *statement,
+                        },
+                        mutation,
                     ),
                 )
                 .await

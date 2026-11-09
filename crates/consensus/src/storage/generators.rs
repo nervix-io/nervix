@@ -1820,6 +1820,7 @@ enum CommandVariant {
     RevertTransaction,
     ExpireTransaction,
     RemoveFinishedTransactions,
+    RecoverOrphanedModelPause,
 }
 
 impl CommandVariant {
@@ -1887,6 +1888,7 @@ impl CommandVariant {
             ConsensusCommand::RevertTransaction { .. } => Self::RevertTransaction,
             ConsensusCommand::ExpireTransaction { .. } => Self::ExpireTransaction,
             ConsensusCommand::RemoveFinishedTransactions { .. } => Self::RemoveFinishedTransactions,
+            ConsensusCommand::RecoverOrphanedModelPause { .. } => Self::RecoverOrphanedModelPause,
         }
     }
 }
@@ -2010,6 +2012,10 @@ fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> Consens
         CommandVariant::ResumeDomain => ConsensusCommand::ResumeDomain {
             domain_id: arbitrary.rule_name(),
             mutation: optional_lease(arbitrary),
+        },
+        CommandVariant::RecoverOrphanedModelPause => ConsensusCommand::RecoverOrphanedModelPause {
+            domain_id: arbitrary.rule_name(),
+            mutation: Box::new(domain_mutation_lease(arbitrary)),
         },
         CommandVariant::ReconcileDomainClockAuthority => {
             let domain_id = arbitrary.rule_name();
