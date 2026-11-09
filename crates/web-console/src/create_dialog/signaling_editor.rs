@@ -225,6 +225,31 @@ pub(super) fn SignalingEditor(
                     signals.edit();
                 } />
         </label>
+        <SignalingFormatEditor signals=signals request_tx=request_tx session_generation=session_generation />
+        <SignalingConnectEditor signals=signals />
+        <ProgramListEditor signals=signals at=ProgramsAt::ProtocolFail
+            label="Protocol failure matcher" input_class="create-signaling-fail" />
+        <label class="create-field"><span>"Handshake timeout"</span>
+            <input class="create-signaling-timeout" type="text"
+                prop:value=move || signals.signaling.get().timeout disabled=pending
+                on:input=move |event| {
+                    let value = event_target_value(&event);
+                    signals.signaling.update(|draft| draft.timeout = value);
+                    signals.edit();
+                } />
+        </label>
+    }
+}
+
+/// The protocol's wire format and its Protobuf descriptor binding and message types.
+#[component]
+fn SignalingFormatEditor(
+    signals: CreateSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    session_generation: RwSignal<u64>,
+) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    view! {
         <fieldset class="create-choice-group create-signaling-format">
             <legend>"Wire format"</legend>
             <div class="create-choice-buttons">
@@ -268,6 +293,14 @@ pub(super) fn SignalingEditor(
                     } />
             </label>
         </Show>
+    }
+}
+
+/// Whether the connection accepts data when it opens, and the ordered steps that run on connect.
+#[component]
+fn SignalingConnectEditor(signals: CreateSignals) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    view! {
         <label class="create-check"><input class="create-signaling-connect-accept" type="checkbox"
             prop:checked=move || signals.signaling.get().accept_data disabled=pending
             on:change=move |event| {
@@ -291,16 +324,5 @@ pub(super) fn SignalingEditor(
                 </button>
             </div>
         </div>
-        <ProgramListEditor signals=signals at=ProgramsAt::ProtocolFail
-            label="Protocol failure matcher" input_class="create-signaling-fail" />
-        <label class="create-field"><span>"Handshake timeout"</span>
-            <input class="create-signaling-timeout" type="text"
-                prop:value=move || signals.signaling.get().timeout disabled=pending
-                on:input=move |event| {
-                    let value = event_target_value(&event);
-                    signals.signaling.update(|draft| draft.timeout = value);
-                    signals.edit();
-                } />
-        </label>
     }
 }

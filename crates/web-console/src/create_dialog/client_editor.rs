@@ -37,6 +37,18 @@ pub(super) fn ClientEditor(
                     signals.edit();
                 } />
         </label>
+        <ClientTransportEditor signals=signals />
+        <ClientMountEditor signals=signals request_tx=request_tx session_generation=session_generation />
+        <ClientSignalingEditor signals=signals request_tx=request_tx session_generation=session_generation />
+        <ClientConfigEditor signals=signals />
+    }
+}
+
+/// The client's connector and the bounds of its connection pool.
+#[component]
+fn ClientTransportEditor(signals: CreateSignals) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    view! {
         <fieldset class="create-choice-group create-client-type">
             <legend>"Connector"</legend>
             <div class="create-choice-buttons">
@@ -73,6 +85,18 @@ pub(super) fn ClientEditor(
                 </label>
             </div>
         </Show>
+    }
+}
+
+/// The resource version the client mounts.
+#[component]
+fn ClientMountEditor(
+    signals: CreateSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    session_generation: RwSignal<u64>,
+) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    view! {
         <label class="create-check"><input class="create-client-mount-enabled" type="checkbox"
             prop:checked=move || signals.client.get().mount_enabled disabled=pending
             on:change=move |event| {
@@ -87,6 +111,18 @@ pub(super) fn ClientEditor(
                 control=ChoiceControl::ClientVersion signals=signals request_tx=request_tx
                 session_generation=session_generation />
         </Show>
+    }
+}
+
+/// The signaling protocol a WebSockets client runs on connect.
+#[component]
+fn ClientSignalingEditor(
+    signals: CreateSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    session_generation: RwSignal<u64>,
+) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    view! {
         <Show when=move || signals.client.get().transport.is_some_and(ClientTransport::websockets) fallback=|| ()>
             <ChoiceGroup class_name="create-client-signaling" label="Signaling protocol · optional"
                 control=ChoiceControl::ClientSignaling signals=signals request_tx=request_tx
@@ -99,6 +135,14 @@ pub(super) fn ClientEditor(
                     }>"No signaling protocol"</button>
             </Show>
         </Show>
+    }
+}
+
+/// The client's connector CONFIG entries and which of them are secret.
+#[component]
+fn ClientConfigEditor(signals: CreateSignals) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    view! {
         <div class="create-client-config">
             <p>"Connector CONFIG · key/value pairs; external services and objects must already exist"</p>
             <datalist id="client-config-keys">

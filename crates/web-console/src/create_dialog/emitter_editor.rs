@@ -37,6 +37,23 @@ pub(super) fn EmitterEditor(
             prop:value=move || signals.emitter.get().name disabled=pending
             on:input=move |event| { let name = event_target_value(&event); signals.emitter.update(|draft| draft.name = name); signals.edit(); } /></label>
         <EmitterDestinationEditor signals=signals request_tx=request_tx session_generation=session_generation />
+        <EmitterInputEditor signals=signals request_tx=request_tx session_generation=session_generation />
+        <EmitterPublicationEditor signals=signals />
+        <EmitterStateEditor signals=signals request_tx=request_tx session_generation=session_generation />
+        <EmitterConstructionEditor signals=signals request_tx=request_tx session_generation=session_generation />
+        <EmitterPolicyEditor signals=signals request_tx=request_tx session_generation=session_generation />
+    }
+}
+
+/// The emitter's ordered input relays, their attachment and their collection.
+#[component]
+fn EmitterInputEditor(
+    signals: CreateSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    session_generation: RwSignal<u64>,
+) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    view! {
         <section class="create-emitter-inputs"><h3>"Ordered input relays"</h3>
             <p>"Inputs share one payload schema and may have different branches. Materialized and error relays must fit every input."</p>
             <For each={move || (0..signals.emitter.get().inputs.len()).collect::<Vec<_>>()} key=|index| *index children=move |index| view! {
@@ -72,9 +89,5 @@ pub(super) fn EmitterEditor(
                     write=|draft, value| { if let Some(collect) = &mut draft.collect { collect.max_batch_size = if value.is_empty() { None } else { Some(value) }; } } />
             </Show>
         </section>
-        <EmitterPublicationEditor signals=signals />
-        <EmitterStateEditor signals=signals request_tx=request_tx session_generation=session_generation />
-        <EmitterConstructionEditor signals=signals request_tx=request_tx session_generation=session_generation />
-        <EmitterPolicyEditor signals=signals request_tx=request_tx session_generation=session_generation />
     }
 }

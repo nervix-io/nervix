@@ -64,6 +64,22 @@ pub(super) fn CodecEditor(
                     signals.edit();
                 } />
         </label>
+        <CodecFormatEditor signals=signals request_tx=request_tx session_generation=session_generation />
+        <CodecProtobufEditor signals=signals request_tx=request_tx session_generation=session_generation />
+        <CodecTransformationEditor signals=signals />
+        <CodecEncodingEditor signals=signals />
+    }
+}
+
+/// The codec's family and format, and the schemas it binds.
+#[component]
+fn CodecFormatEditor(
+    signals: CreateSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    session_generation: RwSignal<u64>,
+) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    view! {
         <fieldset class="create-choice-group create-codec-format">
             <legend>"Codec family and format"</legend>
             <div class="create-choice-buttons">
@@ -88,6 +104,18 @@ pub(super) fn CodecEditor(
                 control=ChoiceControl::CodecWireSchema signals=signals request_tx=request_tx
                 session_generation=session_generation />
         </Show>
+    }
+}
+
+/// The codec's Protobuf descriptor binding and message types.
+#[component]
+fn CodecProtobufEditor(
+    signals: CreateSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    session_generation: RwSignal<u64>,
+) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    view! {
         <Show when=move || matches!(signals.codec.get().format, Some(CodecFormatDraft::Protobuf { .. })) fallback=|| ()>
             <ResourceBindingEditor signals=signals kind=ResourceBindingForm::Codec
                 request_tx=request_tx session_generation=session_generation />
@@ -122,6 +150,14 @@ pub(super) fn CodecEditor(
                     } />
             </label>
         </Show>
+    }
+}
+
+/// The codec's jaq transformations for each direction.
+#[component]
+fn CodecTransformationEditor(signals: CreateSignals) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    view! {
         <Show when=move || signals.codec.get().transformations().is_some() fallback=|| ()>
             <fieldset class="create-choice-group create-codec-directions">
                 <legend>"Jaq transformations and direction"</legend>
@@ -206,6 +242,14 @@ pub(super) fn CodecEditor(
                 </Show>
             </fieldset>
         </Show>
+    }
+}
+
+/// The codec's ordered field encoding rules.
+#[component]
+fn CodecEncodingEditor(signals: CreateSignals) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    view! {
         <Show when=move || signals.codec.get().format.as_ref().is_some_and(|format| format.kind() != CodecFormatKind::Syslog) fallback=|| ()>
             <div class="create-codec-encoding">
                 <p>"Field encoding rules"</p>

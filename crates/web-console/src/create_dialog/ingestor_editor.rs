@@ -434,15 +434,6 @@ pub(super) fn IngestorEditor(
     session_generation: RwSignal<u64>,
 ) -> impl IntoView {
     let pending = move || signals.progress.get().is_pending();
-    let entity_kind = move || signals.ingestor.get().source.kind;
-    let acknowledged = move || {
-        signals
-            .ingestor
-            .get()
-            .source
-            .delivery
-            .is_some_and(IngestDeliveryKind::acknowledged)
-    };
     view! {
         <label class="create-field">
             <span>"Ingestor name"</span>
@@ -455,6 +446,37 @@ pub(super) fn IngestorEditor(
                     signals.edit();
                 } />
         </label>
+        <IngestorSourceEditor signals=signals request_tx=request_tx session_generation=session_generation />
+        <IngestorDeliveryEditor signals=signals />
+        <IngestorDecodingEditor signals=signals request_tx=request_tx session_generation=session_generation />
+        <IngestorRouteEditor signals=signals request_tx=request_tx session_generation=session_generation />
+        <fieldset class="create-field create-ingestor-general-error">
+            <legend>"On general error"</legend>
+            <button type="button" data-error="ignore" class:active=move || signals.ingestor.get().general_error == Some(nervix_models::GeneralErrorPolicy::Ignore)
+                disabled=pending on:click=move |_| { signals.ingestor.update(|draft| draft.general_error = Some(nervix_models::GeneralErrorPolicy::Ignore)); signals.edit(); }>"IGNORE"</button>
+            <button type="button" data-error="log" class:active=move || signals.ingestor.get().general_error == Some(nervix_models::GeneralErrorPolicy::Log)
+                disabled=pending on:click=move |_| { signals.ingestor.update(|draft| draft.general_error = Some(nervix_models::GeneralErrorPolicy::Log)); signals.edit(); }>"LOG"</button>
+        </fieldset>
+        <Show when=move || {
+            let draft = signals.ingestor.get();
+            draft.source.reference.as_ref().is_some_and(|selected| !selected.is_current())
+                || draft.codec.as_ref().is_some_and(|selected| !selected.is_current())
+        } fallback=|| ()>
+            <p class="create-reference-invalid" role="alert">"The selected domain, entity or codec changed. Select affected references again."</p>
+        </Show>
+    }
+}
+
+/// The ingestor's entity, its client or endpoint, and the entity's declared locators and options.
+#[component]
+fn IngestorSourceEditor(
+    signals: CreateSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    session_generation: RwSignal<u64>,
+) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    let entity_kind = move || signals.ingestor.get().source.kind;
+    view! {
         <fieldset class="create-field create-ingestor-source">
             <legend>"Ingestor entity"</legend>
             <For each=IngestorEntityKind::modeled
@@ -488,6 +510,22 @@ pub(super) fn IngestorEditor(
             }}
             key={move |option| (entity_kind(), option.keywords)}
             children=move |option| view! { <EntityOptionEditor signals=signals option=option /> } />
+    }
+}
+
+/// The ingestor's delivery mode, its acknowledgement fields and its quiesce policy.
+#[component]
+fn IngestorDeliveryEditor(signals: CreateSignals) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    let acknowledged = move || {
+        signals
+            .ingestor
+            .get()
+            .source
+            .delivery
+            .is_some_and(IngestDeliveryKind::acknowledged)
+    };
+    view! {
         <Show when=move || !signals.ingestor.get().source.available_modes().is_empty() fallback=|| ()>
             <fieldset class="create-field create-ingestor-mode">
                 <legend>"Delivery mode"</legend>
@@ -553,6 +591,18 @@ pub(super) fn IngestorEditor(
         <Show when=move || signals.ingestor.get().source.quiesce == Some(IngestQuiesceKind::Reject) fallback=|| ()>
             <SourceFieldEditor signals=signals field=IngestorField::RetryAfter />
         </Show>
+    }
+}
+
+/// The ingestor's decoding codec, timestamp policy and arrival filter.
+#[component]
+fn IngestorDecodingEditor(
+    signals: CreateSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    session_generation: RwSignal<u64>,
+) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    view! {
         <ChoiceGroup class_name="create-ingestor-codec" label="Decoding codec"
             control=ChoiceControl::IngestCodec signals=signals request_tx=request_tx
             session_generation=session_generation show_detail=true />
@@ -579,21 +629,6 @@ pub(super) fn IngestorEditor(
                     signals.edit();
                 } />
         </label>
-        <IngestorRouteEditor signals=signals request_tx=request_tx session_generation=session_generation />
-        <fieldset class="create-field create-ingestor-general-error">
-            <legend>"On general error"</legend>
-            <button type="button" data-error="ignore" class:active=move || signals.ingestor.get().general_error == Some(nervix_models::GeneralErrorPolicy::Ignore)
-                disabled=pending on:click=move |_| { signals.ingestor.update(|draft| draft.general_error = Some(nervix_models::GeneralErrorPolicy::Ignore)); signals.edit(); }>"IGNORE"</button>
-            <button type="button" data-error="log" class:active=move || signals.ingestor.get().general_error == Some(nervix_models::GeneralErrorPolicy::Log)
-                disabled=pending on:click=move |_| { signals.ingestor.update(|draft| draft.general_error = Some(nervix_models::GeneralErrorPolicy::Log)); signals.edit(); }>"LOG"</button>
-        </fieldset>
-        <Show when=move || {
-            let draft = signals.ingestor.get();
-            draft.source.reference.as_ref().is_some_and(|selected| !selected.is_current())
-                || draft.codec.as_ref().is_some_and(|selected| !selected.is_current())
-        } fallback=|| ()>
-            <p class="create-reference-invalid" role="alert">"The selected domain, entity or codec changed. Select affected references again."</p>
-        </Show>
     }
 }
 
