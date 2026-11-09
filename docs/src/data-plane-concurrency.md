@@ -1984,6 +1984,10 @@ macros, including operation expectation macros.
 ### Bounded Executor Queue Fence
 
 The bounded executor retains one FIFO per worker class in `crates/execution/src/workers.rs`.
+Worker admission, per-class waiting places and independent memory pools resolve once from node
+capabilities before construction; [Execution Capabilities](node-settings.md#execution-capabilities)
+owns their derivation and overrides. Configured client producer/consumer capacities retain their
+existing atomic admission and wakeup owners. Capacity selection adds no shared cross-class gate.
 Submission, cancellation of an exact queued job, next-job selection and the last worker's idle
 transition acquire that class's mutex. This is an execution-admission protocol keyed by one class,
 with the configured pending and worker counts as its bounds. Each acquisition inserts, removes or

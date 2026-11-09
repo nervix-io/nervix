@@ -101,8 +101,8 @@ pub use runtime_state::{
     StateSyncRequest, StateSyncResponse, SyncKafkaOffsets,
 };
 pub use settings::{
-    BulkChunkBytes, BulkReceiveWindow, BulkReceiveWindowError, PeerReceiveSettings,
-    PeerReceiveSettingsError, RelayBatchBytes, RelayDecodedBytes,
+    BulkChunkBytes, BulkReceiveWindow, BulkReceiveWindowError, PeerReceiveOverrides,
+    PeerReceiveSettings, PeerReceiveSettingsError, RelayBatchBytes, RelayDecodedBytes,
 };
 pub use wasm_state::{
     CoordinateWasmStateResetRequest, CoordinateWasmStateResetResponse,

@@ -2480,6 +2480,7 @@ impl SessionServiceImpl {
                     &self.inner.cluster,
                     &self.inner.consensus,
                     &self.inner.interconnect,
+                    &self.inner.runtime,
                 )
                 .await,
             ),

@@ -51,9 +51,9 @@ use clap_complete::Shell;
 #[cfg(feature = "deloxide")]
 pub use cli::DiagnosticArgs;
 pub use cli::{
-    Args, CapacityArgs, Command, ConsensusArgs, MembershipArgs, MemoryPressureArgs, NodeArgs,
-    ResourceArgs, RuntimeArgs, SchedulingArgs, SettingOverride, SettingsArgs, ShutdownArgs,
-    TracingArgs, TransactionArgs,
+    Args, CapacityArgs, Command, ConsensusArgs, ExecutionArgs, MembershipArgs, MemoryPressureArgs,
+    NodeArgs, ResourceArgs, RuntimeArgs, SchedulingArgs, SettingOverride, SettingsArgs,
+    ShutdownArgs, TracingArgs, TransactionArgs,
 };
 use cli_completions::print_completions;
 pub use cli_values::{HumanBytes, HumanDuration, InternalTransportMode, RefusedCliValue};
@@ -188,6 +188,10 @@ mod observation;
 mod ownership_handoff;
 mod placement_groups;
 mod preflight;
+pub use nervix_execution::{
+    RuntimeMaxBlockingThreads, RuntimeThreadOverrides, RuntimeThreadSettings,
+    RuntimeThreadStackSize, RuntimeWorkerThreads,
+};
 mod public_listener;
 mod relocation;
 mod resource;
@@ -274,6 +278,8 @@ pub struct Application {
     #[builder(default)]
     pub settings: NodeSettings,
     #[builder(default)]
+    pub cpu_detection: crate::capacity::CpuDetection,
+    #[builder(default)]
     #[doc(hidden)]
     pub fault_injection: ConfiguredFaultInjection,
     /// Bound by the shutdown timeout the settings hold, so the two can never disagree.
@@ -310,21 +316,67 @@ pub fn run_server_process() -> Result<(), Report<AppError>> {
         ),
     )
     .change_context(AppError::StartDeadlockDiagnostics)?;
-    let runtime = nervix_primitives::runtime::Builder::new_multi_thread()
-        .thread_stack_size(8 * 1024 * 1024) // Set custom stack size here
-        .enable_all()
+    if let Some(Command::Completions { shell }) = args.subcommand.clone() {
+        let cpus = crate::capacity::CpuCount::detect();
+        let workers = nervix_execution::WorkerSettings::resolve(
+            &nervix_execution::ExecutionOverrides::default(),
+            cpus,
+        )
+        .change_context(AppError::InvalidExecutionSettings)?
+        .counts();
+        let settings =
+            RuntimeThreadSettings::resolve(RuntimeThreadOverrides::default(), cpus, workers, None)
+                .change_context(AppError::InvalidRuntimeCapacity)?;
+        let runtime = settings.build().change_context(AppError::BuildRuntime)?;
+        let tracing_guard = {
+            let _entered = runtime.enter();
+            init_tracing(&args.tracing)?
+        };
+        runtime.block_on(async {
+            print_completions(shell);
+        });
+        drop(tracing_guard);
+        return Ok(());
+    }
+    let tracing_options = args.tracing.clone();
+    let mut application = Application::try_from(args)?;
+    let cpus = application
+        .settings
+        .capacity
+        .effective_cpu_count(crate::capacity::CpuCount::detect());
+    application.cpu_detection = crate::capacity::CpuDetection::Resolved(cpus);
+    let workers = nervix_execution::WorkerSettings::resolve(&application.settings.execution, cpus)
+        .change_context(AppError::InvalidExecutionSettings)?
+        .counts();
+    let memory = application
+        .settings
+        .capacity
+        .memory_limit()
+        .and_then(|memory| std::num::NonZeroU64::new(memory.as_u64()));
+    let runtime_settings =
+        RuntimeThreadSettings::resolve(application.settings.runtime_threads, cpus, workers, memory)
+            .change_context(AppError::InvalidRuntimeCapacity)?;
+    let runtime = runtime_settings
         .build()
         .change_context(AppError::BuildRuntime)?;
-
     let tracing_guard = {
         let _entered = runtime.enter();
-        init_tracing(&args.tracing)?
+        init_tracing(&tracing_options)?
     };
-    runtime.block_on(run_cli(args, termination_signals, &tracing_guard))
+    runtime.block_on(async {
+        info!(
+            worker_threads = runtime_settings.worker_threads().get(),
+            max_blocking_threads = runtime_settings.max_blocking_threads().get(),
+            thread_stack_size = runtime_settings.thread_stack_size().as_u64(),
+            "the native runtime capacity was resolved"
+        );
+        termination_signals.supervise(application.shutdown.clone())?;
+        application.run_with_tracing(Some(&tracing_guard)).await
+    })
 }
 
-/// Runs the server command line with termination signals the caller has already registered, so
-/// neither signal can end the process by its default action while the application starts.
+/// Runs the command line on a runtime the caller owns, with termination signals registered
+/// before that runtime started. The native process entry point sizes its runtime before entering it.
 pub async fn run_cli(
     args: Args,
     termination_signals: TerminationSignals,
@@ -334,7 +386,6 @@ pub async fn run_cli(
         print_completions(shell);
         return Ok(());
     }
-
     let application = Application::try_from(args)?;
     termination_signals.supervise(application.shutdown.clone())?;
     application.run_with_tracing(Some(tracing)).await
@@ -406,23 +457,6 @@ impl Application {
         let replica_count = settings.scheduling.replica_count();
         let runtime_settings = settings.runtime;
         let state_snapshot_interval = runtime_settings.state_snapshot_interval();
-        let memory_pressure_controller = {
-            let mapping_input = settings
-                .memory_pressure
-                .config()
-                .map(MemoryPressureController::new)
-                .transpose();
-            match mapping_input {
-                Ok(mapped_value) => Ok(mapped_value),
-                Err(error) => Err({
-                    error!(
-                        error = format!("{error:#}"),
-                        "failed to initialize memory pressure monitor"
-                    );
-                    error.change_context(AppError::InitMemoryPressureMonitor)
-                }),
-            }
-        }?;
         let db_path = self.identity.db_path.clone();
         let temp_dir = self.identity.temp_dir.clone();
         let resource_store_limits = settings.resources.limits();
@@ -489,6 +523,7 @@ impl Application {
             db_path: &db_path,
             temp_dir: &temp_dir,
             dns: &dns_configuration,
+            cpu_detection: self.cpu_detection,
         }
         .run()
         .instrument(tracing::info_span!("startup_preflight", node_id = %node_id))
@@ -498,6 +533,9 @@ impl Application {
             dns,
             memory,
             capabilities,
+            peer_receive,
+            client_endpoints,
+            memory_pressure,
             restore_staging_max_bytes,
             database_volume,
         } = match preflight {
@@ -510,6 +548,22 @@ impl Application {
                 return Err(error.change_context(AppError::Preflight));
             }
         };
+        let memory_pressure_controller = {
+            let mapping_input = memory_pressure
+                .config()
+                .map(MemoryPressureController::new)
+                .transpose();
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    error!(
+                        error = format!("{error:#}"),
+                        "failed to initialize memory pressure monitor"
+                    );
+                    error.change_context(AppError::InitMemoryPressureMonitor)
+                }),
+            }
+        }?;
         let grpc_listener = TcpListener::bind(grpc_listen_addr)
             .await
             .change_context(AppError::BindGrpcListenAddress)?;
@@ -599,6 +653,7 @@ impl Application {
             let mapping_input = Runtime::with_environment(
                 RuntimeEnvironment {
                     executor,
+                    client_endpoints,
                     outward_tls: outward_tls.clone(),
                     dns: Some(dns.clone()),
                     db: Some(db.clone()),
@@ -671,7 +726,7 @@ impl Application {
             },
             interconnect_tls,
             nervix_interconnect::TransportOptions {
-                peer_receive: Some(settings.peer_receive),
+                peer_receive: Some(peer_receive),
                 ..Default::default()
             },
             startup.runtime.executor().clone(),

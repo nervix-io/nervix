@@ -916,3 +916,7 @@ instead of inventing syntax.
 For password creation policy, read [Node Settings → Password Creation Policy](../../../docs/src/node-settings.md#password-creation-policy)
 and [Cryptography → Password Credentials](../../../docs/src/cryptography.md#password-credentials).
 Use the committed cluster setting for creation cost; preserve the documented startup, replay and restore rules.
+
+For node CPU admission, memory ceilings, native runtime threads, client byte credit and derived
+watermarks, read [Node Settings → Execution Capabilities](../../../docs/src/node-settings.md#execution-capabilities)
+before suggesting local overrides or interpreting DESCRIBE CLUSTER capacity lines.
