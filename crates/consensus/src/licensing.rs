@@ -14,6 +14,7 @@ mod archive;
 #[cfg(test)]
 pub(crate) mod tests;
 
+use error_stack::Report;
 use meticulous::ResultExt as _;
 use nervix_licensing_protocol::{document::DocumentType, impact::UsageSnapshot, keys::KeyId};
 use nervix_models::Timestamp;
@@ -81,9 +82,12 @@ impl LicensingRecord {
         }
     }
 
-    pub(crate) fn validate(&self, identity: &ClusterIdentity) -> Result<(), LicensingRecordError> {
+    pub(crate) fn validate(
+        &self,
+        identity: &ClusterIdentity,
+    ) -> Result<(), Report<LicensingRecordError>> {
         if self.licensing_time < identity.created_at {
-            return Err(LicensingRecordError::Time);
+            return Err(Report::new(LicensingRecordError::Time));
         }
         for document in &self.trust {
             let valid = match document.typ {
@@ -92,7 +96,7 @@ impl LicensingRecord {
                 _ => false,
             };
             if !valid || document.bytes.is_empty() {
-                return Err(LicensingRecordError::TrustIdentity);
+                return Err(Report::new(LicensingRecordError::TrustIdentity));
             }
         }
         Ok(())
@@ -141,7 +145,7 @@ impl Observer {
 pub(super) fn admit_domain(
     state: &crate::StateMachineData,
     quota: nervix_licensing_vocabulary::Quota,
-) -> Result<(), nervix_licensing_vocabulary::LicensingRefusal> {
+) -> error_stack::Result<(), nervix_licensing_vocabulary::LicensingRefusal> {
     use nervix_licensing_vocabulary::{QuotaConstraint, QuotaName};
     QuotaConstraint {
         name: QuotaName::ClusterDomains,

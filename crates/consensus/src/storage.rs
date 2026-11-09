@@ -360,7 +360,7 @@ impl StateMachineData {
             (Some(identity), Some(record)) => {
                 record.validate(&identity.public()).map_err(|error| {
                     crate::durable_batch::storage_report_io(
-                        Report::new(error).change_context(StorageFailure::InvalidState),
+                        error.change_context(StorageFailure::InvalidState),
                     )
                 })?
             }

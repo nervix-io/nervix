@@ -73,7 +73,7 @@ impl LicensingPolicy {
         current_usage: u64,
         requested: u64,
         replacement: bool,
-    ) -> Result<QuotaConstraint, LicensingRefusal> {
+    ) -> error_stack::Result<QuotaConstraint, LicensingRefusal> {
         QuotaConstraint {
             name,
             quota: self.quota(name),
@@ -88,6 +88,8 @@ impl LicensingPolicy {
 
 #[cfg(test)]
 mod tests {
+    use meticulous::ResultExt as _;
+
     use super::*;
 
     #[test]
@@ -107,11 +109,13 @@ mod tests {
             assert_eq!(policy.quota(name), Quota::Unlimited);
             for replacement in [false, true] {
                 assert_eq!(
-                    policy.admit(name, u64::MAX, 1, replacement),
-                    Ok(QuotaConstraint {
+                    policy
+                        .admit(name, u64::MAX, 1, replacement)
+                        .assured("an unlimited quota admits any usage"),
+                    QuotaConstraint {
                         name,
                         quota: Quota::Unlimited
-                    })
+                    }
                 );
             }
         }

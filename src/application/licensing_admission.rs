@@ -40,14 +40,15 @@ impl SessionServiceImpl {
             .licensing_snapshot()
             .usage
             .cluster_domains;
-        self.inner
+        match self
+            .inner
             .licensing
             .admit(QuotaName::ClusterDomains, usage, 1, replacement)
-            .map(|constraint| constraint.quota)
-            .map_err(|refusal| {
-                Report::new(refusal).change_context(DomainLicensingAdmissionError {
-                    domain: domain.clone(),
-                })
-            })
+        {
+            Ok(constraint) => Ok(constraint.quota),
+            Err(report) => Err(report.change_context(DomainLicensingAdmissionError {
+                domain: domain.clone(),
+            })),
+        }
     }
 }

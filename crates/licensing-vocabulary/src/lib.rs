@@ -10,6 +10,7 @@
     nervix::layer(vocabulary, reason = "owns shared licensing words")
 )]
 
+use error_stack::Report;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -97,7 +98,7 @@ impl QuotaConstraint {
         current_usage: u64,
         requested: u64,
         _replacement: bool,
-    ) -> Result<Self, LicensingRefusal> {
+    ) -> Result<Self, Report<LicensingRefusal>> {
         match self.quota {
             Quota::Unlimited => Ok(self),
             Quota::Bounded { value } => {
@@ -107,12 +108,12 @@ impl QuotaConstraint {
                 {
                     Ok(self)
                 } else {
-                    Err(LicensingRefusal {
+                    Err(Report::new(LicensingRefusal {
                         condition: self.name,
                         limit: value,
                         current_usage,
                         requested,
-                    })
+                    }))
                 }
             }
         }
@@ -192,7 +193,7 @@ mod tests {
             .admit(0, 1, false)
             .unwrap_err();
         assert_eq!(
-            refused,
+            *refused.current_context(),
             LicensingRefusal {
                 condition: QuotaName::ClusterDomains,
                 limit: 0,
@@ -201,8 +202,8 @@ mod tests {
             }
         );
         let last = constraint(Quota::Bounded { value: 2 });
-        assert_eq!(last.admit(1, 1, false), Ok(last));
-        assert_eq!(last.admit(1, 1, true), Ok(last));
+        assert!(matches!(last.admit(1, 1, false), Ok(value) if value == last));
+        assert!(matches!(last.admit(1, 1, true), Ok(value) if value == last));
         assert!(last.admit(2, 1, true).is_err());
         assert!(
             constraint(Quota::Bounded { value: u64::MAX })

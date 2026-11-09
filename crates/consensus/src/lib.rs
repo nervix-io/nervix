@@ -661,7 +661,7 @@ pub enum ConsensusResponse {
     Error,
 )]
 pub enum ConsensusConflict {
-    #[error("{refusal}")]
+    #[error("licensing refused this state change")]
     LicensingQuota {
         #[source]
         refusal: nervix_licensing_vocabulary::LicensingRefusal,
@@ -2039,6 +2039,7 @@ impl ConsensusError {
             return report.to_string();
         };
         match error {
+            Self::Conflict(ConsensusConflict::LicensingQuota { .. }) => format!("{report:#}"),
             Self::Storage => match report.downcast_ref::<io::Error>() {
                 Some(source) => format!("consensus storage failed: {source}"),
                 None => error.to_string(),
@@ -4413,7 +4414,9 @@ impl Administrator {
 
     pub async fn maybe_initialize(
         &self,
-        admit: impl Fn(u64) -> Result<(), nervix_licensing_vocabulary::LicensingRefusal> + Send + Sync,
+        admit: impl Fn(u64) -> error_stack::Result<(), nervix_licensing_vocabulary::LicensingRefusal>
+        + Send
+        + Sync,
     ) -> error_stack::Result<bool, ConsensusError> {
         let _membership_mutation = self.inner.membership_mutation.lock().await;
         if self
@@ -4426,7 +4429,7 @@ impl Administrator {
             return Ok(false);
         }
 
-        admit(0).map_err(|refusal| Report::new(refusal).change_context(ConsensusError::Startup))?;
+        admit(0).map_err(|report| report.change_context(ConsensusError::Startup))?;
         let mut nodes = BTreeMap::new();
         nodes.insert(
             self.inner.local_node_id.clone(),
@@ -4454,7 +4457,9 @@ impl Administrator {
     pub async fn reconcile_nodes(
         &self,
         gossip: impl Future<Output = GossipState>,
-        admit: impl Fn(u64) -> Result<(), nervix_licensing_vocabulary::LicensingRefusal> + Send + Sync,
+        admit: impl Fn(u64) -> error_stack::Result<(), nervix_licensing_vocabulary::LicensingRefusal>
+        + Send
+        + Sync,
     ) -> error_stack::Result<(), ConsensusError> {
         let mut reported_refusals = self.inner.membership_mutation.lock().await;
         let gossip = gossip.await;
@@ -4539,11 +4544,17 @@ impl Administrator {
                                     "a learner mutation names a candidate from this gossip cut",
                                 )
                                 .identity();
-                            verdicts.insert(run, AdmissionVerdict::QuotaRefused { refusal });
+                            // Publish only the fixed membership verdict; the report stays at its reporting boundary.
+                            verdicts.insert(
+                                run,
+                                AdmissionVerdict::QuotaRefused {
+                                    refusal: *refusal.current_context(),
+                                },
+                            );
                             self.inner.admission_verdicts.send_replace(Some(
                                 AdmissionVerdicts::new(metrics.current_term, verdicts.clone()),
                             ));
-                            tracing::warn!(node = %node_id, %refusal, "licensing refused a new cluster member");
+                            tracing::warn!(node = %node_id, error = %format_args!("{refusal:#}"), "licensing refused a new cluster member");
                             continue;
                         }
                         let operation = if current.node(&node_id).is_some() {
@@ -6104,7 +6115,7 @@ fn apply_consensus_command_at(
                 && let Err(refusal) = licensing::admit_domain(state, *domain_quota)
             {
                 return AppliedConsensusCommand::conflict(ConsensusConflict::LicensingQuota {
-                    refusal,
+                    refusal: *refusal.current_context(),
                 });
             }
             state.domains.insert(domain.id.clone(), (**domain).clone());

@@ -45,7 +45,7 @@ impl AdmissionMetrics {
         }
     }
 
-    pub(super) fn record(&self, refusal: LicensingRefusal) {
+    pub(super) fn record(&self, refusal: &LicensingRefusal) {
         match refusal.condition {
             QuotaName::ClusterNodes => self.nodes.inc(),
             QuotaName::ClusterDomains => self.domains.inc(),

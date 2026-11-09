@@ -732,9 +732,7 @@ impl SessionServiceImpl {
 
     /// The failure a consensus refusal of a restore step stands for.
     async fn consensus_step_failure(&self, error: &Report<ConsensusError>) -> StepFailure {
-        if let Some(refusal) = error.downcast_ref::<crate::licensing::LicensingRefusal>() {
-            self.inner.licensing.record_refusal(*refusal);
-        }
+        self.inner.licensing.record_refusal(error);
         if let ConsensusError::LeadershipLost { observed } = error.current_context() {
             let redirect = self.not_leader_response("", observed.clone()).await;
             return StepFailure::LeadershipLost(Box::new(redirect));

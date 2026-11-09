@@ -105,15 +105,17 @@ impl PolicyHandle {
         current_usage: u64,
         requested: u64,
         replacement: bool,
-    ) -> Result<QuotaConstraint, LicensingRefusal> {
+    ) -> error_stack::Result<QuotaConstraint, LicensingRefusal> {
         self.current()
             .admit(name, current_usage, requested, replacement)
-            .inspect_err(|refusal| self.record_refusal(*refusal))
+            .inspect_err(|report| self.record_refusal(report))
     }
 
-    pub fn record_refusal(&self, refusal: LicensingRefusal) {
-        self.inner.admissions.record(refusal);
-        tracing::warn!(error = %refusal, "licensing refused admission");
+    pub fn record_refusal<C>(&self, report: &error_stack::Report<C>) {
+        if let Some(refusal) = report.downcast_ref::<LicensingRefusal>() {
+            self.inner.admissions.record(refusal);
+            tracing::warn!(error = %format_args!("{report:#}"), "licensing refused admission");
+        }
     }
 
     pub(crate) fn refresh(&self, observer: &Observer) {

@@ -288,12 +288,8 @@ pub struct RestoredResource {
 /// Why the replicated state refused a restore step or an imported resource version.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum RestoreStepConflict {
-    #[error("licensing refused creation of restored domain '{domain}': {refusal}")]
-    Licensing {
-        domain: DomainName,
-        #[source]
-        refusal: nervix_licensing_vocabulary::LicensingRefusal,
-    },
+    #[error("licensing refused creation of restored domain '{domain}'")]
+    Licensing { domain: DomainName },
     #[error("command execution '{reference}' is not an applying restore")]
     NotARestore {
         reference: CommandExecutionReference,
@@ -576,10 +572,9 @@ fn create_domain(
             domain: domain.clone(),
         }));
     }
-    crate::licensing::admit_domain(state, domain_quota).map_err(|refusal| {
-        Report::new(refusal).change_context(RestoreStepConflict::Licensing {
+    crate::licensing::admit_domain(state, domain_quota).map_err(|report| {
+        report.change_context(RestoreStepConflict::Licensing {
             domain: domain.clone(),
-            refusal,
         })
     })?;
     for declared in resources {

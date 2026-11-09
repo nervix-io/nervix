@@ -3923,8 +3923,11 @@ or HTTP 503 without changing failure pacing. Wrong passwords remain authenticati
 ### Licensing Admission Refusals
 
 `LicensingRefusal` retains the quota name, effective limit, current usage, requested amount and
-refusal state. The admission owner adds its domain or membership context with `change_context`;
-it keeps the typed cause until the reporting boundary. Under a bounded quota, checked addition
+refusal state. Quota arithmetic creates its report at the refusal; policy handles preserve it,
+and the admission owner adds its domain or membership context with `change_context`. It keeps
+the typed cause until the reporting boundary. Membership verdicts and Raft responses project
+their fixed typed outcomes only where they are constructed; refusal metrics borrow the cause
+and refusal logs render the complete report. Under a bounded quota, checked addition
 refuses an overflowing request rather than wrapping its usage below the limit.
 
 A domain-quota refusal changes no domain record. Concurrent proposals check the committed count

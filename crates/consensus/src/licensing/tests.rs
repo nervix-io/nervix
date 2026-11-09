@@ -48,6 +48,14 @@ fn committed_domain_admission_serializes_competing_creates_and_preserves_updates
     assert_eq!(state.domains.len(), 1);
     let report = Proposer::applied_response(result.response).unwrap_err();
     assert_eq!(report.downcast_ref::<LicensingRefusal>(), Some(&refusal));
+    let rendered = format!("{report:#}");
+    assert_eq!(
+        rendered
+            .matches("licensing quota 'cluster.domains'")
+            .count(),
+        1
+    );
+    assert_eq!(crate::ConsensusError::report_message(&report), rendered);
     // A lifecycle update does not occupy another slot, even at the limit.
     assert_eq!(
         apply_consensus_command(&mut state, &command("first")).response,

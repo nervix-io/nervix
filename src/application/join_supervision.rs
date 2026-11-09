@@ -39,8 +39,8 @@ use crate::cluster::{ClockSkew, ClockSkewTolerance, ClusterHandle};
 /// Why a joining node stops instead of joining the cluster.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum JoinRefusedError {
-    #[error("{0}")]
-    Licensing(#[source] crate::licensing::LicensingRefusal),
+    #[error(transparent)]
+    Licensing(crate::licensing::LicensingRefusal),
     /// This node and a member of the cluster cannot run together.
     #[error("{0}")]
     Prerequisite(JoinRefusal),
