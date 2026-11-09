@@ -512,5 +512,6 @@ or JSON message. Clients read verified Row frames using their section schemas; s
 the subscription redaction policy. Bounded pages carry complete counts and an opaque continuation.
 A changed generation, source lifetime, committed control revision or captured row set refuses a
 resume as stale. See [Inspect Materialized State](./relay.md#inspect-materialized-state) for clause
-order and [the protocol](./client-session-protocol.md#materialized-state-inspection-envelope) for
-wire ownership and reply bounds.
+order and [the protocol](./client-session-protocol.md#state-inspection-envelope) for
+wire ownership and reply bounds. A WASM processor state read returns the same envelope with typed
+guest-state facts per unit; see [WASM State And Recovery](./wasm-state.md#observability).

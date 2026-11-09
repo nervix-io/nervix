@@ -675,6 +675,7 @@ pub(in crate::application) fn transaction_statement_label(statement: &Statement)
         | Statement::ShowEmitters(_)
         | Statement::ShowPlacements(_)
         | Statement::ShowRelayMaterializedState(_)
+        | Statement::ShowWasmProcessorState(_)
         | Statement::ShowClusterStatus(_)
         | Statement::ShowTransactions(_) => "SHOW",
         Statement::DescribeRelay(_)

@@ -505,6 +505,20 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             ),
         ),
         (
+            "server_command_wasm_state.nxsm",
+            reply(
+                27,
+                ReplyBody::Command(Box::new({
+                    let mut outcome = command_outcome(CommandDisposition::Completed {
+                        already_existed: false,
+                    });
+                    outcome.state =
+                        Some(Box::new(crate::state_inspection::tests::wasm_inspection()));
+                    outcome
+                })),
+            ),
+        ),
+        (
             "server_domain_clock_already_attached.nxsm",
             clock_attach(
                 11,
@@ -2024,6 +2038,14 @@ fn render_state_inspection(state: &crate::StateInspection, lines: &mut Vec<Strin
         page.unit_count,
         page.continuation.as_deref().unwrap_or("none")
     ));
+    if let Some(binding) = &page.wasm_binding {
+        lines.push(format!(
+            "STATE_WASM_BINDING resource={} version={} file={}",
+            binding.resource.as_str(),
+            binding.version,
+            binding.file
+        ));
+    }
     for unit in &page.units {
         let placement = match unit.unit.kind() {
             nervix_models::UnitKind::Single => "single".to_string(),
@@ -2050,6 +2072,9 @@ fn render_state_inspection(state: &crate::StateInspection, lines: &mut Vec<Strin
             unit.counts.rows,
             unit.counts.bytes
         ));
+        if let Some(state) = &unit.wasm {
+            render_wasm_unit_state(state, lines);
+        }
         for section in &unit.sections {
             lines.push(format!(
                 "STATE_SECTION name={} omitted={} watermarks={}",
@@ -2075,5 +2100,77 @@ fn render_state_inspection(state: &crate::StateInspection, lines: &mut Vec<Strin
                 }
             }
         }
+    }
+}
+
+fn render_wasm_unit_state(state: &nervix_models::WasmUnitStateInspection, lines: &mut Vec<String>) {
+    let counts = &state.checkpoints;
+    lines.push(format!(
+        "STATE_WASM_UNIT default_generation={} entries={} total={} empty={} captured={} \
+         locally_durable={} awaiting_replicas={} replica_confirmed={} failed={} attempted={} \
+         recovered={} recovery_failed={}",
+        state.default_generation,
+        state.entries,
+        counts.total,
+        counts.empty,
+        counts.captured,
+        counts.locally_durable,
+        counts.awaiting_replicas,
+        counts.replica_confirmed,
+        counts.failed,
+        state.recoveries.attempted,
+        state.recoveries.recovered,
+        state.recoveries.failed
+    ));
+    if let Some(reset) = &state.reset {
+        let scope = match reset.reset.scope() {
+            nervix_models::WasmStateResetScope::Unbranched => "unbranched".to_string(),
+            nervix_models::WasmStateResetScope::Branch(branch) => format!("branch:{branch}"),
+            nervix_models::WasmStateResetScope::AllBranches => "all_branches".to_string(),
+        };
+        lines.push(format!(
+            "STATE_WASM_RESET request={} scope={scope} phase={:?} reason={:?} generation={} \
+             readiness={:?}",
+            reset.reset.request().as_str(),
+            reset.reset.phase(),
+            reset.reset.reason(),
+            reset.generation,
+            reset.readiness
+        ));
+    }
+    for entry in &state.branches {
+        let branch = match &entry.branch {
+            Some(branch) => branch.to_string(),
+            None => "unbranched".to_string(),
+        };
+        if let Some(checkpoint) = &entry.checkpoint {
+            lines.push(format!(
+                "STATE_WASM_CHECKPOINT branch={branch} generation={} committed={} latest={} \
+                 stage={:?} required={} confirmed={}",
+                checkpoint.generation,
+                optional_text(checkpoint.committed_revision),
+                optional_text(checkpoint.latest_revision),
+                checkpoint.stage,
+                optional_text(checkpoint.required_replicas),
+                optional_text(checkpoint.confirmed_replicas)
+            ));
+        }
+        if let Some(recovery) = &entry.recovery {
+            lines.push(format!(
+                "STATE_WASM_RECOVERY branch={branch} generation={} rejection={:?} request={} \
+                 outcome={:?}",
+                recovery.generation,
+                recovery.rejection,
+                recovery.request.as_str(),
+                recovery.outcome
+            ));
+        }
+    }
+}
+
+fn optional_text(value: Option<impl std::fmt::Display>) -> String {
+    match value {
+        Some(value) => value.to_string(),
+        None => "none".to_string(),
     }
 }

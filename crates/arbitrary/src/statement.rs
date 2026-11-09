@@ -26,9 +26,9 @@ use nervix_models::{
     Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
     RelocationSelection, ResetWasmState, Restore, RestoreLifecycle, RestoreMode, RestoreScope,
     RestoreState, ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowPlacements,
-    ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SqsIngestorEntity, StartDomain,
-    StateBranchField, StateBranchSelection, Statement, StopDomain, SubscriptionBinding,
-    SubscriptionLiteral, SyslogIngestorEntity, TransactionInspectionRequest,
+    ShowRelayMaterializedState, ShowTransactions, ShowUdfs, ShowWasmProcessorState,
+    SqsIngestorEntity, StartDomain, StateBranchField, StateBranchSelection, Statement, StopDomain,
+    SubscriptionBinding, SubscriptionLiteral, SyslogIngestorEntity, TransactionInspectionRequest,
     TransactionInspectionTarget, TransactionOperationNumber, UncordonNode, UploadResource,
     WebsocketsIngestorEntity, ZeroMqIngestorEntity,
 };
@@ -154,6 +154,7 @@ pub enum StatementVariant {
     ShowEmitters,
     ShowPlacements,
     ShowRelayMaterializedState,
+    ShowWasmProcessorState,
     ShowClusterStatus,
     ShowTransactions,
     DescribeTransaction,
@@ -225,6 +226,7 @@ impl StatementVariant {
             Statement::ShowEmitters(_) => Self::ShowEmitters,
             Statement::ShowPlacements(_) => Self::ShowPlacements,
             Statement::ShowRelayMaterializedState(_) => Self::ShowRelayMaterializedState,
+            Statement::ShowWasmProcessorState(_) => Self::ShowWasmProcessorState,
             Statement::ShowClusterStatus(_) => Self::ShowClusterStatus,
             Statement::ShowTransactions(_) => Self::ShowTransactions,
             Statement::DescribeTransaction(_) => Self::DescribeTransaction,
@@ -694,10 +696,7 @@ impl Arbitrary<'_> {
                 Statement::DescribeWindowProcessor(DescribeWindowProcessor { name: self.name() })
             }
             StatementVariant::DescribeWasmProcessor => {
-                Statement::DescribeWasmProcessor(DescribeWasmProcessor {
-                    name: self.name(),
-                    format: self.inspection_format(),
-                })
+                Statement::DescribeWasmProcessor(DescribeWasmProcessor { name: self.name() })
             }
             StatementVariant::DescribeUdf => {
                 Statement::DescribeUdf(DescribeUdf { name: self.name() })
@@ -723,21 +722,22 @@ impl Arbitrary<'_> {
             StatementVariant::ShowRelayMaterializedState => {
                 let relay = self.name();
                 let selection = self.entropy.flag().then(|| self.state_branch_selection());
-                let page = if self.entropy.flag() {
-                    Some(nervix_models::StateInspectionPageRequest {
-                        limit: self.positive_u64(),
-                        after: self.entropy.flag().then(|| self.non_empty_string()),
-                    })
-                } else {
-                    None
-                };
-                let format = if self.entropy.flag() {
-                    InspectionFormat::Text
-                } else {
-                    InspectionFormat::Json
-                };
+                let page = self.state_inspection_page();
+                let format = self.inspection_format();
                 Statement::ShowRelayMaterializedState(ShowRelayMaterializedState {
                     relay,
+                    selection,
+                    page,
+                    format,
+                })
+            }
+            StatementVariant::ShowWasmProcessorState => {
+                let processor = self.name();
+                let selection = self.entropy.flag().then(|| self.state_branch_selection());
+                let page = self.state_inspection_page();
+                let format = self.inspection_format();
+                Statement::ShowWasmProcessorState(ShowWasmProcessorState {
+                    processor,
                     selection,
                     page,
                     format,
@@ -845,6 +845,16 @@ impl Arbitrary<'_> {
                 nervix_models::Literal::F64(nervix_models::Float64Literal::new(value))
             }
         }
+    }
+
+    /// An optional page of a state read: a positive limit with an optional opaque continuation.
+    fn state_inspection_page(&mut self) -> Option<nervix_models::StateInspectionPageRequest> {
+        if !self.entropy.flag() {
+            return None;
+        }
+        let limit = self.positive_u64();
+        let after = self.entropy.flag().then(|| self.non_empty_string());
+        Some(nervix_models::StateInspectionPageRequest { limit, after })
     }
 
     fn inspection_format(&mut self) -> InspectionFormat {

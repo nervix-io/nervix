@@ -104,6 +104,7 @@ pub enum Statement {
     ShowEmitters(ShowEmitters),
     ShowPlacements(ShowPlacements),
     ShowRelayMaterializedState(ShowRelayMaterializedState),
+    ShowWasmProcessorState(ShowWasmProcessorState),
     ShowClusterStatus(ShowClusterStatus),
     ShowTransactions(ShowTransactions),
     DescribeTransaction(DescribeTransaction),
@@ -186,6 +187,7 @@ impl Statement {
             | Self::ShowEmitters(_)
             | Self::ShowPlacements(_)
             | Self::ShowRelayMaterializedState(_)
+            | Self::ShowWasmProcessorState(_)
             | Self::ShowClusterStatus(_)
             | Self::ShowTransactions(_)
             | Self::DescribeTransaction(_)
@@ -429,6 +431,18 @@ pub struct ShowEmitters;
 )]
 pub struct ShowRelayMaterializedState {
     pub relay: RelayName,
+    pub selection: Option<crate::StateBranchSelection>,
+    pub page: Option<StateInspectionPageRequest>,
+    pub format: InspectionFormat,
+}
+
+/// `SHOW WASM PROCESSOR ... STATE`: one bounded read of a WASM processor's committed guest-state
+/// facts, with the inspection clauses every state read shares.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct ShowWasmProcessorState {
+    pub processor: WasmProcessorName,
     pub selection: Option<crate::StateBranchSelection>,
     pub page: Option<StateInspectionPageRequest>,
     pub format: InspectionFormat,
@@ -997,7 +1011,6 @@ pub struct DescribeWindowProcessor {
 )]
 pub struct DescribeWasmProcessor {
     pub name: WasmProcessorName,
-    pub format: InspectionFormat,
 }
 
 #[derive(

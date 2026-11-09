@@ -189,6 +189,8 @@ class InventoryTests(unittest.TestCase):
             "client-state-inspection",
             "interconnect-state-inspection",
             "state-inspection-cursor",
+            "interconnect-wasm-state-inspection",
+            "wasm-state-inspection-cursor",
             "client-requests",
             "client-replies",
             "client-events",
@@ -528,14 +530,14 @@ class InventoryTests(unittest.TestCase):
             "ingestor-describe-envelope": 7,
             "plexus-model": 55,
             "plexus-archive-model": 57,
-            "plexus-statement": 56,
-            "plexus-statement-text": 55,
-            "plexus-format-document": 55,
-            "plexus-format-text": 54,
-            "models-archived-models": 55,
+            "plexus-statement": 57,
+            "plexus-statement-text": 56,
+            "plexus-format-document": 56,
+            "plexus-format-text": 55,
+            "models-archived-models": 56,
             "registry-archived-models": 50,
-            "consensus-state-records": 47,
-            "consensus-state-corruption": 47,
+            "consensus-state-records": 48,
+            "consensus-state-corruption": 48,
             "consensus-raft-records": 46,
             "registry-stored-models": 43,
             "registry-stored-models-corruption": 43,
@@ -548,7 +550,8 @@ class InventoryTests(unittest.TestCase):
 
     def test_state_inspection_representations_are_bounded_pairs(self) -> None:
         targets = {target.id: target for target in bolero.load_inventory().targets}
-        for name in ("client-state-inspection", "state-inspection-cursor"):
+        for name in ("client-state-inspection", "state-inspection-cursor",
+                     "interconnect-wasm-state-inspection", "wasm-state-inspection-cursor"):
             with self.subTest(target=name):
                 self.assertEqual(targets[name].domain_version, 1)
                 self.assertEqual(targets[name].max_input_bytes, 512)

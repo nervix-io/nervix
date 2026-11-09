@@ -34,6 +34,10 @@ impl StateInspection {
             page.counts.branches, page.counts.rows, page.counts.bytes, page.unit_count
         )
         .assured("writing text to a String cannot fail");
+        if let Some(binding) = &page.wasm_binding {
+            writeln!(output, "{}", super::wasm::binding_line(binding))
+                .assured("writing text to a String cannot fail");
+        }
         for unit in &page.units {
             writeln!(
                 output,
@@ -54,6 +58,13 @@ impl StateInspection {
                 unit.origin.stage.as_ref()
             )
             .assured("writing text to a String cannot fail");
+            if let Some(state) = &unit.wasm {
+                let mut lines = super::wasm::wasm_unit_summary_lines(state);
+                lines.extend(super::wasm::entry_lines(state));
+                for line in lines {
+                    writeln!(output, "{line}").assured("writing text to a String cannot fail");
+                }
+            }
             for section in &unit.sections {
                 writeln!(
                     output,
@@ -114,6 +125,9 @@ impl Serialize for StateInspection {
                 output.serialize_entry("unit_count", &page.unit_count)?;
                 output.serialize_entry("units", &page.units)?;
                 output.serialize_entry("continuation", &page.continuation)?;
+                if let Some(binding) = &page.wasm_binding {
+                    output.serialize_entry("wasm_binding", &super::wasm::BindingJson(binding))?;
+                }
             }
             StateInspectionResult::Rejected(reason) => {
                 output.serialize_entry("outcome", "rejected")?;

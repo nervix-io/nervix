@@ -392,9 +392,9 @@ The focused checks run parts of the runner on their own:
 | `just test-chaos-startup-status` | Bounded startup status publication |
 | `just test-chaos-backup-fixture` | Derivation of the backup graph from the baseline fixture |
 | `just test-chaos-backup-fault` | The option rules of `backup-fault`, `restore-fresh-cluster` and `backup-cycles`. It also checks the [fault backup verdict](#backup-faults) against synthetic reports: a clean refusal; a refusal that left the destination or a `.nervix-backup-` staging file; a failure without a JSON report or without a backup failure reason; an uncertain failure that keeps its execution reference; a success without an archive; leader-crash archives whose cut was engaged before and after the crash; and an archive whose cut released while the acknowledgement gate held |
-| `just test-chaos-restore` | The option rules of `restore-fault` and `restore-volume`; the padded guest generator's bounds and layout; the node sampler's records, the staging verdicts read from them, including a pair of samples across a restart; and the [restore verdict](#restore-faults) against synthetic reports: a completed restore, one without every step applied, an incomplete one with and without its one failed step, a refusal before and after its target exists, an uncertain failure and an end without a JSON report |
+| `just test-chaos-restore` | The option rules of `restore-fault` and `restore-volume`; the padded guest generator's bounds and layout; the node sampler's records, the staging verdicts read from them, including a pair of samples across a restart; and the [restore verdict](#restore-faults) against synthetic reports: a completed restore, one without every step applied, an incomplete one with and without its one failed step, a refusal before and after its target exists, an uncertain failure and an end without a JSON report; and the padded guest's checkpoint wait over a typed WASM state page that is confirmed, uncommitted, left entries unread or was refused |
 | `just test-chaos-backup-state` | The [deduplicator and window verdict](#backup-cycles) over an exact set of outputs and one with replayed copies. It also checks the outputs that a restore which lost deduplicator keys, lost or doubled a window's retained rows, changed a record or dropped an output would produce, and malformed and missing inputs |
-| `just test-chaos-stateful-verifiers` | The state, clock and window verdicts |
+| `just test-chaos-stateful-verifiers` | The state, clock and window verdicts, and the milestone's checkpoint wait over a typed WASM state page that is confirmed, unconfirmed, left entries unread or was refused |
 | `just test-chaos-lifetimes-verifiers` | The option rules of `lifetimes`, and its [verdicts](#lifetimes) against synthetic ledgers: records enriched with their branch's profile, with an ignored lower or equal timestamp's version, or before a replacement applied; a lost parked record; repeats with and without a fault, before and past the milestone; generated rows of a state never held or going back; malformed and lost windows; a rotation that evicted nothing; an expiring branch that never expired or kept its first profile; a lost late record; and buffered records that were not held or waited for their flush interval |
 | `just test-chaos-endpoint-verifiers` | The option rules of `endpoints`, and its [route and WebSocket verdicts](#endpoints) against synthetic ledgers: accepted records that reach both domains, or a withdrawn domain's route; a lost, repeated, altered or unsent record; a record never accepted or abandoned; a client that stopped early; a bound route that answered 404; a retained connection that was refused with 1013, closed otherwise or not probed; a delivered probe; and a lost, repeated or altered frame |
 | `just verify-chaos-clock ARGS` | The clock verifier over retained observer transcripts |
@@ -1122,8 +1122,8 @@ The deployment keeps one state replica, so every guest save stages on an owner a
 The run prepares the restore in order:
 
 1. It starts the load, publishes one record for each of the three branches to
-   `chaos_padded_input`, and waits until `DESCRIBE WASM PROCESSOR` reports a committed checkpoint
-   of every branch that its replica confirmed.
+   `chaos_padded_input`, and waits until `SHOW WASM PROCESSOR chaos_padded STATE FORMAT JSON`
+   lists, on one page, a committed checkpoint of every branch that its replica confirmed.
 2. It takes a quiesced backup under the load and verifies it offline, as in
    [Backup Under Load](#backup-under-load). The archive must also hold a 2 MiB guest save of every
    branch.
@@ -1705,8 +1705,8 @@ the Kafka consumers in place.
    - the stateful consumer group committed through all 100 records, and the profile group through
      its end
    - every stateful output unchanged
-   - `DESCRIBE WASM PROCESSOR chaos_counter FORMAT JSON` reporting both branch checkpoints committed
-     at their latest revision and confirmed by every assigned replica
+   - `SHOW WASM PROCESSOR chaos_counter STATE FORMAT JSON` listing both branch checkpoints on one
+     page, committed at their latest revision and confirmed by every assigned replica
    - the materialized relay showing version 2 for both branches
 4. The run then holds the drained state for five configured snapshot intervals, read from Docker
    inspection, and requires the outputs to stay unchanged throughout.

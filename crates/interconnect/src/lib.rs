@@ -1492,3 +1492,6 @@ pub use state_inspection::{
     MaterializedStatePageBody, MaterializedStatePageDescriptor, MaterializedStatePageReply,
     MaterializedStatePageTransfer, ReadMaterializedStatePage,
 };
+
+mod wasm_state_inspection;
+pub use wasm_state_inspection::{ReadWasmStatePage, ReadWasmStatePageResponse, WasmStatePage};

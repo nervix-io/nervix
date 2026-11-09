@@ -1,7 +1,8 @@
-//! Opaque continuations for one domain-owned materialized-state read.
+//! Opaque continuations for one domain-owned state read.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** Canonical cursor encoding and identity checks for a captured read.
+//! - **Owns.** Canonical cursor encoding and identity checks for a captured read, per inspected
+//!   kind.
 //! - **Depends on.** Typed names and fingerprints, serde JSON and maintained base64 encoding.
 //! - **Must not know.** Schedules, rows, state storage, sessions or how generations are captured.
 
@@ -13,10 +14,11 @@
 use error_stack::{Report, ResultExt as _};
 use nervix_models::{
     DomainName, RelayName, SchemaFingerprint, StateInspectionBranchSelection,
-    StateInspectionPosition,
+    StateInspectionPosition, Unit, WasmProcessorName, WasmStateEntryKey,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+/// A materialized relay read's position, fenced by the generations it captured.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StateInspectionCursor {
@@ -27,6 +29,19 @@ pub(crate) struct StateInspectionCursor {
     pub(crate) generations: [u8; 32],
     pub(crate) selection: StateInspectionBranchSelection,
     pub(crate) position: StateInspectionPosition,
+}
+
+/// A WASM processor read's position: the last branch entry it returned, under the committed
+/// control revision whose guest-state lifetimes the read was planned at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WasmStateInspectionCursor {
+    pub(crate) domain: DomainName,
+    pub(crate) processor: WasmProcessorName,
+    pub(crate) control_revision: u64,
+    pub(crate) selection: StateInspectionBranchSelection,
+    pub(crate) unit: Unit,
+    pub(crate) after: WasmStateEntryKey,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -41,36 +56,68 @@ pub(crate) enum StateInspectionCursorError {
     NonCanonical,
 }
 
+/// The canonical token of one cursor: its JSON in unpadded URL-safe base64, within `limit` bytes.
+fn encode_token(
+    cursor: &impl Serialize,
+    limit: usize,
+) -> Result<String, Report<StateInspectionCursorError>> {
+    let bytes = serde_json::to_vec(cursor).change_context(StateInspectionCursorError::Shape)?;
+    let token = base64_simd::URL_SAFE_NO_PAD.encode_to_string(&bytes);
+    if token.len() > limit {
+        return Err(Report::new(StateInspectionCursorError::TooLarge { limit }));
+    }
+    Ok(token)
+}
+
+/// The cursor a canonical token of one kind carries; another kind's token is not this shape.
+fn decode_token<T: Serialize + DeserializeOwned>(
+    token: &str,
+    limit: usize,
+) -> Result<T, Report<StateInspectionCursorError>> {
+    if token.len() > limit {
+        return Err(Report::new(StateInspectionCursorError::TooLarge { limit }));
+    }
+    let bytes = base64_simd::URL_SAFE_NO_PAD
+        .decode_to_vec(token)
+        .change_context(StateInspectionCursorError::Base64)?;
+    let cursor: T =
+        serde_json::from_slice(&bytes).change_context(StateInspectionCursorError::Shape)?;
+    let canonical = encode_token(&cursor, limit)?;
+    if canonical != token {
+        return Err(Report::new(StateInspectionCursorError::NonCanonical));
+    }
+    Ok(cursor)
+}
+
 impl StateInspectionCursor {
     pub(crate) fn encode(
         &self,
         limit: usize,
     ) -> Result<String, Report<StateInspectionCursorError>> {
-        let bytes = serde_json::to_vec(self).change_context(StateInspectionCursorError::Shape)?;
-        let token = base64_simd::URL_SAFE_NO_PAD.encode_to_string(&bytes);
-        if token.len() > limit {
-            return Err(Report::new(StateInspectionCursorError::TooLarge { limit }));
-        }
-        Ok(token)
+        encode_token(self, limit)
     }
 
     pub(crate) fn decode(
         token: &str,
         limit: usize,
     ) -> Result<Self, Report<StateInspectionCursorError>> {
-        if token.len() > limit {
-            return Err(Report::new(StateInspectionCursorError::TooLarge { limit }));
-        }
-        let bytes = base64_simd::URL_SAFE_NO_PAD
-            .decode_to_vec(token)
-            .change_context(StateInspectionCursorError::Base64)?;
-        let cursor: Self =
-            serde_json::from_slice(&bytes).change_context(StateInspectionCursorError::Shape)?;
-        let canonical = cursor.encode(limit)?;
-        if canonical != token {
-            return Err(Report::new(StateInspectionCursorError::NonCanonical));
-        }
-        Ok(cursor)
+        decode_token(token, limit)
+    }
+}
+
+impl WasmStateInspectionCursor {
+    pub(crate) fn encode(
+        &self,
+        limit: usize,
+    ) -> Result<String, Report<StateInspectionCursorError>> {
+        encode_token(self, limit)
+    }
+
+    pub(crate) fn decode(
+        token: &str,
+        limit: usize,
+    ) -> Result<Self, Report<StateInspectionCursorError>> {
+        decode_token(token, limit)
     }
 }
 
@@ -150,6 +197,90 @@ mod tests {
                     .encode(limit)
                     .assured("a bounded generated cursor fits");
                 let decoded = StateInspectionCursor::decode(&token, limit)
+                    .assured("the current canonical shape decodes");
+                assert_eq!(decoded, original);
+                assert_eq!(
+                    decoded.encode(limit).assured("decoded cursor encodes"),
+                    token
+                );
+            });
+    }
+}
+
+#[cfg(test)]
+mod wasm_tests {
+    use meticulous::ResultExt as _;
+    use nervix_models::BranchKeyFingerprint;
+
+    use super::*;
+
+    fn cursor() -> WasmStateInspectionCursor {
+        WasmStateInspectionCursor {
+            domain: DomainName::parse("sales").assured("valid domain"),
+            processor: WasmProcessorName::parse("counting_guest").assured("valid processor"),
+            control_revision: 31,
+            selection: StateInspectionBranchSelection::All,
+            unit: Unit::partition(3),
+            after: WasmStateEntryKey(Some(BranchKeyFingerprint::new([29; 32]))),
+        }
+    }
+
+    #[test]
+    fn a_wasm_cursor_keeps_its_identity_and_position_and_refuses_another_kinds_token() {
+        let original = cursor();
+        let token = original.encode(4096).assured("the fixed shape fits");
+        assert_eq!(
+            WasmStateInspectionCursor::decode(&token, token.len())
+                .assured("the exact bound is inclusive"),
+            original
+        );
+        assert!(WasmStateInspectionCursor::decode(&token, token.len() - 1).is_err());
+        assert!(StateInspectionCursor::decode(&token, 4096).is_err());
+        let relay = StateInspectionCursor {
+            domain: original.domain.clone(),
+            relay: RelayName::parse("events").assured("valid relay"),
+            schema: SchemaFingerprint::from_digest([7; 32]),
+            control_revision: 31,
+            generations: [13; 32],
+            selection: StateInspectionBranchSelection::All,
+            position: StateInspectionPosition::AfterUnit(Unit::SINGLE),
+        }
+        .encode(4096)
+        .assured("the relay cursor fits");
+        assert!(WasmStateInspectionCursor::decode(&relay, 4096).is_err());
+    }
+
+    #[test]
+    fn bolero_wasm_state_inspection_cursor_round_trips() {
+        bolero::check!()
+            .with_iterations(128)
+            .with_max_len(512)
+            .for_each(|bytes: &[u8]| {
+                let mut arbitrary =
+                    nervix_arbitrary::Arbitrary::new(bytes, nervix_arbitrary::Domain::Vocabulary);
+                let fingerprint =
+                    BranchKeyFingerprint::new(std::array::from_fn(|_| arbitrary.entropy().byte()));
+                let original = WasmStateInspectionCursor {
+                    domain: arbitrary.name(),
+                    processor: arbitrary.name(),
+                    control_revision: arbitrary.positive_u64().get(),
+                    selection: match arbitrary.entropy().byte() % 3 {
+                        0 => StateInspectionBranchSelection::All,
+                        1 => StateInspectionBranchSelection::Unbranched,
+                        _ => StateInspectionBranchSelection::Branch(fingerprint),
+                    },
+                    unit: if arbitrary.entropy().flag() {
+                        Unit::SINGLE
+                    } else {
+                        Unit::partition(u32::from(arbitrary.entropy().byte()))
+                    },
+                    after: WasmStateEntryKey(arbitrary.entropy().flag().then_some(fingerprint)),
+                };
+                let limit = nervix_client_wire::SessionLimits::DEFAULT.string_bytes();
+                let token = original
+                    .encode(limit)
+                    .assured("a bounded generated cursor fits");
+                let decoded = WasmStateInspectionCursor::decode(&token, limit)
                     .assured("the current canonical shape decodes");
                 assert_eq!(decoded, original);
                 assert_eq!(

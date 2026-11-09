@@ -510,9 +510,9 @@ callback returns and never calls back into the guest to do it. The request selec
 scoped to the calling branch and to the generation that branch is running in, so a guest can never
 name another processor, domain, branch, or generation. Every accepted request is routed through the
 same coordinated reset described above, so it has the same durability, replica, fencing and
-recovery guarantees as an operator's. `DESCRIBE WASM PROCESSOR` reports it with the reason
-`GUEST`, and its `FORMAT JSON` inspection carries its request reference, which begins with
-`wasm-guest-reset.`.
+recovery guarantees as an operator's. `DESCRIBE WASM PROCESSOR` and
+`SHOW WASM PROCESSOR <processor> STATE` report it with the reason `GUEST` and its request
+reference, which begins with `wasm-guest-reset.`.
 
 Only the callbacks that end with a [checkpoint](#checkpoints-and-acknowledgements) own uncommitted
 effects a reset can discard, so only those admit a request: an input batch, a timeout callback, and
@@ -577,8 +577,9 @@ spent before it resets anything, so the budget survives whatever happens next:
 The record is control-plane state, so a process restart, a leader change and an owner change all
 read the same spent attempt. Nothing about the refused guest's memory is kept: the record names the
 branch by its opaque fingerprint, the generation that was refused, which of the two verdicts the
-guest gave, and what the attempt achieved. `DESCRIBE WASM PROCESSOR` reports it as a
-`rejected state recovery` line, beside the `rejected state policy` the processor declares.
+guest gave, and what the attempt achieved. `SHOW WASM PROCESSOR <processor> STATE` lists it as the
+recovery of that branch's entry, and `DESCRIBE WASM PROCESSOR` counts each unit's recoveries by
+outcome beside the `rejected state policy` the processor declares.
 
 ### Checkpoints And Acknowledgements
 
@@ -647,20 +648,21 @@ processor's `ON GLOBAL ERROR` policy, and then:
   input, pending output and timeouts. The branch never continues from that state: its next input
   instantiates the guest again from the committed checkpoint.
 
-`DESCRIBE WASM PROCESSOR` reads the scheduled binding and state lifetime beside a read-only sample
-of the owner's current checkpoints. The reset line reports its `PUBLISHING` or `READY` phase, reason,
-scope, and selected generation. `PUBLISHING` remains fenced even if its initiating command has
+`SHOW WASM PROCESSOR <processor> STATE` reads each unit's scheduled binding and state lifetime at
+the unit's owner, beside a read-only sample of that owner's current checkpoints, and
+`DESCRIBE WASM PROCESSOR` prints the same unit summaries without branch entries. The reset reports
+its `PUBLISHING` or `READY` phase, reason, scope, selected generation and request reference. `PUBLISHING` remains fenced even if its initiating command has
 returned an error; `READY` means the new initial checkpoint reached its durability boundary and
 the schedule admitted the new lifetime. Reset readiness reports `RESETTING` while the selected
 checkpoint is unfinished, `AWAITING_USABLE_EXECUTION` when a selected single-branch checkpoint is
 confirmed but its scope is still fenced, and `READY` when the ready schedule is published. An
 all-branches reset remains `RESETTING` until ready publication because a sample of currently
 materialized branches cannot establish that every selected branch completed. Rejected-state recovery
-lines retain the original guest
-rejection class and the attempt's outcome, including a failed fresh initialization.
+entries retain the refused generation, the original guest rejection class, the request and the
+attempt's outcome, including a failed fresh initialization.
 
-For each current branch, the description gives its generation, committed and latest revision,
-checkpoint stage, and required and confirmed replica counts. `CAPTURED` has not reached local
+For each selected branch with a current checkpoint, the state read gives its generation, committed
+and latest revision, checkpoint stage, and required and confirmed replica counts. `CAPTURED` has not reached local
 storage, `LOCALLY_DURABLE` reached it but has not completed the replica boundary, and
 `REPLICA_CONFIRMED` completed its boundary. A restored checkpoint whose earlier replica boundary
 cannot be reconstructed reports replica counts as unknown rather than claiming confirmation.
@@ -668,10 +670,12 @@ cannot be reconstructed reports replica counts as unknown rather than claiming c
 the failure occurred before capture, the latest revision and replica counts are absent because no
 new checkpoint exists. Branch
 identities are fixed-size opaque fingerprints; guest bytes and branch field values never enter the
-inspection. Counts cover all current branches, while detailed branch and recovery entries have a
-fixed report limit. `FORMAT JSON` serializes the same typed inspection; it is also returned to
-clients beside either rendering. JSON is the state inspection itself, so an unscheduled processor
-reports `null` rather than inventing runtime progress.
+inspection. Counts cover every selected branch, and the branch entries are paged with `LIMIT` and
+`AFTER` like every state read, so no entry is cut from a reply without a continuation that resumes
+after it. `FORMAT JSON` renders the same typed envelope, which clients receive beside either
+rendering. A processor the committed schedule does not hold is refused rather than reported with
+invented runtime progress; see
+[Read guest-state facts from Plexus](processors.md#read-guest-state-facts-from-plexus).
 
 A failed synchronization of a node's stable storage is not retried. The operating system may have
 dropped the writes it could not flush, and the database refuses to synchronize again, so every later
@@ -910,8 +914,8 @@ wasm processor '<processor>' <stage> failed (<branch>, resource '<resource>' ver
 ```
 
 `<branch>` is `branch` followed by the lowercase hexadecimal fingerprint of the concrete branch's
-key, or `unbranched`. The fingerprint is the one `DESCRIBE WASM PROCESSOR` prints beside the
-branch's checkpoint, and a diagnostic never contains the key's field values, which the branch
+key, or `unbranched`. The fingerprint is the one `SHOW WASM PROCESSOR <processor> STATE` names
+the branch's entry by, and a diagnostic never contains the key's field values, which the branch
 schema may declare `SENSITIVE`. `<export>` names the
 guest export whose call failed, or the export that runs the failed operation. `<revision>` appears
 when the failure involves saved state: the revision being restored or the revision being persisted.
@@ -1003,8 +1007,9 @@ wasm processor 'sessionizer' application state restoration failed (branch 402383
 : A processor that declares `ON REJECTED STATE RESET` could not replace the
   rejected lifetime, and the one attempt that lifetime was worth is now spent.
   The branch keeps reporting its rejection until an operator acts.
-  `DESCRIBE WASM PROCESSOR` reports the attempt as a `rejected state recovery`
-  line naming the generation, the verdict and the outcome.
+  `SHOW WASM PROCESSOR <processor> STATE` reports the attempt as the recovery
+  of the branch's entry, naming the generation, the verdict, the request and
+  the outcome.
 
 `state restore failed`
 

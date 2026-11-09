@@ -27,7 +27,7 @@ Feature: Coordinated WASM processor state reset
       state reset reason: TRANSACTION
       state reset readiness: READY
       """
-    And within "10s" DESCRIBE WASM PROCESSOR "counting_guest" on the leader node contains
+    And within "10s" SHOW WASM PROCESSOR "counting_guest" STATE on the leader node contains
       """
       stage=REPLICA_CONFIRMED required_replicas=<replica_count> confirmed_replicas=<replica_count>
       """
@@ -62,7 +62,7 @@ Feature: Coordinated WASM processor state reset
       state reset reason: TRANSACTION
       state reset readiness: READY
       """
-    And within "10s" DESCRIBE WASM PROCESSOR "counting_guest" on the leader node contains
+    And within "10s" SHOW WASM PROCESSOR "counting_guest" STATE on the leader node contains
       """
       stage=REPLICA_CONFIRMED required_replicas=<replica_count> confirmed_replicas=<replica_count>
       """
@@ -454,7 +454,7 @@ Feature: Coordinated WASM processor state reset
       """
     When client "owner" executes these Plexus commands
       """
-      DESCRIBE WASM PROCESSOR counting_guest;
+      SHOW WASM PROCESSOR counting_guest STATE;
       """
     Then the last client outcome reports WASM reset phase "READY" at generation 2
     And the last command output does not contain
@@ -463,14 +463,14 @@ Feature: Coordinated WASM processor state reset
       """
     When client "owner" executes these Plexus commands
       """
-      DESCRIBE WASM PROCESSOR counting_guest FORMAT JSON;
+      SHOW WASM PROCESSOR counting_guest STATE FORMAT JSON;
       """
     Then the last command output is a JSON document where
       """
-      /resource_version = 1
+      /wasm_binding/version = 1
       /units/0/unit = "Single"
-      /units/0/reset_readiness = "Ready"
-      /units/0/reset/reset/reason = "Transaction"
+      /units/0/wasm/reset/readiness = "ready"
+      /units/0/wasm/reset/reason = "transaction"
       """
     And the last command output does not contain
       """

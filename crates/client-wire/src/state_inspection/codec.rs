@@ -126,6 +126,10 @@ impl StateInspectionPage {
             "StateInspectionPage.continuation",
             self.continuation.as_deref(),
         )?;
+        let wasm_binding = match &self.wasm_binding {
+            Some(binding) => Some(super::wasm::encode_binding(binding, encoder)?),
+            None => None,
+        };
         Ok(wire::StateInspectionPage::create(
             encoder.fbb(),
             &wire::StateInspectionPageArgs {
@@ -133,6 +137,7 @@ impl StateInspectionPage {
                 unit_count: self.unit_count,
                 units: Some(units),
                 continuation,
+                wasm_binding,
             },
         ))
     }
@@ -151,11 +156,16 @@ impl StateInspectionPage {
             Some(value) => Some(decoder.text("StateInspectionPage.continuation", value)?),
             None => None,
         };
+        let wasm_binding = match page.wasm_binding() {
+            Some(binding) => Some(super::wasm::decode_binding(decoder, binding)?),
+            None => None,
+        };
         Ok(Self {
             counts,
             unit_count: page.unit_count(),
             units,
             continuation,
+            wasm_binding,
         })
     }
 }
@@ -180,6 +190,10 @@ impl StateInspectionUnit {
             &self.sections,
             |section, encoder| section.encode(encoder),
         )?;
+        let wasm = match &self.wasm {
+            Some(state) => Some(super::wasm::encode_unit(state, encoder)?),
+            None => None,
+        };
         Ok(wire::StateInspectionUnit::create(
             encoder.fbb(),
             &wire::StateInspectionUnitArgs {
@@ -190,6 +204,7 @@ impl StateInspectionUnit {
                 origin: Some(origin),
                 counts: Some(counts),
                 sections: Some(sections),
+                wasm,
             },
         ))
     }
@@ -220,6 +235,10 @@ impl StateInspectionUnit {
             table.sections(),
             |section| StateInspectionSection::decode(decoder, section, backing, limits),
         )?;
+        let wasm = match table.wasm() {
+            Some(state) => Some(super::wasm::decode_unit(decoder, state)?),
+            None => None,
+        };
         Ok(Self {
             unit,
             owner,
@@ -227,6 +246,7 @@ impl StateInspectionUnit {
             origin,
             counts,
             sections,
+            wasm,
         })
     }
 }

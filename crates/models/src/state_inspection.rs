@@ -124,6 +124,18 @@ pub enum StateInspectionBranchSelection {
     Branch(BranchKeyFingerprint),
 }
 
+impl StateInspectionBranchSelection {
+    /// Whether this selector admits the execution `branch` names; `None` is the unbranched
+    /// execution.
+    pub fn admits(&self, branch: Option<&BranchKeyFingerprint>) -> bool {
+        match (self, branch) {
+            (Self::All, _) | (Self::Unbranched, None) => true,
+            (Self::Branch(selected), Some(branch)) => selected == branch,
+            (Self::Unbranched, Some(_)) | (Self::Branch(_), None) => false,
+        }
+    }
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]

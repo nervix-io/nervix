@@ -160,7 +160,7 @@ async fn replicate(
 async fn inspect(state: StdArc<ReplicatedWasmProcessorState>, record: StdArc<ConfirmationRecord>) {
     let mut last_committed = None;
     for _ in 0..INSPECTIONS {
-        let inspection = state.inspection();
+        let inspection = state.inspection().state;
         assert!(
             inspection.committed_revision >= last_committed,
             "the committed revision went back from {last_committed:?} to {:?}",
@@ -222,7 +222,7 @@ fn a_checkpoint_waiting_for_its_replicas_misses_no_confirmation() {
         }
         inspecting.await.assured(MODEL_TASK_JOINS);
         assert_eq!(
-            state.inspection().stage,
+            state.inspection().state.stage,
             WasmCheckpointStage::ReplicaConfirmed,
             "the checkpoint every replica confirmed must be committed"
         );

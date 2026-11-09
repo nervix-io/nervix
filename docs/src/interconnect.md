@@ -487,8 +487,8 @@ wire fingerprint fences that request shape during connection setup.
 The fingerprint covers endpoint kinds whose WebSockets variant alone carries an optional signaling
 reference, both in Models and in queued transaction statements.
 It also covers fixed-width 64-bit counts in Models, transaction commands and records,
-and WASM inspection results. These fields use the vocabulary's `CountAsU64` adapter and checked
-native decoding; an unrepresentable count fails decoding. Window processor state has current
+and the unit pages of the WASM state page operation. These fields use the vocabulary's `CountAsU64`
+adapter and checked native decoding; an unrepresentable count fails decoding. Window processor state has current
 runtime-state kind tag `8`, and its bulk snapshot codec validates the `NVXWIN64` frame signature
 before decoding histogram delayed-removal bucket indices in the same count representation.
 
@@ -2428,3 +2428,26 @@ so that definition owns the sole default and configured callers retain the same 
 The complete frontend inspection also has that elapsed-time bound. Failed or cancelled reads retain
 no historical cursor or page cache. The existing materialized dependency/generator snapshot request
 and its grouping, confirmation, integrity and admission behavior remain unchanged.
+
+## WASM State Page Operation
+
+`read_wasm_state_page` is a process-targeted unary request in the Commands class. It names the
+domain, the WASM processor, one execution unit, the committed control revision the coordinator
+planned the read at, the resolved branch selector, the key of the last entry an earlier page
+returned, an entry limit and the exact owner process. The owner waits until it has applied that
+control revision and refuses a newer one as a stale continuation, so any change committed between
+two pages, a reset included, ends the read rather than mixing two schedules. It then checks that it executes the unit and
+that the target names its own incarnation, and reads the unit's committed lifetimes, reset and
+recoveries beside the checkpoints its runtime samples for the unit's branches. Selection, counting
+and the entry limit apply on the owner, so only the selected page crosses the interconnect.
+
+The reply is a typed rkyv value. A page carries the read origin (the owner's identity, a SHA-256
+fingerprint of the unit's selected facts, its newest lifetime and committed revision) and the
+unit's page: complete counts over the selection, at most the requested entries in entry order, and
+whether entries remain after the last one. A refusal carries the envelope's typed reason. The owner
+caps the entries at what one Commands payload holds: every archived entry fits 512 bytes, and room
+for two entries is left for the unit's own facts. A coordinator refuses a page that returned no
+entry while entries remained and it allowed some, instead of issuing a continuation that cannot
+advance. The request runs under the configured inspection deadline through
+`request_with_timeout`; its static default is ten seconds. Branches cross the interconnect only as
+fingerprints, and no guest state bytes travel with the facts.

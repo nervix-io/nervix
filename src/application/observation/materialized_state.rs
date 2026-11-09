@@ -46,12 +46,39 @@ use crate::{
 
 /// Project an observed internal failure to the fixed inspection protocol refusal.
 /// The diagnostic records the complete report before its wire projection leaves this boundary.
-fn inspection_refusal(
+pub(super) fn inspection_refusal(
     error: impl std::fmt::Display,
     reason: StateInspectionRejection,
 ) -> StateInspectionRejection {
     tracing::debug!(error = %format_args!("{error:#}"), ?reason, "state inspection refused");
     reason
+}
+
+/// The command result of one state read: its requested projection as the message, a refusal as
+/// a failed command, and the typed envelope beside either.
+pub(super) fn rendered_inspection(
+    state: StateInspection,
+    format: InspectionFormat,
+) -> CommandResult {
+    let message = match format {
+        InspectionFormat::Json => state.to_json(),
+        InspectionFormat::Text => match state.display_text() {
+            Ok(text) => text,
+            Err(error) => return command_error(format!("{error:#}")),
+        },
+    };
+    let mut result = if matches!(state.result, StateInspectionResult::Rejected(_)) {
+        command_error(message)
+    } else {
+        command_ok(message)
+    };
+    result.state = Some(Box::new(
+        crate::application::command_result::RenderedStateInspection {
+            inspection: state,
+            format,
+        },
+    ));
+    result
 }
 
 fn resume_offset(after: Option<(Option<nervix_models::BranchKeyFingerprint>, u64)>) -> u64 {
@@ -137,25 +164,7 @@ impl SessionServiceImpl {
                 Err(_) => StateInspectionResult::Rejected(StateInspectionRejection::Deadline),
             },
         };
-        let message = match show.format {
-            InspectionFormat::Json => state.to_json(),
-            InspectionFormat::Text => match state.display_text() {
-                Ok(text) => text,
-                Err(error) => return command_error(format!("{error:#}")),
-            },
-        };
-        let mut result = if matches!(state.result, StateInspectionResult::Rejected(_)) {
-            command_error(message)
-        } else {
-            command_ok(message)
-        };
-        result.state = Some(Box::new(
-            crate::application::command_result::RenderedStateInspection {
-                inspection: state,
-                format: show.format,
-            },
-        ));
-        result
+        rendered_inspection(state, show.format)
     }
 
     async fn inspection_plan(
@@ -344,6 +353,7 @@ impl SessionServiceImpl {
                     origin: descriptor.origin,
                     counts: descriptor.counts,
                     sections: Vec::new(),
+                    wasm: None,
                 });
                 continue;
             }
@@ -405,6 +415,7 @@ impl SessionServiceImpl {
                 origin: descriptor.origin,
                 counts: descriptor.counts,
                 sections,
+                wasm: None,
             });
             if descriptor.more || returned < supplied {
                 more = true;
@@ -461,6 +472,7 @@ impl SessionServiceImpl {
             unit_count: u64::try_from(units.len()).assured("a bounded unit count fits u64"),
             units: output,
             continuation,
+            wasm_binding: None,
         })
     }
 
@@ -642,7 +654,7 @@ impl SessionServiceImpl {
     }
 }
 
-fn inspection_owner(
+pub(super) fn inspection_owner(
     node: &ScheduledNode,
     unit: Unit,
     local: &nervix_models::ClusterNodeName,
@@ -677,7 +689,7 @@ fn resume_position(
     }
 }
 
-fn add_counts(
+pub(super) fn add_counts(
     total: &mut StateInspectionCounts,
     unit: StateInspectionCounts,
 ) -> Result<(), StateInspectionRejection> {

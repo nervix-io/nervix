@@ -396,11 +396,11 @@ pub use statement::{
     RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
     RelocationPreferenceStrategy, RelocationSelection, ResolvedBranching, ResolvedCodecWireFormat,
     RetryPolicy, ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowPlacements,
-    ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SignalingProtobufConfig,
-    SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat, StartDomain,
-    StateInspectionPageRequest, Statement, StopDomain, SubscriptionBinding,
-    SubscriptionDeliveryBehavior, SubscriptionLiteral, UncordonNode, UniquelyKindedModel,
-    UploadResource, VhostTlsResource, WireSchemaLookup, default_relay_buffer,
+    ShowRelayMaterializedState, ShowTransactions, ShowUdfs, ShowWasmProcessorState,
+    SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
+    SignalingWireFormat, StartDomain, StateInspectionPageRequest, Statement, StopDomain,
+    SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, UncordonNode,
+    UniquelyKindedModel, UploadResource, VhostTlsResource, WireSchemaLookup, default_relay_buffer,
 };
 pub use timestamp::{AtomicTimestamp, Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};
@@ -410,8 +410,9 @@ pub use wasm_state_generation::{
     WasmStateReset, WasmStateResetPhase, WasmStateResetReason, WasmStateResetScope,
 };
 pub use wasm_state_inspection::{
-    WasmCheckpointCounts, WasmCheckpointInspection, WasmCheckpointStage, WasmRecoveryInspection,
-    WasmStateInspection, WasmStateResetInspection, WasmStateResetReadiness,
-    WasmUnitStateInspection,
+    WasmBranchStateInspection, WasmCheckpointCounts, WasmCheckpointInspection, WasmCheckpointStage,
+    WasmCheckpointState, WasmRecoveryCounts, WasmRecoveryInspection, WasmStateBinding,
+    WasmStateEntryKey, WasmStateInspectionError, WasmStateResetInspection, WasmStateResetReadiness,
+    WasmUnitStateInspection, WasmUnitStatePage, WasmUnitStateSelection,
 };
 pub use window_model_digest::WindowModelDigest;

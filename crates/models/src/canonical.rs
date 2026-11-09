@@ -941,14 +941,10 @@ impl Statement {
                 "DESCRIBE WINDOW PROCESSOR {};",
                 describe.name.as_str()
             )),
-            Self::DescribeWasmProcessor(describe) => {
-                let mut statement = format!("DESCRIBE WASM PROCESSOR {}", describe.name.as_str());
-                if describe.format != InspectionFormat::Text {
-                    statement.push_str(" FORMAT JSON");
-                }
-                statement.push(';');
-                Ok(statement)
-            }
+            Self::DescribeWasmProcessor(describe) => Ok(format!(
+                "DESCRIBE WASM PROCESSOR {};",
+                describe.name.as_str()
+            )),
             Self::DescribeUdf(describe) => Ok(format!("DESCRIBE UDF {};", describe.name.as_str())),
             Self::DescribePlacement(describe) => {
                 Ok(format!("DESCRIBE PLACEMENT {};", describe.name.as_str()))
@@ -967,29 +963,45 @@ impl Statement {
             Self::ShowIngestors(_) => Ok("SHOW INGESTORS;".to_string()),
             Self::ShowEmitters(_) => Ok("SHOW EMITTERS;".to_string()),
             Self::ShowPlacements(_) => Ok("SHOW PLACEMENTS;".to_string()),
-            Self::ShowRelayMaterializedState(show) => {
-                let mut text = format!("SHOW RELAY {} MATERIALIZED STATE", show.relay.as_str());
-                if let Some(selection) = &show.selection {
-                    text.push_str(&format!(" FOR {}", selection.to_canonical_plexus()?));
-                }
-                if let Some(page) = &show.page {
-                    text.push_str(&format!(" LIMIT {}", page.limit));
-                    if let Some(after) = &page.after {
-                        text.push_str(&format!(" AFTER {}", string_literal(after)));
-                    }
-                }
-                text.push_str(match show.format {
-                    crate::InspectionFormat::Text => " FORMAT TEXT;",
-                    crate::InspectionFormat::Json => " FORMAT JSON;",
-                });
-                Ok(text)
-            }
+            Self::ShowRelayMaterializedState(show) => Ok(format!(
+                "SHOW RELAY {} MATERIALIZED STATE{}",
+                show.relay.as_str(),
+                state_inspection_clauses(show.selection.as_ref(), show.page.as_ref(), show.format)?
+            )),
+            Self::ShowWasmProcessorState(show) => Ok(format!(
+                "SHOW WASM PROCESSOR {} STATE{}",
+                show.processor.as_str(),
+                state_inspection_clauses(show.selection.as_ref(), show.page.as_ref(), show.format)?
+            )),
             Self::ShowClusterStatus(_) => Ok("SHOW CLUSTER STATUS;".to_string()),
             Self::DescribeCluster(_) => Ok("DESCRIBE CLUSTER;".to_string()),
             Self::ShowTransactions(_) => Ok("SHOW TRANSACTIONS;".to_string()),
             Self::DescribeTransaction(describe) => Ok(describe.to_canonical_plexus()),
         }
     }
+}
+
+/// The selector, page and format clauses every state read shares, in their written order.
+fn state_inspection_clauses(
+    selection: Option<&crate::StateBranchSelection>,
+    page: Option<&crate::StateInspectionPageRequest>,
+    format: InspectionFormat,
+) -> error_stack::Result<String, CanonicalPlexusError> {
+    let mut text = String::new();
+    if let Some(selection) = selection {
+        text.push_str(&format!(" FOR {}", selection.to_canonical_plexus()?));
+    }
+    if let Some(page) = page {
+        text.push_str(&format!(" LIMIT {}", page.limit));
+        if let Some(after) = &page.after {
+            text.push_str(&format!(" AFTER {}", string_literal(after)));
+        }
+    }
+    text.push_str(match format {
+        InspectionFormat::Text => " FORMAT TEXT;",
+        InspectionFormat::Json => " FORMAT JSON;",
+    });
+    Ok(text)
 }
 
 impl Backup {

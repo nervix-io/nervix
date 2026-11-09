@@ -217,12 +217,6 @@ extreme values, nested lists, and every refusal of a domain clock attachment, to
 `just test-client-wire` checks that the checked-in bytes are exactly what the encoder writes, and
 `just update-client-wire-corpus` regenerates them for review.
 
-A WASM description's typed `wasm_state` contains its shared resource binding and a `units`
-collection. Each unit carries its identity, guest generations, reset readiness, recovery attempts
-and checkpoint observations. Checkpoint and recovery detail each retain a whole-processor limit
-of 128 entries; every unit reports complete counts and omitted totals. Text and JSON descriptions
-render those same facts.
-
 The registered client representation properties also compare complete generated current values
 through the production codecs. Separate targets verify malformed bytes under fixed limits; Arrow
 properties compare selected logical values and validity with decoded Row cells, using float bits
@@ -1127,7 +1121,8 @@ The node a session is on serves completion and choice lookups, listing and selec
 subscriptions, domain clock attachments, producers, and the reads its locally applied state can
 answer: `SHOW CLUSTER STATUS`, `DESCRIBE CLUSTER`, `SHOW TRANSACTIONS`, `SHOW CREATE`, `SHOW UDFS`,
 `SHOW INGESTORS`, `SHOW EMITTERS`, `SHOW PLACEMENTS`,
-`SHOW RELAY MATERIALIZED STATE`, `LOOKUP`, and the `DESCRIBE` statements of domains, resources,
+`SHOW RELAY MATERIALIZED STATE`, `SHOW WASM PROCESSOR STATE`, `LOOKUP`, and the `DESCRIBE`
+statements of domains, resources,
 endpoints, lookups, placements, UDFs, relocations, relays, ingestors, junctions, deduplicators,
 reingestors, correlators, reorderers, window processors, WASM processors, and emitters. Every other
 statement needs the leader, and so do every transaction request, transaction attach and inspection,
@@ -2687,7 +2682,7 @@ Producer and consumer session-byte admission uses the committed cluster limits. 
 existing grant carries its exact row bound, which the admission worker enforces for that
 attachment. The compiled defaults are request preferences, not server admission ceilings.
 
-## Materialized State Inspection Envelope
+## State Inspection Envelope
 
 `CommandOutcome.state` carries `StateInspection`, independently of the display message. Its result
 is exactly one `Page` or `Rejected` value. A page contains complete counts, unit count, ordered unit
@@ -2696,6 +2691,21 @@ process-bound read origin, complete counts and named sections. A section carries
 `RowSchema`, bounded `NXRB` RowBatch frames, omitted-row count and optional positional watermark
 indices. Watermarks are distinct, non-sensitive datetime columns. Frames conform to their section
 schema, keep branch keys and redaction, and share the verified outer reply's backing bytes.
+
+A `SHOW WASM PROCESSOR ... STATE` page also carries its processor's pinned module as
+`WasmStateBinding` (resource, version and file), and each of its units carries `WasmUnitStateFacts`:
+the default generation, the latest reset as `WasmResetFacts` (request reference, the `WasmStateScope`
+union of `WasmUnbranchedScope`, `WasmBranchScope` with its 32-byte `Fingerprint` and
+`WasmAllBranchesScope`, phase, reason, published generation and readiness), the complete entry
+count, `WasmCheckpointCounts` and `WasmRecoveryCounts`, and the returned `WasmBranchStateFacts` in
+strictly increasing branch order. An entry's absent `branch` is the unbranched execution; it carries
+a `WasmCheckpointFacts` (generation, optional committed and latest revisions, stage and optional
+required and confirmed replica counts), a `WasmRecoveryFacts` (refused generation, rejection,
+request reference and outcome) or both, never neither. Generations and revisions are positive; a
+decoder refuses a zero, an unordered or stateless entry, more returned entries than the complete
+count, and every undeclared enum value or union member. Other kinds carry neither table. A WASM
+page has no row sections, so its `rows` and `bytes` counts are zero and `branches` counts the
+selected branches.
 
 Embedded frames use the session transfer bound; transport frames still obey the smaller frame
 bound and the ordinary reply-transfer protocol. The service checks the complete typed outcome plus
@@ -2707,6 +2717,8 @@ single-terminal reply gate still govern that outcome. Other typed reasons are `U
 
 The JSON projection preserves cell types: integer values, float bits, datetime nanoseconds, base64
 bytes, nested typed lists, null and redacted cells. Counts and origin fields remain structural
-metadata. See [Inspect Materialized State](./relay.md#inspect-materialized-state) for token fencing
-and query semantics. This operator page protocol does not change subscription batches or the
+metadata; WASM stages, phases, reasons, readiness, rejections and outcomes render as snake-case
+strings and reset scopes as `{"kind": ..., "branch": ...}`. See
+[Inspect Materialized State](./relay.md#inspect-materialized-state) and
+[WASM State And Recovery](./wasm-state.md#observability) for token fencing and query semantics. This operator page protocol does not change subscription batches or the
 internal dependency/generator full-snapshot protocol.

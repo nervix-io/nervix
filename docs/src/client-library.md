@@ -726,12 +726,9 @@ message names why nothing was read.
 every published version with its entries under their exact paths, and the models bound to each
 version.
 
-`DESCRIBE WASM PROCESSOR <name>` is typed too: `CommandOutcome::wasm_state` holds the
-`WasmStateInspection` beside the text or JSON rendering, with the pinned module binding, the default
-guest-state generation, the latest reset with its request reference, scope, phase, and reason, the
-recorded rejected-state recoveries, and each current branch's checkpoint stage, revisions, and
-replica counts under its opaque fingerprint. `RESET WASM PROCESSOR ... STATE` is an ordinary
-command: its success arrives only once the new lifetime is usable, and a retry the client makes
+`SHOW WASM PROCESSOR <name> STATE` is typed through the same state envelope as every
+`SHOW ... STATE` read (see [Typed State Reads](#typed-state-reads)). `RESET WASM PROCESSOR ...
+STATE` is an ordinary command: its success arrives only once the new lifetime is usable, and a retry the client makes
 after an uncertain outcome reuses the same `execution_reference`, so it recovers the original
 reset's outcome rather than starting another. See
 [WASM State And Recovery](./wasm-state.md#observability).
@@ -741,13 +738,21 @@ the API. It follows leader redirects and reconnects with the session client's no
 dispatch. A successful read of the attached transaction refreshes the same commit preview; a
 rejected read changes no binding or preview.
 
-## Typed Materialized State Reads
+## Typed State Reads
 
 Execute `SHOW RELAY events MATERIALIZED STATE FOR ALL BRANCHES LIMIT 10 FORMAT JSON;`.
 Read `outcome.state`, match `StateInspectionResult::Page` or `Rejected`, then visit units, sections
 and `frame.batch()` using each section's schema. `counts` describe the complete selected cut;
 `continuation` resumes bounded pages. Typed cells preserve sensitivity, integer widths, float bits,
 datetime nanoseconds and bytes. `state.to_json()` and `state.display_text()` render the same value.
+
+`SHOW WASM PROCESSOR guest STATE FOR ALL BRANCHES LIMIT 10;` fills the same envelope with typed WASM
+guest-state facts instead of row sections: the page's `wasm_binding` holds the pinned module, and
+each unit's `wasm` holds its `WasmUnitStateInspection` with the default generation, the latest reset
+with its request reference, scope, phase, reason, generation and readiness, the complete counts of
+selected entries, checkpoint stages and recovery outcomes, and the returned `branches` in branch
+order. Each branch entry names its opaque fingerprint, absent for the unbranched execution, and
+carries its current-lifetime checkpoint, its recorded recovery, or both.
 
 The shared binding exposes `Outcome::state_inspection()` as an independently owned `Inspection`.
 It retains the envelope, lossless JSON, counts, section schemas and verified frame backing. C and
