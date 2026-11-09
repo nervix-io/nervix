@@ -782,6 +782,7 @@ mod window_archive;
 mod window_checkpoint_cases;
 mod window_processor;
 mod window_state;
+mod window_state_charge;
 
 #[doc(hidden)]
 pub use branch_key::BranchKey;
