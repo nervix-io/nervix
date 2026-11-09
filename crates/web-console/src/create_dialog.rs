@@ -89,6 +89,12 @@ mod processor_route_editor;
 mod processor_state_editor;
 mod relay_draft;
 mod relay_editor;
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod render_stack_tests;
 mod resource_binding_draft;
 mod resource_binding_editor;
 mod resource_pin_draft;
