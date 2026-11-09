@@ -4705,6 +4705,11 @@ coverage-chaos-pause-delivery:
 test-chaos-degraded-evidence:
     exec bash scripts/chaos/tests/degraded-self-test.sh
 
+# Judge the leader crash's outward TLS policy evidence and prove its restricted TLS probe against
+# local servers that admit or exclude the probe's offer.
+test-chaos-outward-tls:
+    exec bash scripts/chaos/tests/outward-tls-self-test.sh
+
 # Pin suite preparation and baseline execution accounting and the production output-boundary
 # observations.
 test-chaos-output-boundary selection="all":
