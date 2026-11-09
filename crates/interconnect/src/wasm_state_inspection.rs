@@ -59,7 +59,11 @@ impl ReadWasmStatePage {
     pub fn entry_capacity(executor: &Executor) -> u64 {
         let limit = <Self as InterconnectRequest>::CLASS.payload_limit(executor);
         let entries = limit / MAX_ARCHIVED_ENTRY_BYTES;
-        entries.saturating_sub(2)
+        nervix_primitives::expect_lint!(
+            nervix::clamped_arithmetic,
+            "a payload no larger than the unit's own facts has room for zero branch entries",
+            entries.saturating_sub(2)
+        )
     }
 }
 
