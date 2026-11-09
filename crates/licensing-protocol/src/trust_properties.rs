@@ -3,13 +3,19 @@
 use meticulous::{OptionExt as _, ResultExt as _};
 
 use crate::{
-    document::*, documents::*, representation_properties::number, test_fixture::*, trust::*,
+    document::*, documents::*, representation_properties::number, requests::*, test_fixture::*,
+    trust::*,
 };
 
 #[test]
 fn bolero_jws_malformed() {
     let fixture = Fixture::new();
     let compact = fixture.sign(&fixture.decision());
+    let creation = fixture.requests().remove(0);
+    let request = fixture
+        .cluster
+        .sign(&creation, limits())
+        .assured("bounded current request");
     bolero::check!()
         .with_iterations(128)
         .with_max_len(256)
@@ -18,10 +24,12 @@ fn bolero_jws_malformed() {
             // logical decision. Arbitrary bytes independently exercise bounded no-panic decoding.
             if let Ok(text) = std::str::from_utf8(input) {
                 assert!(verify::<Decision>(text, fixture.working.public_key(), limits()).is_err());
+                assert!(Request::verify(text, RequestSigner::CarriedClusterKey, limits()).is_err());
             }
+            let selector = usize::from(input.first().copied().unwrap_or(0));
             let mut framing: jose_jws::Flattened = compact.parse().assured("maintained framing");
             let mut signature = framing.signature.signature.as_ref().to_vec();
-            let index = usize::from(input.first().copied().unwrap_or(0)) % signature.len();
+            let index = selector % signature.len();
             signature[index] ^= 1;
             framing.signature.signature = signature.into();
             assert!(
@@ -31,6 +39,44 @@ fn bolero_jws_malformed() {
             let original: Decision = verify(&compact, fixture.working.public_key(), limits())
                 .assured("original signature");
             assert_eq!(original, fixture.decision());
+            // A self-signed request is read for its carried key before its signature verifies,
+            // so a mutated signature or payload byte must still be refused.
+            let mut framing: jose_jws::Flattened = request.parse().assured("maintained framing");
+            let mut signature = framing.signature.signature.as_ref().to_vec();
+            let index = selector % signature.len();
+            signature[index] ^= 1;
+            framing.signature.signature = signature.into();
+            assert!(
+                Request::verify(
+                    &framing.to_string(),
+                    RequestSigner::CarriedClusterKey,
+                    limits()
+                )
+                .is_err()
+            );
+            let mut framing: jose_jws::Flattened = request.parse().assured("maintained framing");
+            let mut payload = framing
+                .payload
+                .as_ref()
+                .assured("a compact request carries its payload")
+                .as_ref()
+                .to_vec();
+            let index = selector % payload.len();
+            payload[index] ^= input.get(1).copied().unwrap_or(1).max(1);
+            framing.payload = Some(payload.into());
+            assert!(
+                Request::verify(
+                    &framing.to_string(),
+                    RequestSigner::CarriedClusterKey,
+                    limits()
+                )
+                .is_err()
+            );
+            assert_eq!(
+                Request::verify(&request, RequestSigner::CarriedClusterKey, limits())
+                    .assured("original self-signed request"),
+                creation
+            );
         });
 }
 
@@ -58,6 +104,41 @@ fn bolero_trust_chain() {
                     .decision(),
                 &fixture.decision()
             );
+            // The verified state states exactly what was signed, lacks nothing for a holder of it
+            // and publishes it in its signed form.
+            let verified: Vec<TrustDocumentContent> = trust
+                .documents()
+                .iter()
+                .map(|document| document.content().clone())
+                .collect();
+            assert_eq!(
+                verified,
+                vec![TrustDocumentContent::Authorization(authorization.clone())]
+            );
+            assert_eq!(
+                trust.authorization(fixture.working.key_id(), now()),
+                Some(&authorization)
+            );
+            let nothing = TrustHeld {
+                working_keys: Vec::new(),
+                revocation_serials: Vec::new(),
+                succession_serials: Vec::new(),
+            };
+            assert_eq!(trust.missing(&nothing, fixture.working.key_id()), documents);
+            let held = TrustHeld {
+                working_keys: vec![fixture.working.key_id().clone()],
+                revocation_serials: Vec::new(),
+                succession_serials: Vec::new(),
+            };
+            assert!(
+                trust
+                    .missing(&held, fixture.working.key_id())
+                    .documents
+                    .is_empty()
+            );
+            let publication = trust.publication();
+            round_trip(&publication);
+            assert_eq!(publication.documents(), documents);
             let mut insufficient = set;
             insufficient.signatures.pop();
             let documents = TrustDocuments {
@@ -92,6 +173,16 @@ fn bolero_trust_chain() {
             ));
             let trust = TrustState::build(&fixture.embedded(), &revoked, limits())
                 .assured("verified revocation");
+            assert!(trust.is_revoked(fixture.working.key_id()));
+            assert_eq!(
+                trust
+                    .documents()
+                    .last()
+                    .assured("the revocation was supplied last")
+                    .content(),
+                &TrustDocumentContent::Revocation(revocation.clone())
+            );
+            assert_eq!(trust.publication().revocations.len(), 1);
             assert!(
                 trust
                     .verify_decision(&compact, DecisionVerification::Apply, limits())
