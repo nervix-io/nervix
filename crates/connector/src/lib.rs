@@ -95,7 +95,8 @@ pub use ingestor::{
     IngestorConnector, IngestorError, IngestorHost, IngestorHostServices, IngestorIntakeError,
     IngestorIntakeMessage, IngestorIntakeResult, IngestorMessage, IngestorPlan, IngestorPoll,
     IngestorPollMessage, IngestorReadCancellation, IngestorReadOutcome, IngestorResult,
-    IngestorResume, IngestorSettlement, PacedIngestorConnector,
+    IngestorResume, IngestorResumeOutcome, IngestorSettlement, IngestorSettlementOperation,
+    IngestorSettlementOutcome, IngestorSuspendCause, PacedIngestorConnector,
 };
 pub use nervix_tls::OutwardTlsPolicy;
 pub use row_requests::{

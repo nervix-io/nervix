@@ -52,7 +52,7 @@ datetimes or bytes. JSON, CBOR and AVRO retain their own wire type enums; CBOR c
 native representation types, and an AVRO array nests its item type, arrays included, to a
 bounded depth. The Model/archive, registry and consensus properties preserve those complete
 values, including inferencer state bindings and their initial expressions.
-The `NERVIX HOP RULES` registry signature and `raft_tls_hop_` consensus namespace
+The `NERVIX HOP RULES` registry signature and `raft_tls_cmd_rule_` consensus namespace
 identify the current Model layout before decoding.
 
 `ALTER INGESTOR` and `ALTER EMITTER` statement generators draw, for every entity, each change its
@@ -61,7 +61,7 @@ Kafka's and Pulsar's `SET START AT`, a declared quiesce mode and `SET CLIENT` wh
 or writes through a client. They mix them with the shared operations, the in-place construction
 changes of a route or an emitter, and an emitter's envelope clauses and properties. The
 Model/archive, consensus and canonical Plexus properties preserve the complete operations in order,
-and the `raft_tls_hop_` consensus namespace identifies the statement layout the
+and the `raft_tls_cmd_rule_` consensus namespace identifies the statement layout the
 transactions it keeps are stored in before decoding.
 
 Ingestor count declarations retain their full positive 64-bit range. Compact execution-unit ranks
@@ -102,7 +102,7 @@ contain synthetic data and describe the current shapes.
 | Execution revision built from a scheduled domain | `execution-revision-units` | Every declared partition retains its placement and the handoff fingerprint changes with it; moving one unit names that exact unit in the reassignment and preserves every sibling |
 | Consensus state records: unit-keyed schedules, domains with their clock mappings and authorities, users, resource versions, node statuses and uploads, cordons, admission fences, mutation leases, restore installations, transactions, commit plans, impact reports, command executions and the metadata with its retry fence and required cluster parameters | `consensus-state-records` | The recovered `StateMachineData` equals the stored one, records, derived indexes and metadata alike, for a revision written into an empty keyspace and for a second revision written as the changes from it, with records replaced and removed |
 | Damaged consensus state | `consensus-state-corruption` | Recovery fails with `StorageFailure::InvalidState`, or recovers a state in which every record that names its key is stored under it, each resource version has at most one upload, and every transaction counts its pending and completed operations and numbers a failing one within those it accepted, and which stores and recovers again unchanged |
-| Raft votes, log positions, log entries of every command, current state metadata, snapshot manifests, log keys, section keys and sections | `consensus-raft-records` | Complete equality through the storage codec and its conversions; a log key names its entry's index and a section key its section |
+| Raft votes, log positions, log entries of every command, conditional orphaned-pause recovery replies and typed refusal causes, current state metadata, snapshot manifests, log keys, section keys and sections | `consensus-raft-records` | Complete equality through the storage codec and its conversions; a log key names its entry's index and a section key its section |
 | Malformed Raft records | `consensus-raft-records-malformed` | Arbitrary bytes fail with the typed storage failure, or decode to a value that stores back to the same record |
 | Registry Models keyed by domain, kind and name | `registry-stored-models` | Complete Model equality, listed in key order and read by key, after reopening the registry while its journal serves them and after a flush moved them into on-disk tables |
 | Damaged registry records | `registry-stored-models-corruption` | The listing fails with `DecodeKey`, `InvalidModelArchive`, `DeserializeValue` or `StoredModelKindMismatch`, or lists Models whose own keys are exactly the stored keys |
