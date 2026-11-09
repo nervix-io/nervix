@@ -373,18 +373,36 @@ pub(super) async fn read_branch_state(
         .map_err(|_| Report::new(BranchStateReadError::Ended))?
 }
 
+/// The events a branch task has handled that can change what it holds: ticks, batches,
+/// materialized retries and force flushes. An inspection names the exact state it copied by this
+/// count.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct HandledEvents {
+    count: u64,
+}
+
+impl HandledEvents {
+    /// Counts one more handled event.
+    pub(super) fn record(&mut self) {
+        self.count = self
+            .count
+            .checked_add(1)
+            .assured("a branch handles fewer than 2^64 events");
+    }
+}
+
 /// Answers one inspection with what the branch holds now. The branch task calls this between two
 /// batches; a requester that already withdrew, because its deadline elapsed, receives nothing.
 pub(super) fn answer_branch_state(
     response: oneshot::Sender<error_stack::Result<BranchStateCopy, BranchStateReadError>>,
     incarnation: u64,
-    events: u64,
+    events: HandledEvents,
     held: error_stack::Result<HeldBranchRows, BranchStateReadError>,
 ) {
     let answer = match held {
         Ok(held) => Ok(BranchStateCopy {
             incarnation,
-            events,
+            events: events.count,
             held,
         }),
         Err(error) => Err(error),
@@ -442,6 +460,25 @@ impl SelectedStateBranches {
         branches.sort_by(|left, right| BranchKey::canonical_order(&left.key, &right.key));
         Self { branches }
     }
+
+    /// Answers a unit's branch selection for one inspection. The branches a restore has not
+    /// installed hold rows no task can copy yet, so while a restore is pending the inspection is
+    /// refused rather than reporting an incomplete state as complete.
+    pub(super) fn answer(
+        response: oneshot::Sender<error_stack::Result<Self, BranchStateReadError>>,
+        instances: &BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+        selection: StateInspectionBranchSelection,
+        restore_pending: bool,
+    ) {
+        let answer = if restore_pending {
+            Err(Report::new(BranchStateReadError::Unrestored))
+        } else {
+            Ok(Self::select(instances, selection))
+        };
+        response
+            .send(answer)
+            .means_peer_left("processor state inspection requester");
+    }
 }
 
 /// Why one unit's owner page could not be read.
@@ -484,6 +521,18 @@ pub(crate) struct ProcessorStatePage {
     pub(crate) runs: Vec<ProcessorStateRun>,
     pub(crate) sections: Vec<ProcessorStateSectionColumns>,
 }
+
+/// A processor's state has at most two sections, fixed by its kind: a reorderer's held rows, or a
+/// correlator's left and right pending records.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a reorderer holds one section and a correlator one per side, so a page names at \
+                  most two"
+    )
+)]
+pub(super) const MAX_PROCESSOR_SECTIONS: usize = 2;
 
 /// One section of a unit page: how many rows of it the unit holds, and the returned rows as Arrow
 /// columns, payload first and then the columns the section appends.
@@ -829,7 +878,7 @@ fn correlator_sections(
             }
         }
     }
-    let mut sections = Vec::with_capacity(2);
+    let mut sections = Vec::with_capacity(MAX_PROCESSOR_SECTIONS);
     for (section, held_rows, rows) in [
         (ProcessorStateSection::Left, left_rows, left),
         (ProcessorStateSection::Right, right_rows, right),

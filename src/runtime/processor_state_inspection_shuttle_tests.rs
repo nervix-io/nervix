@@ -66,7 +66,7 @@ async fn branch_task(
     ended: StdArc<AtomicBool>,
 ) {
     let mut buffer = ReordererOutputBuffer::default();
-    let mut events = 0_u64;
+    let mut events = HandledEvents::default();
     let mut receiving = true;
     loop {
         nervix_primitives::task::consume_budget().await;
@@ -97,7 +97,7 @@ async fn branch_task(
             received = input.recv(), if receiving => match received {
                 Some((batch, order)) => {
                     buffer.push(batch, order, Timestamp::from_unix_nanos(1));
-                    events += 1;
+                    events.record();
                 }
                 None => receiving = false,
             },

@@ -558,23 +558,15 @@ pub(super) async fn run_processor_node_runtime(
                         )))
                         .means_peer_left("WASM state reset schedule application requester");
                 }
-                // The branches a restore has not installed hold rows no task can copy yet, so an
-                // inspection is refused rather than reporting an incomplete state as complete.
-                ProcessorNodeCommand::SelectStateBranches { response, .. }
-                    if pending_restore.is_some() =>
-                {
-                    response
-                        .send(Err(Report::new(BranchStateReadError::Unrestored)))
-                        .means_peer_left("processor state inspection requester");
-                }
                 ProcessorNodeCommand::SelectStateBranches {
                     selection,
                     response,
-                } => {
-                    response
-                        .send(Ok(SelectedStateBranches::select(&instances, selection)))
-                        .means_peer_left("processor state inspection requester");
-                }
+                } => SelectedStateBranches::answer(
+                    response,
+                    &instances,
+                    selection,
+                    pending_restore.is_some(),
+                ),
                 ProcessorNodeCommand::Checkpoint { purpose, response } => {
                     let result = nervix_primitives::expect_lint!(
                         nervix::lifecycle_call,
@@ -1582,9 +1574,7 @@ async fn run_processor_branch_task(
     quiesce_gauges.observe(&branch, &processor);
     let stop_mode;
     let mut handoff_execution_snapshot = None;
-    // The events that can change what the branch holds: ticks, batches, materialized retries and
-    // force flushes. An inspection names the exact state it copied by this count.
-    let mut events = 0_u64;
+    let mut events = HandledEvents::default();
     loop {
         nervix_primitives::task::consume_budget().await;
         let freeze = ownership_freeze.observe();
@@ -1621,9 +1611,7 @@ async fn run_processor_branch_task(
                     .next_deadline()
                     .is_some_and(|deadline| deadline <= now))
         {
-            events = events
-                .checked_add(1)
-                .assured("a branch handles fewer than 2^64 events");
+            events.record();
             branch.tick(&execution_snapshot).await;
             quiesce_gauges.observe(&branch, &processor);
             continue;
@@ -1724,9 +1712,7 @@ async fn run_processor_branch_task(
             received = input.recv(), if !ownership_frozen => {
                 match received {
                     Some(ProcessorBranchInput { relay, batch, work }) => {
-                        events = events
-                            .checked_add(1)
-                            .assured("a branch handles fewer than 2^64 events");
+                        events.record();
                         branch
                             .execute_processor_input(&processor, &relay, batch)
                             .await;
@@ -1745,9 +1731,7 @@ async fn run_processor_branch_task(
                     _ = sleep(runtime_handle.inner.state_replication_poll_interval) => {}
                 }
             }, if has_pending_materialized && !ownership_frozen => {
-                events = events
-                    .checked_add(1)
-                    .assured("a branch handles fewer than 2^64 events");
+                events.record();
                 materialized_wait.register_again();
                 branch
                     .retry_processor_pending_materialized(&processor)
@@ -1772,9 +1756,7 @@ async fn run_processor_branch_task(
                         break;
                     }
                 };
-                events = events
-                    .checked_add(1)
-                    .assured("a branch handles fewer than 2^64 events");
+                events.record();
                 // A generation releases everything the branch can release now, including parked
                 // messages whose materialized dependency arrived after they were parked.
                 if branch.processor_has_pending_materialized(&processor) {

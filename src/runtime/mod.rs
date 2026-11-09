@@ -579,8 +579,8 @@ use processor_output::{
     flush_due_processor_outputs, pending_output_batches_by_key,
 };
 use processor_state_inspection::{
-    BranchStateCopy, BranchStateRead, HeldReordererRow, HeldRowsBudget, SelectedStateBranches,
-    answer_branch_state, held_row_bytes,
+    BranchStateCopy, BranchStateRead, HandledEvents, HeldReordererRow, HeldRowsBudget,
+    SelectedStateBranches, answer_branch_state, held_row_bytes,
 };
 pub(crate) use processor_state_inspection::{
     BranchStateReadError, ProcessorStatePageBounds, ProcessorStatePageError,

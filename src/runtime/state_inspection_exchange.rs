@@ -26,6 +26,7 @@ use nervix_primitives::sync::StdArc;
 
 use super::{
     MaterializedGenerationRecord, RestoredMaterializedSnapshot, SealedSource,
+    processor_state_inspection::MAX_PROCESSOR_SECTIONS,
     state_inspection_read::MaterializedInspectionPage,
 };
 use crate::runtime_schema::RuntimeRecordBatch;
@@ -437,18 +438,6 @@ pub(crate) async fn receive_materialized_page(
         snapshot: Some(snapshot),
     }))
 }
-
-/// A processor's state has at most two sections, fixed by its kind: a reorderer's held rows, or a
-/// correlator's left and right pending records.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "a reorderer holds one section and a correlator one per side, so a page names at \
-                  most two"
-    )
-)]
-const MAX_PROCESSOR_SECTIONS: usize = 2;
 
 /// One received section of a processor page: every row of it the unit holds, its complete fields,
 /// and its returned rows, absent when the page returned none of them.
