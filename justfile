@@ -435,6 +435,13 @@ test-inferencer-state *args: build-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input 'tests/features/runtime/inferencer_state*.feature' {{ quote(args) }}
 
+# Verify inference resource replacement without traversing unrelated features or build artifacts.
+test-inferencer-rebinding *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/inferencer_state_rebinding*.feature") }} {{ quote(args) }}
+
 # Inspect materialized relay pages through the native client and in-process cluster.
 test-state-inspection *args: build-deps build-test-cli
     #!/usr/bin/env bash

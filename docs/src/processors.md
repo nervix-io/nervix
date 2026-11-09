@@ -488,6 +488,15 @@ generation, so a returning key starts from `INITIAL`. Dropping the inferencer re
 state. The state identity includes the resource, pinned version, file and complete `STATE`
 declarations; changing that identity starts fresh state. `UNBRANCHED` owns one state sequence;
 `BRANCHED BY` owns one per concrete key.
+
+`REBIND RESOURCE` to a different version starts every stateful branch from its declared `INITIAL`,
+even when the new version contains identical ONNX bytes. Applying the running domain's schedule
+removes snapshots under the replaced fingerprint, so a restart uses only the current binding's
+state. Uploading a newer version alone, rebinding to the version already pinned, or rejecting an
+incompatible model leaves the existing tensors intact. Dropping and recreating the inferencer with
+another `STATE` declaration uses that declaration's initial values. The operation retains its
+`ENTITY_PAUSE` classification; see [Rebinding](resource-versions.md#rebinding).
+
 State ports are internal model inputs and outputs, not fields available to route construction.
 `SHOW CREATE INFERENCER` preserves the state declaration and its initial expression.
 
