@@ -839,7 +839,6 @@ async fn logical_deadline_cannot_cross_domain_capabilities() {
             id: domain("first"),
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
-                placement: nervix_models::PlacementPolicy::Neutral,
             },
             status: nervix_models::DomainStatus::Running,
             start_version: 1,
@@ -854,7 +853,6 @@ async fn logical_deadline_cannot_cross_domain_capabilities() {
             id: domain("second"),
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
-                placement: nervix_models::PlacementPolicy::Neutral,
             },
             status: nervix_models::DomainStatus::Running,
             start_version: 1,
@@ -954,7 +952,6 @@ async fn due_logical_wait_returns_due_time_and_a_fresh_snapshot() {
             id: clock_domain,
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
-                placement: nervix_models::PlacementPolicy::Neutral,
             },
             status: nervix_models::DomainStatus::Running,
             start_version: 4,

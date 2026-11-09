@@ -5,8 +5,8 @@ use std::num::NonZeroUsize;
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    AlterBranch, AlterBranchOperation, AlterDeduplicator, AlterDeduplicatorOperation, AlterDomain,
-    AlterEmitter, AlterEmitterOperation, AlterGenerator, AlterGeneratorOperation, AlterIngestor,
+    AlterBranch, AlterBranchOperation, AlterDeduplicator, AlterDeduplicatorOperation, AlterEmitter,
+    AlterEmitterOperation, AlterGenerator, AlterGeneratorOperation, AlterIngestor,
     AlterIngestorOperation, AlterJunction, AlterPlacement, AlterPlacementOperation,
     AlterProcessorOperation, AlterReingestor, AlterRelay, AlterRelayOperation, AlterReorderer,
     AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterTransportIngestorOperation,
@@ -99,7 +99,7 @@ const RESOURCE_BINDING_KINDS: [ModelKind; 7] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumIter)]
 pub enum StatementVariant {
     CreateDomain,
-    AlterDomain,
+
     CreateUser,
     CreateResource,
     RebindResource,
@@ -170,7 +170,6 @@ impl StatementVariant {
         match statement {
             Statement::AlterCluster(_) => Self::AlterCluster,
             Statement::CreateDomain(_) => Self::CreateDomain,
-            Statement::AlterDomain(_) => Self::AlterDomain,
             Statement::CreateUser(_) => Self::CreateUser,
             Statement::CreateResource(_) => Self::CreateResource,
             Statement::RebindResource(_) => Self::RebindResource,
@@ -361,17 +360,11 @@ impl Arbitrary<'_> {
                 Statement::CreateDomain(CreateStatement::new(
                     CreateDomain {
                         id: self.name(),
-                        config: DomainConfig {
-                            pace,
-                            placement: self.placement_policy(),
-                        },
+                        config: DomainConfig { pace },
                     },
                     if_not_exists,
                 ))
             }
-            StatementVariant::AlterDomain => Statement::AlterDomain(AlterDomain {
-                policy: self.placement_policy(),
-            }),
             StatementVariant::CreateUser => {
                 let if_not_exists = self.entropy.flag();
                 Statement::CreateUser(CreateStatement::new(
@@ -895,7 +888,17 @@ impl Arbitrary<'_> {
 
     fn relocation_member(&mut self) -> RelocationMember {
         let kind = self.entropy.pick(RELOCATABLE_KINDS);
-        RelocationMember::new(kind, self.model_name_of(kind))
+        let mut member = RelocationMember::new(kind, self.model_name_of(kind));
+        member.selection = match self.entropy.byte() % 3 {
+            0 => nervix_models::RelocationUnitSelection::All,
+            1 => nervix_models::RelocationUnitSelection::Partition(u32::from_le_bytes(
+                self.entropy.any_u64().to_le_bytes()[..4]
+                    .try_into()
+                    .verified("four bytes were selected"),
+            )),
+            _ => nervix_models::RelocationUnitSelection::Instance(self.entropy.any_u64()),
+        };
+        member
     }
 
     /// The kind a `DROP` names: one Plexus spells, or in the vocabulary domain any kind at all.
@@ -934,8 +937,16 @@ impl Arbitrary<'_> {
             RelocationSelection::List(self.relocation_members())
         } else {
             RelocationSelection::Corridor {
-                from: self.relocation_members(),
-                to: self.relocation_members(),
+                from: self
+                    .relocation_members()
+                    .into_iter()
+                    .map(|member| member.node)
+                    .collect(),
+                to: self
+                    .relocation_members()
+                    .into_iter()
+                    .map(|member| member.node)
+                    .collect(),
             }
         };
         let count = self.entropy.count(ITEMS);
@@ -1514,9 +1525,13 @@ impl Arbitrary<'_> {
             2 => AlterPlacementOperation::DropRank,
             3 => {
                 let placement = self.create_placement();
-                AlterPlacementOperation::SetMembers {
-                    from: placement.from,
-                    to: placement.to,
+                match placement.scope {
+                    nervix_models::PlacementScope::Corridor { from, to } => {
+                        AlterPlacementOperation::SetMembers { from, to }
+                    }
+                    nervix_models::PlacementScope::DomainWide => {
+                        AlterPlacementOperation::SetDomainWide
+                    }
                 }
             }
             _ => AlterPlacementOperation::RenameTo { name: self.name() },

@@ -17,11 +17,11 @@ use std::{
 };
 
 use error_stack::{Report, ResultExt as _};
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_models::{
     BranchSelection, CreateIngestor, DomainName, IngestorEntity, IngestorEntityKind,
     IngestorInstances, IngestorInstancingCapability, KafkaIngestor, KafkaOffsetMode, ModelIndex,
-    ModelKind, ModelName, NodeRef, NodeUnitRef, RelayName, Unit,
+    ModelName, RelayName, Unit,
 };
 use thiserror::Error;
 
@@ -137,39 +137,13 @@ impl IngestorUnits {
         })
     }
 
-    pub(in crate::registry) fn units(&self) -> Vec<Unit> {
-        let count = match self {
-            Self::Single => return vec![Unit::SINGLE],
-            Self::Instances(count) => count.get(),
-            Self::PerPartition { count, .. } => u64::from(count.get()),
-        };
-        (0..count)
-            .map(|index| {
-                Unit::try_instance(index)
-                    .assured("the validated allocation layout bounds the instance index")
-            })
-            .collect()
-    }
-
-    /// The exact relay units with which this ingestor instance must move.
-    pub(in crate::registry) fn colocated_relays(&self, unit: Unit) -> Vec<NodeUnitRef> {
-        let (Self::PerPartition { count, relays }, nervix_models::UnitKind::Instance(index)) =
-            (self, unit.kind())
-        else {
-            return Vec::new();
-        };
-        if index >= u64::from(count.get()) {
-            return Vec::new();
+    pub(in crate::registry) fn unit_layout(&self) -> super::unit_placement::UnitLayout {
+        use super::unit_placement::UnitLayout;
+        match self {
+            Self::Single => UnitLayout::Single,
+            Self::Instances(count) => UnitLayout::Instances(*count),
+            Self::PerPartition { count, .. } => UnitLayout::Instances(NonZeroU64::from(*count)),
         }
-        let relay_unit = if count.get() == 1 {
-            Unit::SINGLE
-        } else {
-            Unit::partition(u32::try_from(index).assured("a constructed partition index fits u32"))
-        };
-        relays
-            .iter()
-            .map(|relay| NodeUnitRef::new(NodeRef::new(ModelKind::Relay, relay), relay_unit))
-            .collect()
     }
 }
 

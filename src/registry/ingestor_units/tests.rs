@@ -7,7 +7,8 @@
 
 use std::collections::BTreeSet;
 
-use nervix_models::{BranchPartitions, IngestorInput, Model, PlacementPolicy};
+use meticulous::ResultExt as _;
+use nervix_models::{BranchPartitions, IngestorInput, Model, ModelKind, NodeRef, NodeUnitRef};
 use nonzero_ext::nonzero;
 
 use super::*;
@@ -84,12 +85,8 @@ fn graph(instances: IngestorInstances, branched: bool) -> super::super::graph::A
 fn one_instance_exposes_its_single_execution_and_several_instances_keep_distinct_placements() {
     let owner = named::<nervix_models::ClusterNodeName>("node-1");
     let single_graph = graph(IngestorInstances::ONE, false);
-    let mut schedule = single_graph.schedule_for_domain(
-        &named("instances"),
-        std::slice::from_ref(&owner),
-        0,
-        PlacementPolicy::Neutral,
-    );
+    let mut schedule =
+        single_graph.schedule_for_domain(&named("instances"), std::slice::from_ref(&owner), 0);
     let identity = NodeRef::new(ModelKind::Ingestor, named::<ModelName>("source"));
     let source = schedule
         .nodes
@@ -112,12 +109,7 @@ fn one_instance_exposes_its_single_execution_and_several_instances_keep_distinct
     );
 
     let multiple_graph = graph(IngestorInstances::Count(nonzero!(3u64)), false);
-    let schedule = multiple_graph.schedule_for_domain(
-        &named("instances"),
-        &[owner],
-        0,
-        PlacementPolicy::Neutral,
-    );
+    let schedule = multiple_graph.schedule_for_domain(&named("instances"), &[owner], 0);
     let source = &schedule.nodes[&identity];
     assert!(source.sole_unit().is_none());
     assert!(source.assigned_single_node().is_none());
@@ -128,8 +120,7 @@ fn one_instance_exposes_its_single_execution_and_several_instances_keep_distinct
 fn independent_instances_spread_primaries_and_keep_their_own_replicas() {
     let graph = graph(IngestorInstances::Count(nonzero!(3u64)), false);
     let nodes = [named("node-1"), named("node-2"), named("node-3")];
-    let schedule =
-        graph.schedule_for_domain(&named("instances"), &nodes, 1, PlacementPolicy::Neutral);
+    let schedule = graph.schedule_for_domain(&named("instances"), &nodes, 1);
     let source = &schedule.nodes[&NodeRef::new(ModelKind::Ingestor, named::<ModelName>("source"))];
     assert_eq!(
         source.units.keys().copied().collect::<Vec<_>>(),
@@ -155,7 +146,7 @@ fn independent_instances_spread_primaries_and_keep_their_own_replicas() {
 #[test]
 fn per_partition_groups_bind_only_the_corresponding_instance_and_relay_unit() {
     let graph = graph(IngestorInstances::PerPartition, true);
-    let groups = UnitPlacementGroups::decide(&graph, &[]);
+    let groups = UnitPlacementGroups::decide(&graph, &graph.placement.effective());
     assert_eq!(groups.groups.len(), 4);
     for index in 0..4 {
         let source = NodeUnitRef::new(
@@ -178,7 +169,6 @@ fn per_partition_groups_bind_only_the_corresponding_instance_and_relay_unit() {
         &named("instances"),
         &[named("node-1"), named("node-2"), named("node-3")],
         1,
-        PlacementPolicy::Neutral,
     );
     assert_eq!(schedule.placement_groups.len(), 4);
     for group in &schedule.placement_groups {
@@ -201,18 +191,4 @@ fn per_partition_groups_bind_only_the_corresponding_instance_and_relay_unit() {
             .len(),
         3
     );
-}
-
-#[test]
-fn whole_entity_colocation_joins_every_declared_unit() {
-    let graph = graph(IngestorInstances::Count(nonzero!(3u64)), false);
-    let groups = UnitPlacementGroups::decide(
-        &graph,
-        &[vec![
-            NodeRef::new(ModelKind::Ingestor, named::<ModelName>("source")),
-            NodeRef::new(ModelKind::Relay, named::<ModelName>("events")),
-        ]],
-    );
-    assert_eq!(groups.groups.len(), 1);
-    assert_eq!(groups.groups[0].len(), 4);
 }

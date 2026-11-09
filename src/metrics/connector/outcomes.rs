@@ -21,7 +21,7 @@ use strum::AsRefStr;
 
 use super::{
     EMITTER_LABELS, EmitterInteractionMetrics,
-    status::{self, EmitterFailureBinding, FailureProjection},
+    status::{self, FailureProjection, TaskFailureBinding},
 };
 
 const REJECTED: &str = "nervix_emitter_records_rejected_total";
@@ -259,7 +259,7 @@ impl OutcomeFamilies {
             finishes: EmitterFinishOutcome::ALL
                 .map(|outcome| Self::child(&self.finishes, values, outcome.as_ref())),
             unsent: self.unsent.with_label_values(values),
-            failure: FailureProjection::register(&self.registry, values),
+            failure: FailureProjection::register(&self.registry, &status::EMITTER_FAILURE, values),
         }
     }
 
@@ -345,7 +345,7 @@ impl OutcomeMetrics {
         }
         lines.push(format!(
             "{}{{{selector}}} value={}",
-            status::NAME,
+            status::EMITTER_FAILURE.name(),
             self.failure.value()
         ));
     }
@@ -408,7 +408,7 @@ impl EmitterInteractionMetrics {
     pub(crate) fn bind_failure_source(
         &self,
         failed: impl Fn() -> bool + Send + Sync + 'static,
-    ) -> EmitterFailureBinding {
+    ) -> TaskFailureBinding {
         FailureProjection::bind(&self.series.outcomes.failure, failed)
     }
 }

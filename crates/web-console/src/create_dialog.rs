@@ -27,8 +27,8 @@ use nervix_client_wire::{
 use nervix_models::{
     CanonicalPlexusError, CreateDomain, CreateResource, CreateStatement, CreateSubscription,
     CreateUser, DomainClockPeriod, DomainClockSkew, DomainConfig, DomainName, DomainPace, Model,
-    ModelKind, ModelName, PlacementPolicy, RelayName, RequestedResourceVersion, ResourceName,
-    Statement, SubscriptionName, UserName,
+    ModelKind, ModelName, RelayName, RequestedResourceVersion, ResourceName, Statement,
+    SubscriptionName, UserName,
 };
 use nervix_plexus::client_statement::ClientStatement;
 use nervix_recovery::Discarded as _;
@@ -67,6 +67,7 @@ mod ingestor_editor;
 mod ingestor_route_draft;
 mod ingestor_route_editor;
 mod ingestor_source_draft;
+mod placement_draft;
 mod processor_assignment_editor;
 mod processor_choices;
 mod processor_draft;
@@ -74,6 +75,9 @@ mod processor_editor;
 mod processor_inheritance_editor;
 mod processor_input_editor;
 mod processor_invocation_editor;
+mod processor_key_editor;
+#[cfg(test)]
+mod processor_model_tests;
 mod processor_route_editor;
 mod processor_state_editor;
 mod relay_draft;
@@ -114,6 +118,7 @@ use hash_map_editor::HashMapEditor;
 use ingestor_draft::{IngestorDraft, IngestorDraftError, TimestampDraft};
 use ingestor_editor::IngestorEditor;
 use ingestor_route_draft::{InheritDraft, MessageErrorDraft, RouteBranchDraft};
+use placement_draft::{PlacementDraft, PlacementDraftError};
 use processor_draft::{ProcessorDraft, ProcessorDraftError, ProcessorFamily};
 use processor_editor::ProcessorEditor;
 use relay_draft::{RelayDraft, RelayDraftError};
@@ -132,6 +137,7 @@ use vhost_editor::VhostEditor;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum CreateKind {
     Domain,
+    Placement,
     User,
     Resource,
     Schema,
@@ -151,6 +157,8 @@ pub(crate) enum CreateKind {
     Ingestor,
     Emitter,
     Junction,
+    Deduplicator,
+    Reorderer,
     Reingestor,
 }
 
@@ -158,6 +166,7 @@ impl CreateKind {
     fn label(self) -> &'static str {
         match self {
             Self::Domain => "domain",
+            Self::Placement => "placement",
             Self::User => "user",
             Self::Resource => "resource",
             Self::Schema => "schema",
@@ -177,6 +186,8 @@ impl CreateKind {
             Self::Ingestor => "ingestor",
             Self::Emitter => "emitter",
             Self::Junction => "junction",
+            Self::Deduplicator => "deduplicator",
+            Self::Reorderer => "reorderer",
             Self::Reingestor => "reingestor",
         }
     }
@@ -197,6 +208,7 @@ impl CreateKind {
             Self::WireCborSchema => Some(WireFormat::Cbor),
             Self::WireAvroSchema => Some(WireFormat::Avro),
             Self::Domain
+            | Self::Placement
             | Self::User
             | Self::Resource
             | Self::Schema
@@ -213,7 +225,39 @@ impl CreateKind {
             | Self::Ingestor
             | Self::Emitter
             | Self::Junction
+            | Self::Deduplicator
+            | Self::Reorderer
             | Self::Reingestor => None,
+        }
+    }
+
+    /// The processor family the shared processor form creates for this kind.
+    fn processor_family(self) -> Option<ProcessorFamily> {
+        match self {
+            Self::Junction => Some(ProcessorFamily::Junction),
+            Self::Deduplicator => Some(ProcessorFamily::Deduplicator),
+            Self::Reorderer => Some(ProcessorFamily::Reorderer),
+            Self::Reingestor => Some(ProcessorFamily::Reingestor),
+            Self::Domain
+            | Self::Placement
+            | Self::User
+            | Self::Resource
+            | Self::Schema
+            | Self::WireJsonSchema
+            | Self::WireCborSchema
+            | Self::WireAvroSchema
+            | Self::Branch
+            | Self::Relay
+            | Self::Subscription
+            | Self::Codec
+            | Self::SignalingProtocol
+            | Self::Client
+            | Self::Vhost
+            | Self::Endpoint
+            | Self::HashMap
+            | Self::Udf
+            | Self::Ingestor
+            | Self::Emitter => None,
         }
     }
 }
@@ -282,7 +326,8 @@ impl ChoiceControl {
     /// The form whose draft this control edits.
     fn form(self) -> CreateKind {
         match self {
-            Self::DomainPace | Self::PlacementPolicy => CreateKind::Domain,
+            Self::DomainPace => CreateKind::Domain,
+            Self::PlacementPolicy => CreateKind::Placement,
             Self::BranchSchema => CreateKind::Branch,
             Self::RelaySchema | Self::RelayBranch => CreateKind::Relay,
             Self::SubscriptionRelay | Self::SubscriptionField => CreateKind::Subscription,
@@ -337,7 +382,7 @@ impl ChoiceControl {
         if self.form() == kind {
             return true;
         }
-        kind == CreateKind::Reingestor && self.form() == CreateKind::Junction
+        self.form() == CreateKind::Junction && kind.processor_family().is_some()
     }
 }
 
@@ -661,7 +706,6 @@ struct DomainDraft {
     pace: DomainPaceChoice,
     period: String,
     skew: String,
-    placement: PlacementPolicy,
 }
 
 impl Default for DomainDraft {
@@ -672,7 +716,6 @@ impl Default for DomainDraft {
             pace: DomainPaceChoice::Unpaced,
             period: "1s".to_string(),
             skew: "0s".to_string(),
-            placement: PlacementPolicy::Neutral,
         }
     }
 }
@@ -699,10 +742,7 @@ impl DomainDraft {
         let statement = Statement::CreateDomain(CreateStatement::new(
             CreateDomain {
                 id: name.clone(),
-                config: DomainConfig {
-                    pace,
-                    placement: self.placement,
-                },
+                config: DomainConfig { pace },
             },
             self.if_not_exists,
         ));
@@ -812,6 +852,8 @@ enum CreateDraftError {
     KindRequired,
     #[error("Domain name is invalid")]
     DomainName,
+    #[error("{0}")]
+    Placement(#[from] PlacementDraftError),
     #[error("Period is invalid")]
     Period,
     #[error("Skew is invalid")]
@@ -994,6 +1036,7 @@ pub(crate) struct CreateSignals {
     progress: RwSignal<CreateProgress>,
     validation: RwSignal<Option<String>>,
     domain: RwSignal<DomainDraft>,
+    placement: RwSignal<PlacementDraft>,
     user: RwSignal<UserDraft>,
     resource: RwSignal<ResourceDraft>,
     structured: RwSignal<StructuredDrafts>,
@@ -1009,6 +1052,8 @@ pub(crate) struct CreateSignals {
     ingestor: RwSignal<IngestorDraft>,
     emitter: RwSignal<EmitterDraft>,
     junction: RwSignal<ProcessorDraft>,
+    deduplicator: RwSignal<ProcessorDraft>,
+    reorderer: RwSignal<ProcessorDraft>,
     reingestor: RwSignal<ProcessorDraft>,
     /// The number the next generated subscription name carries. Numbers only increase, so no two
     /// generated names of one console coincide.
@@ -1020,16 +1065,29 @@ impl CreateSignals {
     fn processor(self, family: ProcessorFamily) -> RwSignal<ProcessorDraft> {
         match family {
             ProcessorFamily::Junction => self.junction,
+            ProcessorFamily::Deduplicator => self.deduplicator,
+            ProcessorFamily::Reorderer => self.reorderer,
             ProcessorFamily::Reingestor => self.reingestor,
         }
     }
 
     fn active_processor(self) -> Option<RwSignal<ProcessorDraft>> {
-        match self.open.get_untracked() {
-            Some(CreateKind::Junction) => Some(self.junction),
-            Some(CreateKind::Reingestor) => Some(self.reingestor),
-            _ => None,
-        }
+        let family = self.open.get_untracked()?.processor_family()?;
+        Some(self.processor(family))
+    }
+
+    /// The submission of one processor form: its complete Model in the captured domain.
+    fn processor_submission(
+        self,
+        kind: CreateKind,
+        family: ProcessorFamily,
+        captured_domain: Option<DomainName>,
+    ) -> error_stack::Result<CreateSubmission, CreateDraftError> {
+        let scope =
+            captured_domain.ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+        let draft = self.processor(family).get_untracked();
+        let model = draft.build().map_err(draft_error)?;
+        CreateSubmission::domain_model(kind, model, draft.if_not_exists, scope)
     }
 
     pub(crate) fn new() -> Self {
@@ -1044,6 +1102,7 @@ impl CreateSignals {
             progress: RwSignal::new(CreateProgress::Editing),
             validation: RwSignal::new(None),
             domain: RwSignal::new(DomainDraft::default()),
+            placement: RwSignal::new(PlacementDraft::default()),
             user: RwSignal::new(UserDraft::default()),
             resource: RwSignal::new(ResourceDraft::default()),
             structured: RwSignal::new(StructuredDrafts::default()),
@@ -1062,6 +1121,8 @@ impl CreateSignals {
             ingestor: RwSignal::new(IngestorDraft::default()),
             emitter: RwSignal::new(EmitterDraft::default()),
             junction: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Junction)),
+            deduplicator: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Deduplicator)),
+            reorderer: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Reorderer)),
             reingestor: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Reingestor)),
             next_subscription_name: RwSignal::new(2),
             choices: ChoiceControls::new(),
@@ -1176,10 +1237,16 @@ impl CreateSignals {
                 CreateKind::Ingestor => self.ingestor.update(IngestorDraft::invalidate_references),
                 CreateKind::Emitter => self.emitter.update(EmitterDraft::invalidate_references),
                 CreateKind::Junction => self.junction.update(ProcessorDraft::invalidate_references),
+                CreateKind::Deduplicator => self
+                    .deduplicator
+                    .update(ProcessorDraft::invalidate_references),
+                CreateKind::Reorderer => {
+                    self.reorderer.update(ProcessorDraft::invalidate_references)
+                }
                 CreateKind::Reingestor => self
                     .reingestor
                     .update(ProcessorDraft::invalidate_references),
-                CreateKind::Udf => {}
+                CreateKind::Udf | CreateKind::Placement => {}
                 CreateKind::Domain
                 | CreateKind::User
                 | CreateKind::Resource
@@ -1333,9 +1400,7 @@ impl CreateSignals {
             }),
             ChoiceControl::PlacementPolicy => Ok(ChoiceQuery {
                 target: ChoiceTarget::PlacementPolicy,
-                dependencies: vec![ChoiceSelection {
-                    value: ChoiceValue::DomainPace(self.domain.get_untracked().pace),
-                }],
+                dependencies: Vec::new(),
                 page_size: 3,
             }),
             ChoiceControl::BranchSchema | ChoiceControl::RelaySchema => self.domain_question(
@@ -1679,6 +1744,17 @@ impl CreateSignals {
         let captured_domain = self.captured_domain.get_untracked();
         match kind {
             CreateKind::Domain => self.domain.get_untracked().submission(),
+            CreateKind::Placement => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let draft = self.placement.get_untracked();
+                CreateSubmission::domain_model(
+                    CreateKind::Placement,
+                    Model::Placement(draft.build().map_err(draft_error)?),
+                    draft.if_not_exists,
+                    scope,
+                )
+            }
             CreateKind::User => self.user.get_untracked().submission(),
             CreateKind::Resource => self.resource.get_untracked().submission(captured_domain),
             CreateKind::Schema
@@ -1828,28 +1904,16 @@ impl CreateSignals {
                 )
             }
             CreateKind::Junction => {
-                let scope = captured_domain
-                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
-                let draft = self.junction.get_untracked();
-                let junction = draft.build_junction().map_err(draft_error)?;
-                CreateSubmission::domain_model(
-                    kind,
-                    Model::Junction(junction),
-                    draft.if_not_exists,
-                    scope,
-                )
+                self.processor_submission(kind, ProcessorFamily::Junction, captured_domain)
+            }
+            CreateKind::Deduplicator => {
+                self.processor_submission(kind, ProcessorFamily::Deduplicator, captured_domain)
+            }
+            CreateKind::Reorderer => {
+                self.processor_submission(kind, ProcessorFamily::Reorderer, captured_domain)
             }
             CreateKind::Reingestor => {
-                let scope = captured_domain
-                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
-                let draft = self.reingestor.get_untracked();
-                let reingestor = draft.build_reingestor().map_err(draft_error)?;
-                CreateSubmission::domain_model(
-                    kind,
-                    Model::Reingestor(reingestor),
-                    draft.if_not_exists,
-                    scope,
-                )
+                self.processor_submission(kind, ProcessorFamily::Reingestor, captured_domain)
             }
             CreateKind::Subscription => {
                 let scope = captured_domain
@@ -1903,7 +1967,10 @@ pub(crate) fn CreateMenu(
             </button>
             <div class="popup-menu create-menu" class:open=move || menu_open.get() role="menu">
                 <button type="button" role="menuitem" data-create-kind="domain" on:click=move |_| choose(CreateKind::Domain)>
-                    <span>"Domain"</span><em>"Clock and placement"</em>
+                    <span>"Domain"</span><em>"Clock and lifecycle"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="placement" on:click=move |_| choose(CreateKind::Placement)>
+                    <span>"Placement"</span><em>"Domain-wide policy"</em>
                 </button>
                 <button type="button" role="menuitem" data-create-kind="user" on:click=move |_| choose(CreateKind::User)>
                     <span>"User"</span><em>"Login credential"</em>
@@ -1961,6 +2028,12 @@ pub(crate) fn CreateMenu(
                 </button>
                 <button type="button" role="menuitem" data-create-kind="junction" on:click=move |_| choose(CreateKind::Junction)>
                     <span>"Junction"</span><em>"Transform and fan out relay records"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="deduplicator" on:click=move |_| choose(CreateKind::Deduplicator)>
+                    <span>"Deduplicator"</span><em>"Suppress repeated keys in each branch"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="reorderer" on:click=move |_| choose(CreateKind::Reorderer)>
+                    <span>"Reorderer"</span><em>"Release each branch in key order"</em>
                 </button>
                 <button type="button" role="menuitem" data-create-kind="reingestor" on:click=move |_| choose(CreateKind::Reingestor)>
                     <span>"Reingestor"</span><em>"Transform records across branch boundaries"</em>
@@ -2040,7 +2113,8 @@ fn page_cursor(load: RwSignal<ChoiceLoad>) -> Option<String> {
 /// so a reply to an older draft or connection never fills it.
 fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceControl> {
     match kind {
-        CreateKind::Domain => vec![ChoiceControl::DomainPace, ChoiceControl::PlacementPolicy],
+        CreateKind::Domain => vec![ChoiceControl::DomainPace],
+        CreateKind::Placement => vec![ChoiceControl::PlacementPolicy],
         CreateKind::Branch => vec![ChoiceControl::BranchSchema],
         CreateKind::Relay => {
             let mut controls = vec![ChoiceControl::RelaySchema];
@@ -2143,7 +2217,10 @@ fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceCon
             controls
         }
         CreateKind::Emitter => signals.emitter_open_controls(),
-        CreateKind::Junction | CreateKind::Reingestor => {
+        CreateKind::Junction
+        | CreateKind::Deduplicator
+        | CreateKind::Reorderer
+        | CreateKind::Reingestor => {
             let Some(processor) = signals.active_processor() else {
                 return Vec::new();
             };
@@ -2152,10 +2229,10 @@ fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceCon
                 ChoiceControl::ProcessorInputRelay,
                 ChoiceControl::ProcessorRouteRelay,
             ];
-            if kind == CreateKind::Junction
+            if draft.family().declares_node_branch()
                 && matches!(
                     draft.branching,
-                    processor_draft::JunctionBranchDraft::Branched(_)
+                    processor_draft::NodeBranchDraft::Branched(_)
                 )
             {
                 controls.push(ChoiceControl::ProcessorBranch);
@@ -2354,6 +2431,18 @@ pub(crate) fn CreateDialog(
                                     </label>
                                 </div>
                             </Show>
+                        </Show>
+
+                        <Show when=move || signals.open.get() == Some(CreateKind::Placement) fallback=|| ()>
+                            <label class="create-field">
+                                <span>"Placement name"</span>
+                                <input node_ref=name_input class="create-name" type="text" autocomplete="off"
+                                    prop:value=move || signals.placement.get().name
+                                    disabled=move || signals.progress.get().is_pending()
+                                    on:input=move |event| { signals.placement.update(|draft| draft.name = event_target_value(&event)); signals.edit(); }
+                                />
+                            </label>
+                            <div class="create-field"><span>"Coverage"</span><strong class="create-placement-coverage">"Entire domain"</strong></div>
                             <ChoiceGroup
                                 class_name="create-placement-options"
                                 label="Placement"
@@ -2362,6 +2451,14 @@ pub(crate) fn CreateDialog(
                                 request_tx=request_tx
                                 session_generation=session_generation
                             />
+                            <label class="create-field">
+                                <span>"Rank (optional)"</span>
+                                <input class="create-placement-rank" type="text" inputmode="numeric"
+                                    prop:value=move || signals.placement.get().rank
+                                    disabled=move || signals.progress.get().is_pending()
+                                    on:input=move |event| { signals.placement.update(|draft| draft.rank = event_target_value(&event)); signals.edit(); }
+                                />
+                            </label>
                         </Show>
 
                         <Show when=move || signals.open.get() == Some(CreateKind::User) fallback=|| ()>
@@ -2442,6 +2539,12 @@ pub(crate) fn CreateDialog(
                         <Show when=move || signals.open.get() == Some(CreateKind::Junction) fallback=|| ()>
                             <ProcessorEditor family=ProcessorFamily::Junction signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
                         </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::Deduplicator) fallback=|| ()>
+                            <ProcessorEditor family=ProcessorFamily::Deduplicator signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::Reorderer) fallback=|| ()>
+                            <ProcessorEditor family=ProcessorFamily::Reorderer signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
                         <Show when=move || signals.open.get() == Some(CreateKind::Reingestor) fallback=|| ()>
                             <ProcessorEditor family=ProcessorFamily::Reingestor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
                         </Show>
@@ -2453,6 +2556,7 @@ pub(crate) fn CreateDialog(
                                     type="checkbox"
                                     prop:checked=move || match signals.open.get() {
                                         Some(CreateKind::Domain) => signals.domain.get().if_not_exists,
+                                        Some(CreateKind::Placement) => signals.placement.get().if_not_exists,
                                         Some(CreateKind::User) => signals.user.get().if_not_exists,
                                         Some(CreateKind::Resource) => signals.resource.get().if_not_exists,
                                         Some(CreateKind::Schema) => signals.structured.get().schema.if_not_exists,
@@ -2471,6 +2575,8 @@ pub(crate) fn CreateDialog(
                                         Some(CreateKind::Ingestor) => signals.ingestor.get().if_not_exists,
                                         Some(CreateKind::Emitter) => signals.emitter.get().if_not_exists,
                                         Some(CreateKind::Junction) => signals.junction.get().if_not_exists,
+                                        Some(CreateKind::Deduplicator) => signals.deduplicator.get().if_not_exists,
+                                        Some(CreateKind::Reorderer) => signals.reorderer.get().if_not_exists,
                                         Some(CreateKind::Reingestor) => signals.reingestor.get().if_not_exists,
                                         Some(CreateKind::Subscription) | None => false,
                                     }
@@ -2479,6 +2585,7 @@ pub(crate) fn CreateDialog(
                                         let checked = event_target_checked(&event);
                                         match signals.open.get_untracked() {
                                             Some(CreateKind::Domain) => signals.domain.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Placement) => signals.placement.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::User) => signals.user.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::Resource) => signals.resource.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::Schema) => signals.structured.update(|draft| draft.schema.if_not_exists = checked),
@@ -2497,6 +2604,8 @@ pub(crate) fn CreateDialog(
                                             Some(CreateKind::Ingestor) => signals.ingestor.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::Emitter) => signals.emitter.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::Junction) => signals.junction.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Deduplicator) => signals.deduplicator.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Reorderer) => signals.reorderer.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::Reingestor) => signals.reingestor.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::Subscription) | None => {}
                                         }

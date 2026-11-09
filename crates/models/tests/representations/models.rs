@@ -5,6 +5,7 @@
 //! cannot spell, such as negative and non-finite literals, empty arrays and collection casts. A
 //! stored Model binds concrete resource versions; a statement carries `LATEST` or a number.
 
+use meticulous::ResultExt as _;
 use nervix_arbitrary::{Arbitrary, Domain};
 use nervix_models::{Model, RequestedResourceVersion, Statement};
 
@@ -34,6 +35,75 @@ fn archived_model_corpus_reaches_resumed_restore() {
         panic!("the resume corpus entry generates a current restore statement");
     };
     assert_eq!(restore.lifecycle, nervix_models::RestoreLifecycle::Resume);
+}
+
+#[test]
+fn placement_scopes_and_exact_relocation_selectors_keep_their_archived_values() {
+    use std::num::NonZeroU64;
+
+    use nervix_models::{
+        AlterPlacement, AlterPlacementOperation, CreatePlacement, ModelKind, PlacementPolicy,
+        Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
+        RelocationSelection, RelocationUnitSelection,
+    };
+
+    for policy in [
+        PlacementPolicy::Neutral,
+        PlacementPolicy::RequireColocation,
+        PlacementPolicy::PreferColocation,
+        PlacementPolicy::SuggestSeparation,
+    ] {
+        for rank in [None, NonZeroU64::new(u64::MAX)] {
+            for placement in [
+                CreatePlacement::new(
+                    "corridor".try_into().assured("valid name"),
+                    vec!["incoming".try_into().assured("valid name")],
+                    vec!["outgoing".try_into().assured("valid name")],
+                    policy,
+                    rank,
+                )
+                .assured("nonempty corridor"),
+                CreatePlacement::domain_wide(
+                    "domain_rule".try_into().assured("valid name"),
+                    policy,
+                    rank,
+                ),
+            ] {
+                let model: Model = Model::Placement(placement);
+                assert_eq!(crate::archive_round_trip!(&model, Model), model);
+            }
+        }
+    }
+
+    let alter = Statement::AlterPlacement(AlterPlacement {
+        placement: "corridor".try_into().assured("valid name"),
+        operations: vec![AlterPlacementOperation::SetDomainWide],
+    });
+    assert_eq!(crate::archive_round_trip!(&alter, Statement), alter);
+
+    let mut partition = RelocationMember::new(
+        ModelKind::Relay,
+        "incoming".try_into().assured("valid name"),
+    );
+    partition.selection = RelocationUnitSelection::Partition(u32::MAX);
+    let mut instance = RelocationMember::new(
+        ModelKind::Ingestor,
+        "reader".try_into().assured("valid name"),
+    );
+    instance.selection = RelocationUnitSelection::Instance(u64::MAX);
+    let relocation = Statement::Relocate(Relocation {
+        selection: RelocationSelection::List(vec![partition, instance.clone()]),
+        destination: "node-3".try_into().assured("valid node name"),
+        strategy: RelocationPreferenceStrategy::Follow,
+        overrides: vec![RelocationPreferenceOverride {
+            member: instance,
+            strategy: RelocationPreferenceStrategy::Ignore,
+        }],
+    });
+    assert_eq!(
+        crate::archive_round_trip!(&relocation, Statement),
+        relocation
+    );
 }
 
 #[test]

@@ -36,6 +36,7 @@ fi
 "${script_dir}/observation-helpers-self-test.sh"
 "${script_dir}/backup-fixture-self-test.sh"
 "${script_dir}/verifier-self-check-self-test.sh"
+bash "${script_dir}/binding-image-self-test.sh"
 
 fail() {
     printf 'self-test failed: %s\n' "$*" >&2
@@ -643,6 +644,7 @@ CHAOS_STATE_LOAD_INTERVAL_MS="1000" \
 CHAOS_PACED_LOAD_FILE="${expected}" \
 CHAOS_PACED_LOAD_INTERVAL_MS="250" \
 CHAOS_PYTHON_IMAGE="${chaos_python_image}" \
+CHAOS_BINDING_IMAGE="${test_image_id}" \
 CHAOS_POSTGRES_IMAGE="${chaos_postgres_image}" \
 CHAOS_ENDPOINT_DIR="${tmp_dir}" \
 CHAOS_LIFE_LOAD_FILE="${expected}" \

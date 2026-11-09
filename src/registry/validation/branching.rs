@@ -1125,8 +1125,8 @@ mod tests {
         CreateGenerator, CreateIngestor, CreateReingestor, CreateWireSchema, Expression,
         FieldReference, FieldScope, FlushPolicy, GeneralErrorPolicy, IngestorEntity, JsonType,
         KafkaIngestMode, KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor,
-        MaterializedRelayState, MessageErrorPolicy, ParseAsType, PlacementPolicy, ProcessorInputs,
-        SchemaField, WireSchemaField, WireSchemaName,
+        MaterializedRelayState, MessageErrorPolicy, ParseAsType, ProcessorInputs, SchemaField,
+        WireSchemaField, WireSchemaName,
     };
     use nervix_primitives::sync::Arc;
     use nonzero_ext::nonzero;
@@ -2082,7 +2082,6 @@ mod tests {
                 &domain,
                 &[ClusterNodeName::parse("node-1").expect("valid name")],
                 0,
-                PlacementPolicy::Neutral,
             );
         let deduped = scheduled_node(&schedule, ModelKind::Relay, "deduped");
         assert_eq!(

@@ -442,6 +442,7 @@ class InventoryTests(unittest.TestCase):
             "console-codec-drafts",
             "console-endpoint-drafts",
             "console-emitter-drafts",
+            "console-processor-drafts",
             "runtime-window-sketch-panes",
             "kafka-partition-offsets",
             "kafka-destination-partitions",
@@ -521,26 +522,26 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(target.corpus.parent.name, target.test.replace("::", "__"))
             self.assertGreater(target.random_iterations, 0)
 
-    def test_inferencer_state_domains_include_the_required_model_field(self) -> None:
+    def test_model_domains_cover_current_placement_scopes_and_unit_selectors(self) -> None:
         versions = {
             target.id: target.domain_version for target in bolero.load_inventory().targets
         }
         for target, version in {
             "benchmark-metrics-report": 1,
             "ingestor-describe-envelope": 7,
-            "plexus-model": 55,
-            "plexus-archive-model": 57,
-            "plexus-statement": 57,
-            "plexus-statement-text": 56,
-            "plexus-format-document": 56,
-            "plexus-format-text": 55,
-            "models-archived-models": 56,
-            "registry-archived-models": 50,
-            "consensus-state-records": 48,
-            "consensus-state-corruption": 48,
-            "consensus-raft-records": 46,
-            "registry-stored-models": 43,
-            "registry-stored-models-corruption": 43,
+            "plexus-model": 56,
+            "plexus-archive-model": 58,
+            "plexus-statement": 58,
+            "plexus-statement-text": 57,
+            "plexus-format-document": 57,
+            "plexus-format-text": 56,
+            "models-archived-models": 57,
+            "registry-archived-models": 51,
+            "consensus-state-records": 49,
+            "consensus-state-corruption": 49,
+            "consensus-raft-records": 48,
+            "registry-stored-models": 44,
+            "registry-stored-models-corruption": 44,
             "inferencer-tensor-columns": 1,
             "console-emitter-drafts": 2,
             "client-requests": 8,

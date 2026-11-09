@@ -761,42 +761,36 @@ pub(crate) fn impact_report() -> TransactionImpactReport {
         ),
         operation_report(
             4,
-            TransactionOperation::AlterDomain { domain: tenant() },
-            range(4, 4),
-            vec![OperationImpactReason::DomainPlacement],
-        ),
-        operation_report(
-            5,
             TransactionOperation::StartDomain { domain: tenant() },
-            range(5, 8),
+            range(4, 7),
             vec![OperationImpactReason::DomainStart],
         ),
         operation_report(
-            6,
+            5,
             TransactionOperation::StopDomain { domain: tenant() },
-            range(5, 8),
+            range(4, 7),
             vec![OperationImpactReason::DomainStop],
         ),
         operation_report(
-            7,
+            6,
             TransactionOperation::CreateResource {
                 domain: tenant(),
                 resource: name("model"),
             },
-            range(5, 8),
+            range(4, 7),
             vec![OperationImpactReason::ResourceCatalog {
                 resource: name("model"),
             }],
         ),
         operation_report(
-            8,
+            7,
             TransactionOperation::RebindResource {
                 domain: tenant(),
                 resource: name("model"),
                 requested: RequestedResourceVersion::Latest,
                 version: 3,
             },
-            range(5, 8),
+            range(4, 7),
             vec![OperationImpactReason::ResourceRebinding {
                 node: node(ModelKind::Inferencer, "score"),
                 resource: name("model"),
@@ -857,21 +851,12 @@ pub(crate) fn impact_report() -> TransactionImpactReport {
             },
         ),
         ExecutionStepImpactReport::new(
-            range(4, 4),
-            PlannedExecutionStepImpact {
-                completeness: ImpactReportCompleteness::Complete,
-                pause: PauseRequirement::Domain { domain: tenant() },
-                effects: ImpactEffects::default(),
-            },
-            ActualExecutionStepImpact::applying(),
-        ),
-        ExecutionStepImpactReport::new(
-            range(5, 8),
+            range(4, 7),
             PlannedExecutionStepImpact {
                 completeness: ImpactReportCompleteness::incomplete(vec![
                     diagnostic(ImpactDiagnosticKind::Topology, None),
-                    diagnostic(ImpactDiagnosticKind::Ownership, Some(7)),
-                    diagnostic(ImpactDiagnosticKind::Activation, Some(5)),
+                    diagnostic(ImpactDiagnosticKind::Ownership, Some(6)),
+                    diagnostic(ImpactDiagnosticKind::Activation, Some(4)),
                 ])
                 .assured("three diagnostics make an incomplete report"),
                 pause: PauseRequirement::NoPause,
@@ -882,7 +867,7 @@ pub(crate) fn impact_report() -> TransactionImpactReport {
     ];
     TransactionImpactReport::new(
         tenant(),
-        TransactionPosition::new(8),
+        TransactionPosition::new(7),
         ImpactPlanningBasis::new([0x5A; 32]),
         ImpactReportCompleteness::incomplete(vec![failure])
             .assured("one diagnostic makes an incomplete report"),

@@ -11,6 +11,13 @@ parameter is refused where it is written.
 `just test-unit-binary <executable> <filters>` replays a compiled unit-test executable without
 rebuilding it; its evidence applies only to the source inputs that produced that executable.
 
+`just test-partition-placement [feature]` runs the placement scenarios with the native node assets,
+Plexus formatter, CLI and deadlock report tool prepared. Its default input is
+`tests/features/cluster/partition_placement.feature`; select
+`tests/features/web-console/visual_create_placement.feature` for the browser form. These features
+start no paced simulation or Python driver. Arguments pass to the ordinary scenario runner with
+its startup, execution, parallelism and teardown budgets unchanged.
+
 `just test-cli-streams` selects the one- and three-node CLI stream recovery and termination
 examples in `cli_session.feature`. It prepares the in-process server assets and CLI, without
 building unrelated language probes. The outage case observes a failed restoration after the
@@ -3676,7 +3683,13 @@ scenario never leaves one running.
 
 Every example is tagged `@client_conformance_toolchain` and `@client_suite_<host>`, so the suite
 excludes it unless a run selects it: `just test-client-conformance` runs the suites' rows beside
-the probes, `just test-client-python-cluster` runs the Python rows alone, and
+the probes, and `just test-client-python-cluster` runs the Python rows alone.
+`just test-client-ruby-cluster` similarly selects Ruby's rows. Its bundled minitest runner first
+loads the installed gem in a fresh `GEM_HOME`, then runs every remaining cluster test with a fixed
+order seed. Its reporter emits a result only after teardown, keeps completed failure diagnostics
+on the captured output, and excludes minitest's progress dots from protocol lines. The boundary
+tier uses the same inventory judge through the Rust `host_suite` test and already-prepared gem.
+
 `just test-client-c-cluster` runs the C and C++ rows. Each native runner is a checked C11 or C++17
 program with a registered table of named test functions. It prints a result only after the case's
 owned handles and worker threads have been released. The cluster adapter starts the prepared

@@ -86,6 +86,7 @@ Bolero obligation, and none of those discharges a suite.
 | `verify-*.sh` | The external verifiers: ledgers, load pacing, Docker events, and crash, pause, partition, degraded-link, recovery, restart, drain, state, clock, mixed, endpoint, lifetimes and diagnostic evidence |
 | `continuous-load.sh`, `observe-nodes.sh`, `observe-clock.sh` | The paced producer, the listener observer and the domain-clock observer, each running inside a container |
 | `endpoint-client.py` | The [endpoints](#endpoints) scenario's HTTP and WebSocket client, which runs inside the pinned Python image and writes its ledger of attempts to its log |
+| `binding_client.py`, `binding_evidence.py`, `binding-scenario.sh`, `binding-image.sh`, `install_binding.py` | The binding endpoint scenario's Python-package producer/consumer, its exact effect and settlement verdict, fault coordination, source/wheel identity checks and offline image preparation |
 | `docker-event-recording.sh` | The run's live Docker event recording and its marker windows |
 | `output-boundary.sh`, `consumer-group.sh`, `startup-status.sh`, `image-package-check.sh`, `image-identity.sh`, `tool-images.sh`, `select-subnet.sh`, `require-jq.sh` | Kafka end-offset observations and the output boundary, the ingestor consumer group's members and the nodes that run them, startup status publication, the image-package check, image identity rules, the tool image pins, network selection and the jq requirement |
 | `verifier-self-check.sh` | The verifier self-check's bound, the identity of the chaos scripts and the judgement of the record a suite hands its runs |
@@ -176,6 +177,34 @@ the image on the console and in the manifest's `setup_error`, and Docker's outpu
 digest in `tool-images.sh` and requalifying the scenarios that start it. The suite is qualified on
 amd64 workers.
 
+### Prepared Binding Image
+
+The `binding-endpoints` scenario uses a separate prepared test image. It packages the
+`nervix_client` wheel and a Debian Python interpreter; it is independent of the released product
+image and the Alpine Python image used by the HTTP/WebSocket client. Prepare it before an experiment:
+
+```bash
+just build-chaos-client-image nervix:chaos-client
+just chaos run binding-endpoints --image nervix:debian --binding-image nervix:chaos-client
+just chaos suite smoke --image nervix:debian --binding-image nervix:chaos-client
+```
+
+Local preparation uses the wheel that `build-client-python` builds through kache. The CI
+`docker-build-chaos-client` target builds the wheel from the same checkout and compiler boundary as
+the product image. Both install it offline, with no dependency downloads, into the same Debian
+interpreter. Neither preparation changes the released product targets. The wheel's SHA-256, filename
+and source revision are stored inside the resulting image. A dirty checkout declares `-dirty`,
+as the local product overlay does.
+
+A suite resolves this source-derived tool image once, checks its Python-client kind and source
+revision against the product image, and passes its immutable local ID to every selected
+`binding-endpoints` entry. A run checks those labels again and imports the installed wheel without a network before
+starting nodes; its recorded wheel provenance must name the same revision. The manifest's
+`tool_images.binding` retains the requested reference, resolved ID and installed-wheel provenance.
+This source-derived image is the exception to the static tool-pin table: the prepared artifact's
+immutable identity and matching source revision select it. In CI, the plan resolves its published
+reference to one repository digest before shards start. A run builds and installs nothing.
+
 ### Fixtures And The WASM Guest
 
 | Fixture | Use |
@@ -183,6 +212,7 @@ amd64 workers.
 | `fixtures/baseline.plexus` | The graph every scenario installs. It is described in the list below the table |
 | `fixtures/generate-baseline.jq` | The records: a run-scoped `event_id`, a `sequence`, the branches `alpha`, `beta` and `gamma` in turn, and content derived from the sequence |
 | `fixtures/stateful.plexus`, `fixtures/generate-stateful.jq` | The stateful scenario's graph and its two interleaved branches |
+| `fixtures/binding-endpoints.plexus`, `fixtures/generate-endpoints.jq` | The binding client graph and its typed records |
 | `fixtures/paced.plexus`, `fixtures/generate-paced.jq` | The paced domain's graph and its two interleaved branches |
 | `fixtures/wasm/processors/branch-counter.wat` | The stateful scenario's prebuilt WASM guest, in WebAssembly text |
 | `fixtures/restore-state.plexus` | The restore scenarios' padded guest: a Kafka ingestor with domain-owned offsets and a detached, branched WASM processor |
@@ -271,6 +301,7 @@ half of the range. The manifest records the subnet, the dynamic range and the no
 | `kcat` | kcat | Disposable producers and topic readers |
 | `probe` | Alpine | A run-owned container that executes fresh listener, readiness and metrics probes; fault-specific probes may use disposable containers |
 | `load`, `state-load`, `paced-load`, `life-load` | kcat | The continuous loads |
+| `endpoint-binding` | Prepared Python binding image | The [binding endpoints](#binding-endpoints) scenario's package client |
 | `endpoint-load`, `endpoint-websocket` | Python | The [endpoints](#endpoints) scenario's HTTP and WebSocket clients |
 | `postgres` | PostgreSQL | The [lifetimes](#lifetimes) scenario's database, with its data on a tmpfs |
 | `observer` | Alpine | The independent listener observer |
@@ -358,17 +389,18 @@ take.
 | Option | Applies to | Range and default |
 | --- | --- | --- |
 | `--image IMAGE` | Every scenario | Required |
-| `--nodes 1\|3` | Every scenario. Only `baseline`, `backup`, `backup-cycles`, `rolling-restart`, `leader-crash`, `cluster-restart`, `stateful`, `endpoints`, `lifetimes` and `domain-time` accept `--nodes 1` | Default 3 |
+| `--nodes 1\|3` | Every scenario. Only `baseline`, `backup`, `backup-cycles`, `rolling-restart`, `leader-crash`, `cluster-restart`, `stateful`, `endpoints`, `binding-endpoints`, `lifetimes` and `domain-time` accept `--nodes 1` | Default 3 |
+| `--binding-image IMAGE` | Required by `binding-endpoints`. On a suite, applies to its binding entries only | Already prepared image of the product source revision |
 | `--records N` | Every scenario | 1 to 1,000; mixed instability 1 to 20,000. Defaults are in the [catalog](#scenario-catalog) |
 | `--timeout SECONDS` | Every scenario | 120 to 3,600; mixed instability from its duration plus 600 through 21,600. Defaults are in the catalog |
 | `--artifacts DIR` | Every scenario | Default `target/chaos` |
 | `--run-id ID` | Every scenario | 1 to 96 letters, digits, dots, underscores or hyphens, starting with a letter or digit. Generated when omitted. A run ID whose directory already exists is refused |
 | `--verifier-self-check RECORD` | Every scenario | The record of the verifier self-check a suite executed, which the run adopts instead of executing `tests/self-test.sh`. A record that did not pass on this worker, during this boot, for exactly the run's chaos scripts is refused as a setup error before the run creates anything. A suite passes it to every run; a standalone run omits it |
 | `--keep` | Every scenario | Keeps the run's resources after diagnostics and prints their cleanup command |
-| `--outage-seconds N` | The crash scenarios, `cluster-restart`, `stateful`, `endpoints`, `lifetimes`, `domain-time`, `backup-fault` and the crash faults of `restore-fault` | 5 to 120. Default 8; in `stateful`, 45 for `owner-pause` and `owner-partition`; in `endpoints` and `lifetimes`, 45 for `owner-partition`; 30 for `voter-pause` and `voter-partition`. The `owner-partition` fault of `backup-fault` holds a fixed 35-second isolation. In `restore-fault --fault reclamation-owner-crash` the killed owner stays down at least until the other target reclaims its staging |
+| `--outage-seconds N` | The crash scenarios, `cluster-restart`, `stateful`, `endpoints`, `binding-endpoints`, `lifetimes`, `domain-time`, `backup-fault` and the crash faults of `restore-fault` | 5 to 120. Default 8; in `stateful`, 45 for `owner-pause` and `owner-partition`; in `endpoints` and `lifetimes`, 45 for `owner-partition`; 30 for `voter-pause` and `voter-partition`. The `owner-partition` fault of `backup-fault` holds a fixed 35-second isolation. In `restore-fault --fault reclamation-owner-crash` the killed owner stays down at least until the other target reclaims its staging |
 | `--case CASE`, `--partition-seconds N` | `partition-recovery` | `all`, `follower`, `asymmetric`, `leader` or `quorum-loss`, default `all`; 20 to 600, default 45 |
 | `--isolation-seconds N` | `former-owner-restart` | 20 to 600, default 45 |
-| `--fault FAULT` | `stateful`, `endpoints`, `lifetimes`, `domain-time`, `backup-fault`, `restore-fault` | See those scenarios. One node supports `none` and `cluster-restart`. Default `none`; `backup-fault` requires `owner-crash`, `leader-crash`, `owner-partition` or `rolling-restart`, and `restore-fault` requires `leader-crash`, `leader-partition`, `owner-crash` or `reclamation-owner-crash` |
+| `--fault FAULT` | `stateful`, `endpoints`, `binding-endpoints`, `lifetimes`, `domain-time`, `backup-fault`, `restore-fault` | See those scenarios. One node supports `none` and `cluster-restart`. Default `none`; `backup-fault` requires `owner-crash`, `leader-crash`, `owner-partition` or `rolling-restart`, and `restore-fault` requires `leader-crash`, `leader-partition`, `owner-crash` or `reclamation-owner-crash` |
 | `--state-partitions N` | `stateful` | 1 or 4; default 1. Smoke and soak include four partitions through an owner crash. |
 | `--profile NAME` | `degraded-links` | `all`, `delay`, `jitter`, `random-loss`, `burst-loss`, `rate-limit` or `combined`, default `all` |
 | `--load-interval-ms N` | `degraded-links` | 100 to 5,000, default 750 |
@@ -856,6 +888,7 @@ trap ran exits on its own, 15 minutes after the run's bound.
 | `cluster-restart` | 1 or 3 | SIGKILL of every node | 1 s | 1,000, 1,800 s |
 | `stateful` | 1 or 3; one node only with no fault or a cluster restart | None, or a crash, pause or partition of the state owner, or a cluster restart | 1 s, and `state-load` at 1 s | 1,000, 2,700 s |
 | `endpoints` | 1 or 3; one node only with no fault or a cluster restart | None, or a crash or partition of the endpoint owner, or a cluster restart | 1 s, and HTTP endpoint intake at 250 ms | 1,000, 1,800 s |
+| `binding-endpoints` | 1 or 3; one node only with no fault or a cluster restart | None, graceful owner stop/restart, owner crash/restart, or cluster restart | 1 s, and typed package submissions at 250 ms | 1,000 baseline records plus 400 binding records, 1,800 s |
 | `lifetimes` | 1 or 3; one node only with no fault or a cluster restart | None, or a crash or partition of the state owner, or a cluster restart | 1 s, and `life-load` at 500 ms | 1,000, 2,700 s |
 | `domain-time` | 1 or 3; one node only with no fault or a cluster restart | None, or each voter in turn crashed, paused, isolated or stopped, or a cluster restart | 1 s, and `paced-load` at 250 ms | 1,000, 2,700 s |
 | `mixed-instability` | 3 | A seeded or explicit plan of the families above, alone and combined | 1 s | Twice the planned timeline plus 15 minutes of records, at most 20,000; the duration plus the larger of the duration and 20 minutes, at most 6 hours |
@@ -1851,6 +1884,64 @@ belongs to exactly one phase.
 continues to the baseline ledger before it exits nonzero. `results/endpoints-progress.json` records
 the placement, phases, fault, outputs and every verdict.
 
+### Binding Endpoints
+
+```bash
+just chaos run binding-endpoints --image nervix:debian --binding-image nervix:chaos-client --nodes 1
+just chaos run binding-endpoints --image nervix:debian --binding-image nervix:chaos-client --fault owner-stop
+just chaos run binding-endpoints --image nervix:debian --binding-image nervix:chaos-client --fault owner-crash
+just chaos run binding-endpoints --image nervix:debian --binding-image nervix:chaos-client --nodes 1 --fault cluster-restart
+```
+
+This variant installs `fixtures/binding-endpoints.plexus` in the independent `chaos_binding` domain:
+a client producer ingestor, relay and client consumer emitter. It uses the endpoint scenario's
+placement and log readers and the shared node fault primitives. It installs no HTTP routes.
+Its relay and emitter are relocated to one observed owner, a follower on three nodes. The
+Python package initially connects through that node, with every node as a recovery seed. Its
+producer and consumer share one session; a Python thread can await the producer's outcome while
+the consumer reads and acknowledges the output, through the package's GIL-releasing calls.
+
+The client writes 400 typed batches, one record each, with STRING `event_id`, U64 `sequence` and
+STRING `content`, paced at 250 ms. It completes 40 records and holds before the controller releases
+it immediately before fault injection, retaining a second hold after record 320 until the
+controller has verified the restart and cluster recovery. The final 80 records therefore exercise
+the recovered cluster. `none` releases the hold without a fault; `owner-stop`
+verifies the owner's graceful drain and shutdown before restarting it; `owner-crash` kills and
+restarts it; `cluster-restart` kills every node and restarts each from its own volume. The owner
+faults require three nodes and observed failover while the owner is down. The outage is held for
+`--outage-seconds` (default 8). Every input record gets exactly one application `submit`;
+the SDK owns its declared Busy/Suspended backoff. `ProcessingFailed` retains its typed rejection or
+ACK-timeout cause and bounded server message; `OutcomeUnknown` remains uncertain. Neither outcome
+authorizes this client to resubmit.
+The consumer logs each delivery's stable identity, attempt reference and exact columns, applies
+one idempotent effect per event ID, and logs the result of one ACK per received attempt. A lost ACK
+answer remains unknown. An interrupted consumer keeps reading through the SDK's restoration and
+never settles a replacement through a reference from another attachment.
+
+`binding_evidence.py` requires one submission and one final result per input record, exact delivered
+content, one effect for every Completed record, no duplicate effects and one settlement result per
+received attempt. Admitted work may return `ProcessingFailed` during a fault, with zero or partial
+effects; its separate count never joins Completed. This follows [P-5](./client-implementation-manual.md#producers)
+and the [submission outcome contract](./client-session-protocol.md#outcomes-admission-and-ends).
+A Completed producer outcome does not fabricate confirmation of a lost ACK reply;
+that settlement stays unknown and only an actual Confirmed result joins the confirmed count.
+Unknown submissions may have effects but are never assumed complete; the first and final records must complete so an entirely uncertain run
+cannot pass as recovery. The client must finish its complete input. Malformed or truncated evidence
+is a controller failure, not a product verdict. `endpoints/binding.ndjson`, `binding.stderr`,
+`verdict-binding.json` and `diagnostics/binding-provenance.json` keep the evidence.
+`results/binding-endpoints-progress.json` records its placement, fault, failover latency and verdict.
+
+The client's whole lifetime is bounded to 900 seconds, including holds and producer waits;
+connection establishment has 30 seconds, each consumer read one second, and each settlement up to
+240 seconds within the remaining lifetime. The controller gives its pre-fault boundary 240 seconds
+and its post-fault finish 300 seconds. These are harness bounds and change no product deadline.
+`just test-chaos-binding` qualifies uncertainty, loss, duplicate effects, changed content,
+settlements, truncated evidence and wheel identity with deterministic controls. Each binding run executes these Python controls before starting its nodes, under a 30-second
+bound, even when it adopts a suite's shared verifier record. `diagnostics/binding-controls.txt`
+and `binding_verifier_self_check` in the manifest retain that qualification. Other scenarios keep
+their existing host dependencies; only `binding-endpoints` requires host Python 3 for its oracle. `coverage-chaos-binding`, selected by `extra-runners`, exports their
+Python counters to the ordinary coverage merge; external product processes supply no counters.
+
 ### Lifetimes
 
 ```bash
@@ -2517,7 +2608,7 @@ locally built diagnostic server on an available image, and run it like any other
 just docker-build-diagnostic deloxide-order 23 nervix:diagnostic
 just build-chaos-diagnostic-image nervix:diagnostic-local ghcr.io/nervix-io/nervix:debian-latest deloxide-order
 just chaos run leader-crash --image nervix:diagnostic-local
-just chaos suite smoke --image nervix:diagnostic-local --image-kind deloxide-order
+just chaos suite smoke --image nervix:diagnostic-local --binding-image nervix:chaos-client --image-kind deloxide-order
 ```
 
 A diagnostic image declares its selection, `deloxide`, `deloxide-order` or `deloxide-stress`, in its
@@ -2583,10 +2674,10 @@ command, against an already built image.
 
 ```bash
 just chaos suite list
-just chaos suite smoke --image ghcr.io/nervix-io/nervix@sha256:<digest>
+just chaos suite smoke --image ghcr.io/nervix-io/nervix@sha256:<digest> --binding-image ghcr.io/nervix-io/nervix@sha256:<binding-digest>
 just chaos suite soak --image ghcr.io/nervix-io/nervix@sha256:<digest> --shard 6
 just chaos suite soak --image nervix:debian --entry partition-leader --entry stale-follower
-just chaos suite smoke --image nervix:diagnostic --image-kind deloxide-order --image-revision "$(git rev-parse HEAD)"
+just chaos suite smoke --image nervix:diagnostic --binding-image nervix:chaos-client --image-kind deloxide-order --image-revision "$(git rev-parse HEAD)"
 ```
 
 ### Catalog
@@ -2595,7 +2686,7 @@ Each entry is one `just chaos run` command with its arguments, a budget in minut
 which is the unit one CI job runs. An entry may also carry a note. The suite's `ci_reserve_minutes`
 is 21.
 
-The `smoke` suite runs in three shards:
+The `smoke` suite runs in five shards:
 
 | Shard | Entry | Command | Budget (min) |
 | ---: | --- | --- | ---: |
@@ -2605,6 +2696,11 @@ The `smoke` suite runs in three shards:
 | 2 | `endpoints-1` | `endpoints --nodes 1` | 10 |
 | 2 | `endpoints-3-owner-crash` | `endpoints --nodes 3 --fault owner-crash` | 12 |
 | 3 | `lifetimes-3-owner-crash` | `lifetimes --nodes 3 --fault owner-crash` | 25 |
+| 4 | `stateful-partitions-3-owner-crash` | `stateful --nodes 3 --state-partitions 4 --fault owner-crash` | 25 |
+| 5 | `binding-endpoints-1` | `binding-endpoints --nodes 1 --fault none` | 10 |
+| 5 | `binding-endpoints-3-owner-stop` | `binding-endpoints --nodes 3 --fault owner-stop` | 12 |
+| 5 | `binding-endpoints-3-owner-crash` | `binding-endpoints --nodes 3 --fault owner-crash` | 12 |
+| 5 | `binding-endpoints-1-cluster-restart` | `binding-endpoints --nodes 1 --fault cluster-restart` | 12 |
 
 The `intake-recovery` suite selects two existing recovery entries on one shard. It checks spread
 ingestor ownership after a node crash and persisted state after a single-node cluster restart.
@@ -2617,7 +2713,7 @@ as the larger suites. Select `intake-recovery` in a manual Chaos workflow run, o
 | 1 | `ingestor-instances-owner-crash` | `ingestor-instances-owner-crash` | 7 |
 | 1 | `stateful-1-cluster-restart` | `stateful --nodes 1 --fault cluster-restart` | 22 |
 
-The `soak` suite runs every delivered scenario, topology, case, profile and fault, in fourteen shards:
+The `soak` suite runs every delivered scenario, topology, case, profile and fault, in sixteen shards:
 
 | Shard | Entries, with budgets in minutes |
 | ---: | --- |
@@ -2635,6 +2731,8 @@ The `soak` suite runs every delivered scenario, topology, case, profile and faul
 | 12 | `endpoints-1` 10; `endpoints-1-cluster-restart` 12; `endpoints-3` 10; `endpoints-3-owner-crash`, `endpoints-3-owner-partition`, `endpoints-3-cluster-restart` 12 each |
 | 13 | `lifetimes-1` 20; `lifetimes-1-cluster-restart` 22; `lifetimes-3` 22 |
 | 14 | `lifetimes-3-owner-crash`, `lifetimes-3-owner-partition`, `lifetimes-3-cluster-restart` 25 each |
+| 15 | `stateful-partitions-3-owner-crash` 25 |
+| 16 | `binding-endpoints-1` 10; `binding-endpoints-3-owner-stop`, `binding-endpoints-3-owner-crash`, `binding-endpoints-1-cluster-restart` 12 each |
 
 A few soak entries need explanation:
 
@@ -2769,8 +2867,8 @@ cleanup works in this order:
   and the steps after the suite: cleanup, which has its own 8-minute bound holding its five-minute
   wait, plus the summary and the uploads.
 
-The smoke shards therefore run 20, 22 and 25 minutes of entries in steps of 45, 47 and 50 minutes
-and jobs of 66, 68 and 71 minutes. The soak's fourteen shards hold 1,133 minutes of entries.
+The binding smoke shard, for example, holds 46 minutes of entries, giving it a 71-minute step
+and a 92-minute job. The generated plan supplies each smoke or soak shard's current budgets.
 
 `just chaos suite report [--expect-shards N] SUITE_JSON...` renders one summary of several shards.
 It fails unless each shard passed and `N` of them are present.

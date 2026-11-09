@@ -563,6 +563,18 @@ pub(crate) enum RegistryError {
     #[error("active configuration graph for domain '{domain}' contains a cycle")]
     ConfigurationCycle { domain: String },
     #[error(
+        "placement rules {rules:?} in domain '{domain}' apply {policy} to {from:?} → {to:?}, a \
+         {class} hop"
+    )]
+    PlacementHopPolicy {
+        domain: DomainName,
+        from: nervix_models::NodeRef,
+        to: nervix_models::NodeRef,
+        class: super::unit_placement::HopClass,
+        policy: nervix_models::PlacementPolicy,
+        rules: Vec<nervix_models::PlacementName>,
+    },
+    #[error(
         "placement rules '{left_rule}' and '{right_rule}' in domain '{domain}' conflict at equal \
          rank for runtime nodes {left_kind} '{left_identifier}' and {right_kind} \
          '{right_identifier}'"
@@ -879,8 +891,10 @@ mod tests {
                 &domain,
                 vec![Model::Placement(CreatePlacement {
                     name: named("pin_nothing"),
-                    from: Vec::new(),
-                    to: vec![named("emit")],
+                    scope: nervix_models::PlacementScope::Corridor {
+                        from: Vec::new(),
+                        to: vec![named("emit")],
+                    },
                     policy: PlacementPolicy::Neutral,
                     rank: None,
                 })],

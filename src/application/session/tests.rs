@@ -35,7 +35,7 @@ use nervix_models::{
     ClientConsumerLimits, ClientProducerLimits, ClientProducerRefusal, DomainClockObservation,
     DomainClockObservedState, DomainClockState, DomainConfig, DomainName, DomainPace,
     DomainStartPoint, DomainState, DomainStatus, DomainTimeRate, PacedDomainClock, ParseAsType,
-    PlacementPolicy, SchemaField, Timestamp, TransactionPosition, UserName,
+    SchemaField, Timestamp, TransactionPosition, UserName,
 };
 use nervix_primitives::{
     stream::wrappers::UnboundedReceiverStream,
@@ -728,7 +728,6 @@ fn clocked_domain(start_version: u64, status: DomainStatus) -> DomainState {
                 period: "1s".parse().assured("one second is a valid period"),
                 skew: "10ms".parse().assured("ten milliseconds is a valid skew"),
             },
-            placement: PlacementPolicy::Neutral,
         },
         status,
         start_version,

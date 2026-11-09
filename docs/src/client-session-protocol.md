@@ -142,6 +142,9 @@ traversal budgets scale with the frame being verified rather than with the limit
 bytes may hold at most `n / 4` tables and may expand to at most eight times its own size, so a small
 frame whose offsets alias one another cannot make a receiver walk far more than it sent.
 
+The transaction-operation and impact-reason unions declare their current numeric tags explicitly
+in the shared schema. Only declared alternatives are accepted.
+
 Reading then applies the rules the verifier does not know. Every union is required, so the `NONE`
 discriminant is never valid. A union discriminant or enum value the schema does not declare is
 rejected, and so is an absent optional scalar that a comment requires, a zero where a comment
@@ -513,8 +516,8 @@ that `TYPE`. Its decoding-codec target offers codecs that can decode. An unbranc
 target needs a domain; a branched-relay target also needs the selected branch and offers relays
 with exactly that branch. Ingestor error relays use the unbranched target. A branch-field target
 takes a domain and branch reference. Ingestor decoded and output fields use the existing
-codec-field and relay-field targets. A junction or reingestor asks for another input relay with a
-domain and the first relay reference; candidates have that relay's exact named schema and branch.
+codec-field and relay-field targets. A junction, deduplicator, reorderer, or reingestor asks for
+another input relay with a domain and the first relay reference; candidates have that relay's exact named schema and branch.
 The same dependencies with the output-relay target select the input branch, and with the
 materialized-relay target select only relays with materialized state in that branch. Route
 construction of an unbranched or named branch uses the ingestor relay targets, while branch keys
@@ -768,7 +771,8 @@ retention, and the retry fence; this section describes what a client can rely on
 ### What Is Recorded
 
 Every persistent command is recorded under its reference before its first effect: model creation,
-alteration, and removal, `REBIND RESOURCE`, `CREATE DOMAIN`, `ALTER DOMAIN`, `CREATE USER`,
+alteration, and removal (including corridor and domain-wide placement rules), `REBIND RESOURCE`,
+`CREATE DOMAIN`, `CREATE USER`,
 `CREATE RESOURCE`, `START`, `STOP`, `DROP NODE`, `CORDON NODE`, `UNCORDON NODE`, `DRAIN NODE`,
 `RELOCATE`, `RESET WASM PROCESSOR ... STATE`, and `BACKUP`. So is every transaction request: a request that
 begins, commits, or reverts a transaction, one sent while the session is bound to a transaction, and
@@ -926,6 +930,15 @@ refusal included. An ordinary command keeps its mutation lease while its interna
 still committing. When its attempt ends on another failure, it answers `OutcomeUnknown` with the
 `StillApplying` cause instead of a terminal result, so the lease that transaction needs to release
 its pause is never given up first.
+
+An admitted model command that encounters an orphaned model-alteration pause may recover it under
+that exact lease after rechecking its internal transaction for progress. Consensus atomically
+checks the lease, the restore activation gate and the absence of any same-domain `COMMITTING`
+transaction. Only then may it resume the domain and let the command plan again. An active local
+alteration prevents recovery. A proposal that cannot be confirmed leaves the command retryable
+under its original execution reference and retains its mutation lease. Recovery changes no start
+version, start mode, clock or schedule, and produces no extra client success result or notice.
+Backup cuts and transaction-owned pause cleanup keep their respective ownership contracts.
 
 Because the lease lives in replicated state rather than in a leader's memory, it survives leadership
 changes and restarts. A new leader resumes the applying record, or the committing transaction, that
@@ -2681,6 +2694,10 @@ failure outcomes. No transfer starts before this admission check and no wire sha
 Producer and consumer session-byte admission uses the committed cluster limits. A producer's
 existing grant carries its exact row bound, which the admission worker enforces for that
 attachment. The compiled defaults are request preferences, not server admission ceilings.
+
+Placement-policy choices use `ChoiceTarget::PlacementPolicy` with no dependencies. They offer
+policies for named placement rules; the rule's scope and the candidate graph determine which
+policies are applicable. Domain pace is a separate domain-creation choice.
 
 ## State Inspection Envelope
 

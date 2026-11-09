@@ -510,6 +510,12 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
+The archived command and response shapes include conditional orphaned model-pause recovery under
+an exact mutation lease, its typed outcome and its mutation-fence and restore-installation
+conflicts. The operation checks lease authority, the restore start gate and all same-domain
+committing transactions before resuming a pause in one applied revision. It changes only domain
+status, keeping the start version, start mode, clock, schedule and incremental storage unchanged.
+
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
 `raft_wasm_inspection_logs`, `raft_wasm_inspection_meta`, `raft_wasm_inspection_state`, and
@@ -536,7 +542,9 @@ including committed cluster parameters, the durable restore installation gate an
 committed schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,
 typed ingestor instancing, exact-unit placement-group members
-and entity-versus-unit transaction gate targets. Native counts in commands, queued transactions,
+and entity-versus-unit transaction gate targets. Placement Models carry corridor or domain-wide
+coverage; domain records carry pace, and relocation statements retain exact partition or instance
+selectors. Native counts in commands, queued transactions,
 progress, outcomes, and plan, report and topology
 headers are archived as fixed-width 64-bit values with checked native decoding. Log replay, state
 recovery and snapshot installation therefore retain their complete magnitudes. See

@@ -497,9 +497,6 @@ table DropConfigurationOperation {
   node: NodeRef (required);
 }
 
-table AlterDomainOperation {
-  domain: string (required);
-}
 
 table StartDomainOperation {
   domain: string (required);
@@ -541,15 +538,14 @@ table ResetWasmStateOperation {
 }
 
 union TransactionOperation {
-  CreateConfigurationOperation,
-  AlterConfigurationOperation,
-  DropConfigurationOperation,
-  AlterDomainOperation,
-  StartDomainOperation,
-  StopDomainOperation,
-  CreateResourceOperation,
-  RebindResourceOperation,
-  ResetWasmStateOperation
+  CreateConfigurationOperation = 1,
+  AlterConfigurationOperation = 2,
+  DropConfigurationOperation = 3,
+  StartDomainOperation = 5,
+  StopDomainOperation = 6,
+  CreateResourceOperation = 7,
+  RebindResourceOperation = 8,
+  ResetWasmStateOperation = 9
 }
 
 enum ModelChangeAspect : ubyte {
@@ -638,7 +634,6 @@ table ConfigurationReason {
   aspect: ModelChangeAspect = null;
 }
 
-table DomainPlacementReason {}
 
 table DomainStartReason {}
 
@@ -660,13 +655,12 @@ table WasmStateResetReason {
 }
 
 union OperationImpactReason {
-  ConfigurationReason,
-  DomainPlacementReason,
-  DomainStartReason,
-  DomainStopReason,
-  ResourceCatalogReason,
-  ResourceRebindingReason,
-  WasmStateResetReason
+  ConfigurationReason = 1,
+  DomainStartReason = 3,
+  DomainStopReason = 4,
+  ResourceCatalogReason = 5,
+  ResourceRebindingReason = 6,
+  WasmStateResetReason = 7
 }
 
 table OperationReason {

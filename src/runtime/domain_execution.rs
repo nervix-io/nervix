@@ -1256,7 +1256,6 @@ mod tests {
                             .parse()
                             .assured("250 milliseconds fits the fixture skew representation"),
                     },
-                    placement: nervix_models::PlacementPolicy::Neutral,
                 },
                 status: DomainStatus::Stopped,
                 start_version: 0,

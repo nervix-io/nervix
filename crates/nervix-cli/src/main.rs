@@ -1875,7 +1875,10 @@ mod tests {
             "SHOW RELAY events MATERIALIZED STATE FOR UNBRANCHED LIMIT 1 FORMAT JSON;"
         ));
         assert!(is_json_inspection_command(
-            "DESCRIBE WASM PROCESSOR worker FORMAT JSON;"
+            "SHOW WASM PROCESSOR worker STATE FOR ALL BRANCHES LIMIT 1 FORMAT JSON;"
+        ));
+        assert!(!is_json_inspection_command(
+            "SHOW WASM PROCESSOR worker STATE;"
         ));
         assert!(!is_json_inspection_command(
             "SHOW RELAY events MATERIALIZED STATE FORMAT TEXT;"
