@@ -16,7 +16,7 @@
     nervix::layer(edge, reason = "owns the edges boundary declared above")
 )]
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, num::NonZeroU64};
 
 use error_stack::{Report, ResultExt as _};
 use nervix_models::{
@@ -953,6 +953,24 @@ impl ProcessorDraft {
             routes: ProcessorOutputs::new(routes),
         })
     }
+}
+
+/// A positive byte count, read as the language reads a byte-size literal: `unreadable` when the
+/// text is no byte size, and `zero` when it is a size of no bytes.
+pub(super) fn positive_byte_size(
+    text: &str,
+    unreadable: ProcessorDraftError,
+    zero: ProcessorDraftError,
+) -> error_stack::Result<NonZeroU64, ProcessorDraftError> {
+    let bytes = match text.trim().parse::<ubyte::ByteUnit>() {
+        Ok(bytes) => bytes.as_u64(),
+        // The byte-size parser is `no_std`: its refusal is no error type a report can hold, so
+        // the report carries it as a printable attachment.
+        Err(cause) => {
+            return Err(Report::new(unreadable).attach_printable(cause));
+        }
+    };
+    NonZeroU64::new(bytes).ok_or_else(|| Report::new(zero))
 }
 
 /// The checked inputs and node filter every processor family declares.

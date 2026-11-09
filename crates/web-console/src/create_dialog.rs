@@ -91,6 +91,7 @@ mod processor_invocation_editor;
 mod processor_key_editor;
 #[cfg(test)]
 mod processor_model_tests;
+mod processor_node_branch_editor;
 mod processor_route_editor;
 mod processor_route_references;
 mod processor_state_editor;
