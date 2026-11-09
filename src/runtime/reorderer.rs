@@ -326,7 +326,12 @@ pub(super) async fn flush_branch_reorderer_output(
 mod tests {
     use std::time::Duration;
 
-    use arrow_array::BinaryArray;
+    use arrow_array::{
+        BinaryArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
+        TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array,
+        cast::AsArray as _,
+        types::{Float32Type, Float64Type},
+    };
     use nervix_models::{ParseAsType, Timestamp};
     use nervix_primitives::{sync::Arc, time::timeout};
 
@@ -350,6 +355,140 @@ mod tests {
         );
         assert_eq!(reorder_key_part(&values, 2), ReorderKeyPart::Null);
         assert!(reorder_key_part(&values, 0) < reorder_key_part(&values, 1));
+    }
+
+    /// The key column of `expected`'s type built from the parts read from each of its rows.
+    fn typed_column_of_parts(expected: &ArrayRef) -> ArrayRef {
+        let typed = VmTypedArray::try_from_array_ref(StdArc::clone(expected))
+            .assured("every fixture column has a key type");
+        let rows = expected.len();
+        let mut parts = Vec::with_capacity(rows);
+        for row in 0..rows {
+            parts.push(reorder_key_part(&typed, row));
+        }
+        ReorderKeyPart::typed_column(expected.data_type(), parts.iter(), rows)
+            .assured("every part was read from a column of this type")
+    }
+
+    #[test]
+    fn typed_key_columns_rebuild_every_key_type_from_the_parts_read_from_it() {
+        let datetime: ArrayRef = StdArc::new(
+            TimestampNanosecondArray::from(vec![Some(i64::MIN), Some(0), None])
+                .with_timezone("+00:00"),
+        );
+        assert_eq!(
+            datetime.data_type(),
+            &ParseAsType::Datetime.arrow_data_type()
+        );
+        let exact: Vec<ArrayRef> = vec![
+            StdArc::new(UInt8Array::from(vec![Some(0), Some(u8::MAX), None])),
+            StdArc::new(UInt16Array::from(vec![Some(0), Some(u16::MAX), None])),
+            StdArc::new(UInt32Array::from(vec![Some(0), Some(u32::MAX), None])),
+            StdArc::new(UInt64Array::from(vec![Some(0), Some(u64::MAX), None])),
+            StdArc::new(Int8Array::from(vec![Some(i8::MIN), Some(i8::MAX), None])),
+            StdArc::new(Int16Array::from(vec![Some(i16::MIN), Some(i16::MAX), None])),
+            StdArc::new(Int32Array::from(vec![Some(i32::MIN), Some(i32::MAX), None])),
+            StdArc::new(Int64Array::from(vec![Some(i64::MIN), Some(i64::MAX), None])),
+            StdArc::new(BooleanArray::from(vec![Some(false), Some(true), None])),
+            StdArc::new(StringArray::from(vec![Some(""), Some("east"), None])),
+            StdArc::new(BinaryArray::from(vec![
+                Some(&[][..]),
+                Some(&[0, 255][..]),
+                None,
+            ])),
+            datetime,
+        ];
+        for expected in &exact {
+            let column = typed_column_of_parts(expected);
+            assert_eq!(&*column, &**expected, "{}", expected.data_type());
+        }
+
+        // Floats compare by their bits, so negative zero, NaN and the extremes come back exactly.
+        let single: ArrayRef = StdArc::new(Float32Array::from(vec![
+            Some(-0.0),
+            Some(f32::NAN),
+            Some(f32::MIN_POSITIVE),
+            Some(f32::MAX),
+            None,
+        ]));
+        let column = typed_column_of_parts(&single);
+        let restored: Vec<Option<u32>> = column
+            .as_primitive::<Float32Type>()
+            .iter()
+            .map(|value| value.map(f32::to_bits))
+            .collect();
+        let original: Vec<Option<u32>> = single
+            .as_primitive::<Float32Type>()
+            .iter()
+            .map(|value| value.map(f32::to_bits))
+            .collect();
+        assert_eq!(restored, original);
+        let double: ArrayRef = StdArc::new(Float64Array::from(vec![
+            Some(-0.0),
+            Some(f64::NAN),
+            Some(f64::MIN),
+            None,
+        ]));
+        let column = typed_column_of_parts(&double);
+        let restored: Vec<Option<u64>> = column
+            .as_primitive::<Float64Type>()
+            .iter()
+            .map(|value| value.map(f64::to_bits))
+            .collect();
+        let original: Vec<Option<u64>> = double
+            .as_primitive::<Float64Type>()
+            .iter()
+            .map(|value| value.map(f64::to_bits))
+            .collect();
+        assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn a_key_part_outside_its_column_type_is_refused_and_untyped_keys_hold_only_nulls() {
+        let list = ParseAsType::Vec {
+            element: Box::new(ParseAsType::I64),
+        }
+        .arrow_data_type();
+        let refused = [
+            (
+                DataType::UInt8,
+                ReorderKeyPart::UInt64(u64::from(u8::MAX) + 1),
+            ),
+            (
+                DataType::Int16,
+                ReorderKeyPart::Int64(i64::from(i16::MIN) - 1),
+            ),
+            (DataType::Int64, ReorderKeyPart::UInt64(1)),
+            (
+                DataType::Float32,
+                ReorderKeyPart::Float64(OrderedFloat(0.1)),
+            ),
+            (DataType::Float64, ReorderKeyPart::Int64(1)),
+            (DataType::Boolean, ReorderKeyPart::Utf8("true".to_string())),
+            (DataType::Utf8, ReorderKeyPart::Bytes(b"east".to_vec())),
+            (DataType::Binary, ReorderKeyPart::Utf8("east".to_string())),
+            (
+                ParseAsType::Datetime.arrow_data_type(),
+                ReorderKeyPart::Int64(0),
+            ),
+            (list.clone(), ReorderKeyPart::Int64(1)),
+        ];
+        for (data_type, part) in &refused {
+            let error = ReorderKeyPart::typed_column(data_type, std::iter::once(part), 1)
+                .err()
+                .assured("the part is not a value of this column's type");
+            assert_eq!(
+                *error.current_context(),
+                ReorderKeyColumnError::PartType,
+                "{data_type}"
+            );
+        }
+
+        let nulls = [ReorderKeyPart::Null, ReorderKeyPart::Null];
+        let column = ReorderKeyPart::typed_column(&list, nulls.iter(), nulls.len())
+            .assured("a null part fits every key column");
+        assert_eq!(column.data_type(), &list);
+        assert_eq!(column.null_count(), 2);
     }
     #[nervix_primitives::test]
     async fn reorderer_buffer_applies_one_columnar_permutation_to_batches_and_sidecars() {

@@ -675,3 +675,7 @@ impl ReceivedMaterializedPage {
             })
     }
 }
+
+#[cfg(test)]
+#[path = "state_inspection_exchange_tests.rs"]
+mod tests;
