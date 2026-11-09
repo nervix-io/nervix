@@ -34,6 +34,8 @@ fn parameters(input: &[u8; 384]) -> ClusterParameterValues {
         http_header_bytes: Some(generated.http_header_bytes()),
         http_header_fields: Some(generated.http_header_fields()),
         client_batch_rows: Some(generated.client_batch_rows()),
+        tls_cipher_suites: Some(generated.tls_cipher_suites()),
+        tls_key_exchange_groups: Some(generated.tls_key_exchange_groups()),
     })
     .assured("the shared generator supplies values within every definition's bounds")
 }

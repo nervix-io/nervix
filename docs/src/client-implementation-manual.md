@@ -150,6 +150,12 @@ archive; see [Restore Streams](#restore-streams).
   authority and verify the TLS certificate against that hostname on every connection, including
   redirects and reconnects. DNS and address attempts MUST fit within the client's connection
   deadline.
+- **T-2a.** Native client-core, the CLI and native bindings use the cryptography boundary's explicit
+  `fips` cipher/group set by default. A cluster's outward policy governs its listeners and shared
+  connector TLS, not a client's offers; an embedding host's process provider does not replace that
+  native default. Trust roots, certificate identity, hostname verification, ALPN and deadlines
+  retain their independent contracts. Read [Algorithm Policy](cryptography.md#algorithm-policy)
+  for membership and the boundary between algorithm selection and a validated deployment.
 - **T-3.** A WebSocket client MUST connect to `/console/ws` on the leader's console endpoint, using
   `ws` for an `http` endpoint and `wss` for an `https` one, and MUST send binary messages only. It
   MUST treat a close with code `1003`, `1007`, `1008`, or `1009` as a defect in what it sent.

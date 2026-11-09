@@ -53,6 +53,7 @@ const SENTRY_RATE_LIMITS_HEADER: &str = "x-sentry-rate-limits";
 
 /// What one Sentry emitter sends with: the entries naming its project DSN and HTTP client settings.
 pub struct SentryEventEmitterConfig {
+    pub tls_policy: nervix_connector::OutwardTlsPolicy,
     pub config: Vec<ClientConfigEntry>,
     pub dns: DnsResolver,
     /// The plan's resolved platform, used only when the encoded event omits its own.
@@ -108,13 +109,15 @@ enum SentryEventError {
 
 impl SentryEventEmitter {
     fn prepare(config: SentryEventEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
+        let config_policy = config.tls_policy;
         let dns = config.dns;
         let platform = config.platform;
         let config = config.config.as_slice();
         let dsn = Self::dsn(config)
             .change_context(EmitterOpenError::InvalidConfiguration { connector: SENTRY })?;
         let client = {
-            let mapping_input = HttpClientConfig::new(config, "Sentry", &dns).build();
+            let mapping_input =
+                HttpClientConfig::new(config, "Sentry", &dns, &config_policy).build();
             match mapping_input {
                 Ok(mapped_value) => Ok(mapped_value),
                 Err(error) => Err({

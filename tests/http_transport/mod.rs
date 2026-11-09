@@ -201,6 +201,7 @@ async fn given_https_receiver_offering_http2_is_running(
     // The certificate's names may name the scenario, so its identity exists before they expand.
     initialize_scenario_identity(world);
     let options = ReceiverTlsOptions {
+        algorithms: crate::common::http_receiver::ReceiverTlsAlgorithms::Complete,
         certificate_hosts: certificate_hosts(world, &hosts),
         client_certificate: ClientCertificatePolicy::NotRequested,
         protocols: ReceiverProtocols::Http2AndHttp1,
@@ -226,6 +227,7 @@ async fn given_https_receiver_offering_authenticated_http2_is_running(
 ) {
     initialize_scenario_identity(world);
     let options = ReceiverTlsOptions {
+        algorithms: crate::common::http_receiver::ReceiverTlsAlgorithms::Complete,
         certificate_hosts: certificate_hosts(world, &hosts),
         client_certificate: ClientCertificatePolicy::Required,
         protocols: ReceiverProtocols::Http2AndHttp1,

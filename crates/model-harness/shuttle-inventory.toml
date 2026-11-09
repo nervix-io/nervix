@@ -335,3 +335,9 @@ checks = [
   "connection::ingestor::handshake::shuttle_tests::shuttle_a_handshake_future_dropped_before_readiness_ends_its_exact_handoff",
 ]
 name = "nervix-connector-websockets"
+
+[[package]]
+checks = [
+  "shuttle_tests::shuttle_capture_racing_publication_keeps_one_complete_pair_and_the_retained_snapshot",
+]
+name = "nervix-tls"

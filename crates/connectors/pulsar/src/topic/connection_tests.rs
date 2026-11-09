@@ -46,12 +46,13 @@ fn entry(key: &str, value: &str) -> ClientConfigEntry {
 
 /// The method and data `config` connects with.
 fn credential(config: &[ClientConfigEntry]) -> Option<(String, Vec<u8>)> {
-    let authentication = PulsarClientConnection::new(config, None).authentication()?;
+    let authentication =
+        PulsarClientConnection::new(config, None, &Default::default()).authentication()?;
     Some((authentication.name, authentication.data))
 }
 
 fn trust(config: &[ClientConfigEntry]) -> ServerCertificateTrust {
-    PulsarClientConnection::new(config, None)
+    PulsarClientConnection::new(config, None, &Default::default())
         .server_certificate_trust()
         .assured("each fixture holds readable booleans")
 }
@@ -205,7 +206,10 @@ async fn a_tls_key_that_is_no_boolean_is_the_clients_configuration_failure() {
         entry("addr", "pulsar+ssl://127.0.0.1:1"),
         entry("tls_allow_insecure_connection", "sometimes"),
     ];
-    let Err(failure) = PulsarClientConnection::new(&config, None).open().await else {
+    let Err(failure) = PulsarClientConnection::new(&config, None, &Default::default())
+        .open()
+        .await
+    else {
         panic!("a client whose key cannot be read must not connect");
     };
     assert!(matches!(
@@ -222,7 +226,10 @@ async fn a_certificate_file_that_cannot_be_read_is_the_clients_configuration_fai
         entry("tls_cert_file", "/nonexistent/client.pem"),
         entry("tls_key_file", "/nonexistent/client-key.pem"),
     ];
-    let Err(failure) = PulsarClientConnection::new(&config, None).open().await else {
+    let Err(failure) = PulsarClientConnection::new(&config, None, &Default::default())
+        .open()
+        .await
+    else {
         panic!("a client whose identity cannot be read must not connect");
     };
     assert!(matches!(
@@ -237,8 +244,9 @@ async fn a_certificate_file_that_cannot_be_read_is_the_clients_configuration_fai
 
 #[test]
 fn both_directions_leave_every_retry_to_the_host() {
-    let without_timeout = PulsarClientConnection::new(&[], None);
-    let with_timeout = PulsarClientConnection::new(&[], Some(Duration::from_secs(7)));
+    let policy = Default::default();
+    let without_timeout = PulsarClientConnection::new(&[], None, &policy);
+    let with_timeout = PulsarClientConnection::new(&[], Some(Duration::from_secs(7)), &policy);
     assert_eq!(PulsarClientConnection::connection_retries().max_retries, 0);
     for connection in [&without_timeout, &with_timeout] {
         let operations =
@@ -284,7 +292,10 @@ async fn a_broker_that_refuses_the_connection_is_reported_with_its_answer() {
         entry("auth_token", "refused-token"),
     ];
 
-    let Err(failure) = PulsarClientConnection::new(&config, None).open().await else {
+    let Err(failure) = PulsarClientConnection::new(&config, None, &Default::default())
+        .open()
+        .await
+    else {
         panic!("the broker refused the connection");
     };
 
@@ -324,7 +335,10 @@ async fn a_connection_the_address_refuses_is_attempted_once() {
     let config = [entry("addr", &format!("pulsar://{address}"))];
     let started = Instant::now();
 
-    let Err(failure) = PulsarClientConnection::new(&config, None).open().await else {
+    let Err(failure) = PulsarClientConnection::new(&config, None, &Default::default())
+        .open()
+        .await
+    else {
         panic!("nothing listens at the address");
     };
 
@@ -387,7 +401,7 @@ async fn an_operation_the_broker_is_not_ready_for_is_attempted_once() {
     .await;
     let config = [entry("addr", &broker.service_url)];
 
-    let client = PulsarClientConnection::new(&config, None)
+    let client = PulsarClientConnection::new(&config, None, &Default::default())
         .open()
         .await
         .assured("the broker accepts this client");

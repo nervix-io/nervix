@@ -145,3 +145,21 @@ fn an_empty_algorithm_selection_is_a_typed_failure() {
         &InterconnectAlgorithmError::NoKeyExchangeGroups
     );
 }
+
+#[test]
+fn native_clients_reuse_the_explicit_fips_provider() {
+    let first = fips_provider();
+    assert!(StdArc::ptr_eq(&first, &fips_provider()));
+    assert!(first.cipher_suites.iter().all(|suite| !matches!(
+        suite.suite(),
+        CipherSuite::TLS13_CHACHA20_POLY1305_SHA256
+            | CipherSuite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
+            | CipherSuite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+    )));
+    assert!(
+        first
+            .kx_groups
+            .iter()
+            .all(|group| group.name() != NamedGroup::X25519)
+    );
+}

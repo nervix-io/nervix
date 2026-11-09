@@ -7086,6 +7086,7 @@ dependencies = [
  "nervix-models",
  "nervix-primitives",
  "nervix-recovery",
+ "nervix-tls",
  "percent-encoding",
  "rcgen",
  "reqwest 0.13.5",
@@ -7704,11 +7705,26 @@ dependencies = [
  "faster-hex",
  "jsonwebtoken",
  "meticulous",
+ "nervix-crypto-policy",
  "nervix-primitives",
  "nervix-recovery",
  "rustls",
  "serde",
  "sha2 0.10.9",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "nervix-crypto-policy"
+version = "0.1.0-dev"
+dependencies = [
+ "bolero",
+ "error-stack",
+ "meticulous",
+ "rkyv",
+ "serde",
+ "serde_json",
+ "strum 0.26.3",
  "thiserror 2.0.21",
 ]
 
@@ -7922,6 +7938,7 @@ dependencies = [
  "meticulous",
  "nervix-approx-into",
  "nervix-arbitrary",
+ "nervix-crypto-policy",
  "nervix-primitives",
  "nervix-simd-kernels",
  "nonzero_ext",
@@ -8277,6 +8294,7 @@ dependencies = [
  "nervix-connector-zeromq",
  "nervix-consensus",
  "nervix-crypto",
+ "nervix-crypto-policy",
  "nervix-dataflow-graph",
  "nervix-deadlock",
  "nervix-dns",
@@ -8292,6 +8310,7 @@ dependencies = [
  "nervix-roto",
  "nervix-simd-kernels",
  "nervix-test-environment",
+ "nervix-tls",
  "nervix-vm",
  "nervix-wasm",
  "nix",
@@ -8384,6 +8403,18 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "nervix-tls"
+version = "0.1.0-dev"
+dependencies = [
+ "meticulous",
+ "nervix-crypto",
+ "nervix-crypto-policy",
+ "nervix-model-harness",
+ "nervix-primitives",
+ "rustls",
 ]
 
 [[package]]
@@ -11340,8 +11371,7 @@ dependencies = [
 [[package]]
 name = "rustls"
 version = "0.23.46"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
+source = "git+https://github.com/nervix-io/rustls.git?rev=3a454c70e431a25b88cd117e8f7458fb74f7e0b3#3a454c70e431a25b88cd117e8f7458fb74f7e0b3"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -13389,8 +13419,7 @@ checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 [[package]]
 name = "tonic"
 version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e581ba15a835f4d9ea06c55ab1bd4dce26fc53752c69a04aac00703bfb49ba9"
+source = "git+https://github.com/nervix-io/grpc-rust.git?rev=90b5289e691815f26ec6a89fed89c8c370674aaa#90b5289e691815f26ec6a89fed89c8c370674aaa"
 dependencies = [
  "async-trait",
  "axum",
