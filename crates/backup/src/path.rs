@@ -166,6 +166,32 @@ impl SectionPath {
         ))
     }
 
+    /// The descriptor of one inferencer branch's tensor state.
+    pub fn inferencer_descriptor(
+        domain: &DomainName,
+        entity: &ModelName,
+        unit: Unit,
+        branch: Option<&BranchKeyFingerprint>,
+    ) -> Self {
+        Self(format!(
+            "{}/descriptor.rkyv",
+            branch_state_directory(domain, "inferencer", entity, unit, branch)
+        ))
+    }
+
+    /// The ordered F32 tensor bytes named by an inferencer descriptor.
+    pub fn inferencer_tensor_values(
+        domain: &DomainName,
+        entity: &ModelName,
+        unit: Unit,
+        branch: Option<&BranchKeyFingerprint>,
+    ) -> Self {
+        Self(format!(
+            "{}/state.bin",
+            branch_state_directory(domain, "inferencer", entity, unit, branch)
+        ))
+    }
+
     /// The descriptor of one window processor branch's state.
     pub fn window_descriptor(
         domain: &DomainName,

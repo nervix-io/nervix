@@ -1490,7 +1490,12 @@ flight toward its receiver, backed by that stream's window reservation.
 [Resource Versions And Bindings](./resource-versions.md#publication-and-transfer) defines when a
 node fetches a resource archive and how it verifies and records the fetched version.
 
-Backup state capture uses typed drain, capture, inventory, and fetch operations. The leader reads
+Backup state capture uses typed drain, capture, inventory, and fetch operations.
+Inference backup capture uses the inferencer descriptor and tensor-value inventory kinds. Their
+archive paths are typed at assembly; the descriptor precedes its raw values and binds their exact
+length and digest. Restore uses the existing streamed installation inventory and authority for both
+the scheduled owner and replicas, with the inferencer schema and model fingerprints in placement.
+The one wire-contract fingerprint changes with these two capture kinds. The leader reads
 the admitted work of every live node and every node the domain's schedule assigns its work to
 through a management-class drain request, which starts a force-flush generation on a node only
 while that node holds admitted work, and requests a separate confirming force-flush round after
@@ -1599,7 +1604,7 @@ still fail a transfer that does not complete.
 The registered `backup-capture-wire` property checks complete drain, capture, inventory and fetch
 messages through the production payload codec under each request's declared class limit. It covers
 every drain action, all ten counters at zero, their full-width maximum and independent generated
-values, all twelve inventory section kinds, ordered and empty inventories, arbitrary digests,
+values, all fourteen inventory section kinds, ordered and empty inventories, arbitrary digests,
 bounded Unicode paths, and capture/drain/inventory success and refusal responses. The fetch response
 remains an opaque byte stream. `backup-capture-wire-malformed` separately
 checks typed refusal or complete stable re-encoding of damaged and arbitrary message bytes, and

@@ -482,6 +482,12 @@ receive the same generation. A restart continues from the newest surviving snaps
 model binding and branch incarnation. Inputs admitted after that snapshot have already been
 acknowledged and are not replayed, so recovery can skip those state updates. A graceful stop
 persists the final generation before the branch ends. `STOP` followed by `START` retains it.
+A [backup](backup-and-restore.md) also carries each active branch's published tensors with their
+shapes, pinned model identity and branch incarnation. Quiesced capture forces publication;
+`WITHOUT PAUSE` captures the latest published generation without a common quiesced boundary.
+Restore validates that identity and installs exact tensor bits on the scheduled owner and replicas.
+Both `RESUME` and a later normal `START` preserve the tensors; `WITHOUT STATE` on backup or restore
+starts branches from `INITIAL`.
 
 Branch eviction by `TTL` or `MAX INSTANCES` discards the tensors and publishes an empty final
 generation, so a returning key starts from `INITIAL`. Dropping the inferencer removes its stored

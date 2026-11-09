@@ -289,6 +289,9 @@ impl ArchivedKeyCheck {
                 }
                 Ok(())
             }
+            DescribedRuntimeState::Inferencer {
+                descriptor, record, ..
+            } => self.admit_descriptor(domain, descriptor.branch.as_ref(), record),
             DescribedRuntimeState::Wasm {
                 descriptor, record, ..
             } => self.admit_descriptor(domain, descriptor.branch.as_ref(), record),
@@ -369,6 +372,11 @@ impl VerifiedArchive {
                     NodeRef::new(lifecycle.owner_kind, lifecycle.entity.clone()),
                     lifecycle.unit,
                     lifecycle.schema,
+                ),
+                DescribedRuntimeState::Inferencer { descriptor, .. } => (
+                    NodeRef::new(ModelKind::Inferencer, descriptor.entity.clone()),
+                    descriptor.unit,
+                    descriptor.schema,
                 ),
                 DescribedRuntimeState::Wasm { descriptor, .. } => (
                     NodeRef::new(ModelKind::WasmProcessor, descriptor.entity.clone()),

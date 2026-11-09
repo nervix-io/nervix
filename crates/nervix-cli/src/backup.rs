@@ -761,6 +761,22 @@ fn domain_text(domain: &DescribedDomain) -> Vec<String> {
 
 fn runtime_state_text(state: &DescribedRuntimeState) -> String {
     match state {
+        DescribedRuntimeState::Inferencer {
+            descriptor, values, ..
+        } => format!(
+            "  - inferencer={} unit={:?} branch={} incarnation={} revision={} shapes={:?} \
+             schema_fingerprint={} model={} bytes={} blake3={}",
+            descriptor.entity,
+            descriptor.unit.kind(),
+            branch_text(descriptor.branch_fingerprint.as_ref()),
+            descriptor.incarnation,
+            descriptor.revision,
+            descriptor.shapes,
+            digest_hex(descriptor.schema.as_digest()),
+            digest_hex(descriptor.model.as_digest()),
+            values.length,
+            values.digest,
+        ),
         DescribedRuntimeState::Wasm {
             descriptor, guest, ..
         } => format!(
@@ -957,6 +973,17 @@ fn domain_json(domain: &DescribedDomain) -> Value {
 
 fn runtime_state_json(state: &DescribedRuntimeState) -> Value {
     match state {
+        DescribedRuntimeState::Inferencer {
+            descriptor,
+            record,
+            values,
+        } => json!({
+            "kind": "inferencer", "entity": descriptor.entity.as_str(), "unit": descriptor.unit,
+            "schema_fingerprint": digest_hex(descriptor.schema.as_digest()), "model": digest_hex(descriptor.model.as_digest()),
+            "branch_fingerprint": descriptor.branch_fingerprint.as_ref().map(|fingerprint| digest_hex(fingerprint.fingerprint())),
+            "incarnation": descriptor.incarnation, "revision": descriptor.revision, "shapes": descriptor.shapes,
+            "descriptor": section_json(record), "values": section_json(values),
+        }),
         DescribedRuntimeState::Wasm {
             descriptor,
             record,

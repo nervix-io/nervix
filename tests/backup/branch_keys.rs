@@ -126,6 +126,12 @@ fn alter_keys(source: &Path, target: &Path, under: &str, alteration: &KeyAlterat
             alteration.alter(&mut descriptor.branch);
             altered += 1;
             descriptor.encode()
+        } else if path.ends_with("/descriptor.rkyv") && path.contains("/state/inferencer/") {
+            let mut descriptor = nervix_backup::InferencerStateDescriptor::decode(path, bytes)
+                .expect("the inferencer descriptor decodes");
+            alteration.alter(&mut descriptor.branch);
+            altered += 1;
+            descriptor.encode()
         } else if path.ends_with("/descriptor.rkyv") && path.contains("/state/wasm_processor/") {
             let mut descriptor = WasmStateDescriptor::decode(path, bytes)
                 .expect("the archived WASM descriptor decodes");
