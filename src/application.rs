@@ -179,6 +179,7 @@ mod join_supervision;
 mod leader_redirect;
 mod license_description;
 mod licensing_admission;
+mod membership_reconciliation;
 mod model_mutation;
 mod model_validation;
 mod node_capabilities;
@@ -923,8 +924,6 @@ impl Application {
         let cluster_for_membership_reconcile = cluster.clone();
         let administrator_for_membership_reconcile = consensus.administrator();
         let proposer_for_parameter_seeding = consensus.proposer();
-        #[cfg(feature = "testing")]
-        let fault_for_identity_seeding = fault_injection.clone();
         let membership_reconcile_shutdown = shutdown.clone();
         let interconnect_tls_transport = interconnect.clone();
         let interconnect_tls_shutdown = shutdown.clone();
@@ -976,88 +975,20 @@ impl Application {
                 controller.run(memory_runtime, memory_shutdown).await;
             }));
         }
-        let membership_licensing = licensing.clone();
-        background_tasks.push(nervix_primitives::task::spawn(async move {
-            sleep(Duration::from_millis(500)).await;
-            let mut initialized = false;
-            loop {
-                nervix_primitives::task::consume_budget().await;
-                if membership_reconcile_shutdown.is_cancelled() {
-                    break;
-                }
-                if allow_bootstrap && !initialized {
-                    match administrator_for_membership_reconcile
-                        .maybe_initialize(|usage| membership_licensing.admit(
-                            crate::licensing::QuotaName::ClusterNodes, usage, 1, false,
-                        ).map(|_| ()))
-                        .await
-                    {
-                        Ok(did_initialize) => {
-                            initialized = did_initialize;
-                        }
-                        Err(error) => {
-                            if let Some(refusal) = error.downcast_ref::<crate::licensing::LicensingRefusal>() {
-                                bootstrap_refusal_sender.send_replace(Some(join_supervision::JoinRefusedError::Licensing(*refusal)));
-                                match bootstrap_refusal_coordinator.request_stop() {
-                                    ShutdownRequestOutcome::Accepted(_) | ShutdownRequestOutcome::AlreadyRequested(_) => {}
-                                }
-                                break;
-                            }
-                            warn!(error = %format_args!("{error:#}"), "raft bootstrap attempt failed");
-                        }
-                    }
-                }
-                if let Err(error) = cluster_identity::seed(
-                    &proposer_for_parameter_seeding,
-                    #[cfg(feature = "testing")]
-                    &fault_for_identity_seeding,
-                ).await {
-                    warn!(error = %format_args!("{error:#}"), "failed to seed cluster identity");
-                }
-                if allow_bootstrap
-                    && proposer_for_parameter_seeding.cluster_identity().is_some()
-                    && proposer_for_parameter_seeding
-                        .cluster_parameters()
-                        .is_none()
-                    && proposer_for_parameter_seeding
-                        .current_leader()
-                        .await
-                        .as_ref()
-                        == Some(proposer_for_parameter_seeding.local_node_id())
-                    && let Err(error) = proposer_for_parameter_seeding
-                        .seed_cluster_parameters(parameter_seeds)
-                        .await
-                {
-                    warn!(
-                        error = format!("{error:#}"),
-                        "failed to seed cluster parameters"
-                    );
-                }
-                if let Some(record) = proposer_for_parameter_seeding.cluster_parameters() {
-                    cluster_for_membership_reconcile
-                        .publish_cluster_parameters(record, false)
-                        .await;
-                }
-                if let Err(error) = administrator_for_membership_reconcile
-                    .reconcile_nodes(cluster_for_membership_reconcile.gossip_state(), |usage| membership_licensing.admit(
-                        crate::licensing::QuotaName::ClusterNodes, usage, 1, false,
-                    ).map(|_| ()))
-                    .await
-                {
-                    warn!(error = %format_args!("{error:#}"), "raft membership reconciliation failed");
-                }
-                // Published whether or not a membership change failed: the verdicts were judged
-                // before any change was attempted, and a node that stopped leading withdraws them.
-                let verdicts = administrator_for_membership_reconcile.admission_verdicts();
-                cluster_for_membership_reconcile
-                    .publish_admission_verdicts(verdicts.as_ref())
-                    .await;
-                nervix_primitives::select! {
-                    _ = membership_reconcile_shutdown.cancelled() => break,
-                    _ = sleep(Duration::from_secs(1)) => {}
-                }
-            }
-        }));
+        background_tasks.push(membership_reconciliation::spawn(
+            membership_reconciliation::MembershipReconciliation {
+                cluster: cluster_for_membership_reconcile,
+                administrator: administrator_for_membership_reconcile,
+                proposer: proposer_for_parameter_seeding,
+                shutdown: membership_reconcile_shutdown,
+                allow_bootstrap,
+                parameter_seeds,
+                licensing: licensing.clone(),
+                refusals: bootstrap_refusal_sender,
+                coordinator: bootstrap_refusal_coordinator,
+                fault: fault_injection.clone(),
+            },
+        ));
         let certificates = HttpsListenerCertificates::new(
             &resource_store,
             &fault_injection,

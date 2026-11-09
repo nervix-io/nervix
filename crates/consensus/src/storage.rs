@@ -335,6 +335,34 @@ impl StateMetadata {
     }
 }
 
+fn load_cluster_licensing(
+    sm: &Keyspace,
+    expected_identity: Option<uuid::Uuid>,
+) -> io::Result<(
+    Option<crate::ClusterIdentityRecord>,
+    Option<crate::LicensingRecord>,
+)> {
+    let identity: Option<crate::ClusterIdentityRecord> = read_key(sm, KEY_CLUSTER_IDENTITY)?;
+    let licensing: Option<crate::LicensingRecord> = read_key(sm, KEY_LICENSING)?;
+    if identity
+        .as_ref()
+        .map(crate::ClusterIdentityRecord::cluster_uid)
+        != expected_identity
+    {
+        return Err(io::Error::other(StorageFailure::InvalidState));
+    }
+    match (&identity, &licensing) {
+        (Some(identity), Some(record)) => record.validate(&identity.public()).map_err(|error| {
+            crate::durable_batch::storage_report_io(
+                error.change_context(StorageFailure::InvalidState),
+            )
+        })?,
+        (None, None) => {}
+        _ => return Err(io::Error::other(StorageFailure::InvalidState)),
+    }
+    Ok((identity, licensing))
+}
+
 impl StateMachineData {
     fn load(sm: &Keyspace, metadata: StateMetadata) -> io::Result<Self> {
         let StateMetadata {
@@ -347,26 +375,7 @@ impl StateMachineData {
             password_work,
             command_retry_fence,
         } = metadata;
-        let identity: Option<crate::ClusterIdentityRecord> = read_key(sm, KEY_CLUSTER_IDENTITY)?;
-        let licensing: Option<crate::LicensingRecord> = read_key(sm, KEY_LICENSING)?;
-        if identity
-            .as_ref()
-            .map(crate::ClusterIdentityRecord::cluster_uid)
-            != expected_identity
-        {
-            return Err(io::Error::other(StorageFailure::InvalidState));
-        }
-        match (&identity, &licensing) {
-            (Some(identity), Some(record)) => {
-                record.validate(&identity.public()).map_err(|error| {
-                    crate::durable_batch::storage_report_io(
-                        error.change_context(StorageFailure::InvalidState),
-                    )
-                })?
-            }
-            (None, None) => {}
-            _ => return Err(io::Error::other(StorageFailure::InvalidState)),
-        }
+        let (identity, licensing) = load_cluster_licensing(sm, expected_identity)?;
         let state = Self {
             cluster_identity: identity.map(Arc::new),
             licensing: licensing.map(Arc::new),
