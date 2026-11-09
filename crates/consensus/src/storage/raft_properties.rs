@@ -160,6 +160,12 @@ fn bolero_consensus_raft_records_round_trip_through_the_storage_codec() {
                     None
                 },
                 parameters: Some(arbitrary.cluster_parameter_record()),
+                password_work: Some(
+                    nervix_models::PasswordCost::try_from(
+                        nervix_models::PasswordIterations::MAXIMUM,
+                    )
+                    .assured("the maximum cost is accepted"),
+                ),
                 encoding: StateEncoding::ClusterState,
                 last_applied_log_id: optional_log_id(&mut arbitrary),
                 last_membership: Arc::new(stored_membership(&mut arbitrary)),
@@ -180,6 +186,7 @@ fn bolero_consensus_raft_records_round_trip_through_the_storage_codec() {
             assert_eq!(restored.runtime_revision, metadata.runtime_revision);
             assert_eq!(restored.parameters, metadata.parameters);
             assert_eq!(restored.cluster_identity, metadata.cluster_identity);
+            assert_eq!(restored.password_work, metadata.password_work);
             assert_eq!(restored.command_retry_fence, metadata.command_retry_fence);
 
             let section_count = arbitrary.entropy().up_to(u64::from(u32::MAX));

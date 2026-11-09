@@ -359,8 +359,8 @@ that header state, and inferencer state bindings with their initial expressions.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
-Consensus's `raft_cluster_identity_` keyspaces and current `ClusterState`
-metadata encoding, 17, identify its stored shapes, including the partition count of every resolved branch
+Consensus's `raft_identity_credentials_` keyspaces and current `ClusterState`
+metadata encoding, 18, identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations. The runtime state store's
 `ranked-intake-unit-checkpoint-segments` format identifies the checkpoints it keeps, including the
@@ -370,7 +370,7 @@ registry's instancing boundary checks native count conversion and the layout of 
 unit entries before materialization. An unaddressable declaration is a typed validation failure;
 its full-width Model remains representable independently of the target's execution capacity. The
 client placement union carries an instance index as an unsigned 64-bit value. Backup format
-major `6` and its unit-bearing record versions own an eight-byte primitive unit rank. The native
+major `7` and its unit-bearing record versions own an eight-byte primitive unit rank. The native
 `NervixKafkaState` checkpoint contains
 positions and an optional applied explicit-start generation. Pending canonical starts and
 subsequent unit-owned progress use that current shape. An unrecognized signature, namespace or

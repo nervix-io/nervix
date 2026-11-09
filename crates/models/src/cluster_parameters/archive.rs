@@ -62,7 +62,7 @@ where
     }
 }
 
-pub(super) fn serialize<T: SettingDefinition, S: Serializer>(
+pub(crate) fn serialize<T: SettingDefinition, S: Serializer>(
     field: &Setting<T>,
     serializer: S,
 ) -> Result<S::Ok, S::Error>
@@ -72,7 +72,7 @@ where
     serde::Serialize::serialize(field.value(), serializer)
 }
 
-pub(super) fn deserialize<'de, T, D>(deserializer: D) -> Result<Setting<T>, D::Error>
+pub(crate) fn deserialize<'de, T, D>(deserializer: D) -> Result<Setting<T>, D::Error>
 where
     T: SettingDefinition<Context = ()>,
     T::Value: serde::Deserialize<'de>,

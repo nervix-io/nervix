@@ -180,10 +180,7 @@ impl<'a> Values<'a> {
             users.push(UserRecord {
                 name: UserName::parse(&format!("user_{index}"))
                     .assured("indexed synthetic user names are valid"),
-                password_hash: format!(
-                    "$argon2id$v=19$m=8,t=1,p=1$c3ludGhldGlj$c3ludGhldGlj{}",
-                    self.0.entropy().byte(),
-                ),
+                password_credential: self.0.password_credential(),
             });
         }
         UsersRecord { users }

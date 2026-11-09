@@ -75,7 +75,10 @@ impl ModelArchive {
             Some(UsersRecord {
                 users: vec![UserRecord {
                     name: UserName::parse("synthetic").assured("the synthetic user is valid"),
-                    password_hash: "$argon2id$v=19$m=8,t=1,p=1$c3ludGhldGlj$c3ludGhldGlj".into(),
+                    password_credential: nervix_models::PasswordCredential::from_parts(
+                        210000, [54; 16], [54; 64],
+                    )
+                    .assured("the fixed credential has a bounded iteration count"),
                 }],
             })
         } else {

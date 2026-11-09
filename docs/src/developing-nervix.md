@@ -192,7 +192,7 @@ NERVIX_INIT_DEFAULT_USER_PASSWORD='nervix' just server
 
 Fresh clusters require an initial password for the `default` user. Set
 `NERVIX_INIT_DEFAULT_USER_PASSWORD` or pass `--init-default-user-password <password>` on the first
-startup. The leader stores the `default` user's Argon2 password hash in the strongly consistent
+startup. The leader stores the `default` user's typed PBKDF2-HMAC-SHA-512 credential in the strongly consistent
 control plane only when that user does not already exist. After the default user has been created,
 remove the environment variable or flag from normal startup. Later users can be created through Plexus:
 
@@ -618,7 +618,7 @@ compares it with the workflows.
 | `extra-doctests` | Check | Capability doctests |
 | `extra-miri` | Check | Miri over the expiry map |
 | `extra-mutation` | Check | Mutation tests of the expiry map |
-| `extra-runners` | Check | Python coverage of the reporters, gates and collectors: patch coverage, the ordinary merge, the CRAP report, the full union, the paced simulation policy, the release gate, the deployment controller, the kache contract, the connector matrix renderer, the test selection, the wasm-bindgen tool, the native collector, the client suite readers with the unit-test archive, and the primitive source validator |
+| `extra-runners` | Check | Python coverage of the reporters, gates and collectors: patch coverage, the ordinary merge, the CRAP report, the full union, the paced simulation policy, the release gate, the deployment controller, the kache contract, the connector matrix renderer, the test selection, the wasm-bindgen tool, the external binding chaos controls, the native collector, the client suite readers with the unit-test archive, and the primitive source validator |
 | `extra-compiler` | Check | Source contracts, compiler diagnostics, the Rust runner/gate/audit owners, paired API doctests, compiler cache qualification and the Python coverage of the ratchet's callers |
 | `extra-bench-smoke` | Check | Benchmark smoke tests |
 | `extra-primitives` | Check | Primitive boundary conformance in ordinary, Shuttle, Loom and Turmoil modes, plus ordinary documentation and browser checks. `coverage-full` then requires those collections |
@@ -1086,8 +1086,8 @@ suites run selections of those scenarios, each as its own `just chaos run` comma
 
 ```bash
 just chaos suite list
-just chaos suite smoke --image ghcr.io/nervix-io/nervix@sha256:<digest>
-just chaos suite soak --image ghcr.io/nervix-io/nervix@sha256:<digest>
+just chaos suite smoke --image ghcr.io/nervix-io/nervix@sha256:<digest> --binding-image ghcr.io/nervix-io/nervix@sha256:<binding-digest>
+just chaos suite soak --image ghcr.io/nervix-io/nervix@sha256:<digest> --binding-image ghcr.io/nervix-io/nervix@sha256:<binding-digest>
 ```
 
 The smoke suite runs a baseline, a leader crash with its restart and a partition with its recovery;
@@ -1106,7 +1106,7 @@ release-mode diagnostic server of this checkout on an available image:
 
 ```bash
 just build-chaos-diagnostic-image nervix:diagnostic-local ghcr.io/nervix-io/nervix:debian-latest deloxide-order
-just chaos suite smoke --image nervix:diagnostic-local --image-kind deloxide-order
+just chaos suite smoke --image nervix:diagnostic-local --binding-image nervix:chaos-client --image-kind deloxide-order
 ```
 
 [External Cluster Chaos](./cluster-chaos.md) describes the runner, every scenario and its verdicts,
@@ -1230,3 +1230,13 @@ builds and PDF dependencies; its preparation step and pre-build diagnostics repo
 Every pull request's `checks` job runs
 `just test-docs`, the script tests and docs worker tests that `just book` runs first, so a pull
 request without the label still checks the book's structure and its tooling.
+
+### Credential Storage Release Note
+
+This revision requires the current `raft_identity_credentials_*` consensus namespace and `ClusterState`
+encoding 18. A stored state with a different namespace or encoding fails with
+`invalid consensus record storage; recreate the node's stored state` before user records or log
+entries are decoded. Recreate the node's stored state; no credential conversion is performed.
+User backup records require version 2 and contain the complete typed credential. A users record
+with another version is refused by its record header before decoding. Backups without a users
+section retain their existing contract. Protect archives as secrets.

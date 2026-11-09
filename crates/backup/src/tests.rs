@@ -70,11 +70,17 @@ fn users() -> UsersRecord {
         users: vec![
             UserRecord {
                 name: UserName::parse("alice").assured("the test user is valid"),
-                password_hash: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA".to_string(),
+                password_credential: nervix_models::PasswordCredential::from_parts(
+                    210000, [249; 16], [249; 64],
+                )
+                .assured("the fixed credential has a bounded iteration count"),
             },
             UserRecord {
                 name: UserName::parse("default").assured("the test user is valid"),
-                password_hash: "$argon2id$v=19$m=8,t=1,p=1$c2FsdA$aGFzaA".to_string(),
+                password_credential: nervix_models::PasswordCredential::from_parts(
+                    210000, [39; 16], [39; 64],
+                )
+                .assured("the fixed credential has a bounded iteration count"),
             },
         ],
     }
