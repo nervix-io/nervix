@@ -471,3 +471,158 @@ Feature: Web console visual window processor and correlator creation
     When selector ".prompt-row input" is filled with "SHOW CREATE WINDOW PROCESSOR visual_staged_window;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "SET samples = count(input.latency)"
+
+  @visual_correlator_stale_scope
+  Scenario: A correlator draft requires its left, right, timeout and output relays again after its domain changes
+    Given a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the active domain is saved as placeholder "home"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{home}};
+      CREATE UNPACED DOMAIN {{home}}_other;
+      CREATE SCHEMA visual_stale_order (order_id STRING);
+      CREATE SCHEMA visual_stale_payment (order_id STRING, amount I64);
+      CREATE RELAY visual_stale_orders SCHEMA visual_stale_order UNBRANCHED;
+      CREATE RELAY visual_stale_payments SCHEMA visual_stale_payment UNBRANCHED;
+      CREATE RELAY visual_stale_unpaid SCHEMA visual_stale_order UNBRANCHED;
+      CREATE RELAY visual_stale_paid SCHEMA visual_stale_payment UNBRANCHED;
+      """
+    Given the active domain is "{{home}}_other"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA visual_stale_order (order_id STRING);
+      CREATE SCHEMA visual_stale_payment (order_id STRING, amount I64);
+      CREATE RELAY visual_stale_orders SCHEMA visual_stale_order UNBRANCHED;
+      CREATE RELAY visual_stale_payments SCHEMA visual_stale_payment UNBRANCHED;
+      CREATE RELAY visual_stale_unpaid SCHEMA visual_stale_order UNBRANCHED;
+      CREATE RELAY visual_stale_paid SCHEMA visual_stale_payment UNBRANCHED;
+      """
+    Given the active domain is "{{home}}"
+    When the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{home}}'].active" exists
+    When selector ".create-menu-button" is clicked
+    And selector ".create-menu [data-create-kind='correlator']" is clicked
+    And selector ".create-name" is filled with "visual_stale_correlator"
+    And selector ".create-processor-branching [data-branch='unbranched']" is clicked
+    And selector ".create-processor-input .create-choice-search" is filled with "visual_stale_orders"
+    Then selector ".create-processor-input [data-value='visual_stale_orders']" exists
+    When selector ".create-processor-input [data-value='visual_stale_orders']" is clicked
+    And selector ".create-processor-right-input .create-choice-search" is filled with "visual_stale_payments"
+    Then selector ".create-processor-right-input [data-value='visual_stale_payments']" exists
+    When selector ".create-processor-right-input [data-value='visual_stale_payments']" is clicked
+    And selector ".create-correlate-where" is filled with "left.order_id = right.order_id"
+    And selector ".create-correlator-match [data-match='earliest']" is clicked
+    And selector ".create-correlator-max-time" is filled with "10s"
+    And selector ".create-correlator-left-timeout [data-timeout='send']" is clicked
+    And selector ".create-correlator-left-timeout-relay .create-choice-search" is filled with "visual_stale_unpaid"
+    Then selector ".create-correlator-left-timeout-relay [data-value='visual_stale_unpaid']" exists
+    When selector ".create-correlator-left-timeout-relay [data-value='visual_stale_unpaid']" is clicked
+    And selector ".create-correlator-right-timeout [data-timeout='drop']" is clicked
+    And selector ".create-processor-route-relay .create-choice-search" is filled with "visual_stale_paid"
+    Then selector ".create-processor-route-relay [data-value='visual_stale_paid']" exists
+    When selector ".create-processor-route-relay [data-value='visual_stale_paid']" is clicked
+    And selector ".create-processor-output-fields .create-choice-search" is filled with "order_id"
+    Then selector ".create-processor-output-fields [data-value='order_id']" exists
+    When selector ".create-processor-output-fields [data-value='order_id']" is clicked
+    And selector ".create-processor-output-assignments .create-processor-assignment-row:last-of-type .create-processor-assignment-expression" is filled with "left.order_id"
+    And selector ".create-processor-output-fields .create-choice-search" is filled with "amount"
+    Then selector ".create-processor-output-fields [data-value='amount']" exists
+    When selector ".create-processor-output-fields [data-value='amount']" is clicked
+    And selector ".create-processor-output-assignments .create-processor-assignment-row:last-of-type .create-processor-assignment-expression" is filled with "right.amount"
+    And selector ".create-processor-flush [data-flush='immediate']" is clicked
+    And selector ".create-processor-message-error [data-error='log']" is clicked
+    Then selector ".create-preview" contains "CREATE CORRELATOR visual_stale_correlator"
+    When selector ".create-close" is clicked
+    And selector ".domain-select" is clicked
+    And selector ".domain-menu [data-domain='{{home}}_other']" is clicked
+    And selector ".create-menu-button" is clicked
+    And selector ".create-menu [data-create-kind='correlator']" is clicked
+    Then selector ".create-scope" contains "{{home}}"
+    When selector ".create-scope-change" is clicked
+    Then selector ".create-scope" contains "{{home}}_other"
+    And selector ".create-name" has value "visual_stale_correlator"
+    And selector ".create-correlate-where" has value "left.order_id = right.order_id"
+    # Every relay the draft selected belongs to the previous domain, so each must be chosen again.
+    When selector ".create-submit" is clicked
+    Then selector ".create-validation" contains "LEFT FROM input 1: the relay belongs to a changed context"
+    When selector ".create-processor-input .create-choice-search" is filled with "visual_stale_orders"
+    Then selector ".create-processor-input [data-value='visual_stale_orders']" exists
+    When selector ".create-processor-input [data-value='visual_stale_orders']" is clicked
+    And selector ".create-submit" is clicked
+    Then selector ".create-validation" contains "RIGHT FROM input 1: the relay belongs to a changed context"
+    When selector ".create-processor-right-input .create-choice-search" is filled with "visual_stale_payments"
+    Then selector ".create-processor-right-input [data-value='visual_stale_payments']" exists
+    When selector ".create-processor-right-input [data-value='visual_stale_payments']" is clicked
+    And selector ".create-submit" is clicked
+    Then selector ".create-validation" contains "The left timeout relay belongs to a changed context"
+    When selector ".create-correlator-left-timeout-relay .create-choice-search" is filled with "visual_stale_unpaid"
+    Then selector ".create-correlator-left-timeout-relay [data-value='visual_stale_unpaid']" exists
+    When selector ".create-correlator-left-timeout-relay [data-value='visual_stale_unpaid']" is clicked
+    And selector ".create-submit" is clicked
+    Then selector ".create-validation" contains "output relay belongs to a changed context"
+    And selector ".terminal" does not contain "visual_stale_correlator"
+
+  @visual_correlator_reconnect
+  Scenario: A selected correlator draft submits after the console follows a new leader
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA visual_follow_order (order_id STRING);
+      CREATE SCHEMA visual_follow_payment (order_id STRING, amount I64);
+      CREATE RELAY visual_follow_orders SCHEMA visual_follow_order UNBRANCHED;
+      CREATE RELAY visual_follow_payments SCHEMA visual_follow_payment UNBRANCHED;
+      CREATE RELAY visual_follow_unpaid SCHEMA visual_follow_order UNBRANCHED;
+      CREATE RELAY visual_follow_paid SCHEMA visual_follow_payment UNBRANCHED;
+      """
+    Then the current leader node is saved as placeholder "old_leader"
+    And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
+    And the web console is opened on node "{{old_leader}}"
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".create-menu-button" is clicked
+    And selector ".create-menu [data-create-kind='correlator']" is clicked
+    And selector ".create-name" is filled with "visual_follow_correlator"
+    And selector ".create-processor-branching [data-branch='unbranched']" is clicked
+    And selector ".create-processor-input .create-choice-search" is filled with "visual_follow_orders"
+    Then selector ".create-processor-input [data-value='visual_follow_orders']" exists
+    When selector ".create-processor-input [data-value='visual_follow_orders']" is clicked
+    And selector ".create-processor-right-input .create-choice-search" is filled with "visual_follow_payments"
+    Then selector ".create-processor-right-input [data-value='visual_follow_payments']" exists
+    When selector ".create-processor-right-input [data-value='visual_follow_payments']" is clicked
+    And selector ".create-correlate-where" is filled with "left.order_id = right.order_id"
+    And selector ".create-correlator-match [data-match='latest']" is clicked
+    And selector ".create-correlator-max-time" is filled with "30s"
+    And selector ".create-correlator-left-timeout [data-timeout='send']" is clicked
+    And selector ".create-correlator-left-timeout-relay .create-choice-search" is filled with "visual_follow_unpaid"
+    Then selector ".create-correlator-left-timeout-relay [data-value='visual_follow_unpaid']" exists
+    When selector ".create-correlator-left-timeout-relay [data-value='visual_follow_unpaid']" is clicked
+    And selector ".create-correlator-right-timeout [data-timeout='drop']" is clicked
+    And selector ".create-processor-route-relay .create-choice-search" is filled with "visual_follow_paid"
+    Then selector ".create-processor-route-relay [data-value='visual_follow_paid']" exists
+    When selector ".create-processor-route-relay [data-value='visual_follow_paid']" is clicked
+    And selector ".create-processor-output-fields .create-choice-search" is filled with "order_id"
+    Then selector ".create-processor-output-fields [data-value='order_id']" exists
+    When selector ".create-processor-output-fields [data-value='order_id']" is clicked
+    And selector ".create-processor-output-assignments .create-processor-assignment-row:last-of-type .create-processor-assignment-expression" is filled with "left.order_id"
+    And selector ".create-processor-output-fields .create-choice-search" is filled with "amount"
+    Then selector ".create-processor-output-fields [data-value='amount']" exists
+    When selector ".create-processor-output-fields [data-value='amount']" is clicked
+    And selector ".create-processor-output-assignments .create-processor-assignment-row:last-of-type .create-processor-assignment-expression" is filled with "right.amount"
+    And selector ".create-processor-flush [data-flush='immediate']" is clicked
+    And selector ".create-processor-message-error [data-error='log']" is clicked
+    And leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
+    Then node "{{old_leader}}" eventually reports leader "{{new_leader}}"
+    And selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".create-preview" contains "CREATE CORRELATOR visual_follow_correlator"
+    When selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
+    And selector ".prompt-row input" is filled with "SHOW CREATE CORRELATOR visual_follow_correlator;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "LEFT FROM visual_follow_orders"
+    And selector ".terminal" contains "RIGHT FROM visual_follow_payments"
+    And selector ".terminal" contains "ON CORRELATION TIMEOUT SEND TO visual_follow_unpaid, DROP"
