@@ -27,7 +27,7 @@ pub(super) fn ProcessorRouteReferences(
     session_generation: RwSignal<u64>,
 ) -> impl IntoView {
     let pending = move || signals.progress.get().is_pending();
-    let references = match family {
+    match family {
         ProcessorFamily::Window => {
             let draft = signals.processor(family);
             view! {
@@ -76,6 +76,5 @@ pub(super) fn ProcessorRouteReferences(
         | ProcessorFamily::Deduplicator
         | ProcessorFamily::Reorderer
         | ProcessorFamily::Reingestor => ().into_any(),
-    };
-    references
+    }
 }

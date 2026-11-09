@@ -112,8 +112,11 @@ pub(super) fn ProcessorWindowEditor(signals: CreateSignals) -> impl IntoView {
                     <input class="create-window-state-size" type="text" autocomplete="off"
                         prop:value=move || {
                             let draft = signals.processor(ProcessorFamily::Window).get();
-                            match draft.window().and_then(|window| window.state_size.clone()) {
-                                Some(size) => size,
+                            let Some(window) = draft.window() else {
+                                return String::new();
+                            };
+                            match &window.state_size {
+                                Some(size) => size.clone(),
                                 None => String::new(),
                             }
                         }
