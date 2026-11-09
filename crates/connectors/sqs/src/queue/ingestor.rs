@@ -284,6 +284,10 @@ impl SqsQueueIngestorMessage {
 }
 
 impl IngestMessageMetadata for SqsQueueIngestorMessage {
+    fn payload_bytes(&self) -> usize {
+        nervix_connector::IngestorMessage::payload(self).len()
+    }
+
     fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
         let message = &self.attributes.message;
         match message.message_id() {

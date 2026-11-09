@@ -265,6 +265,8 @@ mod inferencer_state;
 pub(crate) use inferencer_archive::CapturedInferencer;
 mod ingest_group;
 mod ingest_metadata;
+#[cfg(test)]
+mod ingest_payload_tests;
 mod ingest_task_handles;
 mod ingestion_time;
 mod ingestor_quiesce;
@@ -510,8 +512,9 @@ use ingest_group::{
     decode_ingested_payload, prepare_branched_entrypoint_input,
 };
 use ingest_metadata::{
-    BRANCH_NAMESPACE, INGEST_METADATA_NAMESPACE, IngestHeaderFunctionInjector,
-    IngestMetadataBuilders, IngestMetadataError, IngestMetadataProjection,
+    BRANCH_NAMESPACE, INGEST_METADATA_NAMESPACE, INGEST_PAYLOAD_NAMESPACE,
+    IngestHeaderFunctionInjector, IngestMetadataBuilders, IngestMetadataError,
+    IngestMetadataProjection,
 };
 pub(in crate::runtime) use ingestor_quiesce::{
     BufferedIngestMetadata, BufferedIngestPayload, IngestorQuiesceCause, IngestorQuiesceControl,

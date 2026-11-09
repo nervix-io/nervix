@@ -32,6 +32,7 @@ Feature: SQS ingestion
         CREATE SQS QUEUE INGESTOR sqs_notifications
         FROM sqs_main QUEUE 'notifications_{{test_id}}' INSTANCES <instances> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
+        FILTER WHERE payload.bytes > (0 AS U64)
         TO notifications
         INHERIT ALL
         BRANCHED BY by_sqs_notifications

@@ -996,9 +996,9 @@ The declaration crosses each boundary once, without becoming runtime graph polic
 
 | Reader | What it takes from the declaration |
 | --- | --- |
-| Plexus grammar and completion | The connector/entity head, locator and option forms, mode bodies, header and metadata names, and valid choices. |
+| Plexus grammar and completion | The connector/entity head, locator and option forms, mode bodies, header, metadata and payload names, and valid choices. |
 | Registry and planner | Reference kinds, exact value and option requirements, legal modes, envelopes and batching; validation produces a typed plan before execution. |
-| Connector host | The validated plan and declared metadata, bounds and waits; the host owns routing, retry, quiesce, flush and acknowledgements. |
+| Connector host | The validated plan and declared metadata, payload facts, bounds and waits; the host owns routing, retry, quiesce, flush and acknowledgements. |
 | Console and inspection | Entity choices, confidential client keys, effective defaults and the canonical or descriptive presentation. |
 | Manuals and checks | The generated capability matrix, conformance tests and scenario inventory described below. |
 
@@ -1583,6 +1583,19 @@ returns; see [Confirmed acknowledgements](#confirmed-acknowledgements).
 A client ingestor's plan is not a connector plan: it carries the input schema, its compiled form, the
 producer policy of window, ACK timeout, and retry backoff, and the endpoint contract digest producers
 attach to. It declares no header model or metadata field and supports only `SUSPEND`.
+
+Every ingestor entity declares its required, non-sensitive `payload` fields beside its metadata.
+All declare `bytes: U64`; `CLIENT PRODUCER` also declares `rows: U64`. The registry validates the
+same declaration that completion, capability exports and the host read. The host obtains byte
+counts from the message owner and sends them through the existing value sink only when a program
+reads them. It creates no second body and no per-row scalar map. Client intake records the IPC
+body's length before decoding and the whole batch's row count before filtering. Retention preserves
+the original byte measure, including the response-body measure shared by a Prometheus poll's
+samples. [Payload Facts](ingestors.md#payload-facts) owns the public transport boundaries.
+
+HTTP and WebSocket endpoint metadata and Syslog listener metadata include the peer IP without its
+port as `remote_ip`. The visitor renders the IP directly into a requested column; an unread IP
+allocates no string. Existing peer-address fields continue to describe the complete socket address.
 
 Each ingestor entity declares its typed metadata fields beside its other capabilities in the
 vocabulary, in order and each with its exact type: `HTTP REQUEST` declares the response status and

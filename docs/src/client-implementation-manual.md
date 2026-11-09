@@ -1042,6 +1042,9 @@ classes and enums. The C retain/release and borrowed-pointer rules become these 
 - **J-5.** Use endpoint `end(Cancel)` to wait for server closure and `close()` to release ownership. The
   library implements no Java retry, correlation, acknowledgement or restoration state machine.
 
+The [JVM Client Library](client-library-jvm.md) shows these rules with examples from the library's
+JUnit suite.
+
 ## Using The Python Package
 
 A CPython host imports `nervix_client`, the package `crates/client-python` builds on pyo3. It
@@ -1078,6 +1081,9 @@ it. A CPython host follows these rules instead:
   else with `InvalidArgumentError` before it sends a batch. A rows event's Arrow export marks every
   sensitive field nullable and reads a withheld value as a null; a host MUST read `states` to tell a
   withheld value from a null.
+
+The [Python Client Library](client-library-python.md) shows these rules with examples from the
+package's pytest suite.
 
 ## Required State Machines
 
@@ -1169,11 +1175,15 @@ stateDiagram-v2
 The rules above are exercised by these tests. The Cucumber scenarios run through
 `just test-scenarios --input <feature>`, the unit tests through `just test-package-lib <package>`,
 the wire and corpus tests through `just test-client-wire`, and the cross-language probes through
-`just test-client-conformance`. The C11 and C++17 application suites under
-`tests/client_conformance/{c,cpp}/suite` add named B-1 through B-16 tests beside the probes;
-`tests/client-suites-inventory.toml` registers every function. Their boundary tiers run in ordinary
-and ASan/UBSan programs, and their cluster tiers run over HTTP and HTTPS on one and three nodes.
-The [C and C++ guide](client-library-c.md) includes their checked source.
+`just test-client-conformance`. Beside its probe, each host binding's language-level suite under
+`tests/client_conformance/<host>/suite` holds the host rules in that host's own test framework:
+pytest for N-1 to N-5, JUnit 5 for J-1 to J-5, minitest for the Ruby gem's R-1 to R-5, and C11
+and C++17 programs with named B-1 through B-16 tests, whose boundary tiers also run under
+AddressSanitizer and UndefinedBehaviorSanitizer. `tests/client-suites-inventory.toml` registers
+every suite test, `just validate-client-suites` holds each suite to its binding's whole public
+surface, and every host guide includes its suite's checked source. [Host Suites And
+Guides](client-host-bindings.md#host-suites-and-guides) states their tiers and what they prove
+beside the probes and the representation properties.
 
 | Rules | Executable evidence |
 | --- | --- |
@@ -1213,7 +1223,7 @@ The [C and C++ guide](client-library-c.md) includes their checked source.
 | B-12 to B-16 | `A <runtime> client publishes typed batches through a client ingestor and acknowledges their output through a client emitter` in `client_conformance.feature` for the C ABI in process, C, C++, Java, and Ruby; `a_producer_reports_its_description_and_takes_every_outcome_class`, `a_refused_open_names_its_refusal_and_a_host_argument_is_checked_first`, `a_consumer_reads_and_settles_a_delivery_and_a_lost_confirmation_is_uncertain`, `a_reconnect_interrupts_a_consumer_expires_its_deliveries_and_restores_only_open_handles`, `every_kind_of_column_reads_back_from_the_batch_and_from_its_stream`, `a_builder_refuses_what_a_column_cannot_hold`, and `bolero_host_columns_round_trip_through_builder_and_stream` in `nervix-client-ffi`; the C11 and C++17 application suites' named `test_b*` cases for these rules, with both programs' public header references checked by Clang |
 | N-1 to N-5 | The three outlines of `client_conformance.feature` for CPython over the Python package, on one and three nodes, whose probe also checks a retained frame view, a wait cancelled from another thread and Arrow data pyarrow builds and reads; the package's pytest suite, `tests/client_conformance/python/suite`, whose boundary tier `just test-client-python-api` runs and whose cluster tier is `A <runtime> client's suite passes its cluster tests over <transport> on <cluster_size> nodes` in `client_suites.feature`, with `with` blocks, collection-driven lifetimes, threads, typed exceptions and Arrow exchange with pyarrow and polars; `a_wait_releases_the_gil_and_another_python_thread_cancels_it`, `every_failure_kind_raises_its_exception`, `a_frame_view_keeps_its_event_alive`, `an_ended_restoration_and_a_refused_one_say_why`, `a_producer_outlives_its_session`, `a_with_block_releases_its_object_and_a_view_outlives_the_release` and `a_pycapsule_round_trip_keeps_every_column_kind_at_its_bounds` in `nervix-client-python`; `bolero_host_columns_round_trip_through_the_arrow_c_data_interface` and `bolero_typed_field_descriptions_round_trip` in `nervix-client-host` |
 | J-1 to J-5 | The inventoried JUnit 5 suite in `tests/client_conformance/java/suite` and the [JVM guide](client-library-jvm.md), with the `@client_suite_java` one-/three-node outlines; Java 21's three conformance probe outlines; `BoundaryTests` checks columns, Cleaner release and cancellation from another Java thread; `nervix-client-jvm` embeds the JVM to check every host failure kind, restoration messages/waits, and registered complete JNI field/column properties. The Java row probe checks native Cleaner release and derived-buffer retention after its session closes. |
-| R-1 to R-5 | The inventoried minitest suite in `tests/client_conformance/ruby/suite` and the [Ruby guide](client-library-ruby.md), with the `@client_suite_ruby` TLS/plaintext one-/three-node outlines; `just test-client-ruby-api` checks the prepared gem without a cluster. The suite covers retained String/IO::Buffer data and slices, collection, GVL release and cancellation, native metadata, typed failures and endpoint recovery. The existing embedded Ruby tests retain the sibling-token interrupt, field-snapshot and native representation evidence; the Ruby conformance probe remains independent. |
+| R-1 to R-5 (Ruby gem) | The inventoried minitest suite in `tests/client_conformance/ruby/suite` and the [Ruby guide](client-library-ruby.md), with the `@client_suite_ruby` TLS/plaintext one-/three-node outlines; `just test-client-ruby-api` checks the prepared gem without a cluster. The suite covers retained String/IO::Buffer data and slices, collection, GVL release and cancellation, native metadata, typed failures and endpoint recovery. The existing embedded Ruby tests retain the sibling-token interrupt, field-snapshot and native representation evidence; the Ruby conformance probe remains independent. |
 | W-1 to W-5, B-10 | `A <client> recovers a completed restore after <reply> on <cluster_size> nodes` in `client_restore_reply_validation.feature` (native client and CLI, both invalid replies, one and three nodes), the `restore_reply` owner tests in `nervix-client-core` (typed uncertainty, exact-session interruption, replacement preservation, local failures and known refusals); every scenario of `restore.feature`, including `An interrupted restore upload is sent again under its execution reference`, `A restore repeated under its execution reference joins it or returns its recorded outcome`, and `A leader change while a restore applies resumes it on the new leader`; the console's restore scenarios in `backup_restore.feature`, including `A console restore whose reply was lost after it applied stays unknown when a later attempt cannot read the archive`; the console's restore driver tests in `nervix-web-console`, including `a_restore_whose_reply_was_lost_stays_unknown_when_the_next_attempt_cannot_read_the_archive` and `a_restore_whose_reply_was_lost_stays_unknown_when_the_leader_refuses_a_later_stream`; `Ctrl-C during a CLI RESTORE leaves it to recover under its execution reference` in `cli_session.feature`; `a_restore_start_round_trips`, `every_restore_chunk_round_trips_and_an_empty_one_is_refused`, and `every_restore_reply_round_trips` in `nervix-client-wire`; `a_foreign_restore_reply_ends_its_session_and_reports_its_own_reference_uncertain` in `nervix-client-core`; the `restore_*` conformance frames; `a_restore_outcome_reports_its_steps` in `nervix-client-ffi`; `test_b10_restore_streams_the_archive_and_reports_its_steps` in both native application suites and the [C and C++ guide](client-library-c.md#back-up-and-restore) |
 | W-3, W-5 (console) | `an_unreadable_restore_reply_naming_another_execution_leaves_its_own_outcome_unknown`, `an_unreadable_restore_reply_leaves_its_outcome_unknown`, and `an_unreadable_restore_reply_answering_another_request_leaves_its_outcome_unknown` in `nervix-web-console`; `A restore reply naming another execution leaves the restore outcome unknown` in `unreadable_replies.feature`, on one and three nodes |
 | W-4, W-5 (console attempt history) | `an_unrecorded_request_failure_cannot_settle_an_earlier_possibly_admitted_restore`, `an_initial_unrecorded_request_failure_is_definitive`, and `a_recorded_or_report_bearing_failure_settles_an_earlier_possibly_admitted_restore` in `nervix-web-console`; `A console restore whose completed reply was lost stays unknown after an unrecorded request failure` in `backup_restore.feature`, on one and three nodes, followed by complete recorded-outcome recovery with the original start and archive |

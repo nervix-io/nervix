@@ -15,8 +15,9 @@ cd nervix
 ## Prerequisites
 
 The [Client Host Bindings](client-host-bindings.md) architecture chapter maps the C ABI, Python
-wheel, Ruby gem and JVM jar to their shared Rust runtime and ownership contracts. The toolchains
-and preparation commands for those native artifacts are listed below.
+wheel, Ruby gem and JVM jar to their shared Rust runtime and ownership contracts, and states the
+contract of their language-level suites and [guides](client-libraries.md). The toolchains and
+preparation commands for those native artifacts and suites are listed below.
 
 Nervix is developed on Linux x86_64, Linux aarch64, and macOS arm64. The `just` recipes fetch an
 ONNX Runtime build for the host and stop on any other.
@@ -1248,7 +1249,7 @@ request without the label still checks the book's structure and its tooling.
 ### Credential Storage Release Note
 
 This revision requires the current `raft_wasm_inspection_*` consensus namespace and `ClusterState`
-encoding 23. A stored state with a different namespace or encoding fails with
+encoding 24. A stored state with a different namespace or encoding fails with
 `invalid consensus record storage; recreate the node's stored state` before user records or log
 entries are decoded. Recreate the node's stored state; no credential conversion is performed.
 User backup records require version 2 and contain the complete typed credential. A users record

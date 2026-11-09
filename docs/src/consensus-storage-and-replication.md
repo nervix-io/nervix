@@ -539,12 +539,13 @@ resolved branch declaration of the committed schedule carries. It identifies
 the current statement shape as well, which the statements a transaction keeps are stored in:
 `ALTER BRANCH` among those statements, an `ALTER INGESTOR` or `ALTER EMITTER` operation that
 changes one part of its entity's body, an envelope clause or the properties, or one part of a
-construction where it stands, and a `RESET WASM PROCESSOR ... STATE` that names its processor and
-scope and takes its domain from the transaction, as the step effect and commit plan step that apply
-it keep it too. The database's state metadata requires the current `ClusterState` encoding, 23,
-including incarnation-bound node capability claims under record-family tag `C`, the cluster identity
-reference, committed cluster parameters, the durable restore installation gate and the unit-keyed
-committed schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
+construction where it stands, including the typed `payload` expression scope and a
+`RESET WASM PROCESSOR ... STATE` that names its processor and scope and takes its domain from
+the transaction, as the step effect and commit plan step keep it too. The database also stores
+incarnation-bound node capability claims under record-family tag `C`. Its state metadata
+requires the current `ClusterState` encoding, 24, including the cluster identity reference,
+committed cluster parameters, the durable restore installation gate and the unit-keyed committed
+schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,
 typed ingestor instancing, exact-unit placement-group members
 and entity-versus-unit transaction gate targets. Placement Models carry corridor or domain-wide

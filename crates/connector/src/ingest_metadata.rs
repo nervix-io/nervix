@@ -6,7 +6,7 @@
 //! - **Owns.** The header trait an ingestor message implements over its own borrowed headers, the
 //!   retained copy of headers that must outlive their message, the visit through which a message
 //!   hands the host the value of every metadata field its entity declares, the retained copy of
-//!   those values, and the transport position a decode rejection names.
+//!   those values and the original payload byte count, and the transport position a decode rejection names.
 //! - **Depends on.** The vocabulary's metadata types and timestamps, and the standard library.
 //! - **Must not know.** The Arrow columns the host projects these values into, which fields a
 //!   program reads, or the VM namespaces programs read them through.
@@ -210,6 +210,10 @@ impl Eq for IngestMetadataFailure {}
     )
 )]
 pub trait IngestMessageMetadata: Send + Sync {
+    /// The original transport body length, retained independently of decoding and row selection.
+    /// The host reads it only when projecting `payload.bytes` or retaining this message.
+    fn payload_bytes(&self) -> usize;
+
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "the caller supplies the synchronous value sink; local sink \
@@ -219,9 +223,12 @@ pub trait IngestMessageMetadata: Send + Sync {
 }
 
 /// The metadata of a message whose entity declares no metadata field.
-pub struct NoIngestMetadata;
+pub struct NoIngestMetadata(pub usize);
 
 impl IngestMessageMetadata for NoIngestMetadata {
+    fn payload_bytes(&self) -> usize {
+        self.0
+    }
     fn visit_metadata(&self, _values: &mut dyn IngestMetadataValues) {}
 }
 
@@ -282,33 +289,42 @@ impl RetainedIngestMetadataValue {
 /// A clone shares the values rather than copying them, so messages that carry the same values, such
 /// as the samples of one poll, hold them once however many there are. A declaration without fields
 /// holds nothing, so an entity that declares none allocates nothing per message.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct RetainedIngestMetadata(Option<Arc<[RetainedIngestMetadataValue]>>);
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetainedIngestMetadata {
+    fields: Option<Arc<[RetainedIngestMetadataValue]>>,
+    payload_bytes: usize,
+}
 
 impl RetainedIngestMetadata {
     /// Copies the values `metadata` hands over right now.
     pub fn capture(metadata: &dyn IngestMessageMetadata) -> Self {
         let mut values = Vec::new();
         metadata.visit_metadata(&mut RetainedIngestMetadataCapture(&mut values));
-        Self::from_values(values)
+        Self::from_values(metadata.payload_bytes(), values)
     }
 
     /// The metadata of a message whose entity declares no metadata field.
-    pub fn none() -> Self {
-        Self(None)
+    pub fn none(payload_bytes: usize) -> Self {
+        Self {
+            fields: None,
+            payload_bytes,
+        }
     }
 
     /// The values, in declared order, of a message a connector already holds owned.
-    pub fn from_values(values: Vec<RetainedIngestMetadataValue>) -> Self {
+    pub fn from_values(payload_bytes: usize, values: Vec<RetainedIngestMetadataValue>) -> Self {
         if values.is_empty() {
-            return Self::none();
+            return Self::none(payload_bytes);
         }
-        Self(Some(Arc::from(values)))
+        Self {
+            fields: Some(Arc::from(values)),
+            payload_bytes,
+        }
     }
 
     /// The retained values in declared order.
     pub fn values(&self) -> &[RetainedIngestMetadataValue] {
-        match &self.0 {
+        match &self.fields {
             Some(values) => values,
             None => &[],
         }
@@ -316,6 +332,9 @@ impl RetainedIngestMetadata {
 }
 
 impl IngestMessageMetadata for RetainedIngestMetadata {
+    fn payload_bytes(&self) -> usize {
+        self.payload_bytes
+    }
     fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
         for value in self.values() {
             match value {
@@ -450,9 +469,12 @@ pub struct IngestMetadataRow<'a> {
 impl<'a> IngestMetadataRow<'a> {
     /// The row of a message that lends its headers alone: its entity declares no metadata field and
     /// its transport names no position.
-    pub fn headers(headers: &'a dyn IngestMessageHeaders) -> Self {
+    pub fn headers(
+        headers: &'a dyn IngestMessageHeaders,
+        fields: &'a dyn IngestMessageMetadata,
+    ) -> Self {
         Self {
-            fields: &NoIngestMetadata,
+            fields,
             headers: IngestRowHeaders::Borrowed(headers),
             position: None,
         }
@@ -481,6 +503,10 @@ mod tests {
     }
 
     impl IngestMessageMetadata for EveryType {
+        fn payload_bytes(&self) -> usize {
+            0
+        }
+
         fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
             values.string("orders");
             values.rendered(&self.peer);
@@ -557,10 +583,13 @@ mod tests {
     /// them.
     #[test]
     fn a_clone_shares_its_values_with_the_copy_it_came_from() {
-        let retained = RetainedIngestMetadata::from_values(vec![
-            RetainedIngestMetadataValue::String("up".to_string()),
-            RetainedIngestMetadataValue::Datetime(Timestamp::from_unix_nanos(1_234)),
-        ]);
+        let retained = RetainedIngestMetadata::from_values(
+            0,
+            vec![
+                RetainedIngestMetadataValue::String("up".to_string()),
+                RetainedIngestMetadataValue::Datetime(Timestamp::from_unix_nanos(1_234)),
+            ],
+        );
 
         let clone = retained.clone();
 
@@ -569,18 +598,26 @@ mod tests {
     }
 
     #[test]
+    fn payload_size_retention_without_metadata_allocates_no_value_list() {
+        let retained = RetainedIngestMetadata::capture(&NoIngestMetadata(1_337));
+        assert!(retained.fields.is_none());
+        assert_eq!(retained.payload_bytes(), 1_337);
+        assert_eq!(retained.clone().payload_bytes(), 1_337);
+    }
+
+    #[test]
     fn a_message_without_declared_fields_or_headers_hands_over_nothing() {
         assert!(
-            RetainedIngestMetadata::capture(&NoIngestMetadata)
+            RetainedIngestMetadata::capture(&NoIngestMetadata(0))
                 .values()
                 .is_empty()
         );
         assert_eq!(
-            RetainedIngestMetadata::none(),
-            RetainedIngestMetadata::from_values(Vec::new())
+            RetainedIngestMetadata::none(0),
+            RetainedIngestMetadata::from_values(0, Vec::new())
         );
 
-        let row = IngestMetadataRow::headers(&NoIngestHeaders);
+        let row = IngestMetadataRow::headers(&NoIngestHeaders, &NoIngestMetadata(0));
         assert!(
             RetainedIngestMetadata::capture(row.fields)
                 .values()
