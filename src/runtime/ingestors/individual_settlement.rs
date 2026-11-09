@@ -119,6 +119,7 @@ where
                         outcome: IngestorAcknowledgementOutcome::Shutdown,
                         acknowledgement,
                     } => {
+                        host.record_acknowledgement(&IngestorAcknowledgementOutcome::Shutdown);
                         let outstanding = positions.len().checked_add(self.waits.len()).assured(
                             "retained positions and pending waits partition the original batch",
                         );
@@ -127,34 +128,34 @@ where
                         return BatchDisposition::Shutdown;
                     }
                     DeliveryOutcome::Graph {
-                        outcome: IngestorAcknowledgementOutcome::NoAck(reason),
+                        outcome,
                         acknowledgement,
                     } => {
-                        host.handle_ack_failure(reason);
+                        host.record_acknowledgement(&outcome);
                         drop(acknowledgement);
                     }
-                    DeliveryOutcome::Graph {
-                        acknowledgement, ..
-                    } => drop(acknowledgement),
                     DeliveryOutcome::IntakeRefused => {}
                 }
                 continue;
             }
             let disposition = match delivery.outcome {
                 DeliveryOutcome::Graph {
-                    outcome: IngestorAcknowledgementOutcome::Ack,
+                    outcome: IngestorAcknowledgementOutcome::Acknowledged,
                     acknowledgement,
                 } => {
+                    host.record_acknowledgement(&IngestorAcknowledgementOutcome::Acknowledged);
                     let disposition =
                         confirm_batch(connector, host, settlement, vec![position]).await;
                     drop(acknowledgement);
                     disposition
                 }
                 DeliveryOutcome::Graph {
-                    outcome: IngestorAcknowledgementOutcome::NoAck(reason),
+                    outcome:
+                        outcome @ (IngestorAcknowledgementOutcome::Failed { .. }
+                        | IngestorAcknowledgementOutcome::TimedOut { .. }),
                     acknowledgement,
                 } => {
-                    host.handle_ack_failure(reason);
+                    host.record_acknowledgement(&outcome);
                     let disposition =
                         reject_batch(connector, host, settlement, vec![position]).await;
                     drop(acknowledgement);
@@ -164,6 +165,7 @@ where
                     outcome: IngestorAcknowledgementOutcome::Shutdown,
                     acknowledgement,
                 } => {
+                    host.record_acknowledgement(&IngestorAcknowledgementOutcome::Shutdown);
                     let outstanding = self.waits.len().checked_add(1).assured(
                         "the completed wait plus pending waits fit the original batch length",
                     );

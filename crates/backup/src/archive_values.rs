@@ -17,8 +17,7 @@ use nervix_arbitrary::{Arbitrary, Domain};
 use nervix_models::{
     BackupCut, BackupQuiesceCounters, BackupResources, BranchKeyFingerprint, DomainClockPeriod,
     DomainClockSkew, DomainClockState, DomainName, DomainPace, DomainStartPoint, DomainStatus,
-    DomainTimeRate, ModelName, PlacementPolicy, ResourceName, SchemaFingerprint, Timestamp, Unit,
-    UserName,
+    DomainTimeRate, ModelName, ResourceName, SchemaFingerprint, Timestamp, Unit, UserName,
 };
 
 use crate::{
@@ -181,10 +180,7 @@ impl<'a> Values<'a> {
             users.push(UserRecord {
                 name: UserName::parse(&format!("user_{index}"))
                     .assured("indexed synthetic user names are valid"),
-                password_hash: format!(
-                    "$argon2id$v=19$m=8,t=1,p=1$c3ludGhldGlj$c3ludGhldGlj{}",
-                    self.0.entropy().byte(),
-                ),
+                password_credential: self.0.password_credential(),
             });
         }
         UsersRecord { users }
@@ -237,12 +233,6 @@ impl<'a> Values<'a> {
         DomainRecord {
             domain,
             pace,
-            placement: self.0.entropy().pick([
-                PlacementPolicy::RequireColocation,
-                PlacementPolicy::PreferColocation,
-                PlacementPolicy::Neutral,
-                PlacementPolicy::SuggestSeparation,
-            ]),
             status: self.0.entropy().pick([
                 DomainStatus::Stopped,
                 DomainStatus::Running,

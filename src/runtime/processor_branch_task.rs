@@ -132,8 +132,8 @@ pub(super) struct ProcessorSnapshotTask {
     pub(super) requests: Option<mpsc::Receiver<ProcessorSnapshotRequest>>,
 }
 
-/// What spawning a processor's snapshot task produced. Only deduplicators and window processors
-/// answer snapshot requests, so a processor without them still reports the task it spawned.
+/// What spawning a processor's snapshot task produced. Stateful inferencers, deduplicators and
+/// window processors answer snapshot requests; other processors still report their spawned task.
 pub(super) struct SpawnedSnapshotTask {
     pub(super) task: Option<JoinHandle<()>>,
     pub(super) requests: Option<mpsc::Receiver<ProcessorSnapshotRequest>>,
@@ -1858,7 +1858,16 @@ async fn run_processor_branch_task(
     }
     stop_processor_snapshot_task(&mut branch, &processor, &mut snapshot).await;
     match stop_mode {
-        Some(ProcessorBranchStopMode::Evict) => {}
+        Some(ProcessorBranchStopMode::Evict) => {
+            if let Some(node) = branch.processors.get(&processor) {
+                nervix_primitives::expect_lint!(
+                    nervix::lifecycle_call,
+                    "the evicted branch and its final writer have ended before exact route \
+                     retirement",
+                    node.retire_evicted_inferencer_state(&branch.runtime)
+                );
+            }
+        }
         Some(ProcessorBranchStopMode::Handoff(response)) => {
             let restored_at = finalization_snapshot
                 .verified("a handoff stop always finalizes with the snapshot its command captured")

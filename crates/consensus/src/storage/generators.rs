@@ -158,10 +158,10 @@ fn leader_tenure(arbitrary: &mut Arbitrary<'_>) -> LeaderTenure {
 /// A user and the password hash it signs in with.
 fn user_credentials(arbitrary: &mut Arbitrary<'_>) -> UserCredentials {
     let name = arbitrary.rule_name::<UserName>();
-    let password_hash = arbitrary.string();
+    let password_credential = arbitrary.password_credential();
     UserCredentials {
         name,
-        password_hash,
+        password_credential,
     }
 }
 
@@ -497,7 +497,7 @@ fn wasm_state_reset(arbitrary: &mut Arbitrary<'_>, domain: &DomainName) -> Reset
 }
 
 /// The authoritative change a successful step of a transaction of `domain` made, with the inputs
-/// it was planned from: a schedule replaced, the domain and its schedule put, the domain started
+/// it was planned from: a schedule replaced, the domain started
 /// at the start, clock and authority admission resolved, the domain stopped, a resource catalog
 /// created, or a WASM processor's guest state reset.
 fn transaction_step_effect(
@@ -505,17 +505,12 @@ fn transaction_step_effect(
     domain: &DomainName,
 ) -> TransactionStepEffect {
     let inputs = Box::new(domain_planning_inputs(arbitrary, domain.clone()));
-    match arbitrary.entropy().byte() % 6 {
+    match arbitrary.entropy().byte() % 5 {
         0 => TransactionStepEffect::ReplaceDomainSchedule {
             inputs,
             schedule: optional_schedule(arbitrary, domain),
         },
-        1 => TransactionStepEffect::PutDomainAndSchedule {
-            inputs,
-            domain: Box::new(arbitrary.domain_state_of(domain.clone())),
-            schedule: optional_schedule(arbitrary, domain),
-        },
-        2 => {
+        1 => {
             let resolved = arbitrary.transaction_resolved_domain_start();
             TransactionStepEffect::StartDomain {
                 inputs,
@@ -524,8 +519,8 @@ fn transaction_step_effect(
                 authority: resolved.authority,
             }
         }
-        3 => TransactionStepEffect::StopDomain { inputs },
-        4 => TransactionStepEffect::CreateResourceCatalog {
+        2 => TransactionStepEffect::StopDomain { inputs },
+        3 => TransactionStepEffect::CreateResourceCatalog {
             inputs,
             identifier: arbitrary.rule_name(),
         },
@@ -910,8 +905,7 @@ fn schedule_eligibility(
 
 /// Leaves room in the start generation of every state `decision` installs for each `START DOMAIN`
 /// that advances it afterwards, as the planner does: it never plans a start past the last
-/// generation. Returns how many starts advance the state captured before the first step, which
-/// no `ALTER DOMAIN` has replaced yet.
+/// generation. Returns how many starts advance the state captured before the first step, which precedes every step.
 fn leave_room_for_starts(decision: &mut TransactionCommitPlan) -> u64 {
     let mut later_starts = 0_u64;
     for step in decision.steps.iter_mut().rev() {
@@ -920,13 +914,6 @@ fn leave_room_for_starts(decision: &mut TransactionCommitPlan) -> u64 {
                 later_starts = later_starts
                     .checked_add(1)
                     .assured("a generated plan holds at most three steps");
-            }
-            TransactionCommitStepKind::AlterDomain { next, .. } => {
-                let latest = u64::MAX
-                    .checked_sub(later_starts)
-                    .assured("a generated plan holds at most three steps");
-                next.start_version = next.start_version.min(latest);
-                later_starts = 0;
             }
             TransactionCommitStepKind::Models { .. }
             | TransactionCommitStepKind::StopDomain
@@ -1149,7 +1136,7 @@ fn command_execution_effect(
         4 => CommandExecutionEffect::CreateUser {
             if_not_exists: arbitrary.entropy().flag(),
             name: arbitrary.rule_name(),
-            password_hash: arbitrary.string(),
+            password_credential: arbitrary.password_credential(),
         },
         5 => CommandExecutionEffect::DropNode {
             identity: arbitrary.node_identity(),
@@ -1415,8 +1402,18 @@ pub(super) fn state_machine(arbitrary: &mut Arbitrary<'_>) -> StateMachineData {
     }
     for _ in 0..arbitrary.entropy().count(RECORDS) {
         let user = user_credentials(arbitrary);
+        state.raise_password_work(user.password_credential.cost());
         state.users.insert(user.name.clone(), user);
     }
+    let cost = nervix_models::PasswordCost::try_from(
+        state
+            .parameters
+            .assured("the generator set the parameter record")
+            .values
+            .password_iterations(),
+    )
+    .assured("generated policy has a bounded cost");
+    state.raise_password_work(cost);
     state.resources = resource_records(arbitrary);
     for _ in 0..arbitrary.entropy().count(RECORDS) {
         let node = arbitrary.rule_name::<ClusterNodeName>();
@@ -1794,7 +1791,6 @@ enum CommandVariant {
     UpdateKafkaPartitionSchedule,
     ApplyAutomaticDomainSchedule,
     ReconcileOwnershipHandoffPreparations,
-    PutDomainAndSchedule,
     PutDomain,
     StartDomain,
     StopDomain,
@@ -1824,6 +1820,7 @@ enum CommandVariant {
     RevertTransaction,
     ExpireTransaction,
     RemoveFinishedTransactions,
+    RecoverOrphanedModelPause,
 }
 
 impl CommandVariant {
@@ -1852,7 +1849,6 @@ impl CommandVariant {
             ConsensusCommand::ReconcileOwnershipHandoffPreparations { .. } => {
                 Self::ReconcileOwnershipHandoffPreparations
             }
-            ConsensusCommand::PutDomainAndSchedule { .. } => Self::PutDomainAndSchedule,
             ConsensusCommand::PutDomain { .. } => Self::PutDomain,
             ConsensusCommand::StartDomain { .. } => Self::StartDomain,
             ConsensusCommand::StopDomain { .. } => Self::StopDomain,
@@ -1892,6 +1888,7 @@ impl CommandVariant {
             ConsensusCommand::RevertTransaction { .. } => Self::RevertTransaction,
             ConsensusCommand::ExpireTransaction { .. } => Self::ExpireTransaction,
             ConsensusCommand::RemoveFinishedTransactions { .. } => Self::RemoveFinishedTransactions,
+            ConsensusCommand::RecoverOrphanedModelPause { .. } => Self::RecoverOrphanedModelPause,
         }
     }
 }
@@ -1984,18 +1981,6 @@ fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> Consens
                 ),
             }
         }
-        CommandVariant::PutDomainAndSchedule => {
-            let domain = arbitrary.rule_name::<DomainName>();
-            let inputs = domain_planning_inputs(arbitrary, domain.clone());
-            let state = arbitrary.domain_state_of(domain.clone());
-            let schedule = optional_schedule(arbitrary, &domain);
-            ConsensusCommand::PutDomainAndSchedule {
-                inputs: Box::new(inputs),
-                domain: Box::new(state),
-                schedule,
-                mutation: optional_lease(arbitrary),
-            }
-        }
         CommandVariant::PutDomain => {
             let domain = arbitrary.rule_name::<DomainName>();
             ConsensusCommand::PutDomain {
@@ -2027,6 +2012,10 @@ fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> Consens
         CommandVariant::ResumeDomain => ConsensusCommand::ResumeDomain {
             domain_id: arbitrary.rule_name(),
             mutation: optional_lease(arbitrary),
+        },
+        CommandVariant::RecoverOrphanedModelPause => ConsensusCommand::RecoverOrphanedModelPause {
+            domain_id: arbitrary.rule_name(),
+            mutation: Box::new(domain_mutation_lease(arbitrary)),
         },
         CommandVariant::ReconcileDomainClockAuthority => {
             let domain_id = arbitrary.rule_name();

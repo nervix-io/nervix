@@ -76,7 +76,9 @@ the queue/default-exchange and named-exchange choices, `MANDATORY`, persistence,
 confirm or message durability from routing alone.
 
 For applications submitting Plexus, use [Client Libraries](../../../docs/src/client-libraries.md)
-to select the host guide; Java and JVM programs follow [JVM Client Library](../../../docs/src/client-library-jvm.md).
+to select the host guide; Java and JVM programs follow [JVM Client Library](../../../docs/src/client-library-jvm.md),
+Ruby applications follow [Ruby Client Library](../../../docs/src/client-library-ruby.md),
+and C and C++ programs follow [C And C++ Client Library](../../../docs/src/client-library-c.md).
 Read its execution, clock and endpoint sections before choosing application-side lifecycle handling.
 
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
@@ -108,7 +110,8 @@ For authentication refusals and retry behavior, follow
 does not establish that a user exists.
 Read the Ingestors and Emitters chapters for `SHOW INGESTORS`, `SHOW EMITTERS`, and `DESCRIBE`;
 their inspection contracts distinguish effective options from canonical `SHOW CREATE` configuration.
-For ingestor inspection, follow [Ingestor Source Interactions](../../../docs/src/metrics-and-observability.md#ingestor-source-interactions) before interpreting raw counts, filtered graph traffic or poll duration.
+For ingestor inspection, follow [Ingestor Source Interactions](../../../docs/src/metrics-and-observability.md#ingestor-source-interactions) before interpreting raw counts, filtered graph traffic, poll duration or endpoint request outcomes.
+Before reading an acknowledgement failure, a reconnect loop or a stuck ingestor from `DESCRIBE INGESTOR`, follow [Ingestor Acknowledgement And Lifecycle](../../../docs/src/metrics-and-observability.md#ingestor-acknowledgement-and-lifecycle): an expired `ACK TIMEOUT` is counted as `timed_out`, not as a failed tree.
 For batching inspection, read [Emitter payload preparation](../../../docs/src/metrics-and-observability.md#emitter-payload-preparation)
 alongside Emitters: check the effective container and distinguish encoded payload measurements,
 retained work, retries and confirmed source records before interpreting a throughput figure.
@@ -121,9 +124,9 @@ for record outcomes, retry causes and waits, acquisition, pool waits, finish out
 current failure gauge in `/metrics` and `DESCRIBE EMITTER`.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
-Roto UDFs, ingestors and emitters for every connector and entity pair, junctions, reingestors, and session
-subscriptions; use the same web-console chapter for their typed fields, resource versions, program
-editors, reference lookup, and transaction behavior.
+Roto UDFs, ingestors and emitters for every connector and entity pair, junctions, deduplicators,
+reorderers, reingestors, and session subscriptions; use the same web-console chapter for their typed
+fields, resource versions, program editors, reference lookup, and transaction behavior.
 
 For materialized relay inspection, read [Relay → Inspect Materialized State](../../../docs/src/relay.md#inspect-materialized-state)
 for selector, LIMIT/AFTER and FORMAT clause order, typed rows, sensitivity and stale continuations.
@@ -138,7 +141,7 @@ same clauses and envelope. Read the CLI chapter for one-shot JSON output; progra
 Establish these inputs before finalizing Plexus. Ask only for missing details that materially change
 the graph; otherwise use conspicuous placeholders and state the assumptions.
 
-- Domain: paced or unpaced, clock period/skew, start behavior, and default placement policy.
+- Domain: paced or unpaced, clock period/skew and start behavior.
 - Payload: sample input, wire format, exact internal field types, optional fields, and sensitive
   fields.
 - Ingestor and emitter: connector kinds, externally provisioned entity names, whether an operator
@@ -154,7 +157,9 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   WASM fuel and linear-memory budgets, correlation, materialized state, lookup, generation, or
   repartitioning.
 - For inference with model-carried state, read `Runtime Nodes` → `Inferencer` → `State tensors`
-  before choosing port bindings, initialization, branch isolation or recovery guarantees.
+  and `Shutdown And Recovery` → `What Survives` before choosing port bindings, initialization,
+  branch isolation or recovery guarantees. Check the snapshot-section bound and branch retention;
+  distinguish a completed graceful stop from recovery of the last periodic snapshot.
 - Placement: latency-critical or heavy corridors, colocation enforcement, rule precedence, and
   whether ordinary scheduler heuristics should remain neutral.
 - Operations: batching/flush, error routes, credentials/TLS resources, observability, session
@@ -358,8 +363,9 @@ fails. Unresolved submissions keep their unknown-outcome boundary and must never
 automatically.
 Every reingestor and generator ALTER uses entity pause; reingestor route bodies retain their
 per-route branch selection, while generator route bodies remain set-only.
-`ALTER DOMAIN SET PLACEMENT` is nameless, targets the active domain, and performs a normal schedule
-activation; a newly effective hard colocation requirement can relocate runtime nodes.
+Read `Placement Policies` before choosing domain-wide or corridor placement, ranks or exact-unit
+relocation. Validate each hop's unit correspondence after rank resolution; a new effective hard
+requirement can relocate the corresponding unit groups.
 
 During node startup, `SHOW CLUSTER STATUS;` and `DESCRIBE CLUSTER;` remain available while live cluster policy is discovered. Status reports `node.initialization=initializing` until initialization finishes; wait for `ready` before policy-dependent commands or transfers.
 
@@ -880,7 +886,7 @@ reports no replicas. Use `DESCRIBE JUNCTION <junction>;` when the verification s
 routing contract, scheduled placement, and local edge metrics.
 
 Use `SHOW PLACEMENTS;`, `DESCRIBE PLACEMENT <placement>;`, and `DESCRIBE DOMAIN;` to verify rule
-coverage, effective claims, colocation groups, and the domain default. Use
+coverage, hop classes, effective policies, exact unit groups, and domain-wide scope. Use
 `DESCRIBE RELOCATION ...;` with the clauses of a planned `RELOCATE` to inspect the unit it would
 move, its quiesce level, the relays its hold would gate, and the preferences it would leave
 unsatisfied.
@@ -889,3 +895,7 @@ Before returning the configuration, trace every reference to its declaration and
 branch, construction, flush, error, sensitivity, transaction, and external-provisioning contracts.
 If the public docs do not establish a requested capability, say it is not documented as supported
 instead of inventing syntax.
+
+For password creation policy, read [Node Settings → Password Creation Policy](../../../docs/src/node-settings.md#password-creation-policy)
+and [Cryptography → Password Credentials](../../../docs/src/cryptography.md#password-credentials).
+Use the committed cluster setting for creation cost; preserve the documented startup, replay and restore rules.

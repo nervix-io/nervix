@@ -153,7 +153,12 @@ them alive on the physical clock: a node that received a record from another nod
 as it holds it, the node delivering a
 record to another node does until that node has admitted it, and an emitter whose publish waits for
 a retry does for the records it holds. A payload whose records report nothing for its `ACK TIMEOUT`
-is delivered again, and its earlier delivery is not cancelled and may still complete.
+is delivered again, and its earlier delivery is not cancelled and may still complete. The ingestor
+reports that as a timeout, not as a failed acknowledgement: its error event names the expired
+`ACK TIMEOUT`, and `nervix_ingestor_ack_outcomes_total` counts it as `timed_out` beside the
+`acknowledged`, `failed` and `shutdown` waits, while a tree the graph failed keeps the reason its
+failing branch gave. See [Ingestor Acknowledgement And
+Lifecycle](metrics-and-observability.md#ingestor-acknowledgement-and-lifecycle).
 
 Endpoint `ACK TIMEOUT` instead bounds the complete response wait on the physical clock; progress
 does not restart it. Expiry reports `processing_failed` with cause `ack_timeout` without undoing
@@ -186,7 +191,10 @@ to its acknowledgement, a `NATS STREAM` for the server's answer to its acknowled
 which neither broker answers. An acknowledgement the transport fails to
 confirm, or a rejection it fails to take back, is an ingestor error that `DESCRIBE INGESTOR` shows as
 the transient error until a later acknowledgement is confirmed, and the messages are delivered
-again. A node that stops gracefully waits for its ingestors' outstanding confirmations before it
+again. `DESCRIBE INGESTOR`'s `source:` section and the matching Prometheus families count each
+transport acknowledgement and rejection with its duration, each resume and suspension of the
+connector, the positions an ingestor stopped before its transport confirmed them, and whether the
+ingestor currently has a transient failure. A node that stops gracefully waits for its ingestors' outstanding confirmations before it
 closes them; see [Shutdown And Recovery](shutdown.md#connector-contracts).
 
 ## Altering Ingestors
@@ -1009,7 +1017,10 @@ complete acknowledgement window on `mode:`, and `quiesce: SUSPEND`. Its runtime 
 `schema:`, `owner:`, `admission:`, `producers:`, `forwarded producers:`, `outstanding batches:`,
 `outstanding bytes:`, and `admitted batches:`. The
 node that executes the ingestor also exports the same counts and every answered batch as metrics;
-see [Metrics And Observability](metrics-and-observability.md#client-ingestors).
+see [Metrics And Observability](metrics-and-observability.md#client-ingestors). An `HTTP ENDPOINT`
+or `WEBSOCKETS ENDPOINT` ingestor answers an acknowledged request in this vocabulary too, and counts
+every request and frame it answers in `nervix_ingestor_endpoint_requests_total` by outcome; see
+[`HTTP ENDPOINT` And `WEBSOCKETS ENDPOINT`](#http-endpoint-and-websockets-endpoint).
 
 ## External Names
 
@@ -3272,6 +3283,14 @@ WebSocket upgrades with 503. A stopped or absent intake refuses new requests too
 by unacknowledged ingestors accepts when at least one accepts; it includes `Retry-After` only when
 all refusals supply a delay. When an acknowledged binding participates, success waits for its root;
 a failure after any binding admitted the input is not reported as `not_admitted`.
+
+Each node counts every request and WebSocket data frame it receives once for each ingestor bound to
+the route, in `nervix_ingestor_endpoint_requests_total` under the outcome that ingestor reached:
+`accepted`, `busy`, `refused`, `not_admitted`, `decode_rejected` or `processing_failed`. An
+ingestor that refuses the requests of a route it shares with an available ingestor counts each of
+them once. `DESCRIBE INGESTOR` shows the family under `source:` for the node that answers it;
+[Ingestor Source Interactions](metrics-and-observability.md#ingestor-source-interactions) defines
+each outcome.
 
 A WebSocket endpoint in `MODE ACK` requires an explicit signaling protocol. Its outbound wire
 format encodes the same `outcome` / `cause` object for each data frame, both during `ACCEPT DATA`

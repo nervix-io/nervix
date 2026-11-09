@@ -96,7 +96,6 @@ impl TaskHandleBenchmark {
                 id: domain.clone(),
                 config: nervix_models::DomainConfig {
                     pace: DomainPace::Unpaced,
-                    placement: nervix_models::PlacementPolicy::Neutral,
                 },
                 status: DomainStatus::Running,
                 start_version: 0,
@@ -139,6 +138,7 @@ impl TaskHandleBenchmark {
             DomainNodeRef::node_in(domain.clone(), ModelKind::WasmProcessor, wasm_node.clone()),
             ScheduledStateAssignment {
                 identity: ScheduledStateIdentity {
+                    inferencer_model: None,
                     schema_fingerprint: schema,
                     wasm_state_generations: Some(nervix_models::WasmStateGenerations::first()),
                 },

@@ -186,14 +186,13 @@ pub(crate) struct UsersWire {
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
 pub(crate) struct UserWire {
     pub(crate) name: String,
-    pub(crate) password_hash: String,
+    pub(crate) password_credential: nervix_models::PasswordCredential,
 }
 
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
 pub(crate) struct DomainWire {
     pub(crate) domain: String,
     pub(crate) pace: PaceWire,
-    pub(crate) placement: PlacementWire,
     pub(crate) status: StatusWire,
     pub(crate) start_version: u64,
     pub(crate) start_point: StartPointWire,
@@ -206,14 +205,6 @@ pub(crate) struct DomainWire {
 pub(crate) enum PaceWire {
     Unpaced,
     Paced { period_nanos: u64, skew_nanos: u64 },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Archive, Serialize, Deserialize)]
-pub(crate) enum PlacementWire {
-    RequireColocation,
-    PreferColocation,
-    Neutral,
-    SuggestSeparation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Archive, Serialize, Deserialize)]

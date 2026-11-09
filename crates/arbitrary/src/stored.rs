@@ -269,7 +269,6 @@ impl Arbitrary<'_> {
     /// the start it last committed, and the clock mapping of a running paced generation.
     pub fn domain_state_of(&mut self, id: DomainName) -> DomainState {
         let pace = self.domain_pace();
-        let placement = self.placement_policy();
         let status = self.entropy.pick([
             DomainStatus::Stopped,
             DomainStatus::Running,
@@ -284,7 +283,7 @@ impl Arbitrary<'_> {
         };
         DomainState {
             id,
-            config: DomainConfig { pace, placement },
+            config: DomainConfig { pace },
             status,
             start_version,
             last_start,
@@ -365,6 +364,7 @@ impl Arbitrary<'_> {
             OwnershipStateComponent::MaterializedRelay,
             OwnershipStateComponent::WasmProcessor,
             OwnershipStateComponent::WindowProcessor,
+            OwnershipStateComponent::Inferencer,
         ]);
         let cause = self.entropy.pick([
             OwnershipStateResetCause::MissingCheckpoint,

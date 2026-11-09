@@ -58,6 +58,12 @@ A changed unit lifetime replaces its publication while retaining reusable compil
 Processor, generator and placement-task ownership is unit-qualified, so an assignment delta ends
 only lost units and preserves unchanged sibling supervisors, checkpoint writers and replica polls.
 
+Placement decisions classify direct hops by the correspondence of their execution units.
+Effective hard policies form groups of exact `NodeUnitRef` bonds: identity maps matching indices,
+and fiber maps each producer to its declared recipient. Domain-wide and corridor rules use the
+same precedence and validation before a schedule exists. The execution revision consumes the
+resulting unit groups; it does not reinterpret placement Models.
+
 Ingestor entrypoints are keyed by `NodeUnitRef`. Planning lowers the common input declaration and
 routes once, then binds each unit's identity and Kafka primary into its start plan. Validation
 requires the complete declared unit set before a plan can run. The runtime registers ingestors,
@@ -130,8 +136,12 @@ tensors before publishing the processor template. Each concrete branch starts wi
 initial generation and exclusively owns its successors. Stateful admission runs the model once per
 row before output-route buffering; native state outputs become the next invocation's inputs without
 an Arrow round trip. Route flushes dispatch already-computed output. The stateless inferencer keeps
-its existing flush-time execution. These tensor generations are volatile and are recreated from
-the prepared initial generation after restart, owner change or eviction.
+its existing flush-time execution. A stateful branch publishes its native tensor generation after
+each admitted batch through the shared periodic branch-state owner. Its placement includes the
+schema fingerprint and the typed fingerprint of its resource, pinned version, file and state
+declarations. Restore selects the newest snapshot for that exact identity and branch incarnation;
+eviction publishes an empty final generation. Node-local binding retains the validated snapshot
+footprint and rejects a declaration exceeding the section bound before allocating INITIAL.
 
 Emitter planning reads the concrete destination's own publishing enum. Broker, MQTT and SQS
 alternatives lower exhaustively into their connector policies; request-only and unconfirmed-only

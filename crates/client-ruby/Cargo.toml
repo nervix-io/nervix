@@ -34,6 +34,8 @@ rb-sys-env = { workspace = true }
 [dev-dependencies]
 bolero = { workspace = true }
 nervix-recovery = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["process"] }
 tonic = { workspace = true }
 
 [[test]]
@@ -42,4 +44,8 @@ required-features = ["ruby-tests"]
 
 [[test]]
 name = "fields"
+required-features = ["ruby-tests"]
+
+[[test]]
+name = "host_suite"
 required-features = ["ruby-tests"]

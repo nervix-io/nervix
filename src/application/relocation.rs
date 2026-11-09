@@ -7,18 +7,19 @@
 //!
 //! Layer: control plane.
 //! - **Owns.** Validating relocation owners and destination, staging assignments and coordinating
-//!   one atomic handoff for the selected logical nodes and every unit they own.
+//!   one atomic handoff for the selected execution units and their hard groups.
 //! - **Depends on.** Pure registry selections, committed schedules and ownership coordination.
 //! - **Must not know.** Parser internals, record delivery or connector drivers.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{ConsensusError, DomainMutationLease, DomainPlanningInputs};
 use nervix_models::{
-    ClusterNodeName, DomainName, DomainSchedule, DomainStatus, Model, NodeRef, PlacementPolicy,
-    QuiesceLevel, RelayName, Relocation, RelocationPreferenceStrategy, ScheduledNode, Unit,
+    ClusterNodeName, DomainName, DomainSchedule, DomainStatus, Model, NodeRef, NodeUnitRef,
+    PlacementPolicy, QuiesceLevel, RelayName, Relocation, RelocationPreferenceStrategy,
+    ScheduledNode,
 };
 
 use super::{
@@ -68,18 +69,12 @@ enum RelocationError {
 
 /// One unit member with the assignment the relocation gives it.
 struct RelocationPlanMember {
-    runtime_node: NodeRef,
+    runtime_unit: NodeUnitRef,
     group: usize,
     strategy: RelocationPreferenceStrategy,
     reason: RelocationMemberReason,
     moves: bool,
-    units: Vec<RelocationPlanUnit>,
-}
-
-struct RelocationPlanUnit {
-    unit: Unit,
     owner: ClusterNodeName,
-    moves: bool,
     replicas: Vec<ClusterNodeName>,
     promoted_replica: bool,
 }
@@ -137,21 +132,14 @@ impl RelocationPlan {
         }
         lines.push("unit:".to_string());
         for member in &self.members {
-            for assignment in &member.units {
-                let unit_label = match assignment.unit.kind() {
-                    nervix_models::UnitKind::Partition(index) => format!(" unit=partition:{index}"),
-                    nervix_models::UnitKind::Instance(index) if member.units.len() > 1 => {
-                        format!(" unit=instance:{index}")
-                    }
-                    nervix_models::UnitKind::Single | nervix_models::UnitKind::Instance(_) => {
-                        String::new()
-                    }
-                };
+            {
+                let assignment = member;
+                let unit_label = member.runtime_unit.unit.status_field();
                 let mut line = format!(
                     "- kind={} name={}{unit_label} group={} strategy={} reason={} owner={} \
                      moves={}",
-                    member.runtime_node.kind.as_str(),
-                    member.runtime_node.identifier.as_str(),
+                    member.runtime_unit.node.kind.as_str(),
+                    member.runtime_unit.node.identifier.as_str(),
                     member.group,
                     member.strategy.as_ref(),
                     member.reason.as_ref(),
@@ -227,7 +215,7 @@ impl SessionServiceImpl {
         let moved = plan.moved_count();
         let Some(mut planned_schedule) = plan.schedule.clone() else {
             return command_ok(format!(
-                "relocated 0 of {total} runtime node(s) onto node '{}'\n{}",
+                "relocated 0 of {total} execution unit(s) onto node '{}'\n{}",
                 plan.destination,
                 plan.render()
             ));
@@ -301,7 +289,7 @@ impl SessionServiceImpl {
         }
 
         let mut message = format!(
-            "relocated {moved} of {total} runtime node(s) onto node '{}'\n{}",
+            "relocated {moved} of {total} execution unit(s) onto node '{}'\n{}",
             plan.destination,
             plan.render()
         );
@@ -315,7 +303,7 @@ impl SessionServiceImpl {
         }
         if let Some(error) = local_activation_error {
             return command_error(format!(
-                "relocated {moved} runtime node(s) onto node '{}', but failed to activate the \
+                "relocated {moved} execution unit(s) onto node '{}', but failed to activate the \
                  updated schedule for domain '{}': {error:#}",
                 plan.destination,
                 domain.as_str()
@@ -323,8 +311,8 @@ impl SessionServiceImpl {
         }
         if let Some(error) = handoff_activation_error {
             return command_error(format!(
-                "relocated {moved} runtime node(s) onto node '{}', but ownership state activation \
-                 did not complete for domain '{}': {error:#}",
+                "relocated {moved} execution unit(s) onto node '{}', but ownership state \
+                 activation did not complete for domain '{}': {error:#}",
                 plan.destination,
                 domain.as_str()
             ));
@@ -411,7 +399,6 @@ impl SessionServiceImpl {
         let unit = graph
             .relocation_unit(
                 domain,
-                domain_state.config.placement,
                 &relocation.selection,
                 relocation.strategy,
                 &relocation.overrides,
@@ -433,10 +420,10 @@ impl SessionServiceImpl {
 
         let mut owners = Vec::with_capacity(unit.members.len());
         for member in &unit.members {
-            owners.push(relocation_member_owners(
+            owners.push(relocation_member_owner(
                 domain,
                 current,
-                &member.runtime_node,
+                &member.runtime_unit,
                 &live_nodes,
             )?);
         }
@@ -452,20 +439,11 @@ impl SessionServiceImpl {
             .members
             .iter()
             .zip(&owners)
-            .filter(|(_, owners)| {
-                owners
-                    .values()
-                    .any(|owner| *owner != &relocation.destination)
-            })
-            .map(|(member, _)| member.runtime_node.clone())
+            .filter(|(_, owner)| ***owner != relocation.destination)
+            .map(|(member, _)| member.runtime_unit.clone())
             .collect::<Vec<_>>();
 
-        let desired = self.desired_domain_schedule(
-            domain,
-            &graph,
-            &schedulable_nodes,
-            domain_state.config.placement,
-        );
+        let desired = self.desired_domain_schedule(domain, &graph, &schedulable_nodes);
         let planned = (!moved.is_empty()).then(|| {
             planned_relocation_schedule(
                 current,
@@ -486,64 +464,57 @@ impl SessionServiceImpl {
             QuiesceLevel::Dynamic
         };
         let gated_relays = if let QuiesceLevel::EntityPause = level {
-            ownership_handoff_relays_for_schedule(current, &moved)
+            ownership_handoff_relays_for_schedule(
+                current,
+                &moved
+                    .iter()
+                    .map(|member| member.node.clone())
+                    .collect::<Vec<_>>(),
+            )
         } else {
             Vec::new()
         };
 
-        let members =
-            unit.members
-                .iter()
-                .zip(&owners)
-                .map(|(member, owners)| {
-                    let planned_assignment = planned
-                        .as_ref()
-                        .and_then(|planned| planned.nodes.get(&member.runtime_node));
-                    let assignment = match planned_assignment {
-                        Some(assignment) => Some(assignment),
-                        None => current.nodes.get(&member.runtime_node),
-                    }
-                    .verified("owner validation resolved every relocation member in this schedule");
-                    let units = owners
-                        .iter()
-                        .map(|(unit, owner)| {
-                            let moves = *owner != &relocation.destination;
-                            let scheduled = assignment.units.get(unit).verified(
-                                "relocation preserves the selected member's unit identities",
-                            );
-                            RelocationPlanUnit {
-                                unit: *unit,
-                                owner: (*owner).clone(),
-                                moves,
-                                replicas: scheduled.replica_nodes().into_iter().cloned().collect(),
-                                promoted_replica: moves
-                                    && current
-                                        .nodes
-                                        .get(&member.runtime_node)
-                                        .and_then(|node| node.units.get(unit))
-                                        .is_some_and(|unit| {
-                                            unit.is_assigned_to(&relocation.destination)
-                                        }),
-                            }
-                        })
-                        .collect::<Vec<_>>();
-                    RelocationPlanMember {
-                        runtime_node: member.runtime_node.clone(),
-                        group: member.group,
-                        strategy: member.strategy,
-                        reason: member.reason,
-                        moves: units.iter().any(|unit| unit.moves),
-                        units,
-                    }
-                })
-                .collect::<Vec<_>>();
+        let members = unit
+            .members
+            .iter()
+            .zip(&owners)
+            .map(|(member, owner)| {
+                let scheduled = planned
+                    .as_ref()
+                    .unwrap_or(current)
+                    .nodes
+                    .get(&member.runtime_unit.node)
+                    .and_then(|node| node.unit(member.runtime_unit.unit))
+                    .verified(
+                        "owner validation resolved the exact unit and planning preserves its \
+                         identity",
+                    );
+                let moves = **owner != relocation.destination;
+                RelocationPlanMember {
+                    runtime_unit: member.runtime_unit.clone(),
+                    group: member.group,
+                    strategy: member.strategy,
+                    reason: member.reason,
+                    moves,
+                    owner: (*owner).clone(),
+                    replicas: scheduled.replica_nodes().into_iter().cloned().collect(),
+                    promoted_replica: moves
+                        && current
+                            .nodes
+                            .get(&member.runtime_unit.node)
+                            .and_then(|node| node.unit(member.runtime_unit.unit))
+                            .is_some_and(|unit| unit.is_assigned_to(&relocation.destination)),
+                }
+            })
+            .collect::<Vec<_>>();
 
         let unsatisfied = unsatisfied_preference_lines(
             &unit,
             planned.as_ref().unwrap_or(current),
             &members
                 .iter()
-                .map(|member| member.runtime_node.clone())
+                .map(|member| member.runtime_unit.node.clone())
                 .collect::<Vec<_>>(),
         );
 
@@ -597,7 +568,6 @@ impl SessionServiceImpl {
         domain: &DomainName,
         graph: &ActiveGraph,
         schedulable_nodes: &BTreeSet<ClusterNodeName>,
-        placement: PlacementPolicy,
     ) -> DomainSchedule {
         let cluster_nodes = schedulable_nodes.iter().cloned().collect::<Vec<_>>();
         #[cfg(feature = "testing")]
@@ -607,7 +577,6 @@ impl SessionServiceImpl {
                 &cluster_nodes,
                 usize::try_from(self.cluster_parameters().replica_count())
                     .assured("the committed count fits a supported target"),
-                placement,
                 self.inner.runtime.scheduler_mode(),
             )
         }
@@ -618,7 +587,6 @@ impl SessionServiceImpl {
                 &cluster_nodes,
                 usize::try_from(self.cluster_parameters().replica_count())
                     .assured("the committed count fits a supported target"),
-                placement,
             )
         }
     }
@@ -630,14 +598,14 @@ fn planned_relocation_schedule(
     current: &DomainSchedule,
     desired: &DomainSchedule,
     destination: &ClusterNodeName,
-    moved: &[NodeRef],
+    moved: &[NodeUnitRef],
     replica_count: usize,
     schedulable_nodes: &BTreeSet<ClusterNodeName>,
     live_nodes: &BTreeSet<ClusterNodeName>,
 ) -> DomainSchedule {
     let mut planned = current.clone();
     for member in moved {
-        let Some(node) = planned.nodes.get_mut(member) else {
+        let Some(node) = planned.nodes.get_mut(&member.node) else {
             continue;
         };
         let replica_slots = if relay_without_materialized_state(node) {
@@ -645,10 +613,14 @@ fn planned_relocation_schedule(
         } else {
             replica_count
         };
-        for (identity, unit) in &mut node.units {
-            if unit.execution_node() == Some(destination) {
-                continue;
-            }
+        let unit = node
+            .units
+            .get_mut(&member.unit)
+            .verified("the owner check resolved this exact unit");
+        if unit.execution_node() == Some(destination) {
+            continue;
+        }
+        {
             let mut candidates = Vec::new();
             if let Some(former_owner) = unit.execution_node()
                 && schedulable_nodes.contains(former_owner)
@@ -663,8 +635,8 @@ fn planned_relocation_schedule(
             );
             if let Some(desired) = desired
                 .nodes
-                .get(member)
-                .and_then(|node| node.units.get(identity))
+                .get(&member.node)
+                .and_then(|node| node.units.get(&member.unit))
             {
                 candidates.extend(
                     desired
@@ -688,11 +660,12 @@ fn planned_relocation_schedule(
         }
     }
 
+    let moved_members = moved.iter().collect::<ahash::HashSet<_>>();
     for group in &mut planned.placement_groups {
         if group
             .members
             .iter()
-            .any(|group_member| moved.contains(&group_member.node))
+            .any(|group_member| moved_members.contains(group_member))
         {
             group.primary_node = Some(destination.clone());
         }
@@ -708,63 +681,35 @@ fn unsatisfied_preference_lines(
 ) -> Vec<String> {
     let mut context = context.to_vec();
     for preference in &unit.preferences {
-        for node in [&preference.left, &preference.right] {
-            if !context.contains(node) {
-                context.push(node.clone());
+        for member in [&preference.left, &preference.right] {
+            if !context.contains(&member.node) {
+                context.push(member.node.clone());
             }
         }
     }
     let mut lines = Vec::new();
     for preference in &unit.preferences {
-        let Some(left_node) = schedule.nodes.get(&preference.left) else {
+        let owner = |member: &NodeUnitRef| {
+            let node = schedule.nodes.get(&member.node)?;
+            let unit = node.unit(member.unit)?;
+            unit.execution_node()
+        };
+        let (Some(left), Some(right)) = (owner(&preference.left), owner(&preference.right)) else {
             continue;
         };
-        let Some(right_node) = schedule.nodes.get(&preference.right) else {
-            continue;
+        let unsatisfied = match preference.policy {
+            PlacementPolicy::PreferColocation => left != right,
+            PlacementPolicy::SuggestSeparation => left == right,
+            PlacementPolicy::RequireColocation | PlacementPolicy::Neutral => false,
         };
-        let identities = left_node
-            .units
-            .keys()
-            .chain(right_node.units.keys())
-            .copied()
-            .filter(|unit| {
-                *unit != Unit::SINGLE
-                    || (left_node.units.contains_key(unit) && right_node.units.contains_key(unit))
-            })
-            .collect::<BTreeSet<_>>();
-        for identity in identities {
-            let left_unit = match left_node.units.get(&identity) {
-                Some(unit) => Some(unit),
-                None => left_node.units.get(&Unit::SINGLE),
-            };
-            let Some(left) = left_unit.and_then(|unit| unit.execution_node()) else {
-                continue;
-            };
-            let right_unit = match right_node.units.get(&identity) {
-                Some(unit) => Some(unit),
-                None => right_node.units.get(&Unit::SINGLE),
-            };
-            let Some(right) = right_unit.and_then(|unit| unit.execution_node()) else {
-                continue;
-            };
-            let unsatisfied = match preference.policy {
-                PlacementPolicy::PreferColocation => left != right,
-                PlacementPolicy::SuggestSeparation => left == right,
-                PlacementPolicy::RequireColocation | PlacementPolicy::Neutral => false,
-            };
-            if !unsatisfied {
-                continue;
-            }
-            let suffix = match identity.kind() {
-                nervix_models::UnitKind::Single => String::new(),
-                nervix_models::UnitKind::Partition(index) => format!(" unit=partition:{index}"),
-                nervix_models::UnitKind::Instance(index) => format!(" unit=instance:{index}"),
-            };
+        if unsatisfied {
             lines.push(format!(
-                "- {} {} <-> {} ({}){suffix}",
+                "- {} {}{} <-> {}{} ({})",
                 preference.policy.as_ref().to_lowercase(),
-                format_placement_runtime_node(&preference.left, &context),
-                format_placement_runtime_node(&preference.right, &context),
+                format_placement_runtime_node(&preference.left.node, &context),
+                preference.left.unit.status_field(),
+                format_placement_runtime_node(&preference.right.node, &context),
+                preference.right.unit.status_field(),
                 placement_claim_owner(&preference.winning_rules)
             ));
         }
@@ -776,35 +721,35 @@ fn unsatisfied_preference_lines(
 ///
 /// A member whose owner is unavailable cannot be relocated: there is nothing to drain from a dead
 /// owner, and failover is already reassigning it.
-fn relocation_member_owners<'a>(
+fn relocation_member_owner<'a>(
     domain: &DomainName,
     schedule: &'a DomainSchedule,
-    member: &NodeRef,
+    member: &NodeUnitRef,
     live_nodes: &BTreeSet<ClusterNodeName>,
-) -> error_stack::Result<BTreeMap<Unit, &'a ClusterNodeName>, RelocationError> {
-    let node = schedule.nodes.get(member).ok_or_else(|| {
+) -> error_stack::Result<&'a ClusterNodeName, RelocationError> {
+    let scheduled = match schedule.nodes.get(&member.node) {
+        Some(node) => node.unit(member.unit),
+        None => None,
+    };
+    let scheduled = scheduled.ok_or_else(|| {
         Report::new(RelocationError::MemberNotScheduled {
             domain: domain.clone(),
-            member: member.clone(),
+            member: member.node.clone(),
         })
     })?;
-    let mut owners = BTreeMap::new();
-    for (unit, scheduled) in &node.units {
-        let owner = scheduled.execution_node().ok_or_else(|| {
-            Report::new(RelocationError::MemberWithoutOwner {
-                domain: domain.clone(),
-                member: member.clone(),
-            })
-        })?;
-        if !live_nodes.contains(owner) {
-            return Err(Report::new(RelocationError::MemberOwnerUnavailable {
-                member: member.clone(),
-                owner: owner.clone(),
-            }));
-        }
-        owners.insert(*unit, owner);
+    let owner = scheduled.execution_node().ok_or_else(|| {
+        Report::new(RelocationError::MemberWithoutOwner {
+            domain: domain.clone(),
+            member: member.node.clone(),
+        })
+    })?;
+    if !live_nodes.contains(owner) {
+        return Err(Report::new(RelocationError::MemberOwnerUnavailable {
+            member: member.node.clone(),
+            owner: owner.clone(),
+        }));
     }
-    Ok(owners)
+    Ok(owner)
 }
 
 fn relay_without_materialized_state(node: &ScheduledNode) -> bool {
@@ -825,7 +770,9 @@ fn format_node_list(nodes: &[ClusterNodeName]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{CreateJunction, JunctionName, ModelKind, ModelName, SchemaFingerprint};
+    use nervix_models::{
+        CreateJunction, JunctionName, ModelKind, ModelName, SchemaFingerprint, Unit,
+    };
 
     use super::*;
 
@@ -963,9 +910,14 @@ mod tests {
         let schedule = schedule(vec![junction_node("route", "node-1", &["node-2"])]);
         let domain = schedule.domain.clone();
         assert_eq!(
-            relocation_member_owners(&domain, &schedule, &member("route"), &live(&["node-1"]))
-                .expect("a live owner must resolve"),
-            BTreeMap::from([(Unit::SINGLE, &node_name("node-1"))])
+            relocation_member_owner(
+                &domain,
+                &schedule,
+                &NodeUnitRef::new(member("route"), Unit::SINGLE),
+                &live(&["node-1"])
+            )
+            .assured("a live owner must resolve"),
+            &node_name("node-1")
         );
     }
 
@@ -973,10 +925,10 @@ mod tests {
     fn rejects_a_member_whose_owner_is_unavailable() {
         let schedule = schedule(vec![junction_node("route", "node-3", &[])]);
         let domain = schedule.domain.clone();
-        let error = relocation_member_owners(
+        let error = relocation_member_owner(
             &domain,
             &schedule,
-            &member("route"),
+            &NodeUnitRef::new(member("route"), Unit::SINGLE),
             &live(&["node-1", "node-2"]),
         )
         .expect_err("an unavailable owner must be rejected");
@@ -992,9 +944,13 @@ mod tests {
     fn rejects_a_member_that_is_not_scheduled() {
         let schedule = schedule(Vec::new());
         let domain = schedule.domain.clone();
-        let error =
-            relocation_member_owners(&domain, &schedule, &member("route"), &live(&["node-1"]))
-                .expect_err("an unscheduled member must be rejected");
+        let error = relocation_member_owner(
+            &domain,
+            &schedule,
+            &NodeUnitRef::new(member("route"), Unit::SINGLE),
+            &live(&["node-1"]),
+        )
+        .expect_err("an unscheduled member must be rejected");
         let expected_member = member("route");
         assert!(matches!(
             error.current_context(),
@@ -1005,6 +961,78 @@ mod tests {
     }
 
     #[test]
+    fn relocating_one_partition_preserves_its_sibling_and_the_siblings_group() {
+        use nervix_models::{
+            BranchPartitions, BranchSelection, CreateSchema, ParseAsType, PlacementGroupSchedule,
+            ResolvedBranching, SchemaField,
+        };
+        let mut node = junction_node("route", "node-1", &["node-3"]);
+        let Model::Junction(model) = node.config.as_mut() else {
+            panic!("the fixture is a junction");
+        };
+        model.branched_by = BranchSelection::BranchedBy {
+            branch: "tenants".try_into().assured("valid name"),
+        };
+        node = node.with_resolved_branching(Some(ResolvedBranching::branched(
+            "tenants".try_into().assured("valid name"),
+            CreateSchema {
+                name: "tenant_key".try_into().assured("valid name"),
+                fields: vec![SchemaField {
+                    name: "tenant".try_into().assured("valid name"),
+                    ty: ParseAsType::String,
+                    optional: false,
+                    sensitive: false,
+                }],
+            },
+            BranchPartitions::Direct(nonzero_ext::nonzero!(2u16)),
+        )));
+        assert!(node.place_unit(
+            Unit::partition(0),
+            Some(node_name("node-1")),
+            vec![node_name("node-1"), node_name("node-3")]
+        ));
+        assert!(node.place_unit(
+            Unit::partition(1),
+            Some(node_name("node-3")),
+            vec![node_name("node-3"), node_name("node-1")]
+        ));
+        let moved = NodeUnitRef::new(node.identity(), Unit::partition(0));
+        let groups = (0..2)
+            .map(|index| PlacementGroupSchedule {
+                members: vec![NodeUnitRef::new(node.identity(), Unit::partition(index))],
+                primary_node: node.units[&Unit::partition(index)].primary_node.clone(),
+            })
+            .collect();
+        let current = DomainSchedule::new(
+            "relocation_test".try_into().assured("valid name"),
+            [node],
+            groups,
+        );
+        let planned = planned_relocation_schedule(
+            &current,
+            &current,
+            &node_name("node-2"),
+            std::slice::from_ref(&moved),
+            1,
+            &live(&["node-1", "node-2", "node-3"]),
+            &live(&["node-1", "node-2", "node-3"]),
+        );
+        assert_eq!(
+            planned.nodes[&moved.node].units[&Unit::partition(1)],
+            current.nodes[&moved.node].units[&Unit::partition(1)]
+        );
+        assert_eq!(planned.placement_groups[1], current.placement_groups[1]);
+        assert_eq!(
+            planned.placement_groups[0].primary_node,
+            Some(node_name("node-2"))
+        );
+        assert_eq!(
+            planned.nodes[&moved.node].units[&Unit::partition(0)].assigned_nodes,
+            vec![node_name("node-2"), node_name("node-1")]
+        );
+    }
+
+    #[test]
     fn relocation_schedule_puts_the_former_owner_first_among_replicas() {
         let current = schedule(vec![junction_node("route", "node-1", &["node-3"])]);
         let desired = schedule(vec![junction_node("route", "node-2", &["node-3"])]);
@@ -1012,7 +1040,7 @@ mod tests {
             &current,
             &desired,
             &ClusterNodeName::parse("node-2").expect("valid name"),
-            &[member("route")],
+            &[NodeUnitRef::new(member("route"), Unit::SINGLE)],
             1,
             &live(&["node-1", "node-2", "node-3"]),
             &live(&["node-1", "node-2", "node-3"]),
@@ -1039,7 +1067,7 @@ mod tests {
             &current,
             &desired,
             &ClusterNodeName::parse("node-2").expect("valid name"),
-            &[member("route")],
+            &[NodeUnitRef::new(member("route"), Unit::SINGLE)],
             0,
             &live(&["node-1", "node-2"]),
             &live(&["node-1", "node-2"]),

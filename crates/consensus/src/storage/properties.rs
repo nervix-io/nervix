@@ -85,6 +85,56 @@ impl StateKeyspace {
     }
 }
 
+#[test]
+fn password_credential_work_refuses_inconsistent_recovered_policy_and_users() {
+    for (policy, user_cost) in [(2, None), (1, Some(2))] {
+        let values = nervix_models::ClusterParameterValues::resolve(
+            nervix_models::ClusterParameterSeedValues {
+                password_iterations: Some(policy),
+                ..Default::default()
+            },
+        )
+        .assured("both explicit policies are within their declared bound");
+        let mut state = StateMachineData {
+            parameters: Some(nervix_models::ClusterParameterRecord {
+                revision: std::num::NonZeroU64::MIN,
+                values,
+            }),
+            password_work: Some(
+                nervix_models::PasswordCost::try_from(1)
+                    .assured("one iteration is the current profile's minimum"),
+            ),
+            ..Default::default()
+        };
+        if let Some(cost) = user_cost {
+            let name: nervix_models::UserName = fixture_name("operator");
+            state.users.insert(
+                name.clone(),
+                crate::UserCredentials {
+                    name,
+                    password_credential: nervix_models::PasswordCredential::from_parts(
+                        cost, [1; 16], [2; 64],
+                    )
+                    .assured("the credential has a bounded current cost"),
+                },
+            );
+        }
+        let keyspace = StateKeyspace::open();
+        keyspace
+            .store(&StateMachineData::default(), &state)
+            .assured("the complete current records fit their reservation");
+        let error = keyspace
+            .recover()
+            .expect_err("inconsistent work must never be published");
+        assert!(matches!(
+            error
+                .get_ref()
+                .and_then(|cause| cause.downcast_ref::<StorageFailure>()),
+            Some(StorageFailure::InvalidState)
+        ));
+    }
+}
+
 /// A generated revision stored into an empty keyspace recovers equal to itself, and a second
 /// revision stored as the changes from the first, replacing and removing records, recovers equal
 /// to the second.
@@ -372,7 +422,6 @@ fn fixture_domain(id: DomainName) -> nervix_models::DomainState {
         id,
         config: nervix_models::DomainConfig {
             pace: nervix_models::DomainPace::Unpaced,
-            placement: nervix_models::PlacementPolicy::Neutral,
         },
         status: nervix_models::DomainStatus::Stopped,
         start_version: 0,
@@ -495,7 +544,10 @@ fn recovery_refuses_an_expired_execution_without_an_issue_time() {
         crate::CommandExecutionEffect::CreateUser {
             if_not_exists: false,
             name: fixture_name("operator"),
-            password_hash: "hash".to_string(),
+            password_credential: nervix_models::PasswordCredential::from_parts(
+                210000, [171; 16], [171; 64],
+            )
+            .assured("the fixed credential has a bounded iteration count"),
         },
     );
     state.command_executions.insert_admitted(

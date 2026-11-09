@@ -90,7 +90,7 @@ pub(super) fn plan_sections(
                 .values()
                 .map(|credentials| UserRecord {
                     name: credentials.name.clone(),
-                    password_hash: credentials.password_hash.clone(),
+                    password_credential: credentials.password_credential.clone(),
                 })
                 .collect(),
         };
@@ -120,7 +120,6 @@ fn plan_domain(
     let record = DomainRecord {
         domain: domain.clone(),
         pace: state.config.pace,
-        placement: state.config.placement,
         status: state.status.clone(),
         start_version: state.start_version,
         start_point: state.last_start.clone(),
@@ -404,8 +403,8 @@ mod tests {
     use nervix_consensus::{AppliedLogPosition, UserCredentials};
     use nervix_models::{
         ClusterNodeName, ClusterSchedule, DomainConfig, DomainPace, DomainStartPoint,
-        PlacementPolicy, ResourceUpload, ResourceUploadIdentity, ResourceUploadKey,
-        ResourceUploads, ResourceVersionCounter, ScheduledNode, SchemaFingerprint, UserName,
+        ResourceUpload, ResourceUploadIdentity, ResourceUploadKey, ResourceUploads,
+        ResourceVersionCounter, ScheduledNode, SchemaFingerprint, UserName,
     };
     use sorted_vec::SortedVec;
 
@@ -428,7 +427,6 @@ mod tests {
             id: domain(name),
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
-                placement: PlacementPolicy::Neutral,
             },
             status,
             start_version: 2,
@@ -502,7 +500,10 @@ mod tests {
                 user("alice"),
                 UserCredentials {
                     name: user("alice"),
-                    password_hash: "$argon2id$hash".to_string(),
+                    password_credential: nervix_models::PasswordCredential::from_parts(
+                        210000, [33; 16], [33; 64],
+                    )
+                    .assured("the fixed credential has a bounded iteration count"),
                 },
             )]),
             resources: ResourceVersionStatus {

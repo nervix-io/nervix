@@ -30,7 +30,7 @@ The planner and executor partition that ordered sequence the same way:
 | Content | Execution boundary |
 | --- | --- |
 | Consecutive model `CREATE`, supported `ALTER`, `DROP`, and `REBIND RESOURCE` operations | One atomic model run, evaluated in written order against one candidate graph. |
-| `ALTER DOMAIN`, `START`, `STOP`, `CREATE RESOURCE`, or `RESET WASM PROCESSOR ... STATE` | One step each; each ends a preceding model run. |
+| `START`, `STOP`, `CREATE RESOURCE`, or `RESET WASM PROCESSOR ... STATE` | One step each; each ends a preceding model run. |
 
 A model run's configuration and schedule are published in one authoritative step. Its *base-to-final*
 diff determines the effective impact: an intermediate change can be cancelled, a drop followed by
@@ -326,6 +326,15 @@ report before anything can end the step, drains it, and checks the frozen inputs
 domain as the pause left it. The adopted attempt is then released like any other engaged pause,
 before the step's outcome is retained, whether the step applies, fails or meets changed planning
 inputs.
+An orphaned model-alteration pause that no `COMMITTING` transaction owns may instead be recovered
+before a model command's standalone preflight or commit planning. The coordinator first rechecks
+its transaction for progress and observes that no local alteration is active. Its conditional
+consensus proposal then checks the exact command mutation lease, restore gate and absence of any
+same-domain committing transaction in one applied revision. Recovery changes only the domain's
+paused status and starts fresh planning. It neither claims a transaction's pause nor takes a new
+local alteration guard. A backup's distinct mutation lease and alteration guard keep its cut
+protected. Only a confirmed status change emits `resumed orphaned ALTER pause`.
+
 Completed effects are not repeated. If an owner timed out, inspection can show `UNCERTAIN` rather
 than falsely declaring that no gate engaged. Recovery may have to rebuild a whole domain after an
 entity swap cannot complete; the actual history then appends a `DOMAIN_PAUSE` attempt and recovery

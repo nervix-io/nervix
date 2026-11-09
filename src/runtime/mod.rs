@@ -193,7 +193,10 @@ use crate::{
         WebsocketsIngestorStartPlan, ZeroMqIngestorStartPlan, ZeroMqPullIngestorStartPlan,
     },
     resource::ResourceStore,
-    runtime_ack::{AckCompletion, AckOutcome, AckParkGuard, AckProgress, AckRootTracker, AckSet},
+    runtime_ack::{
+        AckCompletion, AckOutcome, AckParkGuard, AckProgress, AckRootTracker, AckSet,
+        AckWaitOutcome,
+    },
     runtime_schema::{
         CodecError, CompiledCodec, CompiledSchema, JsonDecoder, ProtobufCodecDescriptors,
         ProtobufDescriptorPool, RuntimeProjectionComponent, RuntimeRecordBatch,
@@ -257,6 +260,7 @@ mod generator;
 mod http_request_fields;
 mod inferencer;
 mod inferencer_output;
+mod inferencer_state;
 mod ingest_group;
 mod ingest_metadata;
 mod ingest_task_handles;
@@ -495,6 +499,7 @@ use http_request_fields::{
     HttpRequestFields, HttpRequestInput, HttpRequestSchemas, SourceRecords,
 };
 use inferencer_output::flush_branch_inferencer_output;
+use inferencer_state::ReplicatedInferencerState;
 pub(in crate::runtime) use ingest_group::INGEST_GROUP_MAX_ROWS;
 use ingest_group::{
     BatchPayload, BoundIngestor, BoundIngestorInput, BranchedEntrypointInput, ClientBatchDispatch,

@@ -510,10 +510,17 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
+The archived command and response shapes include conditional orphaned model-pause recovery under
+an exact mutation lease, its typed outcome and its mutation-fence and restore-installation
+conflicts. The operation checks lease authority, the restore start gate and all same-domain
+committing transactions before resuming a pause in one applied revision. It changes only domain
+status, keeping the start version, start mode, clock, schedule and incremental storage unchanged.
+
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_kind_key_logs`, `raft_kind_key_meta`, `raft_kind_key_state`, and
-`raft_kind_key_snapshots`. Opening it validates the complete keyspace namespace before reading
+`raft_inferencer_credential_pause_logs`, `raft_inferencer_credential_pause_meta`,
+`raft_inferencer_credential_pause_state`, and `raft_inferencer_credential_pause_snapshots`. Opening it
+validates the complete keyspace namespace before reading
 any records. This namespace identifies the current Model shape, including the separate JSON
 and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec encoding, a Pulsar
 subscription's required type, an owned Pulsar subscription's required start position, a Kafka
@@ -529,12 +536,14 @@ resolved branch declaration of the committed schedule carries. It identifies
 the current statement shape as well, which the statements a transaction keeps are stored in:
 `ALTER BRANCH` among those statements, and an `ALTER INGESTOR` or `ALTER EMITTER` operation that
 changes one part of its entity's body, an envelope clause or the properties, or one part of a
-construction where it stands. Its state metadata requires the current `ClusterState` encoding, 14,
+construction where it stands. Its state metadata requires the current `ClusterState` encoding, 17,
 including committed cluster parameters, the durable restore installation gate and the unit-keyed
 committed schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,
 typed ingestor instancing, exact-unit placement-group members
-and entity-versus-unit transaction gate targets. Native counts in commands, queued transactions,
+and entity-versus-unit transaction gate targets. Placement Models carry corridor or domain-wide
+coverage; domain records carry pace, and relocation statements retain exact partition or instance
+selectors. Native counts in commands, queued transactions,
 progress, outcomes, and plan, report and topology
 headers are archived as fixed-width 64-bit values with checked native decoding. Log replay, state
 recovery and snapshot installation therefore retain their complete magnitudes. See
@@ -729,3 +738,16 @@ same fence; an idempotent retry only rejoins retained progress and never reappli
 The metadata encoding has one current identity. Data from a different stored shape fails decoding
 with a typed error asking for node-state recreation. Parameter durations and numeric bounds are
 validated on archive recovery as well as construction. No migration or second decoder is present.
+
+The current schedule archive includes the inferencer ownership-state component. Native tensor checkpoints remain node-owned runtime state, never consensus records. Their placement combines the schema fingerprint and the decision layer's typed fingerprint of the pinned resource, file and ordered `STATE` declarations. Schedule application removes checkpoints whose model identity was replaced. The interconnect, consensus schedule and runtime storage identifiers name this one current shape; stored state in another shape must be recreated.
+
+### Credential Publication
+
+Users, admitted CREATE USER effects and finished-command password evidence hold the same typed
+credential, with its validated cost and fixed salt/digest arrays. Metadata also persists the
+largest admitted verification cost. A policy change, user creation or user import raises it in
+the same state publication; a login captures the optional user and that cost together, with one
+keyed lookup and no user scan. Recovery validates that the count covers both the committed
+creation policy and every recovered user before publishing the state. Snapshot metadata and
+user records preserve the complete values. The namespace and state-encoding checks above fence
+this shape before rkyv reads any user record or log entry.

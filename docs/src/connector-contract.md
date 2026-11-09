@@ -2283,6 +2283,22 @@ ingestor stopped is left unconfirmed; the ingestor instance logs `ingestor insta
 transport confirmed positions it read; the transport presents them again` with the count, and its
 transport's own redelivery contract applies.
 
+A batch acknowledgement's wait returns a typed `IngestorAcknowledgementOutcome`: `Acknowledged`,
+`Failed { reason }` for a tree the graph failed, `TimedOut { silence }` for a tree that reported no
+progress for the ingestor's `ACK TIMEOUT`, or `Shutdown`. The loop hands each outcome to
+`IngestorHost::record_acknowledgement` exactly once, for a batch or for each individually settled
+delivery, before it confirms or rejects the positions; the host counts it and reports a failed or
+timed-out tree as an error event that names which it was. The loop times every `acknowledge` and
+`reject` it asks of the connector, the retried rejection of a replayable ingestor included, and
+records the operation, whether it succeeded and its elapsed time through
+`record_transport_settlement`. It records every resume that completes through `record_resume`
+with its `IngestorResumeOutcome`, every suspension of a ready connector through `record_suspend`
+with its `IngestorSuspendCause`, and the count `record_unconfirmed_stop` reports. A connector that
+needs a resume after a failed read is suspended by that failure, which the loop records as
+`read_failure`. These observations change no settlement, delivery, retry or error policy. [Ingestor
+Acknowledgement And Lifecycle](metrics-and-observability.md#ingestor-acknowledgement-and-lifecycle)
+owns their families and inspection.
+
 ## Emitter boundary
 
 Each committed domain schedule becomes one complete typed execution revision before it reaches the
@@ -3532,7 +3548,11 @@ Broker read results and scheduled polls are observed once through the host's typ
 times paced polls; internal buffer replay is not another transport read. Neither observation
 changes delivery, cancellation, acknowledgement, error reporting or retry policy. An actual
 extension-worker unfolding refusal is counted on acknowledged, unacknowledged and endpoint intake;
-waiting for admission is not a refusal. [Ingestor Source Interactions](metrics-and-observability.md#ingestor-source-interactions)
+waiting for admission is not a refusal. The request path records each endpoint request or frame
+once for every ingestor bound to its route, through retained children of that ingestor's unit,
+from the typed outcome that ingestor reached. A route that refuses a request before reading it
+records each ingestor's refusal there, and a request it admits is recorded at dispatch alone.
+[Ingestor Source Interactions](metrics-and-observability.md#ingestor-source-interactions)
 owns the outcome and inspection contracts.
 
 The emitter host observes one publish or due staged-commit attempt through retained metric

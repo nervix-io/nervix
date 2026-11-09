@@ -219,7 +219,8 @@ impl Runtime {
             }
             RuntimeStateKind::Deduplicator
             | RuntimeStateKind::WasmProcessor
-            | RuntimeStateKind::WindowProcessor => {
+            | RuntimeStateKind::WindowProcessor
+            | RuntimeStateKind::Inferencer => {
                 let Some(entity) = placement.branch_lifecycle() else {
                     return;
                 };

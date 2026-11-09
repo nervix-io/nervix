@@ -32,7 +32,7 @@ In practice, the control plane covers:
 
 - domain creation and selection
 - model creation and deletion
-- scheduling decisions, including domain defaults and named placement rules
+- scheduling decisions, including named corridor and domain-wide placement rules
 - explicit node removal with `DROP NODE <node_id>`
 - node cordon and uncordon with `CORDON NODE <node_id>` and `UNCORDON NODE <node_id>`
 - node drain with `DRAIN NODE <node_id>`, which cordons the node and moves scheduled graph nodes away one at a time
@@ -114,7 +114,7 @@ Only the bound domain's replicated configuration effects may be queued:
 
 - model `CREATE`, supported model `ALTER`, and model `DROP` statements;
 - `REBIND RESOURCE`, as one atomic model-mutation batch;
-- `ALTER DOMAIN`, `START`, and `STOP`;
+- `START` and `STOP`;
 - `CREATE RESOURCE` and `RESET WASM PROCESSOR ... STATE`.
 
 Completion on the bound session resolves identifiers against the configuration the queued
@@ -315,6 +315,14 @@ the first attempt and a resuming leader apply this rule. Repeating the outstandi
 this execution and waits for the retained terminal result. Atomicity still does not span the whole
 transaction.
 
+Before its internal transaction commits, a model command may encounter an orphaned alteration
+pause. After its whole-transaction progress recheck, a typed paused-domain refusal triggers a
+conditional recovery under its admitted mutation lease. The applied consensus operation checks
+that exact fence, the restore activation gate and the absence of a same-domain `COMMITTING`
+transaction atomically. An active local alteration prevents the attempt; no new alteration guard
+is acquired. A confirmed recovery replans the command; an unconfirmed one keeps its identity and
+lease available for retry. This leaves ordinary transaction cleanup and backup cuts unchanged.
+
 Finished transactions remain as small tombstones containing the outcome, step progress, errors,
 and executed quiesce levels. A tombstone also keeps the request identity, position, source digest
 and admitted result of every statement the transaction accepted, without the statement itself. An
@@ -400,8 +408,12 @@ invalidates the candidate and makes the scheduler compute again from a coherent 
 
 Placement coverage is derived from the complete candidate execution graph rather than stored as a
 fixed runtime-node list. During every graph activation, the control plane recomputes path-gated
-rule claims, applies rank resolution, rejects equal-rank policy conflicts, and forms the effective
-`REQUIRE COLOCATION` groups before publishing the schedule. A rejected candidate writes nothing
+rule claims and domain-wide coverage, applies rank resolution, rejects equal-rank policy
+conflicts, and validates the winning policy against each hop's unit correspondence. Identity and
+fiber hops admit colocation; single-to-many hops also admit separation; data-dependent hops admit
+only neutral policy. Exact unit bonds form the effective `REQUIRE COLOCATION` groups before the
+schedule is published. Instancing, branching, partition-count and route mutations all pass through
+this same candidate-graph check. A rejected candidate writes nothing
 and leaves the prior models and schedule active.
 
 Schedule publication preserves the existing primary and replicas of every single-owner ingestor,
@@ -412,15 +424,20 @@ their external sessions. `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LIS
 are the only ingestors whose assignments follow live membership, because their listeners execute
 on every cluster node.
 
-Every relay is also scheduled with one primary owner. Ordinary relays have no replicas.
+Every relay unit is scheduled with one primary owner. Several declared partitions produce
+independent units. Ordinary relays have no replicas.
 Materialized relays use the same relay schedule entry: additional assigned nodes are replicas of
 materialized state only, not relay buffers, branch presence, fan-out, or metrics.
 
 Hard colocation groups constrain every scheduler. A newly effective require group is consolidated
-through the normal runtime-node handoff path, and failover or drain moves the group as one unit.
+through the normal ownership handoff path, and failover or drain moves the exact unit group
+together. Corresponding partition indices form separate groups; a healthy sibling retains its
+ownership, branch state and WASM generation.
 Soft policies affect only future placement decisions and do not relocate existing assignments.
-`ALTER DOMAIN SET PLACEMENT` changes the active domain's fallback through the same schedule
-activation boundary. See [Placement Policies](placement.md) for corridor coverage, precedence,
+`CREATE PLACEMENT ... DOMAIN WIDE` covers every eligible hop and uses the same rank precedence
+and validation as a corridor. Exact `PARTITION` and `INSTANCE` relocation selectors move one
+unit's group through the existing gate, drain and publication boundary. See
+[Placement Policies](placement.md) for corridor coverage, precedence,
 carve-outs, lifecycle commands, and introspection.
 
 ## ALTER Lock And Quiesce Classification

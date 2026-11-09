@@ -75,6 +75,21 @@ representation properties. All-features workspace tests enable `ruby-tests` too,
 restored unit jobs provision the same Ruby version. `ruby/setup-ruby` provides CI's interpreter,
 headers and shared library. No buffer or generated gem is written into the source tree.
 
+The minitest suite in `tests/client_conformance/ruby/suite` uses Ruby's bundled minitest and Prism,
+without another gem download. `just test-client-ruby-api` prepares the gem and runs its boundary
+tier through the native `host_suite` test; that test also runs in ordinary workspace unit jobs.
+`just test-client-ruby-cluster` runs the one- and three-node TLS/plaintext cluster rows.
+Packaging prepares a fresh `GEM_HOME` beside the extracted gem, and each tier loads that installed
+archive first. The coverage build prepares both forms from its instrumented extension and carries
+them in the unit-test archive. `NERVIX_CLIENT_RUBY_TEST_ARTIFACTS` selects those prepared artifacts;
+no test invokes a compiler or package manager. `just test-client-ruby-api-run` runs the prepared
+boundary tier directly. `just validate-client-suites` compares native magnus registrations with
+Prism-parsed constant and typed-receiver references, inventories every minitest identity and
+checks the [Ruby guide](client-library-ruby.md)'s anchored includes. `just test-client-ruby-suite-reader`
+checks registration, receiver, inventory, guide and actual minitest reporter controls.
+The conformance job calls `just test-client-ruby-run` after its artifact build, preserving the
+embedded tests and boundary tier without packaging that same gem twice.
+
 The Python package builds with maturin, which `just build-client-python` runs as
 `uvx --from maturin==1.16.0 maturin`, into an abi3 wheel for CPython 3.12 and later under
 `target/client-conformance/wheels`, with its typed stub `crates/client-python/nervix_client.pyi`
@@ -94,8 +109,18 @@ scenario suite. `just validate-client-suites`, part of `just validate`, types th
 paced simulation driver with `mypy --strict` against the stub through the repository's uv project,
 and holds the suite, its inventory, the stub and the
 [Python Client Library](client-library-python.md) chapter to the package's source. The
-`client-conformance` CI job builds every host's artifacts, runs the JVM, Ruby and Python boundary tiers,
+`client-conformance` CI job builds every host's artifacts, runs the JVM, Ruby, Python, C and C++ boundary tiers,
 then runs the probes and the suites' cluster rows together.
+
+The C ABI application suites use C11 and C++17 compilers with POSIX threads, AddressSanitizer and
+UndefinedBehaviorSanitizer. `just build-client-c-suites` builds the shared binding and both ordinary
+and sanitized programs; `just test-client-c-api` and `just test-client-cpp-api` run their boundary
+tiers through a bounded Cargo integration harness. Ordinary workspace tests run the same harness.
+`just test-client-c-cluster` runs both hosts' HTTP/HTTPS one-/three-node cluster examples. The
+surface checker needs Clang and reads resolved declarations and references from each translation
+unit, holding both programs to every function, typedef and enumerator of `nervix_client.h`.
+`just validate-client-c-suites` checks that surface, the test tables, inventory and
+[C and C++ guide](client-library-c.md) without building a cluster. No test invokes a compiler.
 
 `just build-web-console` builds the console the server embeds. trunk uses a `wasm-bindgen` CLI
 from `PATH` when its version equals the one `Cargo.lock` locks, and otherwise downloads it from
@@ -167,7 +192,7 @@ NERVIX_INIT_DEFAULT_USER_PASSWORD='nervix' just server
 
 Fresh clusters require an initial password for the `default` user. Set
 `NERVIX_INIT_DEFAULT_USER_PASSWORD` or pass `--init-default-user-password <password>` on the first
-startup. The leader stores the `default` user's Argon2 password hash in the strongly consistent
+startup. The leader stores the `default` user's typed PBKDF2-HMAC-SHA-512 credential in the strongly consistent
 control plane only when that user does not already exist. After the default user has been created,
 remove the environment variable or flag from normal startup. Later users can be created through Plexus:
 
@@ -540,6 +565,16 @@ a test job keeps its archive, and a rerun of `scenarios-build` replaces both. Th
 test executables without their debug information, most of a test executable's bytes, as
 [Scenario Shards](integration-test-lifecycle.md#scenario-shards) describes.
 
+Every host suite's boundary tier runs in the ordinary `tests` job. The build prepares the Python
+wheel, instrumented JNI jar and JUnit launcher/classes/reporter, native Ruby gem and C/C++ programs
+before packing; the restored job installs the Python environments and compiles nothing. C/C++
+boundary runs include AddressSanitizer and UndefinedBehaviorSanitizer. The ordinary scenario shards
+also run the Python host suite's one-/three-node cluster examples from their existing wheel.
+JVM, Ruby and C/C++ cluster examples stay in `client-conformance`: those runtimes and prepared host
+artifacts are absent from the ordinary scenario archive. The local host-cluster recipes and the
+full conformance runner require their boundary tiers, including packaging smoke, to pass before
+starting scenarios. The ordinary Python scenario runners apply the same gate.
+
 A transfer reports every ten seconds how much it moved and how fast, how many parts are done,
 moving, waiting to retry or queued, and which moving part is the slowest, so the step's log shows a
 transfer that crawls as well as one that stopped. A connection that does not open within 20 s, one
@@ -588,12 +623,12 @@ compares it with the workflows.
 | `shuttle` | Check | The Shuttle checks and their replay check |
 | `loom` | Check | The Loom models and their weakening qualification |
 | `turmoil` | Check | The Turmoil simulation suite and its replay check |
-| `client-conformance` | Check | The cross-language client probes and the host suites' cluster tiers against one- and three-node clusters, and the JVM, Ruby and Python boundary tiers |
+| `client-conformance` | Check | The cross-language client probes and every host suite's cluster tier against one- and three-node clusters, gated by the prepared boundary tiers and packaging smoke. Boundary tiers and Python cluster examples also run in ordinary CI. |
 | `bolero-random` | Check, through Bolero | Bolero's randomized properties and corpus replay, which a manual run of the Bolero workflow always runs |
 | `extra-doctests` | Check | Capability doctests |
 | `extra-miri` | Check | Miri over the expiry map |
 | `extra-mutation` | Check | Mutation tests of the expiry map |
-| `extra-runners` | Check | Python coverage of the reporters, gates and collectors: patch coverage, the ordinary merge, the CRAP report, the full union, the paced simulation policy, the release gate, the deployment controller, the kache contract, the connector matrix renderer, the test selection, the wasm-bindgen tool, the native collector and the primitive source validator |
+| `extra-runners` | Check | Python coverage of the reporters, gates and collectors: patch coverage, the ordinary merge, the CRAP report, the full union, the paced simulation policy, the release gate, the deployment controller, the kache contract, the connector matrix renderer, the test selection, the wasm-bindgen tool, the external binding chaos controls, the native collector, the client suite readers with the unit-test archive, and the primitive source validator |
 | `extra-compiler` | Check | Source contracts, compiler diagnostics, the Rust runner/gate/audit owners, paired API doctests, compiler cache qualification and the Python coverage of the ratchet's callers |
 | `extra-bench-smoke` | Check | Benchmark smoke tests |
 | `extra-primitives` | Check | Primitive boundary conformance in ordinary, Shuttle, Loom and Turmoil modes, plus ordinary documentation and browser checks. `coverage-full` then requires those collections |
@@ -1061,8 +1096,8 @@ suites run selections of those scenarios, each as its own `just chaos run` comma
 
 ```bash
 just chaos suite list
-just chaos suite smoke --image ghcr.io/nervix-io/nervix@sha256:<digest>
-just chaos suite soak --image ghcr.io/nervix-io/nervix@sha256:<digest>
+just chaos suite smoke --image ghcr.io/nervix-io/nervix@sha256:<digest> --binding-image ghcr.io/nervix-io/nervix@sha256:<binding-digest>
+just chaos suite soak --image ghcr.io/nervix-io/nervix@sha256:<digest> --binding-image ghcr.io/nervix-io/nervix@sha256:<binding-digest>
 ```
 
 The smoke suite runs a baseline, a leader crash with its restart and a partition with its recovery;
@@ -1081,7 +1116,7 @@ release-mode diagnostic server of this checkout on an available image:
 
 ```bash
 just build-chaos-diagnostic-image nervix:diagnostic-local ghcr.io/nervix-io/nervix:debian-latest deloxide-order
-just chaos suite smoke --image nervix:diagnostic-local --image-kind deloxide-order
+just chaos suite smoke --image nervix:diagnostic-local --binding-image nervix:chaos-client --image-kind deloxide-order
 ```
 
 [External Cluster Chaos](./cluster-chaos.md) describes the runner, every scenario and its verdicts,
@@ -1205,3 +1240,13 @@ builds and PDF dependencies; its preparation step and pre-build diagnostics repo
 Every pull request's `checks` job runs
 `just test-docs`, the script tests and docs worker tests that `just book` runs first, so a pull
 request without the label still checks the book's structure and its tooling.
+
+### Credential Storage Release Note
+
+This revision requires the current `raft_credential_pause_*` consensus namespace and `ClusterState`
+encoding 17. A stored state with a different namespace or encoding fails with
+`invalid consensus record storage; recreate the node's stored state` before user records or log
+entries are decoded. Recreate the node's stored state; no credential conversion is performed.
+User backup records require version 2 and contain the complete typed credential. A users record
+with another version is refused by its record header before decoding. Backups without a users
+section retain their existing contract. Protect archives as secrets.

@@ -22,7 +22,7 @@ use nervix_backup::{
 };
 use nervix_models::{
     BackupCut, BackupResources, CreateStatement, DomainName, DomainPace, DomainStartPoint,
-    DomainStatus, Model, PlacementPolicy, RequestedResourceVersion, Statement, Timestamp, UserName,
+    DomainStatus, Model, RequestedResourceVersion, Statement, Timestamp, UserName,
     canonical_plexus_document,
 };
 
@@ -75,7 +75,10 @@ impl ModelArchive {
             Some(UsersRecord {
                 users: vec![UserRecord {
                     name: UserName::parse("synthetic").assured("the synthetic user is valid"),
-                    password_hash: "$argon2id$v=19$m=8,t=1,p=1$c3ludGhldGlj$c3ludGhldGlj".into(),
+                    password_credential: nervix_models::PasswordCredential::from_parts(
+                        210000, [54; 16], [54; 64],
+                    )
+                    .assured("the fixed credential has a bounded iteration count"),
                 }],
             })
         } else {
@@ -115,7 +118,6 @@ impl ModelArchive {
             let record = DomainRecord {
                 domain: domain.clone(),
                 pace: DomainPace::Unpaced,
-                placement: PlacementPolicy::Neutral,
                 status: DomainStatus::Stopped,
                 start_version: arbitrary.entropy().any_u64(),
                 start_point: DomainStartPoint::Resume,

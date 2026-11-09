@@ -8,6 +8,10 @@
     nervix_lint,
     nervix::layer(edge, reason = "public client language adapter")
 )]
+// Erasing a form section to `AnyView` makes the compiler lay out the future that resolves it, and
+// that future nests as deeply as the section's view tree; the processor sections exceed the
+// default limit of 128.
+#![recursion_limit = "256"]
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry},
@@ -12776,7 +12780,7 @@ mod tests {
                     attempt,
                     draft_revision: revision,
                     kind: CreateKind::Domain,
-                    presentation: "CREATE UNPACED DOMAIN created PLACEMENT NEUTRAL;".to_string(),
+                    presentation: "CREATE UNPACED DOMAIN created;".to_string(),
                     domain: None,
                     resource: None,
                     created_domain: Some(created_domain.clone()),

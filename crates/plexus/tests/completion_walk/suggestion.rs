@@ -30,6 +30,7 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("byte_size_literal", "1MiB"),
     ("completed_resource_version", "1"),
     ("instance_count", "2"),
+    ("instance_index", "0"),
     ("integer_literal", "1"),
     ("invocation_number", "1"),
     ("max_fuel", "1000000"),
@@ -42,6 +43,7 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("mqtt_qos", "1"),
     ("operation_number", "1"),
     ("partition_count", "4"),
+    ("partition_index", "0"),
     ("request_window", "8"),
     ("resource_version", "1"),
     // Deliberately constant: a conflict target has to name a column the VALUES record already

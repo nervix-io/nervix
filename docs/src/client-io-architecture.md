@@ -19,7 +19,7 @@ Python owns their lifetimes. The following chapters remain the owners of their r
 | Ingestor syntax, admission and ingestor outcomes | [Ingestors](./ingestors.md#client-ingestors) |
 | Emitter syntax, construction, batching and graph ACK boundary | [Emitters](./emitters.md#client-emitters) |
 | Public attachments, subscriptions and clock observation | [Sessions](./sessions.md) |
-| Rust handles and shared binding | [Rust Client Library](./client-library.md#producers) and the [Client Implementation Manual](./client-implementation-manual.md#using-the-shared-binding), with [its Python package rules](./client-implementation-manual.md#using-the-python-package) |
+| Rust handles and shared binding | [Rust Client Library](./client-library.md#producers), [C and C++ Client Library](./client-library-c.md), and the [Client Implementation Manual](./client-implementation-manual.md#using-the-shared-binding), with [its Python package rules](./client-implementation-manual.md#using-the-python-package) |
 | FlatBuffers, transport, correlation, cancellation and restoration | [Client Session Protocol](./client-session-protocol.md#producers) and the [Client Implementation Manual](./client-implementation-manual.md#producers) |
 | Model validation, typed revision construction and installation | [Execution Plans](./execution-plans.md) |
 | Native ingestor/emitter composition and the common emitter host | [Connector Contract](./connector-contract.md#ingestor-boundary) |
@@ -369,6 +369,14 @@ over TLS and plaintext.
 The inventory accounts for every test after teardown. Java compiler elements resolve the suite
 references to the binding's declared public members; the guide includes compiled, executed suite
 examples. JNI representation properties remain a separate instrument.
+
+The Ruby minitest suite and its [guide](client-library-ruby.md) exercise the native gem, including
+GVL release, collection, retained buffer slices, typed failures and explicit or block-scoped close.
+The boundary tier runs the prepared gem without a cluster, including a fresh installed archive;
+the cluster tier uses the same one-/three-node TLS and plaintext fixture. Results are reported
+after teardown and judged against the common inventory. The source check reads magnus registrations
+and Prism syntax with receiver identity; it rejects missing references rather than counting names
+in strings or comments. Representation properties remain with the native binding owner.
 
 The JNI edge leases every input before a blocking host call, then releases the Java handle's
 monitor. Cleaner cleanup and explicit `close()` release each allocation once, after any admitted
@@ -765,7 +773,7 @@ interleaving has been explored.
 | Exact native input, transforming branches, shared producer window, over-credit refusal, cancelled result waits and control progress | [client_ingestors.feature](https://github.com/nervix-io/nervix/blob/main/tests/features/runtime/client_ingestors.feature) |
 | Branch/source isolation, attached and detached ACKs, pooled consumers, independent emitter fan-out, retry/reject/timeout, sensitive export, oversized output and credit restoration | [client_emitters.feature](https://github.com/nervix-io/nervix/blob/main/tests/features/runtime/client_emitters.feature) |
 | Real owner kill/freeze, forwarding-node kill, cleared versus uncleared batches and fresh restoration | [client_ingestor_process_faults.feature](https://github.com/nervix-io/nervix/blob/main/tests/features/cluster/client_ingestor_process_faults.feature) |
-| Bulk C ABI and C/C++/Python/Java/Ruby round trip, lifetimes, deadlines, credit and session gaps | [client_conformance.feature](https://github.com/nervix-io/nervix/blob/main/tests/features/runtime/client_conformance.feature) and the [client conformance ledger](https://github.com/nervix-io/nervix/blob/main/tests/client-conformance-ledger.md) |
+| Bulk C ABI and C/C++/Python/Java/Ruby round trip, lifetimes, deadlines, credit and session gaps | [client_conformance.feature](https://github.com/nervix-io/nervix/blob/main/tests/features/runtime/client_conformance.feature) and the [client conformance ledger](https://github.com/nervix-io/nervix/blob/main/tests/client-conformance-ledger.md); C11/C++17 named host suites in `client_suites.feature`, their ordinary and ASan/UBSan boundary tiers, and the [C and C++ guide](client-library-c.md) |
 | Runnable Rust/Python pacing, generation separation, current-window admission, saturation, non-owner entry, clock-authority movement and deliberate replay | [paced_simulation.feature](https://github.com/nervix-io/nervix/blob/main/tests/features/runtime/paced_simulation.feature) |
 
 The buffered ALTER outlines are named `An alteration drains buffered branches on a shared relay

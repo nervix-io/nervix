@@ -312,9 +312,40 @@ services:
     networks:
       - chaos
 
-  # The endpoint client posts the endpoints scenario's records to every node's HTTP listener and
-  # writes its ledger of attempts to its log; the runner holds and releases it through the control
-  # files of its read-only endpoint directory.
+  # The prepared package client writes typed submission, delivery, effect and settlement evidence.
+  endpoint-binding:
+    image: ${CHAOS_BINDING_IMAGE:?CHAOS_BINDING_IMAGE is required}
+    profiles:
+      - binding
+    entrypoint:
+      - python3
+      - -I
+      - /opt/chaos/binding_client.py
+      - --uri
+      - ${CHAOS_BINDING_URI:-http://nervix-1:47391}
+      - --seeds
+      - ${CHAOS_BINDING_SEEDS:-http://nervix-1:47391}
+      - --password
+      - ${CHAOS_PASSWORD:?CHAOS_PASSWORD is required}
+      - --input
+      - /opt/chaos/endpoints/binding-input.ndjson
+      - --control
+      - /opt/chaos/endpoints/control
+    labels:
+      <<: *run-labels
+      io.nervix.chaos.role: load
+    volumes:
+      - ${CHAOS_SCRIPT_DIR:?CHAOS_SCRIPT_DIR is required}/binding_client.py:/opt/chaos/binding_client.py:ro
+      - ${CHAOS_ENDPOINT_DIR:?CHAOS_ENDPOINT_DIR is required}:/opt/chaos/endpoints:ro
+    logging:
+      driver: local
+      options:
+        max-file: "2"
+        max-size: 2m
+    networks:
+      - chaos
+
+  # The HTTP client writes its attempt ledger and reads the controller's holds from this directory.
   endpoint-load:
     image: ${CHAOS_PYTHON_IMAGE:?CHAOS_PYTHON_IMAGE is required}
     profiles:

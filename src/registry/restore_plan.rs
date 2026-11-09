@@ -336,7 +336,7 @@ fn plan_users(
         );
         users.push(UserCredentials {
             name: user.name.clone(),
-            password_hash: user.password_hash.clone(),
+            password_credential: user.password_credential.clone(),
         });
     }
     Ok(PlannedUsers {
@@ -428,10 +428,7 @@ fn plan_domain(
     })?;
     let state = DomainState {
         id: target.clone(),
-        config: DomainConfig {
-            pace: record.pace,
-            placement: record.placement,
-        },
+        config: DomainConfig { pace: record.pace },
         status: DomainStatus::Stopped,
         start_version: record.start_version,
         last_start: record.start_point.clone(),
@@ -563,9 +560,7 @@ mod tests {
         BackupManifest, DeclaredResource, DomainCapture, DomainRecord, PublishedResourceVersion,
         RaftLogPosition, ResourceVersionRecord, SectionDigest, SectionPath, UserRecord,
     };
-    use nervix_models::{
-        ClusterNodeName, DomainPace, DomainStartPoint, PlacementPolicy, Statement, Timestamp,
-    };
+    use nervix_models::{ClusterNodeName, DomainPace, DomainStartPoint, Statement, Timestamp};
     use nervix_plexus::client_statement::{ClientStatement, parse_client_statements};
 
     use super::*;
@@ -670,7 +665,6 @@ mod tests {
             record: DomainRecord {
                 domain: domain(name),
                 pace: DomainPace::Unpaced,
-                placement: PlacementPolicy::PreferColocation,
                 status: DomainStatus::Running,
                 start_version: 4,
                 start_point: DomainStartPoint::Resume,
@@ -699,11 +693,17 @@ mod tests {
                 users: vec![
                     UserRecord {
                         name: user("alice"),
-                        password_hash: "$argon2id$alice".to_string(),
+                        password_credential: nervix_models::PasswordCredential::from_parts(
+                            210000, [123; 16], [123; 64],
+                        )
+                        .assured("the fixed credential has a bounded iteration count"),
                     },
                     UserRecord {
                         name: user("bob"),
-                        password_hash: "$argon2id$bob".to_string(),
+                        password_credential: nervix_models::PasswordCredential::from_parts(
+                            210000, [170; 16], [170; 64],
+                        )
+                        .assured("the fixed credential has a bounded iteration count"),
                     },
                 ],
             }),
@@ -841,15 +841,15 @@ mod tests {
                 replaced: 0,
             }
         );
-        assert_eq!(users.users[0].password_hash, "$argon2id$alice");
+        assert_eq!(
+            users.users[0].password_credential,
+            nervix_models::PasswordCredential::from_parts(210000, [123; 16], [123; 64])
+                .assured("the fixture cost is bounded")
+        );
         let prod = &planned.domains[&domain("prod")];
         assert_eq!(prod.state.status, DomainStatus::Stopped);
         assert_eq!(prod.state.start_version, 4);
         assert_eq!(prod.state.clock, None);
-        assert_eq!(
-            prod.state.config.placement,
-            PlacementPolicy::PreferColocation
-        );
         assert_eq!(prod.models.len(), 2);
         assert_eq!(
             planned.target_domains(),

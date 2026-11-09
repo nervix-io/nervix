@@ -10,24 +10,23 @@ use std::num::NonZeroU64;
 use error_stack::Report;
 use nervix_models::{
     ClusterNodeName, DomainClockPeriod, DomainClockSkew, DomainClockState, DomainName, DomainPace,
-    DomainStartPoint, DomainStatus, DomainTimeRate, PlacementPolicy, ResourceName, Timestamp,
-    UserName,
+    DomainStartPoint, DomainStatus, DomainTimeRate, ResourceName, Timestamp, UserName,
 };
 
 use crate::{
     error::{ArchiveReadError, ArchiveWriteError},
     section::{ArchiveRecord, RecordKind, decode_record, encode_record},
     wire::{
-        ClockMappingWire, DeclaredResourceWire, DomainWire, NodeNameWire, PaceWire, PlacementWire,
+        ClockMappingWire, DeclaredResourceWire, DomainWire, NodeNameWire, PaceWire,
         PublishedVersionWire, ResourceVersionWire, StartPointWire, StatusWire, UserWire, UsersWire,
         VersionStateWire,
     },
 };
 
 /// The users record's format version.
-const USERS_VERSION: u16 = 1;
+const USERS_VERSION: u16 = 2;
 /// The domain record's format version.
-const DOMAIN_VERSION: u16 = 1;
+const DOMAIN_VERSION: u16 = 2;
 /// The resource version record's format version.
 const RESOURCE_VERSION_VERSION: u16 = 1;
 
@@ -37,11 +36,11 @@ pub struct UsersRecord {
     pub users: Vec<UserRecord>,
 }
 
-/// One user: its name and its password hash, a PHC string. The password itself is never stored.
+/// One user and its complete typed credential. The password itself is never stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRecord {
     pub name: UserName,
-    pub password_hash: String,
+    pub password_credential: nervix_models::PasswordCredential,
 }
 
 /// A domain's lifecycle, clock and resource catalog.
@@ -49,8 +48,6 @@ pub struct UserRecord {
 pub struct DomainRecord {
     pub domain: DomainName,
     pub pace: DomainPace,
-    /// The placement policy nodes of the domain default to.
-    pub placement: PlacementPolicy,
     pub status: DomainStatus,
     /// How many times the domain has been started.
     pub start_version: u64,
@@ -122,7 +119,7 @@ impl ArchiveRecord for UsersRecord {
                 .iter()
                 .map(|user| UserWire {
                     name: user.name.as_str().to_string(),
-                    password_hash: user.password_hash.clone(),
+                    password_credential: user.password_credential.clone(),
                 })
                 .collect(),
         };
@@ -135,12 +132,9 @@ impl ArchiveRecord for UsersRecord {
         for user in wire.users {
             let name = UserName::parse(&user.name)
                 .map_err(|error| error.change_context(invalid_value(path, "user name")))?;
-            if user.password_hash.is_empty() {
-                return Err(Report::new(invalid_value(path, "password hash")));
-            }
             users.push(UserRecord {
                 name,
-                password_hash: user.password_hash,
+                password_credential: user.password_credential,
             });
         }
         Ok(Self { users })
@@ -158,12 +152,6 @@ impl ArchiveRecord for DomainRecord {
                 period_nanos: period.as_nanos(),
                 skew_nanos: skew.as_nanos(),
             },
-        };
-        let placement = match self.placement {
-            PlacementPolicy::RequireColocation => PlacementWire::RequireColocation,
-            PlacementPolicy::PreferColocation => PlacementWire::PreferColocation,
-            PlacementPolicy::Neutral => PlacementWire::Neutral,
-            PlacementPolicy::SuggestSeparation => PlacementWire::SuggestSeparation,
         };
         let status = match self.status {
             DomainStatus::Stopped => StatusWire::Stopped,
@@ -191,7 +179,6 @@ impl ArchiveRecord for DomainRecord {
         let wire = DomainWire {
             domain: self.domain.as_str().to_string(),
             pace,
-            placement,
             status,
             start_version: self.start_version,
             start_point,
@@ -227,12 +214,6 @@ impl ArchiveRecord for DomainRecord {
                     skew: DomainClockSkew::from_nanos(skew_nanos),
                 }
             }
-        };
-        let placement = match wire.placement {
-            PlacementWire::RequireColocation => PlacementPolicy::RequireColocation,
-            PlacementWire::PreferColocation => PlacementPolicy::PreferColocation,
-            PlacementWire::Neutral => PlacementPolicy::Neutral,
-            PlacementWire::SuggestSeparation => PlacementPolicy::SuggestSeparation,
         };
         let status = match wire.status {
             StatusWire::Stopped => DomainStatus::Stopped,
@@ -275,7 +256,6 @@ impl ArchiveRecord for DomainRecord {
         Ok(Self {
             domain,
             pace,
-            placement,
             status,
             start_version: wire.start_version,
             start_point,

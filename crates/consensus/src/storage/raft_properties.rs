@@ -110,6 +110,44 @@ fn bolero_consensus_raft_records_round_trip_through_the_storage_codec() {
             let restored = StoreInner::decode_log_entry(&StoreInner::log_key(index), &encoded)
                 .assured("an entry stored under its own index recovers");
             assert_eq!(restored, entry);
+            let domain = arbitrary.rule_name::<nervix_models::DomainName>();
+            let owner = crate::DomainMutationOwner::command(arbitrary.execution_reference());
+            // Complete typed recovery replies and their concrete refusal causes use this codec too.
+            for response in [
+                crate::ConsensusResponse::OrphanedPauseRecovery(
+                    crate::OrphanedPauseRecovery::Resumed,
+                ),
+                crate::ConsensusResponse::OrphanedPauseRecovery(
+                    crate::OrphanedPauseRecovery::Unchanged,
+                ),
+                crate::ConsensusResponse::OrphanedPauseRecovery(
+                    crate::OrphanedPauseRecovery::TransactionActive {
+                        transaction: arbitrary.string(),
+                    },
+                ),
+                crate::ConsensusResponse::Conflict(crate::ConsensusConflict::DomainMutation {
+                    cause: Box::new(crate::DomainMutationError::Conflict {
+                        domain: domain.clone(),
+                        owner: owner.clone(),
+                    }),
+                }),
+                crate::ConsensusResponse::Conflict(crate::ConsensusConflict::DomainMutation {
+                    cause: Box::new(crate::DomainMutationError::FenceLost {
+                        domain: domain.clone(),
+                        owner,
+                    }),
+                }),
+                crate::ConsensusResponse::Conflict(crate::ConsensusConflict::RestoreInstallation {
+                    cause: Box::new(crate::RestoreStateInstallationError::Incomplete {
+                        domain: domain.clone(),
+                    }),
+                }),
+                crate::ConsensusResponse::Conflict(crate::ConsensusConflict::RestoreInstallation {
+                    cause: Box::new(crate::RestoreStateInstallationError::Authority { domain }),
+                }),
+            ] {
+                assert_eq!(stored_and_recovered(&response), response);
+            }
             let index = arbitrary.entropy().any_u64();
             let restored = StoreInner::log_index(&StoreInner::log_key(index))
                 .assured("a log key names the index it was built from");
@@ -117,6 +155,12 @@ fn bolero_consensus_raft_records_round_trip_through_the_storage_codec() {
 
             let metadata = StateMetadata {
                 parameters: Some(arbitrary.cluster_parameter_record()),
+                password_work: Some(
+                    nervix_models::PasswordCost::try_from(
+                        nervix_models::PasswordIterations::MAXIMUM,
+                    )
+                    .assured("the maximum cost is accepted"),
+                ),
                 encoding: StateEncoding::ClusterState,
                 last_applied_log_id: optional_log_id(&mut arbitrary),
                 last_membership: Arc::new(stored_membership(&mut arbitrary)),
@@ -136,6 +180,7 @@ fn bolero_consensus_raft_records_round_trip_through_the_storage_codec() {
             assert_eq!(restored.last_membership, metadata.last_membership);
             assert_eq!(restored.runtime_revision, metadata.runtime_revision);
             assert_eq!(restored.parameters, metadata.parameters);
+            assert_eq!(restored.password_work, metadata.password_work);
             assert_eq!(restored.command_retry_fence, metadata.command_retry_fence);
 
             let section_count = arbitrary.entropy().up_to(u64::from(u32::MAX));

@@ -429,7 +429,6 @@ pub(super) fn paced_domain_state(raw: &str) -> DomainState {
                     .parse()
                     .assured("250 milliseconds fits the fixture skew representation"),
             },
-            placement: nervix_models::PlacementPolicy::Neutral,
         },
         status: DomainStatus::Running,
         start_version: 0,
@@ -443,7 +442,6 @@ pub(super) fn unpaced_domain_state(raw: &str) -> DomainState {
         id: domain(raw),
         config: DomainConfig {
             pace: DomainPace::Unpaced,
-            placement: nervix_models::PlacementPolicy::Neutral,
         },
         status: DomainStatus::Running,
         start_version: 0,
@@ -497,6 +495,7 @@ pub(super) fn publish_state_identity(
         nervix_models::DomainNodeRef::node_in(domain.clone(), kind, identifier.into()),
         ScheduledStateAssignment {
             identity: super::ScheduledStateIdentity {
+                inferencer_model: None,
                 schema_fingerprint: SchemaFingerprint::from_digest([7; 32]),
                 wasm_state_generations,
             },

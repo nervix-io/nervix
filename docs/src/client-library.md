@@ -9,8 +9,8 @@ Protocol](./client-session-protocol.md) explains the protocol behavior it relies
 
 For a complete graph, data-handle lifetimes, credit and failure decisions, read
 [Client Ingestors And Emitters](./client-io-architecture.md). A Python program uses the same client
-through the [Python Client Library](./client-library-python.md), which this chapter does not
-describe.
+through the [Python Client Library](./client-library-python.md); a Ruby program uses the
+[Ruby Client Library](./client-library-ruby.md). Their guides own the host-specific APIs.
 
 Capabilities:
 
@@ -414,99 +414,9 @@ clock again behind the detach: an attach it already decided to send to restore t
 first, and the detach releases what it attached, while a restoration that would attach the clock
 during the detach waits for it to end and attaches the clock only if the client still follows it.
 
-### Through The Native Ruby Gem
+C and C++ clock accessors and ownership are described in the
+[C and C++ Client Library](client-library-c.md#follow-a-domain-clock).
 
-Ruby 3.3+ uses the gem built by `just build-client-ruby`: `require 'nervix_client'` exposes
-`Nervix::Client::Session.connect(uri, domain: ..., username: ..., password: ..., cancel: ...)`.
-Connection keywords also select TLS, CA PEM, seeds and connect/request/retry/backup waits in
-seconds. Optional connection and cancellation keywords accept `nil`.
-`Cancel.new(deadline: seconds)` bounds a call and `trigger` cancels it from another Ruby
-thread. Blocking calls release the GVL and use the Rust client's state and recovery decisions.
-Prepare a durable command once with `session.prepare(statement)`, then recover by calling
-`session.execute(execution)` on that same object. Typed `ClientError` subclasses keep the whole
-message, kind, execution reference and endpoint refusal.
-
-`next_event` and `next_clock_event` return native event objects. `domain_clock(domain)` returns
-the current clock snapshot with its logical-time, wall-duration, admission-window and admits
-projections. Paced state, ticks, ends and restoration failures carry the same fields as the Rust
-client, including the restoration message and retry wait in nanoseconds. Variant-inappropriate
-reads raise `TypeMismatchError`. Frame buffers retain their event; `frame.get_string` copies it.
-The collector owns native objects, including clocks that outlive their session.
-
-### Through The Shared C Binding
-
-The shared C binding reads the same events and attached clocks for C and C++ hosts; its
-header is `crates/client-ffi/include/nervix_client.h`. `ATTACH DOMAIN CLOCK;` and
-`DETACH DOMAIN CLOCK;` run through `nx_session_prepare` and `nx_session_execute` like any statement,
-for the session's selected domain, and fail with `NX_ERROR_INVALID_ARGUMENT` when none is selected.
-`nx_session_next_clock_event` waits for the next event, bounded by the same `nx_cancel` tokens and
-deadlines as every blocking call, and hands out an `nx_clock_event` reference. While a followed
-clock waits to be restored it opens a session; when none can open, it fails with `NX_ERROR_CLOSED`
-if no server is known and otherwise with the connection, transport or deadline failure of that
-attempt, and the next call tries again. The events are the Rust client's, coalesced the same way:
-
-- `nx_clock_event_kind_of` tells an `NX_CLOCK_EVENT_STATE`, `NX_CLOCK_EVENT_TICK`,
-  `NX_CLOCK_EVENT_ENDED`, `NX_CLOCK_EVENT_INTERRUPTED` or `NX_CLOCK_EVENT_RESTORATION_FAILED` event
-  apart, and `nx_clock_event_domain` borrows the name of the domain it concerns. A restoration
-  failure reports that the session refused to attach an interrupted clock again, which it tries
-  again after the growing wait the Rust client reports. `nx_clock_event_restoration_cause` reads its
-  cause, `NX_RESTORATION_IN_TRANSACTION`, `NX_RESTORATION_REJECTED` or `NX_RESTORATION_FAILED`. The
-  event also carries the refusal message as borrowed UTF-8 bytes and that wait in nanoseconds, read
-  with `nx_clock_event_restoration_message` and `nx_clock_event_restoration_retry_after`.
-- `nx_clock_event_generation` reads the `START` generation of a state or tick event,
-  `nx_clock_event_state` the installation state of a state event, `nx_clock_event_paced` the period,
-  skew, logical origin, UTC anchor and time rate of a paced one, `nx_clock_event_tick` the id,
-  logical boundary, authority UTC observation and serving node's logical reading of a tick, and
-  `nx_clock_event_end_reason` why the server ended an attachment. Each fails with `NX_ERROR_TYPE`
-  for an event whose kind does not carry what it reads.
-- Instants are signed nanoseconds since the Unix epoch, the period and skew unsigned nanoseconds,
-  and the time rate a `double`. Every field is written to an out-parameter the host provides, so
-  reading an event allocates nothing on the host's side.
-- `nx_clock_event_retain` and `nx_clock_event_release` count references the way `nx_event_retain`
-  and `nx_event_release` do, and a reference may be released on any thread.
-
-For C and C++ hosts, `nx_connect_options_new` starts with the Rust client's defaults. The host
-may set basic credentials, a TLS requirement, a copied CA certificate, seed URLs and the four
-deadlines before it calls `nx_session_connect`. The session copies the options, so the host may
-release them after the call. The Rust client validates endpoint origins and the 1 ms to 24 hour
-deadline bounds when connecting, and an HTTPS initial endpoint requires HTTPS for every later
-server. A subscription's `NX_EVENT_RESTORATION_FAILED` carries its refusal message and retry wait
-through `nx_event_restoration_message` and `nx_event_restoration_retry_after`, with the same
-borrowed-byte and nanosecond rules as the clock event. A wrong event kind returns `NX_ERROR_TYPE`.
-
-`nx_session_domain_clock` reads `domain_clock` for a domain the session follows as an
-`nx_domain_clock` reference, and writes NULL for a domain whose clock the session does not follow.
-It never blocks. Right after `ATTACH DOMAIN CLOCK;` completes it is the clock the attach reply
-carried, so a host that attaches to a running paced clock reads its `START` generation and
-committed mapping before it uses the first tick. Every later observation and accepted tick replaces
-it in the order the session received them, so a read is never older than an event the host has
-already taken, including after a redirect moves the attachment to another session without an
-interruption. Once the session holding the attachment ends, which `NX_CLOCK_EVENT_INTERRUPTED`
-reports, it keeps the clock that session reported last, without a tick, until the restored
-attachment reports the clock again. A read never
-changes once taken, stays valid after the session is freed, and is counted with
-`nx_domain_clock_retain` and `nx_domain_clock_release` like an event:
-
-- `nx_domain_clock_domain`, `nx_domain_clock_generation` and `nx_domain_clock_state` read the
-  domain, the generation and the installation state. `nx_domain_clock_paced` reads the period,
-  skew, logical origin, UTC anchor and time rate of a paced clock and fails with `NX_ERROR_TYPE` for
-  any other state, and `nx_domain_clock_tick` says whether the session holds an accepted tick of the
-  clock's generation and reads it when it does.
-- `nx_domain_clock_logical_time_at`, `nx_domain_clock_wall_duration_until`,
-  `nx_domain_clock_admission_window` and `nx_domain_clock_admits` answer with the arithmetic of
-  `AttachedDomainClock`: the logical time at a UTC instant, rounded down; the physical wait until a
-  logical target, rounded up; the oldest and newest tick centers a `TIMESTAMP AT` ingestor admits
-  events around; and whether it admits a given event time. An unpaced clock reads UTC and admits
-  every timestamp. A stopped or uninstalled clock fails with `NX_ERROR_TYPE`, and a result outside
-  the timestamp range with `NX_ERROR_INVALID_ARGUMENT`.
-
-An attach the server refuses completes as failed with the server's reason, and
-`nx_session_domain_clock` still reads the earlier attachment's clock when the refusal is that the
-session already follows it. An attach whose session was lost is sent again on the next session the
-client opens. An attach cancelled or expired after its request was sent can still attach the
-session: executing the same prepared execution again sends another session-local request, which
-may be refused as already attached even when the first succeeded. `nx_session_domain_clock` tells
-whether the session follows the clock.
 
 ## Events Across Reconnects
 
@@ -606,7 +516,7 @@ producer closes it without waiting.
 ## Emitter Consumers
 
 `Client::subscribe_emitter(domain, emitter, expected_fields, limits)` opens a competing consumer
-of a native `TO CLIENT` emitter on the current session. The field list is exact, including order,
+of a `CLIENT CONSUMER EMITTER` on the current session. The field list is exact, including order,
 optionality and sensitivity. The open reserves its requested credit before it succeeds. The
 returned `EmitterConsumer::description()` reports the schema, emitter ACK window, timeout and
 retry pacing, maximum batch rows and bytes, and granted credit. A refusal is
@@ -667,78 +577,9 @@ redeliveries and deliberate replays. They explicitly reopen changed endpoint con
 START generation, validate the same expected fields and credit requests again, and keep unknown
 submissions with their original handle rather than resending them.
 
-### Endpoints Through The Native Ruby Gem
+C and C++ endpoint accessors, credit and ownership are described in the
+[C and C++ Client Library](client-library-c.md#publish-through-a-client-ingestor).
 
-`Fields.new`, `add(name, type, length = 0, nullable: false, sensitive: false)` and
-`element(type, length = 0)` describe each field completely. `session.open_ingestor(domain, name,
-fields, batches: ..., bytes: ..., cancel: ...)` and `subscribe_emitter` retain an immutable field
-snapshot before waiting. Producer and consumer objects expose their schema, generation,
-contract, grants, policy, state and reopen reason and keep their session runtime alive.
-
-`BatchBuilder.new(schema, rows)` accepts `states(column, presence)`, `offsets(column, level,
-values)`, `fixed(column, level, bytes)` and `varlen(column, level, offsets, bytes)`, copying all
-inputs before return; `finish` validates the complete batch. `Batch.decode(schema, ipc, rows)`
-reads canonical Arrow IPC. A batch exposes typed `column` arrays and bulk states, offsets, fixed
-and variable-length values. Unsigned integers keep their full width and fixed-width bytes keep
-float bits. `ipc` is an immutable owner-retaining `IO::Buffer`; `get_string` makes a binary copy.
-
-`producer.submit(batch)` or `submit_ipc(ipc)` returns a submission identity; `pending`,
-`rejoin(id)` and `release(id)` inspect, take or release interest in that submission. A consumer's
-`next` returns a delivery with its identity, reference, relay, branch, members, execution time,
-IPC and decoded batch. `ack`, `retry` and `reject` await settlement; collection never settles a
-delivery. Endpoint `close(cancel: ...)` waits for closure with the GVL released. The
-[Client Implementation Manual](client-implementation-manual.md#using-the-ruby-gem) owns these
-host rules.
-
-### Endpoints Through The Shared C Binding
-
-The shared C binding exposes the same producers and consumers to C and C++ hosts,
-through `crates/client-ffi/include/nervix_client.h`. Every call forwards to the Rust handles
-above, so credit, retries of temporary refusals, restoration, outcomes and settlements behave
-exactly as described; the binding keeps no acknowledgement or reconnect state of its own.
-
-- **Opening.** A host describes the fields it expects with `nx_fields`: `nx_fields_add` starts a
-  field with its name, outermost type, nullability and sensitivity, and `nx_fields_element` adds
-  the element of each list around it, so `ARRAY<I16, 2, 2>` is a `FIXED_LIST` of 2, a `FIXED_LIST`
-  of 2, then `I16`. `nx_session_open_ingestor` and `nx_session_subscribe_emitter` open a producer
-  or a consumer on a domain named explicitly, with the credit the host asks for, and copy the
-  fields. A refusal is `NX_ERROR_REJECTED`, and `nx_error_open_refusal` reads its
-  `nx_open_refusal`, such as `NX_OPEN_SCHEMA_MISMATCH`.
-- **Description.** `nx_producer_schema`, `nx_consumer_schema`, `*_generation`, `*_contract`,
-  `*_grant` and `*_policy` read what the open established: the schema with every field's
-  nullability, sensitivity and type levels, the `START` generation, the contract digest, the
-  granted credit and batch limits, and the acknowledgement window, ACK timeout and backoff.
-  `nx_producer_state` and `nx_consumer_state` read the connection, `nx_producer_admission` the
-  admission, and `*_reopen_reason` why a handle needs a new open.
-- **Submitting.** A host builds a batch from its own buffers with `nx_batch_builder_new` for the
-  producer's schema: one `nx_batch_builder_states` call per nullable column, one
-  `nx_batch_builder_offsets` call per variable-length list level, and one `nx_batch_builder_fixed`
-  or `nx_batch_builder_varlen` call for the innermost values. Every call copies its buffers before
-  it returns, and nothing is converted. `nx_producer_submit` waits for credit, checks the batch
-  against the producer's schema and row limit, and returns the submission's identity;
-  `nx_producer_rejoin` waits for its outcome and takes it, and `nx_submission_outcome_*` read its
-  class, typed cause and message. `nx_producer_pending` lists what the producer holds and
-  `nx_producer_release` lets a submission go. A host that writes canonical Arrow IPC itself submits
-  it with `nx_producer_submit_ipc`, which copies it and leaves its checking to the server.
-- **Consuming.** `nx_consumer_next` returns a reference-counted `nx_delivery`: its identity,
-  reference, source relay, branch fingerprint, member count and execution time, its stream,
-  borrowed with `nx_delivery_ipc`, and its batch, which `nx_delivery_batch` decodes the first time
-  it is asked for and then shares. A batch is read one level of a column at a time:
-  `nx_batch_states` for the rows, `nx_batch_offsets` for each variable-length list level, and
-  `nx_batch_fixed` or `nx_batch_varlen` for the values, each in one call. `nx_delivery_ack`,
-  `nx_delivery_retry` and `nx_delivery_reject` settle the attempt and return the server's
-  `nx_settlement`. Releasing a delivery settles nothing.
-- **Interruption.** After a session ends, the next `nx_consumer_next` returns
-  `NX_ERROR_INTERRUPTED` once, a delivery read before the gap fails to settle with
-  `NX_ERROR_REJECTED`, a submission sent before it is `NX_UNCERTAINTY_SESSION_LOST`, and a
-  settlement whose answer the session lost is `NX_ERROR_UNCERTAIN`. The next calls restore the
-  handles on a new session while their contract holds. A handle closed while it waits to be
-  restored returns at once and is never restored.
-- **Ownership.** Producers, consumers, deliveries and batches may be used from several threads at
-  once, and deliveries and batches are released on any thread; a field list and a builder are used
-  from one thread at a time. A producer, a consumer and a delivery keep their session running until
-  they are released, and a borrowed stream or value stays valid until the reference it was read from
-  is released.
 
 ## Transaction Handles And Attach
 
@@ -749,7 +590,7 @@ holds the transaction id, the domain the transaction is bound to, its `Transacti
 transaction handle:
 
 ```rust
-client.execute("CREATE DOMAIN production;").await?;
+client.execute("CREATE UNPACED DOMAIN production;").await?;
 client.set_domain(Some(DomainName::parse("production")?)).await;
 
 let begun = client.execute("BEGIN;").await?;
@@ -869,9 +710,7 @@ and `frame.batch()` using each section's schema. `counts` describe the complete 
 datetime nanoseconds and bytes. `state.to_json()` and `state.display_text()` render the same value.
 
 The shared binding exposes `Outcome::state_inspection()` as an independently owned `Inspection`.
-It retains the envelope, lossless JSON, counts, section schemas and verified frame backing. The C
-ABI exposes `nx_outcome_inspection`, `nx_inspection_json`, `nx_inspection_counts`,
-`nx_inspection_schema`, `nx_inspection_row_frame` and `nx_inspection_free`. JSON and frame bytes
-borrow the inspection handle; schema handles are independently owned. Indices outside the result
-return an invalid-argument failure. Counts return false for a typed rejection. Release the inspection
-only after borrowed bytes are no longer used.
+It retains the envelope, lossless JSON, counts, section schemas and verified frame backing. C and
+C++ hosts read it through `nx_inspection`, which the
+[C and C++ Client Library](client-library-c.md#read-materialized-state) describes with a tested
+example.

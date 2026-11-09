@@ -1446,6 +1446,19 @@ broker ingestor's acknowledgement that its transport fails to confirm, and a rej
 take back, become the ingestor's transient status with the innermost context of the ingestor's
 report as the reason, and only a later confirmed acknowledgement clears it.
 
+An ingestor's acknowledgement wait ends with a typed `IngestorAcknowledgementOutcome`:
+`Acknowledged`, `Failed` with the reason the failing share of its tree gave, `TimedOut` with the
+`ACK TIMEOUT` the tree stayed silent for, or `Shutdown`. The timeout is a property of the bounded
+wait, which `AckWaitOutcome::TimedOut` carries as a `Duration`; a root itself resolves only as
+acknowledged or failed, and no text encodes a timeout. The host reports a failed tree as `ingestor
+ACK chain failed for ingestor '<name>' in domain '<domain>': <reason>`, and an expired wait as a
+timeout naming its bound, `ingestor ACK chain for ingestor '<name>' in domain '<domain>' timed out:
+no acknowledgement progress within ACK TIMEOUT <duration>`. Both reject the batch, and both are
+counted by outcome; see [Ingestor Acknowledgement And
+Lifecycle](metrics-and-observability.md#ingestor-acknowledgement-and-lifecycle). The
+`nervix_ingestor_transient_failure` gauge projects the same transient status `DESCRIBE INGESTOR`
+shows, for the task that currently runs the unit.
+
 A WebSockets connection's idle expiry keeps `DeadlineElapsed` with the explicit
 `idle_timeout_ms` key, or `WebsocketsConnectionIngestorFailure::IdleTimeout` with its derived effective budget,
 beneath `IngestorError::Read`. The fieldless timer expiry is retained as a typed attachment, so the
@@ -1669,17 +1682,19 @@ metadata.partition and metadata.offset`. A `TIMESTAMP AT metadata.<field>` that 
 field is refused with `RegistryError::UndeclaredIngestorTimestampMetadata`, and one that names a
 field declared as another type than `DATETIME` with `RegistryError::IngestorTimestampMetadataType`,
 which names the declared type.
-Planning failures
-likewise retain the selected entity or placement so an operator can correct the request. A
-relocation the graph cannot plan is a `RelocationPlanError` report beneath `RelocationError::Graph`:
-a member that does not exist names the domain and the member, a server-listener ingestor names the
-ingestor, a corridor whose `FROM`/`TO` pairs are all disconnected, a hard group whose overrides
-request different strategies lists every member of that group, and an override outside the unit
-names its member. The failed command renders the chain, such as `relocation plan failed: junction
-'chain_distant' is not part of the relocation`. A relay divided into partitions has no one owner to
-move, so a relocation that selects it is refused with `RelocationError::MemberPartitioned`, naming
-the domain and the relay. See [Control Plane](./control-plane.md) for activation and
-[Typed States And Validation Boundaries](./typed-states.md) for required state.
+Placement validation resolves ranked claims before checking the winner on each directed hop.
+`RegistryError::PlacementHopPolicy` retains the domain, both typed node references, the hop's
+class, the effective policy and the winning rule names. A model mutation that changes a unit
+structure is refused against its candidate graph, leaving the stored graph and schedule unchanged.
+
+A relocation the graph cannot plan is a `RelocationPlanError` report beneath
+`RelocationError::Graph`. A missing member names its domain and kind; `UnknownUnit` also names the
+requested partition or instance. Server listeners remain unrelocatable. Disconnected corridors,
+conflicting overrides within an exact unit group and overrides outside the selected/captured unit
+retain their typed causes. The reporting boundary renders that chain once. A qualified selector
+moves its exact hard group; an unqualified member selects all its declared units. See
+[Control Plane](./control-plane.md) for activation and [Typed States And Validation
+Boundaries](./typed-states.md) for required state.
 
 `ALTER BRANCH <branch> SET PARTITIONS <n>` on a domain that is running or paused is refused before
 anything is committed with `TransactionPlanningError::BranchPartitionsRequireStoppedDomain`, which
@@ -1687,6 +1702,10 @@ names the operation, the domain and the branch and states the stopped-domain pat
 'by_tenant' changes its partition count only while its domain is stopped: STOP domain 'payments',
 run ALTER BRANCH, then START it`. A domain build whose committed schedule lacks a unit its relay
 needs reports `ExecutionBuildError::RelayUnitNotScheduled`, naming the relay and the unit.
+
+The domain-wide placement editor retains typed name and positive-integer rank parse failures
+under `PlacementDraftError` and preserves the editable draft. The server decides hop applicability
+against the graph and reports a refused rule inline.
 
 Visual schema, branch, relay, and subscription editors report incomplete names, fields, types,
 modes, references, branching, capacities, instance limits, filters and sample rates before
@@ -2724,7 +2743,14 @@ refusal reached against a transaction that another coordinator has since opened 
 as `TransactionPlanningError::DomainPaused` caused by the same command's own pause, is not that
 command's failure:
 the coordinator recovers the recorded progress under the same execution reference instead. A
-refusal against an unchanged transaction keeps its report, message, and disposition.
+refusal against an unchanged transaction keeps its report, message, and disposition, except for a
+typed paused-domain refusal eligible for orphaned-pause recovery. That recovery presents the
+command's current mutation lease to a conditional consensus operation; typed mutation-fence or
+restore-installation causes survive to the reporting boundary. A refused restore gate preserves
+the original refusal. An unconfirmed recovery, a lost fence or a transaction that now owns the
+pause keeps the admitted command retryable under the same reference. A confirmed resume emits
+the lifecycle log `resumed orphaned ALTER pause`; an unchanged status emits no such log. Neither
+outcome adds a client notice or a second success result.
 
 ### Domain Clock Attachment
 
@@ -3205,6 +3231,14 @@ digest-mismatched current chunk set or a conflicting publication inventory. `Res
 `InvalidStorageFormat` requires recreation of the node state directory when the required current
 format marker is missing or invalid. The unit-keyed checkpoint format uses a distinct marker, so
 state written under an earlier key shape fails at open rather than disappearing from a read.
+
+Inferencer checkpoint failures retain `SnapshotError` beneath
+`RuntimePersistenceError::InferencerSnapshot`. An unrecognized signature, invalid tensor layout or
+undecodable frame asks for the stored state to be recreated. Frame and declared-state bounds report
+the required bytes and the configured snapshot section limit; `CREATE INFERENCER` names the refused
+inferencer. Archive lengths are checked before owned tensor allocation. Executor admission and
+cancellation remain their own typed storage outcomes rather than a judgment that tensor data is
+invalid. Checkpoint diagnostics never include tensor values.
 
 `RestoreStagingQuota` carries the node's unpublished checkpoint limit, current usage and incoming
 checkpoint footprint; `RestoreStagingSize` rejects an unrepresentable accounting sum. A quota
@@ -3863,3 +3897,13 @@ preserves the cause under `WireDecodeError::InvalidValue`, and a stored tagged k
 under `StoredStateIssue::KeyUnitInvalid` and `RuntimePersistenceError::DecodeState`.
 Allocation-layout validation rejects unaddressable count declarations before materializing units;
 every addressable index fits the identity range.
+
+### Credential Cost Refusals
+
+Password credential construction, JSON decoding and archive decoding validate the positive
+iteration count against the password policy definition's 1,000,000 maximum before executor
+admission. A refusal identifies the cost and bound, never password, salt or digest bytes.
+A consensus namespace/state-encoding mismatch requires recreation before any credential is
+read; a user backup record with a different version fails its header check before decoding.
+Executor refusal continues to mean that credentials were not judged, reported as UNAVAILABLE
+or HTTP 503 without changing failure pacing. Wrong passwords remain authentication refusals.

@@ -276,7 +276,73 @@ pub(super) mod tests {
     use nonzero_ext::nonzero;
 
     use super::*;
-    use crate::runtime::endpoint::{EndpointAdmission, EndpointDispatchOutcome};
+    use crate::{
+        metrics::{EndpointIntakeOutcome, IngestorEndpointMetrics},
+        runtime::{
+            endpoint::{EndpointAdmission, EndpointDispatchOutcome},
+            endpoint_acknowledgement::{EndpointAdmissionRefusal, EndpointInputRefusal},
+        },
+    };
+
+    /// The request children the fixture's node registered for its endpoint ingestor `ingestor`.
+    fn endpoint_requests(
+        runtime: &Runtime,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+    ) -> IngestorEndpointMetrics {
+        runtime
+            .inner
+            .metrics
+            .register_ingestor_reads(
+                domain,
+                ingestor,
+                Unit::SINGLE,
+                None,
+                nervix_models::IngestorEntityKind::Http(
+                    nervix_models::HttpIngestorEntity::Endpoint,
+                ),
+            )
+            .endpoint_requests()
+            .assured("an endpoint ingestor's unit registers its request children")
+    }
+
+    /// How many requests an endpoint ingestor counted under each outcome.
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct Counted {
+        accepted: u64,
+        busy: u64,
+        refused: u64,
+        not_admitted: u64,
+        decode_rejected: u64,
+        processing_failed: u64,
+    }
+
+    impl Counted {
+        fn of(requests: &IngestorEndpointMetrics) -> Self {
+            Self {
+                accepted: requests.total(EndpointIntakeOutcome::Accepted),
+                busy: requests.total(EndpointIntakeOutcome::Busy),
+                refused: requests.total(EndpointIntakeOutcome::Refused),
+                not_admitted: requests.total(EndpointIntakeOutcome::NotAdmitted),
+                decode_rejected: requests.total(EndpointIntakeOutcome::DecodeRejected),
+                processing_failed: requests.total(EndpointIntakeOutcome::ProcessingFailed),
+            }
+        }
+    }
+
+    /// The JSON codec of the fixture's `event_wire` wire schema.
+    fn event_wire_format() -> CodecWireFormat {
+        CodecWireFormat::Json {
+            wire_schema: named::<WireSchemaName>("event_wire"),
+        }
+    }
+
+    /// The quiesce that refuses requests while an ingestor is quiesced, naming a one-second retry.
+    fn reject_quiesce() -> IngestQuiesceMode {
+        IngestQuiesceMode::Reject {
+            retry_after: "1s".to_string(),
+        }
+    }
 
     /// A running domain whose one endpoint ingestor reads `/events` on `edge.example.com` through
     /// its `event_wire` JSON wire schema.
@@ -284,15 +350,14 @@ pub(super) mod tests {
         domain: &DomainName,
         ingestor: &IngestorName,
     ) -> Runtime {
-        start_endpoint_ingestor(
-            Runtime::default(),
-            domain,
-            ingestor,
-            CodecWireFormat::Json {
-                wire_schema: named::<WireSchemaName>("event_wire"),
-            },
-        )
-        .await
+        start_endpoint_ingestor(Runtime::default(), domain, ingestor, event_wire_format()).await
+    }
+
+    /// One endpoint ingestor a fixture starts: its name, its mode and its quiesce.
+    struct EndpointIngestorFixture<'a> {
+        name: &'a IngestorName,
+        mode: EndpointIngestMode,
+        quiesce: IngestQuiesceMode,
     }
 
     /// Starts, on `runtime`, a running domain whose one endpoint ingestor reads `/events` on
@@ -303,13 +368,35 @@ pub(super) mod tests {
         ingestor: &IngestorName,
         wire_format: CodecWireFormat,
     ) -> Runtime {
+        start_endpoint_ingestors(
+            runtime,
+            domain,
+            &[EndpointIngestorFixture {
+                name: ingestor,
+                mode: EndpointIngestMode::NoAck,
+                quiesce: IngestQuiesceMode::EndpointBuffer {
+                    max_size: "1MiB".to_string(),
+                },
+            }],
+            wire_format,
+        )
+        .await
+    }
+
+    /// Starts, on `runtime`, a running domain whose endpoint ingestors `ingestors` all read `/events`
+    /// on `edge.example.com` through one codec of `wire_format`, in the order given.
+    async fn start_endpoint_ingestors(
+        runtime: Runtime,
+        domain: &DomainName,
+        ingestors: &[EndpointIngestorFixture<'_>],
+        wire_format: CodecWireFormat,
+    ) -> Runtime {
         runtime.sync_domains(&BTreeMap::from([(
             domain.clone(),
             DomainState {
                 id: domain.clone(),
                 config: DomainConfig {
                     pace: DomainPace::Unpaced,
-                    placement: nervix_models::PlacementPolicy::Neutral,
                 },
                 status: DomainStatus::Running,
                 start_version: 0,
@@ -324,81 +411,82 @@ pub(super) mod tests {
         let relay = named::<RelayName>("events");
         let vhost = named::<VhostName>("edge");
         let endpoint = named::<EndpointName>("event_ingress");
+        let mut models = vec![
+            scheduled_model(Model::Schema(CreateSchema {
+                name: schema.clone(),
+                fields: vec![SchemaField {
+                    name: named("user_id"),
+                    ty: ParseAsType::I64,
+                    optional: false,
+                    sensitive: false,
+                }],
+            })),
+            scheduled_model(Model::WireJsonSchema(CreateJsonWireSchema {
+                name: wire_schema,
+                strictness: Default::default(),
+                fields: vec![WireSchemaField {
+                    name: named("user_id"),
+                    ty: JsonType::Integer,
+                    optional: false,
+                }],
+            })),
+            scheduled_model(Model::Codec(CreateCodec {
+                name: codec.clone(),
+                wire_format,
+                schema: schema.clone(),
+                encoding_rules: Vec::new(),
+            })),
+            scheduled_model(Model::Relay(CreateRelay {
+                name: relay.clone(),
+                schema,
+                buffer: nonzero!(2usize),
+                branching: RelayBranching::unbranched(),
+                materialized_state: None,
+            })),
+            scheduled_model(Model::Vhost(CreateVhost {
+                name: vhost.clone(),
+                hostnames: vec!["edge.example.com".to_string()],
+                tls: None,
+            })),
+            scheduled_model(Model::Endpoint(CreateEndpoint {
+                name: endpoint.clone(),
+                on_vhost: vhost,
+                path: "/events".to_string(),
+                kind: nervix_models::EndpointKind::Http,
+            })),
+        ];
+        for fixture in ingestors {
+            models.push(scheduled_model(Model::Ingestor(CreateIngestor {
+                name: fixture.name.clone(),
+                output_routes: with_inherit_all(ProcessorOutputs::single(relay.clone()))
+                    .with_flush_policy(FlushPolicy::Immediate)
+                    .with_branch(OutputBranch::Unbranched),
+                input: nervix_models::IngestorInput::Transport(
+                    nervix_models::TransportIngestorInput {
+                        source: IngestorEntity::from(HttpEndpointIngestor {
+                            endpoint: endpoint.clone(),
+                            mode: fixture.mode.clone(),
+                            quiesce: fixture.quiesce.clone(),
+                        }),
+                        codec: codec.clone(),
+                    },
+                ),
+                timestamp_source: None,
+                general_error_policy: GeneralErrorPolicy::Log,
+                filter_where: None,
+            })));
+        }
         runtime
             .apply_cluster_schedule(
                 &ClusterNodeName::parse("node-1").expect("valid name"),
                 &ClusterSchedule::from_iter([DomainSchedule::new(
                     domain.clone(),
-                    vec![
-                        scheduled_model(Model::Schema(CreateSchema {
-                            name: schema.clone(),
-                            fields: vec![SchemaField {
-                                name: named("user_id"),
-                                ty: ParseAsType::I64,
-                                optional: false,
-                                sensitive: false,
-                            }],
-                        })),
-                        scheduled_model(Model::WireJsonSchema(CreateJsonWireSchema {
-                            name: wire_schema,
-                            strictness: Default::default(),
-                            fields: vec![WireSchemaField {
-                                name: named("user_id"),
-                                ty: JsonType::Integer,
-                                optional: false,
-                            }],
-                        })),
-                        scheduled_model(Model::Codec(CreateCodec {
-                            name: codec.clone(),
-                            wire_format,
-                            schema: schema.clone(),
-                            encoding_rules: Vec::new(),
-                        })),
-                        scheduled_model(Model::Relay(CreateRelay {
-                            name: relay.clone(),
-                            schema,
-                            buffer: nonzero!(2usize),
-                            branching: RelayBranching::unbranched(),
-                            materialized_state: None,
-                        })),
-                        scheduled_model(Model::Vhost(CreateVhost {
-                            name: vhost.clone(),
-                            hostnames: vec!["edge.example.com".to_string()],
-                            tls: None,
-                        })),
-                        scheduled_model(Model::Endpoint(CreateEndpoint {
-                            name: endpoint.clone(),
-                            on_vhost: vhost,
-                            path: "/events".to_string(),
-                            kind: nervix_models::EndpointKind::Http,
-                        })),
-                        scheduled_model(Model::Ingestor(CreateIngestor {
-                            name: ingestor.clone(),
-                            output_routes: with_inherit_all(ProcessorOutputs::single(relay))
-                                .with_flush_policy(FlushPolicy::Immediate)
-                                .with_branch(OutputBranch::Unbranched),
-                            input: nervix_models::IngestorInput::Transport(
-                                nervix_models::TransportIngestorInput {
-                                    source: IngestorEntity::from(HttpEndpointIngestor {
-                                        endpoint,
-                                        mode: EndpointIngestMode::NoAck,
-                                        quiesce: IngestQuiesceMode::EndpointBuffer {
-                                            max_size: "1MiB".to_string(),
-                                        },
-                                    }),
-                                    codec,
-                                },
-                            ),
-                            timestamp_source: None,
-                            general_error_policy: GeneralErrorPolicy::Log,
-                            filter_where: None,
-                        })),
-                    ],
+                    models,
                     Vec::new(),
                 )]),
             )
             .await
-            .expect("the endpoint ingestor's schedule applies");
+            .expect("the endpoint ingestors' schedule applies");
         runtime
     }
 
@@ -680,6 +768,15 @@ pub(super) mod tests {
             .assured("ingestor stop retains the configured endpoint");
         assert!(current.bindings().is_empty());
         assert!(route.bindings()[0].intake().is_none());
+        assert_eq!(
+            route.refusal(),
+            Some(EndpointDispatchOutcome::NoAck(EndpointAdmission {
+                accepted: 0,
+                rejected: 1,
+                retry_after: None,
+            })),
+            "a retained route refuses a request its only intake can no longer take"
+        );
         let outcome = route
             .dispatch(
                 &runtime,
@@ -741,6 +838,14 @@ pub(super) mod tests {
                 retry_after: None,
             })
         );
+        let requests = endpoint_requests(&runtime, &domain, &ingestor);
+        assert_eq!(
+            Counted::of(&requests),
+            Counted {
+                not_admitted: 1,
+                ..Counted::default()
+            }
+        );
         assert_eq!(
             runtime
                 .inner
@@ -775,6 +880,380 @@ pub(super) mod tests {
                 retry_after: None,
             })
         );
+        assert_eq!(
+            Counted::of(&requests),
+            Counted {
+                accepted: 1,
+                not_admitted: 1,
+                ..Counted::default()
+            }
+        );
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
+    }
+
+    /// A `MODE NO ACK` ingestor counts every request once under the outcome it reached: one it
+    /// dispatched or its endpoint buffer retained as accepted and one its codec refused as a
+    /// decode rejection. Every outcome is registered at zero, and `DESCRIBE INGESTOR` reports the
+    /// same counts under `source:`.
+    #[nervix_primitives::test]
+    async fn an_unacknowledged_endpoint_counts_each_request_once_by_its_outcome() {
+        let domain = domain("default");
+        let ingestor = named::<IngestorName>("event_ingestor");
+        let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
+        let route = runtime
+            .resolve_endpoint("edge.example.com", "/events")
+            .into_route()
+            .assured("the fixture installs its endpoint route");
+        let requests = endpoint_requests(&runtime, &domain, &ingestor);
+        assert_eq!(Counted::of(&requests), Counted::default());
+
+        assert_eq!(route.refusal(), None);
+        let dispatched = route
+            .dispatch(
+                &runtime,
+                br#"{"user_id":7}"#,
+                IngestMetadataRow::headers(&NoIngestHeaders),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(dispatched.is_accepted());
+        let undecodable = route
+            .dispatch(
+                &runtime,
+                br#"{"user_id":"seven"}"#,
+                IngestMetadataRow::headers(&NoIngestHeaders),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(
+            undecodable.is_accepted(),
+            "a body its codec refuses is consumed, so sending it again would not help"
+        );
+        let quiesce = runtime
+            .ingestor_quiesce_control(&domain, &ingestor, Unit::SINGLE)
+            .assured("a running ingestor holds its quiesce control");
+        quiesce.engage(IngestorQuiesceCause::EntityHold);
+        assert_eq!(
+            route.refusal(),
+            None,
+            "the endpoint buffer takes requests while the ingestor is quiesced"
+        );
+        let buffered = route
+            .dispatch(
+                &runtime,
+                br#"{"user_id":8}"#,
+                IngestMetadataRow::headers(&NoIngestHeaders),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(buffered.is_accepted());
+        assert_eq!(quiesce.counters().buffered_records, 1);
+        assert_eq!(
+            Counted::of(&requests),
+            Counted {
+                accepted: 2,
+                decode_rejected: 1,
+                ..Counted::default()
+            }
+        );
+
+        let described = runtime
+            .describe_local_ingestor(
+                &domain,
+                &ingestor,
+                Unit::SINGLE,
+                nervix_models::IngestorEntityKind::Http(
+                    nervix_models::HttpIngestorEntity::Endpoint,
+                ),
+            )
+            .expect("the fixture's ingestor describes itself");
+        let mut lines = Vec::new();
+        for line in &described.source_metrics {
+            if line.starts_with("nervix_ingestor_endpoint_requests_total{") {
+                lines.push(line.as_str());
+            }
+        }
+        assert_eq!(lines.len(), 6, "one line for every outcome: {lines:?}");
+        assert!(
+            lines[0]
+                .contains(r#",connector="HTTP",entity="ENDPOINT",outcome="accepted"} total=2 "#),
+            "{lines:?}"
+        );
+        assert!(
+            lines[4].contains(r#",outcome="decode_rejected"} total=1 "#),
+            "{lines:?}"
+        );
+        quiesce.release(IngestorQuiesceCause::EntityHold);
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
+    }
+
+    /// An ingestor whose quiesce refuses the requests of a route it shares with an available
+    /// ingestor counts each of them once, as does its quiesce's rejected counter. The route refuses
+    /// a request before reading it only when every ingestor refuses it, and each ingestor counts
+    /// that refusal once.
+    #[nervix_primitives::test]
+    async fn a_quiesced_ingestor_counts_each_request_of_a_shared_route_once() {
+        let domain = domain("default");
+        let held = named::<IngestorName>("held");
+        let open = named::<IngestorName>("open");
+        let runtime = start_endpoint_ingestors(
+            Runtime::default(),
+            &domain,
+            &[
+                EndpointIngestorFixture {
+                    name: &held,
+                    mode: EndpointIngestMode::NoAck,
+                    quiesce: reject_quiesce(),
+                },
+                EndpointIngestorFixture {
+                    name: &open,
+                    mode: EndpointIngestMode::NoAck,
+                    quiesce: reject_quiesce(),
+                },
+            ],
+            event_wire_format(),
+        )
+        .await;
+        let route = runtime
+            .resolve_endpoint("edge.example.com", "/events")
+            .into_route()
+            .assured("the fixture installs its endpoint route");
+        assert_eq!(route.bindings().len(), 2);
+        let held_requests = endpoint_requests(&runtime, &domain, &held);
+        let open_requests = endpoint_requests(&runtime, &domain, &open);
+        let held_quiesce = runtime
+            .ingestor_quiesce_control(&domain, &held, Unit::SINGLE)
+            .assured("a running ingestor holds its quiesce control");
+        let open_quiesce = runtime
+            .ingestor_quiesce_control(&domain, &open, Unit::SINGLE)
+            .assured("a running ingestor holds its quiesce control");
+
+        held_quiesce.engage(IngestorQuiesceCause::EntityHold);
+        assert_eq!(
+            route.refusal(),
+            None,
+            "the open ingestor takes the request, so dispatch counts both ingestors' outcomes"
+        );
+        let shared = route
+            .dispatch(
+                &runtime,
+                br#"{"user_id":7}"#,
+                IngestMetadataRow::headers(&NoIngestHeaders),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(
+            shared,
+            EndpointDispatchOutcome::NoAck(EndpointAdmission {
+                accepted: 1,
+                rejected: 1,
+                retry_after: None,
+            })
+        );
+        assert_eq!(
+            Counted::of(&held_requests),
+            Counted {
+                refused: 1,
+                ..Counted::default()
+            }
+        );
+        assert_eq!(held_quiesce.counters().rejected_total, 1);
+        assert_eq!(
+            Counted::of(&open_requests),
+            Counted {
+                accepted: 1,
+                ..Counted::default()
+            }
+        );
+
+        open_quiesce.engage(IngestorQuiesceCause::EntityHold);
+        assert_eq!(
+            route.refusal(),
+            Some(EndpointDispatchOutcome::NoAck(EndpointAdmission {
+                accepted: 0,
+                rejected: 2,
+                retry_after: Some(Duration::from_secs(1)),
+            }))
+        );
+        assert_eq!(
+            Counted::of(&held_requests),
+            Counted {
+                refused: 2,
+                ..Counted::default()
+            }
+        );
+        assert_eq!(held_quiesce.counters().rejected_total, 2);
+        assert_eq!(
+            Counted::of(&open_requests),
+            Counted {
+                accepted: 1,
+                refused: 1,
+                ..Counted::default()
+            }
+        );
+        assert_eq!(open_quiesce.counters().rejected_total, 1);
+        held_quiesce.release(IngestorQuiesceCause::EntityHold);
+        open_quiesce.release(IngestorQuiesceCause::EntityHold);
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
+    }
+
+    /// A `MODE ACK` ingestor counts a request refused for a full response window as busy, one the
+    /// extension workers could not take as not admitted beside its unfolding refusal, one its codec
+    /// refused as a decode rejection and one refused while it is quiesced as refused.
+    #[nervix_primitives::test]
+    async fn an_acknowledged_endpoint_counts_each_request_once_by_its_outcome() {
+        let domain = domain("default");
+        let ingestor = named::<IngestorName>("event_ingestor");
+        let executor = single_worker_executor();
+        let runtime = start_endpoint_ingestors(
+            Runtime::with_executor(executor.clone()),
+            &domain,
+            &[EndpointIngestorFixture {
+                name: &ingestor,
+                mode: EndpointIngestMode::Ack {
+                    max: nonzero!(1u16),
+                    timeout: "30s".to_string(),
+                },
+                quiesce: reject_quiesce(),
+            }],
+            unfolding_wire_format(),
+        )
+        .await;
+        let route = runtime
+            .resolve_endpoint("edge.example.com", "/events")
+            .into_route()
+            .assured("the fixture installs its endpoint route");
+        let requests = endpoint_requests(&runtime, &domain, &ingestor);
+        let unfolding_refused = runtime.inner.metrics.ingestor_unfolding_refused(
+            &domain,
+            &ingestor,
+            Unit::SINGLE,
+            None,
+            nervix_models::IngestorEntityKind::Http(nervix_models::HttpIngestorEntity::Endpoint),
+        );
+
+        {
+            let lease = route.bindings()[0].intake();
+            let binding = lease
+                .as_deref()
+                .assured("the fixture starts its endpoint ingestor");
+            let EndpointRequestPolicy::Ack(window) = &binding.request else {
+                panic!("the fixture's ingestor answers each request once acknowledged");
+            };
+            let _slot = window
+                .try_admit()
+                .assured("the idle window has its only slot free");
+            assert_eq!(
+                route.refusal(),
+                Some(EndpointDispatchOutcome::Ack(EndpointRequestReply {
+                    outcome: EndpointRequestOutcome::NotAdmitted(
+                        EndpointAdmissionRefusal::WindowFull
+                    ),
+                    retry_after: Duration::from_secs(1),
+                }))
+            );
+            // A request that passed the pre-read check while a slot was free finds the window full
+            // at dispatch, which counts it there instead.
+            let raced = route
+                .dispatch(
+                    &runtime,
+                    br#"{"user_id":7}"#,
+                    IngestMetadataRow::headers(&NoIngestHeaders),
+                    &CancellationToken::new(),
+                )
+                .await;
+            let Some(raced) = raced.acknowledgement() else {
+                panic!("an acknowledged ingestor answers the request with its outcome");
+            };
+            assert_eq!(
+                raced.outcome,
+                EndpointRequestOutcome::NotAdmitted(EndpointAdmissionRefusal::WindowFull)
+            );
+        }
+        assert_eq!(
+            Counted::of(&requests),
+            Counted {
+                busy: 2,
+                ..Counted::default()
+            }
+        );
+
+        let filled = FilledCpuClass::fill(&executor, CpuClass::Extension).await;
+        let unfolding = route
+            .dispatch(
+                &runtime,
+                br#"{"user_id":7}"#,
+                IngestMetadataRow::headers(&NoIngestHeaders),
+                &CancellationToken::new(),
+            )
+            .await;
+        filled.release().await;
+        let Some(unfolding) = unfolding.acknowledgement() else {
+            panic!("an acknowledged ingestor answers the request with its outcome");
+        };
+        assert_eq!(
+            unfolding.outcome,
+            EndpointRequestOutcome::NotAdmitted(EndpointAdmissionRefusal::UnfoldingRefused)
+        );
+        assert_eq!(unfolding_refused.get(), 1);
+
+        let undecodable = route
+            .dispatch(
+                &runtime,
+                br#"{"user_id":"seven"}"#,
+                IngestMetadataRow::headers(&NoIngestHeaders),
+                &CancellationToken::new(),
+            )
+            .await;
+        let Some(undecodable) = undecodable.acknowledgement() else {
+            panic!("an acknowledged ingestor answers the request with its outcome");
+        };
+        assert_eq!(
+            undecodable.outcome,
+            EndpointRequestOutcome::Refused(EndpointInputRefusal::Codec)
+        );
+
+        let quiesce = runtime
+            .ingestor_quiesce_control(&domain, &ingestor, Unit::SINGLE)
+            .assured("a running ingestor holds its quiesce control");
+        quiesce.engage(IngestorQuiesceCause::EntityHold);
+        let Some(EndpointDispatchOutcome::Ack(suspended)) = route.refusal() else {
+            panic!("a quiesced acknowledged ingestor refuses the request before it is read");
+        };
+        assert_eq!(
+            suspended.outcome,
+            EndpointRequestOutcome::NotAdmitted(EndpointAdmissionRefusal::Suspended)
+        );
+        assert_eq!(quiesce.counters().rejected_total, 1);
+        // A request that passed the pre-read check before the quiesce is refused at dispatch,
+        // and counted there once.
+        let raced = route
+            .dispatch(
+                &runtime,
+                br#"{"user_id":7}"#,
+                IngestMetadataRow::headers(&NoIngestHeaders),
+                &CancellationToken::new(),
+            )
+            .await;
+        let Some(raced) = raced.acknowledgement() else {
+            panic!("an acknowledged ingestor answers the request with its outcome");
+        };
+        assert_eq!(
+            raced.outcome,
+            EndpointRequestOutcome::NotAdmitted(EndpointAdmissionRefusal::Suspended)
+        );
+        assert_eq!(quiesce.counters().rejected_total, 2);
+        assert_eq!(
+            Counted::of(&requests),
+            Counted {
+                busy: 2,
+                refused: 2,
+                not_admitted: 1,
+                decode_rejected: 1,
+                ..Counted::default()
+            }
+        );
+        quiesce.release(IngestorQuiesceCause::EntityHold);
         runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 

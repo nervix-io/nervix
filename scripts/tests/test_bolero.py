@@ -153,6 +153,8 @@ class InventoryTests(unittest.TestCase):
             "crypto-p256-keys",
             "crypto-p256-signatures",
             "runtime-kafka-unit-layouts",
+            "password-credentials",
+            "password-credentials-malformed",
             "runtime-ingestor-metric-layouts",
             "models-ingestor-instancing",
             "interconnect-intake-units",
@@ -348,6 +350,9 @@ class InventoryTests(unittest.TestCase):
             "registry-stored-models",
             "registry-stored-models-corruption",
             "runtime-state-keys",
+            "inferencer-state-snapshots",
+            "inferencer-state-snapshots-malformed",
+            "inferencer-native-snapshot-projection",
             "runtime-state-keys-malformed",
             "runtime-state-chunk-keys-malformed",
             "runtime-state-staging-namespaces",
@@ -441,6 +446,7 @@ class InventoryTests(unittest.TestCase):
             "console-codec-drafts",
             "console-endpoint-drafts",
             "console-emitter-drafts",
+            "console-processor-drafts",
             "runtime-window-sketch-panes",
             "kafka-partition-offsets",
             "kafka-destination-partitions",
@@ -520,27 +526,30 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(target.corpus.parent.name, target.test.replace("::", "__"))
             self.assertGreater(target.random_iterations, 0)
 
-    def test_inferencer_state_domains_include_the_required_model_field(self) -> None:
+    def test_model_domains_cover_current_placement_scopes_and_unit_selectors(self) -> None:
         versions = {
             target.id: target.domain_version for target in bolero.load_inventory().targets
         }
         for target, version in {
             "benchmark-metrics-report": 1,
             "ingestor-describe-envelope": 7,
-            "plexus-model": 55,
-            "plexus-archive-model": 57,
-            "plexus-statement": 57,
-            "plexus-statement-text": 56,
-            "plexus-format-document": 56,
-            "plexus-format-text": 55,
-            "models-archived-models": 56,
-            "registry-archived-models": 50,
-            "consensus-state-records": 48,
-            "consensus-state-corruption": 48,
-            "consensus-raft-records": 47,
-            "registry-stored-models": 43,
-            "registry-stored-models-corruption": 43,
+            "plexus-model": 56,
+            "plexus-archive-model": 59,
+            "plexus-statement": 59,
+            "plexus-statement-text": 58,
+            "plexus-format-document": 58,
+            "plexus-format-text": 57,
+            "models-archived-models": 58,
+            "registry-archived-models": 51,
+            "consensus-state-records": 51,
+            "consensus-state-corruption": 51,
+            "consensus-raft-records": 50,
+            "registry-stored-models": 44,
+            "registry-stored-models-corruption": 44,
             "inferencer-tensor-columns": 1,
+            "inferencer-state-snapshots": 1,
+            "inferencer-state-snapshots-malformed": 1,
+            "inferencer-native-snapshot-projection": 1,
             "console-emitter-drafts": 2,
             "client-requests": 8,
         }.items():

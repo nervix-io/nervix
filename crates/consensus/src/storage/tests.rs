@@ -31,6 +31,62 @@ use crate::{
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 #[nervix_primitives::test]
+async fn password_work_and_complete_credentials_survive_recovery() -> TestResult {
+    let mut harness = Harness::new().await?;
+    let parameters = nervix_models::ClusterParameterValues::resolve(
+        nervix_models::ClusterParameterSeedValues {
+            password_iterations: Some(1),
+            ..Default::default()
+        },
+    )?;
+    harness
+        .apply(
+            1,
+            ConsensusCommand::SeedClusterParameters { values: parameters },
+        )
+        .await?;
+    let mut expected = BTreeMap::new();
+    for (index, name, iterations, seed) in [(2, "first", 10, 1), (3, "second", 20, 2)] {
+        let user = crate::UserCredentials {
+            name: nervix_models::UserName::parse(name)?,
+            password_credential: nervix_models::PasswordCredential::from_parts(
+                iterations, [seed; 16], [seed; 64],
+            )?,
+        };
+        expected.insert(user.name.clone(), user.clone());
+        harness
+            .apply(
+                index,
+                ConsensusCommand::CreateUser {
+                    user: Box::new(user),
+                },
+            )
+            .await?;
+    }
+    let unchanged = crate::UserCredentials {
+        name: nervix_models::UserName::parse("first")?,
+        password_credential: nervix_models::PasswordCredential::from_parts(30, [3; 16], [3; 64])?,
+    };
+    harness
+        .apply(
+            4,
+            ConsensusCommand::CreateUser {
+                user: Box::new(unchanged),
+            },
+        )
+        .await?;
+    let harness = harness.reopen().await?;
+    let state = harness.store.inner.state();
+    assert_eq!(state.password_work.map(|cost| cost.get().get()), Some(20));
+    assert_eq!(BTreeMap::from(&state.users), expected);
+    assert_eq!(
+        state.parameters.map(|record| record.values),
+        Some(parameters)
+    );
+    Ok(())
+}
+
+#[nervix_primitives::test]
 async fn restore_installation_authority_and_start_gate_survive_restart() -> TestResult {
     use nervix_models::{
         ArchiveDigest, Restore, RestoreArchive, RestoreMode, RestoreScope, RestoreState,
@@ -287,7 +343,6 @@ impl Harness {
             id: DomainName::try_from(name).assured("the fixture generates identifier-shaped names"),
             config: DomainConfig {
                 pace: DomainPace::Unpaced,
-                placement: Default::default(),
             },
             status: DomainStatus::Stopped,
             start_version: 0,
@@ -336,7 +391,7 @@ impl Harness {
             payload: EntryPayload::Normal(command),
         }
     }
-    /// Admit one command execution whose stored record carries `bytes` of password hash, so the
+    /// Admit one command execution whose stored statement carries `bytes` of source, so the
     /// write that stores it charges a known share of its batch.
     fn admission(index: u64, bytes: usize) -> Result<ConsensusCommand, Box<dyn std::error::Error>> {
         let owner = nervix_models::UserName::parse("operator")?;
@@ -347,10 +402,11 @@ impl Harness {
                 None,
                 [0; 32],
                 nervix_models::Timestamp::from_unix_nanos(1_700_000_010_000_000_000),
-                crate::CommandExecutionEffect::CreateUser {
-                    if_not_exists: false,
-                    name: owner,
-                    password_hash: "x".repeat(bytes),
+                crate::CommandExecutionEffect::Statement {
+                    source: "x".repeat(bytes),
+                    statement: Box::new(nervix_models::Statement::ShowClusterStatus(
+                        nervix_models::ShowClusterStatus,
+                    )),
                 },
             )),
             mutation_domains: BTreeSet::new(),
@@ -445,6 +501,15 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
         SchemaFingerprint::from_digest([1; 32]),
     );
     let created = DomainSchedule::new(domain.id.clone(), [processor.clone()], vec![]);
+    harness
+        .apply(
+            1,
+            ConsensusCommand::PutDomain {
+                domain: Box::new(domain.clone()),
+                mutation: None,
+            },
+        )
+        .await?;
     let create_inputs = harness
         .store
         .inner
@@ -452,10 +517,9 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
         .domain_planning_inputs(&domain.id);
     harness
         .apply(
-            1,
-            ConsensusCommand::PutDomainAndSchedule {
+            2,
+            ConsensusCommand::ReplaceDomainSchedule {
                 inputs: Box::new(create_inputs),
-                domain: Box::new(domain.clone()),
                 schedule: Some(Box::new(created)),
                 mutation: None,
             },
@@ -465,7 +529,7 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
     let reference = Harness::command_reference(1);
     harness
         .apply(
-            2,
+            3,
             ConsensusCommand::AdmitCommandExecution {
                 execution: Box::new(crate::CommandExecution::applying(
                     reference.clone(),
@@ -476,7 +540,10 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
                     crate::CommandExecutionEffect::CreateUser {
                         if_not_exists: false,
                         name: owner,
-                        password_hash: "argon2-hash".to_string(),
+                        password_credential: nervix_models::PasswordCredential::from_parts(
+                            210000, [51; 16], [51; 64],
+                        )
+                        .assured("the fixed credential has a bounded iteration count"),
                     },
                 )),
                 mutation_domains: BTreeSet::from([domain.id.clone()]),
@@ -509,7 +576,7 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
         .domain_planning_inputs(&domain.id);
     harness
         .apply(
-            3,
+            4,
             ConsensusCommand::ReplaceDomainSchedule {
                 inputs: Box::new(branch_transition_inputs),
                 schedule: Some(Box::new(branch_schedule.clone())),
@@ -524,7 +591,7 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
         .domain_planning_inputs(&domain.id);
     harness
         .apply(
-            4,
+            5,
             ConsensusCommand::ReplaceDomainSchedule {
                 inputs: Box::new(rejected_transition_inputs),
                 schedule: Some(Box::new(every_branch_schedule.clone())),
@@ -544,7 +611,7 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
         .domain_planning_inputs(&domain.id);
     harness
         .apply(
-            5,
+            6,
             ConsensusCommand::ReplaceDomainSchedule {
                 inputs: Box::new(every_branch_transition_inputs),
                 schedule: Some(Box::new(every_branch_schedule.clone())),
@@ -579,19 +646,25 @@ async fn record_state_and_applied_position_recover_together_at_each_boundary() -
         let mut harness = Harness::new().await?;
         let domain = Harness::domain("tenant");
         let schedule = DomainSchedule::new(domain.id.clone(), [], vec![]);
-        let inputs = Box::new(
-            harness
-                .store
-                .inner
-                .state()
-                .domain_planning_inputs(&domain.id),
-        );
         harness
             .apply(
                 1,
-                ConsensusCommand::PutDomainAndSchedule {
-                    inputs,
+                ConsensusCommand::PutDomain {
                     domain: Box::new(domain.clone()),
+                    mutation: None,
+                },
+            )
+            .await?;
+        let inputs = harness
+            .store
+            .inner
+            .state()
+            .domain_planning_inputs(&domain.id);
+        harness
+            .apply(
+                2,
+                ConsensusCommand::ReplaceDomainSchedule {
+                    inputs: Box::new(inputs),
                     schedule: Some(Box::new(schedule.clone())),
                     mutation: None,
                 },
@@ -602,17 +675,8 @@ async fn record_state_and_applied_position_recover_together_at_each_boundary() -
         let schedule_watch = harness.store.inner.schedule_tx.subscribe();
         let mut changed_domain = domain.clone();
         changed_domain.status = DomainStatus::Running;
-        let inputs = Box::new(
-            harness
-                .store
-                .inner
-                .state()
-                .domain_planning_inputs(&domain.id),
-        );
-        let command = ConsensusCommand::PutDomainAndSchedule {
-            inputs,
+        let command = ConsensusCommand::PutDomain {
             domain: Box::new(changed_domain.clone()),
-            schedule: None,
             mutation: None,
         };
         harness
@@ -620,7 +684,7 @@ async fn record_state_and_applied_position_recover_together_at_each_boundary() -
             .inner
             .faults
             .fail_next(command.to_string(), boundary);
-        assert!(harness.apply(2, command).await.is_err());
+        assert!(harness.apply(3, command).await.is_err());
         assert_eq!(harness.store.inner.state(), preceding);
         assert!(!domain_watch.has_changed()?);
         assert!(!schedule_watch.has_changed()?);
@@ -642,11 +706,14 @@ async fn record_state_and_applied_position_recover_together_at_each_boundary() -
                     recovered.domains.get(&changed_domain.id),
                     Some(&changed_domain)
                 );
-                assert!(recovered.schedule.domain(&changed_domain.id).is_none());
-                assert_eq!(recovered.runtime_revision, 2);
+                assert_eq!(
+                    recovered.schedule.domain(&changed_domain.id),
+                    Some(&schedule)
+                );
+                assert_eq!(recovered.runtime_revision, 3);
                 assert_eq!(
                     harness.store.applied_state().await?.0,
-                    Some(Harness::log_id(2))
+                    Some(Harness::log_id(3))
                 );
             }
         }
