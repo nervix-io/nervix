@@ -92,14 +92,14 @@ pub use canonical::{
     ingestor_input_body_to_plexus, string_literal,
 };
 pub use client_consumer::{
-    CLIENT_CONSUMER_NODE_BYTES, ClientConsumerLimits, DEFAULT_CLIENT_CONSUMER_SESSION_BYTES,
-    MAX_CLIENT_CONSUMER_BATCHES, MAX_CLIENT_CONSUMERS_PER_SESSION,
+    ClientConsumerLimits, DEFAULT_CLIENT_CONSUMER_SESSION_BYTES, MAX_CLIENT_CONSUMER_BATCHES,
+    MAX_CLIENT_CONSUMERS_PER_SESSION,
 };
 pub use client_producer::{
-    CLIENT_PRODUCER_NODE_BYTES, ClientAttachmentId, ClientBatchDefect, ClientEndpointContract,
-    ClientOutcomeUncertainty, ClientProcessingFailure, ClientProducerAdmission,
-    ClientProducerDescription, ClientProducerEndReason, ClientProducerGrant, ClientProducerLimits,
-    ClientProducerPolicy, ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
+    ClientAttachmentId, ClientBatchDefect, ClientEndpointContract, ClientOutcomeUncertainty,
+    ClientProcessingFailure, ClientProducerAdmission, ClientProducerDescription,
+    ClientProducerEndReason, ClientProducerGrant, ClientProducerLimits, ClientProducerPolicy,
+    ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
     DEFAULT_CLIENT_BATCH_ROWS, DEFAULT_CLIENT_PRODUCER_SESSION_BYTES, MAX_CLIENT_PRODUCER_BATCHES,
     MAX_CLIENT_PRODUCERS_PER_SESSION,
 };

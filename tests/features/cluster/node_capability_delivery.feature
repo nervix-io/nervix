@@ -60,6 +60,8 @@ Feature: Relay delivery across a node capability roll
     Given the production sticky scheduler is configured
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And node-2 starts with interconnect-relay-batch-bytes = 2KiB
+    And node-2 starts with memory-limit = 1GiB
+    And node-2 starts with execution-relay-encoded-bytes = 2KiB
     And a 3 node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """

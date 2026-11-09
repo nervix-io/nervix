@@ -16,6 +16,7 @@ mod cluster_parameters;
 mod consensus;
 #[cfg(feature = "deloxide")]
 mod diagnostics;
+mod execution;
 mod membership;
 mod memory_pressure;
 mod node;
@@ -36,6 +37,7 @@ pub use self::diagnostics::DiagnosticArgs;
 pub use self::{
     capacity::CapacityArgs,
     consensus::ConsensusArgs,
+    execution::ExecutionArgs,
     membership::MembershipArgs,
     memory_pressure::MemoryPressureArgs,
     node::{NODE_TAGS_OPTION, NodeArgs},

@@ -23,7 +23,7 @@ use std::{
 
 use error_stack::{Report, ResultExt as _};
 use nervix_dns::{DnsConfiguration, DnsResolver};
-use nervix_execution::{ExecutionConfig, Executor, MemoryClass, StorageClass};
+use nervix_execution::{ExecutionConfig, ExecutionSettings, Executor, MemoryClass, StorageClass};
 use nervix_models::SettingDefinition as _;
 use thiserror::Error;
 use tracing::{Instrument as _, info};
@@ -61,6 +61,14 @@ impl fmt::Display for StagingDirectory {
 pub enum PreflightError {
     #[error("the executor's memory budgets cannot hold the operations its limits admit")]
     ExecutionLimits,
+    #[error("the peer receive bounds do not fit the resolved executor")]
+    PeerReceiveLimits,
+    #[error("the client endpoint capacities do not fit the node memory")]
+    ClientEndpointCapacity,
+    #[error("the native runtime capacities do not fit the node")]
+    RuntimeCapacity,
+    #[error("the derived memory pressure configuration is invalid")]
+    MemoryPressure,
     #[error("the preflight's filesystem work could not be admitted")]
     Execution,
     #[error("the node's memory budgets do not add up to a byte count")]
@@ -116,6 +124,9 @@ pub(in crate::application) struct PreflightOutcome {
     pub(in crate::application) memory: NodeMemory,
     pub(in crate::application) capabilities: nervix_models::NodeCapabilities,
     pub(in crate::application) properties: nervix_models::NodeProperties,
+    pub(in crate::application) peer_receive: nervix_interconnect::PeerReceiveSettings,
+    pub(in crate::application) client_endpoints: crate::runtime::ClientEndpointSettings,
+    pub(in crate::application) memory_pressure: crate::memory_pressure::MemoryPressureSettings,
     /// The restore staging the node's state store may hold, resolved against the database volume.
     pub(in crate::application) restore_staging_max_bytes: ByteUnit,
     pub(in crate::application) database_volume: ByteUnit,
@@ -127,6 +138,7 @@ pub(in crate::application) struct Preflight<'node> {
     pub(in crate::application) db_path: &'node Path,
     pub(in crate::application) temp_dir: &'node Path,
     pub(in crate::application) dns: &'node DnsConfiguration,
+    pub(in crate::application) cpu_detection: crate::capacity::CpuDetection,
     pub(in crate::application) detection: &'node NodeDetection,
 }
 
@@ -140,28 +152,83 @@ impl Preflight<'_> {
     pub(in crate::application) async fn run(
         self,
     ) -> Result<PreflightOutcome, Report<PreflightError>> {
-        let config = ExecutionConfig::default();
-        let executor = Executor::new(config).change_context(PreflightError::ExecutionLimits)?;
-        let budgets = config
-            .budgets
-            .total()
-            .ok_or_else(|| Report::new(PreflightError::UnaddressableBudgets))?;
+        self.settings
+            .execution
+            .validate()
+            .change_context(PreflightError::ExecutionLimits)?;
+        self.settings
+            .peer_receive
+            .validate()
+            .change_context(PreflightError::PeerReceiveLimits)?;
+        self.settings
+            .runtime_threads
+            .validate()
+            .change_context(PreflightError::RuntimeCapacity)?;
+        // Capacity detection uses only a bounded filesystem turn before the final executor exists.
+        let executor = Executor::new(ExecutionConfig::default())
+            .change_context(PreflightError::ExecutionLimits)?;
 
-        let (detected, detected_cpu) = run_filesystem_work(&executor, || {
+        let cpu_detection = self.cpu_detection;
+        let (detected, detected_cpu) = run_filesystem_work(&executor, move || {
             (
                 DetectedMemory::detect(),
-                crate::capacity::CpuCount::detect(),
+                match cpu_detection {
+                    crate::capacity::CpuDetection::Pending => crate::capacity::CpuCount::detect(),
+                    crate::capacity::CpuDetection::Resolved(cpu) => cpu,
+                },
             )
         })
         .await?;
         let memory = self.settings.capacity.effective_memory_limit(detected);
+        let cpu_count = self.settings.capacity.effective_cpu_count(detected_cpu);
+        let memory_bytes = memory
+            .limit()
+            .and_then(|limit| std::num::NonZeroU64::new(limit.as_u64()));
+        let config = ExecutionSettings::resolve(self.settings.execution, cpu_count, memory_bytes)
+            .change_context(PreflightError::ExecutionLimits)?
+            .config();
+        super::RuntimeThreadSettings::resolve(
+            self.settings.runtime_threads,
+            cpu_count,
+            config.workers,
+            memory_bytes,
+        )
+        .change_context(PreflightError::RuntimeCapacity)?;
+        let client_endpoints = crate::runtime::ClientEndpointSettings::resolve(
+            self.settings.client_endpoints,
+            memory_bytes,
+        )
+        .change_context(PreflightError::ClientEndpointCapacity)?;
+        let execution_bytes = config
+            .budgets
+            .total()
+            .ok_or_else(|| Report::new(PreflightError::UnaddressableBudgets))?
+            .as_u64();
+        let endpoint_bytes = client_endpoints
+            .total_bytes()
+            .ok_or_else(|| Report::new(PreflightError::UnaddressableBudgets))?;
+        let budgets = ByteUnit::Byte(
+            execution_bytes
+                .checked_add(endpoint_bytes)
+                .ok_or_else(|| Report::new(PreflightError::UnaddressableBudgets))?,
+        );
+        drop(executor);
+        let executor = Executor::new(config).change_context(PreflightError::ExecutionLimits)?;
+        let peer_receive = self
+            .settings
+            .peer_receive
+            .resolve(executor.limits())
+            .change_context(PreflightError::PeerReceiveLimits)?;
         let capabilities = nervix_models::NodeCapabilities {
-            cpu_count: self.settings.capacity.effective_cpu_count(detected_cpu),
-            memory_bytes: memory
-                .limit()
-                .and_then(|limit| std::num::NonZeroU64::new(limit.as_u64())),
-            receive: self.settings.peer_receive.bounds(),
+            cpu_count,
+            memory_bytes,
+            receive: peer_receive.bounds(),
         };
+        let memory_pressure = self
+            .settings
+            .memory_pressure
+            .for_memory_limit(memory.limit())
+            .change_context(PreflightError::MemoryPressure)?;
         if let Some(limit) = memory.limit() {
             if limit < budgets {
                 return Err(Report::new(PreflightError::MemoryBelowBudgets {
@@ -169,7 +236,7 @@ impl Preflight<'_> {
                     budgets,
                 }));
             }
-            if let Some(watermark) = *self.settings.memory_pressure.high_watermark.value()
+            if let Some(watermark) = *memory_pressure.high_watermark.value()
                 && watermark > limit
             {
                 return Err(Report::new(PreflightError::WatermarkAboveMemory {
@@ -227,6 +294,9 @@ impl Preflight<'_> {
             memory,
             capabilities,
             properties,
+            peer_receive,
+            client_endpoints,
+            memory_pressure,
             restore_staging_max_bytes,
             database_volume: database.capacity,
         })

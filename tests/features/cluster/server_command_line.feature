@@ -33,3 +33,21 @@ Feature: Server command-line values
       | --gossip-interval         | 0s    | gossip-interval (0ns) must be at least 1ms                                                   |
       | --clock-skew-tolerance    | 0s    | clock-skew-tolerance (0ns) must be at least 1ms                                              |
       | --memory-limit            | 0B    | memory-limit must be greater than zero                                                       |
+
+  Scenario Outline: A native node refuses an execution capacity that cannot back its runtime
+    When a nervix-server process is started with command-line option "<option>" set to "<value>"
+    Then the server process exits with status 1
+    And the server process log contains "<refusal>"
+    And the server process log does not contain "panicked"
+
+    Examples:
+      | option                         | value | refusal                          |
+      | --runtime-max-blocking-threads | 1     | cannot hold                      |
+      | --runtime-thread-stack-size    | 0B    | must be positive and addressable |
+      | --execution-relay-memory-bytes | 0B    | execution-relay-memory-bytes     |
+
+  Scenario: A native node refuses an unaddressable runtime thread total before startup
+    When a nervix-server process is started with command-line option "--runtime-max-blocking-threads" set to "18446744073709551615"
+    Then the server process exits with status 1
+    And the server process log contains "the runtime thread capacities do not add up to an addressable total"
+    And the server process log does not contain "panicked"

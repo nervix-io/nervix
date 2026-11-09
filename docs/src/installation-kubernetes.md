@@ -84,9 +84,12 @@ spec:
 
 Each node checks its volume and its memory before it starts, and refuses to start when they cannot
 hold its configuration: its volume must be at least as large as each resource quota, 16 GiB for
-extracted resources by default, and its memory limit must hold its execution budgets, 2.66 GiB. The
+extracted resources by default, and its memory limit must hold all derived execution and client
+credit budgets. The default derivations on a 1 GiB node total 491 MiB; leave further headroom for
+graph state, engine allocations and stacks (see [Execution Capabilities](node-settings.md#execution-capabilities)). The
 example spells out the operator's defaults, a 20 GiB volume and a 3 GiB memory limit, which meet
-both checks. With a smaller volume or memory limit, every pod exits with the refusal.
+both checks. A volume below its quotas, or a memory limit below its complete resolved budget,
+refuses each affected pod's startup.
 [Capacity Planning](capacity-planning.md#what-a-node-needs-to-start) gives the rules.
 
 Apply it and watch the cluster become ready:

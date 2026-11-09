@@ -41,6 +41,14 @@ pub enum CapacitySettingsError {
     EmptyDetectionTimeout,
 }
 
+/// Whether a process runtime has already resolved the CPU measurement used by its node.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum CpuDetection {
+    #[default]
+    Pending,
+    Resolved(Option<NonZeroU64>),
+}
+
 /// The parallel CPU capacity of this process, detected with its control-group quota by default.
 pub struct CpuCount;
 

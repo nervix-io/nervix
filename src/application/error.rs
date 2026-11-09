@@ -122,6 +122,12 @@ pub enum AppError {
     InvalidCapacitySettings,
     #[error("invalid --node-tags")]
     InvalidNodeTags,
+    #[error("invalid client endpoint byte capacity")]
+    InvalidClientEndpointCapacity,
+    #[error("invalid execution capacity")]
+    InvalidExecutionSettings,
+    #[error("invalid native runtime capacity")]
+    InvalidRuntimeCapacity,
     #[error("invalid peer receive settings")]
     InvalidPeerReceiveSettings,
     #[error("invalid state inspection capabilities")]

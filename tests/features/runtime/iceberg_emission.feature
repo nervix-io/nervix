@@ -1772,6 +1772,9 @@ Feature: Iceberg emission
   @iceberg_commit_whole_class @slots_2
   Scenario Outline: An Iceberg staged batch larger than the bulk memory class commits only once the whole class is free
     Given Iceberg dependencies are running
+    And node-1 starts with execution-bulk-memory-bytes = 32MiB
+    And node-2 starts with execution-bulk-memory-bytes = 32MiB
+    And node-3 starts with execution-bulk-memory-bytes = 32MiB
     And a <cluster_size> node nervix cluster is started
     And Iceberg table "oversized_messages_{{test_id}}" exists at "s3://nervix-iceberg/tables/oversized_messages_{{test_id}}" with columns
       """
