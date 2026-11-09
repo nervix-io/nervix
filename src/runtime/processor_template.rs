@@ -940,28 +940,29 @@ impl BranchInstanceTemplate {
                 (identifier.clone(), inputs)
             })
             .collect();
+        // A processor's sent series cover every relay it sends to, a correlator's timeout relays
+        // included, so dispatching a timed-out record finds its series like a route's batch does.
         let processor_outputs = processors
             .iter()
             .map(|(identifier, processor)| {
                 let outputs = processor
                     .operation
-                    .output_routes()
-                    .routes
-                    .iter()
-                    .map(|output| {
+                    .sent_relays()
+                    .into_iter()
+                    .map(|relay| {
                         let metrics = runtime.inner.metrics.resolve_node_batch_metrics(
                             NodeBatchMetricsSpec {
                                 unit: self.owner.unit,
                                 domain,
                                 kind: processor.kind,
                                 node: &processor.processor,
-                                relay: &output.relay,
+                                relay,
                                 physical_node_id,
                                 direction: "sent",
                                 branch,
                             },
                         );
-                        (output.relay.clone(), metrics)
+                        (relay.clone(), metrics)
                     })
                     .collect();
                 (identifier.clone(), outputs)

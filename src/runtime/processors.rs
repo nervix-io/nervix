@@ -11,10 +11,10 @@ use ahash::HashMap;
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    Assignment, AssignmentTarget, BranchName, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
-    ErrorPolicies, FieldName, InferencerTensorDeclaration, InferencerTensorMapping,
-    MessageErrorOperation, MessageErrorPolicy, ModelKind, ModelName, NodeUnitRef, RelayName,
-    ResourceName, RouteConstruction, StructuredMessageError, Timestamp,
+    Assignment, AssignmentTarget, BranchName, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
+    CorrelatorMatchPolicy, ErrorPolicies, FieldName, InferencerTensorDeclaration,
+    InferencerTensorMapping, MessageErrorOperation, MessageErrorPolicy, ModelKind, ModelName,
+    NodeUnitRef, RelayName, ResourceName, RouteConstruction, StructuredMessageError, Timestamp,
 };
 use nervix_primitives::sync::{Arc, StdArc};
 use nervix_roto::UdfExecutor;
@@ -593,6 +593,24 @@ impl RelayProcessorOperationNode {
             | Self::StatefulInferencer { output_routes, .. }
             | Self::WasmProcessor { output_routes, .. } => output_routes,
         }
+    }
+
+    /// Every relay the operation sends records to: each route's relay and, for a correlator, each
+    /// side's `SEND TO` timeout relay, which receives that side's records that time out
+    /// unmatched. The registry plans a timeout relay beside the routes, never as one of them.
+    pub(super) fn sent_relays(&self) -> Vec<&RelayName> {
+        let mut relays = Vec::new();
+        for output in &self.output_routes().routes {
+            relays.push(&output.relay);
+        }
+        if let Self::Correlator { timeout_policy, .. } = self {
+            for action in [&timeout_policy.left, &timeout_policy.right] {
+                if let CorrelationTimeoutAction::SendTo { relay } = action {
+                    relays.push(relay);
+                }
+            }
+        }
+        relays
     }
 
     pub(super) fn output_routes_mut(&mut self) -> &mut RelayProcessorOutputsNode {
