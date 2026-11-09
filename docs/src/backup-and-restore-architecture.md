@@ -658,9 +658,29 @@ Decoded materialized containers keep their metadata and column charges in the in
 equals the relay budget and counts separately in startup sizing, leaving relay work the capacity
 it needs to evaluate, encode and dispatch while those source columns remain admitted.
 
-Partitioned processors restore each archived branch under its scheduled partition unit, including
-that unit's generation and ownership fence. Each unit starts its own supervisor, state writer and
-replica poller. Moving or restoring one unit retains the sibling units' tasks and state identities.
+Partitioned processors restore each archived branch under the partition unit the restored count
+places its key in, including that unit's generation and ownership fence. Each unit starts its own
+supervisor, state writer and replica poller. Moving or restoring one unit retains the sibling units'
+tasks and state identities.
+
+An archive carries each key and the unit that held it, and the key's fingerprint is its partition
+seed. For every entity a branch's partitions divide, a restore recomputes the unit of each archived
+key under the restored count, which is the count the archived branch declares, and stages every
+piece of the key's state for that unit, whichever unit archived it:
+
+- each deduplicator, window and WASM section is installed under the key's unit;
+- each unit's branch lifecycle holds the archived entries of the keys it owns, from every archived
+  lifecycle of the entity, at the newest revision any of them had, which is at least the
+  incarnation of every entry;
+- each unit of a materialized relay holds the archived rows of the keys it owns, regrouped from
+  every archived unit into the unit's own checkpoint.
+
+A backup cut while the branch's keys moved between units holds a claimed key twice: in the unit the
+count current at the cut places it in, where its claim installed it, and in the unit that released
+it and had not forgotten it yet. The restore keeps the copy in the key's own unit, since the
+released copy stopped changing when it was released; a lifecycle entry archived in neither keeps the
+one last active. The restored branch begins its first partition epoch with every key in its
+partition.
 
 Running generators enumerate only their own source partition and keep remote source views only in
 their task-local read cache. They describe
@@ -919,8 +939,11 @@ fingerprint the archive recorded; the archive records a Kafka ingestor's schema 
 its offsets, and the restore checks it before installing them. A materialized placement's
 fingerprint also mixes in the domain's start generation, and a WASM placement names the guest-state
 generation its schedule assigns. The archive descriptors and section paths retain the unit, so
-two units of one entity stage and install separate checkpoints. Restore accepts a state section
-only when its unit exists in the restored schedule and sends it to that unit's assigned nodes.
+two units of one entity stage and install separate checkpoints. Restore stages state of an entity a
+branch's partitions divide in the unit the restored count places each key in, as [State
+Installation](#state-installation) describes; any other state section is accepted only
+when its unit exists in the restored schedule. Each staged checkpoint is sent to its unit's assigned
+nodes.
 
 Kafka offset checkpoints and their archive records also retain the exact optional generation of an
 already applied explicit start. Restore installs it beside the next offsets, so resuming an archived

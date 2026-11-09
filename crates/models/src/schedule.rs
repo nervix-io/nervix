@@ -29,9 +29,10 @@ use serde::{Deserialize, Serialize};
 use strum::AsRefStr;
 
 use crate::{
-    BranchKeyFingerprint, ClusterNodeName, CommandExecutionReference, CreateWasmProcessor,
-    DomainName, DomainNodeRef, IngestorEntity, KafkaIngestor, KafkaOffsetMode, Model, ModelKind,
-    ModelName, NodeRef, ResolvedBranching, SchemaFingerprint, UniquelyKindedModel, Unit,
+    BranchKeyFingerprint, BranchName, BranchPartitionEpoch, ClusterNodeName,
+    CommandExecutionReference, CreateWasmProcessor, DomainName, DomainNodeRef, IngestorEntity,
+    KafkaIngestor, KafkaOffsetMode, Model, ModelKind, ModelName, NodeRef, PartitionEpochNumber,
+    PartitionTransition, ResolvedBranching, SchemaFingerprint, UniquelyKindedModel, Unit,
     WasmSavedStateRejection, WasmStateGeneration, WasmStateGenerations, WasmStateRecoveries,
     WasmStateRecoveryAdmission, WasmStateRecoveryOutcome, WasmStateReset, WasmStateResetPhase,
     WasmStateResetReason, WasmStateResetScope,
@@ -171,6 +172,9 @@ pub struct DomainSchedule {
     pub domain: DomainName,
     pub nodes: ScheduledNodes,
     pub placement_groups: Vec<PlacementGroupSchedule>,
+    /// The partition epoch of every branch whose partition count changed since it was created. A
+    /// branch without an entry keeps the count it was created with, in epoch one.
+    pub partition_epochs: BTreeMap<BranchName, BranchPartitionEpoch>,
 }
 
 impl DomainSchedule {
@@ -188,6 +192,68 @@ impl DomainSchedule {
                 .map(|node| (node.identity(), node))
                 .collect(),
             placement_groups,
+            partition_epochs: BTreeMap::new(),
+        }
+    }
+
+    /// This schedule with `epochs` as the partition epochs of its branches.
+    #[must_use]
+    pub fn with_partition_epochs(
+        mut self,
+        epochs: BTreeMap<BranchName, BranchPartitionEpoch>,
+    ) -> Self {
+        self.partition_epochs = epochs;
+        self
+    }
+
+    /// The partition epoch `branch` executes in: one until its count first changes.
+    pub fn partition_epoch_of(&self, branch: &BranchName) -> PartitionEpochNumber {
+        match self.partition_epochs.get(branch) {
+            Some(epoch) => epoch.number,
+            None => PartitionEpochNumber::FIRST,
+        }
+    }
+
+    /// The transition `branch` is in while keys placed under its previous count may still lie
+    /// outside their partition.
+    pub fn partition_transition_of(&self, branch: &BranchName) -> Option<&PartitionTransition> {
+        self.partition_epochs.get(branch)?.transition.as_ref()
+    }
+
+    /// This schedule once `branch`'s partition transition retired: no unit holds a key outside its
+    /// partition any more, so the epoch keeps its count without a transition and every node that
+    /// keeps state per key for the branch loses the units it kept for the previous count.
+    #[must_use]
+    pub fn with_partition_transition_retired(&self, branch: &BranchName) -> Self {
+        let mut retired = self.clone();
+        let Some(epoch) = retired.partition_epochs.get_mut(branch) else {
+            return retired;
+        };
+        let holding = epoch.holding_units();
+        *epoch = epoch.retired();
+        for node in retired.nodes.values_mut() {
+            if node.partition_branch() != Some(branch) || !node.keeps_state_per_key() {
+                continue;
+            }
+            for unit in &holding {
+                node.units.shift_remove(unit);
+            }
+        }
+        retired
+    }
+
+    /// The units `node` keeps scheduled beyond its branch's current count, because they may still
+    /// hold keys its branch's previous count placed there: none outside a transition.
+    pub fn holding_units_of(&self, node: &ScheduledNode) -> Vec<Unit> {
+        if !node.keeps_state_per_key() {
+            return Vec::new();
+        }
+        let Some(branch) = node.partition_branch() else {
+            return Vec::new();
+        };
+        match self.partition_epochs.get(branch) {
+            Some(epoch) => epoch.holding_units(),
+            None => Vec::new(),
         }
     }
 
@@ -554,20 +620,60 @@ impl ScheduledNode {
         }
     }
 
-    /// Whether the scheduled identities match the current declaration. Ingestor units also
-    /// depend on resolved construction references and are validated by their entrypoint plan.
-    pub fn units_match_declaration(&self) -> bool {
+    /// Whether the scheduled identities match the current declaration together with `holding`,
+    /// the units a partition transition of this node's branch keeps scheduled beyond the current
+    /// count. Ingestor units also depend on resolved construction references and are validated by
+    /// their entrypoint plan.
+    pub fn units_match_declaration(&self, holding: &[Unit]) -> bool {
         if matches!(self.config.as_ref(), Model::Ingestor(_)) {
             return true;
         }
-        match Self::branch_partitions_for(self.config.as_ref(), self.resolved_branching.as_ref()) {
-            Some(partitions) if partitions.is_partitioned() => {
-                self.units.len() == usize::from(partitions.count().get())
-                    && (0..u32::from(partitions.count().get()))
-                        .all(|index| self.units.contains_key(&Unit::partition(index)))
-            }
-            _ => self.units.len() == 1 && self.units.contains_key(&Unit::SINGLE),
+        let declared = match Self::branch_partitions_for(
+            self.config.as_ref(),
+            self.resolved_branching.as_ref(),
+        ) {
+            Some(partitions) => partitions.units(),
+            None => vec![Unit::SINGLE],
+        };
+        let Some(expected) = declared.len().checked_add(holding.len()) else {
+            return false;
+        };
+        if self.units.len() != expected {
+            return false;
         }
+        for unit in declared.iter().chain(holding) {
+            if !self.units.contains_key(unit) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether this node keeps durable state per branch key, which a change of its branch's
+    /// partition count moves between its units: a deduplicator, window or WASM processor, or a
+    /// materialized relay.
+    pub fn keeps_state_per_key(&self) -> bool {
+        Model::keeps_state_per_key(self.config.as_ref())
+    }
+
+    /// The branch whose partition count decides this node's units: none for a node a branch's
+    /// partitions do not divide.
+    pub fn partition_branch(&self) -> Option<&BranchName> {
+        Self::branch_partitions_for(self.config.as_ref(), self.resolved_branching.as_ref())?;
+        self.resolved_branching.as_ref()?.branch()
+    }
+
+    /// Adds `holding`, the units a partition transition keeps scheduled beyond the current count,
+    /// after this node's declared units. A unit already scheduled keeps its placement.
+    #[must_use]
+    pub fn with_holding_units(mut self, holding: &[Unit]) -> Self {
+        for unit in holding {
+            if !self.units.contains_key(unit) {
+                let scheduled = ScheduledUnit::for_model(self.config.as_ref());
+                self.units.insert(*unit, scheduled);
+            }
+        }
+        self
     }
 
     /// Whether this node is scheduled as several partition units.

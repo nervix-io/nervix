@@ -184,6 +184,7 @@ mod node_settings;
 mod observability_http;
 mod observation;
 mod ownership_handoff;
+mod partition_transition;
 mod placement_groups;
 mod preflight;
 mod public_listener;
@@ -1565,11 +1566,13 @@ impl Application {
                                 else {
                                     continue;
                                 };
+                                let current_domain = current_schedule.domain(&domain);
                                 #[cfg(feature = "testing")]
                                 let mut schedule = graph.schedule_for_domain_with_mode(
                                     &domain,
                                     &schedulable_node_ids,
                                     usize::try_from(automatic_schedule_input.runtime_state().parameters.verified("scheduling starts after parameter seeding").values.replica_count()).assured("the committed replica count fits a supported target"),
+                                    current_domain,
                                     scheduler_mode,
                                 );
                                 #[cfg(not(feature = "testing"))]
@@ -1577,8 +1580,8 @@ impl Application {
                                     &domain,
                                     &schedulable_node_ids,
                                     usize::try_from(automatic_schedule_input.runtime_state().parameters.verified("scheduling starts after parameter seeding").values.replica_count()).assured("the committed replica count fits a supported target"),
+                                    current_domain,
                                 );
-                                let current_domain = current_schedule.domain(&domain);
                                 let mut failover_existing = current_domain.cloned();
                                 if let Some(existing) = &mut failover_existing {
                                     let failover_moves =
@@ -2118,8 +2121,10 @@ impl Application {
 
         service.register_wasm_state_reset_service(shutdown.clone())?;
         service.register_wasm_state_recovery_interconnect_handler()?;
+        service.register_partition_transition_handler()?;
         service.register_stopping_node_drain_handler()?;
         service.register_wasm_state_recovery_coordinator(shutdown.clone());
+        service.register_partition_transition_retirement(shutdown.clone());
 
         let entity_drain_service = service.clone();
         interconnect

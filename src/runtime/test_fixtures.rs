@@ -1274,6 +1274,7 @@ pub(super) fn junction_branch_template(
         .into_iter()
         .collect(),
         wasm_state_reset: None,
+        partition_transition: None,
     }
 }
 

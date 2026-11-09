@@ -140,6 +140,9 @@ pub(super) struct BranchInstanceTemplate {
     pub(super) relays: HashMap<RelayName, RelayProcessorRelayTemplate>,
     pub(super) processors: HashMap<ModelName, RelayProcessorTemplate>,
     pub(super) wasm_state_reset: Option<nervix_models::WasmStateReset>,
+    /// The partition transition this unit's branch is in while keys placed under its previous
+    /// count may lie outside their partition; absent for an entity without state per key.
+    pub(super) partition_transition: Option<super::partition_claims::UnitPartitionTransition>,
 }
 
 #[derive(Debug, Clone)]

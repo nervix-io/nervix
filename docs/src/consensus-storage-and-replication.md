@@ -512,8 +512,8 @@ the bounded storage executor, but consensus has its own single ordered worker.
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_hop_rule_logs`, `raft_hop_rule_meta`, `raft_hop_rule_state`, and
-`raft_hop_rule_snapshots`. Opening it validates the complete keyspace namespace before reading
+`raft_part_epoch_logs`, `raft_part_epoch_meta`, `raft_part_epoch_state`, and
+`raft_part_epoch_snapshots`. Opening it validates the complete keyspace namespace before reading
 any records. This namespace identifies the current Model shape, including the separate JSON
 and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec encoding, a Pulsar
 subscription's required type, an owned Pulsar subscription's required start position, a Kafka
@@ -524,8 +524,9 @@ MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an M
 writes beside its publishing mode, its retained-publication flag and MQTT 5 property mappings, a
 `REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription,
 whether a polled HTTP request's header holds a literal or names a client secret, the endpoint kind
-whose signaling data exists only on its WebSockets variant, and the branch partition count every
-resolved branch declaration of the committed schedule carries. It identifies
+whose signaling data exists only on its WebSockets variant, the branch partition count every
+resolved branch declaration of the committed schedule carries, and the partition epoch the
+committed schedule records for every branch whose count changed. It identifies
 the current statement shape as well, which the statements a transaction keeps are stored in:
 `ALTER BRANCH` among those statements, and an `ALTER INGESTOR` or `ALTER EMITTER` operation that
 changes one part of its entity's body, an envelope clause or the properties, or one part of a

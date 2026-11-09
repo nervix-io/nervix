@@ -85,8 +85,9 @@ a partition it owns, and only when the key it decodes lands in that partition. E
 fans its batches out to every runtime consumer and every session subscription of the relay, so a
 consumer and a subscription receive every partition. One key's records pass through one partition
 owner, which keeps their order; records of different keys in different partitions are not ordered
-with each other. Processors, generators and emitters stay single units that read every partition of
-their input relays.
+with each other. Processors and generators of the branch run one unit per partition, each reading
+its own partition (see [Processors](processors.md#partitioned-processing)); emitters stay single
+units that read every partition of their input relays.
 
 `SHOW CLUSTER STATUS` prints one schedule line per partition of a partitioned relay, naming the
 partition after the relay, such as
@@ -94,24 +95,71 @@ partition after the relay, such as
 
 An unbranched relay and a relay of a branch with one partition have one owner.
 
-`ALTER BRANCH <branch> SET PARTITIONS <n>` changes the count:
+### Changing the partition count
+
+`ALTER BRANCH <branch> SET PARTITIONS <n>` changes the count of a running, paused or stopped
+domain:
 
 ```plexus
-STOP;
-ALTER BRANCH by_tenant SET PARTITIONS 2;
-START;
+ALTER BRANCH by_tenant SET PARTITIONS 8;
 ```
 
-The registry accepts it only while the branch's domain is stopped. On a running or paused domain it
-is refused before anything is committed:
+The change begins the branch's next partition epoch. On a running domain it activates entity by
+entity, without pausing the domain: Nervix gates, drains and force-flushes the relays of the branch,
+the processors and generators it divides into partitions, and every producer into and consumer of
+those relays, and from then on producers place each key by the new count. Every other entity of
+the domain keeps running, and session subscriptions of the relays keep receiving rows. On a stopped
+domain the epoch begins at the commit, and the next `START` builds the new set of partitions.
+
+A key whose partition changes keeps its state. The partition the new count places a key in claims
+it the first time it receives one of the key's records: that record and the key's later records
+wait while the partition that held the key drains the key's pending work, checkpoints its state and
+hands it over, and then the key continues with its deduplicator keys, its window, its WASM guest
+state and its materialized row. A materialized relay's partition does not wait for a record: it
+claims every row the partitions of the previous count hold for it as soon as it starts, since a row
+is read far more often than it is written. A record that a `REQUIRED WAIT` dependency held in the old partition
+when the key moved is refused, and its source sends it again to the key's new partition. A key that
+never reappears expires by the branch's TTL in the partition that held it. A materialized read of a
+key that may still lie in its old partition reads the old partition when the new one has no row, so
+`REQUIRED SKIP` and defaults apply only to a row that exists in neither.
+
+While keys may still lie in partitions of the previous count, `DESCRIBE BRANCH` names that count and
+how far moving them has come:
 
 ```text
-branch 'by_tenant' changes its partition count only while its domain is stopped: STOP domain 'payments', run ALTER BRANCH, then START it
+branch: by_tenant
+schema: tenant_key
+ttl: 5m
+partitions: 8
+partition epoch: 2
+previous partitions: 4
+keys pending: 3
+keys claimed: 12
 ```
 
-`START` rebuilds every relay of the branch with the new set of partitions. Materialized relay state
-belongs to the domain start that began it and `START` clears it, so no row recorded under the
-previous count is read under the new one.
+`keys pending` counts the keys partitions still hold outside the partition the current count places
+them in, together with the claims in flight; `keys claimed` counts the keys the partitions' current
+owners claimed in this epoch. A partition the new count drops stays scheduled as a holding unit
+until it holds no key, and takes no new records. Once no partition holds a key outside its
+partition, the leader retires the transition, which pauses nothing: `previous partitions`
+disappears from `DESCRIBE BRANCH`, every partition stops claiming keys and the holding units are
+removed. Until then a change to yet another count is refused, so
+every key has one partition that may hold it outside its own:
+
+```text
+branch 'by_tenant' in domain 'payments' is still moving keys placed under its previous partition count 4 to its current count 8; change its partition count again once DESCRIBE BRANCH reports no previous partitions
+```
+
+Each node also reports its own part: `nervix_branch_partition_epoch`,
+`nervix_branch_partition_keys_pending` and `nervix_branch_partition_keys_claimed_total`, described
+in [Metrics And Observability](metrics-and-observability.md). A backup cut while keys move restores
+every key into the partition the restored count places it in, and the restored branch begins its
+first partition epoch with no keys pending.
+
+A branch none of whose entities keeps state per key, no deduplicator, window or WASM processor and
+no materialized relay, has nothing to move: its new count applies at once and its epoch has no
+transition. [Data-Plane Concurrency](data-plane-concurrency.md#partition-transitions-and-key-claims)
+owns the claim protocol and its bounds.
 
 ## Altering Relays
 

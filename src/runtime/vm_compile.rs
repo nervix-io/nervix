@@ -384,7 +384,10 @@ pub(super) fn referenced_materialized_stream_bindings(
         let Some(spec) = available_materialized_streams.get(&relay) else {
             continue;
         };
-        if !spec.branching.is_unbranched() && spec.branching != *current_branching {
+        // A program reads the materialized relay by its key's fields, which are the same under
+        // every partition count of the branch; while a count change activates, the relay and its
+        // readers are rebound in turn and may name the branch with different counts.
+        if !spec.branching.is_unbranched() && !spec.branching.same_key_as(current_branching) {
             return Err(Report::new(
                 RuntimeVmCompileError::MaterializedBranchMismatch {
                     relay,

@@ -2033,6 +2033,7 @@ mod tests {
                 &domain,
                 &[ClusterNodeName::parse("node-1").expect("valid name")],
                 0,
+                None,
             );
         let scheduled_relay = schedule
             .nodes

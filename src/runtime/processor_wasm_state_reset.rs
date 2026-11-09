@@ -49,7 +49,7 @@ impl<'a> ProcessorWasmStateResetContext<'a> {
 pub(super) fn processor_reset_target_keys(
     processor: &ModelName,
     template: &BranchInstanceTemplate,
-    instances: &BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+    instances: &ProcessorBranches,
     scope: WasmStateResetScope,
     branch_key: Option<BranchKey>,
 ) -> error_stack::Result<Vec<Option<BranchKey>>, WasmStateResetRuntimeError> {
@@ -97,7 +97,7 @@ async fn restore_processor_wasm_state_reset_branches(
     runtime: &Runtime,
     domain: &DomainName,
     template: &BranchInstanceTemplate,
-    instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+    instances: &mut ProcessorBranches,
     branches: &mut Vec<PreparedWasmStateResetBranch>,
 ) -> error_stack::Result<(), WasmStateResetRuntimeError> {
     let processor = ModelName::from(&template.owner.node.identifier);
@@ -130,7 +130,7 @@ async fn restore_processor_wasm_state_reset_branches(
             "the concrete branch creation transition registers its one metric identity",
             runtime.observe_branch_instance_created(domain, template.branch.as_ref(), &key)
         );
-        instances.insert_changed(key, restored_at, task);
+        instances.insert_changed(key, restored_at, ProcessorBranchSlot::Live(task));
     }
     Ok(())
 }
@@ -138,7 +138,7 @@ async fn restore_processor_wasm_state_reset_branches(
 impl ProcessorWasmStateResetContext<'_> {
     pub(super) async fn prepare(
         &self,
-        instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+        instances: &mut ProcessorBranches,
         preparation: WasmStateResetPreparation,
         prepared: &mut Option<PreparedWasmStateReset>,
     ) -> error_stack::Result<(), WasmStateResetRuntimeError> {
@@ -168,6 +168,12 @@ impl ProcessorWasmStateResetContext<'_> {
         let mut branches = Vec::with_capacity(targets.len());
         for key in targets {
             nervix_primitives::task::consume_budget().await;
+            // A released key's state moves to the unit claiming it, whose own reset covers it.
+            if let Some(slot) = instances.get(&key)
+                && slot.live().is_none()
+            {
+                continue;
+            }
             let previous = if let Some(entry) = instances.remove(&key) {
                 nervix_primitives::expect_lint!(
                     nervix::lifecycle_call,
@@ -189,7 +195,9 @@ impl ProcessorWasmStateResetContext<'_> {
                         domain,
                         processor.clone(),
                         &key,
-                        entry,
+                        entry
+                            .live()
+                            .verified("the loop skipped every released key before removing it"),
                         ProcessorBranchStopMode::Handoff(response),
                     )
                 )
@@ -262,7 +270,7 @@ pub(super) async fn abort_processor_wasm_state_reset(
     runtime: &Runtime,
     domain: &DomainName,
     template: &BranchInstanceTemplate,
-    instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+    instances: &mut ProcessorBranches,
     request: &CommandExecutionReference,
     prepared: &mut Option<PreparedWasmStateReset>,
 ) -> error_stack::Result<(), WasmStateResetRuntimeError> {
@@ -291,7 +299,7 @@ pub(super) async fn abort_processor_wasm_state_reset(
 impl ProcessorWasmStateResetContext<'_> {
     pub(super) async fn commit(
         &self,
-        instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+        instances: &mut ProcessorBranches,
         last_persisted_lru_lsm: &mut u64,
         reset: &nervix_models::WasmStateReset,
         prepared: &mut Option<PreparedWasmStateReset>,
@@ -366,7 +374,7 @@ impl ProcessorWasmStateResetContext<'_> {
                 "the concrete branch creation transition registers its one metric identity",
                 runtime.observe_branch_instance_created(domain, template.branch.as_ref(), &key)
             );
-            instances.insert_changed(key, execution_now, task);
+            instances.insert_changed(key, execution_now, ProcessorBranchSlot::Live(task));
             branch.activated = true;
         }
         nervix_primitives::expect_lint!(

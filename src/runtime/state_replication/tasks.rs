@@ -1033,25 +1033,9 @@ impl Runtime {
         }
     }
 
-    /// The placement of runtime state of `state` for `branch_key`, in the identity the committed
-    /// schedule publishes for its node.
-    ///
-    /// Branch-aggregated metrics and Kafka offsets depend on no schema and are placed without one.
-    /// Every other kind is placed under the schema fingerprint the schedule publishes for the node,
-    /// and WASM guest state also in the generation it names for the branch, so neither can be
-    /// placed for a node that no schedule has published them for.
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            recurring,
-            reason = "this owner is reached by recurring record, frame, acknowledgement or \
-                      state-poll work"
-        )
-    )]
-    #[cfg_attr(
-        nervix_lint,
-        nervix::dispatch(reason = "the caller supplies the typed model-name conversion")
-    )]
+    /// The placement of `branch_key`'s state of `state` in the `Single` unit of an unpartitioned
+    /// node, for tests that place state outside any partition.
+    #[cfg(test)]
     pub(in crate::runtime) fn state_placement(
         &self,
         domain: &DomainName,
@@ -1070,6 +1054,13 @@ impl Runtime {
         )
     }
 
+    /// The placement of runtime state of `state` for `branch_key` in `unit`, in the identity the
+    /// committed schedule publishes for its node.
+    ///
+    /// Branch-aggregated metrics and Kafka offsets depend on no schema and are placed without one.
+    /// Every other kind is placed under the schema fingerprint the schedule publishes for the node,
+    /// and WASM guest state also in the generation it names for the branch, so neither can be
+    /// placed for a node that no schedule has published them for.
     #[cfg_attr(
         nervix_lint,
         nervix::context(

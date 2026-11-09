@@ -1683,11 +1683,15 @@ moves its exact hard group; an unqualified member selects all its declared units
 [Control Plane](./control-plane.md) for activation and [Typed States And Validation
 Boundaries](./typed-states.md) for required state.
 
-`ALTER BRANCH <branch> SET PARTITIONS <n>` on a domain that is running or paused is refused before
-anything is committed with `TransactionPlanningError::BranchPartitionsRequireStoppedDomain`, which
-names the operation, the domain and the branch and states the stopped-domain path, such as `branch
-'by_tenant' changes its partition count only while its domain is stopped: STOP domain 'payments',
-run ALTER BRANCH, then START it`. A domain build whose committed schedule lacks a unit its relay
+`ALTER BRANCH <branch> SET PARTITIONS <n>` to a count other than the current one, while the branch's
+previous partition count still has keys to move, is refused before anything is committed with
+`TransactionPlanningError::BranchPartitionsStillMoving`, which names the operation, the domain, the
+branch and both counts, such as `branch 'by_tenant' in domain 'payments' is still moving keys placed
+under its previous partition count 4 to its current count 8; change its partition count again once
+DESCRIBE BRANCH reports no previous partitions`. A claim that cannot move a key, because its holder's
+owner does not answer or refuses, keeps the key's records parked and tries again; it reports a
+`PartitionClaimError` naming the entity and unit at `warn`. `DESCRIBE BRANCH` reports `keys pending:
+unavailable` with the `TransitionHoldingsError` that names the unit whose owner did not answer. A domain build whose committed schedule lacks a unit its relay
 needs reports `ExecutionBuildError::RelayUnitNotScheduled`, naming the relay and the unit.
 
 The domain-wide placement editor retains typed name and positive-integer rank parse failures

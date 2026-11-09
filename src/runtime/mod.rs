@@ -270,6 +270,7 @@ mod kafka_start;
 mod local_drain;
 mod lookup_hash_map;
 mod lsm_sequence;
+mod materialized_partition_moves;
 mod materialized_read;
 mod materialized_snapshot;
 mod materialized_state;
@@ -291,11 +292,15 @@ mod node;
 mod node_settings;
 mod observability;
 mod ownership_handoff_error;
+mod partition_claims;
+mod partition_holdings;
+mod partition_retirement;
 mod planning;
 mod pooled_emitter_clients;
 mod processor_branch_restore;
 mod processor_branch_task;
 mod processor_output;
+mod processor_partition_moves;
 mod processor_plan_binding;
 mod processor_template;
 mod processor_wasm_state_reset;
@@ -313,6 +318,7 @@ mod relay_interaction;
 pub mod relay_interaction_benchmark;
 mod relay_memory_hold;
 mod relay_processor_node;
+mod relay_repartition;
 mod relay_send_attempts;
 mod relay_state_task;
 mod relay_subscription;
@@ -574,6 +580,7 @@ use processor_output::{
     dispatch_processor_output, dispatch_processor_outputs, flush_all_processor_outputs,
     flush_due_processor_outputs, pending_output_batches_by_key,
 };
+use processor_partition_moves::{ProcessorBranchSlot, ProcessorBranches};
 use processor_template::{
     MaterializedDependencyResolution, ProcessorInputFilterKind, ProcessorTemplateError,
     wasm_guest_call_schemas, wasm_instance_next_deadline,

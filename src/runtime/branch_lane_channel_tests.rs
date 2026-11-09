@@ -132,12 +132,12 @@ async fn an_expiring_processor_branch_ends_only_the_channels_it_publishes_throug
     let lane = LaneRelays::new();
     let key = string_branch_key("tenant", "acme");
     let slots = lane.ingress_slots(&key);
-    let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
+    let mut instances = ProcessorBranches::new();
     instances.insert_restored(
         key.clone(),
         last_input(),
         1,
-        finished_processor_branch_task(),
+        ProcessorBranchSlot::Live(finished_processor_branch_task()),
     );
 
     expire_processor_branch_instances(
@@ -160,18 +160,18 @@ async fn an_evicted_processor_branch_ends_only_the_channels_it_publishes_through
     let evicted = string_branch_key("tenant", "acme");
     let retained = string_branch_key("tenant", "globex");
     let slots = lane.ingress_slots(&evicted);
-    let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
+    let mut instances = ProcessorBranches::new();
     instances.insert_restored(
         evicted.clone(),
         last_input(),
         1,
-        finished_processor_branch_task(),
+        ProcessorBranchSlot::Live(finished_processor_branch_task()),
     );
     instances.insert_restored(
         retained.clone(),
         long_after_last_input(),
         2,
-        finished_processor_branch_task(),
+        ProcessorBranchSlot::Live(finished_processor_branch_task()),
     );
 
     evict_processor_branch_instances_to_capacity(

@@ -276,8 +276,10 @@ current connection, retry and deadline limits.
 - Every relay declares a schema and explicit branch selection. Its `CAPACITY` is the cluster-wide
   owner-buffer bound, once per partition when its branch declares `PARTITIONS <n>`, not a
   per-branch or per-consumer bound; nonowner producer and remote consumer nodes each have one
-  additional fixed dispatch slot. A branch's partition count changes only on a stopped domain
-  (`ALTER BRANCH <branch> SET PARTITIONS <n>`); read `Streams And State` → `Relay Partitions`.
+  additional fixed dispatch slot. `ALTER BRANCH <branch> SET PARTITIONS <n>` changes the count on a
+  running domain and moves each key's state to its new partition; confirm with `DESCRIBE BRANCH`
+  that no previous count is still moving before changing it again; read `Streams And State` →
+  `Changing the partition count`.
   On native 64-bit targets, its positive integer range ends at `18446744073709551615`, and stored,
   replicated, and restarted definitions retain the exact accepted capacity.
 - Every ordinary processor input/output uses the same named branch, or all are unbranched.

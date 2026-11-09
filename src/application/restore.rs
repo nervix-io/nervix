@@ -29,6 +29,7 @@
 mod archives;
 mod branch_state;
 mod materialized;
+mod partitions;
 mod prepare;
 mod runner;
 #[cfg(all(test, feature = "shuttle"))]

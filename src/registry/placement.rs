@@ -1419,6 +1419,7 @@ mod tests {
                 ClusterNodeName::parse("node-2").expect("valid name"),
             ],
             0,
+            None,
         );
         let owner = scheduled_node(&schedule, ModelKind::Ingestor, "ing")
             .assigned_single_node()

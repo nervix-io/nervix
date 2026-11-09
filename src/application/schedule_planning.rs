@@ -145,11 +145,16 @@ impl DomainSchedulePlanningSnapshot {
                     domain,
                     &self.cluster_nodes,
                     self.replica_count,
+                    current,
                     self.mode.scheduler_mode(),
                 );
                 #[cfg(not(feature = "testing"))]
-                let mut schedule =
-                    graph.schedule_for_domain(domain, &self.cluster_nodes, self.replica_count);
+                let mut schedule = graph.schedule_for_domain(
+                    domain,
+                    &self.cluster_nodes,
+                    self.replica_count,
+                    current,
+                );
                 SessionServiceImpl::merge_existing_schedule_data(
                     &mut schedule,
                     current,

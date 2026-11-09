@@ -192,6 +192,7 @@ impl Runtime {
                 prepared_forced_runtime_state_recoveries: DashMap::default(),
                 prepared_runtime_state_snapshots: DashMap::default(),
                 relay_branch_presences: DashMap::default(),
+                partition_holdings: Default::default(),
                 replicated_deduplicator_states: DashMap::default(),
                 replicated_kafka_offset_states: DashMap::default(),
                 replicated_materialized_stream_states: DashMap::default(),

@@ -26,6 +26,7 @@ use sorted_vec::SortedSet;
 
 use crate::registry::{
     graph::{ActiveGraph, ActiveNode, EdgeKind, is_schedulable_model, schedulable_depth},
+    partition_epochs::PartitionEpochs,
     placement::{PlacementPair, PlacementTopology, ResolvedPlacementPair},
 };
 
@@ -490,12 +491,17 @@ impl ActiveGraph {
     /// Product code reaches the scheduler here. A `testing` build routes its own callers through
     /// [`Self::schedule_for_domain_with_mode`] so a scenario can pick the mode, which leaves this
     /// entry point compiled for production builds and for this crate's own tests.
+    ///
+    /// `existing` is the schedule in force, which decides every branch's partition epoch: a branch
+    /// whose count changed begins its next epoch, and its nodes keep the units its previous count
+    /// placed keys in scheduled while they may still hold them.
     #[cfg(any(not(feature = "testing"), test))]
     pub(crate) fn schedule_for_domain(
         &self,
         domain: &DomainName,
         cluster_nodes: &[ClusterNodeName],
         replica_count: usize,
+        existing: Option<&DomainSchedule>,
     ) -> DomainSchedule {
         #[cfg(feature = "testing")]
         {
@@ -503,12 +509,13 @@ impl ActiveGraph {
                 domain,
                 cluster_nodes,
                 replica_count,
+                existing,
                 SchedulerMode::Sticky,
             )
         }
         #[cfg(not(feature = "testing"))]
         {
-            self.schedule_for_domain_inner(domain, cluster_nodes, replica_count)
+            self.schedule_for_domain_inner(domain, cluster_nodes, replica_count, existing)
         }
     }
 
@@ -518,9 +525,16 @@ impl ActiveGraph {
         domain: &DomainName,
         cluster_nodes: &[ClusterNodeName],
         replica_count: usize,
+        existing: Option<&DomainSchedule>,
         scheduler_mode: SchedulerMode,
     ) -> DomainSchedule {
-        self.schedule_for_domain_inner(domain, cluster_nodes, replica_count, scheduler_mode)
+        self.schedule_for_domain_inner(
+            domain,
+            cluster_nodes,
+            replica_count,
+            existing,
+            scheduler_mode,
+        )
     }
 
     fn schedule_for_domain_inner(
@@ -528,6 +542,7 @@ impl ActiveGraph {
         domain: &DomainName,
         cluster_nodes: &[ClusterNodeName],
         replica_count: usize,
+        existing: Option<&DomainSchedule>,
         #[cfg(feature = "testing")] scheduler_mode: SchedulerMode,
     ) -> DomainSchedule {
         let cluster_nodes = SortedSet::from_unsorted(cluster_nodes.to_vec()).into_vec();
@@ -584,9 +599,14 @@ impl ActiveGraph {
             .collect::<HashMap<_, _>>();
 
         let mut scheduled_nodes = ScheduledNodes::with_capacity(nodes.len());
+        let epochs = PartitionEpochs::decide(
+            existing,
+            &self.branch_partitions(),
+            &self.branches_with_keyed_state(),
+        );
         for PlacementCandidate { index, node, .. } in nodes {
             let key = node.node_ref();
-            let units = node.placement_units();
+            let units = epochs.scheduled_units(&node);
             let mut working_load = node_load.clone();
             let mut unit_primaries = HashMap::new();
             let mut assignments = Vec::with_capacity(units.len());
@@ -744,6 +764,7 @@ impl ActiveGraph {
             domain: domain.clone(),
             nodes: scheduled_nodes,
             placement_groups,
+            partition_epochs: epochs.into_map(),
         }
     }
 }
@@ -802,6 +823,7 @@ mod tests {
                 ClusterNodeName::parse("node-3").expect("valid name"),
             ],
             0,
+            None,
             SchedulerMode::Random,
         );
 
@@ -860,6 +882,7 @@ mod tests {
                 ClusterNodeName::parse("node-2").expect("valid name"),
             ],
             0,
+            None,
         );
 
         let intake = scheduled_node(&schedule, ModelKind::Ingestor, "ing")
@@ -934,6 +957,7 @@ mod tests {
                 ClusterNodeName::parse("node-2").expect("valid name"),
             ],
             0,
+            None,
         );
 
         assert_eq!(
@@ -1041,7 +1065,7 @@ mod tests {
         let graph = registry
             .active_graph(&domain)
             .assured("the batch installed the graph");
-        let schedule = graph.schedule_for_domain(&domain, &three_nodes(), 1);
+        let schedule = graph.schedule_for_domain(&domain, &three_nodes(), 1, None);
         let upstream = scheduled_node(&schedule, ModelKind::Relay, "events");
         let processor = scheduled_node(&schedule, ModelKind::Junction, "route");
         assert_eq!(processor.units.len(), 4);
@@ -1071,7 +1095,7 @@ mod tests {
             .expect("graph should be installed");
         let nodes = three_nodes();
 
-        let schedule = graph.schedule_for_domain(&domain, &nodes, 0);
+        let schedule = graph.schedule_for_domain(&domain, &nodes, 0, None);
 
         let relay = scheduled_node(&schedule, ModelKind::Relay, "tenant_events");
         let units = relay.units.keys().copied().collect::<Vec<_>>();
@@ -1110,7 +1134,7 @@ mod tests {
         assert_eq!(relay.execution_node(), None);
         assert_eq!(relay.execution_nodes().len(), 3);
 
-        let again = graph.schedule_for_domain(&domain, &nodes, 0);
+        let again = graph.schedule_for_domain(&domain, &nodes, 0, None);
         assert_eq!(again, schedule, "the same inputs place the same partitions");
 
         let _ = fs::remove_dir_all(path);
@@ -1128,7 +1152,7 @@ mod tests {
             .active_graph(&domain)
             .expect("graph should be installed");
 
-        let schedule = graph.schedule_for_domain(&domain, &three_nodes(), 1);
+        let schedule = graph.schedule_for_domain(&domain, &three_nodes(), 1, None);
 
         let relay = scheduled_node(&schedule, ModelKind::Relay, "tenant_state");
         assert_eq!(relay.units.len(), 2);
@@ -1177,6 +1201,7 @@ mod tests {
                 ClusterNodeName::parse("node-2").expect("valid name"),
             ],
             0,
+            None,
         );
 
         assert_eq!(
@@ -1216,6 +1241,7 @@ mod tests {
                 ClusterNodeName::parse("node-3").expect("valid name"),
             ],
             0,
+            None,
         );
 
         let ingestor_node = scheduled_node(&schedule, ModelKind::Ingestor, "ing")
@@ -1300,15 +1326,21 @@ mod tests {
             named::<ClusterNodeName>("node-2"),
             named::<ClusterNodeName>("node-3"),
         ];
-        let expected =
-            graph.schedule_for_domain_with_mode(&domain, &cluster_nodes, 0, SchedulerMode::Random);
+        let expected = graph.schedule_for_domain_with_mode(
+            &domain,
+            &cluster_nodes,
+            0,
+            None,
+            SchedulerMode::Random,
+        );
         for _ in 0..32 {
             assert_eq!(
                 graph.schedule_for_domain_with_mode(
                     &domain,
                     &cluster_nodes,
                     0,
-                    SchedulerMode::Random,
+                    None,
+                    SchedulerMode::Random
                 ),
                 expected,
                 "periodic reconciliation must not move an unchanged random schedule"
@@ -1353,7 +1385,7 @@ mod tests {
             named::<ClusterNodeName>("node-2"),
             named::<ClusterNodeName>("node-3"),
         ];
-        let schedule = graph.schedule_for_domain(&domain, &cluster_nodes, 0);
+        let schedule = graph.schedule_for_domain(&domain, &cluster_nodes, 0, None);
         let ingestor = scheduled_node(&schedule, ModelKind::Ingestor, "ing");
         assert_eq!(ingestor.single_unit().assigned_nodes, cluster_nodes);
         assert_eq!(ingestor.execution_node(), None);
@@ -1388,6 +1420,7 @@ mod tests {
                 &scheduled_domain,
                 &cluster_nodes,
                 0,
+                None,
                 SchedulerMode::Random,
             );
             let ingestor =
@@ -1460,6 +1493,7 @@ mod tests {
                 ClusterNodeName::parse("node-2").expect("valid name"),
             ],
             0,
+            None,
         );
 
         assert_eq!(
@@ -1550,6 +1584,7 @@ mod tests {
                 ClusterNodeName::parse("node-3").expect("valid name"),
             ],
             0,
+            None,
         );
 
         assert_eq!(
@@ -1565,7 +1600,7 @@ mod tests {
 
         let live_nodes = [named("node-1"), named("node-2"), named("node-3")];
         for eligible in [Vec::new(), vec![named("node-2")]] {
-            let mut schedule = graph.schedule_for_domain(&domain, &eligible, 0);
+            let mut schedule = graph.schedule_for_domain(&domain, &eligible, 0, None);
             super::assign_server_listener_nodes(&mut schedule, &live_nodes);
             let listener = scheduled_node(&schedule, ModelKind::Ingestor, "http_ing");
             assert_eq!(listener.single_unit().assigned_nodes, live_nodes);
@@ -1647,6 +1682,7 @@ mod tests {
                 ClusterNodeName::parse("node-3").expect("valid name"),
             ],
             0,
+            None,
         );
         let reduced_schedule = graph.schedule_for_domain(
             &domain,
@@ -1655,6 +1691,7 @@ mod tests {
                 ClusterNodeName::parse("node-3").expect("valid name"),
             ],
             0,
+            None,
         );
 
         assert_eq!(

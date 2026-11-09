@@ -1359,6 +1359,62 @@ impl RelayBoundaryServices {
         self.partitioning.unit_of(key)
     }
 
+    /// The `CAPACITY` of each unit owner's buffer, in batches.
+    pub(super) fn owner_capacity(&self) -> usize {
+        self.fanout
+            .consumers()
+            .owner_capacity
+            .load(Ordering::Acquire)
+    }
+
+    /// Whether the partition count these services place keys by schedules `unit`.
+    pub(super) fn declares_unit(&self, unit: Unit) -> bool {
+        self.branch_presences.of(unit).is_some()
+    }
+
+    /// The input of a consumer unit that holds only keys the branch's previous partition count
+    /// placed there: an audience of the relay's fan-out no producer dispatches to, since the
+    /// current count places no key in `unit`. Delivery counts no such consumer.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a holding unit's consumer takes its dormant input once when it is installed"
+        )
+    )]
+    pub(super) fn dormant_unit_fan_in(&self, mode: AckMode, unit: Unit) -> RelayRuntimeFanIn {
+        let audiences = self.fanout.consumers().unit_audiences(unit);
+        let audience = match mode {
+            AckMode::Attached => &audiences.attached,
+            AckMode::Detached => &audiences.detached,
+        };
+        RelayRuntimeFanIn::new(audience.new_receiver())
+    }
+
+    /// Services of the same relay on the same fan-out, for the partition count `presences` place
+    /// keys by. The fan-out keeps its subscribers, common consumers and the audiences of the units
+    /// both counts share; every runtime consumer registers with the new services afresh.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a partition count change replaces the relay's services once per activation"
+        )
+    )]
+    pub(super) fn repartitioned(&self, presences: RelayBranchPresences) -> Self {
+        let services = Self::new(
+            self.fanout.clone(),
+            0,
+            0,
+            self.remote_runtime_consumers.load().as_ref().clone(),
+            self.remote_dispatcher.clone(),
+            presences,
+            self.domain_ack_tracker.clone(),
+        );
+        services.replace_owner_routes(self.owners.load().as_ref().clone());
+        services
+    }
+
     /// Whether this node's owner of the unit that owns `key` holds `key`'s branch. A key that names
     /// no unit of the relay is held by none.
     #[cfg_attr(
@@ -2284,6 +2340,25 @@ impl ConcreteRelayRuntime {
 }
 
 impl RelayBoundaryBuilder {
+    /// The `CAPACITY` of each unit owner's buffer, in batches.
+    pub(super) fn owner_capacity(&self) -> usize {
+        self.fanout
+            .consumers()
+            .owner_capacity
+            .load(Ordering::Acquire)
+    }
+
+    /// The input of a consumer unit that holds only keys its branch's previous partition count
+    /// placed there: an audience no producer dispatches to, counted by no delivery.
+    pub(super) fn dormant_unit_fan_in(&self, mode: AckMode, unit: Unit) -> RelayRuntimeFanIn {
+        let audiences = self.fanout.consumers().unit_audiences(unit);
+        let audience = match mode {
+            AckMode::Attached => &audiences.attached,
+            AckMode::Detached => &audiences.detached,
+        };
+        RelayRuntimeFanIn::new(audience.new_receiver())
+    }
+
     pub(super) fn runtime_consumer_fan_in_for_unit(
         &mut self,
         mode: AckMode,

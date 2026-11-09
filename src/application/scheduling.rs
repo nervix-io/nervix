@@ -622,6 +622,7 @@ impl SessionServiceImpl {
                 cluster_nodes,
                 usize::try_from(self.cluster_parameters().replica_count())
                     .assured("the committed count fits a supported target"),
+                inputs.schedule(),
                 self.inner.runtime.scheduler_mode(),
             );
             #[cfg(not(feature = "testing"))]
@@ -630,6 +631,7 @@ impl SessionServiceImpl {
                 cluster_nodes,
                 usize::try_from(self.cluster_parameters().replica_count())
                     .assured("the committed count fits a supported target"),
+                inputs.schedule(),
             );
             Self::merge_existing_schedule_data(&mut schedule, inputs.schedule(), preservable_nodes);
             if let Err(error) = self.validate_domain_planning_inputs(&inputs).await {
@@ -874,6 +876,7 @@ impl SessionServiceImpl {
                     &replacement_nodes,
                     usize::try_from(self.cluster_parameters().replica_count())
                         .assured("the committed count fits a supported target"),
+                    inputs.schedule(),
                     self.inner.runtime.scheduler_mode(),
                 );
                 #[cfg(not(feature = "testing"))]
@@ -882,6 +885,7 @@ impl SessionServiceImpl {
                     &replacement_nodes,
                     usize::try_from(self.cluster_parameters().replica_count())
                         .assured("the committed count fits a supported target"),
+                    inputs.schedule(),
                 );
                 let Some(current_domain) = inputs.schedule() else {
                     if let Err(error) = self.validate_domain_planning_inputs(&inputs).await {

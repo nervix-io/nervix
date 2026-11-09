@@ -30,6 +30,7 @@ mod ingestor_plan;
 mod ingestor_units;
 mod message_error_plan;
 mod mutation;
+mod partition_epochs;
 mod placement;
 mod processor_plan;
 mod reingestor_plan;

@@ -1378,6 +1378,16 @@ impl SessionServiceImpl {
             if !is_noop && !model_gate.affected_entities().is_empty() {
                 let relays = model_gate.relays();
                 let affected_entities = model_gate.targets();
+                // A partition count change hands every unit's branches to its next supervisor in
+                // place, so what a unit parks moves with them rather than holding the drain.
+                let gate_purpose = match (expected_schedule.as_ref(), prepared_schedule.as_ref()) {
+                    (Some(expected), Some(prepared))
+                        if ScheduleDelta::changes_a_partition_count(expected, prepared) =>
+                    {
+                        EntityGatePurpose::PartitionChange
+                    }
+                    _ => EntityGatePurpose::ModelAlteration,
+                };
                 let deadline = nervix_primitives::time::Instant::now()
                     + self.inner.runtime.entity_gate_deadline();
                 let gate = match Box::pin(self.engage_cluster_entity_gates(
@@ -1385,7 +1395,7 @@ impl SessionServiceImpl {
                         domain: &domain,
                         relays,
                         targets: affected_entities,
-                        purpose: EntityGatePurpose::ModelAlteration,
+                        purpose: gate_purpose,
                         participants: EntityGateParticipants::EveryAvailableNode,
                     },
                     deadline,
@@ -1407,7 +1417,7 @@ impl SessionServiceImpl {
                     &gate,
                     relays,
                     affected_entities,
-                    EntityGatePurpose::ModelAlteration,
+                    gate_purpose,
                     &[],
                     deadline,
                 ))
@@ -2312,6 +2322,12 @@ impl SessionServiceImpl {
                     .as_ref()
                     .verified("this statement requires a request domain, which was resolved above");
                 self.describe_deduplicator(domain, describe).await
+            }
+            Statement::DescribeBranch(describe) => {
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
+                self.describe_branch(domain, describe).await
             }
             Statement::DescribeReingestor(describe) => {
                 let domain = domain

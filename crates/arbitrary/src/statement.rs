@@ -12,20 +12,21 @@ use nervix_models::{
     AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterTransportIngestorOperation,
     AlterWireSchema, AlterWireSchemaOperation, Backup, BackupCapture, BackupResources, BackupScope,
     ClientIngestorEntity, CordonNode, CreateDomain, CreateResource, CreateStatement, CreateUser,
-    DescribeClient, DescribeCluster, DescribeCorrelator, DescribeDeduplicator, DescribeDomain,
-    DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction, DescribeLookup,
-    DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource,
-    DescribeTransaction, DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig,
-    DomainPace, DomainTimeRate, DrainNode, DropModel, DropNode, EmitterBatchLegality,
-    EmitterBodyForm, EmitterEntityKind, EmitterEnvelopeAlteration, EmitterReferenceKind,
-    ExistingUserPolicy, FieldName, HttpIngestorEntity, IngestorAlteration, IngestorEntityKind,
-    IngestorEntityModel, IngestorReferenceKind, InspectionFormat, KafkaIngestorEntity, LookupQuery,
-    ModelKind, ModelName, MqttIngestorEntity, NatsIngestorEntity, NodeRef, PlacementPolicy,
-    PrometheusIngestorEntity, PulsarIngestorEntity, RabbitMqIngestorEntity, RebindResource,
-    RebindResourceMembers, RebindResourceSelection, RedisIngestorEntity, RelayBranching, RelayName,
-    Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
-    RelocationSelection, ResetWasmState, Restore, RestoreLifecycle, RestoreMode, RestoreScope,
-    RestoreState, ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowPlacements,
+    DescribeBranch, DescribeClient, DescribeCluster, DescribeCorrelator, DescribeDeduplicator,
+    DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction,
+    DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer,
+    DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
+    DescribeWindowProcessor, DomainConfig, DomainPace, DomainTimeRate, DrainNode, DropModel,
+    DropNode, EmitterBatchLegality, EmitterBodyForm, EmitterEntityKind, EmitterEnvelopeAlteration,
+    EmitterReferenceKind, ExistingUserPolicy, FieldName, HttpIngestorEntity, IngestorAlteration,
+    IngestorEntityKind, IngestorEntityModel, IngestorReferenceKind, InspectionFormat,
+    KafkaIngestorEntity, LookupQuery, ModelKind, ModelName, MqttIngestorEntity, NatsIngestorEntity,
+    NodeRef, PlacementPolicy, PrometheusIngestorEntity, PulsarIngestorEntity,
+    RabbitMqIngestorEntity, RebindResource, RebindResourceMembers, RebindResourceSelection,
+    RedisIngestorEntity, RelayBranching, RelayName, Relocation, RelocationMember,
+    RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
+    ResetWasmState, Restore, RestoreLifecycle, RestoreMode, RestoreScope, RestoreState,
+    ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowPlacements,
     ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SqsIngestorEntity, StartDomain,
     StateBranchField, StateBranchSelection, Statement, StopDomain, SubscriptionBinding,
     SubscriptionLiteral, SyslogIngestorEntity, TransactionInspectionRequest,
@@ -159,6 +160,7 @@ pub enum StatementVariant {
     DescribeTransaction,
     DescribeCluster,
     AlterBranch,
+    DescribeBranch,
     AlterCluster,
 }
 
@@ -193,6 +195,7 @@ impl StatementVariant {
             Statement::AlterGenerator(_) => Self::AlterGenerator,
             Statement::AlterPlacement(_) => Self::AlterPlacement,
             Statement::AlterBranch(_) => Self::AlterBranch,
+            Statement::DescribeBranch(_) => Self::DescribeBranch,
             Statement::Drop(_) => Self::Drop,
             Statement::DropNode(_) => Self::DropNode,
             Statement::CordonNode(_) => Self::CordonNode,
@@ -659,6 +662,9 @@ impl Arbitrary<'_> {
             StatementVariant::DescribeLookup => {
                 Statement::DescribeLookup(DescribeLookup { name: self.name() })
             }
+            StatementVariant::DescribeBranch => Statement::DescribeBranch(DescribeBranch {
+                branch: self.name(),
+            }),
             StatementVariant::DescribeEndpoint => {
                 Statement::DescribeEndpoint(DescribeEndpoint { name: self.name() })
             }

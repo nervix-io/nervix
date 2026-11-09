@@ -443,7 +443,7 @@ impl SessionServiceImpl {
             .map(|(member, _)| member.runtime_unit.clone())
             .collect::<Vec<_>>();
 
-        let desired = self.desired_domain_schedule(domain, &graph, &schedulable_nodes);
+        let desired = self.desired_domain_schedule(domain, &graph, &schedulable_nodes, current);
         let planned = (!moved.is_empty()).then(|| {
             planned_relocation_schedule(
                 current,
@@ -562,12 +562,14 @@ impl SessionServiceImpl {
     }
 
     /// The assignment the scheduler would choose today, used to fill replica slots the former
-    /// owner and existing replicas leave open.
+    /// owner and existing replicas leave open. `current` is the schedule in force, whose
+    /// partition epochs the desired schedule continues.
     fn desired_domain_schedule(
         &self,
         domain: &DomainName,
         graph: &ActiveGraph,
         schedulable_nodes: &BTreeSet<ClusterNodeName>,
+        current: &DomainSchedule,
     ) -> DomainSchedule {
         let cluster_nodes = schedulable_nodes.iter().cloned().collect::<Vec<_>>();
         #[cfg(feature = "testing")]
@@ -577,6 +579,7 @@ impl SessionServiceImpl {
                 &cluster_nodes,
                 usize::try_from(self.cluster_parameters().replica_count())
                     .assured("the committed count fits a supported target"),
+                Some(current),
                 self.inner.runtime.scheduler_mode(),
             )
         }
@@ -587,6 +590,7 @@ impl SessionServiceImpl {
                 &cluster_nodes,
                 usize::try_from(self.cluster_parameters().replica_count())
                     .assured("the committed count fits a supported target"),
+                Some(current),
             )
         }
     }

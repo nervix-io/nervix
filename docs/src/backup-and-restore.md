@@ -824,7 +824,7 @@ arrives.
 | `domains/<domain>/state/window_processor/<processor>/<unit>/<branch>/groups/<group>/input.arrow` | The retained input rows as Arrow IPC of the window's input relay schema | Every nonempty window group |
 | `domains/<domain>/state/window_processor/<processor>/<unit>/<branch>/groups/<group>/arguments.arrow` | Each retained row's aggregate argument values, one nullable column per argument in demand order, row-aligned with the input rows | With each window input group |
 
-The `<unit>` path portion is `single`, `partition/<number>`, or `instance/<number>`. The record descriptor carries the same typed unit; sections of separate units of one entity have distinct paths and restore destinations.
+The `<unit>` path portion is `single`, `partition/<number>`, or `instance/<number>`. The record descriptor carries the same typed unit; sections of separate units of one entity have distinct paths. A restore places the deduplicator, window, WASM, branch lifecycle and materialized relay state of an entity its branch's partitions divide in the partition the restored count places each key in, whichever partition archived it, so an archive cut while a branch changed its partition count restores every key into its partition and the restored branch begins its first partition epoch. Every other section restores into its archived unit.
 
 Materialized group coordinates are zero-based decimal numbers padded to ten digits. A descriptor
 with zero rows has zero groups. A record comes before the sections it owns: a resource version

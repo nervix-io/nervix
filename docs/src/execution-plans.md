@@ -324,8 +324,8 @@ contains only typed runtime instructions:
 | Change | Runtime application |
 | --- | --- |
 | Unchanged | Keep the installed tasks and state when the predecessor, lifecycle, and start version still match. |
-| Dynamic | Apply the typed capacity, processor, WASM reset, emitter flush, or VHOST TLS update; bind and publish the desired processor and error plans. |
-| Entity swap | Fence affected input relays, force-flush as required, rebind reassigned placement and selected node tasks, then publish the desired revision and release the gates. Unaffected nodes and their branch state stay in place. |
+| Dynamic | Apply the typed capacity, processor, WASM reset, emitter flush, VHOST TLS or retired partition transition update; bind and publish the desired processor and error plans. A retired transition gates nothing and force-flushes nothing: each local unit the schedule keeps ends its claims in its own task, and each holding unit ends with its placement tasks. |
+| Entity swap | Fence affected input relays, force-flush as required, rebind reassigned placement and selected node tasks, then publish the desired revision and release the gates. A new partition epoch first gives every relay of the branch new boundary services for the new count on the same fan-out. Unaffected nodes and their branch state stay in place. |
 | Rebuild | Stop the preceding domain execution and install the complete desired running or passive revision. Domain-wide changes, a missing predecessor, and lifecycle changes can require this path. |
 
 The schedule classifier retains Model-based change-aspect and quiescence decisions in the

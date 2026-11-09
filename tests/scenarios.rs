@@ -211,6 +211,7 @@ use crate::common::{
 };
 
 mod backup;
+mod branch_repartition;
 mod cli_outcomes;
 mod cli_repl;
 mod clickhouse_connections;

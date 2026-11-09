@@ -95,6 +95,20 @@ where
         self.entries.contains_key(key)
     }
 
+    /// The state of one branch, without refreshing its activity or its place in the eviction order.
+    pub fn get(&self, key: &K) -> Option<Arc<V>> {
+        self.entries.get(key).map(|entry| entry.state.clone())
+    }
+
+    /// Replace the state of one existing branch, keeping its lifetime, its activity and its place
+    /// in the eviction order. The branch's lifecycle is unchanged, so the version is too.
+    pub fn replace_state(&mut self, key: &K, state: V) -> Option<Arc<V>> {
+        let entry = self.entries.get_mut(key)?;
+        let state = Arc::new(state);
+        entry.state = state.clone();
+        Some(state)
+    }
+
     pub fn insert_restored(
         &mut self,
         key: K,
@@ -353,6 +367,40 @@ mod tests {
         registry.remove(&"acme".to_string());
         registry.get_or_create_with("acme".to_string(), timestamp(3, 0), |_| 3);
         assert!(registry.snapshot_entries()[0].incarnation > first);
+    }
+
+    #[test]
+    fn get_and_replace_state_keep_the_lifetime_activity_and_order() {
+        let mut registry = BranchInstanceRegistry::<String, usize>::new();
+        registry.get_or_create_with("acme".to_string(), timestamp(1, 0), |_| 1);
+        registry.get_or_create_with("globex".to_string(), timestamp(2, 0), |_| 2);
+        let version = registry.version();
+        let lifetimes = registry.snapshot_entries();
+
+        assert_eq!(
+            registry.get(&"acme".to_string()).map(|state| *state),
+            Some(1)
+        );
+        let replaced = registry.replace_state(&"acme".to_string(), 3);
+        assert_eq!(replaced.map(|state| *state), Some(3));
+        assert_eq!(registry.replace_state(&"initech".to_string(), 4), None);
+
+        assert_eq!(
+            registry.get(&"acme".to_string()).map(|state| *state),
+            Some(3)
+        );
+        assert_eq!(registry.version(), version);
+        assert_eq!(
+            registry.ordered_keys(),
+            vec!["acme".to_string(), "globex".to_string()]
+        );
+        let after = registry.snapshot_entries();
+        assert_eq!(after.len(), lifetimes.len());
+        for (before, after) in lifetimes.iter().zip(&after) {
+            assert_eq!(before.key, after.key);
+            assert_eq!(before.incarnation, after.incarnation);
+            assert_eq!(before.last_ingestion, after.last_ingestion);
+        }
     }
 
     #[test]
