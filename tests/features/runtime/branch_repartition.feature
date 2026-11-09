@@ -773,7 +773,7 @@ Feature: Changing a running branch's partition count
     And the relay subscription does not receive a payload within "2s"
     And within "90s" DESCRIBE BRANCH "by_tenant" on node "{{leader}}" reports no partition transition
 
-  @restore_installation @long_running
+  @long_running
   Scenario Outline: A backup cut while keys are still moving restores every key into its partition under the new count
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And the production sticky scheduler is configured
