@@ -94,6 +94,13 @@ const RESOURCE_BINDING_KINDS: [ModelKind; 7] = [
     ModelKind::Client,
 ];
 
+/// The clauses a generated state inspection statement takes after its head.
+struct StateInspectionClauses {
+    selection: Option<StateBranchSelection>,
+    page: Option<nervix_models::StateInspectionPageRequest>,
+    format: InspectionFormat,
+}
+
 /// Every variant of [`Statement`], so a property reaches each form as often as any other and a
 /// coverage check can ask for each one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumIter)]
@@ -722,25 +729,12 @@ impl Arbitrary<'_> {
             StatementVariant::ShowPlacements => Statement::ShowPlacements(ShowPlacements),
             StatementVariant::ShowRelayMaterializedState => {
                 let relay = self.name();
-                let selection = self.entropy.flag().then(|| self.state_branch_selection());
-                let page = if self.entropy.flag() {
-                    Some(nervix_models::StateInspectionPageRequest {
-                        limit: self.positive_u64(),
-                        after: self.entropy.flag().then(|| self.non_empty_string()),
-                    })
-                } else {
-                    None
-                };
-                let format = if self.entropy.flag() {
-                    InspectionFormat::Text
-                } else {
-                    InspectionFormat::Json
-                };
+                let clauses = self.state_inspection_clauses();
                 Statement::ShowRelayMaterializedState(ShowRelayMaterializedState {
                     relay,
-                    selection,
-                    page,
-                    format,
+                    selection: clauses.selection,
+                    page: clauses.page,
+                    format: clauses.format,
                 })
             }
             StatementVariant::ShowClusterStatus => Statement::ShowClusterStatus(ShowClusterStatus),
@@ -782,6 +776,29 @@ impl Arbitrary<'_> {
             operations.push(operation(self));
         }
         operations
+    }
+
+    /// The clauses every state inspection statement takes after its head, drawn in their order.
+    fn state_inspection_clauses(&mut self) -> StateInspectionClauses {
+        let selection = self.entropy.flag().then(|| self.state_branch_selection());
+        let page = if self.entropy.flag() {
+            Some(nervix_models::StateInspectionPageRequest {
+                limit: self.positive_u64(),
+                after: self.entropy.flag().then(|| self.non_empty_string()),
+            })
+        } else {
+            None
+        };
+        let format = if self.entropy.flag() {
+            InspectionFormat::Text
+        } else {
+            InspectionFormat::Json
+        };
+        StateInspectionClauses {
+            selection,
+            page,
+            format,
+        }
     }
 
     fn state_branch_selection(&mut self) -> StateBranchSelection {

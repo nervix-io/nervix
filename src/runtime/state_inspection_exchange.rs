@@ -13,11 +13,11 @@
 use error_stack::{Report, ResultExt as _};
 use futures_util::{StreamExt as _, stream};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, MemoryClass};
+use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, MemoryClass, Reservation};
 use nervix_interconnect::{
-    MaterializedStatePageBody, MaterializedStatePageDescriptor, MaterializedStatePageReply,
-    MaterializedStatePageTransfer, PoolClass, ReadMaterializedStatePage, RkyvMessage,
-    StreamHandlerError, StreamingResponse,
+    MaterializedStatePageDescriptor, MaterializedStatePageReply, MaterializedStatePageTransfer,
+    PoolClass, ReadMaterializedStatePage, RkyvMessage, StatePageBody, StreamHandlerError,
+    StreamingResponse,
 };
 use nervix_models::StateInspectionRejection;
 
@@ -40,8 +40,98 @@ pub(crate) enum StatePageExchangeError {
     Admission,
 }
 
+/// The identity of `body`, computed on the bulk executor beside the body it names.
+async fn identified_body(
+    executor: &Executor,
+    body: ChargedBytes,
+) -> Result<(StatePageBody, ChargedBytes), Report<StreamHandlerError>> {
+    let charge = executor
+        .try_reserve(MemoryClass::Bulk, 1)
+        .map_err(StreamHandlerError::with_cause)?;
+    executor
+        .run_cpu(
+            nervix_execution::CpuClass::Bulk,
+            charge,
+            move |_charge, cancellation| {
+                cancellation.check()?;
+                let identity = StatePageBody {
+                    bytes: u64::try_from(body.len()).assured("a bounded body fits u64"),
+                    digest: nervix_crypto::digest::sha256(&body),
+                };
+                Ok::<_, Report<nervix_execution::Cancelled>>((identity, body))
+            },
+        )
+        .await
+        .map_err(StreamHandlerError::with_cause)?
+        .map_err(StreamHandlerError::with_cause)
+}
+
+/// Frames one encoded reply and the bodies it names as a page stream: an eight-byte little-endian
+/// reply length, the bounded rkyv reply, then every body in order. Its chunks share the admitted
+/// allocations without copying.
+fn page_stream(
+    executor: &Executor,
+    header: Vec<u8>,
+    header_charge: Reservation,
+    bodies: Vec<ChargedBytes>,
+) -> Result<StreamingResponse, Report<StreamHandlerError>> {
+    let prefix_charge = executor
+        .try_reserve(MemoryClass::Bulk, 8)
+        .map_err(StreamHandlerError::with_cause)?;
+    let prefix = ChargedBytes::from_owned(
+        u64::try_from(header.len())
+            .assured("a resident descriptor fits u64")
+            .to_le_bytes()
+            .to_vec(),
+        prefix_charge,
+    );
+    let header = ChargedBytes::from_owned(header, header_charge);
+    let mut total = prefix
+        .len()
+        .checked_add(header.len())
+        .assured("a bounded descriptor and its prefix fit usize");
+    for body in &bodies {
+        total = total
+            .checked_add(body.len())
+            .assured("resident page allocations fit usize");
+    }
+    let chunk_bytes = usize::try_from(executor.limits().bulk_chunk_bytes.as_u64())
+        .assured("the executor validates addressable chunks");
+    // The length prefix and the descriptor precede the bodies.
+    let part_count = bodies
+        .len()
+        .checked_add(2)
+        .assured("a page carries far fewer bodies than usize::MAX");
+    let mut parts = Vec::with_capacity(part_count);
+    parts.push(prefix);
+    parts.push(header);
+    parts.extend(bodies);
+    let chunks = stream::iter(parts).flat_map(move |bytes| {
+        stream::unfold((bytes, 0), move |(bytes, offset)| async move {
+            if offset == bytes.len() {
+                return None;
+            }
+            let remaining = bytes
+                .len()
+                .checked_sub(offset)
+                .verified("the offset never passes the allocation's end");
+            let end = offset
+                .checked_add(chunk_bytes.min(remaining))
+                .verified("a chunk ends within its allocation");
+            let chunk = bytes
+                .slice(offset, end)
+                .verified("the chunk is within its immutable allocation");
+            Some((Ok::<_, Report<StreamHandlerError>>(chunk), (bytes, end)))
+        })
+    });
+    Ok(StreamingResponse::new(
+        u64::try_from(total).assured("a bounded page fits u64"),
+        chunks,
+    ))
+}
+
 /// Stream framing is an eight-byte little-endian descriptor length, its bounded rkyv bytes,
-/// then the native Arrow container. Its chunks share admitted allocations without copying.
+/// then the native Arrow container.
 pub(crate) async fn stream_materialized_page(
     executor: &Executor,
     result: Result<
@@ -69,26 +159,7 @@ pub(crate) async fn stream_materialized_page(
                 if u64::try_from(body.len()).assured("resident allocations fit u64") > max_bytes {
                     (Err(StateInspectionRejection::ReplyTooLarge), None)
                 } else {
-                    let charge = executor
-                        .try_reserve(MemoryClass::Bulk, 1)
-                        .map_err(StreamHandlerError::with_cause)?;
-                    let (identity, body) = executor
-                        .run_cpu(
-                            nervix_execution::CpuClass::Bulk,
-                            charge,
-                            move |_charge, cancellation| {
-                                cancellation.check()?;
-                                let identity = MaterializedStatePageBody {
-                                    bytes: u64::try_from(body.len())
-                                        .assured("a bounded body fits u64"),
-                                    digest: nervix_crypto::digest::sha256(&body),
-                                };
-                                Ok::<_, Report<nervix_execution::Cancelled>>((identity, body))
-                            },
-                        )
-                        .await
-                        .map_err(StreamHandlerError::with_cause)?
-                        .map_err(StreamHandlerError::with_cause)?;
+                    let (identity, body) = identified_body(executor, body).await?;
                     (
                         Ok(MaterializedStatePageTransfer {
                             page: descriptor,
@@ -109,43 +180,7 @@ pub(crate) async fn stream_materialized_page(
     )
     .await
     .map_err(StreamHandlerError::with_cause)?;
-    let prefix_charge = executor
-        .try_reserve(MemoryClass::Bulk, 8)
-        .map_err(StreamHandlerError::with_cause)?;
-    let prefix = ChargedBytes::from_owned(
-        u64::try_from(header.len())
-            .assured("a resident descriptor fits u64")
-            .to_le_bytes()
-            .to_vec(),
-        prefix_charge,
-    );
-    let header = ChargedBytes::from_owned(header, charge);
-    let total = prefix.len()
-        + header.len()
-        + match &body {
-            Some(body) => body.len(),
-            None => 0,
-        };
-    let chunk_bytes = usize::try_from(executor.limits().bulk_chunk_bytes.as_u64())
-        .assured("the executor validates addressable chunks");
-    let chunks = stream::iter([Some(prefix), Some(header), body].into_iter().flatten()).flat_map(
-        move |bytes| {
-            stream::unfold((bytes, 0), move |(bytes, offset)| async move {
-                if offset == bytes.len() {
-                    return None;
-                }
-                let end = offset + chunk_bytes.min(bytes.len() - offset);
-                let chunk = bytes
-                    .slice(offset, end)
-                    .verified("the chunk is within its immutable allocation");
-                Some((Ok::<_, Report<StreamHandlerError>>(chunk), (bytes, end)))
-            })
-        },
-    );
-    Ok(StreamingResponse::new(
-        u64::try_from(total).assured("a bounded page fits u64"),
-        chunks,
-    ))
+    page_stream(executor, header, charge, body.into_iter().collect())
 }
 
 pub(crate) struct ReceivedMaterializedPage {
@@ -188,17 +223,11 @@ async fn receive_page_bytes(
     Ok(ChargedBytes::from_buffer(buffer))
 }
 
-pub(crate) async fn receive_materialized_page(
+/// Where a received page stream's descriptor ends. The descriptor is bounded before it is decoded.
+fn descriptor_end(
     executor: &Executor,
-    stream: nervix_interconnect::IncomingByteStream,
-    schema: &nervix_primitives::sync::StdArc<arrow_schema::Schema>,
-    request: &ReadMaterializedStatePage,
-) -> Result<
-    Result<ReceivedMaterializedPage, StateInspectionRejection>,
-    Report<StatePageExchangeError>,
-> {
-    let max_bytes = request.max_bytes;
-    let bytes = receive_page_bytes(executor, stream, max_bytes).await?;
+    bytes: &ChargedBytes,
+) -> Result<usize, Report<StatePageExchangeError>> {
     let header_bound = PoolClass::Bulk.payload_limit(executor);
     let prefix: [u8; 8] = bytes[..8]
         .try_into()
@@ -215,18 +244,73 @@ pub(crate) async fn receive_materialized_page(
     if end > bytes.len() {
         return Err(Report::new(StatePageExchangeError::Framing));
     }
+    Ok(end)
+}
+
+/// Decodes the reply a page stream frames before `end`.
+async fn decode_reply<R: RkyvMessage>(
+    executor: &Executor,
+    bytes: &ChargedBytes,
+    end: usize,
+) -> Result<R, Report<StatePageExchangeError>> {
+    let header_length = u64::try_from(
+        end.checked_sub(8)
+            .verified("a descriptor ends after its eight-byte length"),
+    )
+    .assured("a bounded descriptor length fits u64");
     // The descriptor is bounded independently before copying for the shared rkyv decoder.
     let header_charge = executor
         .try_reserve(MemoryClass::Bulk, header_length.max(1))
         .change_context(StatePageExchangeError::Admission)?;
-    let (reply, _decoded_charge) = MaterializedStatePageReply::decode_rkyv(
-        executor.clone(),
-        PoolClass::Bulk,
-        bytes[8..end].to_vec(),
-    )
-    .await
-    .change_context(StatePageExchangeError::Descriptor)?;
+    let (reply, _decoded_charge) =
+        R::decode_rkyv(executor.clone(), PoolClass::Bulk, bytes[8..end].to_vec())
+            .await
+            .change_context(StatePageExchangeError::Descriptor)?;
     drop(header_charge);
+    Ok(reply)
+}
+
+/// Checks `body` against the digest its descriptor names on the bulk executor, before anything
+/// decodes it.
+async fn verified_body(
+    executor: &Executor,
+    body: ChargedBytes,
+    identity: StatePageBody,
+) -> Result<ChargedBytes, Report<StatePageExchangeError>> {
+    let charge = executor
+        .try_reserve(MemoryClass::Bulk, 1)
+        .change_context(StatePageExchangeError::Admission)?;
+    executor
+        .run_cpu(
+            nervix_execution::CpuClass::Bulk,
+            charge,
+            move |_charge, cancellation| {
+                cancellation
+                    .check()
+                    .change_context(StatePageExchangeError::Receive)?;
+                if nervix_crypto::digest::sha256(&body) != identity.digest {
+                    return Err(Report::new(StatePageExchangeError::Framing));
+                }
+                Ok(body)
+            },
+        )
+        .await
+        .change_context(StatePageExchangeError::Receive)?
+}
+
+pub(crate) async fn receive_materialized_page(
+    executor: &Executor,
+    stream: nervix_interconnect::IncomingByteStream,
+    schema: &nervix_primitives::sync::StdArc<arrow_schema::Schema>,
+    request: &ReadMaterializedStatePage,
+) -> Result<
+    Result<ReceivedMaterializedPage, StateInspectionRejection>,
+    Report<StatePageExchangeError>,
+> {
+    let max_bytes = request.max_bytes;
+    let bytes = receive_page_bytes(executor, stream, max_bytes).await?;
+    let end = descriptor_end(executor, &bytes)?;
+    let reply: MaterializedStatePageReply = decode_reply(executor, &bytes, end).await?;
     let transfer = match reply {
         Ok(transfer) => transfer,
         Err(reason) => {
@@ -271,25 +355,7 @@ pub(crate) async fn receive_materialized_page(
     {
         return Err(Report::new(StatePageExchangeError::Framing));
     }
-    let charge = executor
-        .try_reserve(MemoryClass::Bulk, 1)
-        .change_context(StatePageExchangeError::Admission)?;
-    let body = executor
-        .run_cpu(
-            nervix_execution::CpuClass::Bulk,
-            charge,
-            move |_charge, cancellation| {
-                cancellation
-                    .check()
-                    .change_context(StatePageExchangeError::Receive)?;
-                if nervix_crypto::digest::sha256(&body) != identity.digest {
-                    return Err(Report::new(StatePageExchangeError::Framing));
-                }
-                Ok(body)
-            },
-        )
-        .await
-        .change_context(StatePageExchangeError::Receive)??;
+    let body = verified_body(executor, body, identity).await?;
     let snapshot =
         RestoredMaterializedSnapshot::open_relay(executor, schema, SealedSource::memory(body))
             .await

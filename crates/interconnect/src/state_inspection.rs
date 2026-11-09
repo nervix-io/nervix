@@ -58,11 +58,13 @@ pub struct MaterializedStatePageDescriptor {
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
 pub struct MaterializedStatePageTransfer {
     pub page: MaterializedStatePageDescriptor,
-    pub body: Option<MaterializedStatePageBody>,
+    pub body: Option<StatePageBody>,
 }
 
+/// The identity of one native Arrow body a page stream carries after its descriptor: its exact
+/// length and SHA-256 digest, verified before the body is decoded.
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
-pub struct MaterializedStatePageBody {
+pub struct StatePageBody {
     pub bytes: u64,
     pub digest: [u8; 32],
 }
@@ -151,7 +153,7 @@ mod tests {
                             last_branch: Some(branch),
                             more: remaining != 0,
                         },
-                        body: (returned != 0).then(|| MaterializedStatePageBody {
+                        body: (returned != 0).then(|| StatePageBody {
                             bytes: request.max_bytes,
                             digest: std::array::from_fn(|_| arbitrary.entropy().byte()),
                         }),

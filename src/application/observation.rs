@@ -16,6 +16,7 @@
     )
 )]
 
+mod inspection_pages;
 mod materialized_state;
 
 use std::{collections::BTreeSet, num::NonZeroU64, time::Duration};

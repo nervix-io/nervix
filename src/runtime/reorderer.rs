@@ -1,3 +1,10 @@
+use arrow_array::builder::{
+    BinaryBuilder, BooleanBuilder, Float32Builder, Float64Builder, Int8Builder, Int16Builder,
+    Int32Builder, Int64Builder, StringBuilder, TimestampNanosecondBuilder, UInt8Builder,
+    UInt16Builder, UInt32Builder, UInt64Builder,
+};
+use arrow_schema::{DataType, TimeUnit};
+
 use super::*;
 
 pub(super) fn reorder_key_part(array: &VmTypedArray, row: usize) -> ReorderKeyPart {
@@ -102,6 +109,146 @@ pub(super) fn reorder_key_part(array: &VmTypedArray, row: usize) -> ReorderKeyPa
         }
         VmTypedArray::Generic(_) => ReorderKeyPart::Null,
         VmTypedArray::Uninitialized { .. } => ReorderKeyPart::Null,
+    }
+}
+
+/// A key part that is not a value of the column type its key expression produces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(super) enum ReorderKeyColumnError {
+    #[error("a key part does not have the type its key expression produces")]
+    PartType,
+}
+
+impl ReorderKeyPart {
+    /// One typed key column of `data_type` holding `parts`, every part the type's own normalization.
+    pub(super) fn typed_column<'a>(
+        data_type: &DataType,
+        parts: impl Iterator<Item = &'a ReorderKeyPart>,
+        rows: usize,
+    ) -> error_stack::Result<ArrayRef, ReorderKeyColumnError> {
+        let mismatch = || Report::new(ReorderKeyColumnError::PartType);
+        macro_rules! integers {
+            ($builder:ty, $variant:ident, $integer:ty) => {{
+                let mut builder = <$builder>::with_capacity(rows);
+                for part in parts {
+                    match part {
+                        ReorderKeyPart::Null => builder.append_null(),
+                        ReorderKeyPart::$variant(value) => {
+                            let narrowed = <$integer>::try_from(*value).map_err(|_| mismatch())?;
+                            builder.append_value(narrowed);
+                        }
+                        _ => return Err(mismatch()),
+                    }
+                }
+                let array: ArrayRef = StdArc::new(builder.finish());
+                Ok(array)
+            }};
+        }
+        match data_type {
+            DataType::UInt8 => integers!(UInt8Builder, UInt64, u8),
+            DataType::UInt16 => integers!(UInt16Builder, UInt64, u16),
+            DataType::UInt32 => integers!(UInt32Builder, UInt64, u32),
+            DataType::UInt64 => integers!(UInt64Builder, UInt64, u64),
+            DataType::Int8 => integers!(Int8Builder, Int64, i8),
+            DataType::Int16 => integers!(Int16Builder, Int64, i16),
+            DataType::Int32 => integers!(Int32Builder, Int64, i32),
+            DataType::Int64 => integers!(Int64Builder, Int64, i64),
+            DataType::Float32 => {
+                let mut builder = Float32Builder::with_capacity(rows);
+                for part in parts {
+                    match part {
+                        ReorderKeyPart::Null => builder.append_null(),
+                        ReorderKeyPart::Float64(OrderedFloat(value)) => {
+                            // A single-precision key part was widened exactly, so narrowing it back
+                            // recovers the same value; anything else was never this column's part.
+                            let value = *value;
+                            let narrowed: f32 = value.approx_into();
+                            let widened = f64::from(narrowed);
+                            if widened.to_bits() != value.to_bits()
+                                && !(widened.is_nan() && value.is_nan())
+                            {
+                                return Err(mismatch());
+                            }
+                            builder.append_value(narrowed);
+                        }
+                        _ => return Err(mismatch()),
+                    }
+                }
+                let array: ArrayRef = StdArc::new(builder.finish());
+                Ok(array)
+            }
+            DataType::Float64 => {
+                let mut builder = Float64Builder::with_capacity(rows);
+                for part in parts {
+                    match part {
+                        ReorderKeyPart::Null => builder.append_null(),
+                        ReorderKeyPart::Float64(OrderedFloat(value)) => {
+                            builder.append_value(*value)
+                        }
+                        _ => return Err(mismatch()),
+                    }
+                }
+                let array: ArrayRef = StdArc::new(builder.finish());
+                Ok(array)
+            }
+            DataType::Boolean => {
+                let mut builder = BooleanBuilder::with_capacity(rows);
+                for part in parts {
+                    match part {
+                        ReorderKeyPart::Null => builder.append_null(),
+                        ReorderKeyPart::Boolean(value) => builder.append_value(*value),
+                        _ => return Err(mismatch()),
+                    }
+                }
+                let array: ArrayRef = StdArc::new(builder.finish());
+                Ok(array)
+            }
+            DataType::Utf8 => {
+                let mut builder = StringBuilder::with_capacity(rows, 0);
+                for part in parts {
+                    match part {
+                        ReorderKeyPart::Null => builder.append_null(),
+                        ReorderKeyPart::Utf8(value) => builder.append_value(value),
+                        _ => return Err(mismatch()),
+                    }
+                }
+                let array: ArrayRef = StdArc::new(builder.finish());
+                Ok(array)
+            }
+            DataType::Binary => {
+                let mut builder = BinaryBuilder::with_capacity(rows, 0);
+                for part in parts {
+                    match part {
+                        ReorderKeyPart::Null => builder.append_null(),
+                        ReorderKeyPart::Bytes(value) => builder.append_value(value),
+                        _ => return Err(mismatch()),
+                    }
+                }
+                let array: ArrayRef = StdArc::new(builder.finish());
+                Ok(array)
+            }
+            DataType::Timestamp(TimeUnit::Nanosecond, Some(zone)) => {
+                let mut builder = TimestampNanosecondBuilder::with_capacity(rows);
+                for part in parts {
+                    match part {
+                        ReorderKeyPart::Null => builder.append_null(),
+                        ReorderKeyPart::Datetime(value) => builder.append_value(*value),
+                        _ => return Err(mismatch()),
+                    }
+                }
+                let array: ArrayRef = StdArc::new(builder.finish().with_timezone(zone.clone()));
+                Ok(array)
+            }
+            // Every other type reaches a key as a null part, so only nulls fit its column.
+            other => {
+                for part in parts {
+                    if *part != ReorderKeyPart::Null {
+                        return Err(mismatch());
+                    }
+                }
+                Ok(new_null_array(other, rows))
+            }
+        }
     }
 }
 
