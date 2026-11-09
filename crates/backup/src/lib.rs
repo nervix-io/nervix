@@ -2,7 +2,8 @@
 //!
 //! An archive is one tar file written manifest first, so it can be read as a stream without
 //! seeking. Every section it holds is canonical Plexus text, the original bytes of a resource version,
-//! or a record this crate owns, encoded with rkyv behind a header of its own: a magic, a record kind
+//! a guest save, typed state columns or tensor values, or a record this crate owns, encoded with
+//! rkyv behind a header of its own: a magic, a record kind
 //! and a format version, checked before bytecheck validates a single field of the payload. The
 //! manifest names every section with its length and BLAKE3 digest, so a reader verifies each section
 //! as it passes and refuses truncated, reordered or inconsistent sections. These checks establish
@@ -33,6 +34,7 @@ static TEST_ALLOCATIONS: alloc_count::AllocCounter = alloc_count::AllocCounter(s
 mod branch_state;
 mod describe;
 mod error;
+mod inferencer;
 mod layout;
 mod manifest;
 mod materialized;
@@ -55,6 +57,7 @@ pub use describe::{
     SkippedStateReason, SkippedStateSection, describe_archive, read_archive_contents,
 };
 pub use error::{ArchiveReadError, ArchiveWriteError};
+pub use inferencer::{InferencerStateDescriptor, read_tensor_values, write_tensor_values};
 pub use layout::{ArchiveLayout, ArchivePiece, SectionRecordWriter};
 pub use manifest::{
     ARCHIVE_FORMAT_MAJOR, ArchiveScope, BackupManifest, DomainCapture, RaftLogPosition,
@@ -106,3 +109,6 @@ mod archive_properties;
 
 #[cfg(test)]
 mod malformed_properties;
+
+#[cfg(test)]
+mod inferencer_properties;

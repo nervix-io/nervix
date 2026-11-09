@@ -264,13 +264,15 @@ Build configuration in dependency order:
 8. Commit the graph, inspect it, and start the active domain only when prerequisites exist.
 
 For backup recovery, `RESTORE ... FROM '<file>' RESUME` (CLI `--resume`) installs compatible
-materialized relay rows, deduplicator keys and windows on owners and replicas, then makes the domain
-running at its archived start generation and latest start point. Paced recovery retains the
+materialized relay rows, deduplicator keys, windows and inferencer tensors on owners and replicas,
+then makes the domain running at its archived start generation and latest start point. Paced recovery retains the
 wall/logical mapping and time rate verbatim and projects downtime under a newly selected clock
 authority. The default restore leaves the domain stopped; a normal `START` advances the generation
 and clears materialized state while preserving compatible WASM state, source offsets, branch
-lifecycle, deduplicator keys and windows. `RESUME` precedes the user policy and `DRY RUN`; the dry
-run reports the planned status and generation. Read
+lifecycle, deduplicator keys, windows and inferencer tensors. For model-carried state and either
+`WITHOUT STATE` option, read `Backup And Restore` → `Archive Sections` and `Runtime Nodes` →
+`Inferencer` → `State tensors` before promising recovery. `RESUME` precedes the user policy and
+`DRY RUN`; the dry run reports the planned status and generation. Read
 [Backup And Restore](https://docs.nervix.io/backup-and-restore.html) for format and memory limits.
 
 Keep an uncertain restore's original execution reference, statement and archive across attempts;
