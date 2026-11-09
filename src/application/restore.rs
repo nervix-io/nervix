@@ -28,6 +28,7 @@
 
 mod archives;
 mod branch_state;
+mod inferencer;
 mod materialized;
 mod prepare;
 mod runner;
@@ -657,6 +658,12 @@ fn restore_state_warnings(
                 ),
                 DescribedRuntimeState::Deduplicator { descriptor, .. } => (
                     ModelKind::Deduplicator,
+                    &descriptor.entity,
+                    descriptor.unit,
+                    Some(descriptor.schema),
+                ),
+                DescribedRuntimeState::Inferencer { descriptor, .. } => (
+                    ModelKind::Inferencer,
                     &descriptor.entity,
                     descriptor.unit,
                     Some(descriptor.schema),

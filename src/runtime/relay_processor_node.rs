@@ -2129,6 +2129,16 @@ impl RelayProcessorNode {
         purpose: ProcessorCheckpointPurpose,
     ) -> OwnershipHandoffResult<()> {
         match &mut self.operation {
+            RelayProcessorOperationNode::StatefulInferencer {
+                session,
+                replicated_state,
+                incarnation,
+                snapshot_bytes,
+                ..
+            } => {
+                replicated_state.publish_session(session, *incarnation, *snapshot_bytes);
+                Ok(())
+            }
             RelayProcessorOperationNode::Deduplicator { keyspace, .. } => {
                 keyspace.publish();
                 Ok(())

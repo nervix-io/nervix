@@ -252,6 +252,18 @@ impl SessionServiceImpl {
                     runtime_state,
                     revision,
                 } = match archived {
+                    DescribedRuntimeState::Inferencer { descriptor, .. } => RestoredStateSection {
+                        reference: NodeRef::new(ModelKind::Inferencer, descriptor.entity.clone()),
+                        unit: descriptor.unit,
+                        schema: descriptor.schema,
+                        branch_fingerprint: descriptor.branch_fingerprint,
+                        branch_key: remote_branch_key(descriptor.branch.as_ref()),
+                        runtime_state: RuntimeState::Inferencer {
+                            schema: descriptor.schema,
+                            model: descriptor.model,
+                        },
+                        revision: descriptor.revision,
+                    },
                     DescribedRuntimeState::BranchLifecycle { lifecycle, .. } => {
                         RestoredStateSection {
                             reference: NodeRef::new(lifecycle.owner_kind, lifecycle.entity.clone()),
@@ -370,6 +382,30 @@ impl SessionServiceImpl {
                     state => state,
                 };
                 let (artifact, offset, length, digest) = match archived {
+                    DescribedRuntimeState::Inferencer {
+                        descriptor, values, ..
+                    } => {
+                        let artifact = Arc::new(
+                            super::inferencer::prepare_inferencer_checkpoint(
+                                &self.inner.runtime,
+                                archive,
+                                descriptor,
+                                values,
+                                scheduled,
+                                &lifecycles,
+                            )
+                            .await
+                            .map_err(|error| {
+                                StepFailure::Failed(format!(
+                                    "inferencer '{}': {error:#}",
+                                    descriptor.entity
+                                ))
+                            })?,
+                        );
+                        let length = artifact.length();
+                        let digest = artifact.digest();
+                        (artifact, 0, length, digest)
+                    }
                     DescribedRuntimeState::Wasm { guest, .. } => (
                         archive.artifact(),
                         guest.offset,
