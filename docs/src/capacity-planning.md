@@ -84,7 +84,7 @@ bounds; see [When The Extension Workers Are Full](./ingestors.md#when-the-extens
 Transient memory is 675 MiB per node, divided into ceilings that cannot borrow from each other:
 8 MiB for management, 24 MiB for commands and replication, 192 MiB each for relay work, active
 materialized snapshots and retained materialized-source reads, 32 MiB for
-bulk buffers, 16 MiB for the receive windows of bulk streams and 19 MiB for credentials. Each bulk
+bulk buffers, 16 MiB for the receive windows of bulk streams and 19 MiB for credential preparation. Each bulk
 stream a node opens, such as a resource, checkpoint or snapshot fetch, holds one 1 MiB receive
 window for as long as it is open, so sixteen bulk streams run at once and a seventeenth waits for
 a window within its own request deadline. One relay operation may hold at most 32 MiB of encoded
@@ -120,10 +120,13 @@ Consensus storage operations that need that working set queue at the store rathe
 budget, so the rest of it stays with command and replication traffic and with ingestor control calls
 while they wait; see
 [Storage Working Sets](./consensus-storage-and-replication.md#storage-working-sets).
-The credentials budget holds the 19 MiB Argon2id works in for one password, so a node computes one
-hash at a time and a burst of login attempts waits there without touching any other class. An
-attempt for a name that names no user costs one such hash too. A stored
-hash whose parameters need more memory than that never verifies.
+The Credentials memory class retains 19 MiB for password work and mounted NATS credentials files.
+A password operation charges only the verifier's 64-byte output buffer; native PBKDF2 scratch is
+fixed stack state. The isolated Credentials CPU worker computes one password at a time, and a
+burst waits there without taking another class's budget. Files keep their exact-byte charge until
+the temporary contents have been cleared.
+Every presented name performs the same bounded iteration work. Credential construction and decoding
+refuse iteration counts above the declared 1,000,000 bound before CPU admission.
 
 These budgets cover transient work: data in flight between nodes and the working memory of the
 jobs the classes admit. They are separate from the process memory a running graph holds, which the [memory-pressure watermarks](metrics-and-observability.md) govern.
@@ -255,3 +258,5 @@ history.
 For runtime ownership and snapshot boundaries, see [Data Plane](data-plane.md). For the current
 metric families and cardinality policy, see
 [Metrics And Observability](metrics-and-observability.md).
+
+An inferencer with `STATE` retains one immutable native F32 generation per concrete branch. Snapshot publication shares that generation by pointer; sealing copies values only at a checkpoint boundary on a charged bulk CPU worker. The declared state, shape vectors and derived rkyv framing must fit one configured snapshot section. `CREATE` refuses a larger declaration before storage; runtime preparation repeats the bound check. Encoding and restoration charge their bounded temporary buffers separately from the branch's native state.

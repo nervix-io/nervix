@@ -516,7 +516,7 @@ producer closes it without waiting.
 ## Emitter Consumers
 
 `Client::subscribe_emitter(domain, emitter, expected_fields, limits)` opens a competing consumer
-of a native `TO CLIENT` emitter on the current session. The field list is exact, including order,
+of a `CLIENT CONSUMER EMITTER` on the current session. The field list is exact, including order,
 optionality and sensitivity. The open reserves its requested credit before it succeeds. The
 returned `EmitterConsumer::description()` reports the schema, emitter ACK window, timeout and
 retry pacing, maximum batch rows and bytes, and granted credit. A refusal is
@@ -590,7 +590,7 @@ holds the transaction id, the domain the transaction is bound to, its `Transacti
 transaction handle:
 
 ```rust
-client.execute("CREATE DOMAIN production;").await?;
+client.execute("CREATE UNPACED DOMAIN production;").await?;
 client.set_domain(Some(DomainName::parse("production")?)).await;
 
 let begun = client.execute("BEGIN;").await?;

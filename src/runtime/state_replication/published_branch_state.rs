@@ -1,5 +1,5 @@
 //! Layer: data plane.
-//! Owns: selecting the typed published state of a deduplicator or window processor branch.
+//! Owns: selecting the typed published state of a deduplicator, inferencer or window branch.
 //! May depend on: the shared replicated branch-state owner, the state store, and snapshot requests.
 //! Must not know: how a branch task changes its live state, control-plane transactions, or edge
 //! protocols.
@@ -16,6 +16,7 @@ use super::*;
 #[derive(Debug, Clone)]
 pub(in crate::runtime) enum PublishedBranchState {
     Deduplicator(Arc<ReplicatedDeduplicatorState>),
+    Inferencer(Arc<ReplicatedInferencerState>),
     WindowProcessor(Arc<ReplicatedWindowProcessorState>),
 }
 
@@ -23,6 +24,7 @@ impl PublishedBranchState {
     pub(super) fn placement(&self) -> &RuntimeStatePlacement {
         match self {
             Self::Deduplicator(state) => &state.placement,
+            Self::Inferencer(state) => &state.placement,
             Self::WindowProcessor(state) => &state.placement,
         }
     }
@@ -30,6 +32,7 @@ impl PublishedBranchState {
     pub(super) fn replication(&self) -> &CheckpointReplication {
         match self {
             Self::Deduplicator(state) => state.replication(),
+            Self::Inferencer(state) => state.replication(),
             Self::WindowProcessor(state) => state.replication(),
         }
     }
@@ -41,6 +44,7 @@ impl PublishedBranchState {
     ) -> RuntimeStateResult<()> {
         match self {
             Self::Deduplicator(state) => state.request_publication(snapshot_requests).await,
+            Self::Inferencer(state) => state.request_publication(snapshot_requests).await,
             Self::WindowProcessor(state) => state.request_publication(snapshot_requests).await,
         }
     }
@@ -54,6 +58,7 @@ impl PublishedBranchState {
     ) -> RuntimeStateResult<Option<u64>> {
         match self {
             Self::Deduplicator(state) => state.persist_published(store, executor, staging).await,
+            Self::Inferencer(state) => state.persist_published(store, executor, staging).await,
             Self::WindowProcessor(state) => state.persist_published(store, executor, staging).await,
         }
     }

@@ -486,6 +486,8 @@ mutation lease, typed recovery reply and typed mutation-fence and restore-instal
 The subscription-interest visibility request includes the advertisement version, and its current
 wire fingerprint fences that request shape during connection setup.
 
+The fingerprint also fences typed PBKDF2-HMAC-SHA-512 credentials in consensus commands and the persisted uniform verification-work count in snapshot metadata. Cost validation occurs during decoding before any authentication work is admitted.
+
 The fingerprint covers endpoint kinds whose WebSockets variant alone carries an optional signaling
 reference, both in Models and in queued transaction statements.
 It also covers fixed-width 64-bit counts in Models, transaction commands and records,
@@ -493,6 +495,14 @@ and the unit pages of the WASM state page operation. These fields use the vocabu
 adapter and checked native decoding; an unrepresentable count fails decoding. Window processor state has current
 runtime-state kind tag `8`, and its bulk snapshot codec validates the `NVXWIN64` frame signature
 before decoding histogram delayed-removal bucket indices in the same count representation.
+
+Stateful inferencer checkpoints use branch-local runtime-state kind tag `6`. Their placement
+carries both the schema fingerprint and an `InferencerModelFingerprint`; checkpoint descriptions,
+catalog pages, fetches and acknowledgements retain that exact identity. The native frame records
+the revision, branch incarnation, tensor shapes and float bits. The interconnect moves the opaque
+bounded frame through the existing snapshot bulk quota; the inferencer codec validates its shape.
+The current fingerprint also covers materialized inspection page requests and their typed
+descriptors, so checkpoint identity and inspection operations advance as one wire contract.
 
 Emitter statements exchanged through the control plane use explicit `KEY` expressions and
 `PARTITION FROM BRANCH`, and SQS FIFO groups have one expression shape. The current

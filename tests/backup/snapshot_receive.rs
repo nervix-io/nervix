@@ -77,3 +77,123 @@ async fn snapshot_receive_admission(world: &mut ScenarioWorld, file: String, nod
         .await
         .assured("both actual snapshot receivers refuse promptly and recover complete checkpoints");
 }
+
+/// The archive supplies the production lifecycle identity without reconstructing a schema digest.
+/// Tensor bytes themselves are then observed through authenticated checkpoint requests.
+#[given(
+    expr = "inferencer {string} has complete checkpoints for both branches on replica {string} of \
+            owner {string}"
+)]
+async fn inferencer_replica_checkpoints(
+    world: &mut ScenarioWorld,
+    inferencer: String,
+    replica: String,
+    owner: String,
+) {
+    let replica = expand_placeholders(world, &replica);
+    let owner = expand_placeholders(world, &owner);
+    let file = archive_path(world, "inferencer-lifecycle.nvxb");
+    let command = format!("BACKUP DOMAIN {} TO '{}';", world.domain, file.display());
+    world
+        .cluster()
+        .run_command(&owner, &world.domain, &command)
+        .await
+        .expect("the public client captures lifecycle identities");
+    let archive = described_archive(file).await;
+    let domain = scenario_domain(world, &world.domain);
+    let lifecycle = archive
+        .domains
+        .iter()
+        .find(|d| d.record.domain == domain)
+        .expect("the populated domain is archived")
+        .state
+        .iter()
+        .find_map(|state| match state {
+            DescribedRuntimeState::BranchLifecycle { lifecycle, .. }
+                if lifecycle.owner_kind == ModelKind::Inferencer
+                    && lifecycle.entity.as_str() == inferencer =>
+            {
+                Some(lifecycle.clone())
+            }
+            _ => None,
+        })
+        .expect("the inference branch lifecycle is archived");
+    assert_eq!(
+        lifecycle.branches.len(),
+        2,
+        "the fixture has both branch lifetimes"
+    );
+    let placement = StatePlacementEnvelope {
+        domain,
+        state: RuntimeState::BranchLru {
+            schema: lifecycle.schema,
+        },
+        kind: ModelKind::Inferencer,
+        identifier: lifecycle.entity,
+        unit: lifecycle.unit,
+        branch_key: None,
+    };
+    world
+        .cluster()
+        .wait_for_inferencer_replica_checkpoints(&owner, &replica, placement)
+        .await
+        .expect("both complete replica checkpoints cover the current branch publications");
+}
+
+#[then(expr = "within {string} inferencer {string} has no retained branch for tenant {string}")]
+async fn inferencer_branch_evicted(
+    world: &mut ScenarioWorld,
+    within: String,
+    inferencer: String,
+    tenant: String,
+) {
+    let bound = parse_duration_text(&within).expect("a valid condition bound");
+    let deadline = Instant::now() + bound;
+    loop {
+        let leader = current_leader_node(world).await;
+        let file = archive_path(
+            world,
+            &format!(
+                "inferencer-eviction-{}.nvxb",
+                crate::common::raw_session::fresh_execution_reference()
+            ),
+        );
+        let command = format!("BACKUP DOMAIN {} TO '{}';", world.domain, file.display());
+        world
+            .cluster()
+            .run_command(&leader, &world.domain, &command)
+            .await
+            .expect("the public client captures branch lifecycle metadata");
+        let archive = described_archive(file).await;
+        let retained = archive
+            .domains
+            .iter()
+            .flat_map(|domain| &domain.state)
+            .filter_map(|state| match state {
+                DescribedRuntimeState::BranchLifecycle { lifecycle, .. }
+                    if lifecycle.owner_kind == ModelKind::Inferencer
+                        && lifecycle.entity.as_str() == inferencer =>
+                {
+                    Some(lifecycle)
+                }
+                _ => None,
+            })
+            .flat_map(|lifecycle| &lifecycle.branches)
+            .any(|branch| {
+                branch.key.as_ref().is_some_and(|key| {
+                    key.iter().any(|field| {
+                        field.name == "tenant"
+                            && field.value == nervix_backup::StateValue::String(tenant.clone())
+                    })
+                })
+            });
+        if !retained {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "inference branch {tenant:?} remains in the public lifecycle archive after {within}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(25)).await;
+    }
+}

@@ -55,6 +55,9 @@ pub(super) struct StatefulAdmissionContext<'a> {
     pub(super) program: &'a CompiledProgramWithMaterializedInterest,
     pub(super) prepared: &'a Arc<inferencer::PreparedStatefulInference>,
     pub(super) session: &'a mut inferencer::StatefulInferenceSession,
+    pub(super) replicated_state: &'a Arc<ReplicatedInferencerState>,
+    pub(super) incarnation: u64,
+    pub(super) snapshot_bytes: u64,
     pub(super) materialized_values: &'a HashMap<String, RuntimeValue>,
     pub(super) execution_now: Timestamp,
 }
@@ -158,6 +161,7 @@ async fn admit_stateful_inferencer_rows(
             return;
         }
     };
+    let mut changed = false;
     let acknowledgements = std::mem::take(&mut batch.acks);
     for (row, acks) in acknowledgements.into_iter().enumerate() {
         nervix_primitives::task::consume_budget().await;
@@ -253,7 +257,10 @@ async fn admit_stateful_inferencer_rows(
             )
             .await
         {
-            Ok(Ok(generated)) => generated,
+            Ok(Ok(generated)) => {
+                changed = true;
+                generated
+            }
             Ok(Err(_error)) => {
                 // Native diagnostics may contain input values. The message-error boundary projects
                 // the typed row refusal without copying driver text into the error relay.
@@ -301,5 +308,12 @@ async fn admit_stateful_inferencer_rows(
             &message.record,
         )
         .await;
+    }
+    if changed {
+        context.replicated_state.publish_session(
+            context.session,
+            context.incarnation,
+            context.snapshot_bytes,
+        );
     }
 }
