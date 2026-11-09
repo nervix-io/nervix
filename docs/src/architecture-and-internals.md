@@ -32,7 +32,7 @@ Use it for:
   dispositions, exact recovery, redirect and reconnection, Row subscriptions and
   uploads](./client-session-protocol.md)
 - [client host bindings: the shared runtime, threads, cancellation, host lifetimes, failures,
-  Arrow exchange, packaging and qualification](./client-host-bindings.md)
+  Arrow exchange, packaging, qualification, and the host suites and guides](./client-host-bindings.md)
 - [transaction impact planning, scoped quiescence, inspection, and retained outcomes](./transaction-quiescence.md)
 - [consensus durability, replication pacing, log retention, and snapshot recovery](./consensus-storage-and-replication.md)
 - [resource versions, pinned bindings, `LATEST` resolution, rebinding, and the HTTPS listener refresh](./resource-versions.md)

@@ -420,6 +420,7 @@ pub(super) struct ClientBatchDispatch<'a> {
     pub(super) branched_senders: &'a HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
     pub(super) metrics: &'a MessageMetricsHandle,
     pub(super) batch: RuntimeRecordBatch,
+    pub(super) payload_bytes: usize,
     pub(super) acks: AckSet,
     pub(super) ingested_at: Timestamp,
 }
@@ -604,7 +605,7 @@ impl PendingIngestGroup {
                 .verified("the check above admits at most one metadata row per decoded payload");
             for _ in 0..messages {
                 builders
-                    .append(row)
+                    .append(row, None)
                     .change_context(IngestGroupError::Metadata {
                         operation: IngestMetadataOperation::Append,
                     })?;
@@ -2151,6 +2152,7 @@ impl Runtime {
             branched_senders,
             metrics,
             batch,
+            payload_bytes,
             acks,
             ingested_at,
         } = dispatch;
@@ -2160,11 +2162,14 @@ impl Runtime {
             acks.ack_success();
             return Ok(());
         }
-        let ingest_metadata = IngestFilterMapMetadata::headerless(row_count).change_context(
-            IngestGroupError::Metadata {
-                operation: IngestMetadataOperation::Finish,
-            },
-        )?;
+        let ingest_metadata = IngestFilterMapMetadata::client_batch(
+            output_routes.metadata.clone(),
+            payload_bytes,
+            row_count,
+        )
+        .change_context(IngestGroupError::Metadata {
+            operation: IngestMetadataOperation::Finish,
+        })?;
         let mut row_acks = Vec::with_capacity(row_count);
         acks.split_into(row_count, &mut row_acks);
         // Every row of the batch was received at the one instant the batch was admitted.

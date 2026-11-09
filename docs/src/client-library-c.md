@@ -419,6 +419,11 @@ Raft operations, host retry policy or graph execution state. The shared Rust cli
 reconnection and restoration. The host owns its handles, threads and the decision to act on an
 uncertain application effect.
 
+It does not expose these parts of the [Rust client](client-library.md): the typed transaction
+status, transaction attach and transaction inspection; the typed domain list, structured choice
+lookups, server notices and the leadership view; upload progress and upload identities of your
+choosing; and `DESCRIBE BACKUP`, which reads an archive without a server.
+
 ## A Complete Application
 
 The full suite files are runnable programs with setup, bounded waits, teardown and named test

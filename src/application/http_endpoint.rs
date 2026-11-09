@@ -191,6 +191,7 @@ impl EndpointWebsocketConnection {
         shutdown: &CancellationToken,
     ) -> EndpointDispatchOutcome {
         let metadata = WebsocketsEndpointFrameMetadata {
+            payload_bytes: frame.payload().len(),
             frame_type: frame.frame_type(),
             remote_addr: self.remote_addr,
             path: &self.path,
@@ -490,6 +491,7 @@ async fn dispatch_http_request(
             request.uri().query(),
             remote_addr,
             &host,
+            body.len(),
         );
         let row = IngestMetadataRow {
             fields: &metadata,

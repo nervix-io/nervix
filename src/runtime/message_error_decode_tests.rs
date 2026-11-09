@@ -85,7 +85,7 @@ fn kafka_metadata() -> IngestMetadataRow<'static> {
             partition: 3,
             offset: 42,
         }),
-        ..IngestMetadataRow::headers(&NoIngestHeaders)
+        ..IngestMetadataRow::headers(&NoIngestHeaders, &nervix_connector::NoIngestMetadata(0))
     }
 }
 
@@ -133,7 +133,8 @@ async fn a_refused_field_is_named_with_its_codec_and_its_kafka_position() {
 async fn a_payload_that_is_not_json_names_no_field_and_a_header_source_no_position() {
     let codec = event_codec();
     let report = refusal(&codec, b"not json").await;
-    let headers = IngestMetadataRow::headers(&NoIngestHeaders);
+    let headers =
+        IngestMetadataRow::headers(&NoIngestHeaders, &nervix_connector::NoIngestMetadata(0));
     let rejection = DecodeRejection::new(&codec, &headers, &report, occurred_at());
 
     assert_eq!(rejection.position, None);
@@ -159,7 +160,7 @@ async fn a_syslog_peer_is_the_position_of_its_frame() {
         &codec,
         &IngestMetadataRow {
             position: Some(nervix_connector::IngestTransportPosition::Syslog { peer }),
-            ..IngestMetadataRow::headers(&NoIngestHeaders)
+            ..IngestMetadataRow::headers(&NoIngestHeaders, &nervix_connector::NoIngestMetadata(0))
         },
         &report,
         occurred_at(),

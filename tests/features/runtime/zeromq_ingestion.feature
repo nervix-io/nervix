@@ -28,6 +28,7 @@ Feature: ZeroMQ ingestion
         CREATE ZEROMQ PULL INGESTOR zeromq_notifications
         FROM zeromq_main MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING notification_codec
+        FILTER WHERE payload.bytes > (0 AS U64)
         TO notifications
         INHERIT ALL
         BRANCHED BY by_zeromq_notifications

@@ -27,6 +27,7 @@ Feature: Pulsar batch member metadata
       CREATE PULSAR TOPIC INGESTOR records FROM source TOPIC 'batch_{{test_id}}'
         SUBSCRIPTION 'batch_{{test_id}}' PROVISIONED TYPE SHARED MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING event_codec TIMESTAMP AT metadata.publish_time
+        FILTER WHERE payload.bytes > (0 AS U64)
         TO events INHERIT ALL
           SET topic = metadata.topic, message_id = metadata.message_id,
               publish_time = metadata.publish_time, event_time = metadata.event_time,

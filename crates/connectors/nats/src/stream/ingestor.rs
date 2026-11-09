@@ -401,6 +401,10 @@ impl IngestorMessage for NatsStreamIngestorMessage {
 }
 
 impl IngestMessageMetadata for NatsStreamIngestorMessage {
+    fn payload_bytes(&self) -> usize {
+        nervix_connector::IngestorMessage::payload(self).len()
+    }
+
     fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
         self.headers.visit_metadata(values);
         let metadata = NatsStreamMetadataVisit {

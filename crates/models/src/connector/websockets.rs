@@ -206,6 +206,7 @@ impl IngestorDeclaration for WebsocketsConnectionIngestor {
         instancing: crate::IngestorInstancingCapability::Single,
         headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
         metadata: WEBSOCKETS_CONNECTION_METADATA,
+        payload: crate::IngestorPayloadDeclaration::BYTES,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Websockets),
         position_class: PositionClass::None,
@@ -281,6 +282,7 @@ const WEBSOCKETS_ENDPOINT_METADATA: IngestorMetadataDeclaration =
         IngestorMetadataField::new("frame_type", IngestorMetadataType::String),
         IngestorMetadataField::new("remote_addr", IngestorMetadataType::String),
         IngestorMetadataField::new("path", IngestorMetadataType::String),
+        IngestorMetadataField::new("remote_ip", IngestorMetadataType::String),
     ]);
 
 impl IngestorDeclaration for WebsocketsEndpointIngestor {
@@ -291,6 +293,7 @@ impl IngestorDeclaration for WebsocketsEndpointIngestor {
         // lowercase, every value of a repeated field together under its name.
         headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
         metadata: WEBSOCKETS_ENDPOINT_METADATA,
+        payload: crate::IngestorPayloadDeclaration::BYTES,
         executes_on_every_cluster_node: true,
         reference: IngestorReferenceKind::Endpoint(EndpointType::Websockets),
         position_class: PositionClass::None,

@@ -682,6 +682,10 @@ impl TryFrom<PulsarMessage<Vec<u8>>> for PulsarTopicIngestorMessage {
 }
 
 impl IngestMessageMetadata for PulsarTopicIngestorMessage {
+    fn payload_bytes(&self) -> usize {
+        nervix_connector::IngestorMessage::payload(self).len()
+    }
+
     fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
         values.string(&self.position.topic);
         values.rendered(&self.position);

@@ -399,6 +399,7 @@ Feature: MQTT ingestion
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
         FROM mqtt_main TOPIC 'notifications_client_template_{{test_id}}' INSTANCES 2 SESSION PERSISTENT QOS 1 MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE DROP DECODE USING notification_codec
+        FILTER WHERE payload.bytes > (0 AS U64)
         TO notifications
         INHERIT ALL
         BRANCHED BY by_mqtt_notifications

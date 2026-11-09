@@ -527,7 +527,7 @@ pub(super) mod tests {
                 .dispatch(
                     &runtime,
                     br#"{"user_id":7}"#,
-                    IngestMetadataRow::headers(&probe),
+                    IngestMetadataRow::headers(&probe, &nervix_connector::NoIngestMetadata(0)),
                     &CancellationToken::new(),
                 )
                 .await;
@@ -613,7 +613,10 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":"seven"}"#,
-                IngestMetadataRow::headers(&NoIngestHeaders),
+                IngestMetadataRow::headers(
+                    &NoIngestHeaders,
+                    &nervix_connector::NoIngestMetadata(0),
+                ),
                 &CancellationToken::new(),
             )
             .await;
@@ -751,7 +754,10 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":7}"#,
-                IngestMetadataRow::headers(&NoIngestHeaders),
+                IngestMetadataRow::headers(
+                    &NoIngestHeaders,
+                    &nervix_connector::NoIngestMetadata(0),
+                ),
                 &CancellationToken::new(),
             )
             .await;
@@ -781,7 +787,10 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":8}"#,
-                IngestMetadataRow::headers(&NoIngestHeaders),
+                IngestMetadataRow::headers(
+                    &NoIngestHeaders,
+                    &nervix_connector::NoIngestMetadata(0),
+                ),
                 &CancellationToken::new(),
             )
             .await;
@@ -826,7 +835,10 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":7}"#,
-                IngestMetadataRow::headers(&NoIngestHeaders),
+                IngestMetadataRow::headers(
+                    &NoIngestHeaders,
+                    &nervix_connector::NoIngestMetadata(0),
+                ),
                 &CancellationToken::new(),
             )
             .await;
@@ -868,7 +880,10 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":7}"#,
-                IngestMetadataRow::headers(&NoIngestHeaders),
+                IngestMetadataRow::headers(
+                    &NoIngestHeaders,
+                    &nervix_connector::NoIngestMetadata(0),
+                ),
                 &CancellationToken::new(),
             )
             .await;
@@ -912,7 +927,10 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":7}"#,
-                IngestMetadataRow::headers(&NoIngestHeaders),
+                IngestMetadataRow::headers(
+                    &NoIngestHeaders,
+                    &nervix_connector::NoIngestMetadata(br#"{"user_id":7}"#.len()),
+                ),
                 &CancellationToken::new(),
             )
             .await;
@@ -921,7 +939,10 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":"seven"}"#,
-                IngestMetadataRow::headers(&NoIngestHeaders),
+                IngestMetadataRow::headers(
+                    &NoIngestHeaders,
+                    &nervix_connector::NoIngestMetadata(br#"{"user_id":"seven"}"#.len()),
+                ),
                 &CancellationToken::new(),
             )
             .await;
@@ -942,7 +963,10 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":8}"#,
-                IngestMetadataRow::headers(&NoIngestHeaders),
+                IngestMetadataRow::headers(
+                    &NoIngestHeaders,
+                    &nervix_connector::NoIngestMetadata(br#"{"user_id":8}"#.len()),
+                ),
                 &CancellationToken::new(),
             )
             .await;
@@ -1038,7 +1062,10 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":7}"#,
-                IngestMetadataRow::headers(&NoIngestHeaders),
+                IngestMetadataRow::headers(
+                    &NoIngestHeaders,
+                    &nervix_connector::NoIngestMetadata(br#"{"user_id":7}"#.len()),
+                ),
                 &CancellationToken::new(),
             )
             .await;
@@ -1158,7 +1185,10 @@ pub(super) mod tests {
                 .dispatch(
                     &runtime,
                     br#"{"user_id":7}"#,
-                    IngestMetadataRow::headers(&NoIngestHeaders),
+                    IngestMetadataRow::headers(
+                        &NoIngestHeaders,
+                        &nervix_connector::NoIngestMetadata(br#"{"user_id":7}"#.len()),
+                    ),
                     &CancellationToken::new(),
                 )
                 .await;
@@ -1183,7 +1213,10 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":7}"#,
-                IngestMetadataRow::headers(&NoIngestHeaders),
+                IngestMetadataRow::headers(
+                    &NoIngestHeaders,
+                    &nervix_connector::NoIngestMetadata(br#"{"user_id":7}"#.len()),
+                ),
                 &CancellationToken::new(),
             )
             .await;
@@ -1201,7 +1234,10 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":"seven"}"#,
-                IngestMetadataRow::headers(&NoIngestHeaders),
+                IngestMetadataRow::headers(
+                    &NoIngestHeaders,
+                    &nervix_connector::NoIngestMetadata(br#"{"user_id":"seven"}"#.len()),
+                ),
                 &CancellationToken::new(),
             )
             .await;
@@ -1231,7 +1267,10 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":7}"#,
-                IngestMetadataRow::headers(&NoIngestHeaders),
+                IngestMetadataRow::headers(
+                    &NoIngestHeaders,
+                    &nervix_connector::NoIngestMetadata(br#"{"user_id":7}"#.len()),
+                ),
                 &CancellationToken::new(),
             )
             .await;
@@ -1277,7 +1316,10 @@ pub(super) mod tests {
             .dispatch(
                 &runtime,
                 br#"{"user_id":"seven"}"#,
-                IngestMetadataRow::headers(&NoIngestHeaders),
+                IngestMetadataRow::headers(
+                    &NoIngestHeaders,
+                    &nervix_connector::NoIngestMetadata(0),
+                ),
                 &CancellationToken::new(),
             )
             .await;
@@ -1365,7 +1407,10 @@ pub(super) mod tests {
                 .dispatch(
                     &runtime,
                     body.as_bytes(),
-                    IngestMetadataRow::headers(&NoIngestHeaders),
+                    IngestMetadataRow::headers(
+                        &NoIngestHeaders,
+                        &nervix_connector::NoIngestMetadata(0),
+                    ),
                     &CancellationToken::new(),
                 )
                 .await;
