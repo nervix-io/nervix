@@ -322,6 +322,7 @@ pub(super) fn IngestorRouteEditor(
             </div>
         </section>
     }
+    .into_any()
 }
 
 /// The active route's output branch and its branch key assignments.
@@ -352,6 +353,7 @@ fn IngestorRouteBranchEditor(
             </div>
         </Show>
     }
+    .into_any()
 }
 
 /// The decoded fields the active route inherits, and which of them leak sensitivity.
@@ -425,6 +427,7 @@ fn IngestorRouteInheritanceEditor(
             } />
         </Show>
     }
+    .into_any()
 }
 
 /// The active route's output assignments, its WHERE expression and its ordered invocations.
@@ -458,6 +461,7 @@ fn IngestorRouteConstructionEditor(
                 }>"Add invocation"</button>
         </section>
     }
+    .into_any()
 }
 
 /// The active route's flush policy.
@@ -488,6 +492,7 @@ fn IngestorRouteFlushEditor(signals: CreateSignals) -> impl IntoView {
                 } /></label>
         </Show>
     }
+    .into_any()
 }
 
 /// The active route's message error policy and its error relay assignments.
@@ -517,6 +522,7 @@ fn IngestorRouteMessageErrorEditor(
             </div>
         </Show>
     }
+    .into_any()
 }
 
 #[cfg(test)]

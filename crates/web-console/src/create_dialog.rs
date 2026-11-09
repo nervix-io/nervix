@@ -9,6 +9,13 @@
 //!   choice contract, and the console request dispatcher owned by the parent module.
 //! - **Must not know.** Registry state, command execution internals, subscription tabs, or how the
 //!   server resolves a choice.
+//!
+//! Every form editor, and every large section of one, returns its view erased with `into_any` at
+//! its component boundary. The dialog renders every form in one view, so an editor that returned
+//! its concrete view would spell that whole nested type in the name of every generic the dialog
+//! instantiates over it, and in the debug information of each, while an unoptimized server-side
+//! render would move the complete view value through every enclosing frame. Erased at its
+//! boundary, a section is named once and rendered from the frames of the component that owns it.
 
 #![cfg_attr(
     nervix_lint,

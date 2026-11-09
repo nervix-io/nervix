@@ -465,6 +465,7 @@ pub(super) fn IngestorEditor(
             <p class="create-reference-invalid" role="alert">"The selected domain, entity or codec changed. Select affected references again."</p>
         </Show>
     }
+    .into_any()
 }
 
 /// The ingestor's entity, its client or endpoint, and the entity's declared locators and options.
@@ -511,6 +512,7 @@ fn IngestorSourceEditor(
             key={move |option| (entity_kind(), option.keywords)}
             children=move |option| view! { <EntityOptionEditor signals=signals option=option /> } />
     }
+    .into_any()
 }
 
 /// The ingestor's delivery mode, its acknowledgement fields and its quiesce policy.
@@ -592,6 +594,7 @@ fn IngestorDeliveryEditor(signals: CreateSignals) -> impl IntoView {
             <SourceFieldEditor signals=signals field=IngestorField::RetryAfter />
         </Show>
     }
+    .into_any()
 }
 
 /// The ingestor's decoding codec, timestamp policy and arrival filter.
@@ -630,6 +633,7 @@ fn IngestorDecodingEditor(
                 } />
         </label>
     }
+    .into_any()
 }
 
 #[cfg(test)]
