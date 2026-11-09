@@ -143,6 +143,7 @@ class InventoryTests(unittest.TestCase):
     def test_inventory_has_current_targets_and_exact_corpus_paths(self) -> None:
         inventory = bolero.load_inventory()
         self.assertEqual({target.id for target in inventory.targets}, {
+            "cluster-identity-record-rkyv",
             "licensing-protocol-json-roundtrip",
             "licensing-conditions-resolution",
             "licensing-jws-malformed",
@@ -536,16 +537,16 @@ class InventoryTests(unittest.TestCase):
             "benchmark-metrics-report": 1,
             "ingestor-describe-envelope": 7,
             "plexus-model": 56,
-            "plexus-archive-model": 59,
+            "plexus-archive-model": 60,
             "plexus-statement": 59,
             "plexus-statement-text": 58,
             "plexus-format-document": 58,
             "plexus-format-text": 57,
             "models-archived-models": 58,
             "registry-archived-models": 51,
-            "consensus-state-records": 53,
-            "consensus-state-corruption": 53,
-            "consensus-raft-records": 52,
+            "consensus-state-records": 54,
+            "consensus-state-corruption": 54,
+            "consensus-raft-records": 53,
             "registry-stored-models": 44,
             "registry-stored-models-corruption": 44,
             "inferencer-tensor-columns": 1,

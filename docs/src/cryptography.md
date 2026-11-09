@@ -32,7 +32,9 @@ still have the counted call sites below.
 The one-shot digests use `aws_lc_rs::digest`. Incremental SHA-256 wraps the maintained native
 `SHA256_CTX` from the same AWS-LC module, keeping its state on the stack; the EVP context used by
 `aws_lc_rs::digest::Context` allocates algorithm state. The direct `aws-lc-sys` pin moves together
-with `aws-lc-rs` and librdkafka, preserving the single-module rule.
+with `aws-lc-rs` and librdkafka, preserving the single-module rule. With the boundary's `fips`
+feature the context comes from `aws-lc-fips-sys`, the module `aws-lc-rs` then runs on, so such a
+build references the ordinary module nowhere.
 
 | Purpose | Where Nervix obtains it today |
 | --- | --- |
@@ -377,7 +379,12 @@ does not depend on which digest byte differs; the width is public. `provider::mo
 the linked module with AWS-LC's runtime FIPS check. An approved algorithm or selected TLS suite
 does not establish a validated backend or deployment. The ordinary Nervix build reports
 `ModuleMode::Ordinary`. A service's FIPS qualification must select one consistent FIPS module
-throughout its dependency graph and run these same vectors there.
+throughout its dependency graph and run these same vectors there. The boundary's `fips` feature
+makes that selection beneath it: `aws-lc-rs` on `aws-lc-fips-sys`, the rustls FIPS provider, and
+the native SHA-256 context on the same module, so the build links that module alone and
+`module_mode` reports `ModuleMode::Fips`, which the boundary's own test asserts for each
+configuration. The licensing service's FIPS configuration enables the feature; no Nervix build
+does.
 
 The boundary tests retain the complete P-256/SHA-256 section of the
 [NIST CAVP FIPS 186-4 verification vectors](https://csrc.nist.gov/projects/cryptographic-algorithm-validation-program/digital-signatures),
@@ -396,11 +403,22 @@ error beneath its context and disables generic JWT time/audience policy; callers
 own document validation. The protocol's `jose-jws`/`jose-b64` edges are format-only and enable no
 cryptographic backend.
 
+The consensus cluster identity stores its private DER in an owner that zeroizes on drop, alongside
+the shared protocol's `PublicKey` and `KeyId`. Recovery re-derives both public values from each
+private key. Observers receive a public projection. A leader coordinator receives `ClusterSigner`,
+which wraps the existing `DocumentSigner`, exposes signing without key export, and prints only its
+`kid` in `Debug`. The coordinator owns its leadership lifetime and supplies document limits and a
+working-set reservation; signing runs on the bounded control executor with cancellation checks.
+The maintained signer clears its owned private material. Raft persistence and replication carry
+the identity; public backup archives carry only its source UUID as display metadata.
+
 ## What The FIPS Migration Will Refuse
 
 The migration enables the FIPS module underneath the boundary: `aws-lc-rs` with its FIPS feature on
 `aws-lc-fips-sys`, librdkafka built against that same `aws-lc-fips-sys`, and the rustls FIPS
-provider. The fork's build reads the metadata of whichever AWS-LC crate its backend selects, so
+provider. The boundary's `fips` feature already makes its own part of that selection, for
+`aws-lc-rs`, rustls and its native digest; the migration enables it for `nervix-server` beside
+librdkafka's backend. The fork's build reads the metadata of whichever AWS-LC crate its backend selects, so
 building librdkafka on the FIPS crate is a backend the fork adds, not a rewrite of its build. A
 FIPS build refuses to start, and refuses a commit, when a resolved TLS policy names an algorithm
 FIPS 140-3 does not approve. It refuses each security path of the inventory until that path moves

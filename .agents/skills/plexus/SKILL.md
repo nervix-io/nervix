@@ -108,6 +108,10 @@ its fixed provider; existing connections retain their negotiation and connector 
 remain with their declared client keys.
 For backend validation claims, follow that chapter's P-256 signing and backend-status guidance;
 selecting an approved algorithm does not establish a validated deployment.
+For cluster continuity and public identity inspection, read
+[Node Settings → Permanent Cluster Identity](../../../docs/src/node-settings.md#permanent-cluster-identity).
+For source UUID inspection and restore behavior, read
+[Backup And Restore](../../../docs/src/backup-and-restore.md#what-a-restore-recreates).
 For authentication refusals and retry behavior, follow
 [Authentication](../../../docs/src/client-session-protocol.md#authentication); a response delay
 does not establish that a user exists.

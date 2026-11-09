@@ -441,6 +441,14 @@ check-tls-configuration-source source:
 fmt-tls-configuration-source source:
     cargo fmt --manifest-path {{ quote(source / "rustls/Cargo.toml") }} --package rustls
 
+# Cluster identity, replication and restore checks use the native session client.
+test-cluster-identity *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    # Absolute globs keep Cucumber's file walk within the feature directory.
+    cargo test --package nervix-scenarios --test scenarios -- --input "$(pwd)/tests/features/runtime/cluster_identity*.feature" {{ quote(args) }}
+
 # Placement and console scenarios use native nodes and public clients, without paced simulation.
 test-partition-placement feature="tests/features/cluster/partition_placement.feature" *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash
