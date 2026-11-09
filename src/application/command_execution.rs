@@ -48,7 +48,7 @@ use thiserror::Error;
 use tracing::warn;
 
 use super::{
-    authentication::{user_credentials, verify_password_hash},
+    authentication::{user_credentials, verify_password_credential},
     command_result::{CommandDiagnostic, CommandDisposition, CommandResult, OutcomeUnknownCause},
     domain_clock::current_timestamp,
     model_mutation::command_error,
@@ -601,16 +601,16 @@ impl SessionServiceImpl {
                 )));
             }
             if let (
-                Some(password_hash),
+                Some(password_credential),
                 PersistentCommandRequestBody::Statement {
                     statement: Statement::CreateUser(create),
                     ..
                 },
-            ) = (existing.password_hash(), &request.body)
+            ) = (existing.password_credential(), &request.body)
             {
-                let verified = verify_password_hash(
+                let verified = verify_password_credential(
                     self.inner.runtime.executor(),
-                    password_hash.to_string(),
+                    password_credential.clone(),
                     create.body.password.clone(),
                 )
                 .await;
@@ -682,13 +682,14 @@ impl SessionServiceImpl {
                     self.inner.runtime.executor(),
                     create.body.name.clone(),
                     create.body.password.clone(),
+                    self.password_creation_cost(),
                 )
                 .await
                 .map_err(|error| Box::new(command_error(error.to_string())))?;
                 CommandExecutionEffect::CreateUser {
                     if_not_exists: create.if_not_exists,
                     name: user.name,
-                    password_hash: user.password_hash,
+                    password_credential: user.password_credential,
                 }
             }
             PersistentCommandRequestBody::Statement {
@@ -947,13 +948,13 @@ impl SessionServiceImpl {
             CommandExecutionEffect::CreateUser {
                 if_not_exists,
                 name,
-                password_hash,
+                password_credential,
             } => {
                 Box::pin(self.apply_persistent_user_creation(
                     if_not_exists,
                     nervix_consensus::UserCredentials {
                         name,
-                        password_hash,
+                        password_credential,
                     },
                 ))
                 .await

@@ -249,6 +249,7 @@ mod nats_delivery;
 mod nats_stream_consumers;
 mod paced_replication;
 mod paced_simulation;
+mod password_credentials;
 mod postgres_fixtures;
 mod process_cluster;
 mod pulsar_delivery;
