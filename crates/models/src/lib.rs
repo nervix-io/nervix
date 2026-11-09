@@ -41,6 +41,7 @@ mod emitter_envelope;
 mod execution_unit;
 mod expression;
 mod http_request;
+mod inferencer_model_fingerprint;
 mod ingestor_input;
 mod json_path;
 mod message_error;
@@ -271,6 +272,7 @@ pub use http_request::{
     HttpApplicationHeaders, HttpBodyMode, HttpHeaderLimits, HttpHeaderName, HttpHeaderValue,
     HttpMethod, HttpOrigin, HttpRequestFieldError, HttpTarget,
 };
+pub use inferencer_model_fingerprint::InferencerModelFingerprint;
 pub use ingestor_input::{IngestorInput, TransportIngestorInput};
 pub use json_path::{JsonPath, JsonPathError, JsonPathStep};
 pub use message_error::{

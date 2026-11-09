@@ -220,6 +220,10 @@ artifacts precede test execution; tests never invoke a compiler or package manag
 report is not coverage of every host API, and a public-member reference is not a behavioral
 assertion.
 
+Every host boundary tier runs in ordinary CI, and the Python cluster examples also run in
+ordinary scenario shards. The `client-conformance` lane runs every host's cluster tier and the
+cross-language probes. Prepared boundary and packaging checks pass before any cluster starts.
+
 Registered Bolero batch and field-description properties live with the actual conversion owner:
 the shared host's Arrow interface and the C, Ruby and JNI boundaries. A new binding adds its
 batch property with matching register, corpus and domain bounds. Runtime protocol models stay

@@ -569,6 +569,16 @@ a test job keeps its archive, and a rerun of `scenarios-build` replaces both. Th
 test executables without their debug information, most of a test executable's bytes, as
 [Scenario Shards](integration-test-lifecycle.md#scenario-shards) describes.
 
+Every host suite's boundary tier runs in the ordinary `tests` job. The build prepares the Python
+wheel, instrumented JNI jar and JUnit launcher/classes/reporter, native Ruby gem and C/C++ programs
+before packing; the restored job installs the Python environments and compiles nothing. C/C++
+boundary runs include AddressSanitizer and UndefinedBehaviorSanitizer. The ordinary scenario shards
+also run the Python host suite's one-/three-node cluster examples from their existing wheel.
+JVM, Ruby and C/C++ cluster examples stay in `client-conformance`: those runtimes and prepared host
+artifacts are absent from the ordinary scenario archive. The local host-cluster recipes and the
+full conformance runner require their boundary tiers, including packaging smoke, to pass before
+starting scenarios. The ordinary Python scenario runners apply the same gate.
+
 A transfer reports every ten seconds how much it moved and how fast, how many parts are done,
 moving, waiting to retry or queued, and which moving part is the slowest, so the step's log shows a
 transfer that crawls as well as one that stopped. A connection that does not open within 20 s, one
@@ -617,7 +627,7 @@ compares it with the workflows.
 | `shuttle` | Check | The Shuttle checks and their replay check |
 | `loom` | Check | The Loom models and their weakening qualification |
 | `turmoil` | Check | The Turmoil simulation suite and its replay check |
-| `client-conformance` | Check | The [host-binding](client-host-bindings.md#qualification-and-observability) and independent-client probes, the host suites' cluster tiers against one- and three-node clusters, and the JVM, Ruby, Python, C and C++ boundary tiers |
+| `client-conformance` | Check | The [host-binding](client-host-bindings.md#qualification-and-observability) and independent-client probes and every host suite's cluster tier against one- and three-node clusters, gated by the prepared boundary tiers and packaging smoke. Boundary tiers and Python cluster examples also run in ordinary CI. |
 | `bolero-random` | Check, through Bolero | Bolero's randomized properties and corpus replay, which a manual run of the Bolero workflow always runs |
 | `extra-doctests` | Check | Capability doctests |
 | `extra-miri` | Check | Miri over the expiry map |

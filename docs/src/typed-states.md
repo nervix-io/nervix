@@ -709,6 +709,12 @@ fingerprint is accepted for its identity even if its bytes happen to be zero. Sc
 publish the required fingerprint before schema-bound state can be loaded or replicated. Missing
 required identity is an error, not a default digest.
 
+Stateful inferencer placement also requires an `InferencerModelFingerprint` naming the resource,
+pinned version, file and complete ordered state declarations. Stateless inference has no such
+identity. The decision boundary computes it once; the runtime receives the typed value and never
+reads the inferencer Model to reconstruct it. Snapshot restoration accepts tensors only under that
+identity and the same branch incarnation, and validates their shapes before installation.
+
 The runtime Kafka offset key remains schema-independent. A backup archive also records the
 ingestor's scheduled fingerprint with those offsets, so restore applies them only to the same
 ingestor contract after publishing its target schedule.

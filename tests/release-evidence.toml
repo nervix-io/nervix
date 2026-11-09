@@ -76,9 +76,15 @@ name = "deloxide"
 
 [[method]]
 checks = ["client-conformance"]
-description = "The cross-language client probes against one- and three-node clusters"
+description = "The cross-language client probes and every host suite's cluster tier against one- and three-node clusters, preceded by all inventory-checked boundary tiers and their packaging smoke"
 label = "client-conformance"
 name = "client-conformance"
+
+[[method]]
+checks = ["tests", "scenarios-build"]
+description = "Every host suite's boundary tier from prepared artifacts, including C/C++ ASan/UBSan, and the Python package's one-/three-node cluster tier in ordinary scenario shards; packaging smoke gates every cluster run"
+name = "client-suites"
+sharded = ["scenarios"]
 
 [[method]]
 checks = [

@@ -153,7 +153,9 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   WASM fuel and linear-memory budgets, correlation, materialized state, lookup, generation, or
   repartitioning.
 - For inference with model-carried state, read `Runtime Nodes` → `Inferencer` → `State tensors`
-  before choosing port bindings, initialization, branch isolation or recovery guarantees.
+  and `Shutdown And Recovery` → `What Survives` before choosing port bindings, initialization,
+  branch isolation or recovery guarantees. Check the snapshot-section bound and branch retention;
+  distinguish a completed graceful stop from recovery of the last periodic snapshot.
 - Placement: latency-critical or heavy corridors, colocation enforcement, rule precedence, and
   whether ordinary scheduler heuristics should remain neutral.
 - Operations: batching/flush, error routes, credentials/TLS resources, observability, session

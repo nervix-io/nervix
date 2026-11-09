@@ -252,3 +252,5 @@ round trips cover these fields, their SET/DROP operations, and each connector de
 The registry and consensus current-shape signatures and the interconnect fingerprint advance
 with this archived Model layout. Textual backup documents continue to use the current Plexus
 reader under the existing archive-format contract.
+
+Inferencer tensor state uses the registered `inferencer-state-snapshots` lossless frame/size property, `inferencer-state-snapshots-malformed` rejection property and `inferencer-native-snapshot-projection` native conversion property. The placement/key and runtime-state wire generators include the schema and typed model fingerprint. The frame carries its exact revision, optional branch incarnation, shapes and F32 bits.

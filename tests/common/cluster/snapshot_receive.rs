@@ -213,3 +213,150 @@ impl SnapshotProbe {
         Ok(bytes)
     }
 }
+
+impl Cluster {
+    /// A public checkpoint listing supplies exact model identities; fetching the replica's bytes
+    /// proves it holds the listed generations before the scenario ends their owner.
+    pub(crate) async fn wait_for_inferencer_replica_checkpoints(
+        &self,
+        owner: &str,
+        replica: &str,
+        lifecycle: StatePlacementEnvelope,
+    ) -> io::Result<()> {
+        let probe = self.snapshot_probe(owner).await?;
+        let target = self
+            .nodes
+            .get(replica)
+            .ok_or_else(|| io::Error::other("unknown replica"))?;
+        probe
+            .transport
+            .register_outbound_target(
+                node_name(replica),
+                PeerTarget::new(target.spec.interconnect_listen_addr(), "localhost").endpoint(),
+            )
+            .map_err(io::Error::other)?;
+        let result = nervix_primitives::time::timeout(Duration::from_secs(90), async {
+            let page = probe
+                .transport
+                .request(
+                    &node_name(owner),
+                    nervix_interconnect::BranchCheckpointListingRequest {
+                        lifecycle: lifecycle.clone(),
+                        after: None,
+                    },
+                )
+                .await
+                .map_err(io::Error::other)?
+                .result
+                .map_err(io::Error::other)?;
+            let page = match page {
+                nervix_interconnect::BranchCheckpointListing::Restarted(page)
+                | nervix_interconnect::BranchCheckpointListing::Continued(page) => page,
+                nervix_interconnect::BranchCheckpointListing::Absent => {
+                    return Err(io::Error::other(
+                        "the populated owner has no branch catalog",
+                    ));
+                }
+            };
+            let revisions = page
+                .revised
+                .into_iter()
+                .filter(|entry| {
+                    matches!(
+                        entry.state,
+                        nervix_interconnect::RuntimeState::Inferencer { .. }
+                    )
+                })
+                .collect::<Vec<_>>();
+            if page.more || revisions.len() != 2 {
+                return Err(io::Error::other(
+                    "the fixture must list both inference branches in one page",
+                ));
+            }
+            for revision in revisions {
+                let placement = StatePlacementEnvelope {
+                    state: revision.state,
+                    branch_key: revision.branch_key,
+                    ..lifecycle.clone()
+                };
+                let source = probe
+                    .transport
+                    .request(
+                        &node_name(owner),
+                        StateSyncRequest {
+                            placement: placement.clone(),
+                            after_lsm: None,
+                        },
+                    )
+                    .await
+                    .map_err(io::Error::other)?
+                    .result
+                    .map_err(io::Error::other)?
+                    .ok_or_else(|| {
+                        io::Error::other("the owner has no populated inference checkpoint")
+                    })?;
+                if source.lsm < revision.lsm {
+                    return Err(io::Error::other(
+                        "the owner checkpoint is behind its catalog",
+                    ));
+                }
+                let expected = probe
+                    .fetch(
+                        owner,
+                        FetchStateCheckpoint {
+                            placement: placement.clone(),
+                            lsm: source.lsm,
+                            read: StateCheckpointRead::Published,
+                        },
+                        &source,
+                    )
+                    .await?;
+                loop {
+                    let response = probe
+                        .transport
+                        .request(
+                            &node_name(replica),
+                            StateSyncRequest {
+                                placement: placement.clone(),
+                                after_lsm: None,
+                            },
+                        )
+                        .await
+                        .map_err(io::Error::other)?;
+                    if let Some(snapshot) = response.result.map_err(io::Error::other)?
+                        && snapshot.lsm >= source.lsm
+                    {
+                        let request = FetchStateCheckpoint {
+                            placement: placement.clone(),
+                            lsm: snapshot.lsm,
+                            read: StateCheckpointRead::Published,
+                        };
+                        let payload = probe.fetch(replica, request, &snapshot).await?;
+                        if snapshot != source || payload != expected {
+                            return Err(io::Error::other(
+                                "the replica checkpoint differs from the owner's complete current \
+                                 frame",
+                            ));
+                        }
+                        if payload.is_empty() {
+                            return Err(io::Error::other(
+                                "an inference checkpoint cannot be empty bytes",
+                            ));
+                        }
+                        break;
+                    }
+                    nervix_primitives::time::sleep(Duration::from_millis(25)).await;
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| {
+            io::Error::other(
+                "replica did not hold both current inference branch generations within 90 seconds",
+            )
+        });
+        probe.shutdown().await;
+        result?
+    }
+}
