@@ -4,7 +4,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 
 use super::*;
 
-const RULE: &str = "non_aws_lc_crypto";
+const RULE: &str = AUTHORED_NON_AWS_LC_CRYPTO;
 
 /// The line and column of every counted site in one file.
 fn crypto_sites(path: &str, source: &str) -> Vec<(usize, usize)> {
@@ -89,6 +89,33 @@ mod nested { use super::entropy as e; fn draw() { e::OsRng.next_u32(); } }
             at(source, 9, "getrandom", 0),
             at(source, 10, "default_provider", 0),
             at(source, 11, "e::", 0),
+        ]
+    );
+}
+
+#[test]
+fn the_analysis_configuration_and_its_expectations_do_not_hide_a_use() {
+    let source = "\
+#[cfg(nervix_lint)] use sha2::Sha256;
+#[cfg(not(nervix_lint))] fn entropy() { getrandom::fill(&mut [0u8; 8]); }
+#[cfg_attr(nervix_lint, expect(nervix::bare_error_signature, reason = \"fixture\"))]
+fn expected() { blake3::hash(b\"x\"); }
+#[cfg(any(test, nervix_lint))] fn analysis() { hmac::Hmac::<u8>::new(); }
+#[cfg(all(feature = \"fips\", not(nervix_lint)))] mod fips { use pbkdf2::pbkdf2_hmac; }
+#[cfg(any())] extern crate argon2;
+#[cfg_attr(nervix_lint, doc = \"Non-security BLAKE3: stated only for the analysis.\")]
+fn conditional_purpose() { blake3::hash(b\"x\"); }
+";
+    assert_eq!(
+        crypto_sites("src/fixture.rs", source),
+        [
+            at(source, 1, "Sha256", 0),
+            at(source, 2, "getrandom", 0),
+            at(source, 4, "blake3", 0),
+            at(source, 5, "hmac", 0),
+            at(source, 6, "pbkdf2_hmac", 0),
+            at(source, 7, "argon2", 0),
+            at(source, 9, "blake3", 0),
         ]
     );
 }

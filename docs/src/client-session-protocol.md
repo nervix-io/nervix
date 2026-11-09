@@ -290,7 +290,7 @@ Native client-core, the CLI and native bindings use `nervix-crypto`'s explicit `
 default, independently of an embedding host's process provider. They are clients rather than members
 of the cluster's policy authority. Browser TLS remains the browser's choice. The interconnect has
 its independent fixed provider, unaffected by outward algorithm changes.
-[Cryptography](cryptography.md#algorithm-policy) owns exact names, aliases, defaults and governed
+[Cryptography](cryptography.md#outward-tls-policy) owns exact names, aliases, defaults and governed
 connector paths; certificate trust and provisioning remain as above.
 
 ### Console WebSocket
@@ -351,7 +351,7 @@ that fails authentication ends with `UNAUTHENTICATED`. The console upgrade prese
 credentials in an `Authorization: Basic` header or, because a browser cannot set headers on a
 WebSocket, as the `auth` query parameter; a failure answers `401` with a `Basic` challenge and never
 upgrades. `GET /console/auth` checks credentials without opening a session. Passwords are verified
-against typed PBKDF2-HMAC-SHA-512 credentials held in consensus, on the node's credentials worker under a 64-byte verification-buffer charge. Stored iteration counts are validated before admission; the committed creation default is 210,000 and the accepted upper bound is 1,000,000. Its isolated CPU class serves only password
+against typed PBKDF2-HMAC-SHA-512 credentials held in consensus ([Password Credentials](cryptography.md#password-credentials)), on the node's credentials worker under a 64-byte verification-buffer charge. Stored iteration counts are validated before admission; the committed creation default is 210,000 and the accepted upper bound is 1,000,000. Its isolated CPU class serves only password
 work, so saturated data, extension or bulk work never delays a login, and concurrent attempts wait
 for it in turn. A node whose credentials class cannot take the verification now answers
 `UNAVAILABLE`, or `503` without an upgrade on the console: the

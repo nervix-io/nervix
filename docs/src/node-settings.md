@@ -605,9 +605,11 @@ Outward TLS algorithms are ordered-list cluster parameters. Both bootstrap defau
 Aliases resolve in place and duplicate algorithms keep their first position. The complete resolved
 pair validates at commit and is installed live for new handshakes; established connections keep
 their negotiation. `DESCRIBE CLUSTER` and the settings log show resolved committed/running lists.
-The [cryptography chapter](cryptography.md#algorithm-policy) owns membership, exact spellings,
-validation and the inventory of TLS stacks the policy governs. Protocol versions and signature
-schemes have no additional cluster parameter.
+The [cryptography chapter](cryptography.md#outward-tls-policy) owns membership, exact spellings,
+validation and the inventory of TLS stacks the policy governs. The interconnect's algorithms are a
+[fixed contract](cryptography.md#interconnect-tls) that no setting reaches, because nothing a node
+needs to reach the cluster depends on a cluster parameter. Protocol versions and signature schemes
+have no additional cluster parameter.
 
 ## Fixed Values And The Source Ratchet
 

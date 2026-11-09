@@ -1269,7 +1269,9 @@ current typed password credential, including algorithm, bounded iteration count,
 Restore preserves those values without re-deriving a password. Importing users raises the
 consensus verification-work count in the same publication, so restored costs and local users
 share one uniform authentication workload. Header or cost validation failures occur before
-installation, and diagnostics never include salt, digest or password values.
+installation, and diagnostics never include salt, digest or password values. [Password
+Credentials](cryptography.md#password-credentials) owns the credential profile and its verification
+work.
 
 ### Inference Archive Verification
 
