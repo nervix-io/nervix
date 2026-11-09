@@ -48,6 +48,7 @@ pub(super) fn EmitterPublicationEditor(signals: CreateSignals) -> impl IntoView 
         <EmitterText label="Maximum retry backoff" class_name="create-emitter-retry-max" signals=signals read=|draft| draft.destination.publication.retry_max.clone() write=|draft, value| draft.destination.publication.retry_max = value />
         <EmitterEnvelopeEditor signals=signals />
     }
+    .into_any()
 }
 
 #[component]
@@ -72,6 +73,7 @@ fn EmitterEnvelopeEditor(signals: CreateSignals) -> impl IntoView {
             </Show>
         </section>
     }
+    .into_any()
 }
 
 #[component]
@@ -121,4 +123,5 @@ pub(super) fn EmitterPolicyEditor(
             <button type="button" data-error="log" class:active=move || signals.emitter.get().general_error == Some(GeneralErrorPolicy::Log) disabled=pending on:click=move |_| { signals.emitter.update(|draft| draft.general_error = Some(GeneralErrorPolicy::Log)); signals.edit(); }>"LOG"</button>
         </fieldset>
     }
+    .into_any()
 }

@@ -43,6 +43,7 @@ pub(super) fn EmitterEditor(
         <EmitterConstructionEditor signals=signals request_tx=request_tx session_generation=session_generation />
         <EmitterPolicyEditor signals=signals request_tx=request_tx session_generation=session_generation />
     }
+    .into_any()
 }
 
 /// The emitter's ordered input relays, their attachment and their collection.
@@ -90,4 +91,5 @@ fn EmitterInputEditor(
             </Show>
         </section>
     }
+    .into_any()
 }
