@@ -1398,3 +1398,12 @@ Resume the opaque continuation with the same domain, relay and selector. On `Sta
 start a new read; do not combine it with rows from the abandoned sequence. Complete counts describe
 the whole selected cut. An empty page has no row sections or continuation. See
 [Materialized State Inspection Envelope](./client-session-protocol.md#materialized-state-inspection-envelope).
+
+The native Python, Ruby and JVM bindings expose this envelope through
+`Outcome.state_inspection` (Python property and Ruby method) and `Outcome.stateInspection()`
+(JVM). Their inspection, unit and section views retain the shared host `Inspection`; each frame
+retains only its verified Row bytes and schema. A Python memoryview, Ruby `IO::Buffer`, or JVM
+direct `ByteBuffer` and its derived slices MUST keep that frame alive independently of every
+parent object or closed handle. The JSON view is the existing envelope's lossless serializer,
+never a reconstruction from display text. Native enums preserve the distinct refusal, stage and
+unit-kind values. The host guides' `Inspect Materialized State` sections are executable examples.

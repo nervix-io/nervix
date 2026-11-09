@@ -4885,6 +4885,26 @@ async fn start_client_probe(
     world.client_probe = Some(probe);
 }
 
+#[when(expr = "the {string} client probe inspects typed state on a follower when available")]
+async fn when_native_client_probe_inspects_state(world: &mut ScenarioWorld, runtime: String) {
+    let runtime: ProbeRuntime = runtime
+        .parse()
+        .assured("the step names a known native binding host");
+    let leader = current_leader_node(world).await;
+    // The fixture has one or three nodes; use a follower whenever one exists.
+    let follower = world
+        .cluster()
+        .node_ids()
+        .into_iter()
+        .find(|node| node != &leader);
+    let node_id = match follower {
+        Some(follower) => follower,
+        None => leader,
+    };
+    let target = client_probe_target(world, &node_id, ProbeExercise::StateInspection);
+    start_client_probe(world, runtime, &node_id, target, "INSPECTION retained").await;
+}
+
 #[when(
     expr = "the {string} client probe retries resource {string} from directory {string} on a \
             follower when available"
@@ -9216,6 +9236,21 @@ async fn given_branched_state_counting_wasm_reset_graph_is_running(world: &mut S
     configure_wasm_state_reset_graph(world, WasmStateResetGraph::branched()).await;
 }
 
+#[given(expr = "a branched state-counting WASM reset graph is running on host {string}")]
+async fn given_branched_state_counting_wasm_reset_graph_is_running_on_host(
+    world: &mut ScenarioWorld,
+    host: String,
+) {
+    configure_wasm_state_reset_graph(
+        world,
+        WasmStateResetGraph {
+            host: Some(host),
+            ..WasmStateResetGraph::branched()
+        },
+    )
+    .await;
+}
+
 #[given("a branched state-counting WASM reset graph is running in the existing domain")]
 async fn given_branched_state_counting_wasm_reset_graph_is_running_in_the_existing_domain(
     world: &mut ScenarioWorld,
@@ -9319,7 +9354,7 @@ enum WasmStateResetGraphPlacement {
 }
 
 /// The shape of the guest-state graph a WASM reset or rebind scenario runs on.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct WasmStateResetGraph {
     branched: bool,
     partitions: u16,
@@ -9330,6 +9365,9 @@ struct WasmStateResetGraph {
     /// that resource moves more than one usage in one batch. The second processor filters every
     /// row away, so it holds no guest state of its own.
     second_wasm_usage: bool,
+    /// The hostname the graph's VHOST serves, when it is not `wasm-reset-{{test_id}}.example.com`.
+    /// A second domain's graph needs its own, because a hostname routes to one domain's endpoint.
+    host: Option<String>,
 }
 
 impl WasmStateResetGraph {
@@ -9341,6 +9379,7 @@ impl WasmStateResetGraph {
             placement: WasmStateResetGraphPlacement::Unconstrained,
             create_domain: true,
             second_wasm_usage: false,
+            host: None,
         }
     }
 }
@@ -9353,7 +9392,12 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
         placement,
         create_domain,
         second_wasm_usage,
+        host,
     } = graph;
+    let host = match host {
+        Some(host) => host,
+        None => "wasm-reset-{{test_id}}.example.com".to_string(),
+    };
     let leader = current_leader_node(world).await;
     if create_domain {
         let domain_commands = format!("CREATE UNPACED DOMAIN {};", world.domain);
@@ -9486,7 +9530,7 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
         {branch_schema}
         CREATE RELAY counted_input_events SCHEMA counted_input_event{relay_branching};
         CREATE RELAY {output_relay} SCHEMA counted_output_event{relay_branching};
-        CREATE VHOST edge wasm-reset-{{{{test_id}}}}.example.com;
+        CREATE VHOST edge {host};
         CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
         CREATE HTTP ENDPOINT INGESTOR counted_source
           FROM ingress MODE NO ACK

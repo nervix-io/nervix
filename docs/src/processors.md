@@ -494,6 +494,15 @@ generation, so a returning key starts from `INITIAL`. Dropping the inferencer re
 state. The state identity includes the resource, pinned version, file and complete `STATE`
 declarations; changing that identity starts fresh state. `UNBRANCHED` owns one state sequence;
 `BRANCHED BY` owns one per concrete key.
+
+`REBIND RESOURCE` to a different version starts every stateful branch from its declared `INITIAL`,
+even when the new version contains identical ONNX bytes. Applying the running domain's schedule
+removes snapshots under the replaced fingerprint, so a restart uses only the current binding's
+state. Uploading a newer version alone, rebinding to the version already pinned, or rejecting an
+incompatible model leaves the existing tensors intact. Dropping and recreating the inferencer with
+another `STATE` declaration uses that declaration's initial values. The operation retains its
+`ENTITY_PAUSE` classification; see [Rebinding](resource-versions.md#rebinding).
+
 State ports are internal model inputs and outputs, not fields available to route construction.
 `SHOW CREATE INFERENCER` preserves the state declaration and its initial expression.
 
@@ -565,13 +574,17 @@ outcome in either format. See
 
 ### Reset guest state from Plexus
 
-`RESET WASM PROCESSOR <processor> STATE IN DOMAIN <domain> FOR <scope>;` replaces the selected
-guest-state lifetime of an existing, running processor. The scope is mandatory:
+`RESET WASM PROCESSOR <processor> STATE FOR <scope>;` replaces the selected guest-state lifetime of
+an existing, running processor in the session's active domain, like every other statement that
+acts on a domain. Inside `BEGIN` it acts on the domain the transaction is bound to. Without an
+active domain it fails with `no active domain selected`. A processor of the same name in another
+domain is a different processor and keeps its state. The scope is mandatory:
 
 ```plexus
-RESET WASM PROCESSOR normalize_events STATE IN DOMAIN sales FOR UNBRANCHED;
-RESET WASM PROCESSOR normalize_events STATE IN DOMAIN sales FOR ALL BRANCHES;
-RESET WASM PROCESSOR normalize_events STATE IN DOMAIN sales FOR BRANCH VALUES { tenant = 'acme' };
+USE sales;
+RESET WASM PROCESSOR normalize_events STATE FOR UNBRANCHED;
+RESET WASM PROCESSOR normalize_events STATE FOR ALL BRANCHES;
+RESET WASM PROCESSOR normalize_events STATE FOR BRANCH VALUES { tenant = 'acme' };
 ```
 
 Use `FOR UNBRANCHED` only for an unbranched processor. Use `FOR ALL BRANCHES` or exact

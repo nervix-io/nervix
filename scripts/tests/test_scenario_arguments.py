@@ -104,7 +104,7 @@ class ScenarioArgumentTests(unittest.TestCase):
             ),
             (
                 "test-client-upload-conflict-conformance",
-                str(ROOT / "tests/features/runtime/client_{conformance,suites}.feature"),
+                str(ROOT / "tests/features/runtime/{client_conformance,client_suites,native_binding_inspection}.feature"),
                 (
                     "tests/features/runtime/client_conformance.feature",
                     "tests/features/runtime/client_suites.feature",

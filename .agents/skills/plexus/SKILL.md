@@ -80,6 +80,9 @@ to select the host guide; Java and JVM programs follow [JVM Client Library](../.
 Ruby applications follow [Ruby Client Library](../../../docs/src/client-library-ruby.md),
 and C and C++ programs follow [C And C++ Client Library](../../../docs/src/client-library-c.md).
 Read its execution, clock and endpoint sections before choosing application-side lifecycle handling.
+For typed state inspection in Python, Ruby or JVM applications, read that host guide's
+`Inspect Materialized State` section for page/refusal metadata, opaque continuation and retained
+schema/frame lifetimes before suggesting application code.
 
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
@@ -838,7 +841,8 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   the policy discards state for none of those under either value. Only an owner loss whose forced
   recovery cannot prepare the new owner recreates guest state without the guest's verdict.
 - To intentionally replace an existing WASM processor's guest state, use
-  `RESET WASM PROCESSOR <processor> STATE IN DOMAIN <domain> FOR UNBRANCHED|ALL BRANCHES|BRANCH VALUES { <field> = <literal>, ... };`.
+  `RESET WASM PROCESSOR <processor> STATE FOR UNBRANCHED|ALL BRANCHES|BRANCH VALUES { <field> = <literal>, ... };`.
+  It acts on the session's active domain, so `USE` that domain first.
   Choose the explicit scope that matches its declared branch, and supply every branch-key field
   with an exact typed literal for one selected branch. The processor must be running and the
   selected branch must already exist. This command loses the selected computation state; a fresh

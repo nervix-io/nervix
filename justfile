@@ -485,6 +485,13 @@ test-inferencer-backup *args: build-deps build-test-cli
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/debug/nervix-cli") }}
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/cluster/inferencer_backup*.feature") }} {{ quote(args) }}
 
+# Verify inference resource replacement without traversing unrelated features or build artifacts.
+test-inferencer-rebinding *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/inferencer_state_rebinding*.feature") }} {{ quote(args) }}
+
 # Inspect materialized relay pages through the native client and in-process cluster.
 test-state-inspection *args: build-deps build-test-cli
     #!/usr/bin/env bash
@@ -988,6 +995,16 @@ test-wire-schema-lists *args: build-web-console wasm-processor-guests download-o
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- \
         --input tests/features/runtime/wire_schema_lists.feature "$@"
+
+# Exercise coordinated WASM guest-state resets through in-process nodes: the RESET statement on the
+# session's active domain, its retries and refusals, and the operator and guest-requested resets.
+[positional-arguments]
+test-wasm-state-reset *args: build-web-console wasm-processor-guests download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/runtime/wasm_state_reset.feature "$@"
 
 # Verify every processor/emitter acknowledgement clause through public CREATE and SHOW CREATE.
 [positional-arguments]
@@ -2077,6 +2094,42 @@ build-client-conformance-tests: tests-deps build-client-conformance
 test-client-conformance tags="@client_conformance_toolchain or @client_suite_python" *args: build-client-conformance-tests
     just test-client-conformance-run {{ quote(tags) }} {{ args }}
 
+# Verify typed inspection through the three native libraries, preparing only their artifacts.
+test-native-inspection-host:
+    cargo test --package nervix-client-host --lib -- tests::inspection::inspection_views_preserve_boundary_values --exact --nocapture
+
+# Discover only the changed owners' compiled property targets; execute no generated cases.
+validate-native-inspection-properties:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    uv run --locked python - <<'PY'
+    from pathlib import Path
+    from scripts.bolero import discover_package, load_inventory, package_manifests
+    inventory = load_inventory()
+    manifests = package_manifests()
+    for package in ("nervix-client-host", "nervix-client-python"):
+        targets = tuple(target for target in inventory.targets if target.package == package)
+        compiled = discover_package(package, manifests[package], targets)
+        observed = {(kind, item["test_name"], Path(item["work_dir"]).resolve()) for kind, item in compiled}
+        expected = {(target.test_target, target.test, target.work_dir.resolve()) for target in targets}
+        assert observed == expected, (package, observed, expected)
+        print(f"{package}: discovered={len(compiled)} executed=0 completed=0")
+    PY
+
+# Focused ordinary counters for native inspection owners; prepared JVM fixtures stay unchanged.
+coverage-native-inspection output="lcov-workspace.info":
+    cargo llvm-cov --package nervix-client-host --package nervix-client-python --package nervix-client-ruby --package nervix-client-jvm --features nervix-client-ruby/ruby-tests,nervix-client-jvm/jvm-tests --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- --skip bolero_
+
+test-native-inspection-python:
+    cargo test --package nervix-client-python --lib -- inspection:: --skip bolero_ --nocapture
+
+test-native-binding-inspection *args: tests-deps build-client-python build-client-ruby build-client-jvm-tests
+    cargo test --no-run --package nervix-scenarios --test scenarios
+    just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-python-api-run
+    just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-ruby-api-run
+    just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-jvm-api-run
+    just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-conformance-scenarios '@native_binding_inspection' {{ quote(args) }}
+
 # Exercise upload completion, retained retries and typed identity conflicts in every binding host.
 test-client-upload-conflict-conformance: build-web-console wasm-processor-guests download-onnxruntime build-client-conformance
     just test-client-conformance-run '@client_upload_failure' --concurrency 2 --retry 0
@@ -2097,7 +2150,7 @@ test-client-conformance-scenarios tags="@client_conformance_toolchain or @client
     export NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }}
     export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/debug/libnervix_client_ffi.so") }}
     cargo test --package nervix-scenarios --test scenarios -- \
-        --input {{ quote(justfile_directory() / "tests/features/runtime/client_{conformance,suites}.feature") }} \
+        --input {{ quote(justfile_directory() / "tests/features/runtime/{client_conformance,client_suites,native_binding_inspection}.feature") }} \
         --tags {{ quote(tags) }} {{ quote(args) }}
 
 test-runtime-state-capabilities: tests-deps

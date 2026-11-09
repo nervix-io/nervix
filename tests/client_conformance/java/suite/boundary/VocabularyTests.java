@@ -9,6 +9,23 @@ import org.junit.jupiter.api.Test;
 public final class VocabularyTests {
     @Test
     void everyEnumerationKeepsItsMembersAndCodes() {
+        assertArrayEquals(new Nervix.InspectionRejection[] { Nervix.InspectionRejection.UNKNOWN_ENTITY, Nervix.InspectionRejection.NOT_MATERIALIZED, Nervix.InspectionRejection.INVALID_SELECTION, Nervix.InspectionRejection.INVALID_LIMIT, Nervix.InspectionRejection.STALE_CONTINUATION, Nervix.InspectionRejection.OWNER_UNAVAILABLE, Nervix.InspectionRejection.NOT_READY, Nervix.InspectionRejection.DEADLINE, Nervix.InspectionRejection.REPLY_TOO_LARGE }, Nervix.InspectionRejection.values());
+        assertEquals(1, Nervix.InspectionRejection.UNKNOWN_ENTITY.code());
+        assertEquals(2, Nervix.InspectionRejection.NOT_MATERIALIZED.code());
+        assertEquals(3, Nervix.InspectionRejection.INVALID_SELECTION.code());
+        assertEquals(4, Nervix.InspectionRejection.INVALID_LIMIT.code());
+        assertEquals(5, Nervix.InspectionRejection.STALE_CONTINUATION.code());
+        assertEquals(6, Nervix.InspectionRejection.OWNER_UNAVAILABLE.code());
+        assertEquals(7, Nervix.InspectionRejection.NOT_READY.code());
+        assertEquals(8, Nervix.InspectionRejection.DEADLINE.code());
+        assertEquals(9, Nervix.InspectionRejection.REPLY_TOO_LARGE.code());
+        assertArrayEquals(new Nervix.InspectionStage[] { Nervix.InspectionStage.LIVE, Nervix.InspectionStage.STORED }, Nervix.InspectionStage.values());
+        assertEquals(1, Nervix.InspectionStage.LIVE.code());
+        assertEquals(2, Nervix.InspectionStage.STORED.code());
+        assertArrayEquals(new Nervix.InspectionUnitKind[] { Nervix.InspectionUnitKind.SINGLE, Nervix.InspectionUnitKind.PARTITION, Nervix.InspectionUnitKind.INSTANCE }, Nervix.InspectionUnitKind.values());
+        assertEquals(1, Nervix.InspectionUnitKind.SINGLE.code());
+        assertEquals(2, Nervix.InspectionUnitKind.PARTITION.code());
+        assertEquals(3, Nervix.InspectionUnitKind.INSTANCE.code());
         assertArrayEquals(new Nervix.CellState[] {
             Nervix.CellState.VALUE, Nervix.CellState.NULL, Nervix.CellState.REDACTED
         }, Nervix.CellState.values());

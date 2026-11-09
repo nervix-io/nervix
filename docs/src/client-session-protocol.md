@@ -2343,7 +2343,9 @@ The C ABI's public contract is `crates/client-ffi/include/nervix_client.h`.
 
 The C ABI also exposes an independently retained typed state-inspection envelope through
 `nx_outcome_inspection`: JSON, counts, section schemas and verified Row frames outlive the
-originating outcome. That projection currently has no Python, Ruby or JVM counterpart. Typed
+originating outcome. Python, Ruby and JVM project that same shared owner through typed metadata,
+JSON, section schemas and retained Row frames; [Typed Inspection](client-host-bindings.md#typed-inspection)
+owns their lifetime contract. Typed
 transaction status/inspection, choice lookups, server notices and leadership observation are
 outside the shared binding surface. The architecture chapter's
 [guarantees and limits](client-host-bindings.md#guarantees-and-limits) and the ledger distinguish
@@ -2581,6 +2583,12 @@ process-bound read origin, complete counts and named sections. A section carries
 `RowSchema`, bounded `NXRB` RowBatch frames, omitted-row count and optional positional watermark
 indices. Watermarks are distinct, non-sensitive datetime columns. Frames conform to their section
 schema, keep branch keys and redaction, and share the verified outer reply's backing bytes.
+
+The shared host runtime keeps this envelope in `Inspection`. Python, Ruby and JVM applications
+read its typed metadata and lossless JSON through their native binding, using the host guides'
+`Inspect Materialized State` sections. Metadata views retain the inspection independently; each
+frame view retains its exact verified bytes and schema. Host buffer lifetimes do not depend on
+the outcome or session, and no binding parses the display message to recover inspection data.
 
 Embedded frames use the session transfer bound; transport frames still obey the smaller frame
 bound and the ordinary reply-transfer protocol. The service checks the complete typed outcome plus

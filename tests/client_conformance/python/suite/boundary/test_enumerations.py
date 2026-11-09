@@ -9,6 +9,20 @@ from typing import SupportsInt
 import nervix_client as nx
 
 STABLE_VALUES: tuple[tuple[SupportsInt, int], ...] = (
+    (nx.InspectionRejection.UNKNOWN_ENTITY, 1),
+    (nx.InspectionRejection.NOT_MATERIALIZED, 2),
+    (nx.InspectionRejection.INVALID_SELECTION, 3),
+    (nx.InspectionRejection.INVALID_LIMIT, 4),
+    (nx.InspectionRejection.STALE_CONTINUATION, 5),
+    (nx.InspectionRejection.OWNER_UNAVAILABLE, 6),
+    (nx.InspectionRejection.NOT_READY, 7),
+    (nx.InspectionRejection.DEADLINE, 8),
+    (nx.InspectionRejection.REPLY_TOO_LARGE, 9),
+    (nx.InspectionStage.LIVE, 1),
+    (nx.InspectionStage.STORED, 2),
+    (nx.InspectionUnitKind.SINGLE, 1),
+    (nx.InspectionUnitKind.PARTITION, 2),
+    (nx.InspectionUnitKind.INSTANCE, 3),
     (nx.FailureKind.INVALID_ARGUMENT, 1),
     (nx.FailureKind.CONNECT, 2),
     (nx.FailureKind.TRANSPORT, 3),
