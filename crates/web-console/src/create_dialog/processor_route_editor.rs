@@ -1,10 +1,10 @@
-//! Ordered transforming routes shared by visual junctions, deduplicators, reorderers and
-//! reingestors.
+//! Ordered output routes shared by every visual processor family.
 //!
 //! Layer: edges.
 //!
 //! - **Owns.** Browser route order, reingestor branch choices, construction, flush and message
-//!   error controls until each route is complete.
+//!   error controls until each route is complete, showing only the construction and flush
+//!   controls the family's route contract admits.
 //! - **Depends on.** Shared route drafts, typed choices, and the ordered construction editors.
 //! - **Must not know.** Data-plane routing, buffering, or error execution.
 
@@ -25,6 +25,7 @@ use super::{
     processor_editor::indices,
     processor_inheritance_editor::ProcessorInheritanceEditor,
     processor_invocation_editor::ProcessorInvocationEditor,
+    processor_route_references::ProcessorRouteReferences,
 };
 
 fn route_flush_interval(signals: CreateSignals, family: ProcessorFamily) -> String {
@@ -56,6 +57,9 @@ pub(super) fn ProcessorRouteEditor(
 ) -> impl IntoView {
     let draft = signals.processor(family);
     let pending = move || signals.progress.get().is_pending();
+    let inheritance = family.route_contract().transforms().then(|| {
+        view! { <ProcessorInheritanceEditor family=family signals=signals request_tx=request_tx session_generation=session_generation /> }
+    });
     let section = view! {
         <section class="create-processor-routes">
             <h3>"Ordered output routes"</h3>
@@ -88,7 +92,7 @@ pub(super) fn ProcessorRouteEditor(
                 <ChoiceGroup class_name="create-processor-route-relay" label="Output relay"
                     control=ChoiceControl::ProcessorRouteRelay signals=signals request_tx=request_tx
                     session_generation=session_generation show_detail=true />
-                <ProcessorInheritanceEditor family=family signals=signals request_tx=request_tx session_generation=session_generation />
+                {inheritance}
                 <ProcessorRouteConstructionEditor family=family signals=signals request_tx=request_tx session_generation=session_generation />
                 <ProcessorRouteFlushEditor family=family signals=signals />
                 <ProcessorRouteMessageErrorEditor family=family signals=signals request_tx=request_tx session_generation=session_generation />
@@ -159,7 +163,8 @@ fn ProcessorRouteBranchEditor(
     .into_any()
 }
 
-/// The active route's output assignments, its WHERE expression and its ordered invocations.
+/// The active route's output assignments with the family's scoped field references, its WHERE
+/// expression and, on a transforming route, its ordered invocations.
 #[component]
 fn ProcessorRouteConstructionEditor(
     family: ProcessorFamily,
@@ -169,11 +174,16 @@ fn ProcessorRouteConstructionEditor(
 ) -> impl IntoView {
     let draft = signals.processor(family);
     let pending = move || signals.progress.get().is_pending();
+    let invocations = family
+        .route_contract()
+        .transforms()
+        .then(|| view! { <ProcessorInvocationEditor family=family signals=signals /> });
     view! {
         <div class="create-processor-output-assignments">
             <ChoiceGroup class_name="create-processor-output-fields" label="Add output assignment"
                 control=ChoiceControl::ProcessorOutputField signals=signals request_tx=request_tx
                 session_generation=session_generation show_detail=true />
+            <ProcessorRouteReferences family=family signals=signals request_tx=request_tx session_generation=session_generation />
             <ProcessorAssignmentRows family=family area=AssignmentArea::Output signals=signals />
         </div>
         <label class="create-field"><span>"Route WHERE expression (optional)"</span>
@@ -194,14 +204,17 @@ fn ProcessorRouteConstructionEditor(
                     signals.edit();
                 } />
         </label>
-        <ProcessorInvocationEditor family=family signals=signals />
+        {invocations}
     }
     .into_any()
 }
 
-/// The active route's flush policy.
+/// The active route's flush policy, for the families whose routes flush.
 #[component]
 fn ProcessorRouteFlushEditor(family: ProcessorFamily, signals: CreateSignals) -> impl IntoView {
+    if !family.route_contract().flushes() {
+        return ().into_any();
+    }
     let draft = signals.processor(family);
     let pending = move || signals.progress.get().is_pending();
     view! {

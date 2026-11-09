@@ -4560,10 +4560,10 @@ test_target = "bin:nervix-web-console"
 [[target]]
 case_timeout_seconds = 30
 corpus = "crates/web-console/src/create_dialog/__fuzz__/create_dialog__processor_model_tests__bolero_processor_drafts_preserve_every_complete_model/corpus"
-domain_version = 4
+domain_version = 5
 features = []
 id = "console-processor-drafts"
-invariant = "Every complete junction, deduplicator, reorderer and reingestor Model filled into its browser draft builds back to the complete original and canonical Plexus, including ordered inputs, predicates, collection, node branch, DEDUPLICATE ON and BY order, exact MAX TIME text, materialized dependencies and every route's construction, branch, flush and error policy."
+invariant = "Every complete junction, deduplicator, reorderer, window processor, correlator and reingestor Model filled into its browser draft builds back to the complete original and canonical Plexus, including ordered inputs, predicates, collection, node branch, DEDUPLICATE ON and BY order, exact MAX TIME text, WIDTH and STEP bounds, MAX STATE SIZE, both correlator sides with their collection, CORRELATE WHERE, match policy and timeout actions, materialized dependencies and every route's construction, branch, flush and error policy."
 manifest = "Cargo.toml"
 max_input_bytes = 4096
 package = "nervix-web-console"
