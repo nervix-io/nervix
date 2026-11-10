@@ -2427,7 +2427,9 @@ enum NoticeKind : ubyte {
   /// A failure the runtime of the serving node, or of another node, recovered from.
   Runtime,
   /// A control-plane failure the serving node recovered from.
-  ControlPlane
+  ControlPlane,
+  /// A licensing lifecycle observation or policy warning.
+  Licensing
 }
 
 table ServerNotice {

@@ -147,6 +147,11 @@ fn bolero_consensus_raft_records_round_trip_through_the_storage_codec() {
                 }),
                 crate::ConsensusResponse::Conflict(crate::ConsensusConflict::LicensingQuota {
                     refusal: nervix_licensing_vocabulary::LicensingRefusal {
+                        state: if arbitrary.entropy().flag() {
+                            nervix_licensing_vocabulary::AdmissionState::OverLimit
+                        } else {
+                            nervix_licensing_vocabulary::AdmissionState::Lapsed
+                        },
                         condition: nervix_licensing_vocabulary::QuotaName::ClusterDomains,
                         limit: arbitrary.entropy().any_u64(),
                         current_usage: arbitrary.entropy().any_u64(),

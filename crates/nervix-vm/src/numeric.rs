@@ -425,6 +425,28 @@ pub(crate) enum Arithmetic {
 }
 
 impl Arithmetic {
+    /// The scalar lane contract shared by segmented list runs and the whole-column kernels.
+    pub(crate) fn integer_lane<N: CheckedInteger>(self, left: N, right: N) -> (N, bool) {
+        match self {
+            Self::Add => left.lane_sum(right),
+            Self::Sub => left.lane_difference(right),
+            Self::Mul => left.lane_product(right),
+            Self::Div => left.lane_quotient(right),
+            Self::Rem => left.lane_remainder(right),
+        }
+    }
+
+    /// Floating arithmetic keeps the scalar operand width and rejects a non-finite result.
+    pub(crate) fn float_lane<N: CheckedFloat>(self, left: N, right: N) -> (N, bool) {
+        match self {
+            Self::Add => (left + right).finite_lane(),
+            Self::Sub => (left - right).finite_lane(),
+            Self::Mul => (left * right).finite_lane(),
+            Self::Div => (left / right).finite_lane(),
+            Self::Rem => (left % right).finite_lane(),
+        }
+    }
+
     /// Applies this operator to two integer operands of one batch. Every lane whose result does
     /// not fit the type fails, as does every quotient or remainder by zero.
     pub(crate) fn evaluate_integers<T>(
@@ -560,6 +582,8 @@ where
 pub(crate) trait CheckedInteger: ArrowNativeType + Default + DivisionLane {
     fn lane_sum(self, right: Self) -> (Self, bool);
 
+    fn lane_difference(self, right: Self) -> (Self, bool);
+
     fn lane_product(self, right: Self) -> (Self, bool);
 
     /// Fails for a zero divisor and for a quotient that overflows.
@@ -612,6 +636,10 @@ macro_rules! checked_integer_operations {
     () => {
         fn lane_sum(self, right: Self) -> (Self, bool) {
             self.overflowing_add(right)
+        }
+
+        fn lane_difference(self, right: Self) -> (Self, bool) {
+            self.overflowing_sub(right)
         }
 
         fn lane_product(self, right: Self) -> (Self, bool) {

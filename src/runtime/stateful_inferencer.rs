@@ -291,7 +291,7 @@ async fn admit_stateful_inferencer_rows(
                 .verified("an addressed input row has metadata"),
             acks: vec![message.acks],
         };
-        processor_output::dispatch_inferencer_result(
+        let dispatched = processor_output::dispatch_inferencer_result(
             ProcessorOutputDispatchContext {
                 branch: context.branch,
                 node_kind: ModelKind::Inferencer,
@@ -308,6 +308,14 @@ async fn admit_stateful_inferencer_rows(
             &message.record,
         )
         .await;
+        // The routes forwarded this row's result, and each relay took a share of its own, so the
+        // inferencer resolves the share it was handed. A dispatch that failed has already settled
+        // the row through the error policy and returns nothing.
+        if let Some(dispatched) = dispatched {
+            for acks in dispatched {
+                acks.ack_success();
+            }
+        }
     }
     if changed {
         context.replicated_state.publish_session(
