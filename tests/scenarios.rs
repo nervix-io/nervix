@@ -240,6 +240,7 @@ mod ingestion_time;
 mod ingestor_instances;
 mod ingestor_payload;
 mod kafka_metadata;
+mod licensing;
 mod materialized_state_inspection;
 mod mqtt_fixtures;
 mod mqtt_properties;

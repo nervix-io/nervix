@@ -20,6 +20,13 @@ module RubySuite
       reader = cluster.connect
       begin
         # ANCHOR: inspection
+        license_inspection = execute('DESCRIBE LICENSE;', reader).state_inspection
+        assert_instance_of NX::Inspection, license_inspection
+        assert_nil license_inspection.domain
+        assert_nil license_inspection.entity_name
+        assert_equal 'LICENSE', license_inspection.entity_kind
+        assert_nil license_inspection.rejection
+        assert_equal 3, license_inspection.counts.rows
         outcome = execute("SHOW RELAY #{relay} MATERIALIZED STATE FOR UNBRANCHED LIMIT 1 FORMAT JSON;", reader)
         assert_instance_of NX::Outcome, outcome
         inspection = outcome.state_inspection

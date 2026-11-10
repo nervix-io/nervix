@@ -6746,6 +6746,7 @@ name = "nervix-arbitrary"
 version = "0.1.0-dev"
 dependencies = [
  "meticulous",
+ "nervix-licensing-vocabulary",
  "nervix-models",
  "nervix-wasm-protocol",
  "rkyv",
@@ -7626,6 +7627,7 @@ dependencies = [
  "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "nervix-test-environment",
  "prost 0.13.5",
  "prost-reflect",
@@ -7674,6 +7676,7 @@ dependencies = [
  "nervix-execution",
  "nervix-interconnect",
  "nervix-licensing-protocol",
+ "nervix-licensing-vocabulary",
  "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
@@ -7903,12 +7906,23 @@ dependencies = [
  "meticulous",
  "nervix-bounded-write",
  "nervix-crypto",
+ "nervix-licensing-vocabulary",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "url",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "nervix-licensing-vocabulary"
+version = "0.1.0-dev"
+dependencies = [
+ "error-stack",
+ "rkyv",
+ "serde",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -7941,6 +7955,7 @@ dependencies = [
  "nervix-approx-into",
  "nervix-arbitrary",
  "nervix-crypto-policy",
+ "nervix-licensing-vocabulary",
  "nervix-primitives",
  "nervix-simd-kernels",
  "nonzero_ext",
@@ -8305,6 +8320,8 @@ dependencies = [
  "nervix-expiry-map",
  "nervix-interconnect",
  "nervix-jaq",
+ "nervix-licensing-protocol",
+ "nervix-licensing-vocabulary",
  "nervix-model-harness",
  "nervix-models",
  "nervix-plexus",
@@ -8554,6 +8571,7 @@ dependencies = [
  "nervix-recovery",
  "strum 0.26.3",
  "thiserror 2.0.21",
+ "ubyte",
  "url",
  "uuid",
  "wasm-bindgen",

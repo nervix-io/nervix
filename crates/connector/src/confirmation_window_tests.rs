@@ -33,8 +33,8 @@ use nervix_primitives::{
 
 use super::{BrokerAnswer, BrokerVerdict, ConfirmationWindow, ConfirmationWindowError};
 use crate::emitter::{
-    AckConfirmation, EmitterRecordId, EmitterWriteError, EmitterWriteResult, PerRecordOutcomeParts,
-    RejectedEmitterMember,
+    AckConfirmation, EmitterRecordId, EmitterWriteError, EmitterWriteResult, PerRecordOutcome,
+    PerRecordOutcomeParts, RejectedEmitterMember,
 };
 
 /// The emitter the scripted publishes report their failures for.
@@ -265,6 +265,9 @@ struct WindowCase {
     /// Selects the record whose hand-over the driver fails for a reason not the record's own,
     /// which ends the publish.
     driver_fails_at: Option<u8>,
+    /// Whether the driver gives up every record it holds when the publish fails, so the window
+    /// waits for their answers until `ACK TIMEOUT` after the give-up before it settles them.
+    gives_up: bool,
 }
 
 /// The failure that ends a publish.
@@ -371,7 +374,8 @@ impl WindowCase {
     /// record's deadline is the timeout after its hand-over; a window holding `MAX` records waits
     /// for the oldest answer until the oldest's deadline before the next hand-over; a publish that
     /// handed every record over waits for each answer still awaited, oldest first; and the first
-    /// failure, a missed deadline or a failed oldest answer or the driver's refusal, ends it.
+    /// failure, a missed deadline or a failed oldest answer or the driver's refusal, ends it, at
+    /// once or, where the driver gives up its records, as [`WindowCase::given_up_end`] says.
     fn reference(&self) -> ReferencePublish {
         let max_in_flight = self.max_in_flight();
         let timeout = self.timeout_millis();
@@ -384,7 +388,7 @@ impl WindowCase {
             let id = EmitterRecordId::new(index);
             if self.driver_fails_at() == Some(index) {
                 return ReferencePublish {
-                    end: now,
+                    end: self.failed_end(&in_flight, now),
                     taken,
                     refused,
                     failure: Some(ExpectedFailure::DriverRefused),
@@ -400,7 +404,7 @@ impl WindowCase {
                         && let Some(failure) = Self::await_oldest(&mut in_flight, &mut now)
                     {
                         return ReferencePublish {
-                            end: now,
+                            end: self.failed_end(&in_flight, now),
                             taken,
                             refused,
                             failure: Some(failure),
@@ -419,7 +423,7 @@ impl WindowCase {
                         && let Some(failure) = Self::await_oldest(&mut in_flight, &mut now)
                     {
                         return ReferencePublish {
-                            end: now,
+                            end: self.failed_end(&in_flight, now),
                             taken,
                             refused,
                             failure: Some(failure),
@@ -431,7 +435,7 @@ impl WindowCase {
         while !in_flight.is_empty() {
             if let Some(failure) = Self::await_oldest(&mut in_flight, &mut now) {
                 return ReferencePublish {
-                    end: now,
+                    end: self.failed_end(&in_flight, now),
                     taken,
                     refused,
                     failure: Some(failure),
@@ -444,6 +448,32 @@ impl WindowCase {
             refused,
             failure: None,
         }
+    }
+
+    /// When a publish that failed at `failed_at` ends, with `in_flight` the records its window still
+    /// awaits: at once, unless the driver gives those records up.
+    fn failed_end(&self, in_flight: &VecDeque<ReferenceRecord>, failed_at: u64) -> u64 {
+        if self.gives_up {
+            return Self::given_up_end(in_flight, failed_at, self.timeout_millis());
+        }
+        failed_at
+    }
+
+    /// When a publish whose driver gave up `in_flight` at `failed_at` ends: the window waits for
+    /// each of their answers, oldest first, until the timeout after the give-up, and no longer.
+    fn given_up_end(in_flight: &VecDeque<ReferenceRecord>, failed_at: u64, timeout: u64) -> u64 {
+        let bound = failed_at + timeout;
+        let mut end = failed_at;
+        for awaited in in_flight {
+            let Some(given_at) = awaited.given_at else {
+                return bound;
+            };
+            if given_at > bound {
+                return bound;
+            }
+            end = end.max(given_at);
+        }
+        end
     }
 
     /// The reference wait for the oldest answer: given by now, it is taken at once; given by the
@@ -523,6 +553,35 @@ impl WindowCase {
         None
     }
 
+    /// Ends a publish that failed with `failure`: at once, or, where the driver gives up its
+    /// records, once the window waited for their answers.
+    async fn end_failed<'a>(
+        &self,
+        window: ConfirmationWindow<ScriptedAnswer<'a>>,
+        failure: Report<EmitterWriteError>,
+    ) -> PerRecordOutcome<EmitterRecordId> {
+        if self.gives_up {
+            return window.fail_once_given_up(failure).await;
+        }
+        window.fail(failure)
+    }
+
+    /// Ends a publish that handed every record over: through `finish`, or, where the driver gives
+    /// up its records, by settling the answers still awaited and giving the records up should one
+    /// of them fail or miss its deadline.
+    async fn finish<'a>(
+        &self,
+        mut window: ConfirmationWindow<ScriptedAnswer<'a>>,
+    ) -> PerRecordOutcome<EmitterRecordId> {
+        if !self.gives_up {
+            return window.finish().await;
+        }
+        match window.settle_awaited().await {
+            Ok(()) => window.finish().await,
+            Err(failure) => window.fail_once_given_up(failure).await,
+        }
+    }
+
     /// Publishes this case through a window on a paused clock.
     fn publish(&self) -> ScriptedPublish {
         paused_runtime().block_on(async {
@@ -537,8 +596,8 @@ impl WindowCase {
                 self.records.len(),
             );
             let outcome = match self.hand_over(&mut window, &held).await {
-                Some(failure) => window.fail(failure),
-                None => window.finish().await,
+                Some(failure) => self.end_failed(window, failure).await,
+                None => self.finish(window).await,
             };
             assert_eq!(held.get(), 0, "an ended publish holds no answer");
             ScriptedPublish {
@@ -1039,4 +1098,198 @@ async fn a_deadline_past_the_clock_range_ends_the_publish() {
     let outcome = window.fail(failure).into_parts();
     assert!(outcome.delivered.is_empty());
     assert!(outcome.infrastructure_error.is_some());
+}
+
+/// A driver that gave up the records it still held answers for each of them after the window stopped
+/// waiting. The window waits for those answers, oldest first, until `ACK TIMEOUT` after the give-up,
+/// and settles every one of them: a record the broker confirmed is delivered rather than left for
+/// the host's retry to send again.
+#[nervix_primitives::test(start_paused = true)]
+async fn a_given_up_publish_settles_the_answers_its_driver_gives_after_the_give_up() {
+    let held = Cell::new(0);
+    let began = Instant::now();
+    let timeout = Duration::from_millis(50);
+    let mut window = ConfirmationWindow::new(EMITTER, settings(5, timeout), 3);
+    let records = [
+        Taken {
+            verdict: ScriptedVerdict::Confirmed,
+            answer_after: Some(Duration::from_millis(60)),
+        },
+        Taken {
+            verdict: ScriptedVerdict::Rejected,
+            answer_after: Some(Duration::from_millis(70)),
+        },
+        Taken {
+            verdict: ScriptedVerdict::Failed,
+            answer_after: Some(Duration::from_millis(65)),
+        },
+    ];
+    hand_over_all(&mut window, &records, &held)
+        .await
+        .verified("a window of five never waits while it takes three records");
+
+    let settled = window.settle_awaited().await;
+    let Err(failure) = settled else {
+        panic!("the oldest answer arrives only after its deadline");
+    };
+    assert_eq!(
+        began.elapsed(),
+        timeout,
+        "the window stops waiting for the broker at the oldest's deadline"
+    );
+    assert_failure(&failure, ExpectedFailure::TimedOut, timeout);
+    assert_eq!(
+        held.get(),
+        3,
+        "the failure leaves the publish to its caller"
+    );
+
+    let outcome = window.fail_once_given_up(failure).await.into_parts();
+
+    assert_eq!(
+        began.elapsed(),
+        Duration::from_millis(70),
+        "the given-up publish ends once the last record's answer arrives"
+    );
+    assert_eq!(sorted_delivered(&outcome), record_ids(&[0]));
+    assert_eq!(
+        rejected_records(&outcome),
+        vec![RejectedRecord::by_broker(EmitterRecordId::new(1))]
+    );
+    let failure = outcome
+        .infrastructure_error
+        .verified("the missed deadline ends the publish");
+    assert_failure(&failure, ExpectedFailure::TimedOut, timeout);
+    assert_eq!(held.get(), 0);
+}
+
+/// The window waits for the answers a give-up produces no longer than `ACK TIMEOUT` after it. A
+/// record its driver never answers for then stays unresolved, and so does one answered after that
+/// bound, while an answer given before the bound is settled whichever record it is for.
+#[nervix_primitives::test(start_paused = true)]
+async fn a_given_up_publish_waits_for_its_answers_until_ack_timeout_after_the_give_up() {
+    let held = Cell::new(0);
+    let began = Instant::now();
+    let timeout = Duration::from_millis(50);
+    let mut window = ConfirmationWindow::new(EMITTER, settings(3, timeout), 3);
+    let records = [
+        Taken {
+            verdict: ScriptedVerdict::Confirmed,
+            answer_after: None,
+        },
+        Taken {
+            verdict: ScriptedVerdict::Confirmed,
+            answer_after: Some(Duration::from_millis(70)),
+        },
+        Taken {
+            verdict: ScriptedVerdict::Rejected,
+            answer_after: Some(Duration::from_millis(120)),
+        },
+    ];
+
+    // A window of three waits for its oldest answer as it takes the third record.
+    let handed_over = hand_over_all(&mut window, &records, &held).await;
+    let Err(failure) = handed_over else {
+        panic!("a full window took a record although its oldest answer never arrives");
+    };
+    assert_eq!(began.elapsed(), timeout);
+
+    let outcome = window.fail_once_given_up(failure).await.into_parts();
+
+    assert_eq!(
+        began.elapsed(),
+        timeout + timeout,
+        "the given-up publish waits for its answers until ACK TIMEOUT after the give-up"
+    );
+    assert_eq!(sorted_delivered(&outcome), record_ids(&[1]));
+    assert!(
+        outcome.rejected.is_empty(),
+        "an answer given after the bound is not settled"
+    );
+    let failure = outcome
+        .infrastructure_error
+        .verified("the missed deadline ends the publish");
+    assert_failure(&failure, ExpectedFailure::TimedOut, timeout);
+    assert_eq!(held.get(), 0);
+}
+
+/// A give-up whose driver holds nothing more the window awaits ends the publish at once.
+#[nervix_primitives::test(start_paused = true)]
+async fn a_given_up_publish_without_awaited_records_ends_at_once() {
+    let held = Cell::new(0);
+    let began = Instant::now();
+    let mut window = ConfirmationWindow::new(EMITTER, settings(2, Duration::from_millis(50)), 1);
+    let records = [Taken {
+        verdict: ScriptedVerdict::Confirmed,
+        answer_after: Some(Duration::from_millis(5)),
+    }];
+    hand_over_all(&mut window, &records, &held)
+        .await
+        .verified("a window of two never waits while it takes one record");
+    window
+        .settle_awaited()
+        .await
+        .verified("the only answer arrives within its deadline");
+    assert_eq!(began.elapsed(), Duration::from_millis(5));
+
+    // The driver refuses a further record for a reason that is not the record's own.
+    let outcome = window
+        .fail_once_given_up(driver_refused())
+        .await
+        .into_parts();
+
+    assert_eq!(began.elapsed(), Duration::from_millis(5));
+    assert_eq!(sorted_delivered(&outcome), record_ids(&[0]));
+    let failure = outcome
+        .infrastructure_error
+        .verified("the driver's failure ends the publish");
+    assert_failure(
+        &failure,
+        ExpectedFailure::DriverRefused,
+        Duration::from_millis(50),
+    );
+}
+
+/// A give-up whose `ACK TIMEOUT` the monotonic clock cannot represent waits for nothing: it settles
+/// the answers given by then and ends the publish at once.
+#[nervix_primitives::test(start_paused = true)]
+async fn a_given_up_publish_without_a_representable_deadline_ends_at_once() {
+    let held = Cell::new(0);
+    let began = Instant::now();
+    let mut window = ConfirmationWindow::new(EMITTER, settings(4, Duration::MAX), 1);
+    let answer = ScriptedAnswer::new(
+        EmitterRecordId::new(0),
+        ScriptedVerdict::Confirmed,
+        Some(Instant::now()),
+        &held,
+    );
+    let admitted = window
+        .admit(
+            EmitterRecordId::new(0),
+            occurred_at(EmitterRecordId::new(0)),
+            answer,
+        )
+        .await;
+    let Err(failure) = admitted else {
+        panic!("a window took a record whose deadline the monotonic clock cannot represent");
+    };
+
+    let outcome = window.fail_once_given_up(failure).await.into_parts();
+
+    assert_eq!(began.elapsed(), Duration::ZERO);
+    assert_eq!(
+        held.get(),
+        0,
+        "the window holds no answer it has no deadline for"
+    );
+    assert!(outcome.delivered.is_empty());
+    let failure = outcome
+        .infrastructure_error
+        .verified("the deadline past the clock's range ends the publish");
+    assert_eq!(
+        failure.downcast_ref::<ConfirmationWindowError>(),
+        Some(&ConfirmationWindowError::DeadlineOutOfRange {
+            timeout: Duration::MAX
+        })
+    );
 }

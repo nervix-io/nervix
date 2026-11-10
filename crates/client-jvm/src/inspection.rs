@@ -43,10 +43,26 @@ macro_rules! inspection_string {
     };
 }
 
-inspection_string!(inspection_domain, domain);
 inspection_string!(inspection_entity_kind, entity_kind);
-inspection_string!(inspection_entity_name, entity_name);
 inspection_string!(inspection_json, json);
+
+native!(inspection_domain(handle: long) -> JString);
+fn inspection_domain<'local>(
+    env: &mut Env<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> Result<JString<'local>, Error> {
+    marshal::string(env, value!(handle).inspection()?.domain())
+}
+
+native!(inspection_entity_name(handle: long) -> JString);
+fn inspection_entity_name<'local>(
+    env: &mut Env<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> Result<JString<'local>, Error> {
+    marshal::string(env, value!(handle).inspection()?.entity_name())
+}
 
 native!(inspection_rejection(handle: long) -> int);
 fn inspection_rejection<'local>(

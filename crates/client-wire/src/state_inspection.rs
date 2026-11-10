@@ -10,9 +10,10 @@
     nervix::layer(engine, reason = "owns the boundary declared above")
 )]
 
-use nervix_models::{ClusterNodeName, DomainNodeRef, Unit};
+use nervix_models::{ClusterNodeName, Unit};
 pub use nervix_models::{
-    StateInspectionCounts, StateInspectionOrigin, StateInspectionRejection, StateInspectionStage,
+    StateInspectionCounts, StateInspectionEntity, StateInspectionOrigin, StateInspectionRejection,
+    StateInspectionStage,
 };
 
 use crate::{RowSchema, StateRowFrame};
@@ -22,7 +23,7 @@ mod presentation;
 /// One read, with either a page from its captured generations or a typed refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateInspection {
-    pub entity: DomainNodeRef,
+    pub entity: StateInspectionEntity,
     pub result: StateInspectionResult,
 }
 

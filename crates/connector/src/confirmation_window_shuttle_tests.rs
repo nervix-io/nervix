@@ -192,6 +192,30 @@ impl CheckedPublish {
         Self::settled(outcome.into_parts(), records, self.brokers).await
     }
 
+    /// Ends the publish with `failure` once its driver gave up every record it held, and waits for
+    /// every broker task. The answers given before the give-up began count as given before the end.
+    async fn end_given_up(self, failure: Report<EmitterWriteError>) -> Settled {
+        let records = self.ending_records();
+        let outcome = self.window.fail_once_given_up(failure).await;
+        Self::settled(outcome.into_parts(), records, self.brokers).await
+    }
+
+    /// Like [`CheckedPublish::end_given_up`], for a check that never expires a deadline: the window
+    /// then waits for every answer its driver gives after the give-up, so every record's answer
+    /// counts as given before the end.
+    async fn end_given_up_without_deadlines(self, failure: Report<EmitterWriteError>) -> Settled {
+        let outcome = self.window.fail_once_given_up(failure).await;
+        let mut records = Vec::with_capacity(self.handed.len());
+        for handed in &self.handed {
+            records.push(EndedRecord {
+                record: handed.record,
+                verdict: handed.verdict,
+                given_before_the_end: true,
+            });
+        }
+        Self::settled(outcome.into_parts(), records, self.brokers).await
+    }
+
     /// Ends the publish once every record was handed over and waits for every broker task.
     async fn finish(self) -> Settled {
         let records = self.ending_records();
@@ -508,4 +532,87 @@ fn a_failed_oldest_answer_settles_the_younger_answers_given_before_it() {
 #[test]
 fn shuttle_a_failed_oldest_answer_settles_the_younger_answers_given_before_it() {
     check_interleavings(a_failed_oldest_answer_settles_the_younger_answers_given_before_it);
+}
+
+fn a_give_up_settles_every_answer_its_driver_gives() {
+    shuttle::future::block_on(async {
+        let mut publish = CheckedPublish::new(5, 4);
+        for verdict in [
+            ScriptedVerdict::Confirmed,
+            ScriptedVerdict::Rejected,
+            ScriptedVerdict::Failed,
+            ScriptedVerdict::Confirmed,
+        ] {
+            publish
+                .hand_over(verdict)
+                .await
+                .assured("a window of five never waits while it takes four records");
+        }
+
+        // The driver refuses the next record for a reason that is not the record's own and gives
+        // up every record it holds. Each broker task answers for its record before or after the
+        // give-up, as Shuttle chooses, and no deadline passes.
+        let settled = publish
+            .end_given_up_without_deadlines(driver_refused())
+            .await;
+
+        settled.assert_given_answers_settled();
+        assert!(
+            settled.failure().contains::<DriverRefusedRecords>(),
+            "the driver's failure ends the publish"
+        );
+        assert_eq!(
+            settled.outcome.delivered.len(),
+            2,
+            "both confirmed records are delivered, whenever their answers arrived"
+        );
+    });
+}
+
+/// A publish whose driver gave up its records settles every answer the driver gives for them, each
+/// exactly once, whether it arrived before or after the give-up.
+#[test]
+fn shuttle_a_give_up_settles_every_answer_its_driver_gives() {
+    check_interleavings(a_give_up_settles_every_answer_its_driver_gives);
+}
+
+fn an_expired_give_up_settles_the_answers_given_before_it() {
+    // Timeout triggers are thread-local rather than per execution, so every execution starts
+    // without the trigger an earlier one registered.
+    clear_triggers();
+    shuttle::future::block_on(async {
+        shuttle::current::set_label_for_task(shuttle::current::me(), PublishDeadlines);
+        let mut publish = CheckedPublish::new(5, 3);
+        for verdict in [
+            ScriptedVerdict::Confirmed,
+            ScriptedVerdict::Rejected,
+            ScriptedVerdict::Confirmed,
+        ] {
+            publish
+                .hand_over(verdict)
+                .await
+                .assured("a window of five never waits while it takes three records");
+        }
+        // The clock expires the give-up's bound at a point Shuttle chooses: before, among or after
+        // the broker's answers.
+        let clock = nervix_primitives::task::spawn(async {
+            trigger_timeouts(|labels| labels.get::<PublishDeadlines>().is_some());
+        });
+
+        let settled = publish.end_given_up(driver_refused()).await;
+        clock.await.assured(CHECK_TASK_JOINS);
+
+        settled.assert_given_answers_settled();
+        assert!(
+            settled.failure().contains::<DriverRefusedRecords>(),
+            "the driver's failure ends the publish whenever its give-up stops waiting"
+        );
+    });
+}
+
+/// A give-up whose bound expires among its driver's answers settles every answer given before the
+/// give-up began and none twice.
+#[test]
+fn shuttle_an_expired_give_up_settles_the_answers_given_before_it() {
+    check_interleavings(an_expired_give_up_settles_the_answers_given_before_it);
 }

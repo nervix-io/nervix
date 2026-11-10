@@ -29,7 +29,8 @@ use super::{
     ingestor_route_draft::{
         AssignmentDraft, FlushDraft, InheritDraft, InvocationDraft, MessageErrorDraft,
     },
-    processor_draft::{InputDraft, StateDependencyDraft},
+    processor_draft::StateDependencyDraft,
+    processor_input_draft::InputDraft,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
