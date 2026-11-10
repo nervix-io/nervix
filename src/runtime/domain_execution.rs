@@ -65,6 +65,10 @@ pub(crate) struct DomainRoutingSnapshot {
     /// Where the owner of each unit of every materialized relay runs, which materialized reads ask
     /// for the state of a key's unit.
     pub(super) materialized_stream_owner_nodes: HashMap<RelayName, RelayOwnerRoutes>,
+    /// How the previous partition count placed the keys of every relay whose branch is in a
+    /// partition transition, which materialized reads consult for a key's row that its unit has
+    /// not claimed yet.
+    pub(super) relay_transitions: HashMap<RelayName, RelayPartitioning>,
     pub(super) codecs: HashMap<CodecName, Arc<CompiledCodec>>,
     pub(super) signaling_protocols: HashMap<SignalingProtocolName, Arc<CompiledSignalingProtocol>>,
     pub(super) processor_plans: HashMap<NodeUnitRef, StdArc<PublishedProcessorPlan>>,
@@ -74,6 +78,15 @@ impl DomainRoutingSnapshot {
     /// How the keys of `relay` are divided among its units, as its branch declares.
     pub(super) fn relay_partitioning(&self, relay: &RelayName) -> RelayPartitioning {
         RelayPartitioning::of(self.relay_branchings.get(relay))
+    }
+
+    /// How the previous partition count placed the keys of `relay`, while its branch is in a
+    /// partition transition.
+    pub(super) fn relay_previous_partitioning(
+        &self,
+        relay: &RelayName,
+    ) -> Option<RelayPartitioning> {
+        self.relay_transitions.get(relay).copied()
     }
 
     /// Where the schedule places the owner of `unit` of the materialized relay `relay`, if it
@@ -873,6 +886,7 @@ impl Runtime {
             BoundMessageErrorRoutes::bind(
                 revision.message_errors.clone(),
                 MessageErrorRouteBindingContext {
+                    vm_settings: self.inner.vm_settings,
                     relay_services: &relay_services,
                     materialized_stream_specs: &materialized_stream_specs,
                     lookups: &lookup_runtimes,
@@ -903,6 +917,7 @@ impl Runtime {
         }
 
         let execution_build_deps = ExecutionBuildDeps {
+            vm_settings: self.inner.vm_settings,
             domain,
             relay_schemas: &relay_schemas,
             relay_branchings: &relay_branchings,
@@ -917,8 +932,15 @@ impl Runtime {
                 continue;
             };
             let mut prepared = Some(
-                GeneratorTaskSpec::bind(domain, generator, first, &relay_services, &udf_executor)
-                    .change_context_lazy(build)?,
+                GeneratorTaskSpec::bind(
+                    domain,
+                    generator,
+                    first,
+                    &relay_services,
+                    &udf_executor,
+                    self.inner.vm_settings,
+                )
+                .change_context_lazy(build)?,
             );
             while let Some(unit) = units.next() {
                 let mut spec = if units.peek().is_some() {
@@ -1007,6 +1029,8 @@ impl Runtime {
                         relay_state_epoch: self.relay_state_epoch(domain),
                         materialized_stream_specs,
                         materialized_stream_owner_nodes,
+                        // An unplaced graph has no committed schedule, so no partition epoch.
+                        relay_transitions: HashMap::default(),
                         codecs,
                         signaling_protocols,
                         processor_plans,

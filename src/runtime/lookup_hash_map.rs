@@ -501,6 +501,7 @@ pub(super) fn compile_lookup_hash_map_calls(
     writable_namespace: &str,
     bindings: &[VmCompileBinding],
     udfs: Option<&UdfExecutor>,
+    vm_settings: nervix_vm::VmSettings,
 ) -> error_stack::Result<(Vec<LookupHashMapCall>, Option<VmCompileBinding>), LookupHashMapError> {
     if pending_calls.is_empty() {
         return Ok((Vec::new(), None));
@@ -572,6 +573,7 @@ pub(super) fn compile_lookup_hash_map_calls(
             runtime_udf_compile_options(
                 udfs,
                 VmCompileOptions {
+                    settings: vm_settings,
                     output_mode: VmOutputMode::ExplicitOnly,
                     ..VmCompileOptions::default()
                 },
@@ -712,6 +714,7 @@ mod tests {
             },
             None,
             RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &lookups,
                 current_branching: &ResolvedBranching::unbranched(),
@@ -740,6 +743,7 @@ mod tests {
             },
             None,
             RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &lookups,
                 current_branching: &ResolvedBranching::unbranched(),

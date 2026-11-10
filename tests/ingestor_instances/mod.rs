@@ -31,12 +31,18 @@ async fn instance_metric_has_numeric_values(
     assert_numeric_metric_lines(world, step, &prefix, output);
 }
 
-struct UnitPlacements {
+pub(crate) struct UnitPlacements {
     owners: BTreeMap<u64, String>,
 }
 
 impl UnitPlacements {
-    fn from_status(status: &str, domain: &str, kind: &str, name: &str, prefix: &str) -> Self {
+    pub(crate) fn from_status(
+        status: &str,
+        domain: &str,
+        kind: &str,
+        name: &str,
+        prefix: &str,
+    ) -> Self {
         let mut owners = BTreeMap::new();
         for line in status.lines() {
             let Some(line) = line.trim().strip_prefix("- ") else {
@@ -73,6 +79,11 @@ impl UnitPlacements {
             );
         }
         Self { owners }
+    }
+
+    /// The indexes of every scheduled unit, in order.
+    pub(crate) fn indexes(&self) -> BTreeSet<u64> {
+        self.owners.keys().copied().collect()
     }
 
     fn assert_spread(&self, instances: u64, owners: usize, status: &str) {

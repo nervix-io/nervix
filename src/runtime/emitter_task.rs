@@ -923,6 +923,7 @@ impl EmitterTask {
         let output_compiled_schema = emitter.output_schema.clone();
         let udfs = runtime.udf_executor(domain);
         let compile_context = RuntimeVmCompileContext {
+            settings: runtime.inner.vm_settings,
             available_materialized_streams: &materialized_stream_specs,
             available_lookups: &lookups,
             current_branching: &input_branching,
@@ -1126,7 +1127,10 @@ impl EmitterTask {
             let _failure_observation = context
                 .interactions
                 .bind_failure_source(move || failure_status.failures().is_some());
-            let backoff = RuntimeReconnectBackoff::from_policy(plan.retry_policy);
+            let backoff = RuntimeReconnectBackoff::from_policy(
+                plan.retry_policy,
+                runtime.inner.connector_host.retry,
+            );
             let buffer =
                 EmitterBatchBuffer::new(&context, &task_flush_policy, buffered_messages.clone());
             let connector = EmitterConnectorState::open_until_cancelled(

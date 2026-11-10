@@ -19,6 +19,7 @@ pub(super) enum ScheduledNodeHandoffError {
 /// The node-local surfaces of one domain execution that the programs of its tasks bind against.
 #[derive(Clone, Copy)]
 pub(super) struct ExecutionBuildDeps<'a> {
+    pub(super) vm_settings: nervix_vm::VmSettings,
     pub(super) domain: &'a DomainName,
     pub(super) relay_schemas: &'a HashMap<RelayName, Arc<CompiledSchema>>,
     pub(super) relay_branchings: &'a HashMap<RelayName, ResolvedBranching>,
@@ -29,8 +30,13 @@ pub(super) struct ExecutionBuildDeps<'a> {
 
 impl<'a> ExecutionBuildDeps<'a> {
     /// The surfaces an installed domain routing snapshot publishes.
-    pub(super) fn from_routing(domain: &'a DomainName, routing: &'a DomainRoutingSnapshot) -> Self {
+    pub(super) fn from_routing(
+        domain: &'a DomainName,
+        routing: &'a DomainRoutingSnapshot,
+        vm_settings: nervix_vm::VmSettings,
+    ) -> Self {
         Self {
+            vm_settings,
             domain,
             relay_schemas: &routing.relay_schemas,
             relay_branchings: &routing.relay_branchings,

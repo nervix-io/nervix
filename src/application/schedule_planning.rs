@@ -146,6 +146,7 @@ impl DomainSchedulePlanningSnapshot {
                     domain,
                     &self.cluster_nodes,
                     self.replica_count,
+                    current,
                     self.mode.scheduler_mode(),
                     &self.capabilities,
                 );
@@ -154,6 +155,7 @@ impl DomainSchedulePlanningSnapshot {
                     domain,
                     &self.cluster_nodes,
                     self.replica_count,
+                    current,
                     &self.capabilities,
                 );
                 SessionServiceImpl::merge_existing_schedule_data(

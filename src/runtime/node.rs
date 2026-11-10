@@ -181,6 +181,10 @@ pub(in crate::runtime) struct RuntimeInner {
         DashMap<RuntimeStatePlacement, PreparedRuntimeStateSnapshot, RandomState>,
     pub(in crate::runtime) relay_branch_presences:
         DashMap<RuntimeStatePlacement, RelayBranchPresence, RandomState>,
+    /// The holdings every unit of a branch-keyed entity this node owns publishes while its
+    /// branch's partition count changes. Each unit's owner registers its publication when it starts
+    /// and withdraws it when it ends; claimants and observers read it. No record path reaches it.
+    pub(in crate::runtime) partition_holdings: super::partition_holdings::PartitionHoldingsRegistry,
     pub(in crate::runtime) replicated_deduplicator_states:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedDeduplicatorState>, RandomState>,
     pub(in crate::runtime) replicated_kafka_offset_states:
@@ -207,6 +211,8 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) replicated_branch_aggregated_states:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedBranchAggregatedState>, RandomState>,
     pub(in crate::runtime) wasm_runtime: WasmRuntime,
+    pub(in crate::runtime) connector_host: super::ConnectorHostSettings,
+    pub(in crate::runtime) vm_settings: nervix_vm::VmSettings,
     /// The guest-requested branch state resets this node's branch tasks are waiting for. A branch
     /// fences itself and leaves its request here; the control-plane coordinator drains them.
     pub(in crate::runtime) guest_wasm_state_resets: PendingGuestWasmStateResets,

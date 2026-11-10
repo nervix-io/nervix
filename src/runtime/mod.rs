@@ -114,7 +114,7 @@ use nervix_primitives::{
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use nervix_roto::{UdfExecutor, UdfProgram};
 #[cfg(test)]
-use nervix_vm::INLINE_ROW_LIMIT as VM_INLINE_ROW_LIMIT;
+use nervix_vm::VmInlineRowLimit;
 use nervix_vm::{
     CompileBinding as VmCompileBinding, CompileNamespace as VmCompileNamespace,
     CompileOptions as VmCompileOptions, CompiledPredicate as VmCompiledPredicate,
@@ -283,6 +283,7 @@ mod kafka_start;
 mod local_drain;
 mod lookup_hash_map;
 mod lsm_sequence;
+mod materialized_partition_moves;
 mod materialized_read;
 mod materialized_snapshot;
 mod materialized_state;
@@ -304,14 +305,19 @@ mod node;
 mod node_settings;
 mod observability;
 mod ownership_handoff_error;
+mod partition_claims;
+mod partition_holdings;
+mod partition_retirement;
 mod planning;
 mod pooled_emitter_clients;
 mod processor_branch_restore;
 mod processor_branch_task;
 mod processor_output;
+mod processor_partition_moves;
 mod processor_plan_binding;
 mod processor_state_inspection;
 mod processor_template;
+mod processor_wasm_state_reset;
 mod processors;
 mod published_generation;
 mod reconnect_backoff;
@@ -326,8 +332,10 @@ mod relay_interaction;
 pub mod relay_interaction_benchmark;
 mod relay_memory_hold;
 mod relay_processor_node;
+mod relay_repartition;
 mod relay_send_attempts;
 mod relay_slicing;
+mod relay_state_task;
 mod relay_subscription;
 mod relay_transit;
 mod remote_ack_owner;
@@ -342,8 +350,13 @@ mod resources;
 pub mod revision_index_inspection;
 mod stateful_inferencer;
 pub(crate) use resources::RuntimeResourceError;
+mod connector_host_settings;
 mod runtime_lifecycle;
 mod runtime_settings;
+pub use connector_host_settings::{
+    ConnectorHostSettingOverrides, ConnectorHostSettings, ConnectorHostSettingsError,
+    KafkaPartitionWatchInterval,
+};
 mod schedule_apply;
 mod snapshot_staging;
 pub(crate) mod state_inspection_exchange;
@@ -526,10 +539,7 @@ pub(in crate::runtime) use ingestor_quiesce::{
     BufferedIngestMetadata, BufferedIngestPayload, IngestorQuiesceCause, IngestorQuiesceControl,
     IngestorQuiesceIntake, MemoryPressurePause,
 };
-use ingestor_quiesce::{
-    DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL, IngestorInstanceReadiness, IngestorStatus,
-    RuntimeReconnectStatus,
-};
+use ingestor_quiesce::{IngestorInstanceReadiness, IngestorStatus, RuntimeReconnectStatus};
 use ingestor_start::IngestorRuntime;
 use kafka_offset_state::{
     KafkaOffsetOriginatorSlot, KafkaOffsetSnapshotInstaller, KafkaOffsetStateAssignment,
@@ -589,6 +599,7 @@ use processor_output::{
     dispatch_processor_output, dispatch_processor_outputs, flush_all_processor_outputs,
     flush_due_processor_outputs, pending_output_batches_by_key,
 };
+use processor_partition_moves::{ProcessorBranchSlot, ProcessorBranches};
 use processor_state_inspection::{
     BranchStateCopy, BranchStateRead, HandledEvents, HeldReordererRow, HeldRowsBudget,
     SelectedStateBranches, answer_branch_state, held_row_bytes,
@@ -626,8 +637,7 @@ use relay_boundary::{
     BranchRelayDispatchGateLease, ConcreteRelayRuntime, ConcreteRelayRuntimeBuild,
     RelayBoundaryBuilder, RelayBoundaryFanout, RelayBoundaryFanoutMap, RelayBoundaryServices,
     RelayBranchPresence, RelayBranchPresences, RelayOutboundSlot, RelayOwnerRoutes, RelayOwnerTask,
-    RelayRuntimeFanIn, RelayStateTask, RelayStateTaskSpec, RemoteRuntimeConsumer,
-    addressable_count,
+    RelayRuntimeFanIn, RemoteRuntimeConsumer, addressable_count,
 };
 pub(in crate::runtime) use relay_channel::{
     OwnedRelayDispatchPermit, RelayDispatchGate, RelayDispatchGateLease, RelayTryRecv,
@@ -637,6 +647,7 @@ use relay_interaction::{
 };
 use relay_processor_node::RelayProcessorError;
 use relay_send_attempts::GrantCapacityRefusals;
+use relay_state_task::{RelayStateTask, RelayStateTaskSpec};
 use relay_transit::{
     RelayAdmissions, RelayOwnerAdmission, RelayOwnerBatchCompletion, RelayRoutedAdmission,
     RelayTransit,

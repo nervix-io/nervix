@@ -125,6 +125,9 @@ impl Failure {
             | ClientError::InvalidServerUrl(_)
             | ClientError::InvalidServerEndpoint
             | ClientError::InvalidDeadline { .. }
+            | ClientError::InvalidFrameCapacity { .. }
+            | ClientError::InvalidRetryBackoff
+            | ClientError::InvalidSubscriptionRetention
             | ClientError::TooManySeedServers { .. }
             | ClientError::NoActiveDomain
             | ClientError::InvalidCursor { .. }
@@ -281,6 +284,20 @@ mod endpoint_recovery_tests {
     use uuid::Uuid;
 
     use super::*;
+
+    #[test]
+    fn invalid_client_capabilities_keep_the_host_argument_failure_kind() {
+        for error in [
+            ClientError::InvalidFrameCapacity {
+                field: "upload-frame-capacity",
+                capacity: usize::MAX,
+            },
+            ClientError::InvalidRetryBackoff,
+            ClientError::InvalidSubscriptionRetention,
+        ] {
+            assert_eq!(Failure::from(error).kind(), FailureKind::InvalidArgument);
+        }
+    }
 
     #[test]
     fn client_endpoint_recovery_failures_keep_their_actionable_kind() {

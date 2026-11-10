@@ -51,6 +51,7 @@ mod names;
 mod node_capabilities;
 mod node_endpoint;
 mod node_ref;
+mod partition_epoch;
 mod password_credential;
 mod placement;
 mod prerequisites;
@@ -290,11 +291,15 @@ pub use names::{
     WireSchemaName,
 };
 pub use nervix_licensing_vocabulary::ActivationKind;
-pub use node_capabilities::{NodeCapabilities, NodeCapabilityRecord, PeerReceiveBounds};
+pub use node_capabilities::{
+    ConnectorHostCapabilities, EngineCapabilities, NodeCapabilities, NodeCapabilityRecord,
+    PeerReceiveBounds,
+};
 pub use node_endpoint::{
     NodeEndpoint, NodeEndpointParseError, NodeServiceUrl, NodeServiceUrlParseError,
 };
 pub use node_ref::{DomainNodeRef, NodeRef};
+pub use partition_epoch::{BranchPartitionEpoch, PartitionEpochNumber, PartitionTransition};
 pub use placement::{
     AlterPlacement, AlterPlacementError, AlterPlacementOperation, CreatePlacement, PlacementPolicy,
     PlacementScope,
@@ -395,15 +400,15 @@ pub use statement::{
     CodecProtobufConfig, CodecWireFormat, CordonNode, CreateBranch, CreateCodec, CreateDomain,
     CreateEndpoint, CreateGenerator, CreateIngestor, CreateLookup, CreateRelay, CreateResource,
     CreateSignalingProtocol, CreateStatement, CreateSubscription, CreateUser, CreateVhost,
-    DeleteSubscription, DescribeClient, DescribeCluster, DescribeCorrelator, DescribeDeduplicator,
-    DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction,
-    DescribeLicense, DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay,
-    DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
-    DescribeWindowProcessor, DomainConfig, DomainPace, DomainStartPoint, DomainState, DomainStatus,
-    DomainTick, DrainNode, DropModel, DropNode, EndpointKind, EndpointType, ErrorPolicies,
-    GeneralErrorPolicy, IngestTimestampSource, InspectionFormat, LookupQuery,
-    MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, PartitionSeed, RefreshLicense,
-    RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
+    DeleteSubscription, DescribeBranch, DescribeClient, DescribeCluster, DescribeCorrelator,
+    DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor,
+    DescribeJunction, DescribeLicense, DescribeLookup, DescribePlacement, DescribeReingestor,
+    DescribeRelay, DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf,
+    DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig, DomainPace, DomainStartPoint,
+    DomainState, DomainStatus, DomainTick, DrainNode, DropModel, DropNode, EndpointKind,
+    EndpointType, ErrorPolicies, GeneralErrorPolicy, IngestTimestampSource, InspectionFormat,
+    LookupQuery, MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, PartitionSeed,
+    RefreshLicense, RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
     RelocationPreferenceStrategy, RelocationSelection, RelocationUnitSelection, ResolvedBranching,
     ResolvedCodecWireFormat, RetryPolicy, ShowClusterStatus, ShowCreate, ShowEmitters,
     ShowIngestors, ShowPlacements, ShowProcessorState, ShowRelayMaterializedState,

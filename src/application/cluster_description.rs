@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use nervix_consensus::{ClusterIdentity, GossipNode, Observer};
 use nervix_models::{
     ClusterNodeName, NodeCapabilityRecord, NodePrerequisites, PeerReceiveBounds, Prerequisite,
-    timing_text,
+    SettingDefinition as _, timing_text,
 };
 
 use crate::cluster;
@@ -263,9 +263,48 @@ fn capability_line(record: &NodeCapabilityRecord) -> String {
         None => "unknown".to_string(),
     };
     format!(
-        "  capabilities: committed {} cpu-count={cpu} memory-bytes={memory} {}",
+        "  capabilities: committed {} cpu-count={cpu} memory-bytes={memory} {} {} {}",
         record.identity,
-        bounds_line(capabilities.receive)
+        bounds_line(capabilities.receive),
+        engine_capability_line(capabilities.engines),
+        connector_host_capability_line(capabilities.connector_host),
+    )
+}
+
+fn engine_capability_line(values: nervix_models::EngineCapabilities) -> String {
+    format!(
+        "{}={} {}={} {}={} {}={} {}={} {}={} wasm-parallel-compilation={}",
+        nervix_vm::VmInlineRowLimit::NAME,
+        values.vm_inline_row_limit,
+        nervix_vm::VmRegexSearchCacheBytes::NAME,
+        values.vm_regex_search_cache_bytes,
+        nervix_vm::VmDynamicPatternCacheCapacity::NAME,
+        values.vm_dynamic_pattern_cache_capacity,
+        nervix_vm::VmPatternSetsPerBatch::NAME,
+        values.vm_pattern_sets_per_batch,
+        nervix_wasm::WasmStackBytes::NAME,
+        values.wasm_stack_bytes,
+        nervix_wasm::WasmMemoryReservationBytes::NAME,
+        values.wasm_memory_reservation_bytes,
+        values.wasm_parallel_compilation,
+    )
+}
+
+fn connector_host_capability_line(values: nervix_models::ConnectorHostCapabilities) -> String {
+    format!(
+        "{}={} {}={} {}={} {}={} {}={} {}={}",
+        nervix_connector::ConnectorRetryMultiplier::NAME,
+        values.retry_multiplier,
+        nervix_connector::ConnectorRetryJitterPercent::NAME,
+        values.retry_jitter_percent,
+        nervix_connector_kafka::KafkaDomainAssignmentRetry::NAME,
+        humantime::format_duration(values.kafka_domain_assignment_retry),
+        crate::runtime::KafkaPartitionWatchInterval::NAME,
+        humantime::format_duration(values.kafka_partition_watch_interval),
+        nervix_connector_syslog::SyslogIntakeQueueCapacity::NAME,
+        values.syslog_intake_queue_capacity,
+        nervix_connector_syslog::SyslogReadChunkBytes::NAME,
+        values.syslog_read_chunk_bytes,
     )
 }
 
@@ -391,6 +430,16 @@ mod tests {
                     ClusterNodeIncarnation::new(incarnation),
                 ),
                 capabilities: NodeCapabilities {
+                    engines: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_engine_capabilities(),
+                    connector_host: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_connector_host_capabilities(),
                     cpu_count: None,
                     memory_bytes: NonZeroU64::new(8 << 30),
                     receive,

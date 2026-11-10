@@ -140,6 +140,8 @@ impl Runtime {
             );
         Ok(Self {
             inner: Arc::new(RuntimeInner {
+                connector_host: settings.connector_host,
+                vm_settings: settings.vm,
                 inspection_instances: AtomicU64::new(0),
                 inspection_settings: settings.inspection,
                 dns,
@@ -205,6 +207,7 @@ impl Runtime {
                 prepared_forced_runtime_state_recoveries: DashMap::default(),
                 prepared_runtime_state_snapshots: DashMap::default(),
                 relay_branch_presences: DashMap::default(),
+                partition_holdings: Default::default(),
                 replicated_deduplicator_states: DashMap::default(),
                 replicated_kafka_offset_states: DashMap::default(),
                 replicated_materialized_stream_states: DashMap::default(),
@@ -216,8 +219,11 @@ impl Runtime {
                 wasm_state_recovery_requests: ArcSwapOption::empty(),
                 raised_wasm_state_recoveries: RaisedWasmStateRecoveries::default(),
                 replicated_branch_aggregated_states: DashMap::default(),
-                wasm_runtime: WasmRuntime::new(WasmRuntimeConfig::default())
-                    .assured("wasmtime accepts its own default configuration"),
+                wasm_runtime: WasmRuntime::new(WasmRuntimeConfig {
+                    engine: settings.wasm_engine,
+                    ..WasmRuntimeConfig::default()
+                })
+                .change_context(RuntimePersistenceError::ConfigureWasmEngine)?,
                 guest_wasm_state_resets: PendingGuestWasmStateResets::default(),
                 branch_instance_expiration_scan_interval,
                 state_store,

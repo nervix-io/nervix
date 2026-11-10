@@ -56,6 +56,7 @@ async fn runtime_report_chain_admitted_client_batch_log() {
             output_sensitivity: schema.vm_sensitivity(),
         },
         RuntimeVmCompileContext {
+            settings: nervix_vm::VmSettings::default(),
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
             current_branching: &ResolvedBranching::unbranched(),
@@ -117,6 +118,7 @@ async fn runtime_report_chain_admitted_client_batch_log() {
     let outcome = logs
         .observe(
             intake.admit(AdmissionJob {
+                user: UserName::parse("fixture_user").assured("a literal user name"),
                 attachment: ClientAttachmentId::from_u128(1),
                 submission: submission(1),
                 body: Bytes::copy_from_slice(body.as_ref()),
@@ -216,6 +218,7 @@ impl Fixture {
         // gauges are published after each command.
         let (reply, attached) = oneshot::channel();
         self.send(EndpointCommand::Attach(AttachCommand {
+            user: UserName::parse("fixture_user").assured("a literal user name"),
             expected_fields: fields(&["unmatched"]),
             limits: limits(1, 1),
             max_batch_rows: NonZeroU32::new(nervix_models::DEFAULT_CLIENT_BATCH_ROWS)
@@ -293,8 +296,25 @@ impl Fixture {
         limits: ClientProducerLimits,
         serving: ProducerServing,
     ) -> Result<Producer, ClientProducerRefusal> {
+        self.attach_serving_as_user(
+            expected,
+            limits,
+            serving,
+            UserName::parse("fixture_user").assured("a literal user name"),
+        )
+        .await
+    }
+
+    async fn attach_serving_as_user(
+        &self,
+        expected: Vec<SchemaField>,
+        limits: ClientProducerLimits,
+        serving: ProducerServing,
+        user: UserName,
+    ) -> Result<Producer, ClientProducerRefusal> {
         let (reply, answer) = oneshot::channel();
         self.send(EndpointCommand::Attach(AttachCommand {
+            user,
             expected_fields: expected,
             limits,
             max_batch_rows: NonZeroU32::new(nervix_models::DEFAULT_CLIENT_BATCH_ROWS)
@@ -424,9 +444,46 @@ async fn an_open_needs_an_installed_execution_and_exactly_its_schema() {
     assert_eq!(description.admission, ClientProducerAdmission::Open);
 }
 
+#[nervix_primitives::test]
+async fn interleaved_client_producer_jobs_keep_the_user_of_their_attachment() {
+    let mut fixture = Fixture::start();
+    fixture.install(4, 1, 1, WAIT);
+    let alice = fixture
+        .attach_serving_as_user(
+            fields(&["id"]),
+            limits(4, 4096),
+            ProducerServing::Local,
+            UserName::parse("alice").assured("a literal user name"),
+        )
+        .await
+        .assured("the fixture installed the expected input schema");
+    let bob = fixture
+        .attach_serving_as_user(
+            fields(&["id"]),
+            limits(4, 4096),
+            ProducerServing::Local,
+            UserName::parse("bob").assured("a literal user name"),
+        )
+        .await
+        .assured("the fixture installed the expected input schema");
+    alice.submit(1);
+    bob.submit(2);
+    let first = fixture.next_job().await;
+    assert_eq!(first.user.as_str(), "alice");
+    fixture.admit(&first, WAIT).ack_success();
+    let second = fixture.next_job().await;
+    assert_eq!(second.user.as_str(), "bob");
+    fixture.admit(&second, WAIT).ack_success();
+    alice.submit(3);
+    let third = fixture.next_job().await;
+    assert_eq!(third.user.as_str(), "alice");
+    fixture.admit(&third, WAIT).ack_success();
+}
+
 /// What a session asks this node for when it opens a producer on `ingestor` of `domain`.
 fn local_open(domain: &DomainName, ingestor: &IngestorName) -> ClientProducerOpenRequest {
     ClientProducerOpenRequest {
+        user: UserName::parse("fixture_user").assured("a literal user name"),
         domain: domain.clone(),
         ingestor: ingestor.clone(),
         expected_fields: fields(&["id"]),

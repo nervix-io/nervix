@@ -20,6 +20,7 @@ async fn filter_evaluation_uses_the_typed_operation_when_the_error_site_is_unmap
         },
         None,
         RuntimeVmCompileContext {
+            settings: nervix_vm::VmSettings::default(),
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
             current_branching: &ResolvedBranching::unbranched(),
@@ -78,6 +79,7 @@ async fn filter_predicate_evaluation_error_becomes_a_planned_message_error() {
         },
         MessageErrorOperation::FilterWhere,
         RuntimeVmCompileContext {
+            settings: nervix_vm::VmSettings::default(),
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
             current_branching: &ResolvedBranching::unbranched(),

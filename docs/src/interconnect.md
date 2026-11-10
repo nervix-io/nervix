@@ -62,7 +62,8 @@ one production behavior, which is what every node uses:
   Production bundles use the system clock.
 - **Identity entropy.** The process epoch and relay grant identifiers are drawn from the transport's
   configured entropy, which in production takes AWS-LC's secure random values through
-  `nervix-crypto`. A simulation supplies its deterministic callback through the same seam.
+  `nervix-crypto` ([Digests And Randomness](cryptography.md#digests-and-randomness)). A simulation
+  supplies its deterministic callback through the same seam.
 - **Deadlines.** Every transport deadline is an instant of the boundary's clock,
   `nervix_primitives::time`, whose timers are Tokio's, so it follows the clock of the runtime it
   runs on: connection setup, request and progress timeouts, reconnect backoff, relay grant
@@ -94,12 +95,14 @@ fixed set is TLS 1.3 AES-256-GCM/SHA-384 and AES-128-GCM/SHA-256, with P-256, P-
 X25519MLKEM768 key exchange, in the pinned AWS-LC provider's relative preference order. Each
 client/server bundle checks this membership at construction; a policy failure retains its typed
 cause beneath the TLS configuration error. A peer offering only ChaCha20 or standalone X25519
-fails the rustls handshake. [Cryptography](cryptography.md#algorithm-policy) owns the algorithm
-classification and distinguishes this preparation from a validated FIPS build.
+fails the rustls handshake. [Cryptography](cryptography.md#interconnect-tls) owns the algorithm
+classification, explains why the set is a fixed contract rather than a setting, and distinguishes
+this preparation from a validated FIPS build.
 
 This TLS restriction permits a rolling restart with the preceding full AWS-LC algorithm set:
 both sides offer AES-GCM and P-256. The independent interconnect wire fingerprint and cluster join
-requirements still apply. Outward session and connector TLS keep their existing algorithms.
+requirements still apply. Outward session and connector TLS follow the committed [outward
+policy](cryptography.md#outward-tls-policy) instead, which never reaches the interconnect.
 
 Cluster discovery supplies the current node identity, incarnation, and advertised endpoint for each
 peer. A bootstrap seed, configured or recovered, is the exception: the initiating node knows the
@@ -1936,8 +1939,9 @@ Two opens racing for one owner start one link.
 The opening frame names the serving node, and the owning node refuses a link whose named node is
 not the peer it authenticated. Each forwarded producer then has a key the serving node assigns and
 never reuses within its process, so a late frame about an ended producer can never reach a later
-one. The serving node sends `Open` with the domain, ingestor, expected fields, credit, and the
-largest batch one submission may carry, then the producer's `Submit` frames carrying the Arrow IPC
+one. The serving node sends `Open` with the session's authenticated typed user name, the domain,
+ingestor, expected fields, credit, and the largest batch one submission may carry, then the
+producer's `Submit` frames carrying the Arrow IPC
 bytes of each batch and its `Clear` frames, and finally `Close` or `Detach`. The owning node answers
 with `Opened` and the producer's description or `Refused` with its refusal, then the producer's
 `Admitting`, `Outcome` and `Admission` frames, and finally `Ended` with a reason or `Closed`. The
@@ -1945,6 +1949,11 @@ serving node checked the committed domain, schedule and ingestor before it forwa
 an owning node that runs no endpoint of the ingestor yet, as one that has not installed its domains
 again since it started, refuses it as `EndpointUnavailable` rather than classifying the endpoint
 from its own installation.
+
+The owner retains each producer's user identity separately and supplies it as `metadata.user` on
+that producer's batch rows. The authenticated serving node supplies the identity at open; it does
+not come from submitted Arrow fields or the link's peer name.
+
 Frames of one producer keep their order in both directions, so its open precedes its batches and
 its outcomes, admission changes, and end follow the answer to its open. A batch travels at most once
 over the link, and the frames are validated and charged to the relay memory class like every other

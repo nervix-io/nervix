@@ -508,6 +508,7 @@ async fn domain_ingestor(
     let resets = Arc::new(Mutex::new(Vec::new()));
     let (partition_watch, rebalanced) = watch::channel(0);
     let plan = KafkaTopicIngestorPlan {
+        settings: crate::KafkaTopicIngestorSettings::default(),
         executor: nervix_execution::Executor::default(),
         config: vec![entry("bootstrap.servers", &cluster.bootstrap_servers())],
         topic: KafkaTopicName::parse(TOPIC).assured("the test topic is a valid Kafka topic"),

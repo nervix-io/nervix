@@ -262,8 +262,8 @@ Operations in one `ALTER RELAY`, `ALTER JUNCTION`, `ALTER DEDUPLICATOR`, `ALTER 
 connector and entity, such as `ALTER KAFKA TOPIC INGESTOR` or `ALTER OTEL METRICS EMITTER`, and
 preserves that pair. Its replacement body uses the same entity's grammar. See
 [Streams And State](relay.md#altering-relays) for relay operations and
-[Relay Partitions](relay.md#relay-partitions) for `ALTER BRANCH ... SET PARTITIONS`, which a domain
-accepts only while it is stopped,
+[Relay Partitions](relay.md#changing-the-partition-count) for `ALTER BRANCH ... SET PARTITIONS`,
+which moves each key's state to its new partition on a running domain,
 [Processors](processors.md) for the full processor operation shapes, and
 [Emitters](emitters.md#altering-emitters) and
 [Ingestors](ingestors.md#altering-ingestors) for boundary-node operations. See

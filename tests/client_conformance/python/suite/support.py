@@ -95,7 +95,7 @@ class Cluster:
 
     def connect(self, server: str | None = None, domain: str | None = None) -> nx.Session:
         """A session on `server`, or on the node the suite starts on, in `domain`, or in the
-        scenario's domain, authenticated as the scenario's user over TLS."""
+        scenario's domain, authenticated as the scenario's user on its listener transport."""
 
         return nx.Session(
             server or self.server,

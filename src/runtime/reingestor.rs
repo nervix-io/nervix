@@ -1292,6 +1292,7 @@ mod tests {
             .collect(),
             processors: HashMap::default(),
             wasm_state_reset: None,
+            partition_transition: None,
         };
         let inputs = [
             RelayRecordBatch::single(
@@ -1458,6 +1459,7 @@ mod tests {
             .collect(),
             processors: HashMap::default(),
             wasm_state_reset: None,
+            partition_transition: None,
         };
         let mut instances =
             BranchInstanceRegistry::<Option<BranchKey>, Mutex<BranchRuntime>>::new();
@@ -1637,6 +1639,7 @@ mod tests {
                     .collect(),
                     processors: HashMap::default(),
                     wasm_state_reset: None,
+                    partition_transition: None,
                 },
                 ack_boundary: BranchInstanceAckBoundary::Reingestor(AckMode::Attached),
                 flush_policy: RuntimeFlushPolicy::Immediate,
@@ -1677,9 +1680,10 @@ mod tests {
             .domain_routing(&domain)
             .expect("the test domain routing is installed")
             .load_full();
-        let input = ExecutionBuildDeps::from_routing(&domain, &routing)
-            .bind_reingestor_input(&plan, &plan.inputs[0])
-            .expect("the planned reingestor input binds");
+        let input =
+            ExecutionBuildDeps::from_routing(&domain, &routing, nervix_vm::VmSettings::default())
+                .bind_reingestor_input(&plan, &plan.inputs[0])
+                .expect("the planned reingestor input binds");
         let (acme_acks, acme_completion) = AckSet::root();
         let (beta_acks, beta_completion) = AckSet::root();
         let mut acme_completion = Box::pin(acme_completion.wait());
@@ -1980,9 +1984,10 @@ mod tests {
             .domain_routing(&domain)
             .expect("the test domain routing is installed")
             .load_full();
-        let input = ExecutionBuildDeps::from_routing(&domain, &routing)
-            .bind_reingestor_input(&plan, &plan.inputs[0])
-            .expect("the planned reingestor input binds");
+        let input =
+            ExecutionBuildDeps::from_routing(&domain, &routing, nervix_vm::VmSettings::default())
+                .bind_reingestor_input(&plan, &plan.inputs[0])
+                .expect("the planned reingestor input binds");
         let output_counters = runtime
             .node_quiesce_counters(&domain, NodeRef::new(ModelKind::Reingestor, &reingestor));
         let task = runtime.spawn_reingestor_task(
@@ -2238,9 +2243,10 @@ mod tests {
             .domain_routing(&domain)
             .expect("the test domain routing is installed")
             .load_full();
-        let input = ExecutionBuildDeps::from_routing(&domain, &routing)
-            .bind_reingestor_input(&plan, &plan.inputs[0])
-            .expect("the planned reingestor input binds");
+        let input =
+            ExecutionBuildDeps::from_routing(&domain, &routing, nervix_vm::VmSettings::default())
+                .bind_reingestor_input(&plan, &plan.inputs[0])
+                .expect("the planned reingestor input binds");
         let mut events = runtime.subscribe_events();
         // No branched entrypoint is installed for the route's relay on this node.
         let task =
