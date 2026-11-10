@@ -23,6 +23,7 @@ Feature: Control-plane and session settings
       | 1            |
       | 3            |
 
+  # A full tick of skew keeps TIMESTAMP NOW admissible at every tick phase during the link check.
   Scenario: Producer and consumer links survive different announced heartbeat cadences
     Given node-1 starts with client-link-heartbeat-interval = 2s
     And node-3 starts with client-link-heartbeat-interval = 12s
@@ -30,7 +31,7 @@ Feature: Control-plane and session settings
     And a 3 node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """
-      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       CREATE SCHEMA incoming (id STRING, amount I64);
       CREATE SCHEMA outgoing (id STRING, cents I64);
       CREATE RELAY orders SCHEMA incoming UNBRANCHED;
