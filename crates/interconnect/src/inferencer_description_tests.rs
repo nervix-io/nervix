@@ -15,6 +15,15 @@ use nervix_models::{InferencerModelFingerprint, InferencerReplicaProgress, Schem
 use super::*;
 use crate::{RemoteOperationSubject, request::RkyvMessage};
 
+#[test]
+fn inferencer_description_uses_the_configured_request_budget() {
+    let budget = std::time::Duration::from_secs(37);
+    assert_eq!(
+        DescribeInferencerRequest::DEADLINE.resolve(budget, crate::InterconnectLiveness::default()),
+        budget,
+    );
+}
+
 #[derive(Debug, bolero::TypeGenerator)]
 struct DescriptionCase {
     identity: u8,

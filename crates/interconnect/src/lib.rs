@@ -17,7 +17,8 @@
 
 use std::{collections::BTreeMap, io, net::SocketAddr, time::Duration};
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_dns::{DnsLookupError, DnsLookupFailure};
 use nervix_execution::{ChargedBytes, Executor, Reservation};
 use nervix_models::{
@@ -63,8 +64,7 @@ mod wire;
 pub use authentication::TransportClock;
 pub use connection::{
     ChargedItem, DuplexCodec, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress,
-    DuplexSender, EncodedMessage, IncomingByteStream, RELAY_CHANNEL_RETENTION, RelayAdmission,
-    RelayCancellationGuard,
+    DuplexSender, EncodedMessage, IncomingByteStream, RelayAdmission, RelayCancellationGuard,
 };
 pub use entropy::TransportEntropy;
 pub use identity::{JoinTerms, TlsConfigBundle, TransportIdentity};
@@ -110,8 +110,14 @@ pub use runtime_state::{
     StateSyncRequest, StateSyncResponse, SyncKafkaOffsets,
 };
 pub use settings::{
-    BulkChunkBytes, BulkReceiveWindow, BulkReceiveWindowError, PeerReceiveOverrides,
-    PeerReceiveSettings, PeerReceiveSettingsError, RelayBatchBytes, RelayDecodedBytes,
+    BulkChunkBytes, BulkReceiveWindow, BulkReceiveWindowError, ConcurrentHandshakes,
+    ConnectionReceiveWindow, ConnectionSetupTimeout, IncomingQueueCapacity, InterconnectLiveness,
+    MaxPeers, MaxReconnectBackoff, PeerReceiveOverrides, PeerReceiveSettings,
+    PeerReceiveSettingsError, PingInterval, PingTimeout, ProbeTimeout, ProgressTimeout,
+    ReconnectBackoff, ReconnectJitterPermille, RelayBatchBytes, RelayChannelRetention,
+    RelayChannelSweep, RelayDecodedBytes, RelayRetentionSettings, RequestDeadline, RequestQuota,
+    RequestTimeout, StreamReceiveWindow, TransportSettingValues, TransportSettings,
+    TransportSettingsError,
 };
 pub use wasm_state::{
     CoordinateWasmStateResetRequest, CoordinateWasmStateResetResponse,
@@ -121,39 +127,35 @@ pub use wasm_state::{
 };
 pub use wire::WIRE_CONTRACT;
 
-const DEFAULT_MAX_PEERS: usize = 64;
-const DEFAULT_MAX_CONNECTIONS: usize = 768;
-const DEFAULT_MAX_CONCURRENT_HANDSHAKES: usize = 32;
-const DEFAULT_INCOMING_QUEUE_CAPACITY: usize = 1024;
-/// One retained watermark takes about 180 bytes, so this holds about 1.4 MiB per peer and keeps the
-/// full retention for about 13 new channels a second between two nodes.
-const DEFAULT_RELAY_CHANNEL_WATERMARK_CAPACITY: usize = 8192;
-const _: () = assert!(
-    DEFAULT_RELAY_CHANNEL_WATERMARK_CAPACITY > DEFAULT_INCOMING_QUEUE_CAPACITY,
-    "the default watermark budget exceeds the attempts a peer may hold"
-);
-const DEFAULT_STREAM_WINDOW_BYTES: u32 = 64 * 1024;
-const DEFAULT_CONNECTION_WINDOW_BYTES: u32 = 256 * 1024;
+/// Maximum header block carried by the interconnect's fixed request envelope.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "bounds the fixed internal HTTP/2 header envelope")
+)]
 const DEFAULT_MAX_HEADER_BYTES: u32 = 16 * 1024;
-const DEFAULT_CONNECTION_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
-const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-const DEFAULT_PROGRESS_TIMEOUT: Duration = Duration::from_secs(5);
-const DEFAULT_RECONNECT_BACKOFF: Duration = Duration::from_millis(200);
-const DEFAULT_MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
-const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
-/// The node-wide application-health probe budget, independently reserved in both directions.
-pub const MAX_CONCURRENT_HEALTH_PROBES: usize = 32;
-pub(crate) const RELAY_GRANT_LIFETIME: Duration = Duration::from_secs(5);
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "receiver-enforced slack for the typed record envelope"
+    )
+)]
 pub(crate) const RKYV_RECORD_OVERHEAD_BYTES: u64 = 4 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct TransportOptions {
+    pub relay_retention: RelayRetentionSettings,
+    pub reconnect_jitter_permille: u16,
     /// Explicit receiver claims; absence derives each limit from the supplied executor.
     pub peer_receive: Option<settings::PeerReceiveSettings>,
     pub max_peers: usize,
     pub max_connections: usize,
     pub max_concurrent_handshakes: usize,
     pub incoming_queue_capacity: usize,
+    pub request_quota: usize,
+    pub append_request_quota: usize,
+    pub completion_request_quota: usize,
+    pub max_concurrent_health_probes: usize,
     /// The relay channel watermarks the protocol owner of one peer retains. A watermark keeps a
     /// channel's position and last outcome after its batch resolved; when the budget is full, the
     /// least recently used one is forgotten so the peer's next channel is still admitted. It must
@@ -179,34 +181,61 @@ pub struct TransportOptions {
 
 impl Default for TransportOptions {
     fn default() -> Self {
-        Self {
-            peer_receive: None,
-            max_peers: DEFAULT_MAX_PEERS,
-            max_connections: DEFAULT_MAX_CONNECTIONS,
-            max_concurrent_handshakes: DEFAULT_MAX_CONCURRENT_HANDSHAKES,
-            incoming_queue_capacity: DEFAULT_INCOMING_QUEUE_CAPACITY,
-            relay_channel_watermark_capacity: DEFAULT_RELAY_CHANNEL_WATERMARK_CAPACITY,
-            initial_stream_window_bytes: DEFAULT_STREAM_WINDOW_BYTES,
-            initial_connection_window_bytes: DEFAULT_CONNECTION_WINDOW_BYTES,
-            max_header_bytes: DEFAULT_MAX_HEADER_BYTES,
-            connection_setup_timeout: DEFAULT_CONNECTION_SETUP_TIMEOUT,
-            request_timeout: DEFAULT_REQUEST_TIMEOUT,
-            progress_timeout: DEFAULT_PROGRESS_TIMEOUT,
-            reconnect_backoff: DEFAULT_RECONNECT_BACKOFF,
-            max_reconnect_backoff: DEFAULT_MAX_RECONNECT_BACKOFF,
-            shutdown_drain_timeout: DEFAULT_SHUTDOWN_DRAIN_TIMEOUT,
-            entropy: TransportEntropy::operating_system(),
-        }
+        TransportSettings::default().options(None, None)
     }
 }
 
 impl TransportOptions {
+    pub(crate) fn relay_grant_lifetime(&self) -> Duration {
+        self.progress_timeout.min(self.request_timeout)
+    }
+    pub(crate) fn relay_cancellation_retry_window(&self) -> Duration {
+        self.request_timeout
+            .checked_mul(3)
+            .verified("the request budget fits twelvefold")
+            .min(self.relay_retention.retention())
+    }
+    pub(crate) fn relay_progress_send_timeout(&self) -> Duration {
+        (self.request_timeout / 10)
+            .min(self.progress_timeout)
+            .max(Duration::from_nanos(1))
+    }
+
+    /// Jitter never increases the configured retry ceiling and consumes no entropy when disabled.
+    pub(crate) fn retry_delay(&self, base: Duration) -> Duration {
+        if self.reconnect_jitter_permille == 0 {
+            return base;
+        }
+        let fraction = self.entropy.next_u64() % (u64::from(self.reconnect_jitter_permille) + 1);
+        let fraction = u32::try_from(fraction)
+            .verified("validated jitter contains at most one thousand parts");
+        let reduction = (base / 1000)
+            .checked_mul(fraction)
+            .verified("at most one thousand thousandths fit the original delay");
+        base.checked_sub(reduction)
+            .verified("a jitter fraction of at most one thousand cannot exceed its base")
+            .max(Duration::from_nanos(1))
+    }
+
     pub(crate) fn validate(&self) -> Result<(), Report<TransportError>> {
+        if self.reconnect_jitter_permille > 1000 {
+            return Err(Report::new(TransportSettingsError::Jitter(
+                self.reconnect_jitter_permille,
+            ))
+            .change_context(TransportError::Settings));
+        }
         let nonzero = [
             (self.max_peers, "max_peers"),
             (self.max_connections, "max_connections"),
             (self.max_concurrent_handshakes, "max_concurrent_handshakes"),
             (self.incoming_queue_capacity, "incoming_queue_capacity"),
+            (self.request_quota, "request_quota"),
+            (self.append_request_quota, "append_request_quota"),
+            (self.completion_request_quota, "completion_request_quota"),
+            (
+                self.max_concurrent_health_probes,
+                "max_concurrent_health_probes",
+            ),
         ];
         for (value, name) in nonzero {
             if value == 0 {
@@ -269,6 +298,8 @@ impl TransportOptions {
                 reason: "max_reconnect_backoff must not be below reconnect_backoff".to_string(),
             }));
         }
+        TransportSettings::validate_deadline("interconnect-request-timeout", self.request_timeout)
+            .change_context(TransportError::Settings)?;
         Ok(())
     }
 }
@@ -930,7 +961,7 @@ impl InterconnectRequest for DataflowNodeStatusRequest {
     const NAME: &'static str = "dataflow_node_status";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
-    const TIMEOUT: Duration = Duration::from_secs(2);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 }
 
 impl InterconnectRequest for DomainDrainStatusRequest {
@@ -939,7 +970,7 @@ impl InterconnectRequest for DomainDrainStatusRequest {
     const NAME: &'static str = "domain_drain_status";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
-    const TIMEOUT: Duration = Duration::from_secs(2);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 }
 
 impl InterconnectRequest for EntityGateRequest {
@@ -948,7 +979,7 @@ impl InterconnectRequest for EntityGateRequest {
     const NAME: &'static str = "entity_gate";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Admission;
-    const TIMEOUT: Duration = Duration::from_secs(2);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -961,7 +992,7 @@ impl InterconnectRequest for EntityDrainStatusRequest {
     const NAME: &'static str = "entity_drain_status";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
-    const TIMEOUT: Duration = Duration::from_secs(2);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -974,7 +1005,7 @@ impl InterconnectRequest for EntityGateReleaseRequest {
     const NAME: &'static str = "entity_gate_release";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Cancellation;
-    const TIMEOUT: Duration = Duration::from_secs(2);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -985,28 +1016,28 @@ impl InterconnectRequest for DescribeMetricsRequest {
     type Response = DescribeMetricsResponse;
 
     const NAME: &'static str = "describe_metrics";
-    const TIMEOUT: Duration = Duration::from_secs(5);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
 }
 
 impl InterconnectRequest for DescribeRelayRequest {
     type Response = DescribeRelayResponse;
 
     const NAME: &'static str = "describe_relay";
-    const TIMEOUT: Duration = Duration::from_secs(1);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Control;
 }
 
 impl InterconnectRequest for DescribeLookupRequest {
     type Response = DescribeLookupResponse;
 
     const NAME: &'static str = "describe_lookup";
-    const TIMEOUT: Duration = Duration::from_secs(5);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
 }
 
 impl InterconnectRequest for LookupRequest {
     type Response = LookupResponse;
 
     const NAME: &'static str = "lookup";
-    const TIMEOUT: Duration = Duration::from_secs(5);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
 }
 
 impl InterconnectRequest for SubscriptionInterestVisibilityRequest {
@@ -1020,7 +1051,7 @@ impl InterconnectRequest for SubscriptionInterestVisibilityRequest {
     // This request spans gossip convergence during membership changes. Target departure and node
     // shutdown cancel it independently, so the deadline is only the bound for a live but
     // non-converging cluster.
-    const TIMEOUT: Duration = Duration::from_secs(60);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
 }
 
 #[derive(Debug)]
@@ -1108,6 +1139,20 @@ impl Transport {
             self.inner.connection_setup_timeout(),
         )
         .await
+    }
+
+    /// Install the committed member-liveness policy on established and future connections.
+    pub fn install_cluster_parameters(&self, values: nervix_models::ClusterParameterValues) {
+        self.inner
+            .install_liveness(settings::InterconnectLiveness::from_parameters(&values));
+    }
+
+    pub fn request_timeout(&self) -> Duration {
+        self.inner.request_timeout()
+    }
+
+    pub fn liveness(&self) -> settings::InterconnectLiveness {
+        self.inner.liveness()
     }
 
     pub fn local_addr(&self) -> SocketAddr {
@@ -1253,6 +1298,17 @@ impl ControlEnvelope {
 
 #[derive(Debug, Error)]
 pub enum TransportError {
+    #[error("invalid transport settings")]
+    Settings,
+    #[error(
+        "peer HTTP/2 SETTINGS advertises {advertised} streams for {class:?}; preserving its \
+         traffic reserves requires at least {minimum}"
+    )]
+    Http2StreamCapacity {
+        class: PoolClass,
+        advertised: usize,
+        minimum: usize,
+    },
     #[error(
         "node '{peer}' now runs process {actual}, but this request requires process {expected}"
     )]

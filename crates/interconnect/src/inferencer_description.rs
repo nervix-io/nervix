@@ -11,7 +11,7 @@
 use nervix_models::{DomainName, InferencerName, InferencerStateSummary, Unit};
 use rkyv::{Archive, Deserialize, Serialize};
 
-use crate::{InterconnectRequest, RemoteOperationFailure, RuntimeState};
+use crate::{InterconnectRequest, RemoteOperationFailure, RequestDeadline, RuntimeState};
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
 pub struct DescribeInferencerRequest {
@@ -26,6 +26,7 @@ impl InterconnectRequest for DescribeInferencerRequest {
     type Response = Result<InferencerStateSummary, RemoteOperationFailure>;
 
     const NAME: &'static str = "describe_inferencer";
+    const DEADLINE: RequestDeadline = RequestDeadline::Request;
 }
 
 #[cfg(all(test, not(any(feature = "shuttle", feature = "turmoil"))))]

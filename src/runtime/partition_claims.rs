@@ -515,7 +515,7 @@ impl Runtime {
                 .request_with_timeout(
                     &owner,
                     request,
-                    <PartitionTransitionRequest as nervix_interconnect::InterconnectRequest>::TIMEOUT,
+                    dispatcher.request_deadline::<PartitionTransitionRequest>(),
                 )
                 .await
                 .change_context_lazy(|| PartitionClaimError::Request {
