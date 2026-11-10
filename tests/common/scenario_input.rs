@@ -61,7 +61,8 @@ fn feature_paths(input: &Path) -> io::Result<Vec<PathBuf>> {
     if input.is_file() {
         return Ok(vec![input.canonicalize()?]);
     }
-    let (root, pattern) = if input.is_dir() {
+    let directory_input = input.is_dir();
+    let (root, pattern) = if directory_input {
         (input.to_path_buf(), "*.feature".to_owned())
     } else {
         let mut root = PathBuf::new();
@@ -108,6 +109,7 @@ fn feature_paths(input: &Path) -> io::Result<Vec<PathBuf>> {
         pattern
     };
     let walker = globwalk::GlobWalkerBuilder::from_patterns(root.canonicalize()?, &[pattern])
+        .case_insensitive(directory_input)
         .build()
         .map_err(io::Error::other)?;
     let mut paths = walker

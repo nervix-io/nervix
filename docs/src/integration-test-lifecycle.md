@@ -556,7 +556,9 @@ its package's directory, so `main` moves to the workspace root first, and every 
 `--input` accepts a feature file, directory or quoted glob, either relative to the workspace root
 or absolute. A literal file is parsed directly; a directory discovers its feature files; a glob
 walks only below its literal directory prefix. Relative focused inputs therefore do not traverse
-generated build trees. Matching, Gherkin parsing and outline expansion remain owned by globwalk,
+generated build trees. Directory discovery keeps case-insensitive feature extensions, while
+explicit globs keep their case-sensitive matching.
+Matching, Gherkin parsing and outline expansion remain owned by globwalk,
 Gherkin and Cucumber, and discovery keeps deterministic path order before sharding and feature
 prioritization.
 Missing inputs and traversal or parsing errors fail the run. A completed invocation that took up

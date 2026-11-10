@@ -129,6 +129,28 @@ fn missing_literal_inputs_are_errors_and_unmatched_globs_select_nothing() {
 }
 
 #[test]
+fn directory_discovery_preserves_case_insensitive_feature_extensions() {
+    let root = fixture();
+    std::fs::write(
+        root.path().join("tests/features/runtime/THIRD.FEATURE"),
+        "Feature: third\n  Scenario: selected\n    Given a feature-selection fixture\n",
+    )
+    .expect("the uppercase-extension fixture is writable");
+    assert_eq!(names(root.path(), None), ["third", "first", "second"]);
+    assert_eq!(
+        names(root.path(), Some("tests/features/runtime".to_owned())),
+        ["third", "first", "second"]
+    );
+    assert_eq!(
+        names(
+            root.path(),
+            Some("tests/features/runtime/*.feature".to_owned())
+        ),
+        ["first", "second"]
+    );
+}
+
+#[test]
 fn outlines_expand_names_steps_payloads_tables_and_example_tags_before_selection() {
     let root = fixture();
     std::fs::write(
