@@ -130,6 +130,12 @@ pub enum AppError {
     InvalidPeerReceiveSettings,
     #[error("invalid state inspection capabilities")]
     InvalidStateInspectionSettings,
+    #[error("invalid expression engine capabilities")]
+    InvalidVmSettings,
+    #[error("invalid connector host settings")]
+    InvalidConnectorHostSettings,
+    #[error("invalid WASM engine capabilities")]
+    InvalidWasmEngineSettings,
     #[error("invalid shutdown timeouts")]
     InvalidShutdownTimeouts,
     #[error("failed to read the node settings")]

@@ -59,6 +59,7 @@ pub mod program;
 mod regexp;
 mod runtime;
 mod semantics;
+mod settings;
 mod text_column;
 mod text_search;
 mod url_component;
@@ -106,13 +107,12 @@ pub use json::{
 };
 pub use membership::{MembershipSet, SMALL_SET_CAPACITY};
 pub use regexp::{
-    COMPILED_PATTERN_SIZE_LIMIT, ConstantPattern, DYNAMIC_PATTERN_CACHE_CAPACITY,
-    DynamicPatternStatistics, DynamicPatterns, PatternSource, RegexpCall, RegexpFunction,
-    SEARCH_CACHE_CAPACITY,
+    COMPILED_PATTERN_SIZE_LIMIT, ConstantPattern, DynamicPatternStatistics, DynamicPatterns,
+    PatternSource, RegexpCall, RegexpFunction,
 };
 pub use runtime::{
     ExecutionContext, ExecutionResult, FunctionExecutionPolicy, FunctionInjector,
-    FunctionInvocation, INLINE_ROW_LIMIT, InjectedResult, PredicateExecutionResult, RowSelection,
+    FunctionInvocation, InjectedResult, PredicateExecutionResult, RowSelection,
     execute_predicate_in_context, execute_program_with_selection_in_context,
 };
 pub use semantics::{
@@ -121,6 +121,10 @@ pub use semantics::{
     binary_descriptor, binary_op_semantics, binary_output_type, builtin_descriptor,
     builtin_function_semantics, builtin_signature, cast_descriptor, cast_semantics, expr_semantics,
     unary_descriptor, unary_op_semantics,
+};
+pub use settings::{
+    VmDynamicPatternCacheCapacity, VmInlineRowLimit, VmPatternSetsPerBatch,
+    VmRegexSearchCacheBytes, VmSettingOverrides, VmSettings, VmSettingsError,
 };
 
 #[cfg(test)]

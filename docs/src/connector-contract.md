@@ -919,8 +919,8 @@ may also hold one completed frame of at most `max_message_size` bytes while its 
 An oversized stream frame closes only its connection; it neither fails the listener's ingestor read
 nor makes the host reconnect. UDP admission separately drops and counts a datagram above
 `max_message_size`, after receiving it into a fixed 65,535-byte scratch buffer. The shared stream
-intake queue holds at most 64 frames and applies backpressure; that queue does not limit the
-connection count or total connection-local retention.
+intake queue holds at most the node's `syslog-intake-queue-capacity` frames and applies backpressure;
+that queue does not limit the connection count or total connection-local retention.
 
 A wait ends at a client deadline key, a statement clause such as `ACK TIMEOUT`, a protocol interval
 another client key sets, such as MQTT's `keep_alive_ms`, a fixed bound Nervix sets, or the driver's
@@ -3301,8 +3301,8 @@ sequenceDiagram
   `NATS SUBJECT` instance reconnects never reach it, while a stream keeps them for its consumer as
   long as its retention and limits allow.
 - **Syslog stream listener.** Each accepted TCP or TLS connection has one task that owns its frame
-  buffer and reads into it directly, at most 8 KiB per read and never beyond the connection's
-  frame bound of `max_message_size` plus the eleven bytes of the longest octet count and its
+  buffer and reads into it directly, at most the node's `syslog-read-chunk-bytes` per read and never
+  beyond the connection's frame bound of `max_message_size` plus the eleven bytes of the longest octet count and its
   space. Framing moves a cursor through the buffer and copies each payload into the frame the
   intake queue carries; the bytes before the cursor are discarded once, when the next read needs
   room, so the bytes a read delivers are moved at most once however many frames they hold. The
@@ -3881,3 +3881,19 @@ do not re-open the connector or alter its retry, quiesce, finish or acknowledgem
 Trust roots, identity and ALPN remain properties of the concrete client configuration.
 [Cryptography](cryptography.md#outward-tls-policy) owns the exact governed-path and driver-owned-gap
 inventory.
+
+## Local Host Capabilities
+
+The shared host retry law takes a validated positive multiplier and a jitter percentage from
+`NodeCapabilities`. Initial delay and maximum delay continue to come from the declared retry
+policy. Between attempts the host multiplies the delay, optionally adds zero through the selected
+percentage, and clamps it to the policy ceiling, including arithmetic overflow. Defaults preserve
+doubling without jitter. MQTT's event-loop reconnect uses the same law as ingestor and emitter
+host retries. Reset still restores the policy's initial delay.
+
+Kafka's domain-assignment retry and partition watch, and the Syslog stream intake queue and read
+chunk, likewise receive typed node capabilities. The stream queue remains bounded with
+backpressure, and each read remains bounded by the remaining frame allowance. Driver deadlines,
+prefetch, pool lifetimes and keep-alive depend on an external system and belong in that entity's
+declared client keys or Plexus clauses. The complete local options and defaults are in
+[Node Settings](node-settings.md#engine-and-connector-host-capabilities).

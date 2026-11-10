@@ -784,6 +784,7 @@ impl BranchInstanceTemplate {
         &mut self,
         executor: &nervix_execution::Executor,
         udfs: Option<&UdfExecutor>,
+        vm_settings: nervix_vm::VmSettings,
     ) -> error_stack::Result<(), planning::PlanningError> {
         for processor in self.processors.values_mut() {
             nervix_primitives::task::consume_budget().await;
@@ -802,6 +803,7 @@ impl BranchInstanceTemplate {
                         output_schema,
                         state,
                         udfs,
+                        vm_settings,
                     )
                     .await
                     .change_context_lazy(|| {

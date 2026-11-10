@@ -44,15 +44,6 @@ use regex_automata::{
 /// reports `CompiledTooBig`, whatever its source. It is the limit the `regex` crate applies.
 pub const COMPILED_PATTERN_SIZE_LIMIT: usize = 10 * (1 << 20);
 
-/// The most bytes one search cache may hold for the lazy DFA of a pattern. A search that would
-/// exceed it falls back to a slower engine rather than growing the cache. It is the capacity the
-/// `regex` crate applies.
-pub const SEARCH_CACHE_CAPACITY: usize = 2 * (1 << 20);
-
-/// How many distinct patterns one call keeps compiled for the patterns it reads from a field.
-/// When a further pattern arrives, the pattern compiled longest ago is evicted.
-pub const DYNAMIC_PATTERN_CACHE_CAPACITY: usize = 64;
-
 /// The regular-expression builtins, which share one pattern-preparation contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegexpFunction {
@@ -74,21 +65,38 @@ pub struct RegexpCall {
     pub pattern: PatternSource,
 }
 
+use crate::VmSettings;
+
 impl RegexpCall {
     /// A call whose pattern is read from its second argument on every row.
     pub fn reading_pattern_argument(function: RegexpFunction) -> Self {
+        Self::reading_pattern_argument_with_settings(function, VmSettings::default())
+    }
+
+    pub(crate) fn reading_pattern_argument_with_settings(
+        function: RegexpFunction,
+        settings: VmSettings,
+    ) -> Self {
         Self {
             function,
-            pattern: PatternSource::Argument(DynamicPatterns::default()),
+            pattern: PatternSource::Argument(DynamicPatterns::with_settings(settings)),
         }
     }
 
     /// A call whose pattern is known when the program is compiled. The pattern is compiled here,
     /// once, and a pattern that does not compile keeps its error to report per row.
     pub fn with_constant_pattern(function: RegexpFunction, pattern: &str) -> Self {
+        Self::with_constant_pattern_and_settings(function, pattern, VmSettings::default())
+    }
+
+    pub(crate) fn with_constant_pattern_and_settings(
+        function: RegexpFunction,
+        pattern: &str,
+        settings: VmSettings,
+    ) -> Self {
         Self {
             function,
-            pattern: PatternSource::Constant(ConstantPattern::compile(pattern)),
+            pattern: PatternSource::Constant(ConstantPattern::compile(pattern, settings)),
         }
     }
 }
@@ -127,10 +135,10 @@ pub struct ConstantPattern {
 }
 
 impl ConstantPattern {
-    fn compile(text: &str) -> Self {
+    fn compile(text: &str, settings: VmSettings) -> Self {
         Self {
             text: Box::from(text),
-            outcome: StdArc::new(PatternOutcome::compile(text)),
+            outcome: StdArc::new(PatternOutcome::compile(text, settings)),
         }
     }
 
@@ -162,8 +170,8 @@ pub enum PatternOutcome {
 }
 
 impl PatternOutcome {
-    fn compile(pattern: &str) -> Self {
-        match PreparedRegex::compile(pattern) {
+    fn compile(pattern: &str, settings: VmSettings) -> Self {
+        match PreparedRegex::compile(pattern, settings) {
             Ok(regex) => Self::Regex(regex),
             Err(error) => Self::Invalid(error),
         }
@@ -204,12 +212,12 @@ impl PreparedRegex {
     /// Compiles `pattern` exactly as the `regex` crate compiles a `Regex`: Unicode syntax,
     /// leftmost-first matching, empty matches kept on character boundaries, and the size limits
     /// above.
-    fn compile(pattern: &str) -> Result<Self, regex::Error> {
+    fn compile(pattern: &str, settings: VmSettings) -> Result<Self, regex::Error> {
         let config = meta::Config::new()
             .match_kind(MatchKind::LeftmostFirst)
             .utf8_empty(true)
             .nfa_size_limit(Some(COMPILED_PATTERN_SIZE_LIMIT))
-            .hybrid_cache_capacity(SEARCH_CACHE_CAPACITY);
+            .hybrid_cache_capacity(settings.regex_search_cache_bytes());
         let syntax = syntax::Config::new().utf8(true);
         let regex = meta::Builder::new()
             .configure(config)
@@ -325,7 +333,7 @@ type PatternTable = IndexMap<Box<str>, StdArc<PatternOutcome>, ahash::RandomStat
 /// Readers load one immutable snapshot per batch and resolve every row against it without a lock.
 /// A pattern the snapshot lacks is compiled and published in a new snapshot; publication retries
 /// on a concurrent publication, so a compilation is never repeated for the retry. The cache holds
-/// at most [`DYNAMIC_PATTERN_CACHE_CAPACITY`] patterns and evicts the one compiled longest ago.
+/// at most the configured dynamic-pattern capacity (64 by default) and evicts the one compiled longest ago.
 ///
 /// The cache belongs to the compiled program that created it: a program compiled again starts with
 /// an empty cache, and a clone of the program shares the cache with its original.
@@ -336,6 +344,7 @@ pub struct DynamicPatterns {
 
 #[derive(Debug, Default)]
 struct PatternCache {
+    settings: VmSettings,
     table: ArcSwapOption<PatternTable>,
     compilations: AtomicUsize,
     evictions: AtomicUsize,
@@ -353,6 +362,15 @@ pub struct DynamicPatternStatistics {
 }
 
 impl DynamicPatterns {
+    pub(crate) fn with_settings(settings: VmSettings) -> Self {
+        Self {
+            shared: StdArc::new(PatternCache {
+                settings,
+                ..PatternCache::default()
+            }),
+        }
+    }
+
     pub fn statistics(&self) -> DynamicPatternStatistics {
         let cached = match self.shared.table.load().as_ref() {
             Some(table) => table.len(),
@@ -420,7 +438,7 @@ impl PatternCache {
         {
             return StdArc::clone(outcome);
         }
-        let outcome = StdArc::new(PatternOutcome::compile(text));
+        let outcome = StdArc::new(PatternOutcome::compile(text, self.settings));
         self.compilations.fetch_add(1, Ordering::Relaxed);
         let mut evicted = false;
         self.table.rcu(|current| {
@@ -432,7 +450,7 @@ impl PatternCache {
             // afresh each time and counted once, after the publication that stuck.
             evicted = false;
             if !next.contains_key(text) {
-                if next.len() >= DYNAMIC_PATTERN_CACHE_CAPACITY {
+                if next.len() >= self.settings.dynamic_pattern_cache_capacity() {
                     next.shift_remove_index(0);
                     evicted = true;
                 }
@@ -490,8 +508,8 @@ mod tests {
     use rstest::rstest;
 
     use super::{
-        ActivePattern, BatchPatterns, DYNAMIC_PATTERN_CACHE_CAPACITY, DynamicPatternStatistics,
-        DynamicPatterns, PatternOutcome, PatternSource, RegexpCall, RegexpFunction,
+        ActivePattern, BatchPatterns, DynamicPatternStatistics, DynamicPatterns, PatternOutcome,
+        PatternSource, RegexpCall, RegexpFunction,
     };
 
     fn active(outcome: &PatternOutcome) -> super::ActiveRegex<'_> {
@@ -503,7 +521,7 @@ mod tests {
 
     #[test]
     fn captures_include_full_optional_and_empty_matches() {
-        let outcome = PatternOutcome::compile("(a)?(b)");
+        let outcome = PatternOutcome::compile("(a)?(b)", crate::VmSettings::default());
         let mut regex = active(&outcome);
         assert_eq!(regex.extract("b", 0), Some("b"));
         assert_eq!(regex.extract("b", 1), None);
@@ -512,7 +530,7 @@ mod tests {
         assert_eq!(regex.extract("ab", 1), Some("a"));
         assert_eq!(regex.extract("ab", 3), None);
 
-        let empty = PatternOutcome::compile("");
+        let empty = PatternOutcome::compile("", crate::VmSettings::default());
         assert_eq!(active(&empty).extract("é", 0), Some(""));
     }
 
@@ -531,7 +549,7 @@ mod tests {
         #[case] replacement: &str,
     ) {
         let expected = regex::Regex::new(pattern).expect("pattern must compile");
-        let outcome = PatternOutcome::compile(pattern);
+        let outcome = PatternOutcome::compile(pattern, crate::VmSettings::default());
         let mut regex = active(&outcome);
 
         assert_eq!(regex.is_match(text), expected.is_match(text));
@@ -549,7 +567,9 @@ mod tests {
         let unclosed = String::from("(");
         let expected =
             regex::Regex::new(&unclosed).expect_err("an unclosed group must not compile");
-        let PatternOutcome::Invalid(error) = PatternOutcome::compile(&unclosed) else {
+        let PatternOutcome::Invalid(error) =
+            PatternOutcome::compile(&unclosed, crate::VmSettings::default())
+        else {
             panic!("an unclosed group must not compile");
         };
         assert_eq!(error, expected);
@@ -557,7 +577,9 @@ mod tests {
 
         let too_big = "(?:\\pL{1000}){1000}";
         let expected = regex::Regex::new(too_big).expect_err("the pattern must exceed the limit");
-        let PatternOutcome::Invalid(error) = PatternOutcome::compile(too_big) else {
+        let PatternOutcome::Invalid(error) =
+            PatternOutcome::compile(too_big, crate::VmSettings::default())
+        else {
             panic!("the pattern must exceed the limit");
         };
         assert_eq!(error, expected);
@@ -640,9 +662,63 @@ mod tests {
     }
 
     #[test]
+    fn minimum_search_cache_keeps_the_same_match_results() {
+        use meticulous::ResultExt as _;
+        let settings = crate::VmSettings::resolve(crate::VmSettingOverrides {
+            regex_search_cache_bytes: Some(1),
+            ..crate::VmSettingOverrides::default()
+        })
+        .assured("one byte is a valid cache capability");
+        let regex = super::PreparedRegex::compile("(?i)^(?:café|alpha)[0-9]+$", settings)
+            .assured("a search cache bound does not reject a valid pattern");
+        let mut active = regex.activate();
+        for (text, expected) in [
+            ("CAFÉ42", true),
+            ("alpha7", true),
+            ("alpha", false),
+            ("xalpha7", false),
+            ("", false),
+        ] {
+            assert_eq!(active.is_match(text), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn configured_dynamic_cache_evicts_at_its_selected_capacity() {
+        use meticulous::ResultExt as _;
+        let settings = crate::VmSettings::resolve(crate::VmSettingOverrides {
+            dynamic_pattern_cache_capacity: Some(2),
+            regex_search_cache_bytes: Some(1024),
+            ..crate::VmSettingOverrides::default()
+        })
+        .assured("positive cache bounds validate");
+        let cache = DynamicPatterns::with_settings(settings);
+        for pattern in ["a+", "b+", "c+"] {
+            cache.resolve_rows([Some(pattern)].into_iter());
+        }
+        assert_eq!(
+            cache.statistics(),
+            DynamicPatternStatistics {
+                compiled: 3,
+                evicted: 1,
+                cached: 2
+            }
+        );
+        cache.resolve_rows([Some("a+")].into_iter());
+        assert_eq!(
+            cache.statistics(),
+            DynamicPatternStatistics {
+                compiled: 4,
+                evicted: 2,
+                cached: 2
+            }
+        );
+    }
+
+    #[test]
     fn dynamic_patterns_evict_the_pattern_compiled_longest_ago() {
         let cache = DynamicPatterns::default();
-        let patterns = (0..=DYNAMIC_PATTERN_CACHE_CAPACITY)
+        let patterns = (0..=crate::VmDynamicPatternCacheCapacity::DEFAULT)
             .map(|index| format!("p{index}"))
             .collect::<Vec<_>>();
 
@@ -653,25 +729,28 @@ mod tests {
         assert_eq!(
             cache.statistics(),
             DynamicPatternStatistics {
-                compiled: DYNAMIC_PATTERN_CACHE_CAPACITY + 1,
+                compiled: crate::VmDynamicPatternCacheCapacity::DEFAULT + 1,
                 evicted: 1,
-                cached: DYNAMIC_PATTERN_CACHE_CAPACITY,
+                cached: crate::VmDynamicPatternCacheCapacity::DEFAULT,
             }
         );
 
         cache.resolve_rows([Some("p1")].into_iter());
         assert_eq!(
             cache.statistics().compiled,
-            DYNAMIC_PATTERN_CACHE_CAPACITY + 1
+            crate::VmDynamicPatternCacheCapacity::DEFAULT + 1
         );
 
         cache.resolve_rows([Some("p0")].into_iter());
         assert_eq!(
             cache.statistics().compiled,
-            DYNAMIC_PATTERN_CACHE_CAPACITY + 2
+            crate::VmDynamicPatternCacheCapacity::DEFAULT + 2
         );
         assert_eq!(cache.statistics().evicted, 2);
-        assert_eq!(cache.statistics().cached, DYNAMIC_PATTERN_CACHE_CAPACITY);
+        assert_eq!(
+            cache.statistics().cached,
+            crate::VmDynamicPatternCacheCapacity::DEFAULT
+        );
     }
 
     #[test]
@@ -697,7 +776,7 @@ mod tests {
 
     #[test]
     fn shared_batch_patterns_answer_slot_zero_for_every_row() {
-        let outcome = StdArc::new(PatternOutcome::compile("a"));
+        let outcome = StdArc::new(PatternOutcome::compile("a", crate::VmSettings::default()));
         let batch = BatchPatterns::shared(outcome);
         assert_eq!(batch.slot(0), Some(0));
         assert_eq!(batch.slot(1_000), Some(0));

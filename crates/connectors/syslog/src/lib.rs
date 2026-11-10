@@ -31,5 +31,7 @@ pub use listener::SyslogListenerFault;
 #[cfg(feature = "benchmarks")]
 pub use listener::{SyslogFrameError, frame_stream};
 pub use listener::{
-    SyslogListenerIngestor, SyslogListenerIngestorMessage, SyslogListenerIngestorPlan,
+    SyslogIntakeQueueCapacity, SyslogListenerIngestor, SyslogListenerIngestorMessage,
+    SyslogListenerIngestorPlan, SyslogListenerSettings, SyslogListenerSettingsError,
+    SyslogReadChunkBytes,
 };

@@ -522,7 +522,8 @@ Emitter statements exchanged through the control plane use explicit `KEY` expres
 `payload` expression scope, typed materialized relay inspection, ingestor read interactions,
 corridor/domain-wide placement coverage, pace-only domain configuration, exact partition/instance
 relocation selections, ingestor acknowledgement and connector lifecycle observations, and the current
-transaction operation and commit-step alternatives. Peers must
+transaction operation and commit-step alternatives, and the engine and connector host capabilities
+in each node's incarnation-bound claim. Peers must
 match it exactly.
 
 Execution-unit identities use an eight-byte rank with four-byte archive alignment. Single and
@@ -1154,6 +1155,12 @@ normal frame and ACK operations use retained owners rather than a node-wide shar
 
 A delivery is held back rather than failed while relay memory on either end has no room for it at
 the moment, because that lack of room ends as the node's other relay work resolves.
+
+A receive-bound refusal creates no receiver attempt. The sender can slice the body again at the
+same unused channel position. If one row cannot fit, the current delivery's unadmitted suffix
+fails; an admitted prefix retains its acknowledgement owners. A later fitting delivery can reuse
+the unused position. Producer submissions are not route-buffer boundaries: rows from separate
+submissions can be collected into the same concrete branch delivery under `FLUSH EACH`.
 
 A receiver refuses a grant for capacity when its relay budget cannot reserve the body, the largest
 decoded batch and decode scratch, when its application queue has no item left, when the capacity it

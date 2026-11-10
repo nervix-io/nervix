@@ -114,7 +114,7 @@ use nervix_primitives::{
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use nervix_roto::{UdfExecutor, UdfProgram};
 #[cfg(test)]
-use nervix_vm::INLINE_ROW_LIMIT as VM_INLINE_ROW_LIMIT;
+use nervix_vm::VmInlineRowLimit;
 use nervix_vm::{
     CompileBinding as VmCompileBinding, CompileNamespace as VmCompileNamespace,
     CompileOptions as VmCompileOptions, CompiledPredicate as VmCompiledPredicate,
@@ -351,8 +351,13 @@ mod resources;
 pub mod revision_index_inspection;
 mod stateful_inferencer;
 pub(crate) use resources::RuntimeResourceError;
+mod connector_host_settings;
 mod runtime_lifecycle;
 mod runtime_settings;
+pub use connector_host_settings::{
+    ConnectorHostSettingOverrides, ConnectorHostSettings, ConnectorHostSettingsError,
+    KafkaPartitionWatchInterval,
+};
 mod schedule_apply;
 mod snapshot_staging;
 pub(crate) mod state_inspection_exchange;
@@ -535,10 +540,7 @@ pub(in crate::runtime) use ingestor_quiesce::{
     BufferedIngestMetadata, BufferedIngestPayload, IngestorQuiesceCause, IngestorQuiesceControl,
     IngestorQuiesceIntake, MemoryPressurePause,
 };
-use ingestor_quiesce::{
-    DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL, IngestorInstanceReadiness, IngestorStatus,
-    RuntimeReconnectStatus,
-};
+use ingestor_quiesce::{IngestorInstanceReadiness, IngestorStatus, RuntimeReconnectStatus};
 use ingestor_start::IngestorRuntime;
 use kafka_offset_state::{
     KafkaOffsetOriginatorSlot, KafkaOffsetSnapshotInstaller, KafkaOffsetStateAssignment,

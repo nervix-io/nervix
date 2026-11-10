@@ -207,6 +207,7 @@ impl PreparedStatefulInference {
         outputs: &[InferencerTensorDeclaration],
         state: &InferencerStatePlan,
         udfs: Option<&UdfExecutor>,
+        vm_settings: nervix_vm::VmSettings,
     ) -> error_stack::Result<Self, StatefulInferenceError> {
         let limit = executor.limits().snapshot_section_bytes.as_u64();
         let snapshot_bytes = state
@@ -230,6 +231,7 @@ impl PreparedStatefulInference {
                         expression,
                         udfs,
                         Timestamp::from_unix_nanos(0),
+                        vm_settings,
                     )
                     .await
                     .change_context(StatefulInferenceError::Initial)?,

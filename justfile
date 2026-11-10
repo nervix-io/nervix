@@ -444,6 +444,15 @@ test-execution-capabilities *args: build-deps build-plexus-format build-test-cli
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/execution_capabilities.feature {{ quote(args) }}
 
+# Exercise retained relay delivery and typed refusal across different node capabilities.
+test-relay-capability-delivery *args: build-deps build-codec-tools
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input {{ quote(justfile_directory() / "tests/features/cluster/node_capability_delivery*.feature") }} \
+        {{ quote(args) }}
+
 # Exercise domain pause recovery with ordinary assets and the shared native tool graph.
 test-client-wire-pause-recovery *args: build-deps build-codec-tools
     #!/usr/bin/env bash
@@ -539,6 +548,13 @@ test-partition-placement feature="tests/features/cluster/partition_placement.fea
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(feature) }} {{ quote(args) }}
+
+# Exercise local engine admission and CLI settings through public node and REPL interfaces.
+test-engine-settings *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/engine_settings.feature {{ quote(args) }}
 
 # Exercise emitter destination keys and partitions without unrelated client-tool preparation.
 test-emitter-destinations *args: build-deps
@@ -3077,6 +3093,17 @@ coverage-remote-owners output="target/remote-owners.lcov": build-web-console was
     cargo llvm-cov --no-clean --lcov --output-path "${stages}/frame-cost.lcov" \
         --package nervix-interconnect --lib -- remote_relay_frame_cost --ignored --nocapture
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
+
+# Collect a local patch preview for the native relay capability fixtures.
+# This focused report is outside the complete ordinary workspace merge, which CI produces.
+coverage-relay-capability-delivery output="lcov-workspace.info" *args: build-deps build-codec-tools
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov --package nervix-scenarios --test scenarios --no-default-ignore-filename-regex \
+        --lcov --output-path {{ quote(output) }} -- \
+        --input {{ quote(justfile_directory() / "tests/features/cluster/node_capability_delivery*.feature") }} \
+        {{ quote(args) }}
 
 # Measure selected public scenarios with the same arguments as `test-scenarios`.
 coverage-scenarios output *args: tests-deps
