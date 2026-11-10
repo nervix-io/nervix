@@ -23,7 +23,19 @@
 
 use error_stack::ResultExt as _;
 
-use super::{materialized_read::MaterializedStateWait, *};
+use super::{
+    materialized_read::MaterializedStateWait,
+    processor_partition_moves::{
+        ClaimProgress, HolderKeyRequest, HolderStep, ProcessorBranchSlot, ProcessorBranches,
+        ProcessorPartitionMoves, answer_partition_key,
+    },
+    processor_wasm_state_reset::{
+        ProcessorWasmStateResetContext, abort_processor_wasm_state_reset,
+        complete_processor_wasm_state_reset,
+    },
+    relay_interaction::RELAY_INTERACTION_COMMAND_CAPACITY,
+    *,
+};
 
 /// Every way starting or restoring a processor's branch tasks fails.
 ///
@@ -58,8 +70,6 @@ pub(super) enum ProcessorBranchTaskError {
 }
 
 pub(super) const PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
-
-pub(super) const PROCESSOR_BRANCH_TASK_IDLE_SLEEP: Duration = Duration::from_secs(86_400);
 
 #[derive(Debug)]
 pub(super) enum ProcessorBranchStopMode {
@@ -167,6 +177,14 @@ pub(super) enum ProcessorNodeCommand {
         reset: nervix_models::WasmStateReset,
         response: oneshot::Sender<error_stack::Result<(), WasmStateResetRuntimeError>>,
     },
+    /// A claimant asks this unit, which may hold a key outside its partition, to release or
+    /// forget it.
+    PartitionKey(HolderKeyRequest),
+    /// A claim task this unit started reports its progress.
+    PartitionClaim(ClaimProgress),
+    /// The partition transition of the unit's branch retired: every key lies in its partition, so
+    /// the unit stops claiming keys and runs the input it parked.
+    PartitionTransitionRetired,
     /// Names the branch tasks an operator inspection reads, without waiting for any of them.
     SelectStateBranches {
         selection: nervix_models::StateInspectionBranchSelection,
@@ -188,6 +206,14 @@ impl RelayInteractionCommand for ProcessorNodeCommand {
             Self::Checkpoint { .. } | Self::Handoff { .. } | Self::PrepareWasmStateReset { .. }
         )
     }
+}
+
+/// The command channels of one processor unit's supervisor.
+pub(super) struct ProcessorNodeChannels {
+    pub(super) commands: mpsc::Receiver<ProcessorNodeCommand>,
+    /// A sender into `commands` the supervisor hands its claim tasks, present while its branch's
+    /// keys move between units.
+    pub(super) claim_reports: Option<mpsc::Sender<ProcessorNodeCommand>>,
 }
 
 /// The domain-scoped execution context a processor task runs inside.
@@ -232,7 +258,18 @@ pub(in crate::runtime) fn spawn_processor_node_runtime_with_handoffs(
     expiration_scan_interval: Duration,
 ) -> ScheduledNodeTask {
     let shutdown_rx = shutdown_tx.subscribe();
-    let (commands, command_rx) = mpsc::channel(1);
+    let (commands, command_rx) = mpsc::channel(RELAY_INTERACTION_COMMAND_CAPACITY);
+    // While its branch's keys move between units, the supervisor's claim tasks report through its
+    // own command channel. It stops on shutdown or handoff, never on its commands closing.
+    let claim_reports = if template.partition_transition.is_some() {
+        Some(commands.clone())
+    } else {
+        None
+    };
+    let channels = ProcessorNodeChannels {
+        commands: command_rx,
+        claim_reports,
+    };
     let task = if template.owner.node.kind == ModelKind::Inferencer {
         let metrics = context.runtime_handle.inferencer_state_metrics(
             &context.domain,
@@ -246,7 +283,7 @@ pub(in crate::runtime) fn spawn_processor_node_runtime_with_handoffs(
                 template,
                 inputs,
                 shutdown_rx,
-                command_rx,
+                channels,
                 handoffs,
                 expiration_scan_interval,
             )
@@ -258,7 +295,7 @@ pub(in crate::runtime) fn spawn_processor_node_runtime_with_handoffs(
             template,
             inputs,
             shutdown_rx,
-            command_rx,
+            channels,
             handoffs,
             expiration_scan_interval,
         ))
@@ -275,13 +312,17 @@ pub(in crate::runtime) fn spawn_processor_node_runtime_with_handoffs(
 )]
 pub(super) async fn run_processor_node_runtime(
     context: ProcessorRuntimeContext,
-    template: BranchInstanceTemplate,
+    mut template: BranchInstanceTemplate,
     inputs: Vec<(RelayName, RelayRuntimeFanIn)>,
     shutdown_rx: watch::Receiver<bool>,
-    command_rx: mpsc::Receiver<ProcessorNodeCommand>,
+    channels: ProcessorNodeChannels,
     restored_handoffs: Vec<ProcessorBranchHandoff>,
     expiration_scan_interval: Duration,
 ) {
+    let ProcessorNodeChannels {
+        commands: command_rx,
+        mut claim_reports,
+    } = channels;
     let ProcessorRuntimeContext {
         runtime_handle,
         domain,
@@ -317,7 +358,7 @@ pub(super) async fn run_processor_node_runtime(
         )
     );
     runtime_handle.register_branch_lifecycle_metrics(&domain, template.branch.as_ref());
-    let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
+    let mut instances = ProcessorBranches::new();
     let mut last_persisted_lru_lsm = 0;
     // The task restores its branches before it takes any input. Until one attempt installs every
     // branch, its input stays queued in its relays, so no record starts a new lifetime for a branch
@@ -352,6 +393,7 @@ pub(super) async fn run_processor_node_runtime(
         .clone()
         .filter(|reset| reset.phase() == nervix_models::WasmStateResetPhase::Publishing);
     let mut prepared_reset = None::<PreparedWasmStateReset>;
+    let mut moves = None::<ProcessorPartitionMoves>;
 
     let mut handoff_response = None;
     loop {
@@ -398,6 +440,30 @@ pub(super) async fn run_processor_node_runtime(
                         )
                         .await;
                     }
+                    if let (Some(transition), Some(reports)) =
+                        (template.partition_transition.clone(), claim_reports.clone())
+                    {
+                        // Each claim parks one batch of its key's input; a unit parks no more than
+                        // its input relay's owner buffers.
+                        let capacity = match template.relays.get(&template.root_relay) {
+                            Some(relay) => relay.services.owner_capacity(),
+                            None => 1,
+                        };
+                        moves = Some(nervix_primitives::expect_lint!(
+                            nervix::lifecycle_call,
+                            "a unit in a partition transition begins its moves once, after its \
+                             restore installed its branches",
+                            ProcessorPartitionMoves::begin(
+                                &runtime_handle,
+                                &domain,
+                                &template,
+                                transition,
+                                &instances,
+                                reports,
+                                capacity,
+                            )
+                        ));
+                    }
                 }
                 Err(error) => {
                     warn!(
@@ -422,8 +488,19 @@ pub(super) async fn run_processor_node_runtime(
                     &mut instances,
                 )
                 .await;
+                if let Some(moves) = moves.as_mut() {
+                    moves.retain_held(&instances);
+                }
             }
             next_expiration_scan = Instant::now() + expiration_scan_interval;
+            did_scheduled_work = true;
+        }
+        if let Some(moves) = moves.as_mut()
+            && moves
+                .next_retry()
+                .is_some_and(|retry_at| Instant::now() >= retry_at)
+        {
+            moves.retry_due(&runtime_handle, &domain, &template);
             did_scheduled_work = true;
         }
         if pending_restore.is_none()
@@ -459,10 +536,13 @@ pub(super) async fn run_processor_node_runtime(
         let maintenance_timeout = if ownership_frozen {
             OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL
         } else {
-            let next_maintenance = match pending_restore.as_ref() {
+            let mut next_maintenance = match pending_restore.as_ref() {
                 Some(restore) => restore.retry_at(),
                 None => next_expiration_scan.min(next_lru_snapshot),
             };
+            if let Some(retry_at) = moves.as_ref().and_then(ProcessorPartitionMoves::next_retry) {
+                next_maintenance = next_maintenance.min(retry_at);
+            }
             next_maintenance
                 .checked_duration_since(Instant::now())
                 .unwrap_or(Duration::ZERO)
@@ -479,9 +559,14 @@ pub(super) async fn run_processor_node_runtime(
                 break;
             }
         };
-        // A pending restore keeps new input in the relays; only a drain still delivers it.
+        // A pending restore keeps new input in the relays; only a drain still delivers it. A unit
+        // whose parked input fills its bound takes no more until a claim releases some.
+        let parked_full = match moves.as_ref() {
+            Some(moves) => moves.is_full(),
+            None => false,
+        };
         let work = match interaction
-            .next_with_input(wake, pending_restore.is_none())
+            .next_with_input(wake, pending_restore.is_none() && !parked_full)
             .await
         {
             Ok(work) => work,
@@ -528,19 +613,28 @@ pub(super) async fn run_processor_node_runtime(
                     drop(work);
                     continue;
                 }
-                dispatch_processor_node_input(
-                    ProcessorNodeDispatchContext {
-                        runtime_handle: &runtime_handle,
-                        domain: &domain,
-                        template: &template,
-                        domain_clock: &domain_clock,
-                    },
-                    &mut instances,
-                    relay,
-                    batch,
-                    work,
-                )
-                .await;
+                let input = ProcessorBranchInput { relay, batch, work };
+                let input = match moves.as_mut() {
+                    Some(moves) => {
+                        moves.admit(&runtime_handle, &domain, &template, &instances, input)
+                    }
+                    None => Some(input),
+                };
+                if let Some(input) = input {
+                    dispatch_processor_node_input(
+                        ProcessorNodeDispatchContext {
+                            runtime_handle: &runtime_handle,
+                            domain: &domain,
+                            template: &template,
+                            domain_clock: &domain_clock,
+                        },
+                        &mut instances,
+                        input.relay,
+                        input.batch,
+                        input.work,
+                    )
+                    .await;
+                }
             }
             RelayInteractionEvent::Wake => {}
             RelayInteractionEvent::Command(command) => match command {
@@ -606,6 +700,95 @@ pub(super) async fn run_processor_node_runtime(
                 ProcessorNodeCommand::Handoff { response } => {
                     handoff_response = Some(response);
                     break;
+                }
+                ProcessorNodeCommand::PartitionKey(request) => {
+                    let outcome = nervix_primitives::expect_lint!(
+                        nervix::lifecycle_call,
+                        "a claimant's release or forget moves one key's branch out of this unit \
+                         once per claim",
+                        answer_partition_key(
+                            &restore_context,
+                            &template,
+                            &mut instances,
+                            pending_restore.is_some(),
+                            &domain_clock,
+                            HolderStep {
+                                epoch: request.epoch,
+                                key: request.key,
+                                step: request.step,
+                            },
+                        )
+                    )
+                    .await;
+                    if let Some(moves) = moves.as_mut() {
+                        moves.retain_held(&instances);
+                    }
+                    request
+                        .response
+                        .send(outcome)
+                        .means_peer_left("partition claimant");
+                }
+                ProcessorNodeCommand::PartitionTransitionRetired => {
+                    // The leader retires a transition once no unit holds or claims a key outside
+                    // its partition, so a claim still in flight finds no state: the input it
+                    // parked begins its key here, in arrival order. A claimant still in the
+                    // transition elsewhere is told this unit is not ready until it retires too.
+                    template.partition_transition = None;
+                    // Without claims the supervisor keeps no sender of its own commands, so they
+                    // close with its handle as any supervisor's do.
+                    claim_reports = None;
+                    let Some(mut retired) = moves.take() else {
+                        continue;
+                    };
+                    for input in retired.drain_parked() {
+                        nervix_primitives::task::consume_budget().await;
+                        dispatch_processor_node_input(
+                            ProcessorNodeDispatchContext {
+                                runtime_handle: &runtime_handle,
+                                domain: &domain,
+                                template: &template,
+                                domain_clock: &domain_clock,
+                            },
+                            &mut instances,
+                            input.relay,
+                            input.batch,
+                            input.work,
+                        )
+                        .await;
+                    }
+                }
+                ProcessorNodeCommand::PartitionClaim(progress) => {
+                    let Some(moves_in_progress) = moves.as_mut() else {
+                        continue;
+                    };
+                    let released = nervix_primitives::expect_lint!(
+                        nervix::lifecycle_call,
+                        "a claim task's report settles one catalog read, claim or forget, and an \
+                         installed claim starts its key's branch once",
+                        moves_in_progress.progress(
+                            &restore_context,
+                            &template,
+                            &mut instances,
+                            progress
+                        )
+                    )
+                    .await;
+                    for input in released {
+                        nervix_primitives::task::consume_budget().await;
+                        dispatch_processor_node_input(
+                            ProcessorNodeDispatchContext {
+                                runtime_handle: &runtime_handle,
+                                domain: &domain,
+                                template: &template,
+                                domain_clock: &domain_clock,
+                            },
+                            &mut instances,
+                            input.relay,
+                            input.batch,
+                            input.work,
+                        )
+                        .await;
+                    }
                 }
                 ProcessorNodeCommand::PrepareWasmStateReset {
                     preparation,
@@ -691,6 +874,16 @@ pub(super) async fn run_processor_node_runtime(
         }
     }
 
+    if let Some(moves) = moves.as_mut() {
+        // Input still waiting for its key's claim cannot be handed over with the key's state,
+        // which stays in its holder: it is refused, and its source sends it again.
+        for input in moves.drain_parked() {
+            for ack in input.batch.acks.iter() {
+                ack.no_ack("the processor unit stopped before its key's claim settled");
+            }
+            drop(input.work);
+        }
+    }
     if let Err(error) = nervix_primitives::expect_lint!(
         nervix::lifecycle_call,
         "explicit checkpoint cadence or terminal teardown captures one branch lifecycle \
@@ -749,448 +942,6 @@ pub(super) async fn run_processor_node_runtime(
     }
 }
 
-struct ProcessorWasmStateResetContext<'a> {
-    runtime: &'a Runtime,
-    domain: &'a DomainName,
-    template: &'a BranchInstanceTemplate,
-}
-
-impl<'a> ProcessorWasmStateResetContext<'a> {
-    fn new(
-        runtime: &'a Runtime,
-        domain: &'a DomainName,
-        template: &'a BranchInstanceTemplate,
-    ) -> Self {
-        Self {
-            runtime,
-            domain,
-            template,
-        }
-    }
-}
-
-fn processor_reset_target_keys(
-    processor: &ModelName,
-    template: &BranchInstanceTemplate,
-    instances: &BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
-    scope: WasmStateResetScope,
-    branch_key: Option<BranchKey>,
-) -> error_stack::Result<Vec<Option<BranchKey>>, WasmStateResetRuntimeError> {
-    if template.owner.node.kind != ModelKind::WasmProcessor {
-        return Err(Report::new(WasmStateResetRuntimeError::NotWasmProcessor {
-            processor: processor.clone(),
-        }));
-    }
-    match (template.branch.as_ref(), scope, branch_key) {
-        (None, WasmStateResetScope::Unbranched, None) => Ok(vec![None]),
-        (Some(_), WasmStateResetScope::Branch(selected), Some(branch))
-            if branch.fingerprint() == selected
-                && instances.contains_key(&Some(branch.clone())) =>
-        {
-            Ok(vec![Some(branch)])
-        }
-        (Some(_), WasmStateResetScope::Branch(selected), Some(branch))
-            if branch.fingerprint() == selected =>
-        {
-            Err(Report::new(WasmStateResetRuntimeError::BranchUnavailable {
-                processor: processor.clone(),
-            }))
-        }
-        (Some(_), WasmStateResetScope::Branch(selected), None) => Ok(instances
-            .snapshot_entries()
-            .into_iter()
-            .map(|entry| entry.key)
-            .filter(|key| {
-                key.as_ref()
-                    .is_some_and(|branch| branch.fingerprint() == selected)
-            })
-            .collect()),
-        (Some(_), WasmStateResetScope::AllBranches, None) => Ok(instances
-            .snapshot_entries()
-            .into_iter()
-            .map(|entry| entry.key)
-            .collect()),
-        _ => Err(Report::new(WasmStateResetRuntimeError::InvalidScope {
-            processor: processor.clone(),
-        })),
-    }
-}
-
-async fn restore_processor_wasm_state_reset_branches(
-    runtime: &Runtime,
-    domain: &DomainName,
-    template: &BranchInstanceTemplate,
-    instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
-    branches: &mut Vec<PreparedWasmStateResetBranch>,
-) -> error_stack::Result<(), WasmStateResetRuntimeError> {
-    let processor = ModelName::from(&template.owner.node.identifier);
-    for mut branch in branches.drain(..) {
-        nervix_primitives::task::consume_budget().await;
-        let Some(handoff) = branch.previous.take() else {
-            continue;
-        };
-        let restored_at = handoff.restored_at;
-        let key = branch.key.clone();
-        let task = nervix_primitives::expect_lint!(
-            nervix::lifecycle_call,
-            "the missing or replacement concrete branch installs one retained task under its \
-             branch key and incarnation",
-            spawn_processor_branch_task(
-                ProcessorRuntimeContext::new(runtime.clone(), domain.clone()),
-                template,
-                key.clone(),
-                handoff.pending_materialized,
-                ProcessorBranchLifetime::Restored,
-                handoff.incarnation,
-            )
-        )
-        .await
-        .change_context_lazy(|| WasmStateResetRuntimeError::RestoreAfterAbort {
-            processor: processor.clone(),
-        })?;
-        nervix_primitives::expect_lint!(
-            nervix::lifecycle_call,
-            "the concrete branch creation transition registers its one metric identity",
-            runtime.observe_branch_instance_created(domain, template.branch.as_ref(), &key)
-        );
-        instances.insert_changed(key, restored_at, task);
-    }
-    Ok(())
-}
-
-impl ProcessorWasmStateResetContext<'_> {
-    async fn prepare(
-        &self,
-        instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
-        preparation: WasmStateResetPreparation,
-        prepared: &mut Option<PreparedWasmStateReset>,
-    ) -> error_stack::Result<(), WasmStateResetRuntimeError> {
-        let runtime = self.runtime;
-        let domain = self.domain;
-        let template = self.template;
-        let WasmStateResetPreparation {
-            request,
-            scope,
-            branch_key,
-            published,
-            reason: _,
-        } = preparation;
-        let processor = ModelName::from(&template.owner.node.identifier);
-        if let Some(current) = prepared.as_mut() {
-            if !current.matches(&request, scope) {
-                return Err(Report::new(WasmStateResetRuntimeError::RequestConflict {
-                    processor,
-                }));
-            }
-            current.published |= published;
-            return Ok(());
-        }
-
-        let targets =
-            processor_reset_target_keys(&processor, template, instances, scope, branch_key)?;
-        let mut branches = Vec::with_capacity(targets.len());
-        for key in targets {
-            nervix_primitives::task::consume_budget().await;
-            let previous = if let Some(entry) = instances.remove(&key) {
-                nervix_primitives::expect_lint!(
-                    nervix::lifecycle_call,
-                    "the concrete branch ending or detach transition withdraws its exact metric \
-                     identity",
-                    runtime.observe_branch_instance_removed(
-                        domain,
-                        template.branch.as_ref(),
-                        &key,
-                        None,
-                    )
-                );
-                let (response, receiver) = oneshot::channel();
-                nervix_primitives::expect_lint!(
-                    nervix::lifecycle_call,
-                    "the eviction, reset or ownership transfer transition ends its exact retained \
-                     branch task lifetime",
-                    stop_processor_branch_task(
-                        domain,
-                        processor.clone(),
-                        &key,
-                        entry,
-                        ProcessorBranchStopMode::Handoff(response),
-                    )
-                )
-                .await;
-                match receiver.await {
-                    Ok(handoff) => Some(handoff),
-                    Err(error) => {
-                        let restore = restore_processor_wasm_state_reset_branches(
-                            runtime,
-                            domain,
-                            template,
-                            instances,
-                            &mut branches,
-                        )
-                        .await;
-                        restore?;
-                        return Err(Report::new(WasmStateResetRuntimeError::StopBranch {
-                            processor,
-                        })
-                        .attach_printable(error));
-                    }
-                }
-            } else {
-                None
-            };
-            let initial_state = nervix_primitives::expect_lint!(
-                nervix::lifecycle_call,
-                "the state-generation reset constructs its one fresh guest before publishing the \
-                 replacement save",
-                template.prepare_fresh_wasm_state(runtime, domain, key.clone())
-            )
-            .await;
-            match initial_state {
-                Ok(initial_state) => branches.push(PreparedWasmStateResetBranch {
-                    key,
-                    initial_state: Some(initial_state),
-                    previous,
-                    activated: false,
-                }),
-                Err(error) => {
-                    branches.push(PreparedWasmStateResetBranch {
-                        key,
-                        initial_state: None,
-                        previous,
-                        activated: false,
-                    });
-                    restore_processor_wasm_state_reset_branches(
-                        runtime,
-                        domain,
-                        template,
-                        instances,
-                        &mut branches,
-                    )
-                    .await?;
-                    return Err(error);
-                }
-            }
-        }
-        *prepared = Some(PreparedWasmStateReset {
-            request,
-            scope,
-            published,
-            branches,
-        });
-        Ok(())
-    }
-}
-
-async fn abort_processor_wasm_state_reset(
-    runtime: &Runtime,
-    domain: &DomainName,
-    template: &BranchInstanceTemplate,
-    instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
-    request: &CommandExecutionReference,
-    prepared: &mut Option<PreparedWasmStateReset>,
-) -> error_stack::Result<(), WasmStateResetRuntimeError> {
-    let processor = ModelName::from(&template.owner.node.identifier);
-    let Some(current) = prepared.as_ref() else {
-        return Ok(());
-    };
-    if &current.request != request || current.published {
-        return Err(Report::new(WasmStateResetRuntimeError::RequestConflict {
-            processor,
-        }));
-    }
-    let mut current = prepared
-        .take()
-        .verified("the reset preparation was observed immediately before this take");
-    restore_processor_wasm_state_reset_branches(
-        runtime,
-        domain,
-        template,
-        instances,
-        &mut current.branches,
-    )
-    .await
-}
-
-impl ProcessorWasmStateResetContext<'_> {
-    async fn commit(
-        &self,
-        instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
-        last_persisted_lru_lsm: &mut u64,
-        reset: &nervix_models::WasmStateReset,
-        prepared: &mut Option<PreparedWasmStateReset>,
-    ) -> error_stack::Result<(), WasmStateResetRuntimeError> {
-        let runtime = self.runtime;
-        let domain = self.domain;
-        let template = self.template;
-        let processor = ModelName::from(&template.owner.node.identifier);
-        if prepared.is_none() {
-            self.prepare(
-                instances,
-                WasmStateResetPreparation {
-                    request: reset.request().clone(),
-                    scope: *reset.scope(),
-                    branch_key: None,
-                    published: true,
-                    reason: reset.reason(),
-                },
-                prepared,
-            )
-            .await?;
-        }
-        let current = prepared
-            .as_mut()
-            .verified("the preparation above either returned an error or installed reset state");
-        if !current.matches(reset.request(), *reset.scope()) {
-            return Err(Report::new(WasmStateResetRuntimeError::RequestConflict {
-                processor,
-            }));
-        }
-        current.published = true;
-
-        let execution_now = nervix_primitives::expect_lint!(
-            nervix::lifecycle_call,
-            "this task or concrete branch transition attaches its retained domain clock before \
-             executing in the selected lifetime",
-            runtime.bind_domain_clock(domain)
-        )
-        .change_context_lazy(|| WasmStateResetRuntimeError::InitialCheckpoint {
-            processor: processor.clone(),
-        })?
-        .snapshot()
-        .change_context_lazy(|| WasmStateResetRuntimeError::InitialCheckpoint {
-            processor: processor.clone(),
-        })?
-        .now();
-        for branch in &mut current.branches {
-            nervix_primitives::task::consume_budget().await;
-            if branch.activated {
-                continue;
-            }
-            let key = branch.key.clone();
-            let task = nervix_primitives::expect_lint!(
-                nervix::lifecycle_call,
-                "the missing or replacement concrete branch installs one retained task under its \
-                 branch key and incarnation",
-                spawn_processor_branch_task(
-                    ProcessorRuntimeContext::new(runtime.clone(), domain.clone()),
-                    template,
-                    key.clone(),
-                    VecDeque::new(),
-                    ProcessorBranchLifetime::Appeared,
-                    instances.next_incarnation(),
-                )
-            )
-            .await
-            .change_context_lazy(|| WasmStateResetRuntimeError::InitialCheckpoint {
-                processor: processor.clone(),
-            })?;
-            nervix_primitives::expect_lint!(
-                nervix::lifecycle_call,
-                "the concrete branch creation transition registers its one metric identity",
-                runtime.observe_branch_instance_created(domain, template.branch.as_ref(), &key)
-            );
-            instances.insert_changed(key, execution_now, task);
-            branch.activated = true;
-        }
-        nervix_primitives::expect_lint!(
-            nervix::lifecycle_call,
-            "a committed guest-state reset offers the recreated branch lifecycle to the replicas \
-             once, as the new generation begins",
-            publish_branch_instance_lru_snapshot(runtime, domain, template, instances)
-        )
-        .change_context_lazy(|| WasmStateResetRuntimeError::InitialCheckpoint {
-            processor: processor.clone(),
-        })?;
-        nervix_primitives::expect_lint!(
-            nervix::lifecycle_call,
-            "explicit checkpoint cadence or terminal teardown captures one branch lifecycle \
-             generation; the record path does not invoke it",
-            persist_branch_instance_lru_snapshot(
-                runtime,
-                domain,
-                template,
-                instances,
-                last_persisted_lru_lsm,
-            )
-        )
-        .change_context_lazy(|| WasmStateResetRuntimeError::InitialCheckpoint {
-            processor: processor.clone(),
-        })?;
-        let branch_lru =
-            branch_lru_placement(runtime, domain, template).change_context_lazy(|| {
-                WasmStateResetRuntimeError::InitialCheckpoint {
-                    processor: processor.clone(),
-                }
-            })?;
-        let branch_lru_deadline = Instant::now()
-            .checked_add(WASM_CHECKPOINT_DEADLINE)
-            .assured("the configured WASM checkpoint deadline stays within Instant");
-        nervix_primitives::expect_lint!(
-            nervix::lifecycle_call,
-            "the state-generation reset confirms its exact branch lifecycle before publishing the \
-             replacement save",
-            runtime.confirm_branch_lru_checkpoint(
-                &branch_lru,
-                instances.version(),
-                branch_lru_deadline
-            )
-        )
-        .await
-        .change_context_lazy(|| WasmStateResetRuntimeError::InitialCheckpoint {
-            processor: processor.clone(),
-        })?;
-
-        for branch in &mut current.branches {
-            nervix_primitives::task::consume_budget().await;
-            let Some(initial_state) = branch.initial_state.as_ref() else {
-                continue;
-            };
-            nervix_primitives::expect_lint!(
-                nervix::lifecycle_call,
-                "the state-generation reset installs and commits its one initial replacement save",
-                runtime.commit_wasm_state_reset_checkpoint(
-                    domain,
-                    &processor,
-                    template.owner.unit,
-                    branch.key.clone(),
-                    initial_state.clone(),
-                )
-            )
-            .await?;
-            branch.initial_state = None;
-        }
-        for branch in &mut current.branches {
-            branch.previous.take();
-        }
-        Ok(())
-    }
-}
-
-fn complete_processor_wasm_state_reset(
-    processor: &ModelName,
-    reset: &nervix_models::WasmStateReset,
-    fence: &mut Option<nervix_models::WasmStateReset>,
-    prepared: &mut Option<PreparedWasmStateReset>,
-) -> error_stack::Result<(), WasmStateResetRuntimeError> {
-    if let Some(current) = fence.as_ref()
-        && (current.request() != reset.request() || current.scope() != reset.scope())
-    {
-        return Err(Report::new(WasmStateResetRuntimeError::RequestConflict {
-            processor: processor.clone(),
-        }));
-    }
-    if let Some(current) = prepared.as_ref()
-        && !current.matches(reset.request(), *reset.scope())
-    {
-        return Err(Report::new(WasmStateResetRuntimeError::RequestConflict {
-            processor: processor.clone(),
-        }));
-    }
-    *prepared = None;
-    *fence = None;
-    Ok(())
-}
-
 pub(super) struct ProcessorNodeDispatchContext<'a> {
     pub(super) runtime_handle: &'a Runtime,
     pub(super) domain: &'a DomainName,
@@ -1200,7 +951,7 @@ pub(super) struct ProcessorNodeDispatchContext<'a> {
 
 pub(super) async fn dispatch_processor_node_input(
     context: ProcessorNodeDispatchContext<'_>,
-    instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+    instances: &mut ProcessorBranches,
     relay: RelayName,
     batch: RelayRecordBatch,
     dequeued_work: NodeQuiesceWorkGuard,
@@ -1266,7 +1017,8 @@ pub(super) async fn dispatch_processor_node_input(
                 return;
             }
         };
-        let state = instances.insert_changed(key.clone(), accepted_at, state);
+        let state =
+            instances.insert_changed(key.clone(), accepted_at, ProcessorBranchSlot::Live(state));
         GetOrCreateBranchInstance {
             state,
             created: true,
@@ -1314,12 +1066,22 @@ pub(super) async fn dispatch_processor_node_input(
             );
         }
     }
+    let Some(task) = instance.state.live() else {
+        // The key was released to the unit its branch's partition count places it in, which
+        // receives its input from here on; input that still reaches this unit is refused, and
+        // its source sends it again.
+        for ack in batch.acks.iter() {
+            ack.no_ack("the key moved to the partition its branch's count places it in");
+        }
+        drop(dequeued_work);
+        return;
+    };
     let input = ProcessorBranchInput {
         relay,
         batch,
         work: dequeued_work,
     };
-    if let Err(mpsc::error::SendError(input)) = instance.state.input.send(input).await {
+    if let Err(mpsc::error::SendError(input)) = task.input.send(input).await {
         runtime_handle.handle_internal_processor_error_for_acks(
             domain,
             template.owner.node.kind,
@@ -1342,19 +1104,21 @@ pub(super) async fn dispatch_processor_node_input(
                     None,
                 )
             );
-            nervix_primitives::expect_lint!(
-                nervix::lifecycle_call,
-                "the eviction, reset or ownership transfer transition ends its exact retained \
-                 branch task lifetime",
-                stop_processor_branch_task(
-                    domain,
-                    &template.owner.node.identifier,
-                    &key,
-                    entry,
-                    ProcessorBranchStopMode::Detach,
+            if let Some(task) = entry.live() {
+                nervix_primitives::expect_lint!(
+                    nervix::lifecycle_call,
+                    "the eviction, reset or ownership transfer transition ends its exact retained \
+                     branch task lifetime",
+                    stop_processor_branch_task(
+                        domain,
+                        &template.owner.node.identifier,
+                        &key,
+                        task,
+                        ProcessorBranchStopMode::Detach,
+                    )
                 )
-            )
-            .await;
+                .await;
+            }
         }
         drop(input.work);
     }
@@ -1638,12 +1402,8 @@ async fn run_processor_branch_task(
             continue;
         }
         // Freeze rechecks are physical, so they stay a plain monotonic sleep. The branch's own
-        // deadline is logical and is awaited on the domain clock below.
-        let idle_sleep = if ownership_frozen {
-            OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL
-        } else {
-            PROCESSOR_BRANCH_TASK_IDLE_SLEEP
-        };
+        // deadline is logical and is awaited on the domain clock below. An unfrozen branch with
+        // no deadline waits only for its input and commands.
         let awaited_branch_deadline = if ownership_frozen {
             None
         } else {
@@ -1819,7 +1579,7 @@ async fn run_processor_branch_task(
                     break;
                 }
             }
-            _ = sleep(idle_sleep) => {}
+            _ = sleep(OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL), if ownership_frozen => {}
         }
     }
     while let Ok(ProcessorBranchInput { relay, batch, work }) = input.try_recv() {
@@ -1904,7 +1664,7 @@ pub(super) async fn stop_processor_branch_task(
     domain: &DomainName,
     processor: impl Into<ModelName>,
     key: &Option<BranchKey>,
-    entry: Arc<ProcessorBranchTask>,
+    entry: &ProcessorBranchTask,
     mode: ProcessorBranchStopMode,
 ) {
     let processor = processor.into();
@@ -1960,16 +1720,19 @@ pub(super) async fn stop_processor_branch_task(
 )]
 pub(super) async fn checkpoint_all_processor_branch_instances(
     processor: impl Into<ModelName>,
-    instances: &BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+    instances: &ProcessorBranches,
     purpose: ProcessorCheckpointPurpose,
 ) -> OwnershipHandoffResult<PersistedRuntimeStateEntry> {
     let processor = processor.into();
     let states = instances.states();
     for entry in states {
         nervix_primitives::task::consume_budget().await;
+        // A released key's branch already stopped with its final state persisted.
+        let Some(task) = entry.live() else {
+            continue;
+        };
         let (response, receiver) = oneshot::channel();
-        entry
-            .commands
+        task.commands
             .send(ProcessorBranchCommand::Checkpoint { purpose, response })
             .await
             .map_err(|_| {
@@ -2005,18 +1768,32 @@ pub(super) async fn handoff_all_processor_branch_instances(
     domain: &DomainName,
     processor: impl Into<ModelName>,
     branch: Option<&BranchName>,
-    instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+    instances: &mut ProcessorBranches,
 ) -> Vec<ProcessorBranchHandoff> {
     let processor = processor.into();
     let mut handoffs = Vec::new();
     for (key, entry) in instances.drain() {
         runtime.observe_branch_instance_removed(domain, branch, &key, None);
+        let task = match entry.as_ref() {
+            ProcessorBranchSlot::Live(task) => task,
+            ProcessorBranchSlot::Released(released) => {
+                // A released key's state stays with this unit until its claimant asks to forget
+                // it, so the successor restores it as a branch and releases it again.
+                handoffs.push(ProcessorBranchHandoff {
+                    key,
+                    restored_at: released.last_activity,
+                    incarnation: released.incarnation,
+                    pending_materialized: VecDeque::new(),
+                });
+                continue;
+            }
+        };
         let (response, receiver) = oneshot::channel();
         stop_processor_branch_task(
             domain,
             processor.clone(),
             &key,
-            entry,
+            task,
             ProcessorBranchStopMode::Handoff(response),
         )
         .await;
@@ -2033,7 +1810,7 @@ pub(super) async fn expire_processor_branch_instances(
     template: &BranchInstanceTemplate,
     now: Timestamp,
     expiration_after: Duration,
-    instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+    instances: &mut ProcessorBranches,
 ) {
     let processor = ModelName::from(&template.owner.node.identifier);
     for (key, entry) in instances.expire(now, expiration_after) {
@@ -2048,24 +1825,26 @@ pub(super) async fn expire_processor_branch_instances(
             )
         );
         template.retire_branch_channels(&key);
-        nervix_primitives::expect_lint!(
-            nervix::lifecycle_call,
-            "the eviction, reset or ownership transfer transition ends its exact retained branch \
-             task lifetime",
-            stop_processor_branch_task(
-                domain,
-                processor.clone(),
-                &key,
-                entry,
-                ProcessorBranchStopMode::Evict,
+        if let Some(task) = entry.live() {
+            nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "the eviction, reset or ownership transfer transition ends its exact retained \
+                 branch task lifetime",
+                stop_processor_branch_task(
+                    domain,
+                    processor.clone(),
+                    &key,
+                    task,
+                    ProcessorBranchStopMode::Evict,
+                )
             )
-        )
-        .await;
+            .await;
+        }
         if template.owner.node.kind == ModelKind::WindowProcessor
             && let Err(error) = nervix_primitives::expect_lint!(
                 nervix::lifecycle_call,
                 "the concrete branch eviction withdraws its exact retained window placement",
-                runtime.release_evicted_window_state(domain, &processor, &key)
+                runtime.release_evicted_window_state(domain, &processor, template.owner.unit, &key)
             )
         {
             warn!(error = %format_args!("{error:#}"), "failed to release evicted window state");
@@ -2084,7 +1863,7 @@ pub(super) async fn evict_processor_branch_instances_to_capacity(
     domain: &DomainName,
     template: &BranchInstanceTemplate,
     max_instances: NonZeroUsize,
-    instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+    instances: &mut ProcessorBranches,
 ) {
     let processor = ModelName::from(&template.owner.node.identifier);
     for (key, entry) in instances.evict_lru_to_capacity(max_instances) {
@@ -2099,24 +1878,26 @@ pub(super) async fn evict_processor_branch_instances_to_capacity(
             )
         );
         template.retire_branch_channels(&key);
-        nervix_primitives::expect_lint!(
-            nervix::lifecycle_call,
-            "the eviction, reset or ownership transfer transition ends its exact retained branch \
-             task lifetime",
-            stop_processor_branch_task(
-                domain,
-                processor.clone(),
-                &key,
-                entry,
-                ProcessorBranchStopMode::Evict,
+        if let Some(task) = entry.live() {
+            nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "the eviction, reset or ownership transfer transition ends its exact retained \
+                 branch task lifetime",
+                stop_processor_branch_task(
+                    domain,
+                    processor.clone(),
+                    &key,
+                    task,
+                    ProcessorBranchStopMode::Evict,
+                )
             )
-        )
-        .await;
+            .await;
+        }
         if template.owner.node.kind == ModelKind::WindowProcessor
             && let Err(error) = nervix_primitives::expect_lint!(
                 nervix::lifecycle_call,
                 "the concrete branch eviction withdraws its exact retained window placement",
-                runtime.release_evicted_window_state(domain, &processor, &key)
+                runtime.release_evicted_window_state(domain, &processor, template.owner.unit, &key)
             )
         {
             warn!(error = %format_args!("{error:#}"), "failed to release evicted window state");
@@ -2143,16 +1924,19 @@ pub(super) async fn shutdown_all_processor_branch_instances(
     domain: &DomainName,
     processor: impl Into<ModelName>,
     branch: Option<&BranchName>,
-    instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+    instances: &mut ProcessorBranches,
 ) {
     let processor = processor.into();
     for (key, entry) in instances.drain() {
         runtime.observe_branch_instance_removed(domain, branch, &key, None);
+        let Some(task) = entry.live() else {
+            continue;
+        };
         stop_processor_branch_task(
             domain,
             processor.clone(),
             &key,
-            entry,
+            task,
             ProcessorBranchStopMode::Detach,
         )
         .await;

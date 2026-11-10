@@ -211,6 +211,7 @@ use crate::common::{
 };
 
 mod backup;
+mod branch_repartition;
 mod cli_outcomes;
 mod cli_repl;
 mod clickhouse_connections;
@@ -491,6 +492,7 @@ struct ScenarioWorld {
     endpoint_websocket: Option<endpoint_intake::EndpointWebsocket>,
     endpoint_requests: endpoint_intake::requests::EndpointRequests,
     websocket_peer: Option<websocket_lifecycle::WebsocketPeer>,
+    websocket_handoff_peer: Option<websocket_lifecycle::HandoffPeer>,
     transaction_clients: BTreeMap<String, Client>,
     /// The paced simulation drivers a scenario ran, and the files their runs share.
     paced_simulation: paced_simulation::PacedSimulation,
@@ -37798,6 +37800,17 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.syslog_listener_fault = None;
                 world.syslog_silent_client = None;
                 world.producers = client_producers::ScenarioProducers::default();
+                let websocket_handoff_cleanup =
+                    if let Some(peer) = world.websocket_handoff_peer.take() {
+                        Some(peer.stop().await)
+                    } else {
+                        None
+                    };
+                if let Some(Err(error)) = &websocket_handoff_cleanup {
+                    append_cucumber_log_line(&format!(
+                        "scenario teardown failed: responsive WebSocket handoff peer: {error}"
+                    ));
+                }
                 stop_receivers(world).await;
                 close_browser(world).await;
                 world.active_session = None;
@@ -37889,6 +37902,11 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                     &format!("body={body} {cluster_cleanup}"),
                 );
                 world.scenario_admission = None;
+                if let Some(cleanup) = websocket_handoff_cleanup {
+                    cleanup.assured(
+                        "the responsive WebSocket handoff peer is checked after all other cleanup",
+                    );
+                }
                 if let Some(cleanup) = rabbitmq_cleanup {
                     cleanup.assured(
                         "the scenario-owned RabbitMQ broker is removed after all other cleanup",

@@ -1,13 +1,16 @@
-//! Bounded copies of the rows a reorderer holds, and the columns an owner page gathers from copies.
+//! Bounded copies of the rows a reorderer holds, the columns an owner page gathers from copies, and
+//! the page of a unit still restoring its branches.
 //!
 //! Layer: test harness.
 //! - **Owns.** The owner-level contracts of a held-row read: a copy skips the rows earlier pages
 //!   returned, keeps the branch's arrival order across batches, stops at its row or byte bound and
 //!   never copies part of a run past that bound; gathered sections keep the copies' row order in
 //!   runs of one section and one branch, with payload values taken from the held batches and
-//!   order keys and deadlines in their exact types.
-//! - **Depends on.** The production reorderer buffer, the bounded copy and the section builders.
-//! - **Must not know.** Branch tasks, sessions, Row frames or the interconnect.
+//!   order keys and deadlines in their exact types; and a unit whose restore is pending refuses
+//!   its owner page as unrestored without asking any branch task for its rows.
+//! - **Depends on.** The production reorderer buffer, the bounded copy, the section builders, the
+//!   unit's production selection answer and the owner page read.
+//! - **Must not know.** Sessions, Row frames or the interconnect.
 
 #![cfg_attr(
     nervix_lint,
@@ -21,6 +24,7 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field};
 use nervix_models::{ParseAsType, Timestamp};
+use nervix_primitives::time::timeout;
 
 use super::*;
 use crate::{
@@ -374,6 +378,178 @@ fn correlator_sections_split_each_side_and_keep_its_timeout() {
         vec![103]
     );
     assert!(left.key_fields.is_empty() && right.key_fields.is_empty());
+}
+
+/// How long the page test waits for a unit, a branch or a read that should answer at once, so a
+/// regression that leaves one waiting fails the test instead of hanging it.
+const ANSWERS_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A branch task's handle, as a unit's registry keeps it, and the commands that task receives.
+fn branch_channels() -> (ProcessorBranchTask, mpsc::Receiver<ProcessorBranchCommand>) {
+    let (input, _input) = mpsc::channel(1);
+    let (commands, received) = mpsc::channel(1);
+    let branch = ProcessorBranchTask {
+        input,
+        commands,
+        task: nervix_primitives::sync::blocking::Mutex::new(None),
+    };
+    (branch, received)
+}
+
+/// A reorderer unit task that answers an inspection's branch selection as the production one does,
+/// through the production answer from its own registry, which holds `branch` live as its
+/// unbranched state, while its restore is pending or once it has installed that branch.
+fn selecting_unit(branch: ProcessorBranchTask, restore_pending: bool) -> ScheduledNodeTask {
+    let mut instances = ProcessorBranches::new();
+    instances.insert_restored(
+        None,
+        Timestamp::from_unix_nanos(1_000),
+        7,
+        ProcessorBranchSlot::Live(branch),
+    );
+    let (commands, mut requests) = mpsc::channel(1);
+    let task = nervix_primitives::task::spawn(async move {
+        while let Some(command) = requests.recv().await {
+            nervix_primitives::task::consume_budget().await;
+            let ProcessorNodeCommand::SelectStateBranches {
+                selection,
+                response,
+            } = command
+            else {
+                panic!("an inspection asks its unit only for the branches it reads");
+            };
+            SelectedStateBranches::answer(response, &instances, selection, restore_pending);
+        }
+    });
+    ScheduledNodeTask { commands, task }
+}
+
+/// A unit whose restore is pending refuses its owner page as unrestored without asking any branch
+/// task, so the read never reports branches the restore has not installed as an empty state. Once
+/// the unit has installed its branch, the same read asks that branch and answers with its page.
+#[nervix_primitives::test]
+async fn a_unit_still_restoring_its_branches_refuses_its_page_without_reading_a_branch() {
+    let runtime = Runtime::default();
+    let domain = domain("restoring");
+    install_test_domain_execution(
+        &runtime,
+        &domain,
+        Vec::new(),
+        DomainRoutingSnapshot::default(),
+    );
+    let processor = NodeRef::new(
+        ModelKind::Reorderer,
+        named::<ModelName>("held_notifications"),
+    );
+    let unit = NodeUnitRef::new(processor.clone(), Unit::SINGLE);
+    let bounds = || ProcessorStatePageBounds {
+        rows: 10,
+        bytes: u64::MAX,
+    };
+
+    let (branch, mut branch_commands) = branch_channels();
+    runtime
+        .inner
+        .executions
+        .get_mut(&domain)
+        .assured("the test installed the domain's execution")
+        .node_tasks
+        .insert(unit.clone(), selecting_unit(branch, true));
+    let page = timeout(
+        ANSWERS_WITHIN,
+        runtime.local_processor_state_page(
+            &domain,
+            &processor,
+            Unit::SINGLE,
+            StateInspectionBranchSelection::All,
+            None,
+            bounds(),
+        ),
+    )
+    .await
+    .assured("a unit still restoring its branches refuses the read at once");
+    let Err(refused) = page else {
+        panic!("a unit still restoring its branches answers no page");
+    };
+    assert!(
+        matches!(
+            refused.current_context(),
+            ProcessorStatePageError::Unrestored
+        ),
+        "the page is refused as unrestored, found {refused:?}"
+    );
+    let restoring = runtime
+        .inner
+        .executions
+        .get_mut(&domain)
+        .assured("the test installed the domain's execution")
+        .node_tasks
+        .remove(&unit)
+        .assured("the restoring unit is installed");
+    drop(restoring.commands);
+    timeout(ANSWERS_WITHIN, restoring.task)
+        .await
+        .assured("the unit ends once nothing can send it a command")
+        .assured("the unit task ends without a panic");
+    let asked = timeout(ANSWERS_WITHIN, branch_commands.recv())
+        .await
+        .assured("the branch's commands close once its unit has ended");
+    assert!(
+        asked.is_none(),
+        "the refused read asked no branch task for its rows"
+    );
+
+    let (branch, mut branch_commands) = branch_channels();
+    runtime
+        .inner
+        .executions
+        .get_mut(&domain)
+        .assured("the test installed the domain's execution")
+        .node_tasks
+        .insert(unit, selecting_unit(branch, false));
+    let answering = nervix_primitives::task::spawn(async move {
+        let Some(ProcessorBranchCommand::Inspect { response, .. }) = branch_commands.recv().await
+        else {
+            panic!("the restored unit's read asks its branch for the rows it holds");
+        };
+        answer_branch_state(
+            response,
+            7,
+            HandledEvents::default(),
+            Ok(HeldBranchRows {
+                rows: 0,
+                bytes: 0,
+                copied_bytes: 0,
+                kind: HeldRowsKind::Reorderer {
+                    key_fields: Vec::new(),
+                    rows: Vec::new(),
+                },
+            }),
+        );
+    });
+    let page = timeout(
+        ANSWERS_WITHIN,
+        runtime.local_processor_state_page(
+            &domain,
+            &processor,
+            Unit::SINGLE,
+            StateInspectionBranchSelection::All,
+            None,
+            bounds(),
+        ),
+    )
+    .await
+    .assured("a restored unit answers its page once its branch answers")
+    .assured("a restored unit answers its page");
+    timeout(ANSWERS_WITHIN, answering)
+        .await
+        .assured("the branch is asked for its rows")
+        .assured("the branch answers the read it was asked");
+    assert_eq!(
+        (page.generation, page.counts.rows, page.offset, page.more),
+        (7, 0, 0, false),
+        "the page names the lifetime of the branch it read and that branch's complete counts"
+    );
 }
 
 #[test]

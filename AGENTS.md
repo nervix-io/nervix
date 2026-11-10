@@ -523,9 +523,10 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   fixed-value contracts, validation, carriers, change procedures, capability sizing, settings
   enforcement.
 - [Cryptography](docs/src/cryptography.md): how Nervix obtains a TLS provider, a digest used for
-  security, a random value or a password or key derivation; a non-approved hash or the purpose a
+  security, a random value, a password or key derivation or a signature; the interconnect's fixed
+  TLS set, the outward TLS policy and the paths it governs; a non-approved hash or the purpose a
   site records for it; a dependency that brings cryptography into the `nervix-server` product graph;
-  the `non_aws_lc_crypto` count.
+  the authored-cryptography check and the `non_aws_lc_crypto` count; the FIPS migration's steps.
 - [Execution Plans](docs/src/execution-plans.md): revision construction; typed node, resource,
   ingestor, emitter, processor or message-error plans; schedule-delta application; graph publication;
   plan-based recovery.
@@ -776,25 +777,38 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
 ## Cryptography
 
 [Cryptography](docs/src/cryptography.md) owns the boundary, the algorithm policy, the classification
-register and the inventory these rules refer to.
+register, the inventory, the check and the count these rules refer to, and their evidence.
 
-- Nervix-authored cryptography (the TLS provider, digests used for security, secure randomness,
-  password and key derivation) comes only from the `nervix-crypto` boundary. Until that crate exists
-  it is the target, and every authored use outside it is debt the `non_aws_lc_crypto` count records.
+- Nervix-authored cryptography (TLS providers, digests used for security, secure randomness,
+  password and key derivation, signing) comes only from the `nervix-crypto` boundary on AWS-LC.
+  `nervix-crypto-policy` names TLS algorithms and `nervix-tls` publishes the outward policy; neither
+  implements any. `just ratchet`, in `just validate`, refuses every other authored use, which the
+  stable source parser finds in every configuration, `nervix_lint` included; no baseline admits
+  one.
 - Anything that protects confidentiality, integrity or authenticity uses an algorithm AWS-LC
   provides and FIPS 140-3 approves.
 - A non-approved hash (BLAKE3, MD5, SHA-1, xxHash, CRC) is allowed only for a non-security purpose,
-  which the site records and the chapter lists.
+  which the site records and the chapter's classification register lists; a BLAKE3 operation,
+  import or field records it in a Rustdoc line beginning `Non-security BLAKE3:`. A security purpose
+  takes SHA-256 from the boundary.
+- The interconnect's TLS algorithms are a fixed contract, never a setting. Every outward TLS
+  listener or client takes the committed policy through `nervix-tls`; one whose driver owns its
+  configuration joins the chapter's known gaps in the same change.
 - No change adds a dependency that brings a cryptography implementation other than AWS-LC into the
   `nervix-server` product graph; a connector need that cannot be met is recorded on its connector
   epic.
 - A second `aws-lc-*-sys` crate in the product, or a second version of one, is a defect that
   `just ratchet` refuses. An `aws-lc-rs` upgrade that moves to another `aws-lc-sys` moves Nervix's
   `rust-rdkafka` fork to it in the same change.
-- The `non_aws_lc_crypto` count only decreases. It counts authored uses of cryptography outside
-  AWS-LC, found by the stable source parser in every configuration, and each dependency edge of the
-  `nervix-server` normal and build graph onto a crate implementing other cryptography;
-  `just ratchet --show non_aws_lc_crypto` lists every site.
+- The `non_aws_lc_crypto` count, of each dependency edge of the `nervix-server` normal and build
+  graph onto a crate implementing other cryptography, only decreases until the FIPS migration and
+  the connector epics drain it; `just ratchet --show non_aws_lc_crypto` lists every edge.
+- A change to the boundary, the algorithm catalog, the outward policy or a governed TLS path runs
+  the focused checks the chapter's
+  [evidence](docs/src/cryptography.md#guarantees-limits-and-evidence) names. A change to a signed
+  document's shape rewrites and commits both AWS-LC builds' vectors together
+  (`just signature-vectors ordinary` and `fips`), and `just test-signature-vectors` verifies both
+  on either build.
 
 ## Maintained Implementations
 
@@ -1130,13 +1144,15 @@ inventory and CI policy, and native coverage uses matching LLVM tools.
 
 Architecture debt is counted and only decreases. `just ratchet` counts oversized files, actual Rust
 cast expressions, struct fields whose presence depends on `cfg(feature = "testing")`, functions
-whose cyclomatic complexity exceeds 30, [`hidden_tunables`](#node-settings) and
-[`non_aws_lc_crypto`](#cryptography), over tracked and newly authored Rust. Its stable source parser
-sees inactive branches and named or tuple fields; raw identifiers, import aliases, qualified paths
-and conditional documentation attributes are not those facts. CI fails when a structural count
-exceeds `debt-baseline.json`. A change may lower a count, never raise one; when a count falls, run
-`just ratchet --update` and commit the baseline. `just ratchet --show <count>` lists a count's
-sites.
+whose cyclomatic complexity exceeds 30 and [`hidden_tunables`](#node-settings) over tracked and
+newly authored Rust, and [`non_aws_lc_crypto`](#cryptography) over the product dependency graph.
+Its stable source parser sees inactive branches and named or tuple fields; raw identifiers, import
+aliases, qualified paths and conditional documentation attributes are not those facts. CI fails
+when a structural count exceeds `debt-baseline.json`. A change may lower a count, never raise one;
+when a count falls, run `just ratchet --update` and commit the baseline.
+`just ratchet --show <count>` lists a count's sites. Some defects have no count: the gate refuses
+authored cryptography outside AWS-LC and a second AWS-LC module outright, whatever the baseline
+holds.
 
 Complexity is measured by the cargo-crap version `nervix-ratchet crap` pins, which
 `just install-cargo-crap` builds through kache; another version is refused, and an analysis that

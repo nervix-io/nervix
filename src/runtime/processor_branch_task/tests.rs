@@ -21,7 +21,10 @@ use nervix_primitives::{
 
 use super::*;
 use crate::{
-    runtime::scheduled_node::ScheduledNodeHandoffError,
+    runtime::{
+        processor_wasm_state_reset::processor_reset_target_keys,
+        scheduled_node::ScheduledNodeHandoffError,
+    },
     runtime_ack::AckSet,
     runtime_schema::{RuntimeValue, compile_schema, test_runtime_row},
 };
@@ -41,6 +44,7 @@ fn reset_target_template(entity_kind: ModelKind, branched: bool) -> BranchInstan
         relays: HashMap::default(),
         processors: HashMap::default(),
         wasm_state_reset: None,
+        partition_transition: None,
     }
 }
 
@@ -240,8 +244,9 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
         .into_iter()
         .collect(),
         wasm_state_reset: None,
+        partition_transition: None,
     };
-    let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
+    let mut instances = ProcessorBranches::new();
     let domain_clock = runtime
         .bind_domain_clock(&domain)
         .expect("the fixture installs a running unpaced clock");
@@ -339,16 +344,16 @@ async fn processor_dispatch_hands_dequeued_work_into_branch_mailbox() {
     let (input_tx, mut input_rx) = mpsc::channel(1);
     let (commands, _command_rx) = mpsc::channel(1);
     let task = nervix_primitives::task::spawn(std::future::pending::<()>());
-    let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
+    let mut instances = ProcessorBranches::new();
     instances.insert_restored(
         None,
         Timestamp::now(),
         1,
-        ProcessorBranchTask {
+        ProcessorBranchSlot::Live(ProcessorBranchTask {
             input: input_tx,
             commands,
             task: nervix_primitives::sync::blocking::Mutex::new(Some(AbortOnDropHandle::new(task))),
-        },
+        }),
     );
 
     dispatch_processor_node_input(
@@ -381,6 +386,8 @@ async fn processor_dispatch_hands_dequeued_work_into_branch_mailbox() {
         .remove(&None)
         .expect("test branch task should remain registered");
     let task = entry
+        .live()
+        .expect("test branch task should still be live")
         .task
         .lock()
         .take()
@@ -402,7 +409,7 @@ async fn accepted_processor_input_records_branch_activity_at_its_own_domain_time
     let (input_tx, mut input_rx) = mpsc::channel(1);
     let (commands, _command_rx) = mpsc::channel(1);
     let task = nervix_primitives::task::spawn(std::future::pending::<()>());
-    let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
+    let mut instances = ProcessorBranches::new();
     // A supervisor that started waiting long before this batch arrived would hold a sample
     // this old. Accepting the input must replace it with the domain time of the acceptance.
     let stale = Timestamp::from_unix_nanos(1_000_000_000);
@@ -410,11 +417,11 @@ async fn accepted_processor_input_records_branch_activity_at_its_own_domain_time
         None,
         stale,
         1,
-        ProcessorBranchTask {
+        ProcessorBranchSlot::Live(ProcessorBranchTask {
             input: input_tx,
             commands,
             task: nervix_primitives::sync::blocking::Mutex::new(Some(AbortOnDropHandle::new(task))),
-        },
+        }),
     );
     let domain_clock = runtime
         .bind_domain_clock(&domain)
@@ -459,6 +466,8 @@ async fn accepted_processor_input_records_branch_activity_at_its_own_domain_time
         .remove(&None)
         .expect("test branch task should remain registered");
     let task = entry
+        .live()
+        .expect("test branch task should still be live")
         .task
         .lock()
         .take()
@@ -646,7 +655,10 @@ async fn processor_handoff_drains_ready_batches_from_every_input() {
         template,
         vec![(orders, orders_input), (returns, returns_input)],
         shutdown_rx,
-        command_rx,
+        ProcessorNodeChannels {
+            commands: command_rx,
+            claim_reports: None,
+        },
         Vec::new(),
         Duration::from_secs(60),
     ));
