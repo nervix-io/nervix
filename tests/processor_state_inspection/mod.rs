@@ -59,6 +59,15 @@ fn last_state(world: &ScenarioWorld) -> &StateInspection {
         .assured("the command returned typed state")
 }
 
+fn processor_kind(state: &StateInspection) -> nervix_models::ModelKind {
+    state
+        .entity
+        .domain_node()
+        .assured("a processor inspection names a domain node")
+        .node
+        .kind
+}
+
 fn displayed_rows(section: &StateInspectionSection) -> Vec<DisplayedRow> {
     let mut rows = Vec::new();
     for frame in &section.frames {
@@ -139,7 +148,7 @@ fn complete_rows(state: &StateInspection) -> Vec<String> {
 }
 
 fn metadata_section(state: &StateInspection, section: &str) -> bool {
-    state.entity.node.kind == nervix_models::ModelKind::WindowProcessor
+    processor_kind(state) == nervix_models::ModelKind::WindowProcessor
         && matches!(section, "header" | "accumulators")
 }
 
@@ -287,7 +296,7 @@ fn counts(world: &mut ScenarioWorld, rows: u64, branches: u64) {
     };
     assert_eq!(page.counts.rows, rows, "{state:?}");
     assert_eq!(page.counts.branches, branches, "{state:?}");
-    if state.entity.node.kind == nervix_models::ModelKind::WindowProcessor {
+    if processor_kind(state) == nervix_models::ModelKind::WindowProcessor {
         if rows > 0 {
             assert!(
                 page.counts.bytes > 0,

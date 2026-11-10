@@ -131,7 +131,7 @@ fn described_counts(world: &mut ScenarioWorld) {
         .last_command_output
         .as_ref()
         .assured("DESCRIBE completed");
-    let label = if state.entity.node.kind == nervix_models::ModelKind::Deduplicator {
+    let label = if processor_kind(state) == nervix_models::ModelKind::Deduplicator {
         "keys"
     } else {
         "rows"

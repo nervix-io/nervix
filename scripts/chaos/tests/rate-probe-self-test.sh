@@ -7,14 +7,28 @@ script_dir="${chaos_dir}"
 source "${chaos_dir}/tool-images.sh"
 # shellcheck source=../link-degradation.sh
 source "${chaos_dir}/link-degradation.sh"
+# shellcheck source=../verifier-self-check.sh
+source "${chaos_dir}/verifier-self-check.sh"
 CHAOS_PROBE_IMAGE="${chaos_probe_image}"
 scenario=rate-probe-self-test
 run_id="rate-probe-check-$$-${RANDOM}"
-tmp_dir="${CHAOS_RATE_PROBE_ARTIFACTS:-$(mktemp -d)}"
-mkdir -p "${tmp_dir}"
+# The probes' raw streams and records. Inside a verifier self-check they are written straight into
+# the evidence directory the check names, so a deadline or a signal that ends the check before this
+# self-test's own exit trap finishes still leaves every record written until then with the check's
+# controller.
+if [[ -n "${CHAOS_RATE_PROBE_ARTIFACTS:-}" ]]; then
+    tmp_dir="${CHAOS_RATE_PROBE_ARTIFACTS}"
+    mkdir -p "${tmp_dir}"
+elif [[ -n "${CHAOS_SELF_TEST_EVIDENCE:-}" ]]; then
+    tmp_dir="${CHAOS_SELF_TEST_EVIDENCE}/rate-probe"
+    mkdir -p "${CHAOS_SELF_TEST_EVIDENCE}"
+    mkdir "${tmp_dir}"
+else
+    tmp_dir="$(mktemp -d)"
+fi
 
-# A failed self-test keeps its probes' raw streams and records: in the evidence directory that the
-# verifier self-check names, or where they are.
+# A passing self-test removes its probes' raw streams and records; a failed one keeps them where
+# they were written.
 cleanup() {
     local status=$?
     "${chaos_dir}/cleanup.sh" --run-id "${run_id}" --quiet >/dev/null 2>&1 || true
@@ -23,12 +37,7 @@ cleanup() {
         rm -rf "${tmp_dir}"
         return 0
     fi
-    local retained="${tmp_dir}"
-    if [[ -n "${CHAOS_SELF_TEST_EVIDENCE:-}" ]] && mkdir -p "${CHAOS_SELF_TEST_EVIDENCE}" \
-        && mv "${tmp_dir}" "${CHAOS_SELF_TEST_EVIDENCE}/rate-probe"; then
-        retained="${CHAOS_SELF_TEST_EVIDENCE}/rate-probe"
-    fi
-    printf 'rate probe self-test evidence retained in %s\n' "${retained}" >&2
+    printf 'rate probe self-test evidence retained in %s\n' "${tmp_dir}" >&2
 }
 trap cleanup EXIT
 fail() { printf 'rate probe self-test failed: %s\n' "$*" >&2; exit 1; }
@@ -39,6 +48,9 @@ for image in "${CHAOS_PROBE_IMAGE}" "${chaos_nettools_image}"; do
             || fail "pinned tool image ${image} is unavailable"
     fi
 done
+# Recorded before anything carries it, so the verifier self-check's controller removes the
+# namespace owners and helpers when a deadline or a signal ends this self-test before its cleanup.
+chaos_verifier_register_run "${run_id}"
 docker network create --label "io.nervix.chaos.run=${run_id}" "${run_id}" >/dev/null
 # Namespace owners live until cleanup, independently of how long the controls take on this
 # worker. Each probe keeps its own bound; an owner must not expire between controls.
