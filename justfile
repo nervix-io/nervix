@@ -369,6 +369,19 @@ test-scenarios *args: tests-deps test-client-python-api-run
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
 
+# Exercise the compiled runner's expected-empty failures; no scenario workload is qualified.
+test-scenario-selection-guards binary="" evidence="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    binary={{ quote(binary) }}
+    evidence={{ quote(evidence) }}
+    if [[ -z "$binary" ]]; then binary="$(python3 -m scripts.scenario_shards executable)"; fi
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    if [[ -z "$evidence" ]]; then
+        evidence="$(mktemp -d {{ quote(cargo_target_dir + "/scenario-selection-guards.XXXXXXXX") }})"
+    fi
+    python3 -m scripts.scenario_selection_qualification "$binary" "$evidence"
+
 # Exercise transport payload facts without unrelated paced client-driver preparation.
 test-ingestor-payload *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash

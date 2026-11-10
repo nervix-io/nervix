@@ -564,6 +564,14 @@ no scenarios also fails, including when its name, tag or shard filter matched no
 counts never qualify a workload. The harness regressions cover relative and absolute literal
 files, directories, wildcard/brace/question-mark/character-class patterns and missing inputs.
 
+The scenario-build job also runs `just test-scenario-selection-guards` against its already compiled
+runner after publishing its cache and archives. Two bounded child invocations select a missing glob
+or an unmatched name, and the supervisor requires the specific failure exit and exactly zero
+scenario work. It retains their logs and separate qualification profiles, restores the previous
+logs, and uploads its control counts. These expected failures qualify the guard; they never supply
+ordinary workload or coverage verdicts. An explicit binary and evidence directory replay the same
+check locally without compiling.
+
 The relay-channel turnover scenario posts through an acknowledged HTTP endpoint on a node other
 than the relay owner. Its generated-payload step reuses one HTTP client and requires each request
 to return HTTP 200 with the complete `completed` / `none` outcome before posting the next tenant.
