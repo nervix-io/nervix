@@ -577,8 +577,8 @@ class InventoryTests(unittest.TestCase):
             "inferencer-state-snapshots-malformed": 1,
             "inferencer-native-snapshot-projection": 1,
             "console-emitter-drafts": 5,
-            "console-processor-drafts": 5,
-            "client-requests": 11,
+            "console-processor-drafts": 6,
+            "client-requests": 12,
             "client-producer-link-frames": 10,
             "client-producer-link-frames-malformed": 10,
         }.items():

@@ -2,7 +2,8 @@
 //!
 //! Layer: test harness, outside product layer order.
 //! - **Owns.** Independent semantic-to-form fixtures and equality oracles for junction,
-//!   deduplicator, reorderer, window processor, correlator and reingestor drafts.
+//!   deduplicator, reorderer, window processor, correlator, reingestor, generator, inferencer and
+//!   WASM processor drafts.
 //! - **Depends on.** Current vocabulary generators, visual drafts and canonical Plexus parsing.
 //! - **Must not know.** Registry validation or runtime processing.
 
@@ -15,11 +16,13 @@ use std::collections::BTreeMap;
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    Assignment, BranchSelection, CorrelationTimeoutAction, CreateCorrelator, CreateStatement,
-    CreateWindowProcessor, Expression, FlushPolicy, Inheritance, MaterializedStateDependency,
-    MaterializedStatePolicy, MessageErrorPolicy, Model, OutputBranch, ProcessorInputs,
-    ProcessorOutput, ProcessorOutputs, RelayName, Statement, WindowBound, WindowStateLimit,
-    expression_to_plexus,
+    Assignment, BranchSelection, CorrelationTimeoutAction, CreateCorrelator, CreateGenerator,
+    CreateInferencer, CreateStatement, CreateWasmProcessor, CreateWindowProcessor, Expression,
+    FlushPolicy, InferencerStateBinding, InferencerStateInitial, InferencerTensorDeclaration,
+    InferencerTensorDimension, InferencerTensorMapping, InferencerTensorSchema, Inheritance,
+    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model, OutputBranch,
+    ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayName, RequestedResourceVersion,
+    ResourceName, Statement, WindowBound, WindowStateLimit, expression_to_plexus,
 };
 use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
 
@@ -29,12 +32,18 @@ use super::{
         AssignmentDraft, FlushDraft, IngestRouteDraft, InheritDraft, InheritedFieldDraft,
         InvocationDraft, MessageErrorDraft, RouteBranchDraft,
     },
+    processor_binding_draft::ProcessorBindingDraft,
     processor_correlator_draft::TimeoutDraft,
     processor_draft::{
         NodeBranchDraft, ProcessorDraft, ProcessorFamily, StateDependencyDraft, StatePolicyDraft,
     },
+    processor_inferencer_draft::{
+        DimensionDraft, OrderedDrafts, StateBindingDraft, StateInitialDraft,
+        TensorDeclarationDraft, TensorMappingDraft, TensorShapeDraft,
+    },
     processor_input_draft::{InputDraft, InputListDraft},
     processor_window_draft::WindowBoundDraft,
+    resource_pin_draft::ResourcePinDraft,
 };
 
 fn expression(value: &Expression) -> String {
@@ -318,7 +327,134 @@ fn correlator_draft(value: &CreateCorrelator) -> ProcessorDraft {
     draft
 }
 
-fn filled(value: &Model) -> ProcessorDraft {
+fn generator_draft(value: &CreateGenerator) -> ProcessorDraft {
+    let mut draft = ProcessorDraft::new(ProcessorFamily::Generator);
+    draft.name = value.name.to_string();
+    draft.branching = branching(Some(&value.branched_by));
+    draft.routes = value.output_routes.routes.iter().map(route).collect();
+    let generator = draft
+        .generator_mut()
+        .assured("a generator draft holds its source");
+    generator.relay = Some(SelectedReference::chosen(value.materialized_relay.clone()));
+    generator.each = value.each.to_string();
+    draft
+}
+
+/// A resource binding as its form shows it: the chosen resource and requested version, and the
+/// file exactly as written.
+fn binding(
+    resource: &ResourceName,
+    version: RequestedResourceVersion,
+    file: &str,
+) -> ProcessorBindingDraft {
+    ProcessorBindingDraft {
+        pin: ResourcePinDraft {
+            resource: Some(SelectedReference::chosen(resource.clone())),
+            version: Some(SelectedReference::chosen(version)),
+        },
+        file: file.to_string(),
+    }
+}
+
+/// A tensor shape as its form shows it: each fixed size as its decimal text.
+fn shape(value: &InferencerTensorSchema) -> TensorShapeDraft {
+    let mut dimensions = Vec::with_capacity(value.dimensions.len());
+    for dimension in &value.dimensions {
+        dimensions.push(match dimension {
+            InferencerTensorDimension::Fixed(size) => DimensionDraft::Size(size.to_string()),
+            InferencerTensorDimension::Dynamic => DimensionDraft::Dynamic,
+            InferencerTensorDimension::Batch => DimensionDraft::Batch,
+        });
+    }
+    TensorShapeDraft {
+        representation: value.representation,
+        element_type: value.element_type,
+        dimensions,
+    }
+}
+
+fn ordered<T>(items: Vec<T>) -> OrderedDrafts<T> {
+    OrderedDrafts { items, active: 0 }
+}
+
+fn tensor_mapping(value: &InferencerTensorMapping) -> TensorMappingDraft {
+    TensorMappingDraft {
+        tensor: value.tensor.clone(),
+        shape: shape(&value.schema),
+        expression: expression(&value.expression),
+    }
+}
+
+fn state_binding(value: &InferencerStateBinding) -> StateBindingDraft {
+    let initial = match &value.initial {
+        InferencerStateInitial::Zeros => StateInitialDraft::Zeros,
+        InferencerStateInitial::Constant(constant) => {
+            StateInitialDraft::Constant(expression(constant))
+        }
+    };
+    StateBindingDraft {
+        input: value.input.clone(),
+        output: value.output.clone(),
+        shape: shape(&value.schema),
+        initial,
+    }
+}
+
+fn tensor_declaration(value: &InferencerTensorDeclaration) -> TensorDeclarationDraft {
+    TensorDeclarationDraft {
+        tensor: value.tensor.clone(),
+        shape: shape(&value.schema),
+    }
+}
+
+fn inferencer_draft(value: &CreateInferencer<RequestedResourceVersion>) -> ProcessorDraft {
+    let mut draft = shared_draft(
+        ProcessorFamily::Inferencer,
+        SharedParts {
+            name: value.name.to_string(),
+            from: &value.from,
+            output_routes: &value.output_routes,
+            branched_by: Some(&value.branched_by),
+            mode: value.mode,
+            filter_where: &value.filter_where,
+            materialized_state: &value.materialized_state,
+        },
+    );
+    let inferencer = draft
+        .inferencer_mut()
+        .assured("an inferencer draft holds its model");
+    inferencer.binding = binding(&value.resource, value.resource_version, &value.file);
+    inferencer.inputs = ordered(value.inputs.iter().map(tensor_mapping).collect());
+    inferencer.state = ordered(value.state.iter().map(state_binding).collect());
+    inferencer.outputs = ordered(value.output_schema.iter().map(tensor_declaration).collect());
+    draft
+}
+
+fn wasm_draft(value: &CreateWasmProcessor<RequestedResourceVersion>) -> ProcessorDraft {
+    let mut draft = shared_draft(
+        ProcessorFamily::Wasm,
+        SharedParts {
+            name: value.name.to_string(),
+            from: &value.from,
+            output_routes: &value.output_routes,
+            branched_by: Some(&value.branched_by),
+            mode: value.mode,
+            filter_where: &value.filter_where,
+            materialized_state: &value.materialized_state,
+        },
+    );
+    let wasm = draft
+        .wasm_mut()
+        .assured("a WASM processor draft holds its guest");
+    wasm.binding = binding(&value.resource, value.resource_version, &value.file);
+    wasm.max_fuel = value.limits.max_fuel.to_string();
+    wasm.max_memory = format!("{}B", value.limits.max_memory_bytes);
+    wasm.rejected_state = value.rejected_state_policy;
+    wasm.global_error = Some(value.global_error_policy.clone());
+    draft
+}
+
+fn filled(value: &Model<RequestedResourceVersion>) -> ProcessorDraft {
     match value {
         Model::Junction(value) => shared_draft(
             ProcessorFamily::Junction,
@@ -366,6 +502,9 @@ fn filled(value: &Model) -> ProcessorDraft {
         ),
         Model::WindowProcessor(value) => window_draft(value),
         Model::Correlator(value) => correlator_draft(value),
+        Model::Generator(value) => generator_draft(value),
+        Model::Inferencer(value) => inferencer_draft(value),
+        Model::WasmProcessor(value) => wasm_draft(value),
         Model::Reingestor(value) => shared_draft(
             ProcessorFamily::Reingestor,
             SharedParts {
@@ -384,14 +523,14 @@ fn filled(value: &Model) -> ProcessorDraft {
 
 /// Fills a draft from `value`, builds it back, and requires the complete Model and its canonical
 /// statement to survive unchanged.
-fn round_trip(value: Model, conditional: bool) {
+fn round_trip(value: Model<RequestedResourceVersion>, conditional: bool) {
     let mut draft = filled(&value);
     draft.if_not_exists = conditional;
     let actual = draft
         .build()
         .assured("every complete current processor is representable by its visual form");
     assert_eq!(actual, value);
-    let statement = Statement::Create(CreateStatement::new(Box::new(actual.into()), conditional));
+    let statement = Statement::Create(CreateStatement::new(Box::new(actual), conditional));
     let source = statement
         .to_canonical_plexus()
         .assured("every visual processor renders canonical Plexus");
@@ -423,5 +562,36 @@ fn bolero_processor_drafts_preserve_every_complete_model() {
             round_trip(correlator, arbitrary.entropy().flag());
             let reingestor = Model::Reingestor(arbitrary.create_reingestor());
             round_trip(reingestor, arbitrary.entropy().flag());
+            let generator = Model::Generator(arbitrary.create_generator());
+            round_trip(generator, arbitrary.entropy().flag());
+            let mut inferencer = arbitrary.create_inferencer();
+            name_blank_texts_of_inferencer(&mut inferencer);
+            round_trip(Model::Inferencer(inferencer), arbitrary.entropy().flag());
+            let mut wasm = arbitrary.create_wasm_processor();
+            name(&mut wasm.file);
+            round_trip(Model::WasmProcessor(wasm), arbitrary.entropy().flag());
         });
+}
+
+/// Gives a blank text a name. The form reads a blank file, tensor or port name as the choice it
+/// still lacks, so a generated blank one is named before the round trip; every other text keeps
+/// its exact spelling, surrounding whitespace included.
+fn name(text: &mut String) {
+    if text.trim().is_empty() {
+        text.push_str("named");
+    }
+}
+
+fn name_blank_texts_of_inferencer(value: &mut CreateInferencer<RequestedResourceVersion>) {
+    name(&mut value.file);
+    for mapping in &mut value.inputs {
+        name(&mut mapping.tensor);
+    }
+    for state in &mut value.state {
+        name(&mut state.input);
+        name(&mut state.output);
+    }
+    for declaration in &mut value.output_schema {
+        name(&mut declaration.tensor);
+    }
 }

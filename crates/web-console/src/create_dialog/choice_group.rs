@@ -347,6 +347,12 @@ pub(super) fn selected_choice(
             | ChoiceControl::ProcessorRightTimeoutRelay,
             value,
         ) => signals.processor_scope_selected(control, value),
+        (
+            ChoiceControl::GeneratorRelay
+            | ChoiceControl::ProcessorResource
+            | ChoiceControl::ProcessorResourceVersion,
+            value,
+        ) => signals.generated_family_selected(control, value),
         (ChoiceControl::ProcessorErrorRelay, ChoiceValue::Model(node)) => {
             signals.active_processor().is_some_and(|signal| {
                 signal.get().active_route().is_some_and(|route| {
@@ -641,6 +647,16 @@ pub(super) fn select_choice(signals: CreateSignals, control: ChoiceControl, valu
             | ChoiceControl::ProcessorRouteRightField,
             value,
         ) => signals.select_processor_scope_choice(control, value),
+        (
+            ChoiceControl::GeneratorRelay
+            | ChoiceControl::GeneratorStateField
+            | ChoiceControl::ProcessorResource
+            | ChoiceControl::ProcessorResourceVersion
+            | ChoiceControl::InferencerInputField
+            | ChoiceControl::ProcessorBranchKeyField
+            | ChoiceControl::WasmGuestField,
+            value,
+        ) => signals.select_generated_family_choice(control, value),
         (ChoiceControl::ProcessorErrorField, ChoiceValue::Field(field)) => {
             if let Some(signal) = signals.active_processor() {
                 signal.update(|draft| {

@@ -100,6 +100,9 @@ pub enum ChoiceTarget {
     EmitterMaterializedRelay,
     EmitterErrorRelay,
     SchemaField,
+    /// Relays with materialized state on exactly a generator's branch, asked with the domain
+    /// alone for an unbranched generator, or with the domain and then its named branch.
+    GeneratorMaterializedRelay,
 }
 
 wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
@@ -167,6 +170,7 @@ wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
     EmitterMaterializedRelay,
     EmitterErrorRelay,
     SchemaField,
+    GeneratorMaterializedRelay,
 });
 
 impl ChoiceTarget {
@@ -450,7 +454,8 @@ impl ChoiceTarget {
             | Self::EmitterCompatibleInputRelay
             | Self::EmitterMaterializedRelay
             | Self::EmitterErrorRelay
-            | Self::SchemaField => None,
+            | Self::SchemaField
+            | Self::GeneratorMaterializedRelay => None,
         }
     }
 }

@@ -1089,12 +1089,15 @@ bytes_to_utf8, base64 or hex functions`.
 An empty input encodes and decodes to an empty output. `md5` reads `STRING` text and returns
 hexadecimal text, while `sha256` reads `BYTES` and returns raw bytes: hash text with
 `sha256(bytes_from_utf8(input.text))` and write the digest with `hex_encode`.
-Nervix obtains SHA-256 from AWS-LC through its cryptography boundary. `md5` is only a
-non-cryptographic checksum; use `sha256` where collision resistance matters.
+Nervix obtains SHA-256 from AWS-LC through its [cryptography
+boundary](cryptography.md#the-boundary). `md5` is only a non-cryptographic checksum; use `sha256`
+where collision resistance matters.
 
 `xxh3_64` hashes the input octets in their given order and returns the algorithm's unsigned 64-bit
 number. The value is independent of host byte order and stays the same across nodes and restarts.
-It is a noncryptographic hash, so use `sha256` where collision resistance matters.
+It is a noncryptographic hash, so use `sha256` where collision resistance matters. The
+[cryptography register](cryptography.md#classification-register) records both functions'
+non-security purposes.
 
 A decoding failure reports a `cast_failed` error: `bytes_to_utf8 input is not valid UTF-8`,
 `base64_decode input is not valid encoded bytes`, or `hex_decode input is not valid encoded bytes`.
