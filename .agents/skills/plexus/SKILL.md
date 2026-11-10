@@ -95,6 +95,10 @@ and [Inspect Retained Window State](../../../docs/src/processors.md#inspect-reta
 Follow those sections for sensitive argument projection, branch selectors, paging and the distinction
 between retained rows and window metadata; use each processor's `DESCRIBE` for a count summary.
 
+For arithmetic on sequences, read [Expression Functions → List Arithmetic](../../../docs/src/filter-map-functions.md#list-arithmetic)
+before choosing a two-list or scalar-broadcast function. Check its exact numeric type, fixed-shape,
+null and message-error rules; scalar operators do not select list arithmetic.
+
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
 contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and

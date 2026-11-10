@@ -502,6 +502,10 @@ and yields null for that message, instead of wrapping, saturating, or producing 
 Only that message fails: every other message in the batch is computed as usual, and a message's
 result never depends on the other messages in its batch.
 
+Operators and scalar numeric functions accept scalar values. For element-wise list arithmetic,
+use the explicit [list arithmetic functions](#list-arithmetic); scalar broadcasting has its own
+named functions.
+
 - Integer `+`, `-`, and `*` report an `overflow` error when the exact result does not fit the operand
   type, so `-` over `U8`, `U16`, `U32`, or `U64` operands fails when the right operand is larger.
 - Integer `/` truncates toward zero. A zero divisor reports a `division_by_zero` error, and dividing
@@ -1786,8 +1790,8 @@ any element is null, the constructed container is null; schema elements themselv
 A fixed `ARRAY` has at least one element, so `[]` and `array()` are rejected.
 
 The functions below take `ARRAY` or `VEC` values described in
-[Schemas And Codecs](schemas-and-codecs.md#internal-schemas), and a function of two lists accepts an
-`ARRAY` and a `VEC`, or fixed arrays of different widths, together. The elements of a
+[Schemas And Codecs](schemas-and-codecs.md#internal-schemas). Their individual contracts determine
+which container combinations and lengths are accepted. The elements of a
 multidimensional `ARRAY` are its outermost items. A null container produces a null result,
 including for binary functions when either container is null.
 
@@ -1806,6 +1810,9 @@ including for binary functions when either container is null.
 | `mean(list)` | numeric | optional `F64` | Arithmetic mean. An empty list returns null; integer inputs round to `F64` for the calculation |
 | `dot(left, right)` | numeric | element type | Dot product of two lists of one element type. Empty lists return zero. Integer multiplication and accumulation are checked at the element type |
 | `distance(left, right)` | numeric | `F64` | Euclidean distance of two lists of one element type. Empty lists return zero; integer inputs round to `F64` for the calculation |
+| `list_add(left, right)`, `list_sub(left, right)`, `list_mul(left, right)`, `list_div(left, right)` | numeric, including fixed nested `ARRAY`s | `ARRAY` or `VEC` | Element-wise arithmetic with exact matching element types and shapes |
+| `list_add_scalar(list, value)`, `list_sub_scalar(list, value)`, `list_mul_scalar(list, value)`, `list_div_scalar(list, value)` | numeric, including fixed nested `ARRAY`s | same list type | Apply the exact numeric scalar to every leaf element |
+| `list_abs(list)` | numeric, including fixed nested `ARRAY`s | same list type | Apply scalar absolute value to every numeric leaf |
 
 `nth` counts from `0`, unlike string positions: `nth(input.values, 0)` is the same element as
 `first(input.values)`. A function whose elements the table narrows rejects any other element type
@@ -1830,6 +1837,36 @@ every message; a mismatch reports `invalid_argument`, `vector lengths differ: le
 beyond the `F64` range fails even where the mean itself would be finite. `contains` and `overlap`
 use the scalar equality contract: NaN equals no element, and positive and negative zero are equal.
 These functions compare exact element types; they never cast or stringify list elements.
+
+### List Arithmetic
+
+The `list_` arithmetic functions preserve numeric types and every fixed inner dimension. Two
+`ARRAY` operands return an `ARRAY` and must have equal widths when the statement is applied.
+If either operand is a `VEC`, the result is a `VEC`, and each message's lengths must match.
+A nested `VEC` is refused; inner `ARRAY` shapes must match exactly.
+
+The `_scalar` functions take a scalar of exactly the innermost numeric type, with the list on the
+left: `list_sub_scalar(values, adjustment)` subtracts `adjustment` from each value. They explicitly
+broadcast that scalar through every fixed dimension. A null list or scalar produces a null list.
+An empty vector produces an empty vector without evaluating an element operation.
+
+Each element follows its scalar operation: integer division truncates toward zero, integer
+arithmetic is checked, and floating arithmetic rejects a non-finite result. `list_abs` follows
+`abs`, including signed-minimum overflow and the positive absolute value of negative zero.
+The first failing element reports one error for that message and makes its result null; the
+other messages continue. Arguments preserve sensitivity, and unselected conditional arms report
+no errors from these calls.
+
+| Failure | Kind and message |
+| --- | --- |
+| Unequal lengths with a `VEC` operand | `invalid_argument`: `vector lengths differ: left has 3, right has 2` |
+| Integer addition, subtraction or multiplication outside its type | `overflow`, such as `integer addition overflowed` |
+| Integer division by zero | `division_by_zero`: `integer division by zero` |
+| Signed minimum divided by `-1`, or its absolute value | `overflow`: `integer division overflowed` or `integer absolute value overflowed` |
+| Non-finite floating arithmetic or absolute value | `invalid_argument`: `floating-point operation produced a non-finite result` or `floating-point absolute value produced a non-finite result` |
+
+These names also denote list operations in a window route, where they can consume a list-valued
+aggregate result without shadowing the window aggregate names.
 
 In a [window route](#window-aggregates), `count`, `sum`, `first`, `last`, `min`, and `max` are always
 window aggregates, like every other aggregate name. They take a per-row expression over `input` and
@@ -2149,6 +2186,8 @@ errors. `T` is the argument's type, and a list is an `ARRAY` or a `VEC`.
 | `mean` | optional `F64` | [Array And Vector Functions](#array-and-vector-functions) |
 | `dot` | element type | [Array And Vector Functions](#array-and-vector-functions) |
 | `distance` | `F64` | [Array And Vector Functions](#array-and-vector-functions) |
+| `list_add`, `list_sub`, `list_mul`, `list_div` | `ARRAY` or `VEC` | [List Arithmetic](#list-arithmetic) |
+| `list_add_scalar`, `list_sub_scalar`, `list_mul_scalar`, `list_div_scalar`, `list_abs` | same list type | [List Arithmetic](#list-arithmetic) |
 | `COUNT`, `COUNT_IF`, `APPROX_COUNT_DISTINCT` | `I64` | [Window Aggregates](#window-aggregates) |
 | `BOOL_AND`, `BOOL_OR` | `BOOL` | [Window Aggregates](#window-aggregates) |
 | `SUM`, `MIN`, `MAX`, `FIRST`, `LAST` | the argument's type | [Window Aggregates](#window-aggregates) |
