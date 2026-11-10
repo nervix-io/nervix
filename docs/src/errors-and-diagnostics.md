@@ -1470,8 +1470,11 @@ operating system refusing a bind because another socket holds the address.
 
 ### Connector Status Observation
 
-An outbound WebSocket peer's Close is a typed read failure preserving its status code and reason;
-an end without a status has its own typed state. Transport failures keep the WebSocket driver's
+An outbound WebSocket peer's Close preserves its status code and reason as a typed resume failure
+during signaling, or a read failure after readiness. A Close without a status has its own typed
+state, distinct from an ended stream. The signaling engine reports that distinction to its caller;
+the outbound connection flushes the queued reply within the one-second control-frame budget before
+returning the resume failure. Transport failures keep the WebSocket driver's
 error beneath `IngestorError::Read`. A locally initiated close whose handshake exceeds its one-second
 budget keeps a typed timeout beneath the suspend or close context. The broker host retains a read
 failure and its growing retry delay across successful reconnects until a batch is accepted. A
