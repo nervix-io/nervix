@@ -98,85 +98,97 @@ impl CreateKind {
             Self::User => "user",
             Self::Resource => "resource",
             Self::Subscription => "subscription",
-            Self::Model(kind) => match kind {
-                ModelKind::Placement => "placement",
-                ModelKind::Schema => "schema",
-                ModelKind::WireJsonSchema => "wire JSON schema",
-                ModelKind::WireCborSchema => "wire CBOR schema",
-                ModelKind::WireAvroSchema => "wire AVRO schema",
-                ModelKind::Branch => "branch",
-                ModelKind::Relay => "relay",
-                ModelKind::Codec => "codec",
-                ModelKind::SignalingProtocol => "signaling protocol",
-                ModelKind::Client => "client",
-                ModelKind::Vhost => "VHOST",
-                ModelKind::Endpoint => "endpoint",
-                ModelKind::Lookup => "hash map",
-                ModelKind::Udf => "Roto UDF",
-                ModelKind::Ingestor => "ingestor",
-                ModelKind::Emitter => "emitter",
-                ModelKind::Junction => "junction",
-                ModelKind::Deduplicator => "deduplicator",
-                ModelKind::Reorderer => "reorderer",
-                ModelKind::WindowProcessor => "window processor",
-                ModelKind::Correlator => "correlator",
-                ModelKind::Reingestor => "reingestor",
-                ModelKind::Generator => "generator",
-                ModelKind::Inferencer => "inferencer",
-                ModelKind::WasmProcessor => "WASM processor",
-            },
+            Self::Model(kind) => Self::model_label(kind),
+        }
+    }
+
+    /// The name a Model kind's family uses in its form's title and actions.
+    fn model_label(kind: ModelKind) -> &'static str {
+        match kind {
+            ModelKind::Placement => "placement",
+            ModelKind::Schema => "schema",
+            ModelKind::WireJsonSchema => "wire JSON schema",
+            ModelKind::WireCborSchema => "wire CBOR schema",
+            ModelKind::WireAvroSchema => "wire AVRO schema",
+            ModelKind::Branch => "branch",
+            ModelKind::Relay => "relay",
+            ModelKind::Codec => "codec",
+            ModelKind::SignalingProtocol => "signaling protocol",
+            ModelKind::Client => "client",
+            ModelKind::Vhost => "VHOST",
+            ModelKind::Endpoint => "endpoint",
+            ModelKind::Lookup => "hash map",
+            ModelKind::Udf => "Roto UDF",
+            ModelKind::Ingestor => "ingestor",
+            ModelKind::Emitter => "emitter",
+            ModelKind::Junction => "junction",
+            ModelKind::Deduplicator => "deduplicator",
+            ModelKind::Reorderer => "reorderer",
+            ModelKind::WindowProcessor => "window processor",
+            ModelKind::Correlator => "correlator",
+            ModelKind::Reingestor => "reingestor",
+            ModelKind::Generator => "generator",
+            ModelKind::Inferencer => "inferencer",
+            ModelKind::WasmProcessor => "WASM processor",
         }
     }
 
     /// The name and the one-line summary the Create menu shows for this family.
     pub(crate) fn menu_entry(self) -> MenuEntry {
-        let (name, summary) = match self {
-            Self::Domain => ("Domain", "Clock and lifecycle"),
-            Self::User => ("User", "Login credential"),
-            Self::Resource => ("Resource", "Catalog and upload"),
-            Self::Subscription => ("Subscription", "Read-only relay tab"),
-            Self::Model(kind) => match kind {
-                ModelKind::Placement => ("Placement", "Domain-wide or corridor policy"),
-                ModelKind::Schema => ("Schema", "Internal record fields"),
-                ModelKind::WireJsonSchema => ("Wire JSON schema", "JSON payload fields"),
-                ModelKind::WireCborSchema => ("Wire CBOR schema", "CBOR payload fields"),
-                ModelKind::WireAvroSchema => ("Wire AVRO schema", "AVRO payload fields"),
-                ModelKind::Branch => ("Branch", "Key schema and lifetime"),
-                ModelKind::Relay => ("Relay", "Schema, branching and capacity"),
-                ModelKind::Codec => ("Codec", "Wire format and schema mapping"),
-                ModelKind::SignalingProtocol => {
-                    ("Signaling protocol", "Ordered connection handshake")
-                }
-                ModelKind::Client => ("Client", "External transport configuration"),
-                ModelKind::Vhost => ("VHOST", "Hostnames and optional TLS"),
-                ModelKind::Endpoint => ("Endpoint", "HTTP or WebSocket path"),
-                ModelKind::Lookup => ("Hash map", "Resource-backed lookup"),
-                ModelKind::Udf => ("Roto UDF", "Typed function and source tests"),
-                ModelKind::Ingestor => ("Ingestor", "External source and ordered routes"),
-                ModelKind::Emitter => ("Emitter", "External publication and client output"),
-                ModelKind::Junction => ("Junction", "Transform and fan out relay records"),
-                ModelKind::Deduplicator => {
-                    ("Deduplicator", "Suppress repeated keys in each branch")
-                }
-                ModelKind::Reorderer => ("Reorderer", "Release each branch in key order"),
-                ModelKind::WindowProcessor => (
-                    "Window processor",
-                    "Aggregate each branch over WIDTH and STEP",
-                ),
-                ModelKind::Correlator => {
-                    ("Correlator", "Match left and right records in each branch")
-                }
-                ModelKind::Reingestor => {
-                    ("Reingestor", "Transform records across branch boundaries")
-                }
-                ModelKind::Generator => {
-                    ("Generator", "Generate from materialized state on a cadence")
-                }
-                ModelKind::Inferencer => ("Inferencer", "Score each branch with an ONNX model"),
-                ModelKind::WasmProcessor => {
-                    ("WASM processor", "Run a guest with fuel and memory limits")
-                }
+        match self {
+            Self::Domain => MenuEntry {
+                name: "Domain",
+                summary: "Clock and lifecycle",
             },
+            Self::User => MenuEntry {
+                name: "User",
+                summary: "Login credential",
+            },
+            Self::Resource => MenuEntry {
+                name: "Resource",
+                summary: "Catalog and upload",
+            },
+            Self::Subscription => MenuEntry {
+                name: "Subscription",
+                summary: "Read-only relay tab",
+            },
+            Self::Model(kind) => Self::model_menu_entry(kind),
+        }
+    }
+
+    /// The name and the one-line summary the Create menu shows for a Model kind's family.
+    fn model_menu_entry(kind: ModelKind) -> MenuEntry {
+        let (name, summary) = match kind {
+            ModelKind::Placement => ("Placement", "Domain-wide or corridor policy"),
+            ModelKind::Schema => ("Schema", "Internal record fields"),
+            ModelKind::WireJsonSchema => ("Wire JSON schema", "JSON payload fields"),
+            ModelKind::WireCborSchema => ("Wire CBOR schema", "CBOR payload fields"),
+            ModelKind::WireAvroSchema => ("Wire AVRO schema", "AVRO payload fields"),
+            ModelKind::Branch => ("Branch", "Key schema and lifetime"),
+            ModelKind::Relay => ("Relay", "Schema, branching and capacity"),
+            ModelKind::Codec => ("Codec", "Wire format and schema mapping"),
+            ModelKind::SignalingProtocol => ("Signaling protocol", "Ordered connection handshake"),
+            ModelKind::Client => ("Client", "External transport configuration"),
+            ModelKind::Vhost => ("VHOST", "Hostnames and optional TLS"),
+            ModelKind::Endpoint => ("Endpoint", "HTTP or WebSocket path"),
+            ModelKind::Lookup => ("Hash map", "Resource-backed lookup"),
+            ModelKind::Udf => ("Roto UDF", "Typed function and source tests"),
+            ModelKind::Ingestor => ("Ingestor", "External source and ordered routes"),
+            ModelKind::Emitter => ("Emitter", "External publication and client output"),
+            ModelKind::Junction => ("Junction", "Transform and fan out relay records"),
+            ModelKind::Deduplicator => ("Deduplicator", "Suppress repeated keys in each branch"),
+            ModelKind::Reorderer => ("Reorderer", "Release each branch in key order"),
+            ModelKind::WindowProcessor => (
+                "Window processor",
+                "Aggregate each branch over WIDTH and STEP",
+            ),
+            ModelKind::Correlator => ("Correlator", "Match left and right records in each branch"),
+            ModelKind::Reingestor => ("Reingestor", "Transform records across branch boundaries"),
+            ModelKind::Generator => ("Generator", "Generate from materialized state on a cadence"),
+            ModelKind::Inferencer => ("Inferencer", "Score each branch with an ONNX model"),
+            ModelKind::WasmProcessor => {
+                ("WASM processor", "Run a guest with fuel and memory limits")
+            }
         };
         MenuEntry { name, summary }
     }
