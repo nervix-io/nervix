@@ -1,9 +1,9 @@
 //! Public observations of a node's committed capacity claim.
 //!
 //! Outside the layer order: a harness module.
-//! - **Owns.** Waiting for capability facts through `DESCRIBE CLUSTER` on a running node.
-//! - **Depends on.** The scenario world and the public session interface.
-//! - **Must not know.** Consensus stores, scheduler internals or transport admission state.
+//! - **Owns.** Public capability observations and controlled relay capability fixtures.
+//! - **Depends on.** The scenario world, public sessions and typed fault-injection probes.
+//! - **Must not know.** Consensus stores, scheduler internals or admission decisions.
 
 #![cfg_attr(
     nervix_lint,
@@ -14,9 +14,39 @@
 )]
 
 use cucumber::{given, then, when};
-use nervix_models::{ClusterNodeIncarnation, ClusterNodeName};
+use nervix_models::{BranchKeyFingerprint, ClusterNodeIncarnation, ClusterNodeName};
 
 use crate::{ScenarioWorld, cluster_description_block, expand_placeholders};
+
+#[given(expr = "ingestor {string} pauses before buffering branch {string}")]
+fn hold_branch_buffer(world: &mut ScenarioWorld, ingestor: String, branch: String) {
+    let branch = BranchKeyFingerprint::of_canonical_text(&branch);
+    world
+        .fault_injection
+        .pause_ingestor_branch_buffer(world.ingestor_dispatch_ref(&ingestor), branch);
+}
+
+#[then(expr = "ingestor {string} reaches its buffer pause for branch {string}")]
+async fn waiting_branch_buffer(world: &mut ScenarioWorld, ingestor: String, branch: String) {
+    let branch = BranchKeyFingerprint::of_canonical_text(&branch);
+    let ingestor = world.ingestor_dispatch_ref(&ingestor);
+    let reached = nervix_primitives::time::timeout(
+        std::time::Duration::from_secs(30),
+        world
+            .fault_injection
+            .wait_for_ingestor_branch_buffer_pause(&ingestor, branch),
+    )
+    .await;
+    assert!(reached.is_ok(), "the branch reaches its buffer boundary");
+}
+
+#[when(expr = "ingestor {string} releases its buffer pause for branch {string}")]
+fn release_branch_buffer(world: &mut ScenarioWorld, ingestor: String, branch: String) {
+    let branch = BranchKeyFingerprint::of_canonical_text(&branch);
+    world
+        .fault_injection
+        .release_ingestor_branch_buffer_pause(&world.ingestor_dispatch_ref(&ingestor), branch);
+}
 
 #[given(expr = "node {string} holds its ACK view of node {string} at its current incarnation")]
 async fn hold_registrar_view(world: &mut ScenarioWorld, observer: String, registrar: String) {
@@ -82,6 +112,44 @@ async fn release_before_grant(world: &mut ScenarioWorld, domain: String) {
     world
         .fault_injection
         .release_relay_before_grant_pause(&domain);
+}
+
+#[then(expr = "node {string} has refused {int} oversized branch rows in domain {string}")]
+async fn refused_branch_rows(
+    world: &mut ScenarioWorld,
+    node: String,
+    count: usize,
+    domain: String,
+) {
+    let node = expand_placeholders(world, &node);
+    let domain = expand_placeholders(world, &domain);
+    let ready = nervix_primitives::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let refused = world.fault_injection.capability_relay_refusals(&domain);
+            let selected = refused
+                .into_iter()
+                .filter(|refusal| refusal.node.as_str() == node)
+                .collect::<Vec<_>>();
+            if selected.len() >= count {
+                return selected;
+            }
+            nervix_primitives::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    let Ok(refused) = ready else {
+        panic!(
+            "all {count} oversized branch buffers are refused before submitting fitting rows: {:?}",
+            world.fault_injection.capability_relay_refusals(&domain)
+        );
+    };
+    assert_eq!(refused.len(), count);
+    assert!(refused.iter().all(|refusal| refusal.rows == 1));
+    let channels = refused
+        .iter()
+        .map(|refusal| refusal.delivery.channel_incarnation)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(channels.len(), count, "each concrete branch was refused");
 }
 
 #[then(
