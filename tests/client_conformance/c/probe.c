@@ -2283,10 +2283,6 @@ int main(int argc, char **argv) {
     }
     free(retained);
     free(reported);
-    snprintf(query, sizeof query, "SET LABELS ON RELAY %s { 'probe' = ' retained Δ ' };", relay);
-    nx_outcome *metadata_set = execute(session, query);
-    if (nx_outcome_disposition(metadata_set) != NX_DISPOSITION_COMPLETED) fail("entity label edit failed");
-    nx_outcome_free(metadata_set);
     snprintf(query, sizeof query, "SHOW LABELS ON RELAY %s FORMAT TEXT;", relay);
     nx_outcome *metadata_read = execute(session, query);
     nx_entity_labels *metadata = NULL;

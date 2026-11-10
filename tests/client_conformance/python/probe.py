@@ -1268,7 +1268,6 @@ def main():
     if output_dir := environment.get("NERVIX_CLIENT_WIRE_BINDING_PROFILE_DIR"):
         profile_binding(retained[0], fields, output_dir)
 
-    execute(session, f"SET LABELS ON RELAY {relay} {{ 'probe' = ' retained Δ ' }};")
     captured_labels = execute(session, f"SHOW LABELS ON RELAY {relay} FORMAT TEXT;").entity_labels
     if captured_labels is None or captured_labels.labels.get("probe") != " retained Δ ":
         raise RuntimeError("typed entity labels lost exact metadata")

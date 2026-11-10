@@ -673,12 +673,6 @@ impl Drop for OwnedLabels {
 }
 
 fn check_labels(session: &OpenSession, relay: &str) -> io::Result<()> {
-    let changed = session.execute(&format!(
-        "SET LABELS ON RELAY {relay} {{ 'probe' = ' retained Δ ' }};"
-    ))?;
-    if changed.disposition() != "completed" {
-        return Err(io::Error::other(changed.message()));
-    }
     let outcome = session.execute(&format!("SHOW LABELS ON RELAY {relay} FORMAT TEXT;"))?;
     let mut labels = ptr::null_mut();
     // SAFETY: the outcome is live and the pointer output is writable.

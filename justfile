@@ -2160,6 +2160,18 @@ test-client-jvm-executable executable *args:
 coverage-client-jvm output="lcov-client-jvm.info": build-client-jvm-tests
     CARGO_TARGET_DIR={{ quote(cargo_target_dir) }} cargo llvm-cov --package nervix-client-jvm --features jvm-tests --lib --lcov --output-path {{ quote(output) }}
 
+# Check the native probe sources against the current headers and Java API without linking Rust.
+check-client-probe-sources:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cc -std=c11 -Wall -Wextra -Werror -pthread -fsyntax-only -I crates/client-ffi/include tests/client_conformance/c/probe.c
+    c++ -std=c++17 -Wall -Wextra -Werror -pthread -fsyntax-only -I crates/client-ffi/include tests/client_conformance/cpp/probe.cpp
+    classes={{ quote(cargo_target_dir + "/client-conformance/probe-check") }}
+    mkdir -p "${classes}"
+    javac --release 21 -Xlint:all -Werror -d "${classes}" crates/client-jvm/java/io/nervix/client/*.java tests/client_conformance/java/Probe.java
+    python3 -c 'from pathlib import Path; p = Path("tests/client_conformance/python/probe.py"); compile(p.read_text(), str(p), "exec")'
+    ruby -c tests/client_conformance/ruby/probe.rb
+
 # Build what the cross-language client probes run: the shared Rust binding, the C and C++ probes
 # linked against it, the JNI jar and Java probe, the native Ruby gem, the Python package in its virtual environment,
 # the Go probe with its generated FlatBuffers code, and the TypeScript probe bundled with its generated code for Node.js

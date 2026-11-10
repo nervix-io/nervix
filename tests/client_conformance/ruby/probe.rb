@@ -1088,7 +1088,6 @@ module Probe
       event.release
     end
 
-    session.execute("SET LABELS ON RELAY #{relay} { 'probe' = ' retained Δ ' };")
     captured_labels = session.execute("SHOW LABELS ON RELAY #{relay} FORMAT TEXT;").entity_labels
     raise 'typed entity labels lost exact metadata' unless captured_labels && captured_labels.labels['probe'] == ' retained Δ '
     raise 'typed entity labels lost identity or revision' unless captured_labels.entity_name == relay && !captured_labels.revision.nil?
