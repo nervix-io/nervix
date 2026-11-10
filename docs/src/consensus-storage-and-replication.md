@@ -518,8 +518,8 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_payload_identity_capability_tls_inference_reset_logs`, `raft_payload_identity_capability_tls_inference_reset_meta`, `raft_payload_identity_capability_tls_inference_reset_state`, and
-`raft_payload_identity_capability_tls_inference_reset_snapshots`. Opening it validates the complete keyspace namespace before reading
+`raft_payload_identity_licensing_capability_tls_inference_reset_logs`, `raft_payload_identity_licensing_capability_tls_inference_reset_meta`, `raft_payload_identity_licensing_capability_tls_inference_reset_state`, and
+`raft_payload_identity_licensing_capability_tls_inference_reset_snapshots`. Opening it validates the complete keyspace namespace before reading
 any records. The committed cluster-parameter record stores ordered typed TLS cipher suites and
 key-exchange groups; recovery validates their complete pair before returning that record.
 This namespace identifies the current Model shape, including the separate JSON
@@ -541,7 +541,7 @@ construction where it stands, including the typed `payload` expression scope and
 `RESET WASM PROCESSOR ... STATE` that names its processor and scope and takes its domain from
 the transaction, as the step effect and commit plan step keep it too. The database also stores
 incarnation-bound node capability claims under record-family tag `C`. Its state metadata
-requires the current `ClusterState` encoding, 22, including the cluster identity reference,
+requires the current `ClusterState` encoding, 23, including the cluster identity reference,
 committed cluster parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,
@@ -620,16 +620,19 @@ node name and concrete local interconnect address. OpenRaft captures that contex
 its core. Parallel isolated clusters may use the same node names; the listener address distinguishes
 their core events in a shared log. The span belongs to that consensus lifetime and exposes no
 command, record or credential values.
-The unary append, vote and pre-vote receivers also establish trace-level contexts with the same
+The unary append, vote and pre-vote receivers also establish debug-level contexts with the same
 local node and listener address. When detailed tracing is selected, their existing OpenRaft API
 events distinguish arrival at the Raft API from processing by that node's core. The annotations
 change no request, deadline or retry policy.
-Vote and pre-vote clients emit trace-level send and completion events with the local endpoint,
+Vote and pre-vote clients emit debug-level send and completion events with the local endpoint,
 peer, vote, request deadline, elapsed transport time and result. The elapsed measurement spans
 encoding, connection admission, the exchange and response decoding. An outer OpenRaft timeout may
 cancel the request before its completion event; its timeout event remains the outcome in that
 case. These infrequent requests take one additional monotonic-clock reading when they begin;
-completion timing and result formatting are evaluated only when their trace event is enabled.
+completion timing and result formatting are evaluated only when their debug event is enabled.
+Selecting them therefore never needs a `trace` directive, which would make the process's log
+bridge hand every dependency's `trace` record to the filter (see [the scenario tracing
+default](integration-test-lifecycle.md#how-failure-reaches-ci-output)).
 
 Durable record decoding and recovered catalog checks preserve decoding or nested report causes
 inside the standard-error carrier that the storage trait accepts. The carrier's ordinary rendering
@@ -754,6 +757,32 @@ Backup archives carry the source UUID as display metadata. They carry no private
 state, and restore retains the target cluster's identity. Rebuilding from an archive is a clone;
 recovering a licensed installation requires an administrative transfer to the rebuilt cluster.
 [Backup And Restore](backup-and-restore.md#what-a-restore-recreates) owns that archive contract.
+
+## Free Licensing Record
+
+The first identity installation also creates one `LicensingRecord` at state key `L`, in the same
+applied command and durable batch. Its licensing time is the installed identity's creation time,
+its trust-document list is empty and its mode is `Free`. Repeated identity proposals retain both
+installed singletons. Neither installation changes the graph revision.
+
+The current storage shape requires the identity and licensing record to be absent together before
+initialization or present together afterwards. Load refuses a missing partner or an invalid record;
+it never creates replacement licensing state. The record has explicit load, keyed-record-count
+and incremental-write ownership, and snapshots include it. Snapshot installation follows the same
+record validation as ordinary open.
+
+An observer captures public identity, licensing record, applied revision and `UsageSnapshot` from
+one committed state. Node usage is the number of committed voters and learners, and domain usage
+is the number of committed domain records. These facts require no per-node usage report. A node's
+single policy publisher derives an immutable value from that observation and publishes it through
+the execution-primitive publication boundary. Consumers read that one value without acquiring a
+policy lock or recomputing permissions.
+
+Domain creation includes the captured quota constraint in its durable effect and authoritative
+write. Apply checks the actual committed domain count before inserting a new record; restore's
+domain insertion does the same. Existing records do not spend another slot. Membership admission
+checks the node quota under its existing serialization before adding a member. The shipped free
+policy leaves both quotas unlimited.
 
 ## Cluster Parameter Publication
 

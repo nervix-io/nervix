@@ -478,6 +478,10 @@ answer arrived.
 
 ## Wire Contract And Payloads
 
+The current contract includes the free licensing singleton in snapshots, captured domain quotas in
+creation and restore commands, and typed quota refusals in membership verdicts. These shapes advance
+the same fingerprint as every other consensus and prerequisite shape.
+
 All nodes in a running cluster use one current wire contract. A fixed fingerprint covers the set of
 supported operations and their encoded shapes. It is one of the prerequisites every hello carries,
 so a node whose fingerprint differs is refused at join as a wire-contract mismatch, and a hello of
@@ -2381,9 +2385,9 @@ The consensus owner establishes a trace context containing the cluster, node and
 interconnect listener address before it starts OpenRaft. Its captured core events can therefore be
 assigned to one concrete listener when several isolated test clusters reuse the same node names. This
 is diagnostic context; traffic classes, quotas, requests and deadlines keep their own contracts.
-Trace-level contexts on unary Raft receivers carry the same endpoint into their existing API
+Debug-level contexts on unary Raft receivers carry the same endpoint into their existing API
 events, before the core processes the request.
-Vote and pre-vote client trace events also record send and completion boundaries and elapsed
+Vote and pre-vote client debug events also record send and completion boundaries and elapsed
 transport time, including encoding, connection admission and response decoding. The existing
 caller deadline and cancellation still own an exchange that ends before a completion event.
 [Consensus Storage And Replication](consensus-storage-and-replication.md#observability) owns the

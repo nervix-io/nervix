@@ -85,6 +85,12 @@ impl LogFilter {
         Self { configured }
     }
 
+    /// The directives a scenario run records with when `RUST_LOG` is unset: the node's default and
+    /// what a scenario needs beyond it.
+    fn scenario_default() -> String {
+        format!("{DEFAULT_TRACE_FILTER},{TEST_TRACE_FILTER}")
+    }
+
     /// The registry the process records through, which its writers are layered on: the payload rule
     /// as the layer beneath and the filter above it. The filter answers first, so the subscriber's
     /// level hint is the filter's, a callsite the filter refuses is never asked about again, and the
@@ -479,12 +485,20 @@ impl io::Write for SharedFileWriter {
 /// nothing costs nothing.
 ///
 /// Consensus receiver contexts identify the concrete node even when parallel clusters use the
-/// same names. Its vote and pre-vote clients record send and completion timing at `trace`, so the
+/// same names. Its vote and pre-vote clients record send and completion timing at `debug`, so the
 /// failing attempt shows whether an election waited before the Raft API, in its core, or for its
 /// response. These events are per election request, not per heartbeat. OpenRaft keeps its existing
 /// filter; collecting these boundaries does not enable its per-tick and per-append debug stream.
+///
+/// Nothing here selects `trace`. The process records through one subscriber, and the `log` bridge
+/// hands it every record a dependency writes through the `log` crate, up to the most verbose level
+/// any directive selects, to be judged one record at a time. Cranelift writes `trace` records
+/// throughout every module it compiles, and a node compiles the WASM module it installs before it
+/// reports the revision prepared: one `trace` directive made each compile of the scenario guest
+/// about six times as long, and the installations after a restart, a restore or a peer's
+/// validation outlasted the budget a revision has to become prepared and ready.
 const TEST_TRACE_FILTER: &str =
-    "nervix_interconnect=debug,nervix_consensus=trace,nervix_consensus::replication=debug,\
+    "nervix_interconnect=debug,nervix_consensus=debug,nervix_consensus::replication=debug,\
      nervix_client_core::restoration=debug,nervix_client_core::upload=debug,\
      nervix_server::application=debug,nervix_client_core::consumer=debug,\
      nervix_client_core::producer=debug,nervix_server::application::session::consumers=debug,\
@@ -497,7 +511,7 @@ pub fn init_tracing_to_file(path: &Path) -> io::Result<()> {
     let file = OpenOptions::new().create(true).append(true).open(path)?;
     let file = Arc::new(ParkingMutex::new(file));
     let make_writer = BoxMakeWriter::new(move || SharedFileWriter(file.clone()));
-    LogFilter::from_environment(&format!("{DEFAULT_TRACE_FILTER},{TEST_TRACE_FILTER}"))
+    LogFilter::from_environment(&LogFilter::scenario_default())
         .into_subscriber()
         .with(fmt::layer().with_ansi(false).with_writer(make_writer))
         .try_init()

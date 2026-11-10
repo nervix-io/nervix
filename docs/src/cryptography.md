@@ -64,7 +64,7 @@ does.
 | Purpose | Where Nervix obtains it |
 | --- | --- |
 | TLS provider | `nervix-crypto` installs the outward provider through rustls's process-default installation and supplies an independent checked interconnect provider. Shared connector TLS, native sessions, the web console's HTTPS listener and TLS VHOSTs use the committed outward policy; SQS projects the boundary's typed outward choice into Smithy's mode, preserving the SDK's cipher filtering. |
-| Security digests | `nervix_crypto::digest` obtains SHA-256 and SHA-512 from AWS-LC. The interconnect trust-root fingerprint, the expression function `sha256()` and the licensing protocol's canonical request, condition and impact digests use this boundary, as do the non-security identities that chose SHA-256: the inferencer model identity and state inspection's page fingerprints and exchanged body digests. |
+| Security digests | `nervix_crypto::digest` obtains SHA-256 and SHA-512 from AWS-LC. The interconnect trust-root fingerprint, the expression function `sha256()` and the licensing protocol's canonical request, condition and impact digests use this boundary, as do the non-security identities that chose SHA-256: the inferencer model identity, state inspection's page fingerprints and exchanged body digests, and the cluster licensing inspection's fingerprint. |
 | Digest comparison | `nervix_crypto::digest::equal` compares equal-width digest arrays through AWS-LC's constant-time comparison. |
 | ECDSA signatures and keys | `nervix_crypto::ecdsa` owns P-256/SHA-256 fixed `r‖s` signing and verification, PKCS#8 v1 key generation/import/export, and uncompressed public-point coordinates. The consensus cluster identity generates its key through it. |
 | JWS documents | `nervix_crypto::jws` owns the maintained JWS library's AWS-LC provider, ES256 signing and verification, and RFC 7638 SHA-256 thumbprints. The [licensing protocol](./licensing-protocol.md) owns the documents it signs. |
@@ -202,6 +202,11 @@ The one-shot digests use `aws_lc_rs::digest`. Incremental SHA-256 wraps the main
 with `aws-lc-rs` and librdkafka, preserving the single-module rule. With the boundary's `fips`
 feature the context comes from `aws-lc-fips-sys`, the module `aws-lc-rs` then runs on, so such a
 build references the ordinary module nowhere.
+
+Cluster licensing inspection fingerprints its complete public Row schemas and encoded frames,
+with length framing and the committed revision, through `nervix_crypto::digest::Sha256`. The
+captured origin retains that digest. This bounded observation contains public identity and policy
+facts; private cluster keys never enter its Row sections.
 
 `digest::equal` uses AWS-LC's maintained constant-time primitive on equal-width arrays. Its work
 does not depend on which digest byte differs; the width is public.

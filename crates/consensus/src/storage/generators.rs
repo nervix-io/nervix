@@ -1096,6 +1096,16 @@ fn restore_execution(arbitrary: &mut Arbitrary<'_>) -> RestoreExecution {
 
 /// A `CREATE DOMAIN` as admission captured it: the domain as admission found it when it already
 /// existed, and otherwise the new domain, stopped and never started.
+fn domain_quota(arbitrary: &mut Arbitrary<'_>) -> nervix_licensing_vocabulary::Quota {
+    if arbitrary.entropy().flag() {
+        nervix_licensing_vocabulary::Quota::Unlimited
+    } else {
+        nervix_licensing_vocabulary::Quota::Bounded {
+            value: arbitrary.entropy().any_u64(),
+        }
+    }
+}
+
 fn create_domain_effect(arbitrary: &mut Arbitrary<'_>) -> CommandExecutionEffect {
     let if_not_exists = arbitrary.entropy().flag();
     let existed_at_admission = arbitrary.entropy().flag();
@@ -1113,6 +1123,7 @@ fn create_domain_effect(arbitrary: &mut Arbitrary<'_>) -> CommandExecutionEffect
         }
     };
     CommandExecutionEffect::CreateDomain {
+        domain_quota: domain_quota(arbitrary),
         if_not_exists,
         existed_at_admission,
         state: Box::new(state),
@@ -1405,6 +1416,10 @@ pub(super) fn state_machine(arbitrary: &mut Arbitrary<'_>) -> StateMachineData {
         runtime_revision,
         ..StateMachineData::default()
     };
+    state.licensing = state
+        .cluster_identity
+        .as_ref()
+        .map(|identity| Arc::new(crate::LicensingRecord::free(identity.public().created_at)));
     for _ in 0..arbitrary.entropy().count(RECORDS) {
         let domain = arbitrary.rule_name::<DomainName>();
         let schedule = arbitrary.domain_schedule_of(domain.clone());
@@ -1567,6 +1582,7 @@ fn restore_step_effect(
             };
             let resources = arbitrary.records(restored_resource);
             RestoreStepEffect::Domain {
+                domain_quota: domain_quota(arbitrary),
                 state: Box::new(state),
                 resources,
             }
@@ -2020,6 +2036,7 @@ fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> Consens
         CommandVariant::PutDomain => {
             let domain = arbitrary.rule_name::<DomainName>();
             ConsensusCommand::PutDomain {
+                domain_quota: domain_quota(arbitrary),
                 domain: Box::new(arbitrary.domain_state_of(domain)),
                 mutation: optional_lease(arbitrary),
             }

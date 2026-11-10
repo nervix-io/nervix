@@ -2589,6 +2589,11 @@ process-bound read origin, complete counts and named sections. A section carries
 indices. Watermarks are distinct, non-sensitive datetime columns. Frames conform to their section
 schema, keep branch keys and redaction, and share the verified outer reply's backing bytes.
 
+The entity is a typed choice between a domain node and the cluster license. A domain-node entity
+carries its domain and node reference. A cluster-license entity has neither a domain nor a model
+name. `DESCRIBE LICENSE` uses the same page, unit, origin and Row-section contract, capturing one
+published policy revision and its committed usage. Its single unit belongs to the answering node.
+
 Stateful processor reads use the same envelope. Deduplicators publish `keys`; windows publish
 retained `rows` plus per-branch `header` and `accumulators` sections. Window metadata consumes
 reply bytes and sections, while complete row counts, `LIMIT` and continuation offsets refer only

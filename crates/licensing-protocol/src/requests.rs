@@ -240,6 +240,10 @@ macro_rules! request_operations {
     ($($variant:ident, $wire:ident, $body:ident => $name:literal { $($fields:tt)* });* $(;)?) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
         pub enum Operation { $(#[serde(rename = $name)] $variant,)* }
+        impl Operation {
+            pub const ALL: &'static [Self] = &[$(Self::$variant,)*];
+            pub const fn as_str(self) -> &'static str { match self { $(Self::$variant => $name,)* } }
+        }
         #[derive(Deserialize)]
         #[serde(tag = "op", deny_unknown_fields)]
         enum RequestWire { $(#[serde(rename = $name)] $variant($wire),)* }
