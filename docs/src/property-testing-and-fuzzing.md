@@ -70,6 +70,7 @@ deterministic checks of their projections without introducing a second report sh
 
 | ID | Package and invariant | Domain | Ordinary cases | Input limit |
 | --- | --- | --- | ---: | ---: |
+| `vm-list-arithmetic` | `nervix-vm` complete result shape, validity, float bits and first typed message error against independent scalar arithmetic at every integer and float width | fixed/ragged and mixed lists, nested fixed arrays, empty/null/sliced rows, shared and per-row scalars, v1 | 128 | 512 bytes |
 | `tls-algorithm-selections` | `nervix-crypto-policy` complete member and order equality through canonical names, JSON and rkyv | bounded current selections, including complete catalogs and approved defaults, v2 | 256 | 64 bytes |
 | `tls-algorithm-unknown-names` | `nervix-crypto-policy` exact typed kind and offending-name refusal without a panic | bounded unknown names with Unicode and binary-derived text, v1 | 256 | 64 bytes |
 | `licensing-protocol-json-roundtrip` | `nervix-licensing-protocol` Every current signed decision status, operation, stream ticket, trust document, proof of life, decision and trust-bundle response, key, condition and problem detail preserves the complete typed value and canonical payload bytes, including Unicode, optional fields and unknown external values. | bounded current values and boundary/Unicode inputs, v3 | 128 | 256 bytes |

@@ -99,6 +99,10 @@ between retained rows and window metadata; use each processor's `DESCRIBE` for a
 For inspections while partitions change, also read [Relay → Changing the partition count](../../../docs/src/relay.md#changing-the-partition-count)
 before interpreting a key's partition or retrying a raced inspection.
 
+For arithmetic on sequences, read [Expression Functions → List Arithmetic](../../../docs/src/filter-map-functions.md#list-arithmetic)
+before choosing a two-list or scalar-broadcast function. Check its exact numeric type, fixed-shape,
+null and message-error rules; scalar operators do not select list arithmetic.
+
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
 contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and
