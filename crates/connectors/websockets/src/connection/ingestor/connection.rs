@@ -106,18 +106,46 @@ pub(super) enum WebsocketRead {
     Ping,
 }
 
-/// How a connection ends when its transport fails a read. An endpoint that fails an established
-/// connection tells its peer why with a Close frame, unless the peer is unlikely to receive it (RFC
-/// 6455 section 7.1.7).
+/// How this client ends an established connection it gives up. An endpoint that fails an
+/// established connection tells its peer why with a Close frame, unless the peer is unlikely to
+/// receive it (RFC 6455 section 7.1.7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FailedReadEnding {
-    /// The peer sent a frame this client refuses, and the Close names why.
+pub(super) enum ConnectionEnding {
+    /// The Close names why this client ends the connection.
     Close(CloseCode),
     /// The transport broke, already ended or is already closing, so no frame reaches the peer.
     Release,
 }
 
-impl From<&WebsocketError> for FailedReadEnding {
+impl ConnectionEnding {
+    /// Offers the peer this ending's Close, waiting neither for the write nor for a reply. The
+    /// frame gets one poll outside the cooperative budget, so only a transport that cannot take it
+    /// at once holds it back, and the caller releases the connection either way. A write the
+    /// transport refuses is reported under `operation`. A release offers nothing.
+    pub(super) fn offer(
+        self,
+        relay: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+        operation: &str,
+    ) {
+        match self {
+            Self::Close(status) => {
+                let close = Message::Close(Some(CloseFrame {
+                    code: status,
+                    reason: "".into(),
+                }));
+                let offered = unconstrained(relay.send(close)).now_or_never();
+                if let Some(written) = offered {
+                    written.reported(operation);
+                }
+            }
+            Self::Release => {}
+        }
+    }
+}
+
+/// How a connection ends when its transport fails a read: a frame the peer sent and this client
+/// refuses earns a Close naming why.
+impl From<&WebsocketError> for ConnectionEnding {
     fn from(failure: &WebsocketError) -> Self {
         match failure {
             // A frame beyond max_frame_size, or a message beyond max_message_size.
@@ -142,7 +170,7 @@ impl From<&WebsocketError> for FailedReadEnding {
     }
 }
 
-impl From<&ProtocolError> for FailedReadEnding {
+impl From<&ProtocolError> for ConnectionEnding {
     fn from(violation: &ProtocolError) -> Self {
         match violation {
             // Frames RFC 6455 section 5 forbids the peer to send.
@@ -288,8 +316,8 @@ impl WebsocketConnection {
     /// frame. A transport that cannot take the frame now belongs to a peer that has stopped
     /// reading, which could not read the frame either; that connection is released all the same.
     fn end_silent(&mut self, elapsed: Elapsed) -> Report<IngestorError> {
-        self.offer_close(
-            CloseCode::Away,
+        ConnectionEnding::Close(CloseCode::Away).offer(
+            &mut self.relay,
             "offering a silent WebSocket peer a going-away Close",
         );
         self.idle_deadline.elapsed(elapsed)
@@ -303,31 +331,14 @@ impl WebsocketConnection {
     /// not UTF-8 and 1002 for any other violation of the framing rules. A transport that broke or
     /// already ended can carry no frame, and is released without one.
     fn end_failed(&mut self, failure: WebsocketError) -> Report<IngestorError> {
-        match FailedReadEnding::from(&failure) {
-            FailedReadEnding::Close(status) => self.offer_close(
-                status,
-                "offering a WebSocket peer whose frame failed the read a Close",
-            ),
-            FailedReadEnding::Release => {}
-        }
+        let ending = ConnectionEnding::from(&failure);
+        ending.offer(
+            &mut self.relay,
+            "offering a WebSocket peer whose frame failed the read a Close",
+        );
         Report::new(failure).change_context(IngestorError::Read {
             connector: WEBSOCKETS.keyword(),
         })
-    }
-
-    /// Offers the peer a Close with `status`, waiting neither for the write nor for a reply. The
-    /// frame gets one poll outside the cooperative budget, so only a transport that cannot take it
-    /// at once holds it back, and the caller releases the connection either way. A write the
-    /// transport refuses is reported under `operation`.
-    fn offer_close(&mut self, status: CloseCode, operation: &str) {
-        let close = Message::Close(Some(CloseFrame {
-            code: status,
-            reason: "".into(),
-        }));
-        let offered = unconstrained(self.relay.send(close)).now_or_never();
-        if let Some(written) = offered {
-            written.reported(operation);
-        }
     }
 }
 
