@@ -38,36 +38,36 @@ pub fn evaluate_policy(snapshot: LicensingSnapshot) -> LicensingPolicy {
         conditions: FREE_POLICY.usage(),
         state: PolicyState::Free,
     };
-    if let Some(initialized) = &policy.snapshot.initialized {
-        if let nervix_consensus::LicensingMode::Activated(_) = &initialized.record.mode {
-            match &initialized.verification {
-                Some(Ok(verified)) => {
-                    let decision = &verified.decision;
-                    let now = initialized.record.licensing_time.into_datetime();
-                    policy.conditions = if now >= decision.timing.term_ends_at
-                        || decision.status
-                            != nervix_licensing_protocol::documents::DecisionStatus::Active
-                    {
-                        FREE_POLICY.usage()
-                    } else {
-                        decision.conditions.usage.clone()
-                    };
-                    policy.state = if decision
-                        .timing
-                        .valid_until
-                        .is_some_and(|until| now >= until)
-                    {
-                        PolicyState::Lapsed
-                    } else if now >= decision.timing.overdue_at {
-                        PolicyState::LicensedOverdue
-                    } else if now >= decision.timing.refresh_after {
-                        PolicyState::LicensedDue
-                    } else {
-                        PolicyState::LicensedFresh
-                    };
-                }
-                Some(Err(_)) | None => policy.state = PolicyState::Degraded,
+    if let Some(initialized) = &policy.snapshot.initialized
+        && let nervix_consensus::LicensingMode::Activated(_) = &initialized.record.mode
+    {
+        match &initialized.verification {
+            Some(Ok(verified)) => {
+                let decision = &verified.decision;
+                let now = initialized.record.licensing_time.into_datetime();
+                policy.conditions = if now >= decision.timing.term_ends_at
+                    || decision.status
+                        != nervix_licensing_protocol::documents::DecisionStatus::Active
+                {
+                    FREE_POLICY.usage()
+                } else {
+                    decision.conditions.usage.clone()
+                };
+                policy.state = if decision
+                    .timing
+                    .valid_until
+                    .is_some_and(|until| now >= until)
+                {
+                    PolicyState::Lapsed
+                } else if now >= decision.timing.overdue_at {
+                    PolicyState::LicensedOverdue
+                } else if now >= decision.timing.refresh_after {
+                    PolicyState::LicensedDue
+                } else {
+                    PolicyState::LicensedFresh
+                };
             }
+            Some(Err(_)) | None => policy.state = PolicyState::Degraded,
         }
     }
     policy

@@ -191,15 +191,15 @@ fn families(
                 }
             }
         }
-        if let nervix_consensus::LicensingMode::Activated(activation) = &initialized.record.mode {
-            if let Some(expiry) = activation.binding.ephemeral_expires_at {
-                let nanos: f64 = expiry.unix_nanos().approx_into();
-                sample(
-                    &mut deadlines,
-                    &[("deadline", "ephemeral_expires_at")],
-                    nanos / 1_000_000_000.0,
-                );
-            }
+        if let nervix_consensus::LicensingMode::Activated(activation) = &initialized.record.mode
+            && let Some(expiry) = activation.binding.ephemeral_expires_at
+        {
+            let nanos: f64 = expiry.unix_nanos().approx_into();
+            sample(
+                &mut deadlines,
+                &[("deadline", "ephemeral_expires_at")],
+                nanos / 1_000_000_000.0,
+            );
         }
     }
     output.push(revision);

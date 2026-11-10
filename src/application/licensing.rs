@@ -308,12 +308,12 @@ impl SessionServiceImpl {
         decision: ReceivedLicenseDecision,
     ) -> super::command_result::CommandResult {
         let state = self.inner.consensus.observer().licensing_snapshot();
-        if let Some(initialized) = state.initialized {
-            if let nervix_consensus::LicensingMode::Activated(current) = &initialized.record.mode {
-                if current.binding == binding && current.decision.bytes == decision.bytes {
-                    return super::model_mutation::command_ok("License activated".to_owned());
-                }
-            }
+        if let Some(initialized) = state.initialized
+            && let nervix_consensus::LicensingMode::Activated(current) = &initialized.record.mode
+            && current.binding == binding
+            && current.decision.bytes == decision.bytes
+        {
+            return super::model_mutation::command_ok("License activated".to_owned());
         }
         let creation_id = match activation_request_id(reference) {
             Ok(id) => id,

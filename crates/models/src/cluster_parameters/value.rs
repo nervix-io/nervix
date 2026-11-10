@@ -117,6 +117,25 @@ where
     }
 }
 
+impl<D> Deserialize<DurationParts, D> for ArchivedDurationParts
+where
+    D: rkyv::rancor::Fallible + ?Sized,
+    D::Error: rkyv::rancor::Source,
+{
+    fn deserialize(&self, deserializer: &mut D) -> Result<DurationParts, D::Error> {
+        use rkyv::rancor::Source as _;
+        let seconds = self.seconds.deserialize(deserializer)?;
+        let nanos = self.nanos.deserialize(deserializer)?;
+        if nanos >= 1_000_000_000 {
+            return Err(D::Error::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "duration nanoseconds exceed their coordinate",
+            )));
+        }
+        Ok(DurationParts { seconds, nanos })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,24 +164,5 @@ mod tests {
             )
             .is_err()
         );
-    }
-}
-
-impl<D> Deserialize<DurationParts, D> for ArchivedDurationParts
-where
-    D: rkyv::rancor::Fallible + ?Sized,
-    D::Error: rkyv::rancor::Source,
-{
-    fn deserialize(&self, deserializer: &mut D) -> Result<DurationParts, D::Error> {
-        use rkyv::rancor::Source as _;
-        let seconds = self.seconds.deserialize(deserializer)?;
-        let nanos = self.nanos.deserialize(deserializer)?;
-        if nanos >= 1_000_000_000 {
-            return Err(D::Error::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "duration nanoseconds exceed their coordinate",
-            )));
-        }
-        Ok(DurationParts { seconds, nanos })
     }
 }
