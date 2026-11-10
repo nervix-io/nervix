@@ -22,8 +22,8 @@ lowercase HTTP field names, and on an emitter that keeps one value per header na
 header name once: a repeated literal name is refused when the statement is validated.
 For outbound WebSockets, read the `WEBSOCKETS CONNECTION` section of Ingestors for literal upgrade
 headers, subprotocol offers, response-header reads, frame metadata and the closed client CONFIG key
-set, including idle deadlines after a delayed host handoff, the trust roots `tls_ca_file` adds to
-and how inspection redacts an endpoint. Offer
+set, including idle deadlines after a delayed host handoff, the trust roots `tls_ca_file` adds to,
+peer Close diagnostics during signaling and how inspection redacts an endpoint. Offer
 subprotocols only through `HEADERS { 'sec-websocket-protocol' = '...' }`, and expect the peer to
 select one of them: any other answer fails the connection.
 For ClickHouse HTTP connection tuning, client certificates, compression and which insert failures
@@ -143,6 +143,8 @@ For cluster continuity and public identity inspection, read
 For activation, refresh, `DESCRIBE LICENSE`, effective policy, credential handling and quota usage, read
 [Node Settings → Cluster Licensing](../../../docs/src/node-settings.md#cluster-licensing) and
 [Licensing Metrics](../../../docs/src/metrics-and-observability.md#licensing-metrics).
+For notification freshness, reconnects and polling fallback, use that chapter’s event-stream contract.
+Treat notification hints as requests to obtain a verified decision, never as permissions.
 Keep licensing commands cluster-scoped and obtain credentials and trust provisioning externally;
 Plexus supplies no service-address or trust-anchor override.
 For source UUID inspection and restore behavior, read
@@ -168,9 +170,10 @@ The web console's visual Create forms also cover internal schemas, declared JSON
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
 Roto UDFs, ingestors and emitters for every connector and entity pair, junctions, deduplicators,
 reorderers, window processors, correlators, reingestors, generators, inferencers, WASM processors,
-and session subscriptions; use the same web-console chapter for their typed fields, resource
-versions, tensor shapes, guest limits, program editors, reference lookup, and transaction
-behavior.
+domain-wide and corridor placement rules, and session subscriptions; use the same web-console
+chapter for their typed fields, resource versions, tensor shapes, guest limits, program editors,
+reference lookup, placement members, contextual create actions, and transaction behavior, and its
+Creation Coverage section for which form creates each statement.
 
 For materialized relay inspection, read [Relay → Inspect Materialized State](../../../docs/src/relay.md#inspect-materialized-state)
 for selector, LIMIT/AFTER and FORMAT clause order, typed rows, sensitivity and stale continuations.
@@ -543,27 +546,32 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   - `AND`, `OR`, and `coalesce` evaluate every operand, so only an `IF` or `CASE` arm shields an
     operand that can fail, such as a division by a field that can be zero;
   - an optional result (`TRY_CAST`, JSON extraction, `nullif`, `LOOKUP_HASH_MAP`, `regexp_substr`,
-    `regexp_extract`, URL components, list `first`/`last`/`nth`/`sum`/`min`/`max`/`mean`, sample
-    window statistics, `CASE` without `ELSE`) reaches a required field only through `coalesce`;
+    `regexp_extract`, URL components, list `first`/`last`/`nth`/`sum`/`min`/`max`/`mean`, the
+    `list_` statistics, sample window statistics, `CASE` without `ELSE`) reaches a required field
+    only through `coalesce`;
   - every route whose functions can fail has an `ON MESSAGE ERROR` policy, which also receives a
     failed ingestor `BRANCHED BY ... SET`, and expressions that can fail stay out of deduplication
     keys, reorderer `BY`, `CORRELATE WHERE`, inferencer `INPUTS`, and a reingestor's
     `BRANCHED BY ... SET`, which have no error route;
   - `IN` sets hold non-null constants of the operand's exact type, and string positions count from
     1 while `nth`, `slice`, and JSON path indexes count from 0;
+  - a list changes its element type or container only through `AS` or `TRY_CAST` to the full list
+    type, nested as deep as the operand (`input.readings AS ARRAY<F32, 64>`); a `VEC` that does not
+    hold the `ARRAY`'s length fails its message, and a list never converts to a scalar or `STRING`;
   - before shaping an inferencer input or reading a nested list, read `Expression Functions` →
     `Array And Vector Functions` and `Processors` → `Inferencer`; check the fixed shape and literal
     dimensions rather than treating a change of axes as an element-type conversion;
-  - datetime units, parts, `date_bin` widths, zones, formats, and disambiguations are literals, a
-    local calendar names its zone, `now()` supplies domain time, and foreign timestamps are read
-    with a strict `parse_datetime` format;
+  - datetime units, parts, `date_bin` widths, zones, formats, and disambiguations, and the
+    `list_quantile` percentile, are literals, a local calendar names its zone, `now()` supplies
+    domain time, and foreign timestamps are read with a strict `parse_datetime` format;
   - IP text is parsed once into a `BYTES` field, IPv4-mapped addresses are unmapped before IPv4
     network tests, URL inputs are absolute, and many JSON fields are read from one document field;
   - every sensitive value stored in a field that is not sensitive goes through `leak_sensitive(...)`;
     hashing, counting, or testing a sensitive value keeps the result sensitive.
 - In window routes, read `Expression Functions` → `Window Aggregates`. Aggregates appear only in
   window route `SET`, `input` only inside their arguments, and `COUNT`, `SUM`, `FIRST`, `LAST`,
-  `MIN`, and `MAX` are aggregates there, never list functions. Compute window output from aggregates
+  `MIN`, and `MAX` are aggregates there, never list functions, while the `list_` statistics stay
+  list functions an aggregate's argument may call. Compute window output from aggregates
   and constants, and prefer the dedicated aggregates (`AVG`, `COUNT_IF`, `ARG_MIN`, `ARG_MAX`, the
   `*_POP` and `*_SAMP` statistics, `CORR`) over hand-built formulas. Before using `COLLECT_VEC` or
   `COLLECT_ARRAY`, check the reference's required-argument, retention and count-width rules;
@@ -912,10 +920,12 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   Keep that reference when publication loses leadership while the reset is applying;
   `Command Completion` defines recovery and retained failures.
   See the reset section in `Runtime Nodes` and `Command Completion` before suggesting it.
-- To inspect WASM guest-state progress, use `DESCRIBE WASM PROCESSOR <processor> [FORMAT TEXT|JSON];`.
-  Read its reset phase and generation beside the checkpoint revision and replica counts; both
-  formats use the same typed state inspection. See `Runtime Nodes` and `WASM Processor Guests` for
-  the meaning of each stage and the bounded branch details.
+- To inspect WASM guest-state progress, use
+  `SHOW WASM PROCESSOR <processor> STATE [FOR ...] [LIMIT <n> [AFTER '<continuation>']] [FORMAT TEXT|JSON];`.
+  Read each unit's reset phase, generation and readiness beside every selected branch's checkpoint
+  revision, stage and replica counts; follow a returned continuation with `AFTER` to page the rest.
+  `DESCRIBE WASM PROCESSOR <processor>;` prints only the binding and per-unit summary counts. See
+  `Runtime Nodes` and `WASM Processor Guests` for the meaning of each stage.
 - On a flush-based route, treat `ON MESSAGE ERROR SEND TO` as a separately buffered error output
   governed by that route's same interval and maximum batch-size boundaries. General/global errors
   are node-wide and do not inherit route-local `FLUSH`.

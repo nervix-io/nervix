@@ -60,7 +60,7 @@ fn hash_map_and_roto_udf_forms_render_current_model_controls() {
         };
 
         signals.open(
-            CreateKind::HashMap,
+            CreateKind::Model(ModelKind::Lookup),
             Some(domain.clone()),
             "global-create-button",
         );
@@ -87,9 +87,16 @@ fn hash_map_and_roto_udf_forms_render_current_model_controls() {
         assert!(lookup.contains("KEY id"));
         assert!(lookup.contains("VERSION LATEST"));
         assert!(lookup.contains("Selected key: id"));
-        assert_eq!(open_form_controls(signals, CreateKind::HashMap).len(), 4);
+        assert_eq!(
+            open_form_controls(signals, CreateKind::Model(ModelKind::Lookup)).len(),
+            4
+        );
 
-        signals.open(CreateKind::Udf, Some(domain), "global-create-button");
+        signals.open(
+            CreateKind::Model(ModelKind::Udf),
+            Some(domain),
+            "global-create-button",
+        );
         signals.udf.update(|draft| {
             draft.name = "reflect".to_string();
             let mut argument = UdfArgumentDraft {
@@ -116,7 +123,7 @@ fn hash_map_and_roto_udf_forms_render_current_model_controls() {
         assert!(udf.contains("ARGS (value I64)"));
         assert!(udf.contains("RETURNS I64"));
         assert!(udf.contains("fn reflect(value: I64Column)"));
-        assert!(open_form_controls(signals, CreateKind::Udf).is_empty());
+        assert!(open_form_controls(signals, CreateKind::Model(ModelKind::Udf)).is_empty());
 
         signals.udf.update(|draft| {
             draft.arguments[0].ty.layers.push(CollectionLayer::Vector);
@@ -161,7 +168,7 @@ fn junction_and_reingestor_render_ordered_route_and_state_controls() {
         };
 
         signals.open(
-            CreateKind::Junction,
+            CreateKind::Model(ModelKind::Junction),
             Some(domain.clone()),
             "global-create-button",
         );
@@ -235,7 +242,7 @@ fn junction_and_reingestor_render_ordered_route_and_state_controls() {
         assert!(ordered_rows.contains("LEAK SENSITIVE"));
 
         signals.open(
-            CreateKind::Reingestor,
+            CreateKind::Model(ModelKind::Reingestor),
             Some(domain.clone()),
             "global-create-button",
         );
@@ -268,7 +275,7 @@ fn processor_choices_follow_branch_schema_and_incoming_state_context() {
         let domain = DomainName::parse("orders").assured("valid domain");
         let signals = CreateSignals::new();
         signals.open(
-            CreateKind::Junction,
+            CreateKind::Model(ModelKind::Junction),
             Some(domain.clone()),
             "global-create-button",
         );
@@ -320,7 +327,11 @@ fn processor_choices_follow_branch_schema_and_incoming_state_context() {
             .assured("incoming branch selected");
         assert_eq!(output.target, ChoiceTarget::ProcessorInputBranchRelay);
 
-        signals.open(CreateKind::Reingestor, Some(domain), "global-create-button");
+        signals.open(
+            CreateKind::Model(ModelKind::Reingestor),
+            Some(domain),
+            "global-create-button",
+        );
         assert_eq!(
             signals
                 .choice_query(ChoiceControl::ProcessorInputRelay)
@@ -366,13 +377,13 @@ fn processor_choices_update_each_selected_ordered_section() {
     Owner::new().with(|| {
         let domain = DomainName::parse("orders").assured("valid domain");
         let signals = CreateSignals::new();
-        signals.open(CreateKind::Junction, Some(domain.clone()), "global-create-button");
+        signals.open(CreateKind::Model(ModelKind::Junction), Some(domain.clone()), "global-create-button");
         signals.junction.update(|draft| draft.choose_branched());
         let junction_branch = ChoiceValue::Model(node(ModelKind::Branch, "by_tenant"));
         select_choice(signals, ChoiceControl::ProcessorBranch, junction_branch.clone());
         assert!(selected_choice(signals, ChoiceControl::ProcessorBranch, &junction_branch));
 
-        signals.open(CreateKind::Reingestor, Some(domain), "global-create-button");
+        signals.open(CreateKind::Model(ModelKind::Reingestor), Some(domain), "global-create-button");
         assert_eq!(
             signals.choice_query(ChoiceControl::ProcessorStateRelay).err(),
             Some("Choose an input relay before materialized state")
@@ -475,7 +486,7 @@ fn processor_choices_update_each_selected_ordered_section() {
         assert!(matches!(route.branch, super::ingestor_route_draft::RouteBranchDraft::Branched { ref assignments, .. } if assignments.len() == 1));
         assert_eq!(route.assignments.len(), 1);
         assert!(matches!(route.message_error, MessageErrorDraft::SendTo { ref assignments, .. } if assignments.len() == 1));
-        assert!(open_form_controls(signals, CreateKind::Reingestor)
+        assert!(open_form_controls(signals, CreateKind::Model(ModelKind::Reingestor))
             .contains(&ChoiceControl::ProcessorErrorField));
     });
 }
@@ -491,14 +502,14 @@ fn hash_map_choices_bind_the_key_to_the_selected_codec_and_domain() {
         let codec = ChoiceValue::Model(node(ModelKind::Codec, "entry_codec"));
         let key = ChoiceValue::Field(FieldName::parse("id").assured("valid field"));
         let signals = CreateSignals::new();
-        for control in open_form_controls(signals, CreateKind::HashMap) {
-            assert_eq!(control.form(), CreateKind::HashMap);
+        for control in open_form_controls(signals, CreateKind::Model(ModelKind::Lookup)) {
+            assert_eq!(control.form(), CreateKind::Model(ModelKind::Lookup));
         }
-        assert_eq!(CreateKind::HashMap.wire_format(), None);
-        assert_eq!(CreateKind::Udf.wire_format(), None);
+        assert_eq!(CreateKind::Model(ModelKind::Lookup).wire_format(), None);
+        assert_eq!(CreateKind::Model(ModelKind::Udf).wire_format(), None);
 
         signals.open(
-            CreateKind::HashMap,
+            CreateKind::Model(ModelKind::Lookup),
             Some(scope.clone()),
             "global-create-button",
         );
@@ -563,7 +574,7 @@ fn ingestor_form_renders_every_source_and_keeps_its_typed_references_in_scope() 
         let scope = DomainName::parse("orders").assured("valid domain");
         let signals = CreateSignals::new();
         signals.open(
-            CreateKind::Ingestor,
+            CreateKind::Model(ModelKind::Ingestor),
             Some(scope.clone()),
             "global-create-button",
         );
@@ -650,7 +661,7 @@ fn ingestor_choices_follow_the_selected_source_codec_branch_and_relays() {
     Owner::new().with(|| {
         let domain = DomainName::parse("orders").assured("valid domain");
         let signals = CreateSignals::new();
-        signals.open(CreateKind::Ingestor, Some(domain.clone()), "global-create-button");
+        signals.open(CreateKind::Model(ModelKind::Ingestor), Some(domain.clone()), "global-create-button");
         assert_eq!(
             signals.choice_query(ChoiceControl::IngestSourceRef).err(),
             Some("Choose a source type before its client or endpoint")
@@ -756,7 +767,7 @@ fn ingestor_choices_follow_the_selected_source_codec_branch_and_relays() {
             signals.ingestor.get().routes[0].message_error,
             super::ingestor_route_draft::MessageErrorDraft::SendTo { ref assignments, .. } if assignments.len() == 1
         ));
-        assert!(open_form_controls(signals, CreateKind::Ingestor)
+        assert!(open_form_controls(signals, CreateKind::Model(ModelKind::Ingestor))
             .contains(&ChoiceControl::IngestErrorField));
     });
 }
@@ -787,7 +798,11 @@ fn ingestor_editor_shows_source_specific_fields_and_route_construction_sections(
             any_spawner::Executor::poll_local();
             dialog.to_html()
         };
-        signals.open(CreateKind::Ingestor, Some(scope), "global-create-button");
+        signals.open(
+            CreateKind::Model(ModelKind::Ingestor),
+            Some(scope),
+            "global-create-button",
+        );
         for (kind, field) in [
             (
                 IngestorEntityKind::Http(HttpIngestorEntity::Request),
@@ -924,7 +939,7 @@ fn client_vhost_and_endpoint_forms_render_every_transport_and_typed_reference_co
         };
 
         signals.open(
-            CreateKind::Client,
+            CreateKind::Model(ModelKind::Client),
             Some(scope.clone()),
             "global-create-button",
         );
@@ -964,18 +979,22 @@ fn client_vhost_and_endpoint_forms_render_every_transport_and_typed_reference_co
         assert!(render().contains("create-client-signaling-clear"));
 
         signals.open(
-            CreateKind::Vhost,
+            CreateKind::Model(ModelKind::Vhost),
             Some(scope.clone()),
             "global-create-button",
         );
-        assert!(open_form_controls(signals, CreateKind::Vhost).is_empty());
+        assert!(open_form_controls(signals, CreateKind::Model(ModelKind::Vhost)).is_empty());
         signals.vhost.update(|draft| draft.tls_enabled = true);
         let vhost = render();
         assert!(vhost.contains("create-vhost-hostname"));
         assert!(vhost.contains("create-vhost-resource"));
         assert!(vhost.contains("create-vhost-version"));
 
-        signals.open(CreateKind::Endpoint, Some(scope), "global-create-button");
+        signals.open(
+            CreateKind::Model(ModelKind::Endpoint),
+            Some(scope),
+            "global-create-button",
+        );
         signals.endpoint.update(|draft| draft.select_websockets());
         let endpoint = render();
         assert!(endpoint.contains("create-endpoint-vhost"));
@@ -994,7 +1013,7 @@ fn client_vhost_and_endpoint_submissions_use_current_models_and_mask_secrets() {
         let signals = CreateSignals::new();
 
         signals.open(
-            CreateKind::Client,
+            CreateKind::Model(ModelKind::Client),
             Some(scope.clone()),
             "global-create-button",
         );
@@ -1016,7 +1035,7 @@ fn client_vhost_and_endpoint_submissions_use_current_models_and_mask_secrets() {
         assert_eq!(command.domain, Some(scope.clone()));
 
         signals.open(
-            CreateKind::Vhost,
+            CreateKind::Model(ModelKind::Vhost),
             Some(scope.clone()),
             "global-create-button",
         );
@@ -1031,7 +1050,11 @@ fn client_vhost_and_endpoint_submissions_use_current_models_and_mask_secrets() {
                 .contains("CREATE VHOST external_edge api.example.com")
         );
 
-        signals.open(CreateKind::Endpoint, Some(scope), "global-create-button");
+        signals.open(
+            CreateKind::Model(ModelKind::Endpoint),
+            Some(scope),
+            "global-create-button",
+        );
         signals.endpoint.update(|draft| {
             draft.name = "external_path".to_string();
             draft.select_vhost(&node(ModelKind::Vhost, "external_edge"));
@@ -1059,20 +1082,41 @@ fn client_vhost_and_endpoint_choices_keep_their_typed_dependencies() {
         let vhost = ChoiceValue::Model(node(ModelKind::Vhost, "edge"));
         let signals = CreateSignals::new();
         for (control, kind) in [
-            (ChoiceControl::ClientResource, CreateKind::Client),
-            (ChoiceControl::ClientVersion, CreateKind::Client),
-            (ChoiceControl::ClientSignaling, CreateKind::Client),
-            (ChoiceControl::VhostResource, CreateKind::Vhost),
-            (ChoiceControl::VhostVersion, CreateKind::Vhost),
-            (ChoiceControl::EndpointVhost, CreateKind::Endpoint),
-            (ChoiceControl::EndpointSignaling, CreateKind::Endpoint),
+            (
+                ChoiceControl::ClientResource,
+                CreateKind::Model(ModelKind::Client),
+            ),
+            (
+                ChoiceControl::ClientVersion,
+                CreateKind::Model(ModelKind::Client),
+            ),
+            (
+                ChoiceControl::ClientSignaling,
+                CreateKind::Model(ModelKind::Client),
+            ),
+            (
+                ChoiceControl::VhostResource,
+                CreateKind::Model(ModelKind::Vhost),
+            ),
+            (
+                ChoiceControl::VhostVersion,
+                CreateKind::Model(ModelKind::Vhost),
+            ),
+            (
+                ChoiceControl::EndpointVhost,
+                CreateKind::Model(ModelKind::Endpoint),
+            ),
+            (
+                ChoiceControl::EndpointSignaling,
+                CreateKind::Model(ModelKind::Endpoint),
+            ),
         ] {
             assert_eq!(control.form(), kind);
         }
-        assert_eq!(CreateKind::Endpoint.wire_format(), None);
+        assert_eq!(CreateKind::Model(ModelKind::Endpoint).wire_format(), None);
 
         signals.open(
-            CreateKind::Client,
+            CreateKind::Model(ModelKind::Client),
             Some(scope.clone()),
             "global-create-button",
         );
@@ -1110,7 +1154,7 @@ fn client_vhost_and_endpoint_choices_keep_their_typed_dependencies() {
             resource
         );
         assert_eq!(
-            open_form_controls(signals, CreateKind::Client),
+            open_form_controls(signals, CreateKind::Model(ModelKind::Client)),
             [
                 ChoiceControl::ClientResource,
                 ChoiceControl::ClientVersion,
@@ -1135,7 +1179,7 @@ fn client_vhost_and_endpoint_choices_keep_their_typed_dependencies() {
         ));
 
         signals.open(
-            CreateKind::Vhost,
+            CreateKind::Model(ModelKind::Vhost),
             Some(scope.clone()),
             "global-create-button",
         );
@@ -1161,7 +1205,7 @@ fn client_vhost_and_endpoint_choices_keep_their_typed_dependencies() {
             resource
         );
         assert_eq!(
-            open_form_controls(signals, CreateKind::Vhost),
+            open_form_controls(signals, CreateKind::Model(ModelKind::Vhost)),
             [ChoiceControl::VhostResource, ChoiceControl::VhostVersion]
         );
         signals.change_scope(Some(elsewhere.clone()));
@@ -1177,7 +1221,7 @@ fn client_vhost_and_endpoint_choices_keep_their_typed_dependencies() {
         ));
 
         signals.open(
-            CreateKind::Endpoint,
+            CreateKind::Model(ModelKind::Endpoint),
             Some(scope.clone()),
             "global-create-button",
         );
@@ -1211,7 +1255,7 @@ fn client_vhost_and_endpoint_choices_keep_their_typed_dependencies() {
             ChoiceTarget::SignalingProtocol
         );
         assert_eq!(
-            open_form_controls(signals, CreateKind::Endpoint),
+            open_form_controls(signals, CreateKind::Model(ModelKind::Endpoint)),
             [
                 ChoiceControl::EndpointVhost,
                 ChoiceControl::EndpointSignaling
@@ -1264,7 +1308,7 @@ fn codec_and_signaling_forms_render_every_current_editor_family() {
         };
 
         signals.open(
-            CreateKind::Codec,
+            CreateKind::Model(ModelKind::Codec),
             Some(scope.clone()),
             "global-create-button",
         );
@@ -1324,7 +1368,7 @@ fn codec_and_signaling_forms_render_every_current_editor_family() {
         assert!(protobuf.contains("USING RESOURCE proto_bundle VERSION LATEST"));
 
         signals.open(
-            CreateKind::SignalingProtocol,
+            CreateKind::Model(ModelKind::SignalingProtocol),
             Some(scope),
             "global-create-button",
         );
@@ -1443,7 +1487,7 @@ fn changing_domain_invalidates_codec_and_signaling_references() {
         let other = DomainName::parse("other").assured("test domain is valid");
         let signals = CreateSignals::new();
 
-        signals.open(CreateKind::Codec, Some(orders.clone()), "global-create-button");
+        signals.open(CreateKind::Model(ModelKind::Codec), Some(orders.clone()), "global-create-button");
         signals.codec.update(|draft| {
             draft.name = "selected_codec".to_string();
             draft.select_schema(&node(ModelKind::Schema, "payload"));
@@ -1455,7 +1499,7 @@ fn changing_domain_invalidates_codec_and_signaling_references() {
         assert!(codec.schema.as_ref().is_some_and(|selected| !selected.is_current()));
         assert!(matches!(codec.format, Some(CodecFormatDraft::Wire { schema: Some(ref selected), .. }) if !selected.is_current()));
 
-        signals.open(CreateKind::SignalingProtocol, Some(orders), "global-create-button");
+        signals.open(CreateKind::Model(ModelKind::SignalingProtocol), Some(orders), "global-create-button");
         signals.signaling.update(|draft| {
             draft.set_format(SignalingFormatKind::Protobuf);
             let binding = draft.binding_mut().verified("Protobuf signaling has a binding");
@@ -1476,7 +1520,11 @@ fn codec_and_signaling_choice_queries_follow_format_and_resource_dependencies() 
         let scope = DomainName::parse("orders").assured("test domain is valid");
         let resource = ResourceName::parse("proto_bundle").assured("test resource is valid");
         let signals = CreateSignals::new();
-        signals.open(CreateKind::Codec, None, "global-create-button");
+        signals.open(
+            CreateKind::Model(ModelKind::Codec),
+            None,
+            "global-create-button",
+        );
         assert_eq!(
             signals.choice_query(ChoiceControl::CodecVersion).err(),
             Some("Select a domain before choosing a resource version")
@@ -1540,7 +1588,7 @@ fn codec_and_signaling_choice_queries_follow_format_and_resource_dependencies() 
             ]
         );
         assert_eq!(
-            open_form_controls(signals, CreateKind::Codec),
+            open_form_controls(signals, CreateKind::Model(ModelKind::Codec)),
             [
                 ChoiceControl::CodecSchema,
                 ChoiceControl::CodecResource,
@@ -1549,7 +1597,7 @@ fn codec_and_signaling_choice_queries_follow_format_and_resource_dependencies() 
         );
 
         signals.open(
-            CreateKind::SignalingProtocol,
+            CreateKind::Model(ModelKind::SignalingProtocol),
             Some(scope.clone()),
             "global-create-button",
         );
@@ -1582,7 +1630,7 @@ fn codec_and_signaling_choice_queries_follow_format_and_resource_dependencies() 
             ChoiceValue::Resource(resource)
         );
         assert_eq!(
-            open_form_controls(signals, CreateKind::SignalingProtocol),
+            open_form_controls(signals, CreateKind::Model(ModelKind::SignalingProtocol)),
             [
                 ChoiceControl::SignalingResource,
                 ChoiceControl::SignalingVersion,
@@ -1590,9 +1638,12 @@ fn codec_and_signaling_choice_queries_follow_format_and_resource_dependencies() 
         );
         assert_eq!(
             ChoiceControl::SignalingVersion.form(),
-            CreateKind::SignalingProtocol
+            CreateKind::Model(ModelKind::SignalingProtocol)
         );
-        assert_eq!(ChoiceControl::CodecVersion.form(), CreateKind::Codec);
+        assert_eq!(
+            ChoiceControl::CodecVersion.form(),
+            CreateKind::Model(ModelKind::Codec)
+        );
     });
 }
 
@@ -1636,10 +1687,13 @@ fn deduplicator_and_reorderer_forms_edit_ordered_keys_after_their_node_branch() 
                 .err(),
             Some("Open a processor form first")
         );
-        assert!(!ChoiceControl::ProcessorBranch.applies_to(CreateKind::Emitter));
-        assert_eq!(CreateKind::Emitter.processor_family(), None);
+        assert!(!ChoiceControl::ProcessorBranch.applies_to(CreateKind::Model(ModelKind::Emitter)));
+        assert_eq!(
+            CreateKind::Model(ModelKind::Emitter).processor_family(),
+            None
+        );
         signals.open(
-            CreateKind::Junction,
+            CreateKind::Model(ModelKind::Junction),
             Some(domain.clone()),
             "global-create-button",
         );
@@ -1649,7 +1703,7 @@ fn deduplicator_and_reorderer_forms_edit_ordered_keys_after_their_node_branch() 
 
         let forms = [
             KeyedForm {
-                kind: CreateKind::Deduplicator,
+                kind: CreateKind::Model(ModelKind::Deduplicator),
                 prerequisite: "Choose the deduplicator branch before its input relays",
                 unnamed: "Choose the named deduplicator branch before its input relays",
                 heading: "Ordered DEDUPLICATE ON expressions",
@@ -1659,7 +1713,7 @@ fn deduplicator_and_reorderer_forms_edit_ordered_keys_after_their_node_branch() 
                        by_tenant",
             },
             KeyedForm {
-                kind: CreateKind::Reorderer,
+                kind: CreateKind::Model(ModelKind::Reorderer),
                 prerequisite: "Choose the reorderer branch before its input relays",
                 unnamed: "Choose the named reorderer branch before its input relays",
                 heading: "Ordered BY expressions",
@@ -1786,5 +1840,171 @@ fn deduplicator_and_reorderer_forms_edit_ordered_keys_after_their_node_branch() 
             assert!(changed.current_first_input().is_none());
             assert!(signals.submission().is_err());
         }
+    });
+}
+
+#[test]
+fn a_corridor_placement_asks_for_members_and_renders_their_ordered_rows() {
+    use super::placement_draft::{CorridorSide, MemberChange, MemberMove, PlacementCoverage};
+
+    super::super::initialize_test_executor();
+    Owner::new().with(|| {
+        let scope = DomainName::parse("orders").assured("valid domain");
+        let placement = CreateKind::Model(ModelKind::Placement);
+        let signals = CreateSignals::new();
+        signals.open(placement, Some(scope.clone()), "global-create-button");
+        assert_eq!(
+            open_form_controls(signals, placement),
+            vec![ChoiceControl::PlacementPolicy],
+            "a domain-wide rule asks for no members"
+        );
+        assert_eq!(
+            signals
+                .choice_query(ChoiceControl::PlacementPolicy)
+                .assured("policies need no dependency")
+                .page_size,
+            100,
+            "every policy fits the first page"
+        );
+
+        signals
+            .placement
+            .update(|draft| draft.coverage = PlacementCoverage::Corridor);
+        assert_eq!(
+            open_form_controls(signals, placement),
+            vec![
+                ChoiceControl::PlacementPolicy,
+                ChoiceControl::PlacementFromMember,
+                ChoiceControl::PlacementToMember,
+            ]
+        );
+        for control in [
+            ChoiceControl::PlacementFromMember,
+            ChoiceControl::PlacementToMember,
+        ] {
+            let query = signals
+                .choice_query(control)
+                .assured("a captured domain asks for members");
+            assert_eq!(query.target, ChoiceTarget::PlacementMember);
+            assert_eq!(query.dependencies.len(), 1);
+            assert_eq!(
+                query.dependencies[0].value,
+                ChoiceValue::Domain(scope.clone())
+            );
+        }
+
+        let input = ChoiceValue::Model(node(ModelKind::Relay, "input"));
+        let normalize = ChoiceValue::Model(node(ModelKind::Junction, "normalize"));
+        let publish = ChoiceValue::Model(node(ModelKind::Emitter, "publish"));
+        select_choice(signals, ChoiceControl::PlacementFromMember, input.clone());
+        select_choice(
+            signals,
+            ChoiceControl::PlacementFromMember,
+            normalize.clone(),
+        );
+        select_choice(signals, ChoiceControl::PlacementToMember, publish.clone());
+        assert!(selected_choice(
+            signals,
+            ChoiceControl::PlacementFromMember,
+            &input
+        ));
+        assert!(selected_choice(
+            signals,
+            ChoiceControl::PlacementToMember,
+            &publish
+        ));
+        assert!(
+            !selected_choice(signals, ChoiceControl::PlacementToMember, &input),
+            "each side keeps its own members"
+        );
+
+        let dialog = CreateDialog(
+            CreateDialogProps::builder()
+                .signals(signals)
+                .active_domain(RwSignal::new(Some(scope.clone())))
+                .connection_state(RwSignal::new(super::super::ConsoleConnectionState::Waiting))
+                .session_generation(RwSignal::new(1))
+                .request_tx(RwSignal::new(None))
+                .submit(super::ignore_test_submission)
+                .build(),
+        );
+        any_spawner::Executor::poll_local();
+        let html = dialog.to_html();
+        for control in [
+            "create-placement-coverage",
+            "create-placement-from",
+            "create-placement-to",
+            "create-placement-from-members",
+            "create-placement-to-members",
+            "Move input down",
+            "Move normalize up",
+            "Remove publish",
+        ] {
+            assert!(html.contains(control), "{control} must render");
+        }
+
+        signals.placement.update(|draft| {
+            draft.name = "corridor".to_string();
+            draft.change_member(
+                CorridorSide::From,
+                1,
+                MemberChange::Move(MemberMove::Earlier),
+            );
+        });
+        let built = signals
+            .placement
+            .get_untracked()
+            .build()
+            .assured("a complete corridor builds");
+        assert_eq!(
+            built
+                .to_canonical_plexus()
+                .assured("a placement renders canonical Plexus"),
+            "CREATE PLACEMENT corridor FROM normalize, input TO publish NEUTRAL;",
+            "the moved member leads the FROM side"
+        );
+
+        signals.change_scope(Some(DomainName::parse("refunds").assured("valid domain")));
+        assert!(signals.placement.get_untracked().has_changed_members());
+        assert!(!selected_choice(
+            signals,
+            ChoiceControl::PlacementFromMember,
+            &input
+        ));
+        select_choice(signals, ChoiceControl::PlacementFromMember, input.clone());
+        assert!(selected_choice(
+            signals,
+            ChoiceControl::PlacementFromMember,
+            &input
+        ));
+    });
+}
+
+#[test]
+fn the_graph_place_action_replaces_the_draft_with_a_corridor_in_its_domain() {
+    use super::placement_draft::{CorridorSide, PlacementCoverage};
+
+    super::super::initialize_test_executor();
+    Owner::new().with(|| {
+        let scope = DomainName::parse("orders").assured("valid domain");
+        let signals = CreateSignals::new();
+        signals
+            .placement
+            .update(|draft| draft.name = "retained".to_string());
+        signals.open_placement_from(
+            scope.clone(),
+            ModelName::parse("normalize").assured("valid name"),
+            "graph-search",
+        );
+        let draft = signals.placement.get_untracked();
+        assert_eq!(draft.coverage, PlacementCoverage::Corridor);
+        assert_eq!(draft.name, "", "the action starts a new draft");
+        assert!(draft.selects_member(CorridorSide::From, &node(ModelKind::Junction, "normalize")));
+        assert!(draft.members(CorridorSide::To).is_empty());
+        assert_eq!(
+            signals.open.get_untracked(),
+            Some(CreateKind::Model(ModelKind::Placement))
+        );
+        assert_eq!(signals.captured_domain.get_untracked(), Some(scope));
     });
 }

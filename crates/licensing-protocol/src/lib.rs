@@ -15,6 +15,7 @@ pub mod document;
 pub mod documents;
 pub mod impact;
 pub mod keys;
+pub mod notifications;
 pub mod problems;
 pub mod requests;
 pub mod trust;

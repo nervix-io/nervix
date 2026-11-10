@@ -214,6 +214,8 @@ enum ChoiceTarget : ubyte {
   EmitterErrorRelay,
   SchemaField,
   GeneratorMaterializedRelay,
+  /// Runtime nodes a placement rule may name as a FROM or TO member. Requires a domain.
+  PlacementMember,
 }
 
 enum DomainPaceChoice : ubyte {
@@ -1725,6 +1727,40 @@ table StatementOutcome {
   diagnostics: [Diagnostic] (required);
 }
 
+/// The pinned module a WASM processor's guest state belongs to.
+table WasmStateBinding { resource: string (required); version: ulong; file: string (required); }
+/// The progress of a branch's latest checkpoint through its durability boundary.
+enum WasmCheckpointStage : ubyte { Empty, Captured, LocallyDurable, ReplicaConfirmed, Failed }
+enum WasmResetPhase : ubyte { Publishing, Ready }
+/// The operation that requested a coordinated guest-state lifetime change.
+enum WasmResetReason : ubyte { Operator, Transaction, Guest, RejectedSnapshot }
+/// A reset's admission boundary as observed by the read.
+enum WasmResetReadiness : ubyte { Resetting, AwaitingUsableExecution, Ready }
+/// Why a guest refused the saved snapshot it was asked to restore.
+enum WasmSavedStateRejection : ubyte { SnapshotEnvelope, ApplicationState }
+/// What the one recovery attempt a refused lifetime is worth achieved.
+enum WasmRecoveryOutcome : ubyte { Attempted, Recovered, Failed }
+table WasmUnbranchedScope {}
+table WasmBranchScope { branch: Fingerprint (required); }
+table WasmAllBranchesScope {}
+/// The executions a reset selects.
+union WasmStateScope { WasmUnbranchedScope, WasmBranchScope, WasmAllBranchesScope }
+/// The latest coordinated reset, the generation it published for its scope and its readiness.
+table WasmResetFacts { request: string (required); scope: WasmStateScope (required); phase: WasmResetPhase = null; reason: WasmResetReason = null; generation: ulong; readiness: WasmResetReadiness = null; }
+/// Every selected checkpoint of the current lifetimes by stage, including those beyond the page.
+table WasmCheckpointCounts { total: ulong; empty: ulong; captured: ulong; locally_durable: ulong; awaiting_replicas: ulong; replica_confirmed: ulong; failed: ulong; }
+/// Every selected rejected-state recovery by what its attempt achieved.
+table WasmRecoveryCounts { attempted: ulong; recovered: ulong; failed: ulong; }
+/// A branch's checkpoint in its current lifetime. Revisions are absent until the guest saved one,
+/// and replica counts until the checkpoint names its durability boundary.
+table WasmCheckpointFacts { generation: ulong; committed_revision: ulong = null; latest_revision: ulong = null; stage: WasmCheckpointStage = null; required_replicas: uint = null; confirmed_replicas: uint = null; }
+/// The recovery recorded for a branch's refused lifetime.
+table WasmRecoveryFacts { generation: ulong; rejection: WasmSavedStateRejection = null; request: string (required); outcome: WasmRecoveryOutcome = null; }
+/// One selected branch, absent for the unbranched execution, with at least one of its facts.
+table WasmBranchStateFacts { branch: Fingerprint; checkpoint: WasmCheckpointFacts; recovery: WasmRecoveryFacts; }
+/// One unit's guest-state lifetimes, complete counts over the selection and one page of branch
+/// entries in branch order.
+table WasmUnitStateFacts { default_generation: ulong; reset: WasmResetFacts; entries: ulong; checkpoints: WasmCheckpointCounts (required); recoveries: WasmRecoveryCounts (required); branches: [WasmBranchStateFacts] (required); }
 /// The captured state a read was served from.
 enum StateInspectionStage : ubyte { Live, Stored }
 enum StateInspectionRejection : ubyte { UnknownEntity, NotMaterialized, InvalidSelection, InvalidLimit, StaleContinuation, OwnerUnavailable, NotReady, Deadline, ReplyTooLarge }
@@ -1734,8 +1770,10 @@ table StateInspectionOrigin { node: string (required); incarnation: ulong; finge
 table StateRowFrame { data: [ubyte] (required); }
 table StateWatermarkColumns { low: uint; high: uint; }
 table StateInspectionSection { name: string (required); schema: RowSchema (required); frames: [StateRowFrame] (required); omitted_rows: ulong; watermarks: StateWatermarkColumns; }
-table StateInspectionUnit { unit: PlacementUnit (required); owner: string (required); replicas: [string] (required); origin: StateInspectionOrigin (required); counts: StateInspectionCounts (required); sections: [StateInspectionSection] (required); }
-table StateInspectionPage { counts: StateInspectionCounts (required); unit_count: ulong; units: [StateInspectionUnit] (required); continuation: string; }
+/// `wasm` carries a WASM processor unit's guest-state facts; other kinds omit it.
+table StateInspectionUnit { unit: PlacementUnit (required); owner: string (required); replicas: [string] (required); origin: StateInspectionOrigin (required); counts: StateInspectionCounts (required); sections: [StateInspectionSection] (required); wasm: WasmUnitStateFacts; }
+/// `wasm_binding` names a WASM processor's pinned module; other kinds omit it.
+table StateInspectionPage { counts: StateInspectionCounts (required); unit_count: ulong; units: [StateInspectionUnit] (required); continuation: string; wasm_binding: WasmStateBinding; }
 table StateInspectionRefused { reason: StateInspectionRejection = null; }
 union StateInspectionResult { StateInspectionPage, StateInspectionRefused }
 table DomainNodeInspectionEntity { domain: string (required); node: NodeRef (required); }
@@ -1762,8 +1800,6 @@ table CommandOutcome {
   /// inspected transaction may differ from `transaction`, which keeps describing this session's
   /// own binding.
   inspection: TransactionInspected;
-  /// JSON serialization of the typed WASM state inspection returned by a processor description.
-  wasm_state: string;
   /// Present when the command described every version of a resource, beside the text its message
   /// renders.
   resource: ResourceDescription;

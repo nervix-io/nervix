@@ -2,8 +2,9 @@
 //!
 //! Layer: control plane.
 //! - **Owns.** Projecting an observed failure to its fixed refusal, the unit owner an inspection
-//!   asks, the resume position of a continuation within one unit, complete count accumulation and
-//!   the distinct names of the columns a section appends to its payload.
+//!   asks, the resume position of a continuation within one unit, complete count accumulation, the
+//!   distinct names of the columns a section appends to its payload, and the command result that
+//!   carries a read's envelope beside its requested projection.
 //! - **Depends on.** Committed schedules, typed inspection identities and bounded execution.
 //! - **Must not know.** How any kind of state is held, captured, carried or encoded.
 
@@ -12,12 +13,44 @@
     nervix::layer(control_plane, reason = "owns the boundary declared above")
 )]
 
+use nervix_client_wire::{StateInspection, StateInspectionResult};
 use nervix_models::{
-    BranchKeyFingerprint, ClusterNodeName, FieldName, ParseAsType, ScheduledNode, SchemaField,
-    StateInspectionCounts, StateInspectionPosition, StateInspectionRejection, Unit,
+    BranchKeyFingerprint, ClusterNodeName, FieldName, InspectionFormat, ParseAsType, ScheduledNode,
+    SchemaField, StateInspectionCounts, StateInspectionPosition, StateInspectionRejection, Unit,
 };
 
-use crate::state_inspection_cursor::StateInspectionCursor;
+use crate::{
+    application::{
+        command_result::{CommandResult, RenderedStateInspection},
+        model_mutation::{command_error, command_ok},
+    },
+    state_inspection_cursor::StateInspectionCursor,
+};
+
+/// The command result of one state read: its requested projection as the message, a refusal as
+/// a failed command, and the typed envelope beside either.
+pub(super) fn rendered_inspection(
+    state: StateInspection,
+    format: InspectionFormat,
+) -> CommandResult {
+    let message = match format {
+        InspectionFormat::Json => state.to_json(),
+        InspectionFormat::Text => match state.display_text() {
+            Ok(text) => text,
+            Err(error) => return command_error(format!("{error:#}")),
+        },
+    };
+    let mut result = if matches!(state.result, StateInspectionResult::Rejected(_)) {
+        command_error(message)
+    } else {
+        command_ok(message)
+    };
+    result.state = Some(Box::new(RenderedStateInspection {
+        inspection: state,
+        format,
+    }));
+    result
+}
 
 /// Project an observed internal failure to the fixed inspection protocol refusal.
 /// The diagnostic records the complete report before its wire projection leaves this boundary.

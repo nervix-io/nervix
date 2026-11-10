@@ -30,7 +30,7 @@ use tokio_tungstenite::{
     },
 };
 
-use super::{connection::FailedReadEnding, *};
+use super::{connection::ConnectionEnding, *};
 
 #[nervix_primitives::test]
 async fn a_message_retains_its_upgrade_snapshot_and_exact_data_frame_kind() {
@@ -775,8 +775,8 @@ fn a_failed_read_offers_a_close_only_for_what_the_peer_sent() {
     ];
     for (failure, status) in close_bearing {
         assert_eq!(
-            FailedReadEnding::from(&failure),
-            FailedReadEnding::Close(status),
+            ConnectionEnding::from(&failure),
+            ConnectionEnding::Close(status),
             "{failure}"
         );
     }
@@ -798,8 +798,8 @@ fn a_failed_read_offers_a_close_only_for_what_the_peer_sent() {
     ];
     for failure in released {
         assert_eq!(
-            FailedReadEnding::from(&failure),
-            FailedReadEnding::Release,
+            ConnectionEnding::from(&failure),
+            ConnectionEnding::Release,
             "{failure}"
         );
     }

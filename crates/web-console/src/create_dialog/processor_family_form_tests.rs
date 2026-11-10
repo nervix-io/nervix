@@ -78,7 +78,7 @@ fn window_and_correlator_forms_render_their_own_sections_and_omit_what_their_rou
     Owner::new().with(|| {
         let signals = CreateSignals::new();
         signals.open(
-            CreateKind::WindowProcessor,
+            CreateKind::Model(ModelKind::WindowProcessor),
             Some(orders()),
             "global-create-button",
         );
@@ -123,7 +123,7 @@ fn window_and_correlator_forms_render_their_own_sections_and_omit_what_their_rou
         }
 
         signals.open(
-            CreateKind::Correlator,
+            CreateKind::Model(ModelKind::Correlator),
             Some(orders()),
             "global-create-button",
         );
@@ -178,7 +178,7 @@ fn correlator_choices_ask_for_each_side_and_its_timeout_by_that_side_s_first_rel
     Owner::new().with(|| {
         let signals = CreateSignals::new();
         signals.open(
-            CreateKind::Correlator,
+            CreateKind::Model(ModelKind::Correlator),
             Some(orders()),
             "global-create-button",
         );
@@ -292,7 +292,7 @@ fn relay_pickers_hold_the_right_input_and_each_side_s_timeout_relay_they_selecte
     Owner::new().with(|| {
         let signals = CreateSignals::new();
         signals.open(
-            CreateKind::Correlator,
+            CreateKind::Model(ModelKind::Correlator),
             Some(orders()),
             "global-create-button",
         );
@@ -374,7 +374,7 @@ fn scoped_pickers_insert_their_references_where_the_operator_writes() {
     Owner::new().with(|| {
         let signals = CreateSignals::new();
         signals.open(
-            CreateKind::Correlator,
+            CreateKind::Model(ModelKind::Correlator),
             Some(orders()),
             "global-create-button",
         );
@@ -428,7 +428,7 @@ fn scoped_pickers_insert_their_references_where_the_operator_writes() {
         assert_eq!(route.assignments[1].expression, "right.amount");
 
         signals.open(
-            CreateKind::WindowProcessor,
+            CreateKind::Model(ModelKind::WindowProcessor),
             Some(orders()),
             "global-create-button",
         );
@@ -499,7 +499,7 @@ fn window_and_correlator_submissions_render_their_canonical_statements() {
     Owner::new().with(|| {
         let signals = CreateSignals::new();
         signals.open(
-            CreateKind::WindowProcessor,
+            CreateKind::Model(ModelKind::WindowProcessor),
             Some(orders()),
             "global-create-button",
         );
@@ -520,7 +520,10 @@ fn window_and_correlator_submissions_render_their_canonical_statements() {
             route.message_error = MessageErrorDraft::Log;
         });
         let submission = signals.submission().assured("the window draft is complete");
-        assert_eq!(submission.kind, CreateKind::WindowProcessor);
+        assert_eq!(
+            submission.kind,
+            CreateKind::Model(ModelKind::WindowProcessor)
+        );
         assert!(
             submission.presentation.contains(
                 "CREATE WINDOW PROCESSOR latency_windows\n  FROM latencies\n  ATTACHED\n  WIDTH \
@@ -537,7 +540,7 @@ fn window_and_correlator_submissions_render_their_canonical_statements() {
         assert_eq!(command.domain, Some(orders()));
 
         signals.open(
-            CreateKind::Correlator,
+            CreateKind::Model(ModelKind::Correlator),
             Some(orders()),
             "global-create-button",
         );
@@ -566,7 +569,7 @@ fn window_and_correlator_submissions_render_their_canonical_statements() {
         let submission = signals
             .submission()
             .assured("the correlator draft is complete");
-        assert_eq!(submission.kind, CreateKind::Correlator);
+        assert_eq!(submission.kind, CreateKind::Model(ModelKind::Correlator));
         assert!(
             submission.presentation.contains(
                 "CREATE CORRELATOR paid_orders\n  LEFT FROM orders\n  RIGHT FROM payments\n  \
@@ -586,7 +589,7 @@ fn a_changed_domain_requires_right_inputs_and_timeout_relays_again() {
     Owner::new().with(|| {
         let signals = CreateSignals::new();
         signals.open(
-            CreateKind::Correlator,
+            CreateKind::Model(ModelKind::Correlator),
             Some(orders()),
             "global-create-button",
         );

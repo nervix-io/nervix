@@ -1861,8 +1861,10 @@ The outbound WebSocket ingestor sends a Close frame on suspension or close and w
 Close within a one-second budget covering both the send and the reply. The transport is detached
 before waiting, so cancellation also drops that exact connection. Suspension retains accepted
 signaling payloads; terminal close clears them even if the handshake fails. A peer-initiated Close
-is answered before releasing the transport and becomes a typed transient read failure carrying
-its status code and reason. An EOF or transport failure also reaches the host's retry path.
+is answered within the same control-frame budget before releasing the transport. It becomes a
+typed transient resume failure during signaling, or a read failure after readiness, carrying its
+status code and reason. A Close without a status remains distinct from an ended stream. An EOF or
+transport failure also reaches the host's retry path.
 
 A transport acknowledgement that fails because the connection died is handled the same way: the
 host rejects the positions, that rejection fails on the same lost connection, and the class decides.
@@ -3557,6 +3559,23 @@ sequenceDiagram
   `1007` (invalid frame payload data) for message text or a Close reason that is not UTF-8, and
   `1002` (protocol error) for any other framing violation. A transport that broke, already ended
   or is already closing can carry no frame and is released without one.
+  The connection is established from the moment its upgrade completes, so a signaling handshake
+  that fails ends it the same way before `resume` returns the failure, its typed causes unchanged.
+  `resume` classifies the engine's typed failure and offers the Close exactly like the idle
+  verdict's. A read that fails while signaling takes the read's own status: `1009`, `1007`,
+  `1002`, or a release. A frame a `FAIL JAQ` guard rejects earns `1008` (policy violation), and
+  the protocol's `TIMEOUT` earns `1001` (going away), the idle verdict's status, since the peer
+  left the handshake unfinished and the client leaves for another connection. A failure of the
+  client's own handshake programs earns `1011` (internal error): a `SEND JAQ` program that does
+  not produce exactly one value, an output the wire format cannot encode, or a `CAPTURE` program
+  that fails or produces no object. RFC 6455 erratum 3227 extends `1011` from servers to clients. A handshake
+  whose own write failed or whose TCP ended can carry no frame and is released without one. A
+  failed handshake still drops its attempt's handoff, so frames it accepted never reach a read.
+  A peer's Close during signaling is a distinct typed failure carrying its status and reason, or
+  the explicit absence of a status. Before returning that resume failure, the connection flushes
+  the transport's queued reply within the existing one-second control-frame budget, preserving
+  the peer's exact Close rather than sending a new failure status. Cancellation drops that exact
+  transport. An ended stream queues no reply.
   The host reconnects on its policy. Suspension closes the connection while retaining successful
   handshake payloads, which drain before another connection opens; close clears the queue.
   Transport failure requires another resume of the retained ingestor.
@@ -3572,7 +3591,10 @@ sequenceDiagram
 - **WebSocket signaling.** The WebSocket crate owns the compiled signaling engine shared by
   client ingestors and server endpoint sessions. Its ordered send and wait clauses, acceptance
   policy, per-connection state and handshake timeout govern when frames become payload; the
-  caller supplies the accepted-data emitter, and the host still owns intake and routing. Domain
+  caller supplies the accepted-data emitter, and the host still owns intake and routing. A failed
+  handshake returns its typed failure and leaves the connection to the caller, which decides how
+  that connection ends: the outbound connection offers the Close its classification names, and an
+  endpoint session keeps its own contract. Domain
   activation resolves the endpoint's VHOST and signaling reference first. The runtime binds the
   pinned protobuf resource, when present, and hands its send and wait message descriptors to the
   compiler. The compiled artifact retains the wire format, compiled jaq programs and timeout;
