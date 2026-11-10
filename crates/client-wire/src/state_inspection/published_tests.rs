@@ -107,7 +107,8 @@ fn bolero_published_processor_sections_round_trip() {
                 name("sales"),
                 kind,
                 name::<nervix_models::ModelName>("held"),
-            );
+            )
+            .into();
             let StateInspectionResult::Page(page) = &mut state.result else {
                 panic!("the fixture is a page");
             };
