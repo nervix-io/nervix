@@ -87,6 +87,7 @@
   - [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md)
   - [Consensus Storage And Replication](./consensus-storage-and-replication.md)
   - [Command Completion](./command-completion.md)
+  - [Visual Creation And Shared Completion](./visual-creation.md)
   - [Resource Versions And Bindings](./resource-versions.md)
   - [Data Plane](./data-plane.md)
   - [Execution Primitives](./execution-primitives.md)
