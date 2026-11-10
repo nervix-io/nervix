@@ -424,6 +424,11 @@ impl SubscriptionSetup {
         })
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the private future drives only this connection's \
+                                   SUBSCRIBE/SUBACK exchange after connection setup completed")
+    )]
     async fn wait(&mut self) -> MqttTopicIngestorResult<UnstartedConnection> {
         self.completion.as_mut().await
     }
