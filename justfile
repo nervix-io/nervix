@@ -382,6 +382,13 @@ test-scenario-selection-guards binary="" evidence="":
     fi
     python3 -m scripts.scenario_selection_qualification "$binary" "$evidence"
 
+# Exercise authenticated producer metadata without preparing unrelated host-language drivers.
+test-client-producer-metadata *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() + "/tests/features/runtime/{client_producer_metadata,client_producer_metadata}.feature") }} {{ quote(args) }}
+
 # Exercise transport payload facts without unrelated paced client-driver preparation.
 test-ingestor-payload *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash
@@ -1097,6 +1104,16 @@ test-visual-window-correlator *args: build-web-console wasm-processor-guests dow
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- \
         --input tests/features/web-console/visual_create_window_correlator.feature "$@"
+
+# Create generators, inferencers and WASM processors through the web console's visual forms on
+# in-process one- and three-node clusters, with only the in-process server's prerequisites.
+[positional-arguments]
+test-visual-generator-inferencer-wasm *args: build-web-console wasm-processor-guests download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/web-console/visual_create_generator_inferencer_wasm.feature "$@"
 
 # Exercise coordinated WASM guest-state resets through in-process nodes: the RESET statement on the
 # session's active domain, its retries and refusals, and the operator and guest-requested resets.
@@ -1859,6 +1876,14 @@ test-mysql *args:
 test-websockets *args:
     cargo test --package nervix-connector-websockets --lib -- {{ args }}
 
+# Exercise outbound connection behavior through the public graph without preparing unrelated
+# host-language and paced-simulation drivers.
+test-websockets-runtime *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input 'tests/features/runtime/websocket_connection*.feature' {{ quote(args) }}
+
 # Diagnose one WebSockets owner check with its replayable schedule. `test-shuttle` remains the
 # inventory, completion and nondeterminism gate for qualification.
 test-websockets-shuttle check:
@@ -2538,6 +2563,10 @@ test-scenarios-coverage-shard shard:
 # the current ones in a report.
 coverage-clean-workspace:
     cargo llvm-cov clean --workspace
+
+# Discard old counters before measuring revised sources, retaining instrumented build artifacts.
+coverage-clean-profiles:
+    cargo llvm-cov clean --profraw-only
 
 # Rewrite lcov-workspace.info and its checkout path from the profiles the last coverage recipe
 # collected, over the sources of every workspace package, so crate lines the server's tests executed

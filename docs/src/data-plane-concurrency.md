@@ -1755,6 +1755,85 @@ therefore the watch owner's registration order, checked by
 release path. Other data-plane waits on `watch` subscribe before their deciding read, or use an
 existing receiver whose `borrow` leaves a subsequent `changed` able to see an intervening send.
 
+### Partition transitions and key claims
+
+A committed change of a branch's partition count begins the branch's next partition epoch. The
+activation is an entity-level swap of every entity the branch reaches: its relays, the processors
+it divides into units, and every producer into and consumer of its relays. The swap's gate drains
+and force-flushes those entities first, so no unit holds pending work for a key when producers start
+placing keys by the new count. Each relay of the branch gets new boundary services for the new unit
+set; its fan-out, subscriptions and the unit audiences of the units both counts share are kept, and
+the owner task of a unit both counts share adopts the unit's branch presence instead of starting
+from an empty one. A processor's unit hands its branches over to the next supervisor of the same
+unit, so a key the new count places elsewhere stays where it was.
+
+While keys placed under the previous count may still lie outside their partition, the epoch keeps a
+transition. A unit of a deduplicator, window processor, WASM processor, inferencer that declares
+state or materialized relay that the previous count scheduled and the current count does not stays
+scheduled as a holding unit. A
+holding unit takes no input: its supervisor reads a dormant audience no producer dispatches to,
+and a materialized relay's holding unit has a state task but no owner task.
+
+Each unit's owner publishes its holdings as one immutable value, replaced when the set changes,
+never per record: every key it holds that the current count places in another unit, keyed by
+fingerprint in a persistent ordered map, with that unit; the keys it claimed in the epoch; and the
+claims it has in flight. Claimants read catalog pages from that publication and DESCRIBE BRANCH
+and the leader's retirement read the counts; neither reaches the owner's registry.
+
+A claim moves one key's durable state from its holding unit to the unit the current count places
+it in. Its key is `(domain, entity, epoch, branch key)`.
+
+1. The claimant parks the first input of a key it does not hold while the key may lie elsewhere,
+   reading its catalog first when it has not: one page at a time from every other unit of the
+   previous count. Parked input counts against the unit's bound, the capacity of its input relay's
+   owner buffers; a full claimant takes no further input, so the relays hold the rest back. Parked
+   input keeps its quiesce work, so a drain waits for the claim, and a unit that stops before its
+   claims settle refuses what it parked so that its sources send it again. A materialized relay's
+   unit of the current count does not wait for a batch: its state task reads its catalog when it
+   starts and claims every row the catalog names, since a row is read far more often than it is
+   written and a row moved only by its next write could hold the transition open until its TTL.
+   At most as many of those claims as the unit parks batches are in flight at once, and a batch for
+   a key whose claim is in flight waits for that claim.
+2. The claimant asks the holder to release the key. A processor holder stops the key's branch with
+   a handoff, which drains its pending work and persists its final state, keeps the key in its
+   lifecycle as a released slot, and answers with the key's lifetime and the descriptor of each
+   checkpoint. Batches the branch held for `REQUIRED WAIT` are refused, since their
+   acknowledgements cannot move between nodes. A materialized holder answers with the key's row.
+3. A processor claimant fetches each checkpoint through `FetchStateCheckpoint` on the bulk pool,
+   writes it under its own placement as the placement's newest revision, starts the branch as a
+   restored lifetime with the holder's incarnation, persists its lifecycle and runs the parked
+   input in arrival order. A materialized claimant takes the released row as one Arrow section of
+   the relay's schema, installs it in its state task before anything else of the key, and applies
+   the parked batches in arrival order, keeping each key's latest record by timestamp.
+4. Only then does the claimant ask the holder to forget the key: a processor claimant once its
+   lifecycle is persisted, a materialized claimant once the revision of its state that holds the row
+   is persisted on its node. The holder drops the slot or the row and the key's state.
+
+Release and forget are idempotent, and the holder keeps a released key's state until it is told to
+forget it, so a failure of either side between the steps loses nothing: a claimant that fails
+retries the claim, and a holder that restarted restores the released key as a live branch and
+releases it again. A released slot or row expires by the branch TTL counted from its release. Claim
+results reach the claimant's supervisor or state task through its own command channel, so a unit
+keeps answering its holders' requests while its own claims are in flight and two units claiming
+from each other cannot deadlock. A failed step is tried again after the runtime's reconnect backoff,
+which grows with each failure; each request is bounded by the partition-transition request's
+deadline.
+
+A materialized read of a key whose row may still lie in its holder reads the key's unit under the
+current count, then the holder, then the current unit again. The holder's row is the value that was
+current before the claim, so the read is ordered before the claim's first write; `REQUIRED SKIP`
+and defaults apply only once all three reads miss.
+
+A key that never reappears expires by TTL in its holding unit. While a transition lasts the leader
+reads every unit's holdings and, once no unit holds or claims a key, commits the retired epoch. No
+unit gains a key outside its partition after that read, so a claim started later finds no state.
+Every node then ends the transition in place, as a dynamic schedule update that neither gates a
+relay nor stops a task that keeps its unit: each such unit's supervisor or state task drops its
+claims, runs or applies the input it parked in arrival order, since a key no unit holds begins
+where it waits, withdraws its holdings and refuses later claim steps as not ready; each holding
+unit, which holds nothing, ends with its placement tasks. A count change while a transition lasts
+is refused, so every key has exactly one unit that may hold it outside its partition.
+
 ## Ordering Fences
 
 Four fences remain because they define externally observable order or ownership. Each is scoped to
@@ -2074,8 +2153,9 @@ borrowed string traversal; local SQL quoting callbacks retain their recurring-ex
 Statement construction reaches no internal runtime acquisition.
 
 Processor state inspection's branch selection carries a dispatch contract for the branch
-registry's opaque iterator over a unit's live instances. The unit task walks its own registry once
-per inspection, bounded by its live branches, and the walk acquires nothing.
+registry's opaque iterator over a unit's instances. The unit task walks its own registry once per
+inspection, bounded by its branches, and the walk acquires nothing. It selects live branches only:
+a key the unit released during a partition transition is reported by the unit that claims it.
 
 Local iteration and polling implementations remain call edges. Generated `await` polling is the
 Rust scheduling protocol, rather than a separate application callback diagnostic. Synchronization
@@ -2648,9 +2728,11 @@ These async observations introduce no tracked blocking-lock owner. Deloxide cont
 the registered product locks, while the public scenarios and model checks exercise pause ordering
 at their applicable boundaries.
 
-The host suites' declared action channel arms subscription-opening refusals on every node and
-confirms their application before a suite restores its session relay. Its teardown action removes
-unused entries from the testing-only refusal map before another test can open a subscription.
+The host suites' declared action channel arms subscription-opening or clock-attachment refusals on
+every node and confirms their application before a suite restores its session relay. Each
+testing-only map is keyed by node and consumes its entry once at the cold opening boundary,
+releasing its guard before sending the refusal. The respective teardown action removes unused
+entries before another test can open a subscription or attach a clock.
 The map operations and the host's pipe waits are untracked; they add no blocking-lock owner or
 product synchronization protocol. The action owner's ordered-confirmation and deadline checks,
 the Python pipe-adapter checks and the one- and three-node `client_suites.feature` rows hold this
@@ -2884,6 +2966,12 @@ map on the frame path. Upgrade-field installation has a focused external-iterato
 contract; its local conversions remain analyzed. The registered `websocket-retained-metadata` Bolero property checks every
 field and exact snapshot identity through the production retain/replay conversion. Client ping
 timer and socket scheduling remain outside the detector and are exercised by real-peer owner tests.
+The outbound connection owns its last written ping and one bounded catch-up response window in
+ordinary mutable state. Cancelled reads retain that window, and only an inbound frame restores
+ordinary activity tracking. This adds no shared synchronization protocol or tracked lock. The
+production-owner cancellation and no-ping deadline regressions and the one-/three-node delayed
+decoder-handoff scenarios cover the timer and real socket behavior; no model-checker or deadlock
+claim is made for those network waits.
 
 The WebSockets signaling handoff uses one bounded primitive mpsc channel only while signaling
 accepts data and while its completed frames drain. A full queue backpressures signaling within its
@@ -3703,7 +3791,7 @@ channel, the bounded channel that already carries its checkpoint and stop comman
 
 The request is scoped by the `NodeUnitRef` of the inspected processor unit and the concrete branch
 key. The unit task answers a `SelectStateBranches` command from its own branch registry by cloning
-the selected branch tasks' handles in canonical branch order, without waiting for any branch, so
+the selected live tasks' handles in canonical branch order, without waiting for any branch, so
 input dispatch is never held behind the branches' answers. While the unit task's restore is pending,
 the branches its lifecycle names are not installed yet and hold rows no branch task can copy, so it
 refuses the selection as unrestored, which the read reports as `not_ready`, rather than selecting

@@ -301,7 +301,7 @@ fn relay_has_external_producer(
     !has_producer
 }
 
-fn entity_input_relays(model: &Model) -> Vec<RelayName> {
+pub(in crate::registry) fn entity_input_relays(model: &Model) -> Vec<RelayName> {
     match model {
         Model::Emitter(emitter) => emitter.from.relays().to_vec(),
         Model::Reingestor(reingestor) => reingestor.from.relays().to_vec(),

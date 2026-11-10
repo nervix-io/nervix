@@ -460,8 +460,3 @@ impl SuiteReport {
             .count()
     }
 }
-
-/// The fixture certificate authority every TLS session listener of a scenario chains to.
-pub(crate) fn fixture_certificate_authority() -> PathBuf {
-    workspace_root().join("tls/dev/ca.pem")
-}

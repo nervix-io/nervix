@@ -262,8 +262,12 @@ archive; see [Restore Streams](#restore-streams).
   branch, and the third a relay with materialized state in that branch. A junction's first input
   uses the ingestor relay target for its selected branch; a reingestor's first input uses the
   ordinary relay target. Reingestor routes that construct a different branch use the ingestor
-  relay and branch-field targets. An emitter-reference target carries a domain and offers only
-  the client connectors its entity declares; a client consumer instead uses the schema target.
+  relay and branch-field targets. A generator's materialized-relay target carries a domain alone
+  for an unbranched generator, or a domain followed by its branch `Model` reference, and returns
+  only relays with materialized state on exactly that branch declaration; the generator's routes
+  then use the input-branch target with that relay as the first input. An emitter-reference
+  target carries a domain and offers only the client connectors its entity declares; a client
+  consumer instead uses the schema target.
   The Iceberg catalog target uses its declared catalog-client option. An emitter encoding-codec
   target carries a domain and selects encoding-capable codecs; its schema may differ from the
   inputs because construction builds the output. A compatible-input target carries a domain
@@ -631,6 +635,11 @@ a session solely to detach. [CLI streaming](client-tools-cli.md#streaming-a-rela
 statuses and operator-facing output.
 
 ## Producers
+
+Nervix supplies the opening session's authenticated user name as `metadata.user` to the ingestor's
+arrival filter and routes. That identity belongs to the producer attachment, including when the
+serving node forwards it to another owner. The producer's expected input fields and submitted rows
+remain the schema the ingestor declares; a payload field cannot replace the authenticated name.
 
 - **P-1.** A client MUST open a producer with `OpenIngestorRequest`, naming the domain, the
   ingestor, the exact fields it expects, including each field's optionality and sensitivity, and

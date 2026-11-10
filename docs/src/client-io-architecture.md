@@ -62,6 +62,13 @@ console sessions are served by the leader. Public endpoint scenarios exercise bo
 The Rust library and its host bindings connect through native gRPC; the console's ordinary
 inspection flow does not open a consumer or claim output.
 
+A producer captures its session's authenticated, typed user name at open. The local attachment or
+forwarded open carries that identity to the ingestor owner, which retains it per attachment and
+supplies it as `metadata.user` on every admitted row. An arrival filter and route construction read
+the same identity. Producers sharing a forwarding link keep separate identities, and application
+payload fields cannot supply or replace them. Metadata columns are projected only when a program
+reads them; [Client Ingestors](./ingestors.md#client-ingestors) owns the field's public type.
+
 ```mermaid
 flowchart LR
     App[Application producer and consumer] <--> Session[Serving node session]

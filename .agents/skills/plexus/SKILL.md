@@ -22,7 +22,8 @@ lowercase HTTP field names, and on an emitter that keeps one value per header na
 header name once: a repeated literal name is refused when the statement is validated.
 For outbound WebSockets, read the `WEBSOCKETS CONNECTION` section of Ingestors for literal upgrade
 headers, subprotocol offers, response-header reads, frame metadata and the closed client CONFIG key
-set, including the trust roots `tls_ca_file` adds to and how inspection redacts an endpoint. Offer
+set, including idle deadlines after a delayed host handoff, the trust roots `tls_ca_file` adds to
+and how inspection redacts an endpoint. Offer
 subprotocols only through `HEADERS { 'sec-websocket-protocol' = '...' }`, and expect the peer to
 select one of them: any other answer fails the connection.
 For ClickHouse HTTP connection tuning, client certificates, compression and which insert failures
@@ -85,6 +86,8 @@ Java and JVM programs follow [JVM Client Library](../../../docs/src/client-libra
 Ruby applications follow [Ruby Client Library](../../../docs/src/client-library-ruby.md),
 and C and C++ programs follow [C And C++ Client Library](../../../docs/src/client-library-c.md).
 Read its execution, clock and endpoint sections before choosing application-side lifecycle handling.
+For using the authenticated producer identity in arrival filters and routes, read
+[Client Ingestors](../../../docs/src/ingestors.md#client-ingestors) before choosing metadata fields.
 For typed state inspection in Python, Ruby or JVM applications, read that host guide's
 `Inspect Materialized State` section for page/refusal metadata, opaque continuation and retained
 schema/frame lifetimes before suggesting application code.
@@ -113,7 +116,7 @@ commits, read [Signing In](../../../docs/src/client-tools-web-console.md#signing
 [Inspecting a transaction](../../../docs/src/client-tools-web-console.md#inspecting-a-transaction).
 Read [Layout](../../../docs/src/client-tools-web-console.md#layout) before interpreting footer totals.
 Listener certificates are node provisioning, configured outside Plexus statements.
-For TLS algorithm choices, read [Cryptography](../../../docs/src/cryptography.md#algorithm-policy):
+For TLS algorithm choices, read [Cryptography](../../../docs/src/cryptography.md#outward-tls-policy):
 use ordered string lists with `ALTER CLUSTER SET TLS_CIPHER_SUITES = ('fips'),
 TLS_KEY_EXCHANGE_GROUPS = ('fips');`. Read that chapter before choosing exact names or aliases,
 changing both lists, or promising which connector handshakes are governed. The interconnect keeps
@@ -148,9 +151,10 @@ current failure gauge in `/metrics` and `DESCRIBE EMITTER`.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
 Roto UDFs, ingestors and emitters for every connector and entity pair, junctions, deduplicators,
-reorderers, window processors, correlators, reingestors, and session subscriptions; use the same
-web-console chapter for their typed fields, resource versions, program editors, reference lookup,
-and transaction behavior.
+reorderers, window processors, correlators, reingestors, generators, inferencers, WASM processors,
+and session subscriptions; use the same web-console chapter for their typed fields, resource
+versions, tensor shapes, guest limits, program editors, reference lookup, and transaction
+behavior.
 
 For materialized relay inspection, read [Relay → Inspect Materialized State](../../../docs/src/relay.md#inspect-materialized-state)
 for selector, LIMIT/AFTER and FORMAT clause order, typed rows, sensitivity and stale continuations.

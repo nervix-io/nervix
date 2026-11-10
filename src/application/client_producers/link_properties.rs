@@ -37,7 +37,7 @@ use nervix_models::{
     ClientProducerDescription, ClientProducerEndReason, ClientProducerGrant, ClientProducerLimits,
     ClientProducerPolicy, ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
     ClusterNodeName, DEFAULT_CLIENT_PRODUCER_SESSION_BYTES, DomainName, IngestorName,
-    MAX_CLIENT_PRODUCER_BATCHES,
+    MAX_CLIENT_PRODUCER_BATCHES, UserName,
 };
 use strum::{EnumIter, IntoEnumIterator as _};
 
@@ -129,6 +129,7 @@ impl LinkFrameKind {
             }),
             Self::Open => LinkFrame::Item(ClientProducerLinkItem::Open {
                 key: arbitrary.entropy().any_u64(),
+                user: arbitrary.rule_name::<UserName>(),
                 domain: arbitrary.rule_name::<DomainName>(),
                 ingestor: arbitrary.rule_name::<IngestorName>(),
                 expected_fields: arbitrary.schema_fields(0),
@@ -473,6 +474,7 @@ fn boundary_frames() -> Vec<LinkFrame> {
         for expected_fields in [Vec::new(), fields_of_every_type()] {
             frames.push(LinkFrame::Item(ClientProducerLinkItem::Open {
                 key: u64::MAX,
+                user: UserName::parse("producer.user-01").assured("a literal user name"),
                 domain: DomainName::parse("orders").assured("a literal domain name"),
                 ingestor: IngestorName::parse("intake").assured("a literal ingestor name"),
                 expected_fields,
