@@ -584,6 +584,7 @@ impl Registry {
                     };
                     let previous = domain_state.clone();
                     domain_state.status = DomainStatus::Running;
+                    domain_state.stop_cause = None;
                     domain_state.last_start = start.start.clone();
                     domain_state.start_version =
                         domain_state.start_version.checked_add(1).ok_or_else(|| {
@@ -615,8 +616,7 @@ impl Registry {
                     operation = TransactionOperation::StopDomain {
                         domain: domain.clone(),
                     };
-                    domain_state.status = DomainStatus::Stopped;
-                    domain_state.clock = None;
+                    domain_state.record_stop(nervix_models::DomainStopCause::Operator);
                     reasons = vec![OperationImpactReason::DomainStop];
                     contribution = ImpactEffects {
                         lifecycle: CanonicalImpactSet::new([DomainLifecycleImpact {

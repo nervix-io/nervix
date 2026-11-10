@@ -1724,12 +1724,7 @@ impl StateMachineData {
         let Some(domain) = self.domains.get_mut(domain_id) else {
             return false;
         };
-        // A stop that finds the domain already stopped keeps the cause of the stop that ended it.
-        if domain.status != DomainStatus::Stopped {
-            domain.stop_cause = Some(cause);
-        }
-        domain.status = DomainStatus::Stopped;
-        domain.clock = None;
+        domain.record_stop(cause);
         let paced = domain.config.pace.is_paced();
 
         if paced {
