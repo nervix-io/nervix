@@ -915,6 +915,7 @@ pub enum WindowAggregateFunction {
     Avg,
     BoolAnd,
     BoolOr,
+    CollectArray,
     CollectVec,
     Corr,
     Count,
@@ -978,6 +979,11 @@ impl PartialOrd for WindowAggregateInvocation {
 }
 
 impl WindowAggregateFunction {
+    /// Whether the function gathers the retained argument as a list value.
+    pub const fn collects_values(self) -> bool {
+        matches!(self, Self::CollectArray | Self::CollectVec)
+    }
+
     pub fn plexus_name(&self) -> &str {
         self.as_ref()
     }
@@ -991,6 +997,7 @@ impl WindowAggregateFunction {
             Self::Avg
             | Self::BoolAnd
             | Self::BoolOr
+            | Self::CollectArray
             | Self::CollectVec
             | Self::Count
             | Self::CountIf
@@ -1017,6 +1024,7 @@ impl WindowAggregateFunction {
             | Self::ApproxTopK
             | Self::BoolAnd
             | Self::BoolOr
+            | Self::CollectArray
             | Self::CollectVec
             | Self::Count
             | Self::CountIf
