@@ -128,6 +128,10 @@ command returned no inspection. Check `rejection` against `InspectionRejection` 
 page fields. A refusal has no counts or units; a successful empty page has zero counts.
 `json` preserves the complete typed envelope.
 
+`DESCRIBE LICENSE;` uses this envelope for cluster scope: `entity_kind` is `"LICENSE"`, while
+`domain` and `entity_name` are `None`. Its summary and quota rows describe the answering node's
+committed policy. The command also works without selecting a domain.
+
 Complete `counts` cover the selected cut. Units carry their own counts, owner, ordered
 replicas, captured origin, `InspectionUnitKind` and `index`. `InspectionStage` distinguishes live and stored
 state. Sections expose schemas, omitted rows and positional watermark columns. Resume the opaque

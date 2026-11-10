@@ -14,8 +14,9 @@ own boundaries; a verified signature alone never authorizes a graph operation.
 ## Documents And Bounds
 
 The current payloads include decisions, operation-specific activation requests, stream tickets,
-key-possession proofs, working-key authorizations, revocations, root successions, the decision and
-trust-bundle response envelopes, challenge exchanges and the closed problem-details catalog. Fixed structures reject unknown fields;
+key-possession proofs, working-key authorizations, revocations, root successions, root custodians'
+proofs of life, the decision and trust-bundle response envelopes, challenge exchanges and the
+closed problem-details catalog. Fixed structures reject unknown fields;
 timestamps use RFC 3339 `DateTime<Utc>`. Requests have one exact flat shape per operation. Create
 and adoption refresh omit committed state; the three committed revision/time fields are present
 together for an established refresh, release, rotation or stream ticket. Secret strings zeroize
@@ -44,6 +45,7 @@ RFC 7638 SHA-256 thumbprint, never a caller-selected label.
 | Working-key authorization | `nervix.licensing.trust.working-key` |
 | Working-key revocation | `nervix.licensing.trust.revocation` |
 | Root succession | `nervix.licensing.trust.succession` |
+| Root custodian's proof of life | `nervix.licensing.trust.proof-of-life` |
 
 The format-only maintained `jose-jws`/`jose-b64` decoder exposes the original protected JSON so the
 engine can enforce the exact header. It does not interpret payload JSON. `jsonwebtoken` with
@@ -93,6 +95,14 @@ every verified succession, authorization and revocation in its signed form. Only
 members are authoritative; a receiver verifies them against its own embedded bundle and never
 learns an anchor from the published root sets.
 
+A proof of life is a root custodian's dated statement that the custodian still holds a root key,
+so that a lost key is discovered before a ceremony needs it. One root signs it alone, under its own
+`typ`, and it names that root and an epoch. It verifies when its signature checks under a root of a
+trusted epoch, it names the root that signed it, and the epoch it names is trusted and holds that
+root; a root a succession carries into the next epoch may name either. It reaches no threshold,
+grants nothing and is no trust document: a trust state refuses to build from one, and the trust
+documents a holder stores never include it.
+
 `PRODUCTION_TRUST_BUNDLE` explicitly represents unprovisioned anchors until the production ceremony
 supplies its reviewed output. An empty bundle grants no trust. This crate embeds no artificial
 production roots and exposes no runtime configuration that replaces the server's anchors. The
@@ -101,6 +111,10 @@ Test-service roots are explicit engine inputs; their availability in a server be
 separate testing-only composition seam.
 
 ## Conditions And Resolution
+
+`nervix-licensing-vocabulary` owns the runtime-independent `Quota` value and its arithmetic.
+The protocol re-exports that one type. Vocabulary consumers can use its bounded/unlimited
+distinction without depending on cryptography.
 
 The catalog declares the kind, scope and owner of every current name. Cluster quotas belong in
 `usage`; relationship quotas, durations, sets and policy belong in `operating`.
@@ -187,8 +201,9 @@ The cross-build signature vectors of licensing specification §17.6 hold, for ev
 one compact JWS that the ordinary AWS-LC build signed and one that the FIPS build signed. Both
 cover the same fixed documents, signed with public test-only keys. Every build verifies both sets
 the way a receiver does: the succession, authorization and revocation through the trust chain from
-an embedded root, the decision through the working key that chain authorizes, the self-signed
-creation request under the cluster key it carries, and the stream ticket under its cluster key.
+an embedded root, the proof of life under the root that chain installs, the decision through the
+working key that chain authorizes, the self-signed creation request under the cluster key it
+carries, and the stream ticket under its cluster key.
 Each check compares the decoded document and refuses the vector with one signature byte changed.
 Nervix CI runs them on the ordinary module, so it verifies what the FIPS module signed; the
 licensing service's FIPS lane runs them on the FIPS module at the Nervix revision the service pins,

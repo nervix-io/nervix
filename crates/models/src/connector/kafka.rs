@@ -362,6 +362,10 @@ const KAFKA_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Clause("ACK TIMEOUT"),
         },
         DeclaredWait {
+            wait: "a failed publish under ACK, for the reports of the records its purge gave up",
+            bound: WaitBound::Clause("ACK TIMEOUT"),
+        },
+        DeclaredWait {
             wait: "destroying a producer, for its polling thread and the reports of the records \
                    its purge failed",
             bound: WaitBound::Driver("100 ms poll, then a 500 ms flush"),

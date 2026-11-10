@@ -144,6 +144,7 @@ class InventoryTests(unittest.TestCase):
         inventory = bolero.load_inventory()
         self.assertEqual({target.id for target in inventory.targets}, {
             "cluster-identity-record-rkyv",
+            "licensing-record-rkyv",
             "licensing-protocol-json-roundtrip",
             "licensing-conditions-resolution",
             "licensing-jws-malformed",
@@ -193,6 +194,7 @@ class InventoryTests(unittest.TestCase):
             "relay-channel-watermark-turnover",
             "client-emitter-wire",
             "client-state-inspection",
+            "client-published-processor-sections",
             "interconnect-state-inspection",
             "interconnect-processor-state-inspection",
             "state-inspection-cursor",
@@ -543,18 +545,19 @@ class InventoryTests(unittest.TestCase):
         }
         for target, version in {
             "benchmark-metrics-report": 1,
+            "node-settings-command-line": 8,
             "ingestor-describe-envelope": 11,
             "plexus-model": 60,
             "plexus-archive-model": 63,
-            "plexus-statement": 63,
-            "plexus-statement-text": 62,
-            "plexus-format-document": 62,
-            "plexus-format-text": 61,
-            "models-archived-models": 62,
+            "plexus-statement": 65,
+            "plexus-statement-text": 64,
+            "plexus-format-document": 64,
+            "plexus-format-text": 63,
+            "models-archived-models": 64,
             "registry-archived-models": 55,
-            "consensus-state-records": 58,
-            "consensus-state-corruption": 58,
-            "consensus-raft-records": 57,
+            "consensus-state-records": 59,
+            "consensus-state-corruption": 59,
+            "consensus-raft-records": 58,
             "registry-stored-models": 48,
             "registry-stored-models-corruption": 48,
             "cluster-identity-record-rkyv": 1,
@@ -574,6 +577,7 @@ class InventoryTests(unittest.TestCase):
             "inferencer-state-snapshots-malformed": 1,
             "inferencer-native-snapshot-projection": 1,
             "console-emitter-drafts": 5,
+            "console-processor-drafts": 5,
             "client-requests": 11,
         }.items():
             with self.subTest(target=target):
@@ -581,7 +585,7 @@ class InventoryTests(unittest.TestCase):
 
     def test_state_inspection_representations_are_bounded_pairs(self) -> None:
         targets = {target.id: target for target in bolero.load_inventory().targets}
-        for name, version in (("client-state-inspection", 5), ("state-inspection-cursor", 6)):
+        for name, version in (("client-state-inspection", 6), ("state-inspection-cursor", 7)):
             with self.subTest(target=name):
                 self.assertEqual(targets[name].domain_version, version)
                 self.assertEqual(targets[name].max_input_bytes, 512)

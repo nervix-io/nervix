@@ -975,6 +975,12 @@ impl Statement {
                     crate::StateInspectedProcessor::Correlator(name) => {
                         format!("SHOW CORRELATOR {} STATE", name.as_str())
                     }
+                    crate::StateInspectedProcessor::Deduplicator(name) => {
+                        format!("SHOW DEDUPLICATOR {} STATE", name.as_str())
+                    }
+                    crate::StateInspectedProcessor::WindowProcessor(name) => {
+                        format!("SHOW WINDOW PROCESSOR {} STATE", name.as_str())
+                    }
                 };
                 state_inspection_text(
                     head,
@@ -985,6 +991,7 @@ impl Statement {
             }
             Self::ShowClusterStatus(_) => Ok("SHOW CLUSTER STATUS;".to_string()),
             Self::DescribeCluster(_) => Ok("DESCRIBE CLUSTER;".to_string()),
+            Self::DescribeLicense(_) => Ok("DESCRIBE LICENSE;".to_string()),
             Self::ShowTransactions(_) => Ok("SHOW TRANSACTIONS;".to_string()),
             Self::DescribeTransaction(describe) => Ok(describe.to_canonical_plexus()),
         }

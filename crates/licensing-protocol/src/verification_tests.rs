@@ -998,3 +998,168 @@ fn a_serial_conflicts_only_between_documents_with_different_signed_bytes() {
     };
     assert!(TrustState::build(&fixture.embedded(), &distinct_types, limits()).is_ok());
 }
+
+/// A custodian's proof of life of the fixture's second epoch-0 root.
+fn proof_of_life(fixture: &Fixture) -> ProofOfLife {
+    ProofOfLife {
+        doc: ProofOfLifeKind::ProofOfLife,
+        protocol: 1,
+        issued_at: now(),
+        root_epoch: 0,
+        kid: fixture.roots[1].key_id().clone(),
+    }
+}
+
+fn proof_refusal(trust: &TrustState, compact: &str) -> error_stack::Report<TrustError> {
+    trust
+        .verify_proof_of_life(compact, limits())
+        .err()
+        .assured("the scenario's proof does not verify")
+}
+
+#[test]
+fn a_proof_of_life_verifies_only_under_the_root_and_epoch_it_names() {
+    let fixture = Fixture::new();
+    let trust = fixture.trust();
+    let proof = proof_of_life(&fixture);
+    let signed = fixture.roots[1]
+        .sign(&proof, limits())
+        .assured("bounded current proof");
+    let verified = trust
+        .verify_proof_of_life(&signed, limits())
+        .assured("one root's signature is its whole proof");
+    assert_eq!(verified, proof);
+
+    // A key that is no root proves nothing, even one the roots authorized.
+    let mut working = proof.clone();
+    working.kid = fixture.working.key_id().clone();
+    let by_working_key = fixture
+        .working
+        .sign(&working, limits())
+        .assured("current proof");
+    assert!(matches!(
+        proof_refusal(&trust, &by_working_key).current_context(),
+        TrustError::UnknownRoot
+    ));
+
+    // The payload names the root that signed it, of an epoch whose root set holds that root.
+    let mut another_root = proof.clone();
+    another_root.kid = fixture.roots[0].key_id().clone();
+    let names_another_root = fixture.roots[1]
+        .sign(&another_root, limits())
+        .assured("current proof");
+    assert!(matches!(
+        proof_refusal(&trust, &names_another_root).current_context(),
+        TrustError::ProofRoot
+    ));
+    let mut untrusted_epoch = proof.clone();
+    untrusted_epoch.root_epoch = 1;
+    let names_an_untrusted_epoch = fixture.roots[1]
+        .sign(&untrusted_epoch, limits())
+        .assured("current proof");
+    assert!(matches!(
+        proof_refusal(&trust, &names_an_untrusted_epoch).current_context(),
+        TrustError::ProofRoot
+    ));
+    let mut future = proof.clone();
+    future.protocol = 2;
+    let future_protocol = fixture.roots[1]
+        .sign(&future, limits())
+        .assured("current proof shape");
+    assert!(matches!(
+        proof_refusal(&trust, &future_protocol).current_context(),
+        TrustError::Protocol
+    ));
+
+    // A signature changed by one bit, or a root's signature of another document type, is no proof.
+    let tampered = proof_refusal(&trust, &flip_signature_bit(&signed));
+    assert!(matches!(tampered.current_context(), TrustError::Document));
+    assert!(matches!(
+        tampered.downcast_ref::<DocumentError>(),
+        Some(DocumentError::Verification)
+    ));
+    let authorization = fixture.roots[1]
+        .sign(&fixture.authorization(), limits())
+        .assured("current authorization");
+    let another_type = proof_refusal(&trust, &authorization);
+    assert!(matches!(
+        another_type.current_context(),
+        TrustError::Document
+    ));
+    assert!(matches!(
+        another_type.downcast_ref::<DocumentError>(),
+        Some(DocumentError::Header)
+    ));
+
+    // A proof of life is no trust document: a trust state refuses to build from one.
+    let documents = TrustDocuments {
+        documents: vec![SignedTrustDocument::Compact(signed)],
+    };
+    assert!(matches!(
+        TrustState::build(&fixture.embedded(), &documents, limits())
+            .err()
+            .assured("a trust state builds only from trust documents")
+            .current_context(),
+        TrustError::Document
+    ));
+}
+
+#[test]
+fn a_root_a_succession_installs_proves_life_for_the_epoch_that_holds_it() {
+    let fixture = Fixture::new();
+    let next = [signer(), signer(), signer()];
+    let succession = RootSuccession {
+        doc: SuccessionKind::RootSuccession,
+        protocol: 1,
+        serial: 4,
+        issued_at: at(-200),
+        from_epoch: 0,
+        to_epoch: 1,
+        // The second root stays a root of the next epoch beside two new ones.
+        roots: vec![
+            fixture.roots[1].public_key().clone(),
+            next[0].public_key().clone(),
+            next[1].public_key().clone(),
+        ],
+        threshold: std::num::NonZeroUsize::new(2).assured("nonzero threshold"),
+        effective_at: at(-100),
+    };
+    let documents = TrustDocuments {
+        documents: vec![SignedTrustDocument::Signatures(
+            fixture.root_sign(&succession),
+        )],
+    };
+    let trust = TrustState::build(&fixture.embedded(), &documents, limits())
+        .assured("the embedded roots install the next epoch");
+
+    let mut new_root = proof_of_life(&fixture);
+    new_root.root_epoch = 1;
+    new_root.kid = next[0].key_id().clone();
+    let signed = next[0].sign(&new_root, limits()).assured("current proof");
+    let verified = trust
+        .verify_proof_of_life(&signed, limits())
+        .assured("a root of the installed epoch proves life for it");
+    assert_eq!(verified, new_root);
+    let mut wrong_epoch = new_root;
+    wrong_epoch.root_epoch = 0;
+    let signed = next[0]
+        .sign(&wrong_epoch, limits())
+        .assured("current proof");
+    assert!(matches!(
+        proof_refusal(&trust, &signed).current_context(),
+        TrustError::ProofRoot
+    ));
+
+    // The root both epochs hold may name either of them.
+    for root_epoch in [0, 1] {
+        let mut carried = proof_of_life(&fixture);
+        carried.root_epoch = root_epoch;
+        let signed = fixture.roots[1]
+            .sign(&carried, limits())
+            .assured("current proof");
+        let verified = trust
+            .verify_proof_of_life(&signed, limits())
+            .assured("each epoch holding the root accepts its proof");
+        assert_eq!(verified, carried);
+    }
+}

@@ -1,4 +1,4 @@
-//! Typed reorderer and correlator state inspections coordinated against captured unit owners.
+//! Typed stateful processor inspections coordinated against captured unit owners.
 //!
 //! Layer: control plane.
 //! - **Owns.** Processor schedule validation, section layouts, per-unit routing, cursor fencing,
@@ -25,13 +25,13 @@ use nervix_interconnect::{
     ReadProcessorStatePage, StreamHandlerError, StreamingResponse,
 };
 use nervix_models::{
-    BranchKeyFingerprint, ClusterNodeIdentity, CreateCorrelator, CreateRelay, CreateReorderer,
-    CreateSchema, DomainName, DomainNodeRef, DomainSchedule, Expression, FieldScope,
-    InspectionFormat, ModelKind, NodeRef, ParseAsType, ProcessorStateSection, ResolvedBranching,
-    ResolvedStateBranchSelection, ScheduledNode, SchemaField, ShowProcessorState,
-    StateInspectedProcessor, StateInspectionBranchSelection, StateInspectionCounts,
-    StateInspectionOrigin, StateInspectionPosition, StateInspectionRejection, StateInspectionStage,
-    Unit,
+    BranchKeyFingerprint, ClusterNodeIdentity, ClusterSchedule, CreateCorrelator,
+    CreateDeduplicator, CreateRelay, CreateReorderer, CreateSchema, CreateWindowProcessor,
+    DomainName, DomainNodeRef, DomainSchedule, Expression, FieldScope, InspectionFormat, ModelKind,
+    NodeRef, ParseAsType, ProcessorStateSection, ResolvedBranching, ResolvedStateBranchSelection,
+    ScheduledNode, SchemaField, ShowProcessorState, StateInspectedProcessor,
+    StateInspectionBranchSelection, StateInspectionCounts, StateInspectionOrigin,
+    StateInspectionPosition, StateInspectionRejection, StateInspectionStage, Unit,
 };
 use nervix_primitives::time::timeout;
 
@@ -112,6 +112,43 @@ fn section_fields(
                 false,
             ));
         }
+        ProcessorStateSection::Keys => {
+            if key_types.len() != layout.sensitive_keys.len() {
+                return Err(StateInspectionRejection::NotReady);
+            }
+            for (index, ((ty, _optional), sensitive)) in
+                key_types.iter().zip(&layout.sensitive_keys).enumerate()
+            {
+                let position = index
+                    .checked_add(1)
+                    .assured("the compiled key list fits usize");
+                appended.push((format!("key_{position}"), ty.clone(), true, *sensitive));
+            }
+            appended.push(("seen_at".to_string(), ParseAsType::Datetime, false, false));
+        }
+        ProcessorStateSection::Rows => {
+            if key_types.len() != layout.sensitive_keys.len() {
+                return Err(StateInspectionRejection::NotReady);
+            }
+            appended.push(("sequence".to_string(), ParseAsType::U64, false, false));
+            appended.push((
+                "received_at".to_string(),
+                ParseAsType::Datetime,
+                false,
+                false,
+            ));
+            for (index, ((ty, optional), sensitive)) in
+                key_types.iter().zip(&layout.sensitive_keys).enumerate()
+            {
+                appended.push((
+                    nervix_vm::window::argument_snapshot_column(index),
+                    ty.clone(),
+                    *optional,
+                    *sensitive,
+                ));
+            }
+        }
+        ProcessorStateSection::Header | ProcessorStateSection::Accumulators => {}
         ProcessorStateSection::Left | ProcessorStateSection::Right => {
             appended.push((
                 "received_at".to_string(),
@@ -226,8 +263,92 @@ fn processor_layout(
                 ],
             })
         }
+        ModelKind::Deduplicator => {
+            let deduplicator = schedule
+                .scheduled::<CreateDeduplicator>(processor.identifier.clone())
+                .ok_or(StateInspectionRejection::UnknownEntity)?;
+            let payload = relay_schema_fields(schedule, deduplicator.config.from.relays())?;
+            let branch = branch_fields(deduplicator.node);
+            let sensitive_keys = deduplicator
+                .config
+                .deduplicate_on
+                .iter()
+                .map(|expression| reads_sensitive_field(expression, &payload, &branch))
+                .collect();
+            Ok(ProcessorLayout {
+                node: deduplicator.node.clone(),
+                sections: vec![SectionLayout {
+                    section: ProcessorStateSection::Keys,
+                    payload: Vec::new(),
+                    sensitive_keys,
+                }],
+            })
+        }
+        ModelKind::WindowProcessor => window_layout(schedule, processor),
         _ => Err(StateInspectionRejection::UnknownEntity),
     }
+}
+
+fn window_layout(
+    schedule: &DomainSchedule,
+    processor: &NodeRef,
+) -> Result<ProcessorLayout, StateInspectionRejection> {
+    let window = schedule
+        .scheduled::<CreateWindowProcessor>(processor.identifier.clone())
+        .ok_or(StateInspectionRejection::UnknownEntity)?;
+    let payload = relay_schema_fields(schedule, window.config.from.relays())?;
+    let mut secrets = Vec::new();
+    for field in &payload {
+        if field.sensitive {
+            secrets.push(field.name.as_str());
+        }
+    }
+    let sensitivity = nervix_vm::SchemaSensitivity::from_sensitive_fields(secrets);
+    let input = nervix_primitives::sync::StdArc::new(SchemaField::arrow_schema(&payload));
+    let mut programs = Vec::new();
+    for (_, node) in schedule.nodes.iter() {
+        if let nervix_models::Model::Udf(udf) = node.config.as_ref() {
+            programs.push(crate::registry::udf_program(udf));
+        }
+    }
+    let options = nervix_vm::CompileOptions {
+        udf_signatures: nervix_roto::signatures_for(programs.iter()),
+        ..nervix_vm::CompileOptions::default()
+    };
+    let mut sensitive_keys = Vec::new();
+    for output in window.config.output_routes.outputs() {
+        let program = nervix_vm::window::lower_window_assignments(&output.construction)
+            .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))?;
+        let inferred = nervix_vm::window::CompiledWindowRoute::argument_inspection_fields(
+            &program.inner,
+            &input,
+            &sensitivity,
+            &options,
+        )
+        .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))?;
+        for field in inferred {
+            sensitive_keys.push(field.sensitive);
+        }
+    }
+    let mut sections = vec![SectionLayout {
+        section: ProcessorStateSection::Rows,
+        payload,
+        sensitive_keys,
+    }];
+    for section in [
+        ProcessorStateSection::Header,
+        ProcessorStateSection::Accumulators,
+    ] {
+        sections.push(SectionLayout {
+            section,
+            payload: section.metadata_fields(),
+            sensitive_keys: Vec::new(),
+        });
+    }
+    Ok(ProcessorLayout {
+        node: window.node.clone(),
+        sections,
+    })
 }
 
 /// The node reference a `SHOW <kind> <name> STATE` names.
@@ -238,6 +359,12 @@ fn inspected_node(processor: &StateInspectedProcessor) -> NodeRef {
         }
         StateInspectedProcessor::Correlator(name) => {
             NodeRef::new(ModelKind::Correlator, name.clone())
+        }
+        StateInspectedProcessor::Deduplicator(name) => {
+            NodeRef::new(ModelKind::Deduplicator, name.clone())
+        }
+        StateInspectedProcessor::WindowProcessor(name) => {
+            NodeRef::new(ModelKind::WindowProcessor, name.clone())
         }
     }
 }
@@ -451,9 +578,54 @@ pub(in crate::application) struct OwnerPage {
     descriptor: ProcessorStatePageDescriptor,
     runs: Vec<OwnerRun>,
     sections: Vec<OwnerSection>,
+    /// Retains the published reader's allocation admission through projection and encoding.
+    _memory: Option<crate::runtime::ProcessorStatePageMemory>,
 }
 
 impl SessionServiceImpl {
+    async fn prepared_processor_layout(
+        &self,
+        schedule: ClusterSchedule,
+        domain: &DomainName,
+        processor: &NodeRef,
+    ) -> Result<ProcessorLayout, StateInspectionRejection> {
+        match processor.kind {
+            ModelKind::Deduplicator | ModelKind::WindowProcessor => {
+                let executor = self.inner.runtime.inspection_executor();
+                let charge = executor
+                    .try_reserve(nervix_execution::MemoryClass::Bulk, 1)
+                    .map_err(|error| {
+                        inspection_refusal(error, StateInspectionRejection::NotReady)
+                    })?;
+                let domain = domain.clone();
+                let processor = processor.clone();
+                executor
+                    .run_cpu(
+                        nervix_execution::CpuClass::Bulk,
+                        charge,
+                        move |_charge, cancellation| {
+                            cancellation.check().map_err(|error| {
+                                inspection_refusal(error, StateInspectionRejection::Deadline)
+                            })?;
+                            let domain = schedule
+                                .domain(&domain)
+                                .ok_or(StateInspectionRejection::UnknownEntity)?;
+                            processor_layout(domain, &processor)
+                        },
+                    )
+                    .await
+                    .map_err(|error| {
+                        inspection_refusal(error, StateInspectionRejection::NotReady)
+                    })?
+            }
+            _ => {
+                let domain = schedule
+                    .domain(domain)
+                    .ok_or(StateInspectionRejection::UnknownEntity)?;
+                processor_layout(domain, processor)
+            }
+        }
+    }
     pub(in crate::application) async fn show_processor_state(
         &self,
         domain: &DomainName,
@@ -468,7 +640,7 @@ impl SessionServiceImpl {
         )
         .await;
         let state = StateInspection {
-            entity,
+            entity: entity.into(),
             result: match result {
                 Ok(Ok(page)) => StateInspectionResult::Page(page),
                 Ok(Err(reason)) => StateInspectionResult::Rejected(reason),
@@ -503,11 +675,9 @@ impl SessionServiceImpl {
     ) -> Result<ProcessorInspectionPlan, StateInspectionRejection> {
         let processor = inspected_node(&show.processor);
         let state = self.inner.consensus.current_runtime_state().await;
-        let domain_schedule = state
-            .schedule
-            .domain(domain)
-            .ok_or(StateInspectionRejection::UnknownEntity)?;
-        let layout = processor_layout(domain_schedule, &processor)?;
+        let layout = self
+            .prepared_processor_layout(state.schedule, domain, &processor)
+            .await?;
         let branching = layout
             .node
             .resolved_branching
@@ -638,11 +808,18 @@ impl SessionServiceImpl {
             add_counts(&mut counts, descriptor.counts)?;
             let mut supplied = 0_usize;
             for run in &page.runs {
+                if run.section.is_metadata() {
+                    continue;
+                }
                 supplied = supplied
                     .checked_add(run.rows)
                     .assured("a unit page holds at most the rows it was asked for");
             }
-            if progress.closed || skip || supplied == 0 {
+            let metadata = page
+                .runs
+                .iter()
+                .any(|run| run.section.is_metadata() && run.rows != 0);
+            if progress.closed || skip || (supplied == 0 && !metadata) {
                 let unit_more = descriptor.more;
                 output.push(StateInspectionUnit {
                     unit: **unit,
@@ -790,6 +967,7 @@ impl SessionServiceImpl {
             descriptor: received.descriptor,
             runs,
             sections,
+            _memory: None,
         })
     }
 
@@ -836,11 +1014,9 @@ impl SessionServiceImpl {
         if state.revision != request.control_revision {
             return Err(StateInspectionRejection::StaleContinuation);
         }
-        let domain = state
-            .schedule
-            .domain(&request.domain)
-            .ok_or(StateInspectionRejection::UnknownEntity)?;
-        let layout = processor_layout(domain, &request.processor)?;
+        let layout = self
+            .prepared_processor_layout(state.schedule, &request.domain, &request.processor)
+            .await?;
         if layout.node.schema_fingerprint != request.schema {
             return Err(StateInspectionRejection::StaleContinuation);
         }
@@ -872,17 +1048,7 @@ impl SessionServiceImpl {
         {
             Ok(page) => page,
             Err(error) => {
-                let reason = match error.current_context() {
-                    ProcessorStatePageError::Position => {
-                        StateInspectionRejection::StaleContinuation
-                    }
-                    ProcessorStatePageError::Unavailable | ProcessorStatePageError::Branch => {
-                        StateInspectionRejection::OwnerUnavailable
-                    }
-                    ProcessorStatePageError::Unrestored
-                    | ProcessorStatePageError::Admission
-                    | ProcessorStatePageError::Columns => StateInspectionRejection::NotReady,
-                };
+                let reason = StateInspectionRejection::from(error.current_context());
                 return Err(inspection_refusal(error, reason));
             }
         };
@@ -943,6 +1109,7 @@ impl SessionServiceImpl {
             descriptor,
             runs,
             sections,
+            _memory: page.memory,
         })
     }
 
@@ -961,20 +1128,26 @@ impl SessionServiceImpl {
             .read_timeout
             .value();
         let executor = self.inner.runtime.inspection_executor();
+        let mut memory = None;
         let result = match timeout(deadline, self.native_processor_state_page(request)).await {
-            Ok(Ok(page)) => Ok((
-                page.descriptor,
-                page.sections
-                    .into_iter()
-                    .map(|section| ProcessorPageSection {
-                        batch: section.batch,
-                    })
-                    .collect::<Vec<_>>(),
-            )),
+            Ok(Ok(page)) => {
+                memory = page._memory;
+                Ok((
+                    page.descriptor,
+                    page.sections
+                        .into_iter()
+                        .map(|section| ProcessorPageSection {
+                            batch: section.batch,
+                        })
+                        .collect::<Vec<_>>(),
+                ))
+            }
             Ok(Err(reason)) => Err(reason),
             Err(_) => Err(StateInspectionRejection::Deadline),
         };
-        stream_processor_page(executor, result, max_bytes).await
+        let response = stream_processor_page(executor, result, max_bytes).await;
+        drop(memory);
+        response
     }
 
     /// The `branches:`, `rows:` and `state bytes:` lines `DESCRIBE` reports for each unit of a
@@ -1029,14 +1202,19 @@ impl SessionServiceImpl {
                 },
                 Err(reason) => Err(reason),
             };
+            let label = if processor.kind == ModelKind::Deduplicator {
+                "keys"
+            } else {
+                "rows"
+            };
             match counts {
                 Ok(counts) => {
                     lines.push(format!("{prefix}branches: {}", counts.branches));
-                    lines.push(format!("{prefix}rows: {}", counts.rows));
+                    lines.push(format!("{prefix}{label}: {}", counts.rows));
                     lines.push(format!("{prefix}state bytes: {}", counts.bytes));
                 }
                 Err(reason) => {
-                    for line in ["branches", "rows", "state bytes"] {
+                    for line in ["branches", label, "state bytes"] {
                         lines.push(format!("{prefix}{line}: unavailable ({})", reason.as_ref()));
                     }
                 }
@@ -1079,6 +1257,24 @@ impl SessionServiceImpl {
     }
 }
 
+/// The typed refusal an inspection reports when a unit's owner could not read its page. A
+/// continuation position the unit's state no longer holds is stale. A unit task this node no
+/// longer runs, or a branch task that could not answer, leaves the owner unavailable. A processor
+/// still restoring its branches, or a page the node could not admit or gather, is not ready yet.
+impl From<&ProcessorStatePageError> for StateInspectionRejection {
+    fn from(error: &ProcessorStatePageError) -> Self {
+        match error {
+            ProcessorStatePageError::Position => Self::StaleContinuation,
+            ProcessorStatePageError::Unavailable | ProcessorStatePageError::Branch => {
+                Self::OwnerUnavailable
+            }
+            ProcessorStatePageError::Unrestored
+            | ProcessorStatePageError::Admission
+            | ProcessorStatePageError::Columns => Self::NotReady,
+        }
+    }
+}
+
 /// Projects a data-plane page's columns into each section's complete fields, appending the
 /// owner's columns with the types its programs produce.
 fn project_sections(
@@ -1097,7 +1293,14 @@ fn project_sections(
         if layout.section != section.section {
             return Err(StateInspectionRejection::NotReady);
         }
-        if section.payload.is_empty() {
+        let returned = match section.payload.first() {
+            Some(column) => column.len(),
+            None => match section.appended.first() {
+                Some(column) => column.len(),
+                None => 0,
+            },
+        };
+        if returned == 0 {
             // Nothing of this section was returned: the page carries only its complete count.
             projected.push(OwnerSection {
                 section: section.section,
@@ -1153,6 +1356,7 @@ fn encode_page(
         descriptor,
         runs,
         sections,
+        _memory,
     } = page;
     let mut schemas = Vec::with_capacity(sections.len());
     for section in &sections {
@@ -1179,8 +1383,7 @@ fn encode_page(
     let mut last_branch = None;
     let mut full = false;
     'runs: for run in &runs {
-        // A processor's state has at most two sections, fixed by its kind, so the run's section is
-        // found among at most two entries.
+        // Each processor kind fixes its sections; windows have the maximum of three.
         let Some(index) = sections
             .iter()
             .position(|section| section.section == run.section)
@@ -1233,6 +1436,9 @@ fn encode_page(
                 .checked_add(frame.bytes().len())
                 .filter(|&bytes| bytes <= byte_limit)
             else {
+                if run.section.is_metadata() {
+                    return Err(StateInspectionRejection::ReplyTooLarge);
+                }
                 full = true;
                 break 'runs;
             };
@@ -1241,10 +1447,12 @@ fn encode_page(
             next_row[index] = row
                 .checked_add(1)
                 .assured("a section's rows are counted by an addressable batch");
-            rows = rows
-                .checked_add(1)
-                .assured("a page's rows are counted by addressable batches");
-            last_branch = key.as_ref().map(BranchKey::fingerprint);
+            if !run.section.is_metadata() {
+                rows = rows
+                    .checked_add(1)
+                    .assured("a page's rows are counted by addressable batches");
+                last_branch = key.as_ref().map(BranchKey::fingerprint);
+            }
         }
     }
     let mut encoded = Vec::new();
@@ -1274,3 +1482,7 @@ fn encode_page(
         last_branch,
     })
 }
+
+#[cfg(test)]
+#[path = "processor_state_tests.rs"]
+mod tests;

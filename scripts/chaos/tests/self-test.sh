@@ -11,6 +11,8 @@ source "${chaos_dir}/require-jq.sh"
 source "${chaos_dir}/cluster-parameters.sh"
 # shellcheck source=cluster-parameters-fixture.sh
 source "${script_dir}/cluster-parameters-fixture.sh"
+# shellcheck source=../verifier-self-check.sh
+source "${chaos_dir}/verifier-self-check.sh"
 
 if ! chaos_jq_supported; then
     printf 'self-test failed: the chaos scripts need jq 1.8 or later, not %s\n' "$(chaos_jq_found)" >&2
@@ -27,6 +29,7 @@ fi
 
 "${script_dir}/role-wait-self-test.sh"
 "${script_dir}/instance-owners-self-test.sh"
+"${script_dir}/outward-tls-self-test.sh"
 "${script_dir}/pause-delivery-self-test.sh"
 "${script_dir}/hold-quorum-self-test.sh"
 "${script_dir}/output-boundary-self-test.sh"
@@ -544,6 +547,7 @@ preflight_bundle() {
 preflight_bundle "${tmp_dir}/probe-tools" "${chaos_probe_image}"
 status=0
 invalid_image_run_id="invalid-image-$$-${RANDOM}"
+chaos_verifier_register_run "${invalid_image_run_id}"
 "${tmp_dir}/probe-tools/chaos.sh" run baseline \
     --image 'not a valid image reference' \
     --nodes 1 \
@@ -569,6 +573,7 @@ unpullable_image="localhost:1/nervix-chaos/unpullable@sha256:$(printf '0%.0s' {1
 preflight_bundle "${tmp_dir}/unpullable-kcat" "${unpullable_image}"
 status=0
 unpullable_run_id="unpullable-tool-$$-${RANDOM}"
+chaos_verifier_register_run "${unpullable_run_id}"
 "${tmp_dir}/unpullable-kcat/chaos.sh" run baseline \
     --image 'not a valid image reference' \
     --nodes 1 \
@@ -589,9 +594,11 @@ jq -e --arg image "${unpullable_image}" --arg probe "${chaos_probe_image}" '
 [[ -s "${tmp_dir}/artifacts/${unpullable_run_id}/diagnostics/tool-image-pull-kcat.txt" ]] \
     || fail "an unpullable tool image did not keep its pull output"
 
-# A fault scenario also resolves and records its Pumba image, and its finding carries every tool.
+# A fault scenario also resolves and records its Pumba image, and its finding carries every tool. A
+# three-node leader crash also records the Python image of its TLS probe.
 status=0
 crash_setup_run_id="crash-setup-$$-${RANDOM}"
+chaos_verifier_register_run "${crash_setup_run_id}"
 "${tmp_dir}/probe-tools/chaos.sh" run leader-crash \
     --image 'not a valid image reference' \
     --artifacts "${tmp_dir}/artifacts" \
@@ -601,11 +608,14 @@ crash_setup_run_id="crash-setup-$$-${RANDOM}"
 [[ "${status}" -eq 2 ]] || fail "a fault scenario with an invalid image returned ${status}, expected setup error 2"
 crash_setup_dir="${tmp_dir}/artifacts/${crash_setup_run_id}"
 pinned_pumba_image_id="$(docker image inspect --format '{{.Id}}' "${chaos_pumba_image}")"
-jq -e --arg pumba "${chaos_pumba_image}" --arg pumba_id "${pinned_pumba_image_id}" '
-    (.tool_images | keys) == ["kafka", "kcat", "probe", "pumba"]
+pinned_python_image_id="$(docker image inspect --format '{{.Id}}' "${chaos_python_image}")"
+jq -e --arg pumba "${chaos_pumba_image}" --arg pumba_id "${pinned_pumba_image_id}" \
+    --arg python "${chaos_python_image}" --arg python_id "${pinned_python_image_id}" '
+    (.tool_images | keys) == ["kafka", "kcat", "probe", "pumba", "python"]
     and .tool_images.pumba == {reference: $pumba, image_id: $pumba_id}
+    and .tool_images.python == {reference: $python, image_id: $python_id}
 ' "${crash_setup_dir}/manifest.json" >/dev/null \
-    || fail "a fault scenario did not record its Pumba image with the other tool images"
+    || fail "a fault scenario did not record its Pumba image and its TLS probe's Python image with the other tool images"
 jq -e --slurpfile manifest "${crash_setup_dir}/manifest.json" '
     .category == "setup" and .phase == "preflight" and .tool_images == $manifest[0].tool_images
 ' "${crash_setup_dir}/results/finding.json" >/dev/null \
@@ -723,6 +733,7 @@ jq -e '
 # A controller killed while Pumba owns the pause cannot run its EXIT trap.
 # The external cleanup path must unpause that exact labeled node before removal.
 cleanup_run_id="pause-cleanup-$$-${RANDOM}"
+chaos_verifier_register_run "${cleanup_run_id}"
 cleanup_container="$(docker run --detach --rm \
     --label "io.nervix.chaos.run=${cleanup_run_id}" \
     --label io.nervix.chaos.role=node "${chaos_probe_image}" sleep 60)"
@@ -737,6 +748,7 @@ fi
 # Cleanup after a controller that never ran its exit trap captures what the run left behind before
 # it removes anything, then confirms that nothing carries the run's label.
 cleanup_run_id="evidence-cleanup-$$-${RANDOM}"
+chaos_verifier_register_run "${cleanup_run_id}"
 evidence_container="$(docker run --detach --rm \
     --label "io.nervix.chaos.run=${cleanup_run_id}" \
     --label io.nervix.chaos.role=node "${chaos_probe_image}" sh -c 'echo left-behind-marker; sleep 60')"
@@ -770,6 +782,7 @@ fi
 # A resource that removal cannot take is removed again in later rounds and, still there after the
 # last one, fails the cleanup: a container the run does not own keeps the run's network in use.
 cleanup_run_id="stuck-cleanup-$$-${RANDOM}"
+chaos_verifier_register_run "${cleanup_run_id}"
 docker network create --label "io.nervix.chaos.run=${cleanup_run_id}" "${cleanup_run_id}" >/dev/null
 foreign_holder="$(docker run --detach --rm --network "${cleanup_run_id}" "${chaos_probe_image}" sleep 60)"
 status=0
@@ -798,6 +811,8 @@ if chaos_image_carries_digest "${chaos_probe_image}" docker.io/library/alpine:3.
 fi
 
 cleanup_run_id="pause-injector-failure-$$-${RANDOM}"
+
+chaos_verifier_register_run "${cleanup_run_id}"
 cleanup_container="$(docker run --detach --rm \
     --label "io.nervix.chaos.run=${cleanup_run_id}" \
     --label io.nervix.chaos.role=node "${chaos_probe_image}" sleep 60)"
@@ -823,6 +838,7 @@ status=0
     >"${tmp_dir}/network-usage.txt" 2>&1 || status=$?
 [[ "${status}" -eq 2 ]] || fail "network preflight without a probe image returned ${status}, expected usage error 2"
 cleanup_run_id="network-heal-$$-${RANDOM}"
+chaos_verifier_register_run "${cleanup_run_id}"
 heal_target="$(docker run --detach --rm \
     --label "io.nervix.chaos.run=${cleanup_run_id}" \
     --label io.nervix.chaos.role=node "${chaos_probe_image}" sleep 120)"
@@ -871,6 +887,7 @@ docker rm --force "${heal_injectors[@]}" >/dev/null
 
 # A qdisc Pumba does not own is never removed; healing reports it instead.
 cleanup_run_id="network-foreign-$$-${RANDOM}"
+chaos_verifier_register_run "${cleanup_run_id}"
 foreign_target="$(docker run --detach --rm \
     --label "io.nervix.chaos.run=${cleanup_run_id}" \
     --label io.nervix.chaos.role=node "${chaos_probe_image}" sleep 120)"

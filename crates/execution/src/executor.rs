@@ -47,6 +47,7 @@ struct ExecutorInner {
 /// progress guarantee rather than a sleep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExecutorSnapshot {
+    pub limits: OperationLimits,
     pub control_cpu: WorkerClassSnapshot,
     pub credentials_cpu: WorkerClassSnapshot,
     pub data_cpu: WorkerClassSnapshot,
@@ -67,6 +68,59 @@ pub struct ExecutorSnapshot {
 }
 
 impl ExecutorSnapshot {
+    /// The configured admission and queue capacity of every independently owned worker class.
+    pub fn worker_classes(&self) -> [(crate::limits::WorkerClassName, WorkerClassSnapshot); 8] {
+        [
+            (
+                crate::limits::WorkerClassName::Cpu(CpuClass::Control),
+                self.control_cpu,
+            ),
+            (
+                crate::limits::WorkerClassName::Cpu(CpuClass::Credentials),
+                self.credentials_cpu,
+            ),
+            (
+                crate::limits::WorkerClassName::Cpu(CpuClass::Data),
+                self.data_cpu,
+            ),
+            (
+                crate::limits::WorkerClassName::Cpu(CpuClass::Extension),
+                self.extension_cpu,
+            ),
+            (
+                crate::limits::WorkerClassName::Cpu(CpuClass::Bulk),
+                self.bulk_cpu,
+            ),
+            (
+                crate::limits::WorkerClassName::Storage(StorageClass::Consensus),
+                self.consensus_storage,
+            ),
+            (
+                crate::limits::WorkerClassName::Storage(StorageClass::Filesystem),
+                self.filesystem_storage,
+            ),
+            (
+                crate::limits::WorkerClassName::Storage(StorageClass::Connector),
+                self.connector_storage,
+            ),
+        ]
+    }
+
+    /// All independent memory pools, including active and retained materialized reads.
+    pub fn memory_classes(&self) -> [(MemoryClass, MemoryBudgetSnapshot); 9] {
+        [
+            (MemoryClass::Management, self.management_memory),
+            (MemoryClass::Commands, self.commands_memory),
+            (MemoryClass::Relay, self.relay_memory),
+            (MemoryClass::StateRead, self.state_read_memory),
+            (MemoryClass::StateReadCache, self.state_read_cache_memory),
+            (MemoryClass::Bulk, self.bulk_memory),
+            (MemoryClass::BulkWindow, self.bulk_window_memory),
+            (MemoryClass::RestoreMetadata, self.restore_metadata_memory),
+            (MemoryClass::Credentials, self.credentials_memory),
+        ]
+    }
+
     /// What one CPU class is doing.
     pub fn cpu_class(&self, class: CpuClass) -> WorkerClassSnapshot {
         match class {
@@ -99,42 +153,42 @@ impl Executor {
                 control_cpu: WorkerPool::new(
                     CpuClass::Control.into(),
                     validated.workers.control_cpu,
-                    validated.workers.pending_jobs,
+                    validated.workers.pending_jobs.control_cpu,
                 ),
                 credentials_cpu: WorkerPool::new(
                     CpuClass::Credentials.into(),
                     validated.workers.credentials_cpu,
-                    validated.workers.pending_jobs,
+                    validated.workers.pending_jobs.credentials_cpu,
                 ),
                 data_cpu: WorkerPool::new(
                     CpuClass::Data.into(),
                     validated.workers.data_cpu,
-                    validated.workers.pending_jobs,
+                    validated.workers.pending_jobs.data_cpu,
                 ),
                 extension_cpu: WorkerPool::new(
                     CpuClass::Extension.into(),
                     validated.workers.extension_cpu,
-                    validated.workers.pending_jobs,
+                    validated.workers.pending_jobs.extension_cpu,
                 ),
                 bulk_cpu: WorkerPool::new(
                     CpuClass::Bulk.into(),
                     validated.workers.bulk_cpu,
-                    validated.workers.pending_jobs,
+                    validated.workers.pending_jobs.bulk_cpu,
                 ),
                 consensus_storage: WorkerPool::new(
                     StorageClass::Consensus.into(),
                     validated.workers.consensus_storage,
-                    validated.workers.pending_jobs,
+                    validated.workers.pending_jobs.consensus_storage,
                 ),
                 filesystem_storage: WorkerPool::new(
                     StorageClass::Filesystem.into(),
                     validated.workers.filesystem_storage,
-                    validated.workers.pending_jobs,
+                    validated.workers.pending_jobs.filesystem_storage,
                 ),
                 connector_storage: WorkerPool::new(
                     StorageClass::Connector.into(),
                     *validated.workers.connector_storage.value(),
-                    validated.workers.pending_jobs,
+                    validated.workers.pending_jobs.connector_storage,
                 ),
                 management_memory: MemoryBudget::new(
                     MemoryClass::Management,
@@ -147,11 +201,11 @@ impl Executor {
                 relay_memory: MemoryBudget::new(MemoryClass::Relay, validated.budgets.relay),
                 state_read_memory: MemoryBudget::new(
                     MemoryClass::StateRead,
-                    validated.budgets.relay,
+                    validated.budgets.state_read,
                 ),
                 state_read_cache_memory: MemoryBudget::new(
                     MemoryClass::StateReadCache,
-                    validated.budgets.relay,
+                    validated.budgets.state_read_cache,
                 ),
                 bulk_memory: MemoryBudget::new(MemoryClass::Bulk, validated.budgets.bulk),
                 bulk_window_memory: MemoryBudget::new(
@@ -305,6 +359,7 @@ impl Executor {
 
     pub fn snapshot(&self) -> ExecutorSnapshot {
         ExecutorSnapshot {
+            limits: self.inner.limits,
             control_cpu: self.inner.control_cpu.snapshot(),
             credentials_cpu: self.inner.credentials_cpu.snapshot(),
             data_cpu: self.inner.data_cpu.snapshot(),

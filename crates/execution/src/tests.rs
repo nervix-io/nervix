@@ -28,7 +28,7 @@ fn small_executor() -> Executor {
             filesystem_storage: one(),
             connector_storage: crate::ConnectorStorageWorkers::resolve(Some(one()))
                 .expect("one worker fits the primitive permit bound"),
-            pending_jobs: one(),
+            pending_jobs: crate::PendingJobCounts::uniform(one()),
         },
         budgets: MemoryBudgets::default(),
         limits: OperationLimits::default(),
@@ -43,7 +43,9 @@ fn small_executor() -> Executor {
 fn queued_executor(pending_jobs: usize) -> Executor {
     Executor::new(ExecutionConfig {
         workers: WorkerCounts {
-            pending_jobs: NonZeroUsize::new(pending_jobs).expect("a test queue holds at least one"),
+            pending_jobs: crate::PendingJobCounts::uniform(
+                NonZeroUsize::new(pending_jobs).expect("a test queue holds at least one"),
+            ),
             ..WorkerCounts {
                 control_cpu: one(),
                 credentials_cpu: one(),
@@ -54,7 +56,7 @@ fn queued_executor(pending_jobs: usize) -> Executor {
                 filesystem_storage: one(),
                 connector_storage: crate::ConnectorStorageWorkers::resolve(Some(one()))
                     .expect("one worker fits the primitive permit bound"),
-                pending_jobs: one(),
+                pending_jobs: crate::PendingJobCounts::uniform(one()),
             }
         },
         budgets: MemoryBudgets::default(),
@@ -84,6 +86,8 @@ fn the_memory_total_counts_every_class_once() {
         management: ByteUnit::Byte(1),
         commands: ByteUnit::Byte(2),
         relay: ByteUnit::Byte(4),
+        state_read: ByteUnit::Byte(4),
+        state_read_cache: ByteUnit::Byte(4),
         bulk: ByteUnit::Byte(8),
         bulk_window: ByteUnit::Byte(16),
         restore_metadata: ByteUnit::Byte(32),

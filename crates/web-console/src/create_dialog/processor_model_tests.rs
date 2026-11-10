@@ -2,7 +2,7 @@
 //!
 //! Layer: test harness, outside product layer order.
 //! - **Owns.** Independent semantic-to-form fixtures and equality oracles for junction,
-//!   deduplicator, reorderer and reingestor drafts.
+//!   deduplicator, reorderer, window processor, correlator and reingestor drafts.
 //! - **Depends on.** Current vocabulary generators, visual drafts and canonical Plexus parsing.
 //! - **Must not know.** Registry validation or runtime processing.
 
@@ -15,9 +15,11 @@ use std::collections::BTreeMap;
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    Assignment, BranchSelection, CreateStatement, Expression, FlushPolicy, Inheritance,
-    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model, OutputBranch,
-    ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayName, Statement, expression_to_plexus,
+    Assignment, BranchSelection, CorrelationTimeoutAction, CreateCorrelator, CreateStatement,
+    CreateWindowProcessor, Expression, FlushPolicy, Inheritance, MaterializedStateDependency,
+    MaterializedStatePolicy, MessageErrorPolicy, Model, OutputBranch, ProcessorInputs,
+    ProcessorOutput, ProcessorOutputs, RelayName, Statement, WindowBound, WindowStateLimit,
+    expression_to_plexus,
 };
 use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
 
@@ -27,10 +29,12 @@ use super::{
         AssignmentDraft, FlushDraft, IngestRouteDraft, InheritDraft, InheritedFieldDraft,
         InvocationDraft, MessageErrorDraft, RouteBranchDraft,
     },
+    processor_correlator_draft::TimeoutDraft,
     processor_draft::{
-        InputDraft, NodeBranchDraft, ProcessorDraft, ProcessorFamily, StateDependencyDraft,
-        StatePolicyDraft,
+        NodeBranchDraft, ProcessorDraft, ProcessorFamily, StateDependencyDraft, StatePolicyDraft,
     },
+    processor_input_draft::{InputDraft, InputListDraft},
+    processor_window_draft::WindowBoundDraft,
 };
 
 fn expression(value: &Expression) -> String {
@@ -72,6 +76,15 @@ fn inputs(value: &ProcessorInputs) -> Vec<InputDraft> {
         });
     }
     drafts
+}
+
+/// The input list a draft shows for `value`, its collection included.
+fn input_list(value: &ProcessorInputs) -> InputListDraft {
+    InputListDraft {
+        relays: inputs(value),
+        active: 0,
+        collect: value.collect_policy.clone(),
+    }
 }
 
 fn branching(value: Option<&BranchSelection>) -> NodeBranchDraft {
@@ -210,8 +223,7 @@ fn shared_draft(family: ProcessorFamily, parts: SharedParts<'_>) -> ProcessorDra
     let mut draft = ProcessorDraft::new(family);
     draft.name = parts.name;
     draft.mode = parts.mode;
-    draft.inputs = inputs(parts.from);
-    draft.collect = parts.from.collect_policy.clone();
+    draft.from = input_list(parts.from);
     draft.filter = optional_expression(parts.filter_where);
     draft.branching = branching(parts.branched_by);
     draft.state = state(parts.materialized_state);
@@ -230,6 +242,79 @@ fn keyed_draft(
         .assured("a deduplicator or reorderer draft holds its ordered keys");
     keyed.expressions = keys.expressions.iter().map(expression).collect();
     keyed.max_time = keys.max_time.to_string();
+    draft
+}
+
+/// A window bound as its form shows it: each kind it measures as text, and an empty text for a
+/// kind it does not.
+fn window_bound(value: &WindowBound) -> WindowBoundDraft {
+    let messages = match value.messages {
+        Some(messages) => messages.to_string(),
+        None => String::new(),
+    };
+    let duration = match &value.duration {
+        Some(duration) => duration.clone(),
+        None => String::new(),
+    };
+    WindowBoundDraft { messages, duration }
+}
+
+fn window_draft(value: &CreateWindowProcessor) -> ProcessorDraft {
+    let mut draft = shared_draft(
+        ProcessorFamily::Window,
+        SharedParts {
+            name: value.name.to_string(),
+            from: &value.from,
+            output_routes: &value.output_routes,
+            branched_by: Some(&value.branched_by),
+            mode: value.mode,
+            filter_where: &value.filter_where,
+            materialized_state: &value.materialized_state,
+        },
+    );
+    let window = draft
+        .window_mut()
+        .assured("a window processor draft holds its cadence");
+    window.width = window_bound(&value.width);
+    window.step = window_bound(&value.step);
+    window.state_size = match value.state_limit {
+        WindowStateLimit::Unbounded => None,
+        WindowStateLimit::MaxBytes(bytes) => Some(format!("{bytes}B")),
+    };
+    draft
+}
+
+fn timeout(value: &CorrelationTimeoutAction) -> TimeoutDraft {
+    match value {
+        CorrelationTimeoutAction::Drop => TimeoutDraft::Drop,
+        CorrelationTimeoutAction::SendTo { relay } => {
+            TimeoutDraft::SendTo(Some(SelectedReference::chosen(relay.clone())))
+        }
+    }
+}
+
+fn correlator_draft(value: &CreateCorrelator) -> ProcessorDraft {
+    let mut draft = shared_draft(
+        ProcessorFamily::Correlator,
+        SharedParts {
+            name: value.name.to_string(),
+            from: &value.left,
+            output_routes: &value.output_routes,
+            branched_by: Some(&value.branched_by),
+            mode: value.mode,
+            filter_where: &value.filter_where,
+            materialized_state: &value.materialized_state,
+        },
+    );
+    let correlator = draft
+        .correlator_mut()
+        .assured("a correlator draft holds its correlation");
+    correlator.right = input_list(&value.right);
+    correlator.correlate_where = expression(&value.correlate_where);
+    correlator.match_policy = Some(value.match_policy);
+    correlator.max_time = value.max_time.clone();
+    correlator.left_timeout = timeout(&value.timeout_policy.left);
+    correlator.right_timeout = timeout(&value.timeout_policy.right);
     draft
 }
 
@@ -279,6 +364,8 @@ fn filled(value: &Model) -> ProcessorDraft {
                 max_time: &value.max_time,
             },
         ),
+        Model::WindowProcessor(value) => window_draft(value),
+        Model::Correlator(value) => correlator_draft(value),
         Model::Reingestor(value) => shared_draft(
             ProcessorFamily::Reingestor,
             SharedParts {
@@ -330,6 +417,10 @@ fn bolero_processor_drafts_preserve_every_complete_model() {
             round_trip(deduplicator, arbitrary.entropy().flag());
             let reorderer = Model::Reorderer(arbitrary.create_reorderer());
             round_trip(reorderer, arbitrary.entropy().flag());
+            let window = Model::WindowProcessor(arbitrary.create_window_processor());
+            round_trip(window, arbitrary.entropy().flag());
+            let correlator = Model::Correlator(arbitrary.create_correlator());
+            round_trip(correlator, arbitrary.entropy().flag());
             let reingestor = Model::Reingestor(arbitrary.create_reingestor());
             round_trip(reingestor, arbitrary.entropy().flag());
         });

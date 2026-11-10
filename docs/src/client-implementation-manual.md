@@ -1399,14 +1399,23 @@ section schemas, watermark positions, row frames and continuation. A refused ins
 unsuccessful command disposition while retaining its typed reason. Clients MUST NOT derive success
 from the presence of `state` or parse text to reconstruct rows.
 
+Clients MUST preserve the inspection entity's typed scope. `DomainNodeInspectionEntity` contains
+a domain and node reference; `ClusterLicenseInspectionEntity` contains neither. Native host
+domain/name accessors return absent values for a cluster-license observation, and its entity kind
+is `LICENSE`. The page and Row-section contract is shared by both scopes.
+
 Embedded `NXRB` frames use the existing verified Row/Cell representation and the session transfer
 bound. A retained frame MUST keep its backing bytes alive after its containing outcome is released.
 Clients MUST preserve full integer widths, float bits, datetime values, bytes, nested lists, null
 and redaction. Watermark column identities are their declared positions, never guessed names.
 
-Resume the opaque continuation with the same domain, relay and selector. On `StaleContinuation`,
+Resume the opaque continuation with the same domain, inspected entity and selector. On `StaleContinuation`,
 start a new read; do not combine it with rows from the abandoned sequence. Complete counts describe
-the whole selected cut. An empty page has no row sections or continuation. See
+the whole selected cut. An empty materialized page has no row sections or continuation. Processor
+reads use the same envelope: a window page with no retained inputs can still carry `header` and
+`accumulators` sections. Clients preserve these metadata frames without counting them toward the
+retained-row limit or continuation offset. See [Runtime Nodes](./processors.md#inspect-retained-window-state)
+for section meanings and
 [Materialized State Inspection Envelope](./client-session-protocol.md#materialized-state-inspection-envelope).
 
 The native Python, Ruby and JVM bindings expose this envelope through

@@ -108,6 +108,7 @@ pub enum Statement {
     ShowTransactions(ShowTransactions),
     DescribeTransaction(DescribeTransaction),
     DescribeCluster(DescribeCluster),
+    DescribeLicense(DescribeLicense),
     DescribeClient(DescribeClient),
     AlterBranch(AlterBranch),
 }
@@ -189,6 +190,7 @@ impl Statement {
             | Self::ShowTransactions(_)
             | Self::DescribeTransaction(_)
             | Self::DescribeCluster(_)
+            | Self::DescribeLicense(_)
             | Self::ResetWasmState(_) => false,
         }
     }
@@ -396,6 +398,20 @@ pub struct ShowClusterStatus;
 pub struct DescribeCluster;
 
 #[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub struct DescribeLicense;
+
+#[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct ShowTransactions;
@@ -445,13 +461,15 @@ pub struct ShowProcessorState {
     pub format: InspectionFormat,
 }
 
-/// A processor whose task-owned state `SHOW <kind> <name> STATE` reads, named with its kind.
+/// A stateful processor that `SHOW <kind> <name> STATE` reads, named with its kind.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum StateInspectedProcessor {
     Reorderer(ReordererName),
     Correlator(CorrelatorName),
+    Deduplicator(DeduplicatorName),
+    WindowProcessor(WindowProcessorName),
 }
 
 #[derive(

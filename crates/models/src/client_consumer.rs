@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_CLIENT_CONSUMERS_PER_SESSION: usize = 32;
 pub const DEFAULT_CLIENT_CONSUMER_SESSION_BYTES: u64 = crate::ClientConsumerSessionBytes::DEFAULT;
-pub const CLIENT_CONSUMER_NODE_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAX_CLIENT_CONSUMER_BATCHES: u32 = 1024;
 
 #[derive(
@@ -44,10 +43,8 @@ impl ClientConsumerLimits {
 }
 
 const _: () = {
-    assert!(DEFAULT_CLIENT_CONSUMER_SESSION_BYTES <= CLIENT_CONSUMER_NODE_BYTES);
     assert!(
         DEFAULT_CLIENT_CONSUMER_SESSION_BYTES + crate::DEFAULT_CLIENT_PRODUCER_SESSION_BYTES
             <= 64 * 1024 * 1024
     );
-    assert!(CLIENT_CONSUMER_NODE_BYTES + crate::CLIENT_PRODUCER_NODE_BYTES <= 256 * 1024 * 1024);
 };

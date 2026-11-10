@@ -89,6 +89,11 @@ For typed state inspection in Python, Ruby or JVM applications, read that host g
 `Inspect Materialized State` section for page/refusal metadata, opaque continuation and retained
 schema/frame lifetimes before suggesting application code.
 
+For deduplicator keys and retained window state, read [Runtime Nodes → Inspect Remembered Keys](../../../docs/src/processors.md#inspect-remembered-keys)
+and [Inspect Retained Window State](../../../docs/src/processors.md#inspect-retained-window-state).
+Follow those sections for sensitive argument projection, branch selectors, paging and the distinction
+between retained rows and window metadata; use each processor's `DESCRIBE` for a count summary.
+
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
 contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and
@@ -118,6 +123,9 @@ For backend validation claims, follow that chapter's P-256 signing and backend-s
 selecting an approved algorithm does not establish a validated deployment.
 For cluster continuity and public identity inspection, read
 [Node Settings → Permanent Cluster Identity](../../../docs/src/node-settings.md#permanent-cluster-identity).
+For `DESCRIBE LICENSE`, effective policy and quota usage, read
+[Node Settings → Cluster Licensing](../../../docs/src/node-settings.md#cluster-licensing) and
+[Licensing Metrics](../../../docs/src/metrics-and-observability.md#licensing-metrics).
 For source UUID inspection and restore behavior, read
 [Backup And Restore](../../../docs/src/backup-and-restore.md#what-a-restore-recreates).
 For authentication refusals and retry behavior, follow
@@ -140,8 +148,9 @@ current failure gauge in `/metrics` and `DESCRIBE EMITTER`.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
 Roto UDFs, ingestors and emitters for every connector and entity pair, junctions, deduplicators,
-reorderers, reingestors, and session subscriptions; use the same web-console chapter for their typed
-fields, resource versions, program editors, reference lookup, and transaction behavior.
+reorderers, window processors, correlators, reingestors, and session subscriptions; use the same
+web-console chapter for their typed fields, resource versions, program editors, reference lookup,
+and transaction behavior.
 
 For materialized relay inspection, read [Relay → Inspect Materialized State](../../../docs/src/relay.md#inspect-materialized-state)
 for selector, LIMIT/AFTER and FORMAT clause order, typed rows, sensitivity and stale continuations.
@@ -927,3 +936,7 @@ instead of inventing syntax.
 For password creation policy, read [Node Settings → Password Creation Policy](../../../docs/src/node-settings.md#password-creation-policy)
 and [Cryptography → Password Credentials](../../../docs/src/cryptography.md#password-credentials).
 Use the committed cluster setting for creation cost; preserve the documented startup, replay and restore rules.
+
+For node CPU admission, memory ceilings, native runtime threads, client byte credit and derived
+watermarks, read [Node Settings → Execution Capabilities](../../../docs/src/node-settings.md#execution-capabilities)
+before suggesting local overrides or interpreting DESCRIBE CLUSTER capacity lines.

@@ -1,4 +1,4 @@
-//! `SHOW REORDERER <name> STATE` and `SHOW CORRELATOR <name> STATE`.
+//! Kinded `SHOW <processor> <name> STATE` statements.
 //!
 //! Layer: language.
 //! - **Owns.** The statement head that names an inspected processor by its kind and name.
@@ -18,8 +18,9 @@ use nervix_models::{ShowProcessorState, StateInspectedProcessor};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, correlator_ref, into_parse_error, kw,
-        lex_input, reorderer_ref, suggest_from,
+        LexedInput, ParseError, ParseFromSourceError, correlator_ref, deduplicator_ref,
+        into_parse_error, kw, kw_phrase2, lex_input, reorderer_ref, suggest_from,
+        window_processor_ref,
     },
     state_inspection_clauses::state_inspection_clauses,
 };
@@ -33,6 +34,12 @@ pub fn show_processor_state_parser<'src>()
         kw(Identifier::Correlator)
             .ignore_then(correlator_ref())
             .map(StateInspectedProcessor::Correlator),
+        kw(Identifier::Deduplicator)
+            .ignore_then(deduplicator_ref())
+            .map(StateInspectedProcessor::Deduplicator),
+        kw_phrase2(Identifier::Window, Identifier::Processor)
+            .ignore_then(window_processor_ref())
+            .map(StateInspectedProcessor::WindowProcessor),
     ));
     kw(Identifier::Show)
         .ignore_then(processor)
@@ -86,10 +93,12 @@ mod tests {
     use crate::statement::{parse_statement, suggest_statement};
 
     #[test]
-    fn both_processor_kinds_name_their_state_with_every_clause() {
+    fn processor_kinds_name_their_state_with_every_clause() {
         for (head, kind) in [
             ("SHOW REORDERER held STATE", "reorderer"),
             ("SHOW CORRELATOR held STATE", "correlator"),
+            ("SHOW DEDUPLICATOR held STATE", "deduplicator"),
+            ("SHOW WINDOW PROCESSOR held STATE", "window_processor"),
         ] {
             for selector in [
                 "FOR ALL BRANCHES",
@@ -109,6 +118,12 @@ mod tests {
                         assert_eq!(name.as_str(), "held");
                     }
                     (StateInspectedProcessor::Correlator(name), "correlator") => {
+                        assert_eq!(name.as_str(), "held");
+                    }
+                    (StateInspectedProcessor::Deduplicator(name), "deduplicator") => {
+                        assert_eq!(name.as_str(), "held");
+                    }
+                    (StateInspectedProcessor::WindowProcessor(name), "window_processor") => {
                         assert_eq!(name.as_str(), "held");
                     }
                     (other, _) => panic!("the head names its kind: {other:?}"),
@@ -149,7 +164,9 @@ mod tests {
             "SHOW REORDERER held STATE FOR UNBRANCHED FOR ALL BRANCHES;",
             "SHOW REORDERER held STATE FORMAT XML;",
             "SHOW JUNCTION held STATE;",
-            "SHOW DEDUPLICATOR held STATE;",
+            "SHOW WINDOW held STATE;",
+            "SHOW WINDOW PROCESSOR held STATE LIMIT 0;",
+            "SHOW DEDUPLICATOR held STATE FORMAT JSON LIMIT 1;",
         ] {
             assert!(parse_statement(statement).is_err(), "{statement}");
         }
@@ -159,7 +176,13 @@ mod tests {
     fn completion_offers_the_processor_kinds_and_their_state_clauses() {
         let input = "SHOW ";
         let suggestions = suggest_statement(input, input.len());
-        for expected in ["REORDERER", "CORRELATOR", "RELAY"] {
+        for expected in [
+            "REORDERER",
+            "CORRELATOR",
+            "RELAY",
+            "DEDUPLICATOR",
+            "WINDOW PROCESSOR",
+        ] {
             assert!(
                 suggestions.iter().any(|item| item == expected),
                 "{expected}: {suggestions:?}"
@@ -174,6 +197,12 @@ mod tests {
             suggest_show_processor_state(input, input.len())
                 .contains(&"ref:correlator".to_string())
         );
+        for (input, expected) in [
+            ("SHOW DEDUPLICATOR ", "ref:deduplicator"),
+            ("SHOW WINDOW PROCESSOR ", "ref:window_processor"),
+        ] {
+            assert!(suggest_statement(input, input.len()).contains(&expected.to_string()));
+        }
         let input = "SHOW CORRELATOR settle ";
         assert!(suggest_show_processor_state(input, input.len()).contains(&"STATE".to_string()));
         for (prefix, expected) in [

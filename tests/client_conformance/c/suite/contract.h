@@ -1145,6 +1145,21 @@ static void test_inspection_retains_typed_state_after_its_outcome_is_released(vo
     const char *show = "SHOW RELAY c_state MATERIALIZED STATE FOR UNBRANCHED LIMIT 10 FORMAT JSON;";
     suite_await_state_rows(session, show, 1);
     // ANCHOR: inspection
+    {
+        nx_outcome *license_outcome = suite_completed(session, "DESCRIBE LICENSE;");
+        nx_inspection *license_inspection = NULL;
+        suite_check(nx_outcome_inspection(license_outcome, &license_inspection));
+        HOLD(nx_inspection, license_inspection);
+        suite_drop(license_outcome);
+        uint64_t license_branches = 0, license_rows = 0, license_bytes = 0;
+        REQUIRE(nx_inspection_counts(license_inspection, &license_branches, &license_rows, &license_bytes));
+        REQUIRE(license_branches == 0 && license_rows == 3 && license_bytes > 0);
+        const uint8_t *license_json = NULL;
+        size_t license_json_len = 0;
+        nx_inspection_json(license_inspection, &license_json, &license_json_len);
+        REQUIRE(suite_contains(license_json, license_json_len, "\"cluster_license\""));
+        suite_drop(license_inspection);
+    }
     nx_outcome *outcome = suite_completed(session, show);
     nx_inspection *inspection = NULL;
     suite_check(nx_outcome_inspection(outcome, &inspection));

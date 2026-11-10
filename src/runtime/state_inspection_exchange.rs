@@ -467,6 +467,7 @@ fn processor_page_rows(
     };
     let count = descriptor.offset.checked_sub(start).ok_or_else(framing)?;
     if count > request.max_rows
+        || (request.max_rows == 0 && !descriptor.runs.is_empty())
         || descriptor.more != (descriptor.offset < descriptor.counts.rows)
         || descriptor.offset > descriptor.counts.rows
         || descriptor.sections.len() > MAX_PROCESSOR_SECTIONS
@@ -497,7 +498,9 @@ fn processor_page_rows(
         section_rows[index] = section_rows[index]
             .checked_add(run.rows)
             .ok_or_else(framing)?;
-        returned = returned.checked_add(run.rows).ok_or_else(framing)?;
+        if !run.section.is_metadata() {
+            returned = returned.checked_add(run.rows).ok_or_else(framing)?;
+        }
     }
     if returned != count {
         return Err(framing());
@@ -561,13 +564,8 @@ impl ProcessorPageBodies<'_> {
     }
 }
 
-/// Receives one processor page and checks it against the read before any row is used.
-///
-/// `payload` names the sections the coordinator expects, in order, each with the payload fields its
-/// own committed schema gives it: a section that returns rows declares exactly those fields first.
-/// A count-only read passes no section and accepts no returned row. Every body is bounded,
-/// verified against its digest and decoded with exactly its declared fields, and the runs, the
-/// returned offset and the row counts must agree with the bodies and the descriptor.
+/// Receives one processor page and checks it against the read before any row is used, as
+/// [`ReceivedProcessorPage::decode`] describes.
 pub(crate) async fn receive_processor_page(
     executor: &Executor,
     stream: nervix_interconnect::IncomingByteStream,
@@ -575,55 +573,75 @@ pub(crate) async fn receive_processor_page(
     payload: &[(ProcessorStateSection, Vec<SchemaField>)],
 ) -> Result<Result<ReceivedProcessorPage, StateInspectionRejection>, Report<StatePageExchangeError>>
 {
-    let framing = || Report::new(StatePageExchangeError::Framing);
     let bytes = receive_page_bytes(executor, stream, request.max_bytes).await?;
-    let end = descriptor_end(executor, &bytes)?;
-    let reply: ProcessorStatePageReply = decode_reply(executor, &bytes, end).await?;
-    let descriptor = match reply {
-        Ok(descriptor) => descriptor,
-        Err(reason) => {
-            if end != bytes.len() {
+    ReceivedProcessorPage::decode(executor, &bytes, request, payload).await
+}
+
+impl ReceivedProcessorPage {
+    /// Decodes the bytes of one received processor page stream and checks them against the read
+    /// before any row is used. `bytes` is the whole stream [`receive_page_bytes`] took, so it
+    /// holds at least the descriptor's eight-byte length.
+    ///
+    /// `payload` names the sections the coordinator expects, in order, each with the payload fields
+    /// its own committed schema gives it: a section that returns rows declares exactly those fields
+    /// first. A count-only read passes no section and accepts no returned row. Every body is
+    /// bounded, verified against its digest and decoded with exactly its declared fields, and the
+    /// runs, the returned offset and the row counts must agree with the bodies and the descriptor.
+    async fn decode(
+        executor: &Executor,
+        bytes: &ChargedBytes,
+        request: &ReadProcessorStatePage,
+        payload: &[(ProcessorStateSection, Vec<SchemaField>)],
+    ) -> Result<Result<Self, StateInspectionRejection>, Report<StatePageExchangeError>> {
+        let framing = || Report::new(StatePageExchangeError::Framing);
+        let end = descriptor_end(executor, bytes)?;
+        let reply: ProcessorStatePageReply = decode_reply(executor, bytes, end).await?;
+        let descriptor = match reply {
+            Ok(descriptor) => descriptor,
+            Err(reason) => {
+                if end != bytes.len() {
+                    return Err(framing());
+                }
+                return Ok(Err(reason));
+            }
+        };
+        let section_rows = processor_page_rows(&descriptor, request, payload)?;
+        let mut bodies = ProcessorPageBodies {
+            bytes,
+            offset: end,
+            received: 0,
+            max_bytes: request.max_bytes,
+        };
+        let mut sections = Vec::with_capacity(descriptor.sections.len());
+        for (index, transfer) in descriptor.sections.iter().enumerate() {
+            if let Some((expected, fields)) = payload.get(index) {
+                let declared = transfer.fields.get(..fields.len());
+                if transfer.section != *expected
+                    || (transfer.body.is_some() && declared != Some(fields.as_slice()))
+                {
+                    return Err(framing());
+                }
+            }
+            let rows = section_rows[index];
+            if rows > transfer.rows {
                 return Err(framing());
             }
-            return Ok(Err(reason));
+            let batch = bodies.section(executor, transfer, rows).await?;
+            sections.push(ReceivedProcessorSection {
+                section: transfer.section,
+                fields: transfer.fields.clone(),
+                rows: transfer.rows,
+                batch,
+            });
         }
-    };
-    let section_rows = processor_page_rows(&descriptor, request, payload)?;
-    let mut bodies = ProcessorPageBodies {
-        bytes: &bytes,
-        offset: end,
-        received: 0,
-        max_bytes: request.max_bytes,
-    };
-    let mut sections = Vec::with_capacity(descriptor.sections.len());
-    for (index, transfer) in descriptor.sections.iter().enumerate() {
-        if let Some((expected, fields)) = payload.get(index) {
-            let declared = transfer.fields.get(..fields.len());
-            if transfer.section != *expected
-                || (transfer.body.is_some() && declared != Some(fields.as_slice()))
-            {
-                return Err(framing());
-            }
-        }
-        let rows = section_rows[index];
-        if rows > transfer.rows {
+        if bodies.offset != bytes.len() {
             return Err(framing());
         }
-        let batch = bodies.section(executor, transfer, rows).await?;
-        sections.push(ReceivedProcessorSection {
-            section: transfer.section,
-            fields: transfer.fields.clone(),
-            rows: transfer.rows,
-            batch,
-        });
+        Ok(Ok(Self {
+            descriptor,
+            sections,
+        }))
     }
-    if bodies.offset != bytes.len() {
-        return Err(framing());
-    }
-    Ok(Ok(ReceivedProcessorPage {
-        descriptor,
-        sections,
-    }))
 }
 
 fn validate_received_snapshot(
