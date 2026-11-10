@@ -988,6 +988,12 @@ producer its batch's outcome instead, so their acknowledgement, transport, lifec
 counters stay at zero. Endpoints count their requests in `nervix_ingestor_endpoint_requests_total`,
 and client producers keep the outcomes of [Client Ingestors](#client-ingestors).
 
+A tree that has already resolved keeps its outcome when the ingestor observes a stop at the same
+poll. Domain `STOP` applies independently on each node: a remote emitter can drop its buffered
+tree before the ingestor stops, producing a `failed` wait and a transport rejection instead of a
+`shutdown` wait and an unconfirmed stop position. Only a tree still unresolved when the stop ends
+its wait contributes to the unconfirmed-stop counter.
+
 An ACK timeout is not a failed tree. The tree that went silent is not resolved by the timeout: the
 ingestor rejects the batch, its transport presents the positions again, and the earlier delivery
 may still complete. The ingestor's error event names the expired `ACK TIMEOUT` as a timeout, and a
