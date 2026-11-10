@@ -10,6 +10,9 @@
     nervix::layer(vocabulary, reason = "owns shared licensing words")
 )]
 
+mod problem;
+pub use problem::ProblemCode;
+
 mod decision;
 pub use decision::{BindingField, DecisionRejection, RevisionField, TimingField};
 use error_stack::Report;
