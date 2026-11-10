@@ -43,6 +43,7 @@ macro_rules! with_typed_registers {
 
 mod batch;
 mod bytes;
+mod cast;
 mod compiler;
 mod count;
 mod datetime;
@@ -65,6 +66,7 @@ mod url_component;
 pub mod window;
 
 pub use batch::{TypedArray, TypedBatch};
+pub use cast::{CastTarget, ListCast};
 pub use compiler::{
     CompileBinding, CompileNamespace, CompileOptions, InferredSetField, OutputMode,
     PredicateCompileOptions, SchemaSensitivity, UdfParameter, UdfSignature, UdfSignatures,
@@ -89,10 +91,10 @@ pub use error::{
 };
 pub use extremum::{ClampBoundsDefect, Extremum};
 pub use frontend::{
-    ArgumentCount, AssignmentTargetSet, CastTargetKind, DatetimeLiteral, FrontendError,
-    FrontendErrorKind, FrontendResult, SemanticScopePolicy, lower_branch_construction,
-    lower_expression, lower_finalized_output_filter, lower_generated_route,
-    lower_route_construction, lower_set_only_route, lower_transforming_route,
+    ArgumentCount, AssignmentTargetSet, DatetimeLiteral, FrontendError, FrontendErrorKind,
+    FrontendResult, SemanticScopePolicy, lower_branch_construction, lower_expression,
+    lower_finalized_output_filter, lower_generated_route, lower_route_construction,
+    lower_set_only_route, lower_transforming_route,
 };
 pub use ip_address::{IpFamily, IpNetwork, NetworkDefect, NetworkSource};
 pub use ir::{

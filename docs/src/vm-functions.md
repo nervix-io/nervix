@@ -1043,6 +1043,16 @@ The reference owns each family's contract. These notes describe its implementati
   - URLs parse with the `url` crate, and the functions never resolve a host or fetch anything.
 - **Conversions.** `AS` and `TRY_CAST` share one cast path through Arrow's safe cast. A `STRING`
   read as a number follows Arrow's parser.
+  - `CastTarget::between` alone decides which pairs of types convert. Validation, compilation and
+    constant set elements read it, so a refused pair has one `CastRefusal` with one message.
+  - A list cast compiles to a `ListCast` plan prepared once from the validated pair. The plan holds
+    each level's container change and the item field it converts to, and the element conversion.
+  - The kernel converts the innermost child values with the scalar conversion. It then rebuilds
+    each level from the input's offsets and validity, reusing the element values when their type
+    is unchanged. It gathers by index only when a row fails or a null row's layout is one the
+    target cannot keep, such as a `VEC` hiding elements that do not convert.
+  - A list cast whose elements read or write text runs over an arm's selected rows only, as a
+    scalar text cast does. Every other list cast converts the whole batch.
 
 ## Context, Determinism, And Extension Boundaries
 

@@ -27,9 +27,9 @@ use super::{
     FunctionInjector, InjectedResult, RowSelection, cast_typed_array, execute_program_sync,
 };
 use crate::{
-    CompileBinding, CompileError, CompileOptions, CompiledProgram, ErrorCode, InstructionKind,
-    RegisterType, RowErrorMask, RowErrors, RuntimeError, SchemaSensitivity, SideError,
-    SideErrorReason, TypedArray, TypedBatch, UdfParameter, UdfSignature, UdfSignatures,
+    CastTarget, CompileBinding, CompileError, CompileOptions, CompiledProgram, ErrorCode,
+    InstructionKind, RegisterType, RowErrorMask, RowErrors, RuntimeError, SchemaSensitivity,
+    SideError, SideErrorReason, TypedArray, TypedBatch, UdfParameter, UdfSignature, UdfSignatures,
     compile_program_with_options_for_bindings,
     compile_program_with_options_for_bindings_with_sensitivity,
     program::{BinaryOp, CastFailure, FunctionName, Span},
@@ -418,7 +418,7 @@ fn is_cast(kind: &InstructionKind, target: RegisterType, on_failure: CastFailure
     else {
         return false;
     };
-    *cast_target == target && *cast_failure == on_failure
+    *cast_target == CastTarget::Scalar(target) && *cast_failure == on_failure
 }
 
 #[test]

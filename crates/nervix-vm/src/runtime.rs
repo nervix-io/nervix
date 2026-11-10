@@ -31,7 +31,7 @@ use arrow_array::{
     PrimitiveArray, Scalar, StringArray, StructArray, TimestampNanosecondArray, UInt8Array,
     UInt16Array, UInt32Array, UInt64Array,
     builder::{BooleanBuilder, Int64Builder, PrimitiveBuilder, StringBuilder},
-    make_array, new_empty_array, new_null_array,
+    new_empty_array, new_null_array,
     types::{
         ArrowPrimitiveType, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type,
         TimestampNanosecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
@@ -67,6 +67,7 @@ use uuid::{NoContext, Timestamp as UuidTimestamp, Uuid};
 use crate::{
     batch::{TypedArray, TypedBatch},
     bytes,
+    cast::{CastTarget, without_null_elements},
     count::{CountOperand, SignedCount},
     datetime::{self, FormattedColumn, TextFailure, UnitCounts, UnresolvedLocalTime},
     error::{
@@ -92,7 +93,7 @@ use crate::{
     semantics::{
         ArmExecution, BitwiseOperation, BuiltinLowering, CaseMapping, FloatClass, Volatility,
         binary_arm_execution, builtin_arm_execution, builtin_semantics_for_lowering,
-        cast_arm_execution, unary_arm_execution,
+        unary_arm_execution,
     },
     text_column::TextColumnBuilder,
     text_search,
@@ -1265,14 +1266,20 @@ impl Instruction {
                 false,
                 rows,
                 row_errors,
-                |registers, _, row_errors| {
-                    cast_typed_array(
+                |registers, _, row_errors| match target {
+                    CastTarget::Scalar(target) => cast_typed_array(
                         registers.read_array(*input)?,
                         *target,
                         *on_failure,
                         row_errors,
                         self.span,
-                    )
+                    ),
+                    CastTarget::List(plan) => plan.convert(
+                        registers.read_array(*input)?,
+                        *on_failure,
+                        row_errors,
+                        self.span,
+                    ),
                 },
             ),
             InstructionKind::Builtin {
@@ -1465,7 +1472,7 @@ impl Instruction {
         match &self.kind {
             InstructionKind::Unary { op, .. } => unary_arm_execution(*op),
             InstructionKind::Binary { op, .. } => binary_arm_execution(*op),
-            InstructionKind::Cast { input, target, .. } => cast_arm_execution(input.ty, *target),
+            InstructionKind::Cast { input, target, .. } => target.arm_execution(input.ty),
             InstructionKind::Builtin { lowering, .. } => builtin_arm_execution(lowering),
             // Calling out of the VM, or parsing a document, costs far more per row than
             // narrowing.
@@ -3129,30 +3136,9 @@ impl ListConstruction {
             Self::Variable => {
                 // ListArray requires a non-nullable child to have no physical nulls, even when
                 // its parent row is null. Replace those hidden slots with a typed empty value.
-                let child = if let Some(nulls) = child.nulls() {
-                    let mask = BooleanArray::new(nulls.inner().clone(), None);
-                    let empty = new_null_array(&child_type, 1);
-                    let empty = {
-                        let mapping_input = empty
-                            .to_data()
-                            .into_builder()
-                            .nulls(None)
-                            .build()
-                            .map(make_array);
-                        match mapping_input {
-                            Ok(mapped_value) => Ok(mapped_value),
-                            Err(error) => Err(collection_arrow_error(
-                                "VEC null-element replacement",
-                                error,
-                            )),
-                        }
-                    }?;
-                    zip(&mask, &child, &Scalar::new(empty)).map_err(|error| {
-                        collection_arrow_error("VEC null-element replacement", error)
-                    })?
-                } else {
-                    child
-                };
+                let child = without_null_elements(child).map_err(|error| {
+                    collection_arrow_error("VEC null-element replacement", error)
+                })?;
                 let offsets =
                     OffsetBuffer::from_lengths(std::iter::repeat_n(columns.len(), row_count));
                 StdArc::new(
@@ -5864,7 +5850,10 @@ fn cast_typed_array(
 
 /// Converts every value of `input` to `target` as `AS` does. A value the target cannot hold becomes
 /// null, which the caller reports as that row's cast failure.
-fn cast_values(input: &TypedArray, target: RegisterType) -> Result<ArrayRef, ArrowError> {
+pub(crate) fn cast_values(
+    input: &TypedArray,
+    target: RegisterType,
+) -> Result<ArrayRef, ArrowError> {
     let cast_options = CastOptions {
         safe: true,
         format_options: FormatOptions::new().with_timestamp_tz_format(Some("%+")),
@@ -5993,6 +5982,10 @@ fn row_selected(predicate: &BooleanArray, row: usize) -> bool {
 #[cfg(test)]
 #[path = "runtime_list_tests.rs"]
 mod list_tests;
+
+#[cfg(test)]
+#[path = "runtime_list_cast_tests.rs"]
+mod list_cast_tests;
 
 #[cfg(test)]
 #[path = "runtime_admission_tests.rs"]
@@ -6443,7 +6436,7 @@ mod tests {
             matches!(
                 kind,
                 InstructionKind::Cast {
-                    target: RegisterType::Int64,
+                    target: CastTarget::Scalar(RegisterType::Int64),
                     ..
                 }
             )

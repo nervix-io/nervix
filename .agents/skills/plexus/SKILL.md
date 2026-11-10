@@ -525,6 +525,9 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
     `BRANCHED BY ... SET`, which have no error route;
   - `IN` sets hold non-null constants of the operand's exact type, and string positions count from
     1 while `nth`, `slice`, and JSON path indexes count from 0;
+  - a list changes its element type or container only through `AS` or `TRY_CAST` to the full list
+    type, nested as deep as the operand (`input.readings AS ARRAY<F32, 64>`); a `VEC` that does not
+    hold the `ARRAY`'s length fails its message, and a list never converts to a scalar or `STRING`;
   - datetime units, parts, `date_bin` widths, zones, formats, and disambiguations are literals, a
     local calendar names its zone, `now()` supplies domain time, and foreign timestamps are read
     with a strict `parse_datetime` format;

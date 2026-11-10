@@ -28,6 +28,7 @@ use nervix_primitives::sync::StdArc;
 
 use crate::{
     CompileError, CompileErrorCode, RegisterType,
+    cast::CastTarget,
     extremum::Extremum,
     ip_address::NetworkSource,
     json::JsonOutput,
@@ -628,34 +629,21 @@ pub struct CastDescriptor {
 }
 
 impl CastDescriptor {
+    /// Accepts a cast of a value of `input_type` to `target_type` when some value of that type
+    /// can convert, and refuses with the reason [`CastTarget::between`] gives when none ever can.
     pub fn validate(
         self,
         input_type: &DataType,
         target_type: &DataType,
         span: impl Into<std::ops::Range<usize>>,
     ) -> error_stack::Result<(), CompileError> {
-        if (input_type == &DataType::Binary || target_type == &DataType::Binary)
-            && input_type != target_type
-        {
-            return Err(Report::new(CompileError {
+        match CastTarget::between(input_type, target_type) {
+            Ok(_) => Ok(()),
+            Err(refusal) => Err(Report::new(CompileError {
                 code: CompileErrorCode::UnsupportedCast,
-                message: "BYTES conversions require bytes_from_utf8, bytes_to_utf8, base64 or hex \
-                          functions"
-                    .to_string(),
+                message: refusal.to_string(),
                 span: span.into().into(),
-            }));
-        }
-        if is_supported_type(input_type) && is_supported_type(target_type) {
-            Ok(())
-        } else {
-            Err(Report::new(CompileError {
-                code: CompileErrorCode::UnsupportedCast,
-                message: format!(
-                    "casts are only implemented for supported nervix VM types, found {:?} AS {:?}",
-                    input_type, target_type
-                ),
-                span: span.into().into(),
-            }))
+            })),
         }
     }
 }
