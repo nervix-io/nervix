@@ -550,6 +550,9 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
     `BRANCHED BY ... SET`, which have no error route;
   - `IN` sets hold non-null constants of the operand's exact type, and string positions count from
     1 while `nth`, `slice`, and JSON path indexes count from 0;
+  - before shaping an inferencer input or reading a nested list, read `Expression Functions` →
+    `Array And Vector Functions` and `Processors` → `Inferencer`; check the fixed shape and literal
+    dimensions rather than treating a change of axes as an element-type conversion;
   - datetime units, parts, `date_bin` widths, zones, formats, and disambiguations are literals, a
     local calendar names its zone, `now()` supplies domain time, and foreign timestamps are read
     with a strict `parse_datetime` format;
@@ -898,7 +901,7 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   the policy discards state for none of those under either value. Only an owner loss whose forced
   recovery cannot prepare the new owner recreates guest state without the guest's verdict.
 - To intentionally replace an existing WASM processor's guest state, use
-  `RESET WASM PROCESSOR <processor> STATE FOR UNBRANCHED|ALL BRANCHES|BRANCH VALUES { <field> = <literal>, ... };`.
+  `RESET WASM PROCESSOR <processor> STATE FOR UNBRANCHED|ALL BRANCHES|BRANCH KEY { <field> = <literal>, ... };`.
   It acts on the session's active domain, so `USE` that domain first.
   Choose the explicit scope that matches its declared branch, and supply every branch-key field
   with an exact typed literal for one selected branch. The processor must be running and the

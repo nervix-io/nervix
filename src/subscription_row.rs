@@ -809,7 +809,8 @@ mod properties;
 mod tests {
     use std::num::{NonZeroU32, NonZeroUsize};
 
-    use arrow_array::{ArrayRef, BinaryArray, RecordBatch};
+    use arrow_array::{Array, ArrayRef, BinaryArray, FixedSizeListArray, Int64Array, RecordBatch};
+    use arrow_buffer::NullBuffer;
     use arrow_schema::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_client_wire::{
@@ -939,6 +940,128 @@ mod tests {
 
     fn size(value: usize) -> NonZeroUsize {
         NonZeroUsize::new(value).assured("the test limit is nonzero")
+    }
+
+    #[test]
+    fn fixed_arrays_encode_null_containers_with_masked_children() {
+        let scalar: ArrayRef = StdArc::new(Int64Array::from(vec![
+            Some(0),
+            Some(1),
+            Some(2),
+            Some(3),
+            None,
+            None,
+            Some(4),
+            Some(5),
+        ]));
+        let validity = NullBuffer::from(vec![true, true, false, true]);
+        let inner = FixedSizeListArray::try_new(
+            StdArc::new(ArrowField::new("item", ArrowDataType::Int64, false)),
+            2,
+            scalar,
+            Some(validity.clone()),
+        )
+        .assured("the null inner list masks its physical null children");
+        let outer = FixedSizeListArray::try_new(
+            StdArc::new(ArrowField::new("item", inner.data_type().clone(), false)),
+            1,
+            StdArc::new(inner),
+            Some(validity),
+        )
+        .assured("the null outer list masks its null inner list")
+        .slice(1, 3);
+        let batch = RecordBatch::try_new(
+            StdArc::new(ArrowSchema::new(vec![ArrowField::new(
+                "items",
+                outer.data_type().clone(),
+                true,
+            )])),
+            vec![StdArc::new(outer)],
+        )
+        .assured("the sliced nested column matches its schema");
+        let payload = CreateSchema {
+            name: named("events"),
+            fields: vec![field(
+                "items",
+                ParseAsType::Array {
+                    element: Box::new(ParseAsType::Array {
+                        element: Box::new(ParseAsType::I64),
+                        len: NonZeroU32::new(2).assured("the inner width is two"),
+                    }),
+                    len: NonZeroU32::new(1).assured("the outer width is one"),
+                },
+                true,
+                false,
+            )],
+        };
+        let schema = subscription_row_schema(&payload, None)
+            .assured("the payload is an unbranched optional matrix");
+        let (_, encoder) = open(schema, 8);
+        let frames = encoder
+            .encode(&batch, &[None, None, None], SubscriptionRowSelection::All)
+            .assured("physical nulls hidden by null containers do not become list elements");
+        let decoded = frames.into_iter().map(rows_from_frame).collect::<Vec<_>>();
+        assert_eq!(decoded.len(), 1);
+        let batch = decoded[0].batch();
+        let rows = batch.rows().collect::<Vec<_>>();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1].get(0), Some(CellView::Null));
+        for (row, expected) in [(&rows[0], [2, 3]), (&rows[2], [4, 5])] {
+            let CellView::List(outer) = row.get(0).assured("the row has its matrix cell") else {
+                panic!("the present matrix remains a list");
+            };
+            assert_eq!(outer.len(), 1);
+            let CellView::List(inner) = outer.get(0).assured("the matrix has one inner row") else {
+                panic!("the inner row remains a list");
+            };
+            assert_eq!(
+                inner.iter().collect::<Vec<_>>(),
+                expected.map(CellView::I64),
+            );
+        }
+    }
+
+    #[test]
+    fn list_encoding_requires_a_required_element_schema() {
+        let values: ArrayRef = StdArc::new(Int64Array::from(vec![1, 2]));
+        let array = FixedSizeListArray::try_new(
+            StdArc::new(ArrowField::new("item", ArrowDataType::Int64, true)),
+            2,
+            values,
+            None,
+        )
+        .assured("Arrow can represent a nullable child schema");
+        let batch = RecordBatch::try_new(
+            StdArc::new(ArrowSchema::new(vec![ArrowField::new(
+                "items",
+                array.data_type().clone(),
+                false,
+            )])),
+            vec![StdArc::new(array)],
+        )
+        .assured("the column matches its Arrow schema");
+        let payload = CreateSchema {
+            name: named("events"),
+            fields: vec![field(
+                "items",
+                ParseAsType::Array {
+                    element: Box::new(ParseAsType::I64),
+                    len: NonZeroU32::new(2).assured("the array width is two"),
+                },
+                false,
+                false,
+            )],
+        };
+        let schema = subscription_row_schema(&payload, None)
+            .assured("the payload requires its list elements");
+        let (_, encoder) = open(schema, 8);
+        let error = encoder
+            .encode(&batch, &[None], SubscriptionRowSelection::All)
+            .expect_err("a nullable child schema cannot enter required list encoding");
+        assert!(matches!(
+            error.current_context(),
+            SubscriptionRowEncodingError::NullableListElements { .. }
+        ));
     }
 
     fn runtime_batch(schema: &CreateSchema) -> RuntimeRecordBatch {

@@ -1842,6 +1842,16 @@ test-turmoil-sweep first="1000" count="64" budget_seconds="1500" filter="":
 test-vm *args:
     cargo test --package nervix-vm --lib -- {{ args }}
 
+# Verify list shape semantics through the public graph and session subscription, including the
+# multidimensional ONNX mapping, without preparing unrelated host simulation packages.
+test-list-shapes *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/runtime/list_shape_functions.feature {{ quote(args) }}
+
+# Measure the focused shape/compiler owners for pre-commit executable-line review.
+coverage-vm-list-shapes output=(cargo_target_dir / "vm-list-shapes.lcov"):
+    cargo llvm-cov --package nervix-vm --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- list_shape
+
 # Run the WASM host, guest SDK and ABI protocol unit tests, which live in their own crates rather
 # than the server lib. The host tests drive the bundled Rust and Go reference guests.
 test-wasm *args: wasm-processor-guests
