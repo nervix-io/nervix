@@ -35,13 +35,14 @@ use crate::{
     CreateClientWebsockets, CreateClientZeroMq, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateInferencer, CreateJsonWireSchema, CreateJunction, CreatePlacement,
     CreateReingestor, CreateReorderer, CreateSchema, CreateUdf, CreateWasmProcessor,
-    CreateWindowProcessor, DeduplicatorName, DomainClockPeriod, DomainClockSkew, DomainClockState,
-    DomainName, DomainTimeRate, EmitterName, EndpointName, FieldName, GeneratorName,
-    InferencerName, IngestQuiesceMode, IngestorName, JsonType, JunctionName, LookupName, ModelName,
-    NodeRef, PlacementName, ProcessorOutput, ProcessorOutputs, RebindResource, ReingestorName,
-    RelayName, ReordererName, RequestedResourceVersion, ResetWasmState, ResourceName, Restore,
-    SchemaName, SignalingProtocolName, SubscriptionName, Timestamp, TransactionInspectionRequest,
-    UdfName, Unit, UserName, VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
+    CreateWindowProcessor, DeduplicatorName, DescribeInferencer, DomainClockPeriod,
+    DomainClockSkew, DomainClockState, DomainName, DomainTimeRate, EmitterName, EndpointName,
+    FieldName, GeneratorName, IngestQuiesceMode, IngestorName, JsonType, JunctionName, LookupName,
+    ModelName, NodeRef, PlacementName, ProcessorOutput, ProcessorOutputs, RebindResource,
+    ReingestorName, RelayName, ReordererName, RequestedResourceVersion, ResetWasmState,
+    ResourceName, Restore, SchemaName, SignalingProtocolName, SubscriptionName, Timestamp,
+    TransactionInspectionRequest, UdfName, Unit, UserName, VhostName, WasmProcessorName,
+    WindowProcessorName, WireSchemaName,
 };
 
 #[derive(
@@ -1071,13 +1072,6 @@ pub struct DescribeEmitter {
 )]
 pub struct DescribeWindowProcessor {
     pub name: WindowProcessorName,
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub struct DescribeInferencer {
-    pub name: InferencerName,
 }
 
 #[derive(
