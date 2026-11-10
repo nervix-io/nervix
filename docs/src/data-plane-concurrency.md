@@ -2884,6 +2884,12 @@ map on the frame path. Upgrade-field installation has a focused external-iterato
 contract; its local conversions remain analyzed. The registered `websocket-retained-metadata` Bolero property checks every
 field and exact snapshot identity through the production retain/replay conversion. Client ping
 timer and socket scheduling remain outside the detector and are exercised by real-peer owner tests.
+The outbound connection owns its last written ping and one bounded catch-up response window in
+ordinary mutable state. Cancelled reads retain that window, and only an inbound frame restores
+ordinary activity tracking. This adds no shared synchronization protocol or tracked lock. The
+production-owner cancellation and no-ping deadline regressions and the one-/three-node delayed
+decoder-handoff scenarios cover the timer and real socket behavior; no model-checker or deadlock
+claim is made for those network waits.
 
 The WebSockets signaling handoff uses one bounded primitive mpsc channel only while signaling
 accepts data and while its completed frames drain. A full queue backpressures signaling within its

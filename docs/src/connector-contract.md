@@ -935,7 +935,7 @@ thing for every connector:
 
 A read that waits for whatever the peer sends next is bounded by the protocol's keep-alive or by
 `idle_timeout_ms`, and a write by `timeout_ms` or the retry policy. A key's value is a positive whole
-number of milliseconds no longer than about 146 years, the vocabulary's `ClientDeadline` rule, and
+number of milliseconds no longer than about 292 years, the vocabulary's `ClientDeadline` rule, and
 the connector contract's `ConfiguredDeadline` reads each key once, so no connector parses its own. A
 connector that dials for itself and reads `connect_timeout_ms` allows 30 seconds where the client
 leaves the key out, and so does a listener that bounds the TLS handshake of a connection it accepted
@@ -3499,7 +3499,14 @@ sequenceDiagram
   data reads. Protocol control frames remain transport concerns.
   `idle_timeout_ms` bounds silence; omission derives three configured ping intervals, or thirty
   seconds without configured pings. Received data and control frames refresh the absolute activity
-  deadline; local pings and read cancellation do not. An explicit idle value overrides derivation.
+  deadline; regular local pings and read cancellation do not. An explicit idle value overrides
+  derivation. At expiry, two ping intervals without an inbound frame or successfully written client
+  ping establish a missed client interval. The connection writes one catch-up ping and allows one
+  existing idle-bound response window from its successful write. This window survives cancelled
+  reads and is never renewed by further pings or another local delay; an inbound frame restores
+  ordinary activity tracking. The ping write keeps its fixed one-second bound. The same rule
+  applies to an explicit idle value; without client pings the physical activity deadline is retained
+  across handoff and cancellation. On-schedule pings keep the ordinary silent-peer bound.
   Incoming frame or message overflow fails the read and ends the connection, as `fail_read` declares.
   The host reconnects on its policy. Suspension closes the connection while retaining successful
   handshake payloads, which drain before another connection opens; close clears the queue.
