@@ -413,6 +413,7 @@ class InventoryTests(unittest.TestCase):
             "vm-decimal-rounding-integers",
             "vm-list-shapes",
             "vm-list-arithmetic",
+            "vm-list-statistics",
             "approx-into-rounding",
             "approx-into-exact",
             "simd-json-escapes",

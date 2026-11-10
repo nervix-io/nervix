@@ -5,7 +5,8 @@
 //! - **Owns.** The count, means and centered second moments of one or two arguments, how two row
 //!   sets' moments combine, and the `AVG`, variance, standard deviation, covariance and correlation
 //!   results derived from them.
-//! - **Depends on.** The argument columns of admitted rows and the mergeable-aggregate contract.
+//! - **Depends on.** The argument columns of admitted rows, the mergeable-aggregate contract, and
+//!   the estimators the run statistics divide by.
 //! - **Must not know.** Which rows a window retains, how retraction recomputes them, or when a
 //!   window emits.
 //!
@@ -21,6 +22,7 @@
 use std::ops::Range;
 
 use arrow_array::Float64Array;
+use nervix_simd_kernels::Estimator;
 
 use super::{two_stacks::MergeableAggregate, *};
 
@@ -142,30 +144,6 @@ impl MergeableAggregate for CoMoments {
                 + newer.cross_products
                 + combined.correction(first_delta, second_delta),
         }
-    }
-}
-
-/// Whether a dispersion statistic describes the contributing rows themselves or estimates the
-/// population they were sampled from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Estimator {
-    /// Divides by the number of contributing rows, and is defined from one row.
-    Population,
-    /// Divides by one less than the number of contributing rows, and needs two.
-    Sample,
-}
-
-impl Estimator {
-    /// The divisor for `count` contributing rows, or `None` when the statistic is undefined.
-    fn divisor(self, count: u64) -> Option<f64> {
-        let divisor = match self {
-            Self::Population => count,
-            Self::Sample => count.checked_sub(1)?,
-        };
-        if divisor == 0 {
-            return None;
-        }
-        Some(divisor.approx_into())
     }
 }
 
