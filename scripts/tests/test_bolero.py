@@ -144,6 +144,7 @@ class InventoryTests(unittest.TestCase):
         inventory = bolero.load_inventory()
         self.assertEqual({target.id for target in inventory.targets}, {
             "cluster-identity-record-rkyv",
+            "licensing-record-rkyv",
             "licensing-protocol-json-roundtrip",
             "licensing-conditions-resolution",
             "licensing-jws-malformed",
@@ -550,16 +551,16 @@ class InventoryTests(unittest.TestCase):
             "inferencer-describe-envelope": 1,
             "plexus-model": 60,
             "plexus-archive-model": 63,
-            "plexus-statement": 65,
-            "plexus-statement-text": 64,
-            "plexus-format-document": 64,
-            "plexus-format-text": 63,
-            "models-archived-models": 63,
+            "plexus-statement": 66,
+            "plexus-statement-text": 65,
+            "plexus-format-document": 65,
+            "plexus-format-text": 64,
+            "models-archived-models": 64,
             "registry-archived-models": 55,
-            "consensus-state-records": 59,
-            "consensus-state-corruption": 59,
-            "consensus-raft-records": 58,
-            "consensus-raft-records-malformed": 44,
+            "consensus-state-records": 60,
+            "consensus-state-corruption": 60,
+            "consensus-raft-records": 59,
+            "consensus-raft-records-malformed": 45,
             "registry-stored-models": 48,
             "registry-stored-models-corruption": 48,
             "cluster-identity-record-rkyv": 1,
@@ -587,7 +588,7 @@ class InventoryTests(unittest.TestCase):
 
     def test_state_inspection_representations_are_bounded_pairs(self) -> None:
         targets = {target.id: target for target in bolero.load_inventory().targets}
-        for name, version in (("client-state-inspection", 5), ("state-inspection-cursor", 7)):
+        for name, version in (("client-state-inspection", 6), ("state-inspection-cursor", 7)):
             with self.subTest(target=name):
                 self.assertEqual(targets[name].domain_version, version)
                 self.assertEqual(targets[name].max_input_bytes, 512)

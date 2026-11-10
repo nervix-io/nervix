@@ -140,7 +140,8 @@ fn inspection(value: Option<&str>) -> nervix_client_wire::StateInspection {
             nervix_models::DomainName::parse("fixture").assured("domain"),
             ModelKind::Relay,
             nervix_models::RelayName::parse("state_11").assured("relay"),
-        ),
+        )
+        .into(),
         result: StateInspectionResult::Page(StateInspectionPage {
             counts,
             unit_count: 1,

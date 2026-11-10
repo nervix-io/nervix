@@ -137,6 +137,7 @@ pub fn statement_parser<'src>()
         crate::drop_stmt::drop_parser().map(Statement::Drop),
         crate::show_cluster_status::show_cluster_status_parser().map(Statement::ShowClusterStatus),
         crate::describe_cluster::describe_cluster_parser().map(Statement::DescribeCluster),
+        crate::describe_license::describe_license_parser().map(Statement::DescribeLicense),
         crate::show_transactions::show_transactions_parser().map(Statement::ShowTransactions),
         crate::describe_transaction::describe_transaction_parser()
             .map(Statement::DescribeTransaction),

@@ -38,6 +38,7 @@ pub mod describe_endpoint;
 pub mod describe_inferencer;
 pub mod describe_ingestor;
 pub mod describe_junction;
+pub mod describe_license;
 pub mod describe_lookup;
 pub mod describe_reingestor;
 pub mod describe_reorderer;

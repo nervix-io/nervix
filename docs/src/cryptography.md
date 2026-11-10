@@ -36,6 +36,11 @@ with `aws-lc-rs` and librdkafka, preserving the single-module rule. With the bou
 feature the context comes from `aws-lc-fips-sys`, the module `aws-lc-rs` then runs on, so such a
 build references the ordinary module nowhere.
 
+Cluster licensing inspection fingerprints its complete public Row schemas and encoded frames,
+with length framing and the committed revision, through `nervix_crypto::digest::Sha256`. The
+captured origin retains that digest. This bounded observation contains public identity and policy
+facts; private cluster keys never enter its Row sections.
+
 | Purpose | Where Nervix obtains it today |
 | --- | --- |
 | TLS provider | `nervix-crypto` installs the outward provider through rustls's process-default installation and supplies an independent checked interconnect provider. Shared connector TLS, native sessions and TLS VHOSTs use the committed outward policy; SQS projects the boundary's typed outward choice into Smithy's mode, preserving the SDK's cipher filtering. |

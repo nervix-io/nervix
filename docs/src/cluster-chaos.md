@@ -90,7 +90,8 @@ Bolero obligation, and none of those discharges a suite.
 | `binding_client.py`, `binding_evidence.py`, `binding-scenario.sh`, `binding-image.sh`, `install_binding.py` | The binding endpoint scenario's Python-package producer/consumer, its exact effect and settlement verdict, fault coordination, source/wheel identity checks and offline image preparation |
 | `docker-event-recording.sh` | The run's live Docker event recording and its marker windows |
 | `output-boundary.sh`, `consumer-group.sh`, `startup-status.sh`, `image-package-check.sh`, `image-identity.sh`, `tool-images.sh`, `select-subnet.sh`, `require-jq.sh` | Kafka end-offset observations and the output boundary, the ingestor consumer group's members and the nodes that run them, startup status publication, the image-package check, image identity rules, the tool image pins, network selection and the jq requirement |
-| `verifier-self-check.sh` | The verifier self-check's bound, the identity of the chaos scripts and the judgement of the record a suite hands its runs |
+| `verifier-self-check.sh` | The verifier self-check's bound and session, the run labels its parts record and the removal of what they still own, the identity of the chaos scripts and the judgement of the record a suite hands its runs |
+| `sessions.sh` | The sessions in which a controller starts its runs and its verifier self-check, and the end of what such a session leaves |
 | `cleanup.sh` | Removal of one run's labeled resources, with optional evidence capture |
 | `suite.sh`, `suites.json`, `suite-report.jq` | The suites: catalog, shard budgets, runs, verdict records, summaries and suite cleanup |
 | `compose.yaml`, `compose.diagnostic.yaml`, `compose.outward-tls.yaml` | The deployment, its diagnostic overlay and the outward TLS overlay of a three-node leader crash |
@@ -364,7 +365,9 @@ ran.
 
 ### Labels And Ownership
 
-Every container, network and volume a run owns carries `io.nervix.chaos.run=<run-id>`.
+Every container, network and volume a run owns carries `io.nervix.chaos.run=<run-id>`. The parts
+of a [verifier self-check](#the-verifier-self-check) label theirs with run IDs of their own, which
+the check records for its controller.
 `io.nervix.chaos.role` names each container's role, such as `node`, `broker`, `admin`, `load`,
 `observer`, `fault` or `deadlock-report`, and node containers also carry
 `io.nervix.chaos.target=true`. The run label serves three purposes:
@@ -427,6 +430,7 @@ The focused checks run parts of the runner on their own:
 | `just test-chaos-pause-delivery` | A failover-length pause's emitter check on the retained leader and relay-owner pause timelines: the ingestor consumer group's handoff from a paused ingestor owner, read before the relocated consumer joins and after the handoff deadline; a handoff that never comes or comes after the unpause; a stalled emitter; the window that opens at placement when the consumer stayed in place; and emitter progress sampled after the unpause |
 | `just test-chaos-output-boundary [SELECTION]` | The suite preparation and baseline execution budgets and the Kafka end-offset observations, without Docker |
 | `just test-chaos-verifier-self-check` | The identity of the chaos scripts, every reason a verifier self-check record does not apply, and a run's refusal of such a record before it creates anything, without Docker |
+| `just test-chaos-verifier-cancellation` | A [verifier self-check](#the-verifier-self-check) ended at its deadline and by its controller while the production rate probe holds its namespace owners: no process of the check remains, nothing carries the run label the probe recorded, the probe's records stay in the check's evidence directory, and the controller's cleanup evidence names exactly the owners and the network it removed |
 | `just test-chaos-image-package` | The image-package check and its refused or invalid observations |
 | `just test-chaos-startup-status` | Bounded startup status publication |
 | `just test-chaos-backup-fixture` | Derivation of the backup graph from the baseline fixture |
@@ -453,7 +457,7 @@ A run records each phase it enters in `phases.ndjson` and its final phase in `ma
 | --- | --- |
 | `action plan and fixtures` | Mixed instability only: it generates or copies the plan and validates it, then sizes and generates the fixture, before any container exists |
 | `preflight` | Arguments and host tools; the tool images; the Nervix image; the live Docker event recording; the image-package check; a diagnostic image's evidence directories; Pumba's version and Docker access; the [network preflight](#network-preflight) |
-| `verifier self-check` | `tests/self-test.sh`, bounded to 600 seconds, which proves the external verifiers on this worker before they judge the run. A run of a suite instead adopts the record of the check its suite executed once before its first run: it copies the record into `results/verifier-self-check.json` and the check's output into `results/verifier-self-test.txt`, and its manifest names the record under `verifier_self_check` |
+| `verifier self-check` | `tests/self-test.sh`, bounded to 600 seconds, which proves the external verifiers on this worker before they judge the run. It leads a session of its own, and however it ends the run removes what it left; see [The Verifier Self-Check](#the-verifier-self-check). A run of a suite instead adopts the record of the check its suite executed once before its first run: it copies the record into `results/verifier-self-check.json` and the check's output into `results/verifier-self-test.txt`, and its manifest names the record under `verifier_self_check` |
 | `TLS generation` | The run's certificate authority and node certificates |
 | `Compose validation` | `docker compose config`, rendered into `compose.rendered.yaml`. Mixed instability also records the node settings and load interval Compose renders |
 | `broker startup and provisioning` | The broker, within 90 seconds, and every topic the scenario uses |
@@ -778,7 +782,10 @@ both sides of the inclusive thresholds.
 The rate-probe self-test keeps its sender and receiver namespace owners alive until its cleanup
 removes them. Their lifetime follows the whole control sequence, so a slow worker cannot expire a
 namespace before a later control reaches it. Probe, sample and controller deadlines retain their
-own bounds.
+own bounds. Inside a verifier self-check it records its run label before it creates them and writes
+its records into the check's evidence directory as it takes them, so when the check's deadline or
+a signal ends it first, the check's controller still removes the owners and keeps the records; see
+[The Verifier Self-Check](#the-verifier-self-check).
 
 ### Network Preflight
 
@@ -2604,7 +2611,7 @@ Each run writes bounded evidence under `ARTIFACTS/RUN_ID/`, by default `target/c
 | `public/` | Every packaged-CLI command and its output: domain and graph creation, placements, descriptions, cluster status and metrics |
 | `traffic/` | Accepted input, observed output, every Kafka end-offset read, the output-boundary polls, consumer groups, load timestamps and producer results |
 | `results/` | The verdicts: the scenario's result and progress, the ledger, the output boundary, load pacing, container images, a diagnostic run's evidence verdict, `finding.json`. Also the verifier self-check's output, `verifier-self-test.txt`, and in a run of a suite the record it adopted, `verifier-self-check.json` |
-| `diagnostics/` | The live event recording and its bounds, container inspection, Compose logs (a fresh-cluster restore adds `fresh-compose-ps.json` and `fresh-compose.log` for its second project), the image-package and startup-status records, preflight and healing records, cleanup output |
+| `diagnostics/` | The live event recording and its bounds, container inspection, Compose logs (a fresh-cluster restore adds `fresh-compose-ps.json` and `fresh-compose.log` for its second project), the image-package and startup-status records, preflight and healing records, cleanup output. Also `verifier-self-test/`, the evidence of a [verifier self-check](#the-verifier-self-check) that did not pass or left something behind |
 | `backup/`, `backup-cycles/`, `backup-fault/`, `restore-fresh/`, `restore-fault/`, `restore-volume/`, `restarts/`, `crash/`, `pauses/`, `partitions/`, `degraded/`, `stale/`, `former-owner/`, `restart/`, `stateful/`, `domain-time/`, `mixed/` | Each scenario's own evidence, in catalog order: `restarts/` belongs to rolling restarts and `restart/` to cluster restarts |
 | `deadlock/` | A diagnostic run's per-node evidence files, their inspections and qualifications, in `node-N/` for the run's nodes and `fresh-N/` for a fresh-cluster restore's |
 | `tls/` | The run's certificates. The private keys are removed when the run ends |
@@ -2653,6 +2660,35 @@ A container that was exiting while its removal ran can still hold its network. C
 removes whatever the listing still finds, in at most three rounds two seconds apart, and fails only
 when the last listing still finds something. `cleanup.json` in `DIR` records what was removed, the
 rounds taken and what remained. A run that left nothing gets no evidence directory.
+
+### The Verifier Self-Check
+
+A standalone run executes its verifier self-check the way a suite executes the one check of all its
+runs. The check leads a session of its own in the background. Its 600-second bound, or the run's
+remaining timeout when that is shorter, ends it with one TERM to the check's process group and
+kills `tests/self-test.sh` five seconds later if it still executes. A signal to the controller while
+the check executes reaches the check as one TERM through the same bound. The bound exits with
+`tests/self-test.sh`, which ends at once on TERM, while the parts of the check still run their own
+exit work, and a part can leave the group. The controller therefore kills whatever is left of the
+check's session once the bound has exited. No bound changed.
+
+The parts of the check give Docker resources run labels of their own, such as the network and
+namespace owners of the rate-probe self-test, `rate-probe-check-<pid>-<n>`. Each part records its
+label in `run-ids.txt` of the check's evidence directory before it creates anything under it, and
+the rate-probe self-test writes its records into `rate-probe/` there as it takes them. However the
+check ends, by itself, at its deadline or by a signal, its controller then cleans up every recorded
+label as `just chaos cleanup --evidence` does, keeping what it found under `cleanup/<run-id>/`
+beside the records, before anything else:
+
+- **A check that did not pass** keeps the records its parts took, the labels and what cleanup found
+  under them. A run lists them in its finding.
+- **A check that passed** and whose labels owned nothing leaves no evidence directory.
+- **A check that passed but left what cleanup cannot remove** fails the run, or the suite, as a
+  controller failure in the `verifier self-check` phase, before any other phase or run starts.
+
+The evidence directory is `diagnostics/verifier-self-test/` in a run and `verifier-self-test/` in a
+suite. `just test-chaos-verifier-cancellation` holds the production rate probe once its owners exist
+and ends the check both ways.
 
 ## Diagnostic Images
 
@@ -2811,15 +2847,17 @@ A few soak entries need explanation:
 - **Before the first run.** The suite checks its own verdict logic with `tests/suite-self-test.sh`,
   which `just chaos self-test` also runs. After it has resolved the image, it executes the full
   verifier self-check, `tests/self-test.sh`, once and within its 600-second bound. The check leads
-  a session of its own, as a run does. It passes only when it exits 0 and the chaos scripts were
-  the same when it ended as when it began. The suite then writes `verifier-self-check.json`: the
+  a session of its own, as a run does, and the suite removes what it leaves as a run does; see
+  [The Verifier Self-Check](#the-verifier-self-check). It passes only when it exits 0, the chaos
+  scripts were the same when it ended as when it began, and cleanup removed whatever its run labels
+  still owned. The suite then writes `verifier-self-check.json`: the
   check's outcome and timing, the digest of its output, the identity of the chaos scripts it
   checked and the boot identity of the worker. Every run receives that record with
   `--verifier-self-check` and adopts it instead of executing its own check. A run refuses a record
   that did not pass on its worker, during its boot, for exactly its scripts, as a setup error
   before it creates anything.
-- **A failed verifier self-check.** A check that fails, or whose scripts change while it executes,
-  starts no run and leaves no record a run could adopt. The suite fails as a controller failure,
+- **A failed verifier self-check.** A check that fails, whose scripts change while it executes, or
+  whose leftovers cleanup cannot remove, starts no run and leaves no record a run could adopt. The suite fails as a controller failure,
   with exit status 1, and records every entry as not started.
 - **Image resolution.** The suite resolves the image once. A digest reference stays as given, and
   any other reference runs as the local image ID it resolves to, so every run of the suite uses one
@@ -2853,8 +2891,9 @@ A suite writes `ARTIFACTS/SUITE_ID/`, by default `target/chaos/<suite>-<time>-<p
   - a diagnostic run's evidence verdict and counts
   - the result files
 - **`verifier-self-test.txt`, `verifier-self-check.json` and `verifier-self-test/`.** The verifier
-  self-check's whole output, the record every run adopts, and the probe records a failed rate-probe
-  self-test keeps. `suite.json` records the check under `verifier_self_check`: its status, exit
+  self-check's whole output, the record every run adopts, and the evidence of a check that did not
+  pass or left something behind: the run labels its parts recorded, the records a failed or
+  interrupted rate-probe self-test took and what cleanup found under the labels. `suite.json` records the check under `verifier_self_check`: its status, exit
   status, start, end, duration, bound, process, output and record.
 - **`summary.md`.** The same verdicts rendered for a reader, with the verifier self-check's outcome.
   The suite also prints it at the end.
@@ -2903,12 +2942,15 @@ cleanup works in this order:
 3. Cleanup then kills the controller if it still executes, and every process left in each run's
    session and in the session of a verifier self-check that still executed.
 4. For every run the suite started, cleanup runs `just chaos cleanup --evidence` into
-   `cleanup/<run-id>/`, and removes the private keys of any run whose exit trap never ran.
+   `cleanup/<run-id>/`, and removes the private keys of any run whose exit trap never ran. It does
+   the same for every run label the verifier self-check recorded and still keeps, into
+   `cleanup/<run-id>/` of that label.
 5. It keeps the verdict of a run that finished before its controller ended. It records entries that
    never reported an exit status as interrupted, and entries never started as not-started.
 6. It records how the controller ended, which runs it signalled or killed, and under
    `cleanup.verifier_self_check` whether it signalled a verifier self-check that still executed and
-   how many of its processes it killed. A check that still executed is recorded as interrupted.
+   how many of its processes it killed, and under `cleanup.verifier_runs` what it removed for the
+   check's run labels. A check that still executed is recorded as interrupted.
    Cleanup then renders the summary again.
 
 ### Shard Budgets
