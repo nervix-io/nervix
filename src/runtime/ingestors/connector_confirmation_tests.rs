@@ -353,6 +353,7 @@ impl ConfirmationCheck {
             IngestorHost::new(self.host),
             sequential_policy(PositionClass::Replayable),
             self.loop_shutdown,
+            nervix_connector::RetryBackoffSettings::default(),
         )
         .await;
         drop(self.shutdown);

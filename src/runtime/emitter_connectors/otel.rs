@@ -39,6 +39,7 @@ impl EmitterConnectorStarter {
             ($entity:ident, $config:ident, $plan:expr $(, $metric:expr)?) => {{
                 let connector = &$plan.export;
                 let projection = Self::projection(MappedValuesProjectionInit {
+                vm_settings: context.runtime.inner.vm_settings,
                     label: $entity::KIND.connector().keyword(),
                     namespace: "otel",
                     emitter: &context.emitter,

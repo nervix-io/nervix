@@ -96,6 +96,8 @@ For deduplicator keys and retained window state, read [Runtime Nodes → Inspect
 and [Inspect Retained Window State](../../../docs/src/processors.md#inspect-retained-window-state).
 Follow those sections for sensitive argument projection, branch selectors, paging and the distinction
 between retained rows and window metadata; use each processor's `DESCRIBE` for a count summary.
+For inspections while partitions change, also read [Relay → Changing the partition count](../../../docs/src/relay.md#changing-the-partition-count)
+before interpreting a key's partition or retrying a raced inspection.
 
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
@@ -107,6 +109,11 @@ the CLI's Completion section.
 For live subscription, clock and notice output while editing, and terminal omission notices,
 follow the CLI's [Asynchronous Output](../../../docs/src/client-tools-cli.md#asynchronous-output)
 section.
+For native client deadlines, reconnect pacing and retention, read the CLI's
+[Connection Capabilities](../../../docs/src/client-tools-cli.md#connection-capabilities).
+For VM admission/cache limits, WASM engine resources and connector-host cadences, read
+[Engine And Connector Host Capabilities](../../../docs/src/node-settings.md#engine-and-connector-host-capabilities).
+Keep external-system timing and pool choices in the connector's declared client configuration.
 For secure CLI connections and console leader redirects, follow those chapters' connection
 sections and [Native session TLS](../../../docs/src/installation-cargo.md#native-session-tls).
 For scripted CLI use, read [Modes](../../../docs/src/client-tools-cli.md#modes) and
@@ -320,8 +327,13 @@ configuration/lifecycle, `CREATE RESOURCE`, and `RESET WASM PROCESSOR ... STATE`
 administration outside the transaction. Plan restore capacity for independently admitted archive
 metadata and streamed checkpoint I/O, following the backup guidance in `references/configuring-nervix.md`.
 Size node memory for every execution pool, including active snapshots and optional retained materialized-source reads;
-the default startup requirement is 2,723 MiB. Read [Node Settings](https://docs.nervix.io/node-settings.html)
+the default startup requirement is 2,787 MiB, including both database caches. Read [Node Settings](https://docs.nervix.io/node-settings.html)
 for the complete prerequisite checks.
+For Nervix transport, DNS, database or consensus sizing, read
+[Node Settings → Transport, Resolver And Database Capacities](../../../docs/src/node-settings.md#transport-resolver-and-database-capacities).
+These are server provisioning options. Change liveness through committed
+`ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = <duration>;` and verify each node's running
+projection with `DESCRIBE CLUSTER`; changing a local flag does not replace committed cluster policy.
 For detected CPU/memory claims, capability rolls, peer receive bounds and placement weighting, read
 [Node Settings](../../../docs/src/node-settings.md#committed-node-capabilities) and
 [Placement](../../../docs/src/placement.md#capacity-at-the-load-tier). Verify the committed

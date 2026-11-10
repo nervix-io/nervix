@@ -18,9 +18,9 @@ use error_stack::Report;
 use futures_util::{StreamExt as _, future::join_all, stream};
 use nervix_execution::{ExecutionConfig, ExecutorSnapshot, WorkerCounts};
 use nervix_interconnect::{
-    ConnectionDirection, IncomingByteStream, InterconnectStreamRequest,
-    MAX_CONCURRENT_HEALTH_PROBES, RelayAdmissionDecision, RelayAdmissionStatus, StreamHandlerError,
-    StreamingResponse, TransferDirection, TransportSnapshot,
+    ConnectionDirection, IncomingByteStream, InterconnectStreamRequest, RelayAdmissionDecision,
+    RelayAdmissionStatus, StreamHandlerError, StreamingResponse, TransferDirection,
+    TransportSnapshot,
 };
 use nervix_models::{RemoteAckOutcome, RemoteAckResolution};
 use nervix_primitives::{
@@ -67,7 +67,8 @@ impl InterconnectRequest for StalledOperation {
 
     const NAME: &'static str = "simulation_stalled_operation";
     const CLASS: PoolClass = PoolClass::Management;
-    const TIMEOUT: Duration = Duration::from_secs(60);
+    const DEADLINE: nervix_interconnect::RequestDeadline =
+        nervix_interconnect::RequestDeadline::Transfer;
 }
 
 /// A shared management operation answered at once.
@@ -84,7 +85,8 @@ impl InterconnectRequest for ManagementProbe {
 
     const NAME: &'static str = "simulation_management_probe";
     const CLASS: PoolClass = PoolClass::Management;
-    const TIMEOUT: Duration = Duration::from_secs(2);
+    const DEADLINE: nervix_interconnect::RequestDeadline =
+        nervix_interconnect::RequestDeadline::Coordination;
 }
 
 /// A management operation on the reserved relay-cancellation streams.
@@ -100,7 +102,8 @@ impl InterconnectRequest for CancellationProbe {
     const NAME: &'static str = "simulation_cancellation_probe";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Cancellation;
-    const TIMEOUT: Duration = Duration::from_secs(2);
+    const DEADLINE: nervix_interconnect::RequestDeadline =
+        nervix_interconnect::RequestDeadline::Coordination;
 }
 
 /// A management operation on the reserved discovery streams gossip uses.
@@ -116,7 +119,8 @@ impl InterconnectRequest for DiscoveryProbe {
     const NAME: &'static str = "simulation_discovery_probe";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Discovery;
-    const TIMEOUT: Duration = Duration::from_secs(2);
+    const DEADLINE: nervix_interconnect::RequestDeadline =
+        nervix_interconnect::RequestDeadline::Coordination;
 }
 
 /// A typed request on the bulk pool, encoded and decoded by the bulk CPU class.
@@ -131,7 +135,8 @@ impl InterconnectRequest for BulkProbe {
 
     const NAME: &'static str = "simulation_bulk_probe";
     const CLASS: PoolClass = PoolClass::Bulk;
-    const TIMEOUT: Duration = Duration::from_secs(10);
+    const DEADLINE: nervix_interconnect::RequestDeadline =
+        nervix_interconnect::RequestDeadline::Request;
 }
 
 /// A flow-controlled resource stream the hub produces in charged chunks.
@@ -141,10 +146,8 @@ struct ResourceStream;
 impl InterconnectStreamRequest for ResourceStream {
     const NAME: &'static str = "simulation_resource_stream";
     const SUBQUOTA: RequestSubquota = RequestSubquota::Resource;
-    #[inline]
-    fn default_timeout() -> Duration {
-        Duration::from_secs(2)
-    }
+    const DEADLINE: nervix_interconnect::RequestDeadline =
+        nervix_interconnect::RequestDeadline::Coordination;
 }
 
 /// Worker counts fixed independently of the machine, so every replay admits the same jobs.
@@ -227,14 +230,18 @@ impl HostBounds {
     fn admissions(subquota: RequestSubquota) -> usize {
         match subquota {
             RequestSubquota::Shared => TransportOptions::default().incoming_queue_capacity,
-            RequestSubquota::Liveness => MAX_CONCURRENT_HEALTH_PROBES,
-            RequestSubquota::Cancellation | RequestSubquota::Terminal => 4,
+            RequestSubquota::Liveness => {
+                nervix_interconnect::TransportSettings::default().health_probes()
+            }
+            RequestSubquota::Cancellation | RequestSubquota::Terminal => {
+                TransportOptions::default().completion_request_quota
+            }
             RequestSubquota::Append
             | RequestSubquota::Resource
             | RequestSubquota::Snapshot
             | RequestSubquota::Discovery
             | RequestSubquota::Progress
-            | RequestSubquota::Admission => 8,
+            | RequestSubquota::Admission => TransportOptions::default().request_quota,
         }
     }
 
@@ -1301,7 +1308,10 @@ impl HubHost {
         );
 
         let waited = self.stalled.call(PeerCommand::OverflowResourceSlots).await;
-        assert!(waited >= ResourceStream::default_timeout(), "{waited:?}");
+        assert!(
+            waited >= ResourceStream::DEADLINE.declared_default(),
+            "{waited:?}"
+        );
         let read = self.healthy.call(PeerCommand::ReadStream).await;
         assert_eq!(read, STREAM_BYTES);
         let during = self.observe();

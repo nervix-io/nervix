@@ -27,6 +27,7 @@ pub struct Runtime {
 /// a `Runtime` handle and therefore hold their values directly. The few that keep an `Arc` of
 /// their own have a second owner that outlives the handle's borrow, and each names that owner.
 pub(in crate::runtime) struct RuntimeInner {
+    pub(in crate::runtime) interconnect_request_timeout: Duration,
     /// Process-local lifetimes of materialized state, allocated once at construction.
     pub(in crate::runtime) inspection_instances: AtomicU64,
     pub(in crate::runtime) inspection_settings: StateInspectionSettings,
@@ -211,6 +212,8 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) replicated_branch_aggregated_states:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedBranchAggregatedState>, RandomState>,
     pub(in crate::runtime) wasm_runtime: WasmRuntime,
+    pub(in crate::runtime) connector_host: super::ConnectorHostSettings,
+    pub(in crate::runtime) vm_settings: nervix_vm::VmSettings,
     /// The guest-requested branch state resets this node's branch tasks are waiting for. A branch
     /// fences itself and leaves its request here; the control-plane coordinator drains them.
     pub(in crate::runtime) guest_wasm_state_resets: PendingGuestWasmStateResets,

@@ -134,6 +134,7 @@ pub struct MqttTopicEmitterConfig {
     pub topic: MqttTopicName,
     pub mode: MqttPublishingMode,
     pub retry_policy: ParsedRetryPolicy,
+    pub retry_settings: nervix_connector::RetryBackoffSettings,
     pub default_client_id: String,
     pub dns: DnsResolver,
 }
@@ -424,14 +425,19 @@ impl MqttUnsentPublishes {
 
 /// The delay before the event loop's next reconnect attempt, doubling up to the declared ceiling.
 struct MqttReconnectBackoff {
+    settings: nervix_connector::RetryBackoffSettings,
     policy: ParsedRetryPolicy,
     next: Duration,
 }
 
 impl MqttReconnectBackoff {
-    fn from_policy(policy: ParsedRetryPolicy) -> Self {
+    fn from_policy(
+        policy: ParsedRetryPolicy,
+        settings: nervix_connector::RetryBackoffSettings,
+    ) -> Self {
         Self {
             policy,
+            settings,
             next: policy.backoff,
         }
     }
@@ -442,12 +448,13 @@ impl MqttReconnectBackoff {
 
     fn take_next_delay(&mut self) -> Duration {
         let delay = self.next;
-        self.next = next_retry_delay(self.next, self.policy);
+        self.next = next_retry_delay(self.next, self.policy, self.settings);
         delay
     }
 }
 
 struct MqttEventLoopStart {
+    retry_settings: nervix_connector::RetryBackoffSettings,
     eventloop: rumqttc::EventLoop,
     eventloop_shutdown_rx: watch::Receiver<bool>,
     retry_policy: ParsedRetryPolicy,
@@ -461,11 +468,12 @@ impl MqttEventLoopStart {
             mut eventloop,
             mut eventloop_shutdown_rx,
             retry_policy,
+            retry_settings,
             declared_limit,
             host,
         } = self;
         nervix_primitives::task::spawn(async move {
-            let mut backoff = MqttReconnectBackoff::from_policy(retry_policy);
+            let mut backoff = MqttReconnectBackoff::from_policy(retry_policy, retry_settings);
             loop {
                 nervix_primitives::task::consume_budget().await;
                 let polled = nervix_primitives::select! {
@@ -526,6 +534,7 @@ impl MqttTopicEmitter {
         let declared_limit = broker_limit.clone();
         let (eventloop_shutdown, eventloop_shutdown_rx) = watch::channel(false);
         let eventloop = Some(Box::new(MqttEventLoopStart {
+            retry_settings: config.retry_settings,
             eventloop,
             eventloop_shutdown_rx,
             retry_policy,
@@ -1328,6 +1337,7 @@ mod tests {
     /// retrying slowly enough that a test never sees a second attempt.
     fn qos0_config(addr: &str, topic_name: &str, dns: DnsResolver) -> MqttTopicEmitterConfig {
         MqttTopicEmitterConfig {
+            retry_settings: nervix_connector::RetryBackoffSettings::default(),
             config: vec![ClientConfigEntry {
                 key: "addr".to_string(),
                 value: addr.to_string(),
@@ -1604,6 +1614,7 @@ mod tests {
         confirmation: AckConfirmation,
     ) -> MqttTopicEmitterConfig {
         MqttTopicEmitterConfig {
+            retry_settings: nervix_connector::RetryBackoffSettings::default(),
             mode: MqttPublishingMode::Qos1(confirmation),
             ..qos0_config(addr, topic_name, dns)
         }

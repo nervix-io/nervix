@@ -11,7 +11,8 @@
 )]
 
 use nervix_models::{
-    ClusterNodeName, CommandExecutionReference, DomainName, DomainNodeRef, RestoreStep,
+    BranchKeyFingerprint, ClusterNodeName, CommandExecutionReference, DomainName, DomainNodeRef,
+    RestoreStep,
 };
 
 use super::{DomainResumeBoundary, StandaloneTransactionBoundary};
@@ -68,8 +69,11 @@ pub(super) enum CommandPausePoint {
     },
     RestoreBranchStateConversion(DomainName),
     IngestorRoutePoll(DomainNodeRef),
+    IngestorBranchBuffer(DomainNodeRef, BranchKeyFingerprint),
     OwnershipHandoffFlush(DomainName),
     ProcessorFlushCompletion(DomainNodeRef),
+    ProcessorPartitionInstall(DomainNodeRef),
+    ProcessorPartitionForget(DomainNodeRef),
     OwnershipHandoffActivation(DomainName),
     GracefulDrain(ClusterNodeName),
     TransactionCommit {

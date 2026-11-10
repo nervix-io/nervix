@@ -21,6 +21,7 @@ fn quotient_branch_program(schema: &Arc<CompiledSchema>) -> CompiledBranchProgra
         vm_schema(schema),
         vm_schema(&branch_schema),
         RuntimeVmCompileContext {
+            settings: nervix_vm::VmSettings::default(),
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
             current_branching: &ResolvedBranching::unbranched(),

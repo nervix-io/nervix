@@ -15,7 +15,6 @@
 use std::{collections::BTreeSet, path::PathBuf, process::Command};
 
 use futures_util::FutureExt as _;
-use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{CpuClass, MemoryClass};
 use nervix_models::RemoteAckOutcome;
 use nervix_primitives::{
@@ -166,7 +165,7 @@ impl InterconnectRequest for EchoRequest {
     type Response = EchoResponse;
 
     const NAME: &'static str = "test_echo";
-    const TIMEOUT: Duration = Duration::from_secs(2);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -180,7 +179,7 @@ impl InterconnectRequest for BlockingBulkRequest {
 
     const NAME: &'static str = "test_blocking_bulk";
     const CLASS: PoolClass = PoolClass::Bulk;
-    const TIMEOUT: Duration = Duration::from_secs(5);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -196,7 +195,7 @@ impl InterconnectRequest for ReplicationRequest {
 
     const NAME: &'static str = "test_replication";
     const CLASS: PoolClass = PoolClass::Replication;
-    const TIMEOUT: Duration = Duration::from_secs(5);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -210,7 +209,7 @@ impl InterconnectRequest for ManagementRequest {
 
     const NAME: &'static str = "test_management";
     const CLASS: PoolClass = PoolClass::Management;
-    const TIMEOUT: Duration = Duration::from_secs(2);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -224,7 +223,7 @@ impl InterconnectRequest for BlockingManagementRequest {
 
     const NAME: &'static str = "test_blocking_management";
     const CLASS: PoolClass = PoolClass::Management;
-    const TIMEOUT: Duration = Duration::from_secs(5);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -239,7 +238,7 @@ impl InterconnectRequest for CancellationRequest {
     const NAME: &'static str = "test_cancellation";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Cancellation;
-    const TIMEOUT: Duration = Duration::from_secs(2);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -254,7 +253,7 @@ impl InterconnectRequest for BlockingDiscoveryRequest {
     const NAME: &'static str = "test_blocking_discovery";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Discovery;
-    const TIMEOUT: Duration = Duration::from_secs(2);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -286,7 +285,8 @@ impl InterconnectRequest for BlockingProgressRequest {
     const NAME: &'static str = "test_blocking_progress";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
-    const TIMEOUT: Duration = LIVENESS_QUOTA_REQUEST_TIMEOUT;
+    const DEADLINE: crate::RequestDeadline =
+        crate::RequestDeadline::Explicit(LIVENESS_QUOTA_REQUEST_TIMEOUT);
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -301,7 +301,8 @@ impl InterconnectRequest for LivenessRequest {
     const NAME: &'static str = "test_liveness";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
-    const TIMEOUT: Duration = LIVENESS_QUOTA_REQUEST_TIMEOUT;
+    const DEADLINE: crate::RequestDeadline =
+        crate::RequestDeadline::Explicit(LIVENESS_QUOTA_REQUEST_TIMEOUT);
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -314,7 +315,7 @@ impl InterconnectRequest for HangingRequest {
     type Response = HangingResponse;
 
     const NAME: &'static str = "test_hanging";
-    const TIMEOUT: Duration = Duration::from_secs(30);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Snapshot;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -323,10 +324,7 @@ struct ResourceStreamRequest;
 impl InterconnectStreamRequest for ResourceStreamRequest {
     const NAME: &'static str = "test_resource_stream";
     const SUBQUOTA: RequestSubquota = RequestSubquota::Resource;
-    #[inline]
-    fn default_timeout() -> Duration {
-        Duration::from_secs(2)
-    }
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -335,10 +333,7 @@ struct SnapshotStreamRequest;
 impl InterconnectStreamRequest for SnapshotStreamRequest {
     const NAME: &'static str = "test_snapshot_stream";
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    #[inline]
-    fn default_timeout() -> Duration {
-        Duration::from_secs(2)
-    }
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -349,10 +344,8 @@ struct DeadlineStreamRequest {
 impl InterconnectStreamRequest for DeadlineStreamRequest {
     const NAME: &'static str = "test_deadline_stream";
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    #[inline]
-    fn default_timeout() -> Duration {
-        Duration::from_millis(200)
-    }
+    const DEADLINE: crate::RequestDeadline =
+        crate::RequestDeadline::Explicit(Duration::from_millis(200));
 }
 
 pub(crate) struct ConnectedTransports {

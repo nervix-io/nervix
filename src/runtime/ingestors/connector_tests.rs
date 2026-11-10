@@ -327,7 +327,14 @@ async fn run_policy_with_refresh(
     connector.replays_pending_after_resume = 0;
     let host = IngestorHost::new(FakeHost::running(observations.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    run_ingestor_instance_with_retry(connector, host, replayable(policy), shutdown_rx).await;
+    run_ingestor_instance_with_retry(
+        connector,
+        host,
+        replayable(policy),
+        shutdown_rx,
+        nervix_connector::RetryBackoffSettings::default(),
+    )
+    .await;
     drop(shutdown_tx);
     observations
 }
@@ -517,6 +524,7 @@ async fn ingestor_loop_replays_a_buffer_released_during_resume_before_polling() 
         host,
         replayable(IngestorAckPolicy::None),
         shutdown_rx,
+        nervix_connector::RetryBackoffSettings::default(),
     )
     .await;
     drop(shutdown_tx);
@@ -550,6 +558,7 @@ async fn ingestor_shutdown_cancels_pending_resume_and_closes_the_ingestor() {
         host,
         replayable(IngestorAckPolicy::None),
         shutdown_rx,
+        nervix_connector::RetryBackoffSettings::default(),
     ));
     started.notified().await;
     shutdown_tx.send_replace(true);
@@ -576,6 +585,7 @@ async fn ingestor_quiesce_change_cancels_pending_resume_before_retrying() {
         host,
         replayable(IngestorAckPolicy::None),
         shutdown_rx,
+        nervix_connector::RetryBackoffSettings::default(),
     ));
     started.notified().await;
     changed.notify_one();
@@ -804,7 +814,14 @@ async fn failed_rewind_cannot_commit_past_an_unacknowledged_kafka_position() {
         timeout: Duration::from_secs(1),
         retry: retry_policy(),
     };
-    run_ingestor_instance_with_retry(connector, host, replayable(policy), shutdown_rx).await;
+    run_ingestor_instance_with_retry(
+        connector,
+        host,
+        replayable(policy),
+        shutdown_rx,
+        nervix_connector::RetryBackoffSettings::default(),
+    )
+    .await;
     drop(shutdown_tx);
 
     let observations = observations.lock();
@@ -1296,6 +1313,7 @@ async fn broker_payload_observation_counts_the_transport_batch_and_skips_buffer_
         IngestorHost::new(services),
         replayable(IngestorAckPolicy::None),
         receiver,
+        nervix_connector::RetryBackoffSettings::default(),
     )
     .await;
     let events = events.lock();
@@ -1422,6 +1440,7 @@ async fn run_recording_broker(
         IngestorHost::new(host),
         replayable(policy),
         shutdown_rx,
+        nervix_connector::RetryBackoffSettings::default(),
     )
     .await;
     drop(shutdown_tx);
@@ -1659,6 +1678,7 @@ async fn a_quiesce_suspends_only_a_ready_connector_and_is_recorded_once() {
         IngestorHost::new(host),
         replayable(sequential_policy()),
         shutdown_rx,
+        nervix_connector::RetryBackoffSettings::default(),
     ));
 
     // A connector the loop never resumed is not ready, so the quiesce has nothing to suspend.

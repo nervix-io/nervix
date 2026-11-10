@@ -29,9 +29,9 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector_syslog::SyslogListenerFault;
 use nervix_execution::Executor;
 use nervix_models::{
-    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CommandExecutionReference,
-    DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName, RelayName,
-    RemoteRuntimeField, RestoreStep,
+    BranchKeyFingerprint, ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName,
+    CommandExecutionReference, DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind,
+    ModelName, NodeRef, RelayName, RemoteRuntimeField, RestoreStep,
 };
 use nervix_primitives::{
     collections::DashMap,
@@ -82,6 +82,7 @@ mod processor_flush;
 mod relay_memory;
 mod relay_partition_fanout;
 mod relay_slicing;
+pub use relay_slicing::RelayCapabilityRefusal;
 mod relocation_commit;
 mod resource_discovery;
 mod resource_publication;
@@ -1782,6 +1783,54 @@ impl FaultInjection {
         pause.release();
     }
 
+    /// Holds a concrete branch before creating its buffer and arming its flush deadline.
+    pub fn pause_ingestor_branch_buffer(
+        &self,
+        ingestor: DomainNodeRef,
+        branch: BranchKeyFingerprint,
+    ) {
+        self.arm_command_pause(CommandPausePoint::IngestorBranchBuffer(ingestor, branch));
+    }
+
+    pub async fn wait_for_ingestor_branch_buffer_pause(
+        &self,
+        ingestor: &DomainNodeRef,
+        branch: BranchKeyFingerprint,
+    ) {
+        self.wait_for_command_pause(&CommandPausePoint::IngestorBranchBuffer(
+            ingestor.clone(),
+            branch,
+        ))
+        .await;
+    }
+
+    pub fn release_ingestor_branch_buffer_pause(
+        &self,
+        ingestor: &DomainNodeRef,
+        branch: BranchKeyFingerprint,
+    ) {
+        self.release_command_pause(&CommandPausePoint::IngestorBranchBuffer(
+            ingestor.clone(),
+            branch,
+        ));
+    }
+
+    pub(crate) async fn pause_ingestor_branch_buffer_if_armed(
+        &self,
+        domain: &DomainName,
+        ingestor: &NodeRef,
+        branch: Option<BranchKeyFingerprint>,
+    ) {
+        let Some(branch) = branch else {
+            return;
+        };
+        self.pause_command_if_armed(CommandPausePoint::IngestorBranchBuffer(
+            ingestor.in_domain(domain),
+            branch,
+        ))
+        .await;
+    }
+
     /// Holds one route after accepting its input and before observing handoff or flush state.
     pub fn pause_ingestor_route_poll(&self, ingestor: DomainNodeRef) {
         self.arm_command_pause(CommandPausePoint::IngestorRoutePoll(ingestor));
@@ -1810,6 +1859,64 @@ impl FaultInjection {
     /// Holds handoff after publishing its force-flush generation, before declaring the hold ready.
     pub fn pause_ownership_handoff_flush(&self, domain: DomainName) {
         self.arm_command_pause(CommandPausePoint::OwnershipHandoffFlush(domain));
+    }
+
+    /// Holds a processor claim after release, before installing its checkpoint.
+    pub fn pause_processor_partition_install(&self, processor: DomainNodeRef) {
+        self.arm_command_pause(CommandPausePoint::ProcessorPartitionInstall(processor));
+    }
+
+    pub async fn wait_for_processor_partition_install(&self, processor: &DomainNodeRef) {
+        self.wait_for_command_pause(&CommandPausePoint::ProcessorPartitionInstall(
+            processor.clone(),
+        ))
+        .await;
+    }
+
+    pub fn release_processor_partition_install(&self, processor: &DomainNodeRef) {
+        self.release_command_pause(&CommandPausePoint::ProcessorPartitionInstall(
+            processor.clone(),
+        ));
+    }
+
+    pub(crate) async fn pause_processor_partition_install_if_armed(
+        &self,
+        domain: &DomainName,
+        processor: &NodeRef,
+    ) {
+        self.pause_command_if_armed(CommandPausePoint::ProcessorPartitionInstall(
+            processor.in_domain(domain),
+        ))
+        .await;
+    }
+
+    /// Holds a processor claim after installation, before asking its holder to forget.
+    pub fn pause_processor_partition_forget(&self, processor: DomainNodeRef) {
+        self.arm_command_pause(CommandPausePoint::ProcessorPartitionForget(processor));
+    }
+
+    pub async fn wait_for_processor_partition_forget(&self, processor: &DomainNodeRef) {
+        self.wait_for_command_pause(&CommandPausePoint::ProcessorPartitionForget(
+            processor.clone(),
+        ))
+        .await;
+    }
+
+    pub fn release_processor_partition_forget(&self, processor: &DomainNodeRef) {
+        self.release_command_pause(&CommandPausePoint::ProcessorPartitionForget(
+            processor.clone(),
+        ));
+    }
+
+    pub(crate) async fn pause_processor_partition_forget_if_armed(
+        &self,
+        domain: &DomainName,
+        processor: &NodeRef,
+    ) {
+        self.pause_command_if_armed(CommandPausePoint::ProcessorPartitionForget(
+            processor.in_domain(domain),
+        ))
+        .await;
     }
 
     pub async fn wait_for_ownership_handoff_flush_pause(&self, domain: &DomainName) {
@@ -2752,10 +2859,11 @@ impl FaultInjection {
         nervix_lint,
         nervix::context(
             bounded,
-            reason = "a scenario holds its one-shot command or processor-completion point",
-            key = "one typed test pause point",
-            bound = "one keyed read and at most one removal; no guard survives the test wait, \
-                     which explicit release or scenario cleanup ends"
+            reason = "one scenario-owned command or processor-completion pause selects at most \
+                      one waiting attempt",
+            key = "one armed CommandPausePoint",
+            bound = "one keyed read and conditional removal; one claimed waiter; guards end \
+                     before the test-controlled wait and scenario teardown releases the pause"
         )
     )]
     async fn pause_command_if_armed(&self, point: CommandPausePoint) {

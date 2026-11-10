@@ -11,6 +11,15 @@ parameter is refused where it is written.
 `just test-unit-binary <executable> <filters>` replays a compiled unit-test executable without
 rebuilding it; its evidence applies only to the source inputs that produced that executable.
 
+`just test-partition-state-inspection --concurrency 1 --retry 0` selects the eight one- and
+three-node deduplicator/window cases for growing and shrinking a running branch. The native server
+assets, formatter, CLI and report tool are prepared through the usual recipes. Domain-scoped
+one-shot claim controls hold the released checkpoint before installation and the installed branch
+before forget; ordinary fault cleanup releases either hold after a failure. Inspections still use
+the public client and assert one partition per key, exact counts and byte charges, retained values
+of two tenants, and one-row continuations. The absolute feature pattern starts discovery in the
+feature's directory and leaves scenario startup, execution and teardown budgets unchanged.
+
 `just test-partition-placement [feature]` runs the placement scenarios with the native node assets,
 Plexus formatter, CLI and deadlock report tool prepared. Its default input is
 `tests/features/cluster/partition_placement.feature`; select

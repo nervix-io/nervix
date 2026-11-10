@@ -44,6 +44,7 @@ impl SyslogListenerIngestorStartPlan {
             resolved.entries,
             |configured| runtime.syslog_ingestor_bind_addr(configured),
             runtime.outward_tls().clone(),
+            runtime.inner.connector_host.syslog,
         )
         .change_context_lazy(|| ingestor.initialize_failure())?;
         #[cfg(feature = "testing")]

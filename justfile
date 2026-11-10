@@ -382,6 +382,10 @@ test-scenario-selection-guards binary="" evidence="":
     fi
     python3 -m scripts.scenario_selection_qualification "$binary" "$evidence"
 
+# Observe released and installed processor keys through bounded public inspection pages.
+test-partition-state-inspection *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/partition_state_inspection{,}.feature") }} {{ quote(args) }}
+
 # Exercise authenticated producer metadata without preparing unrelated host-language drivers.
 test-client-producer-metadata *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash
@@ -458,6 +462,15 @@ test-execution-capabilities *args: build-deps build-plexus-format build-test-cli
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/execution_capabilities.feature {{ quote(args) }}
+
+# Exercise retained relay delivery and typed refusal across different node capabilities.
+test-relay-capability-delivery *args: build-deps build-codec-tools
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input {{ quote(justfile_directory() / "tests/features/cluster/node_capability_delivery*.feature") }} \
+        {{ quote(args) }}
 
 # Exercise domain pause recovery with ordinary assets and the shared native tool graph.
 test-client-wire-pause-recovery *args: build-deps build-codec-tools
@@ -548,12 +561,26 @@ test-cluster-identity *args: build-deps build-plexus-format build-test-cli build
     # Absolute globs keep Cucumber's file walk within the feature directory.
     cargo test --package nervix-scenarios --test scenarios -- --input "$(pwd)/tests/features/runtime/cluster_identity*.feature" {{ quote(args) }}
 
+# Verify infrastructure capacities and derived liveness through native nodes and public clients.
+test-infrastructure-settings *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input "$(pwd)/tests/features/cluster/infrastructure_settings*.feature" {{ quote(args) }}
+
 # Placement and console scenarios use native nodes and public clients, without paced simulation.
 test-partition-placement feature="tests/features/cluster/partition_placement.feature" *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(feature) }} {{ quote(args) }}
+
+# Exercise local engine admission and CLI settings through public node and REPL interfaces.
+test-engine-settings *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/engine_settings.feature {{ quote(args) }}
 
 # Exercise emitter destination keys and partitions without unrelated client-tool preparation.
 test-emitter-destinations *args: build-deps
@@ -1301,6 +1328,13 @@ test-kafka-driver checkout *args:
 test-settings:
     cargo test --package nervix-models --lib settings::
     cargo test --package nervix-models --doc SettingDefinition
+
+# Exercise node settings' public argument groups without building unrelated host probes.
+test-node-settings *args: build-web-console download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --lib application::cli::tests:: -- {{ args }}
 
 # Run one integration test target of one workspace package whose tests need no server test
 # dependencies, such as the vocabulary's representation properties.
@@ -3082,6 +3116,17 @@ coverage-remote-owners output="target/remote-owners.lcov": build-web-console was
     cargo llvm-cov --no-clean --lcov --output-path "${stages}/frame-cost.lcov" \
         --package nervix-interconnect --lib -- remote_relay_frame_cost --ignored --nocapture
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
+
+# Collect a local patch preview for the native relay capability fixtures.
+# This focused report is outside the complete ordinary workspace merge, which CI produces.
+coverage-relay-capability-delivery output="lcov-workspace.info" *args: build-deps build-codec-tools
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov --package nervix-scenarios --test scenarios --no-default-ignore-filename-regex \
+        --lcov --output-path {{ quote(output) }} -- \
+        --input {{ quote(justfile_directory() / "tests/features/cluster/node_capability_delivery*.feature") }} \
+        {{ quote(args) }}
 
 # Measure selected public scenarios with the same arguments as `test-scenarios`.
 coverage-scenarios output *args: tests-deps

@@ -70,8 +70,8 @@ pub(crate) mod task_shutdown;
 #[cfg(feature = "testing")]
 pub use fault_injection::{
     BackupCutBoundary, DomainResumeBoundary, FaultInjection, ForeignExecutionObservation,
-    ModelPublicationRefusalKind, RestoreStagingKind, StandaloneTransactionBoundary,
-    WasmCheckpointWindow, WasmStateResetRequestError,
+    ModelPublicationRefusalKind, RelayCapabilityRefusal, RestoreStagingKind,
+    StandaloneTransactionBoundary, WasmCheckpointWindow, WasmStateResetRequestError,
 };
 #[cfg(feature = "testing")]
 pub use registry::SchedulerMode;

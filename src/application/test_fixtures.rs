@@ -359,9 +359,12 @@ pub(crate) async fn test_interconnect(cluster_id: &str, node_id: &ClusterNodeNam
     let addr = "127.0.0.1:0"
         .parse()
         .expect("ephemeral interconnect address must parse");
-    let dns = nervix_dns::DnsResolver::load(nervix_dns::DnsConfiguration::system())
-        .await
-        .expect("the host's resolver configuration should load");
+    let dns = nervix_dns::DnsResolver::load(
+        nervix_dns::DnsConfiguration::system(),
+        nervix_dns::DnsSettings::default(),
+    )
+    .await
+    .expect("the host's resolver configuration should load");
     let (transport, _rx) = Transport::bind(
         addr,
         nervix_interconnect::TransportIdentity {
@@ -663,6 +666,9 @@ pub(in crate::application) async fn build_test_service_inner(
     let interconnect = test_interconnect("test", &expected_leader).await;
     let executor = nervix_execution::Executor::default();
     let settings = ConsensusSettings {
+        operations: nervix_consensus::RaftOperationSettings::default(),
+        database: nervix_models::DatabaseSettings::<nervix_models::ConsensusDatabase>::default()
+            .capabilities(None),
         cluster_name: "test".to_string(),
         node_id: expected_leader.clone(),
         interconnect_advertise_addr: interconnect.local_addr().into(),
@@ -746,6 +752,42 @@ pub(in crate::application) async fn build_test_service_inner(
         .announce_node_capabilities(nervix_models::NodeCapabilityRecord {
             identity: cluster.local_node_identity().await,
             capabilities: nervix_models::NodeCapabilities {
+                interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
+                dns: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
+                    .node_capability_record()
+                    .capabilities
+                    .dns,
+                node_database: nervix_arbitrary::Arbitrary::new(
+                    &[],
+                    nervix_arbitrary::Domain::Vocabulary,
+                )
+                .node_capability_record()
+                .capabilities
+                .node_database,
+                consensus_database: nervix_arbitrary::Arbitrary::new(
+                    &[],
+                    nervix_arbitrary::Domain::Vocabulary,
+                )
+                .node_capability_record()
+                .capabilities
+                .consensus_database,
+                consensus: nervix_arbitrary::Arbitrary::new(
+                    &[],
+                    nervix_arbitrary::Domain::Vocabulary,
+                )
+                .node_capability_record()
+                .capabilities
+                .consensus,
+                engines: nervix_arbitrary::Arbitrary::new(
+                    &[],
+                    nervix_arbitrary::Domain::Vocabulary,
+                )
+                .node_engine_capabilities(),
+                connector_host: nervix_arbitrary::Arbitrary::new(
+                    &[],
+                    nervix_arbitrary::Domain::Vocabulary,
+                )
+                .node_connector_host_capabilities(),
                 cpu_count: Some(std::num::NonZeroU64::MIN),
                 memory_bytes: Some(std::num::NonZeroU64::MIN),
                 receive: interconnect.local_receive_bounds(),
