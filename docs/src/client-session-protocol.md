@@ -519,7 +519,7 @@ JSON/CBOR/AVRO wire schemas, or resource catalogs; a domain and relay reference 
 fields; a domain and codec reference select that codec's output schema fields; a domain and resource
 reference select completed resource versions. Wire-schema targets have separate discriminants, so
 a codec cannot mistake a JSON wire schema for a CBOR or AVRO schema with the same name. A
-visual ingestor uses a distinct ingestor-reference target for each of the 14 connector and entity
+visual ingestor uses a distinct ingestor-reference target for each of the 15 connector and entity
 pairs that read an external system; a client producer ingestor selects its schema through the
 schema target instead. Each ingestor-reference target requires a domain and offers clients of its
 pair's connector, except the HTTP endpoint and WebSocket endpoint targets, which offer endpoints of
