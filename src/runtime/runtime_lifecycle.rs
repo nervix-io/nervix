@@ -241,7 +241,7 @@ impl Runtime {
                         nervix_models::ClusterParameterSeedValues {
                             state_snapshot_interval: Some(state_snapshot_interval),
                             domain_drain_timeout: Some(domain_drain_timeout),
-                            entity_gate_deadline: Some(entity_gate_deadline),
+                            entity_gate_deadline: Some(entity_gate_deadline.as_duration()),
                             ..Default::default()
                         },
                     )

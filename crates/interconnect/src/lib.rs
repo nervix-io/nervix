@@ -109,8 +109,8 @@ pub use runtime_state::{
 };
 pub use settings::{
     BulkChunkBytes, BulkReceiveWindow, BulkReceiveWindowError, ConcurrentHandshakes,
-    ConnectionReceiveWindow, ConnectionSetupTimeout, IncomingQueueCapacity, InterconnectLiveness,
-    MaxPeers, MaxReconnectBackoff, PeerReceiveOverrides, PeerReceiveSettings,
+    ConnectionReceiveWindow, ConnectionSetupTimeout, DuplexSetupDeadline, IncomingQueueCapacity,
+    InterconnectLiveness, MaxPeers, MaxReconnectBackoff, PeerReceiveOverrides, PeerReceiveSettings,
     PeerReceiveSettingsError, PingInterval, PingTimeout, ProbeTimeout, ProgressTimeout,
     ReconnectBackoff, ReconnectJitterPermille, RelayBatchBytes, RelayChannelRetention,
     RelayChannelSweep, RelayDecodedBytes, RelayRetentionSettings, RequestDeadline, RequestQuota,
@@ -597,6 +597,8 @@ pub struct ConfirmOwnershipHandoffStateRequest {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PrepareForcedOwnershipRecoveryRequest {
+    /// The coordinator captures this budget from the policy that planned the transition.
+    pub recovery_budget: nervix_models::ClusterParameterDuration,
     pub operation_id: String,
     pub source: ClusterNodeName,
     pub destination: ClusterNodeName,

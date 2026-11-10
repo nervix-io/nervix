@@ -992,6 +992,7 @@ mod shuttle_tests {
         Arc::new(ConsumerAttachment {
             id: ConsumerId::opened_by(RequestId::new(NonZeroU64::MIN)),
             exchange: Arc::new(ExchangeRequests {
+                limits: nervix_client_wire::SessionLimits::DEFAULT,
                 frames,
                 pending: Arc::new(SyncMutex::new(PendingReplies::new())),
             }),

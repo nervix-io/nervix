@@ -591,6 +591,9 @@ async fn stopped_wasm_ownership_recovery_preserves_the_complete_checkpoint_inven
     let result = runtime
         .prepare_forced_ownership_recovery(
             nervix_interconnect::PrepareForcedOwnershipRecoveryRequest {
+                recovery_budget: *nervix_models::ForcedRecoveryBudget::resolve_duration(None)
+                    .expect("the declared recovery default validates")
+                    .value(),
                 operation_id: "stopped-wasm-recovery".to_string(),
                 source,
                 destination,

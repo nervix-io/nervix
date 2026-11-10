@@ -13,156 +13,156 @@
 use std::time::Duration;
 
 use error_stack::Report;
+use meticulous::ResultExt as _;
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use serde::{Deserialize, Serialize};
 
 use super::{ClusterParameterError, ClusterParameterKey};
 use crate::{ClusterParameters, SettingDefinition};
 
-/// How long an unobserved member remains available.
-pub struct NodeUnavailabilityTimeout;
+/// The exact nanoseconds of a bounded cluster duration. All admitted durations are at most
+/// u32::MAX seconds and therefore fit u64 nanoseconds without loss. The compact value keeps the
+/// complete policy and the Raft commands that carry it inline, with no allocation.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+#[serde(try_from = "Duration", into = "Duration")]
+pub struct ClusterParameterDuration(u64);
 
-impl SettingDefinition for NodeUnavailabilityTimeout {
-    type Class = ClusterParameters;
-    type Value = Duration;
-    type Context = ();
-    type Error = ClusterParameterError;
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[error("cluster duration {value:?} cannot be represented as u64 nanoseconds")]
+pub struct ClusterParameterDurationError {
+    value: Duration,
+}
 
-    const NAME: &'static str = "node-unavailability-timeout";
-    const DERIVATION: Option<&'static str> = None;
-
-    fn default_value(_: &()) -> Duration {
-        Duration::from_secs(10)
+impl TryFrom<Duration> for ClusterParameterDuration {
+    type Error = Report<ClusterParameterDurationError>;
+    fn try_from(value: Duration) -> Result<Self, Self::Error> {
+        let nanos = u64::try_from(value.as_nanos()).map_err(|error| {
+            Report::new(error).change_context(ClusterParameterDurationError { value })
+        })?;
+        Ok(Self(nanos))
     }
-
-    fn validate(value: &Duration, _: &()) -> Result<(), Report<ClusterParameterError>> {
-        ClusterParameterKey::NodeUnavailabilityTimeout.validate_duration(*value)
+}
+impl From<ClusterParameterDuration> for Duration {
+    fn from(value: ClusterParameterDuration) -> Self {
+        value.as_duration()
+    }
+}
+impl ClusterParameterDuration {
+    pub fn as_duration(self) -> Duration {
+        Duration::from_nanos(self.0)
+    }
+    pub(super) fn resolve(
+        parameter: ClusterParameterKey,
+        value: Duration,
+    ) -> Result<Self, Report<ClusterParameterError>> {
+        parameter.validate_duration(value)?;
+        Ok(Self::try_from(value).assured("at most u32::MAX seconds fit u64 nanoseconds exactly"))
     }
 }
 
-/// How long a domain drain may wait for accepted work.
-pub struct DomainDrainTimeout;
-
-impl SettingDefinition for DomainDrainTimeout {
-    type Class = ClusterParameters;
-    type Value = Duration;
-    type Context = ();
-    type Error = ClusterParameterError;
-
-    const NAME: &'static str = "domain-drain-timeout";
-    const DERIVATION: Option<&'static str> = None;
-
-    fn default_value(_: &()) -> Duration {
-        Self::DEFAULT
-    }
-
-    fn validate(value: &Duration, _: &()) -> Result<(), Report<ClusterParameterError>> {
-        ClusterParameterKey::DomainDrainTimeout.validate_duration(*value)
-    }
+macro_rules! duration_parameter {
+    ($definition:ident, $name:literal, $default:expr) => {
+        pub struct $definition;
+        impl $definition {
+            /// Resolves a semantic duration once into this definition's exact compact value.
+            pub fn resolve_duration(
+                value: Option<Duration>,
+            ) -> Result<crate::Setting<Self>, Report<ClusterParameterError>> {
+                let value = value
+                    .map(|value| {
+                        ClusterParameterDuration::resolve(ClusterParameterKey::$definition, value)
+                    })
+                    .transpose()?;
+                crate::Setting::resolve(value, &())
+            }
+        }
+        impl SettingDefinition for $definition {
+            type Class = ClusterParameters;
+            type Value = ClusterParameterDuration;
+            type Context = ();
+            type Error = ClusterParameterError;
+            const NAME: &'static str = $name;
+            const DERIVATION: Option<&'static str> = None;
+            fn default_value(_: &()) -> Self::Value {
+                ClusterParameterDuration::resolve(ClusterParameterKey::$definition, $default)
+                    .assured(
+                        "the duration definition's default is positive and within its declared \
+                         bound",
+                    )
+            }
+            fn validate(value: &Self::Value, _: &()) -> Result<(), Report<Self::Error>> {
+                ClusterParameterKey::$definition.validate_duration(value.as_duration())
+            }
+        }
+    };
 }
-
-/// How long an entity gate may take to engage and drain.
-pub struct EntityGateDeadline;
-
-impl SettingDefinition for EntityGateDeadline {
-    type Class = ClusterParameters;
-    type Value = Duration;
-    type Context = ();
-    type Error = ClusterParameterError;
-
-    const NAME: &'static str = "entity-gate-deadline";
-    const DERIVATION: Option<&'static str> = None;
-
-    fn default_value(_: &()) -> Duration {
-        Duration::from_secs(60)
-    }
-
-    fn validate(value: &Duration, _: &()) -> Result<(), Report<ClusterParameterError>> {
-        ClusterParameterKey::EntityGateDeadline.validate_duration(*value)
-    }
-}
-
-/// How long an open transaction may wait for its next statement.
-pub struct TransactionIdleTimeout;
-
-impl SettingDefinition for TransactionIdleTimeout {
-    type Class = ClusterParameters;
-    type Value = Duration;
-    type Context = ();
-    type Error = ClusterParameterError;
-
-    const NAME: &'static str = "transaction-idle-timeout";
-    const DERIVATION: Option<&'static str> = None;
-
-    fn default_value(_: &()) -> Duration {
-        Duration::from_secs(900)
-    }
-
-    fn validate(value: &Duration, _: &()) -> Result<(), Report<ClusterParameterError>> {
-        ClusterParameterKey::TransactionIdleTimeout.validate_duration(*value)
-    }
-}
-
-/// The minimum retention of a terminal transaction.
-pub struct TransactionTombstoneRetention;
-
-impl SettingDefinition for TransactionTombstoneRetention {
-    type Class = ClusterParameters;
-    type Value = Duration;
-    type Context = ();
-    type Error = ClusterParameterError;
-
-    const NAME: &'static str = "transaction-tombstone-retention";
-    const DERIVATION: Option<&'static str> = None;
-
-    fn default_value(_: &()) -> Duration {
-        Duration::from_secs(900)
-    }
-
-    fn validate(value: &Duration, _: &()) -> Result<(), Report<ClusterParameterError>> {
-        ClusterParameterKey::TransactionTombstoneRetention.validate_duration(*value)
-    }
-}
-
-/// How long a completed command remains recoverable by its execution reference.
-pub struct CommandRetryValidity;
-
-impl SettingDefinition for CommandRetryValidity {
-    type Class = ClusterParameters;
-    type Value = Duration;
-    type Context = ();
-    type Error = ClusterParameterError;
-
-    const NAME: &'static str = "command-retry-validity";
-    const DERIVATION: Option<&'static str> = None;
-
-    fn default_value(_: &()) -> Duration {
-        Duration::from_secs(900)
-    }
-
-    fn validate(value: &Duration, _: &()) -> Result<(), Report<ClusterParameterError>> {
-        ClusterParameterKey::CommandRetryValidity.validate_duration(*value)
-    }
-}
-
-/// How often a runtime state owner publishes a checkpoint.
-pub struct StateSnapshotInterval;
-
-impl SettingDefinition for StateSnapshotInterval {
-    type Class = ClusterParameters;
-    type Value = Duration;
-    type Context = ();
-    type Error = ClusterParameterError;
-
-    const NAME: &'static str = "state-snapshot-interval";
-    const DERIVATION: Option<&'static str> = None;
-
-    fn default_value(_: &()) -> Duration {
-        Self::DEFAULT
-    }
-
-    fn validate(value: &Duration, _: &()) -> Result<(), Report<ClusterParameterError>> {
-        ClusterParameterKey::StateSnapshotInterval.validate_duration(*value)
-    }
-}
+duration_parameter!(
+    ForcedRecoveryBudget,
+    "forced-recovery-budget",
+    Duration::from_secs(5)
+);
+duration_parameter!(
+    OwnershipHandoffPollInterval,
+    "ownership-handoff-poll-interval",
+    Duration::from_millis(250)
+);
+duration_parameter!(
+    EntityGatePollInterval,
+    "entity-gate-poll-interval",
+    Duration::from_millis(25)
+);
+duration_parameter!(
+    DomainDrainPollInterval,
+    "domain-drain-poll-interval",
+    Duration::from_millis(50)
+);
+duration_parameter!(
+    RuntimeReadinessPropagationBound,
+    "runtime-readiness-propagation-bound",
+    Duration::from_secs(30)
+);
+duration_parameter!(
+    NodeUnavailabilityTimeout,
+    "node-unavailability-timeout",
+    Duration::from_secs(10)
+);
+duration_parameter!(DomainDrainTimeout, "domain-drain-timeout", Self::DEFAULT);
+duration_parameter!(
+    EntityGateDeadline,
+    "entity-gate-deadline",
+    Duration::from_secs(60)
+);
+duration_parameter!(
+    TransactionIdleTimeout,
+    "transaction-idle-timeout",
+    Duration::from_secs(900)
+);
+duration_parameter!(
+    TransactionTombstoneRetention,
+    "transaction-tombstone-retention",
+    Duration::from_secs(900)
+);
+duration_parameter!(
+    CommandRetryValidity,
+    "command-retry-validity",
+    Duration::from_secs(900)
+);
+duration_parameter!(
+    StateSnapshotInterval,
+    "state-snapshot-interval",
+    Self::DEFAULT
+);
 
 impl DomainDrainTimeout {
     /// The compile-time source of this setting definition's default.

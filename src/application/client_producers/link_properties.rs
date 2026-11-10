@@ -76,6 +76,7 @@ enum LinkDirection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, EnumIter)]
 enum LinkFrameKind {
     Opening,
+    LinkOpened,
     Open,
     Submit,
     Clear,
@@ -110,7 +111,8 @@ impl LinkFrameKind {
             | Self::Close
             | Self::Detach
             | Self::ServingHeartbeat => LinkDirection::Serving,
-            Self::Opened
+            Self::LinkOpened
+            | Self::Opened
             | Self::Refused
             | Self::Admitting
             | Self::Outcome
@@ -126,6 +128,10 @@ impl LinkFrameKind {
         match self {
             Self::Opening => LinkFrame::Opening(OpenClientProducerLink {
                 serving_node: arbitrary.rule_name::<ClusterNodeName>(),
+                heartbeat: arbitrary.entropy().announced_link_heartbeat(),
+            }),
+            Self::LinkOpened => LinkFrame::Event(ClientProducerLinkEvent::LinkOpened {
+                heartbeat: arbitrary.entropy().announced_link_heartbeat(),
             }),
             Self::Open => LinkFrame::Item(ClientProducerLinkItem::Open {
                 key: arbitrary.entropy().any_u64(),
@@ -221,6 +227,7 @@ impl LinkFrame {
                 ClientProducerLinkItem::Heartbeat => LinkFrameKind::ServingHeartbeat,
             },
             Self::Event(event) => match event {
+                ClientProducerLinkEvent::LinkOpened { .. } => LinkFrameKind::LinkOpened,
                 ClientProducerLinkEvent::Opened { .. } => LinkFrameKind::Opened,
                 ClientProducerLinkEvent::Refused { .. } => LinkFrameKind::Refused,
                 ClientProducerLinkEvent::Admitting { .. } => LinkFrameKind::Admitting,
@@ -380,10 +387,33 @@ fn boundary_frames() -> Vec<LinkFrame> {
         LinkFrame::Opening(OpenClientProducerLink {
             serving_node: ClusterNodeName::parse("serving-node")
                 .assured("a literal cluster node name"),
+            heartbeat: nervix_models::ClientLinkCapabilities::default().announced_heartbeat(),
         }),
         LinkFrame::Item(ClientProducerLinkItem::Heartbeat),
         LinkFrame::Event(ClientProducerLinkEvent::Heartbeat),
     ];
+    for interval in [
+        Duration::from_nanos(1),
+        Duration::from_secs(2),
+        Duration::from_secs(12),
+        Duration::from_secs(u64::from(u32::MAX)),
+    ] {
+        let heartbeat = nervix_models::ClientLinkCapabilities::resolve(
+            nervix_models::ClientLinkCapabilityValues {
+                heartbeat_interval: Some(interval),
+                ..Default::default()
+            },
+        )
+        .assured("the boundary cadence is valid")
+        .announced_heartbeat();
+        frames.push(LinkFrame::Opening(OpenClientProducerLink {
+            serving_node: ClusterNodeName::parse("serving-node").assured("a valid node name"),
+            heartbeat,
+        }));
+        frames.push(LinkFrame::Event(ClientProducerLinkEvent::LinkOpened {
+            heartbeat,
+        }));
+    }
     for key in [0, 1, u64::MAX] {
         frames.push(LinkFrame::Item(ClientProducerLinkItem::Close { key }));
         frames.push(LinkFrame::Item(ClientProducerLinkItem::Detach { key }));

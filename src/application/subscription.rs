@@ -80,7 +80,6 @@ use nervix_primitives::{
     task::JoinHandle,
 };
 use nervix_recovery::Discarded as _;
-use nonzero_ext::nonzero;
 use sorted_vec::SortedSet;
 
 use self::delivery::SubscriptionDelivery;
@@ -207,15 +206,12 @@ pub(in crate::application) enum SubscriptionError {
     MissingScheduledBranch { relay: RelayName },
 }
 
-/// The most rows one frame of a subscription carries. A frame also stops at the session's frame
-/// limit, so this bounds the rows a client decodes per frame rather than the frame's size.
-const SUBSCRIPTION_ROWS_PER_FRAME: NonZeroUsize = nonzero!(256_usize);
-
 /// Where a session's subscriptions queue their frames, and the limits those frames are held to.
 #[derive(Clone)]
 pub(in crate::application) struct SessionDelivery {
     pub(in crate::application) outbound: SessionOutbound,
     pub(in crate::application) limits: SessionLimits,
+    pub(in crate::application) rows_per_frame: NonZeroUsize,
 }
 
 /// One subscription generation its session announced, until it is withdrawn.
@@ -1462,7 +1458,7 @@ impl SessionServiceImpl {
             handle.clone(),
             row_schema,
             delivery.limits,
-            SUBSCRIPTION_ROWS_PER_FRAME,
+            delivery.rows_per_frame,
         );
         let opening = match opening {
             Ok(opening) => opening,
@@ -1830,7 +1826,7 @@ mod tests {
 
     use super::{
         super::{
-            session::outbound::{self, SESSION_SUBSCRIPTION_CAPACITY, SessionFrames},
+            session::outbound::{self, SessionFrames},
             test_fixtures::{TestService, build_test_service, named, string_branch_key},
         },
         *,
@@ -1873,10 +1869,17 @@ mod tests {
 
     /// Session lanes whose transport the test reads, or leaves unread to hold them full.
     fn session_delivery() -> (SessionDelivery, SessionFrames) {
-        let (outbound, frames) = outbound::channel(CancellationToken::new());
+        let (outbound, frames) = outbound::channel(
+            CancellationToken::new(),
+            &nervix_models::SessionCapabilities::default(),
+        );
         let delivery = SessionDelivery {
             outbound,
             limits: SessionLimits::DEFAULT,
+            rows_per_frame: nervix_models::SessionCapabilities::default()
+                .subscription_rows_per_frame()
+                .try_into()
+                .assured("default rows fit usize"),
         };
         (delivery, frames)
     }
@@ -1902,7 +1905,7 @@ mod tests {
             handle.clone(),
             schema,
             delivery.limits,
-            SUBSCRIPTION_ROWS_PER_FRAME,
+            delivery.rows_per_frame,
         )
         .assured("the test row limit fits the default collection limit")
         .open(domain.clone(), relay.clone());
@@ -2403,7 +2406,8 @@ mod tests {
 
         // The lane takes one frame per batch until it is full, the delivery holds the next
         // frame it cannot queue, and the relay receiver holds one more batch.
-        let absorbed = SESSION_SUBSCRIPTION_CAPACITY
+        let absorbed = nervix_models::SessionCapabilities::default()
+            .queue_capacity()
             .checked_add(2)
             .assured("the lane capacity is a small constant");
         for user_id in 0..absorbed {

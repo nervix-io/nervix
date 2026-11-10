@@ -764,3 +764,10 @@ retain their resolution order independently of the DNS query-family selection.
 The committed incarnation-bound capability record reports the policy loaded for each node.
 A changed file or override takes effect with the next node run; it does not silently replace a
 resolver that existing clients retain.
+
+Client-link duplex setup receives the active interconnect connection-setup budget, including any
+host lookup within that operation. Control-plane request owners derive their RPC caps from the
+active transport request budget; each caller still passes the remaining operation budget where
+applicable. The native session opening reads authenticated bound metadata over its already
+resolved channel, preserving resolver ownership, origin validation, TLS name and HTTP authority.
+No announcement lookup or additional connection is introduced.

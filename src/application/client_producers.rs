@@ -106,6 +106,7 @@ pub(in crate::application) struct ClientProducerRouter {
     runtime: Runtime,
     local_node: ClusterNodeName,
     links: ProducerLinks,
+    settings: nervix_models::ClientLinkCapabilities,
 }
 
 impl ClientProducerRouter {
@@ -113,12 +114,14 @@ impl ClientProducerRouter {
         runtime: Runtime,
         interconnect: Transport,
         local_node: ClusterNodeName,
+        settings: nervix_models::ClientLinkCapabilities,
     ) -> Self {
-        let links = ProducerLinks::new(interconnect, local_node.clone());
+        let links = ProducerLinks::new(interconnect, local_node.clone(), settings);
         Self {
             runtime,
             local_node,
             links,
+            settings,
         }
     }
 
@@ -128,7 +131,7 @@ impl ClientProducerRouter {
         &self,
         interconnect: &Transport,
     ) -> error_stack::Result<(), HandlerRegistrationError> {
-        link::serve_owner_links(interconnect, self.runtime.clone())
+        link::serve_owner_links(interconnect, self.runtime.clone(), self.settings)
     }
 
     /// Attaches a producer to the client ingestor `owner` executes.

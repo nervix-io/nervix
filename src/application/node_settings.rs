@@ -34,6 +34,7 @@ use crate::{
 pub struct NodeSettings {
     /// Explicit first-bootstrap seeds, retained separately from resolved local defaults.
     pub parameter_seeds: nervix_models::ClusterParameterSeedValues,
+    pub operational: nervix_models::NodeOperationalCapabilities,
     pub raft: RaftTimings,
     pub raft_retention: RaftRetentionSettings,
     pub consensus_operations: nervix_consensus::RaftOperationSettings,

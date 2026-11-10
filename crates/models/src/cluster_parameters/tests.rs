@@ -11,6 +11,11 @@ fn parameters(input: &[u8; 384]) -> ClusterParameterValues {
     let generated = nervix_arbitrary::Arbitrary::new(input, nervix_arbitrary::Domain::Vocabulary)
         .cluster_parameter_values();
     ClusterParameterValues::resolve(ClusterParameterSeedValues {
+        forced_recovery_budget: Some(generated.forced_recovery_budget()),
+        ownership_handoff_poll_interval: Some(generated.ownership_handoff_poll_interval()),
+        entity_gate_poll_interval: Some(generated.entity_gate_poll_interval()),
+        domain_drain_poll_interval: Some(generated.domain_drain_poll_interval()),
+        runtime_readiness_propagation_bound: Some(generated.runtime_readiness_propagation_bound()),
         password_iterations: Some(generated.password_iterations()),
         node_unavailability_timeout: Some(generated.node_unavailability_timeout()),
         domain_drain_timeout: Some(generated.domain_drain_timeout()),
@@ -95,6 +100,11 @@ fn bolero_cluster_parameter_records_preserve_every_value() {
 fn every_duration_refuses_zero_at_its_definition_boundary() {
     let current = ClusterParameterValues::default();
     let changes = [
+        ClusterParameterChange::ForcedRecoveryBudget(Duration::ZERO),
+        ClusterParameterChange::OwnershipHandoffPollInterval(Duration::ZERO),
+        ClusterParameterChange::EntityGatePollInterval(Duration::ZERO),
+        ClusterParameterChange::DomainDrainPollInterval(Duration::ZERO),
+        ClusterParameterChange::RuntimeReadinessPropagationBound(Duration::ZERO),
         ClusterParameterChange::NodeUnavailabilityTimeout(Duration::ZERO),
         ClusterParameterChange::DomainDrainTimeout(Duration::ZERO),
         ClusterParameterChange::EntityGateDeadline(Duration::ZERO),
@@ -228,4 +238,70 @@ fn delayed_observations_and_installations_preserve_the_newest_coherent_revision(
         }))
         .is_err()
     );
+}
+
+/// Every duration keeps its complete nanosecond value in both public and compact stored forms.
+#[test]
+fn bounded_durations_preserve_nanoseconds_at_both_ends_of_their_domain() {
+    let definitions: [fn(Duration) -> ClusterParameterChange; 12] = [
+        ClusterParameterChange::ForcedRecoveryBudget,
+        ClusterParameterChange::OwnershipHandoffPollInterval,
+        ClusterParameterChange::EntityGatePollInterval,
+        ClusterParameterChange::DomainDrainPollInterval,
+        ClusterParameterChange::RuntimeReadinessPropagationBound,
+        ClusterParameterChange::NodeUnavailabilityTimeout,
+        ClusterParameterChange::DomainDrainTimeout,
+        ClusterParameterChange::EntityGateDeadline,
+        ClusterParameterChange::TransactionIdleTimeout,
+        ClusterParameterChange::TransactionTombstoneRetention,
+        ClusterParameterChange::CommandRetryValidity,
+        ClusterParameterChange::StateSnapshotInterval,
+    ];
+    let maximum = Duration::from_secs(u64::from(u32::MAX));
+    for value in [
+        Duration::from_nanos(1),
+        Duration::from_secs(3600) + Duration::from_nanos(17),
+        maximum - Duration::from_nanos(1),
+        maximum,
+    ] {
+        let updates = ClusterParameterUpdates::try_from(
+            definitions.map(|definition| definition(value)).to_vec(),
+        )
+        .assured("the complete duration assignment has unique parameter identities");
+        let original = ClusterParameterValues::default()
+            .changed(&updates)
+            .assured("the duration is in the positive bounded domain");
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original)
+            .assured("the complete current policy archives");
+        let restored: ClusterParameterValues = rkyv::from_bytes::<_, rkyv::rancor::Error>(&bytes)
+            .assured("all checked current durations restore");
+        assert_eq!(restored, original);
+        let json =
+            serde_json::to_value(original).assured("the current public duration fields encode");
+        assert_eq!(
+            json["forced_recovery_budget"],
+            serde_json::json!({"secs": value.as_secs(), "nanos": value.subsec_nanos()})
+        );
+        assert_eq!(
+            serde_json::from_value::<ClusterParameterValues>(json)
+                .assured("the complete public policy decodes"),
+            original
+        );
+        for change in updates.iter() {
+            let described = restored
+                .described()
+                .into_iter()
+                .find(|field| field.parameter == change.parameter())
+                .assured("every assigned duration is described");
+            assert_eq!(described.value, change.value_text());
+        }
+    }
+}
+
+#[test]
+fn a_compact_duration_refusal_keeps_its_integer_conversion_cause() {
+    let refusal = crate::ClusterParameterDuration::try_from(Duration::MAX)
+        .expect_err("the external duration cannot fit the nanosecond scalar");
+    assert!(refusal.contains::<crate::ClusterParameterDurationError>());
+    assert!(refusal.contains::<std::num::TryFromIntError>());
 }

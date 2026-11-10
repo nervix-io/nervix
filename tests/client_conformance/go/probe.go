@@ -63,6 +63,7 @@ type target struct {
 type exchange struct {
 	connection *grpc.ClientConn
 	stream     grpc.ClientStream
+	frameBytes uint64
 	nextID     uint64
 	// Unsolicited frames that arrived while a reply was awaited, kept in arrival order.
 	pending []*session.ServerMessage
@@ -90,7 +91,28 @@ func dial(ctx context.Context, uri string, probe target) (*exchange, error) {
 		connection.Close()
 		return nil, err
 	}
-	return &exchange{connection: connection, stream: stream}, nil
+	headers, err := stream.Header()
+	if err != nil {
+		connection.Close()
+		return nil, err
+	}
+	var frameBytes uint64
+	for _, key := range []string{"nervix-session-frame-bytes", "nervix-session-transfer-bytes", "nervix-session-nesting-depth", "nervix-session-collection-entries", "nervix-session-string-bytes"} {
+		values := headers.Get(key)
+		if len(values) != 1 {
+			connection.Close()
+			return nil, fmt.Errorf("session opening requires one %s", key)
+		}
+		value, err := strconv.ParseUint(values[0], 10, 64)
+		if err != nil || value == 0 {
+			connection.Close()
+			return nil, fmt.Errorf("invalid session opening %s", key)
+		}
+		if key == "nervix-session-frame-bytes" {
+			frameBytes = value
+		}
+	}
+	return &exchange{connection: connection, stream: stream, frameBytes: frameBytes}, nil
 }
 
 func (e *exchange) close() {
@@ -103,6 +125,9 @@ func (e *exchange) receive() (*session.ServerMessage, error) {
 	var frame []byte
 	if err := e.stream.RecvMsg(&frame); err != nil {
 		return nil, err
+	}
+	if uint64(len(frame)) > e.frameBytes {
+		return nil, errors.New("a received frame exceeds this session limit")
 	}
 	if len(frame) < 8 || string(frame[4:8]) != "NXSM" {
 		return nil, errors.New("a server frame lacks the NXSM identifier")
@@ -122,7 +147,11 @@ func (e *exchange) request(kind session.ClientRequest,
 	session.ClientMessageAddRequestType(builder, kind)
 	session.ClientMessageAddRequest(builder, body)
 	builder.FinishWithFileIdentifier(session.ClientMessageEnd(builder), []byte("NXCM"))
-	if err := e.stream.SendMsg(builder.FinishedBytes()); err != nil {
+	frame := builder.FinishedBytes()
+	if uint64(len(frame)) > e.frameBytes {
+		return nil, errors.New("the request exceeds this session limit")
+	}
+	if err := e.stream.SendMsg(frame); err != nil {
 		return nil, err
 	}
 	for {

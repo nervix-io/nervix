@@ -132,6 +132,8 @@ pub enum AppError {
     InvalidClientEndpointCapacity,
     #[error("invalid execution capacity")]
     InvalidExecutionSettings,
+    #[error("invalid operational node capabilities")]
+    InvalidOperationalCapabilities,
     #[error("invalid native runtime capacity")]
     InvalidRuntimeCapacity,
     #[error("invalid peer receive settings")]

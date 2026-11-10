@@ -832,12 +832,18 @@ that set, so a change published between the read and the wait still ends the wai
 publishes its first set, every target counts as live so that bootstrap discovery can reach its
 peers.
 
-Connection setup has a five-second deadline covering TCP, TLS, HTTP/2, and connection binding. The
-default bounded request deadline is ten seconds and includes time waiting for an admission or stream
-slot. An operation can declare a tighter or longer semantic deadline; application health uses one
-second, domain-clock progress uses two seconds, and resource and state stream openings use longer
-operation deadlines. Once a streaming body is moving, five seconds without progress fails that
-transfer. Queueing never creates an unbounded extension to a declared deadline.
+Connection setup defaults to five seconds covering TCP, TLS, HTTP/2, and connection binding.
+The default bounded request deadline is ten seconds and includes time waiting for an admission or
+stream slot. A typed request resolves its owning deadline against that active transport budget.
+Gate, drain, revision and clock-progress requests use one fifth of it; relay descriptions use one
+tenth; resource replica publication and metrics/lookup requests use one half. Snapshot, checkpoint
+transfer and recovery requests use three, six and twelve request budgets respectively.
+Application-health probes follow the installed committed liveness policy. Explicit caller-owned
+remaining deadlines still govern bounded operations. Partition-key release uses the same selected
+request budget in its request type and explicitly timed runtime dispatch while the holder drains
+and persists the key. A resource archive open uses the Snapshot class, three transport request
+budgets and thirty seconds by default. Once a streaming body is moving, the configured progress budget, five seconds
+by default, bounds lack of progress. Queueing never extends a declared deadline.
 
 ## Remote Relay Delivery
 
@@ -1671,7 +1677,7 @@ Before forced-recovery checkpoint selection, the destination waits for its local
 to finish installing within the existing preparation deadline. It still validates the request's
 base fingerprint and entity against that installed revision. A startup installation wait does not
 classify the replica's checkpoints as absent; expiry is an installation deadline failure carrying
-the domain and entity. The request, process-incarnation fence and response envelope are unchanged.
+the domain and entity. The required request carries the coordinator's captured `forced-recovery-budget`; the destination validates it and uses that budget while waiting for installation, without requiring its local policy to be ready first. The coordinator supplies that captured budget as the RPC timeout and also bounds the entire preparation by its captured deadline. The process-incarnation fence and response envelope retain their existing ownership.
 
 WASM handoff and forced-recovery preparation on a passive revision validate and retain the complete
 checkpoint inventory without running guest callbacks or reading the stopped domain clock. The
@@ -1937,12 +1943,13 @@ their state.
 A client may open a producer for a [client ingestor](./ingestors.md#client-ingestors) through any
 live node. When the serving node does not execute the ingestor, it forwards the producer to the node
 that does over one `client_producer_link`: an ordered duplex stream on the relay pool, admitted
-through the shared relay subquota, with a five-second setup deadline. A serving node keeps at most
+through the shared relay subquota, with the transport connection-setup deadline, five seconds by default. A serving node keeps at most
 one link to each owning node, opened by the first producer that needs it and shared by every
 producer it forwards there, so forwarding holds one stream per peer however many producers use it.
 Two opens racing for one owner start one link.
 
-The opening frame names the serving node, and the owning node refuses a link whose named node is
+The opening frame names the serving node and its sender heartbeat. The owner first returns
+`LinkOpened` with its own heartbeat, before any producer answer or idle event. It refuses a link whose named node is
 not the peer it authenticated. Each forwarded producer then has a key the serving node assigns and
 never reuses within its process, so a late frame about an ended producer can never reach a later
 one. The serving node sends `Open` with the session's authenticated typed user name, the domain,
@@ -1984,10 +1991,15 @@ therefore costs one more round trip of the link. A batch awaiting its clearance 
 the window, so a serving node that stops answering holds at most the slots it was asked to clear,
 until the silence limit ends its link.
 
-The serving node waits at most 20 seconds for the owning node to answer a forwarded open, including
-opening the link. Both ends send a heartbeat after two seconds without other frames and treat ten
-seconds without hearing anything as a lost link; the owning node skips a heartbeat rather than queue
-it behind 64 unsent answers. When a link ends for any reason, the serving node refuses the opens it
+The serving node's producer-open capability bounds the owning node's answer, including opening
+the link; its default is 20 seconds. The opening request announces the serving node's checked
+heartbeat interval, and the owner's first answer announces its own. Each receiver derives its
+silence limit as five times the sender's announced interval. The default interval is two seconds,
+giving ten seconds of tolerated silence. Nodes with different intervals retain the same one wire
+shape and use the peer's interval for receiving and their own interval for sending. Opening must
+finish within its deadline, and a missing or invalid announcement ends it. The owning node skips
+a heartbeat rather than queue it behind its configured answer capacity, 64 by default.
+When a link ends for any reason, the serving node refuses the opens it
 has not heard back about as `EndpointUnavailable` and ends every producer the link carried as
 `OwnerLost`. Before that end, it answers each batch of the producer that it never cleared — whether
 it sent the batch or the link ended before it could — as `NotAdmitted` with `ProducerEnded`: the
@@ -2022,8 +2034,12 @@ well within its 32 MiB payload limit.
 The serving node checks the announced length against the grant and reassembles one delivery before
 answering a client read. It sends `Settle` frames with a stream-local correlation key and receives
 one typed result for each; an independent writer keeps settlement and heartbeat sends from
-blocking response reads. Both ends send two-second heartbeats and end the attachment after ten
-seconds of peer silence. A lost stream detaches the owner's consumer, revokes its attempts and
+blocking response reads. The opening request and the owner's first answer announce their
+respective heartbeat intervals. Each receiver tolerates five of the peer's intervals without
+traffic; each sender uses its own interval. The two-second default therefore tolerates ten
+seconds of silence, while mixed intervals remain independent in both directions. Stream-open
+deadlines and the owner-answer and serving-writer capacities are node capabilities. One captured open deadline covers both transport setup and the first answer; silence expiry follows the peer's announced cadence independently of the local send timer.
+A lost stream detaches the owner's consumer, revokes its attempts and
 allows the retained batches to be reassigned. Output and ACK state stay volatile, so an owner
 loss can require upstream replay. [Client Session
 Protocol](./client-session-protocol.md#emitter-consumers) owns what clients observe.
@@ -2559,3 +2575,8 @@ against the descriptor before any row reaches a Row frame. A typed refusal carri
 coordinator writes Row frames at the session reporting boundary, as for materialized pages.
 The inspection deadline controls stream admission and setup through
 `request_stream_with_timeout`, and the request type's `DEADLINE` projects from the configured request budget, like the materialized page operation. The caller's explicit remaining inspection deadline remains authoritative.
+
+Duplex setup selects its budget through `DuplexSetupDeadline`. Client producer and consumer
+links select the active transport connection-setup budget. Engine operations retain their
+request-relative class; consensus prefix confirmation and ordered-stream setup resolve the
+same selected value. The selection bounds opening, never the stream's lifetime.

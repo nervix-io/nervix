@@ -674,7 +674,10 @@ mod tests {
     #[test]
     fn the_deadline_supervisor_forces_an_exit_once_the_deadline_of_the_stop_request_passes() {
         let (process, _endings) = UnwindingProcess::with_endings();
-        let shutdown = ShutdownCoordinator::new(Duration::from_millis(50));
+        let shutdown = ShutdownCoordinator::new(
+            Duration::from_millis(50),
+            crate::application::shutdown::ShutdownSettings::default().task_grace_period(),
+        );
         let deadline = DeadlineSupervision::new(shutdown.clone(), ForcedExitClaim::new(process))
             .expect("a current-thread Tokio runtime builds without a driver");
         let ShutdownRequestOutcome::Accepted(request) = shutdown.request_stop() else {
@@ -783,7 +786,10 @@ mod shuttle_tests {
         /// Supervises a shutdown whose deadline passes `timeout` after its first stop request, and
         /// delivers SIGINT and then SIGTERM to the process.
         fn start(timeout: Duration) -> Self {
-            let shutdown = ShutdownCoordinator::new(timeout);
+            let shutdown = ShutdownCoordinator::new(
+                timeout,
+                crate::application::shutdown::ShutdownSettings::default().task_grace_period(),
+            );
             let (recorder, ending) = watch::channel(RecordedEnding::default());
             let forced_exit = ForcedExitClaim::new(RecordedProcess { ending: recorder });
             let deadline = DeadlineSupervision::new(shutdown.clone(), forced_exit.clone()).assured(

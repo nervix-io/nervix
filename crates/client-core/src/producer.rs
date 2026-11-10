@@ -51,7 +51,7 @@ use tracing::debug;
 use crate::{
     client::{Client, RecoveryDeadline, RecoveryMode, SessionRecovery},
     error::{ClientError, RequestKind},
-    exchange::{ExchangeRequests, PendingRequest, SESSION_LIMITS},
+    exchange::{ExchangeRequests, PendingRequest},
 };
 
 mod slots;
@@ -632,7 +632,7 @@ pub(crate) async fn send_on_exchange(
         request,
     };
     let frame = message
-        .encode(&SESSION_LIMITS)
+        .encode(&exchange.limits)
         .change_context(ClientError::EncodeRequest { request: kind })?;
     if exchange.frames.send(frame).await.is_err() {
         return Err(Report::new(exchange.pending.lock().failure()));
@@ -1121,7 +1121,7 @@ impl ProducerAttachment {
             request_id: registered.request_id,
             request,
         };
-        let frame = match message.encode(&SESSION_LIMITS) {
+        let frame = match message.encode(&self.exchange.limits) {
             Ok(frame) => frame,
             Err(error) => {
                 return Attempt::Answered(ProducerOutcome::not_sent(format!(

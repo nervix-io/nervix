@@ -367,8 +367,8 @@ expression scope.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
-Consensus's `raft_payload_identity_licensing_capability_tls_inference_reset_epoch_` keyspaces and current
-`ClusterState` metadata encoding, 24, identify its stored shapes, including the partition count of every resolved
+Consensus's `raft_operational_policy_epoch_` keyspaces and current
+`ClusterState` metadata encoding, 25, identify its stored shapes, including the partition count of every resolved
 branch declaration in the committed schedule, the partition epoch the schedule records for each
 branch whose count changed, and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations and a `RESET WASM PROCESSOR ... STATE` that takes
@@ -1450,3 +1450,22 @@ already admitted members outside the new-usage path.
 An inspection entity is `DomainNode` or `ClusterLicense`. Only the former contains a domain and
 node reference. Both use the shared page and Row-section representation; a cluster observation
 never invents a graph identity to satisfy the envelope.
+
+## Session Opening And Bounded Policy Values
+
+The native command's attempt state retains admission uncertainty independently of the latest
+attempt's failure. A replacement session's smaller bound can refuse a replay without settling
+an earlier attempt; that error keeps the original execution identity as uncertain. A fresh
+request refused before handoff has no earlier admission to preserve.
+
+A session opening carries all five checked bounds. Native metadata requires each dimension once;
+a WebSocket's first fixed-envelope frame has the same complete values. Missing or invalid bounds
+end the opening before ordinary traffic. An exchange and its reader retain one immutable value,
+and generation-scoped subscription queues install their byte budgets under their existing owner
+lock. Before an opening, no peer-derived subscription budget exists; ending or replacing a
+generation cannot publish a later generation's limits.
+
+Cluster duration definitions store exact u64 nanoseconds behind their `Setting` values, validate
+the same positive bounded duration domain, and project public durations without allocation.
+Their public JSON remains seconds and nanoseconds. Both stored and public decoders cross the
+definition's validation boundary; an invalid stored scalar cannot become a valid policy by defaulting.

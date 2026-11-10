@@ -70,6 +70,10 @@ impl CommandRetries {
         CommandRetryWait { order, delay }
     }
 
+    pub(super) fn is_uncertain(&self, order: IssueOrder) -> bool {
+        self.retries.contains_key(&order)
+    }
+
     pub(super) fn is_waiting(&self, order: IssueOrder) -> bool {
         if let Some(state) = self.retries.get(&order) {
             state.is_waiting()

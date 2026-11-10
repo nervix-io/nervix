@@ -158,8 +158,9 @@ pub struct MembershipValues {
 impl MembershipSettings {
     /// Resolves each value that is not given through its definition's default, then validates it.
     pub fn resolve(values: MembershipValues) -> Result<Self, Report<MembershipSettingsError>> {
-        let node_unavailability_timeout = Setting::resolve(values.node_unavailability_timeout, &())
-            .change_context(MembershipSettingsError::InvalidClusterParameter)?;
+        let node_unavailability_timeout =
+            NodeUnavailabilityTimeout::resolve_duration(values.node_unavailability_timeout)
+                .change_context(MembershipSettingsError::InvalidClusterParameter)?;
         Ok(Self {
             node_unavailability_timeout,
             gossip_interval: Setting::resolve(values.gossip_interval, &())?,
@@ -168,7 +169,7 @@ impl MembershipSettings {
     }
 
     pub fn node_unavailability_timeout(&self) -> Duration {
-        *self.node_unavailability_timeout.value()
+        self.node_unavailability_timeout.value().as_duration()
     }
 
     pub fn gossip_interval(&self) -> Duration {

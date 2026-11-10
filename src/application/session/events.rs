@@ -20,7 +20,7 @@
     nervix::layer(edge, reason = "owns the edges boundary declared above")
 )]
 
-use std::{num::NonZeroU64, time::Duration};
+use std::num::NonZeroU64;
 
 use arch_into::ArchInto as _;
 use error_stack::ResultExt as _;
@@ -45,12 +45,6 @@ use crate::{
     runtime::RuntimeEvent,
 };
 
-/// How often a session checks which node leads.
-const LEADERSHIP_CHECK_INTERVAL: Duration = Duration::from_millis(250);
-
-/// How often a session that selected a domain receives its snapshot.
-const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(500);
-
 /// Sends a session its unsolicited events until the session ends.
 pub(super) async fn run_session_events(shared: Arc<SessionShared>) {
     let service = shared.service.clone();
@@ -58,9 +52,15 @@ pub(super) async fn run_session_events(shared: Arc<SessionShared>) {
     let mut runtime_events = service.inner.runtime.subscribe_events();
     let mut domains = service.inner.consensus.subscribe_domains();
     let mut selection = shared.selection.subscribe();
-    let mut leadership_check = interval(LEADERSHIP_CHECK_INTERVAL);
+    let mut leadership_check = interval(
+        service
+            .inner
+            .operational
+            .session
+            .leadership_check_interval(),
+    );
     leadership_check.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let mut snapshots = interval(SNAPSHOT_INTERVAL);
+    let mut snapshots = interval(service.inner.operational.session.snapshot_interval());
     snapshots.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     let mut leadership = service.observed_leadership().await;

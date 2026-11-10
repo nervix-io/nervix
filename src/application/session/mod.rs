@@ -646,7 +646,17 @@ impl SessionServiceImpl {
         let shared = Arc::new(SessionShared {
             service: self.clone(),
             transport,
-            delivery: SessionDelivery { outbound, limits },
+            delivery: SessionDelivery {
+                outbound,
+                limits,
+                rows_per_frame: self
+                    .inner
+                    .operational
+                    .session
+                    .subscription_rows_per_frame()
+                    .try_into()
+                    .assured("the class validates the native subscription row count"),
+            },
             in_flight: Mutex::new(InFlightRequests::default()),
             view: RwLock::new(subscriptions.view()),
             selection,

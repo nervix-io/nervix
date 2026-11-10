@@ -3877,3 +3877,24 @@ focused canonical runner is `just test-outward-tls-publication`; full CI retains
 inventory. The cache mutex's diagnostic applicability and unrun scope are recorded in the Deloxide
 inventory. Public one-/three-node scenarios use real native/console/HTTPS and shared HTTP connector
 handshakes, including retained traffic and dynamic certificate rebinding.
+
+The main session opening publishes one immutable value through the native request body's opening
+oneshot. Its source stays unpolled until publication, and ending the publication cancels the body.
+Upload and restore companions offer the five captured bounds with their authenticated request and
+start their maintained tonic encoders immediately. The server checks the complete offer before
+polling input; a changed-bounds refusal carries the current values and admits no archive input.
+The caller retries that same identity with the current bounds while retaining any earlier admission
+uncertainty. This preserves streaming overlap without an extra negotiation round trip. Maintained
+tonic encoders and decoders retain the installed value without a recurring settings lock. The existing event-queue owner installs subscription byte budgets at generation
+start under its existing lock, using the client's two configured retention counts and the
+announced frame size. Overflow of the derived byte arithmetic fails before taking that lock or
+replacing the current generation. Its map access frequency and per-subscription overflow rules stay
+with that owner. Producer-link owner answers publish `LinkOpened` into the bounded queue before
+the link is exposed, so a concurrent idle heartbeat or receiver close cannot put an ordinary event
+before the opening. Registered Shuttle checks exercise those production publication owners;
+peer-cadence lifetime is also covered by the mixed-node public scenario.
+
+Captured-backup section reads resolve one batch bound from the immutable execution bulk quantum
+and pool capacity at stream creation. It is capped at half that pool, so the next read can coexist
+with the preceding charged transport buffer. This derivation takes no admission snapshot, adds no
+map access or lock, and retains the default 1 MiB read.

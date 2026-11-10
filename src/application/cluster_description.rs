@@ -402,8 +402,15 @@ fn capability_line(record: &NodeCapabilityRecord) -> String {
         Some(bytes) => bytes.to_string(),
         None => "unknown".to_string(),
     };
+    let operational = record
+        .operational
+        .described()
+        .into_iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     format!(
-        "  capabilities: committed {} cpu-count={cpu} memory-bytes={memory} {} {} {}",
+        "  capabilities: committed {} cpu-count={cpu} memory-bytes={memory} {} {} {} {operational}",
         record.identity,
         bounds_line(capabilities.receive),
         engine_capability_line(capabilities.engines),
@@ -564,6 +571,7 @@ mod tests {
             receive.relay_batch_bytes = NonZeroU64::new(relay).expect("positive relay bound");
             receive.bulk_chunk_bytes = NonZeroU64::new(chunk).expect("positive chunk bound");
             NodeCapabilityRecord {
+                operational: Default::default(),
                 identity: ClusterNodeIdentity::new(
                     name(node),
                     ClusterNodeIncarnation::new(incarnation),

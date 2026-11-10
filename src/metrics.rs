@@ -63,6 +63,7 @@ use tikv_jemalloc_ctl::{epoch, epoch_mib, stats};
 
 mod command_execution;
 mod connector;
+mod control_plane;
 mod interconnection;
 mod restore_staging;
 mod session;
@@ -1644,6 +1645,24 @@ impl AggregatedCounterSummary {
 #[derive(Debug, Clone)]
 pub struct RuntimeMetrics {
     series: Arc<MetricSeries>,
+}
+
+impl RuntimeMetrics {
+    pub(crate) fn install_control_plane_cadences(
+        &self,
+        capabilities: &nervix_models::ControlPlaneCapabilities,
+    ) {
+        self.series
+            .prometheus
+            .registry
+            .register(Box::new(control_plane::ControlPlaneCadences::new(
+                capabilities,
+            )))
+            .assured(
+                "a node installs its immutable cadence family once, before publishing its \
+                 listeners",
+            );
+    }
 }
 
 /// Every series one node records into, plus the Prometheus registry they are exported through.

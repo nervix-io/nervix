@@ -2457,6 +2457,15 @@ table LeadershipObserved {
   leadership: Leadership (required);
 }
 
+/// First server message on each authenticated WebSocket. All five bounds are required and nonzero.
+table SessionOpened {
+  frame_bytes: ulong = null;
+  transfer_bytes: ulong = null;
+  nesting_depth: ulong = null;
+  collection_entries: ulong = null;
+  string_bytes: ulong = null;
+}
+
 table DomainsObserved {
   domains: [DomainInfo] (required);
 }
@@ -2639,7 +2648,8 @@ union ServerBody {
   DomainClockAttachmentEnded,
   DomainClockTicked,
   ProducerAdmissionChanged,
-  ProducerEnded
+  ProducerEnded,
+  SessionOpened
 }
 
 // ---------------------------------------------------------------------------------------------

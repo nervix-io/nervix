@@ -40,6 +40,7 @@ use std::{
 
 use arch_into::ArchInto as _;
 use futures_util::{Sink, SinkExt as _, Stream, StreamExt as _, stream};
+use meticulous::ResultExt as _;
 use nervix_client_wire::{
     BackupDownloadFrame, EncodedFrame, FrameRoot, RestoreFrame, RestoreMessage, SessionLimits,
     VerifiedFrame,
@@ -146,6 +147,12 @@ impl SessionServiceImpl {
     {
         let codec = ServerBackupDownloadWebSocketCodec::new(limits);
         let (mut connector, mut messages) = connection.split();
+        if let Err(ending) =
+            send_opening(&mut connector, limits, &self.inner.admission_shutdown).await
+        {
+            ending.finish(&mut connector).await;
+            return;
+        }
         let request = loop {
             nervix_primitives::task::consume_budget().await;
             let message = nervix_primitives::select! {
@@ -266,6 +273,12 @@ impl SessionServiceImpl {
     {
         let codec = ServerRestoreWebSocketCodec::new(limits);
         let (mut connector, messages) = connection.split();
+        if let Err(ending) =
+            send_opening(&mut connector, limits, &self.inner.admission_shutdown).await
+        {
+            ending.finish(&mut connector).await;
+            return;
+        }
         let reader = codec.clone();
         // A connection that ends without a close message ended abnormally.
         let frames = messages
@@ -411,3 +424,31 @@ where
 
 #[cfg(test)]
 mod tests;
+
+/// Publish only the bounded scalar opening before a companion call consumes ordinary frames.
+async fn send_opening<S>(
+    connector: &mut S,
+    limits: SessionLimits,
+    admission: &nervix_primitives::sync::CancellationToken,
+) -> Result<(), ConsoleCallEnd>
+where
+    S: Sink<Message> + Unpin,
+    S::Error: Display,
+{
+    let frame = nervix_client_wire::SessionOpened { limits }
+        .encode()
+        .assured("five bounded numeric fields fit the fixed opening envelope");
+    nervix_primitives::select! {
+        biased;
+        _ = admission.cancelled() => Err(ConsoleCallEnd::ShuttingDown),
+        sent = connector.send(Message::Binary(frame.into_bytes().to_vec())) => {
+            match sent {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    debug!(error = %error, "a console call failed while sending its opening");
+                    Err(ConsoleCallEnd::Failed)
+                }
+            }
+        }
+    }
+}

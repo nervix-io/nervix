@@ -160,6 +160,11 @@ impl RaftTimings {
         *self.heartbeat_interval.value()
     }
 
+    /// Local runtime admission and installation retry after two opportunities for Raft progress.
+    pub fn runtime_state_retry_interval(&self) -> Duration {
+        self.heartbeats(2)
+    }
+
     /// The shortest time a follower waits without hearing from a leader before it stands for
     /// election.
     pub fn election_timeout_min(&self) -> Duration {

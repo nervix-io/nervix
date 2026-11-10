@@ -699,6 +699,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
             consensus_operations: self.consensus_operations(),
             node_database: self.database(),
             consensus_database: self.database(),
+            operational: self.entropy.node_operational_capabilities(),
             parameter_seeds: nervix_models::ClusterParameterSeedValues {
                 tls_cipher_suites: Some(tls_cipher_suites),
                 tls_key_exchange_groups: Some(tls_key_exchange_groups),

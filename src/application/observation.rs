@@ -21,7 +21,7 @@ mod materialized_state;
 mod processor_descriptions;
 mod processor_state;
 
-use std::{collections::BTreeSet, num::NonZeroU64, time::Duration};
+use std::{collections::BTreeSet, num::NonZeroU64};
 
 use arch_into::ArchInto;
 use error_stack::{Report, ResultExt as _};
@@ -86,8 +86,6 @@ use crate::{registry::RegistryError, runtime::RelayPartitioning, runtime_schema}
 
 mod ingestor_units;
 mod relay_units;
-
-const REMOTE_DESCRIBE_RELAY_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// A model as `DESCRIBE` reads it: the configuration it was created with, and the schedule entry
 /// that places it while its domain is running.
@@ -295,7 +293,9 @@ impl SessionServiceImpl {
                         relay: describe.relay.clone(),
                         bindings: describe.bindings.clone(),
                     },
-                    REMOTE_DESCRIBE_RELAY_TIMEOUT,
+                    self.inner
+                        .interconnect
+                        .request_deadline::<RemoteDescribeRelayRequest>(),
                 )
                 .await;
             match response {
@@ -943,7 +943,7 @@ impl SessionServiceImpl {
                     kind: model_kind,
                     name: identifier.clone(),
                 },
-                Duration::from_secs(2),
+                self.coordination_rpc_timeout(),
             )
             .await;
         match response {

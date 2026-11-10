@@ -118,14 +118,18 @@ struct ReceiveRestore {
 
 impl StreamingService<VerifiedFrame<RestoreFrame>> for ReceiveRestore {
     type Response = Bytes;
-    type ResponseStream =
-        nervix_primitives::stream::wrappers::ReceiverStream<Result<Bytes, Status>>;
+    type ResponseStream = super::AnnouncedAnswers<Bytes>;
     type Future = BoxFuture<Response<Self::ResponseStream>, Status>;
 
     fn call(&mut self, request: Request<Streaming<VerifiedFrame<RestoreFrame>>>) -> Self::Future {
         let restores = self.restores.clone();
         let archive_read = self.archive_read;
         Box::pin(async move {
+            if let Some(refusal) =
+                crate::wire::grpc::limits::offer_refusal(request.metadata(), limits())
+            {
+                return Err(refusal);
+            }
             let mut stream = request.into_inner();
             let first = stream
                 .message()
@@ -157,26 +161,24 @@ impl StreamingService<VerifiedFrame<RestoreFrame>> for ReceiveRestore {
                 })
                 .await
                 .assured("the test receives the restore before answering it");
+            // Withhold headers until the selected input prefix was received. A refusal ends
+            // the call in its headers; a body failure follows successful opening metadata.
             let item = match reply.await.assured("the test sends the scripted answer") {
-                ScriptedReply::Message(bytes) => Some(Ok(bytes)),
+                ScriptedReply::Message(bytes) => Ok(Some(bytes)),
                 ScriptedReply::Refusal(status) => return Err(status),
-                ScriptedReply::BodyFailure(status) => Some(Err(status)),
-                ScriptedReply::Empty => None,
+                ScriptedReply::BodyFailure(status) => Err(status),
+                ScriptedReply::Empty => Ok(None),
             };
-            let (outbound, receiver) = mpsc::channel(1);
-            if let Some(item) = item {
-                outbound
-                    .send(item)
-                    .await
-                    .assured("one answer fits the bounded reply channel");
-            }
-            let mut response = Response::new(
-                nervix_primitives::stream::wrappers::ReceiverStream::new(receiver),
+            use nervix_primitives::stream::StreamExt as _;
+            let body: Self::ResponseStream = Box::pin(
+                nervix_primitives::stream::iter([item]).filter_map(|result| result.transpose()),
             );
+            let mut response = Response::new(body);
+            crate::wire::grpc::limits::write(response.metadata_mut(), limits());
             for value in ["first", "second"] {
                 response.metadata_mut().append(
                     "restore-peer",
-                    value.parse().assured("the fixture metadata is ASCII"),
+                    value.parse().assured("ASCII fixture metadata"),
                 );
             }
             Ok(response)
@@ -783,11 +785,13 @@ async fn a_local_restore_decoder_failure_retains_its_cause() {
             .ready()
             .await
             .assured("the scripted peer remains ready");
+        let mut request = Request::new(nervix_primitives::stream::wrappers::ReceiverStream::new(
+            receiver,
+        ));
+        crate::wire::grpc::limits::write(request.metadata_mut(), limits());
         client
             .client_streaming(
-                Request::new(nervix_primitives::stream::wrappers::ReceiverStream::new(
-                    receiver,
-                )),
+                request,
                 http::uri::PathAndQuery::from_static(RESTORE_BACKUP_PATH),
                 ClientRestoreCodec::new(limits()),
             )

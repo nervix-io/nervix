@@ -15,9 +15,8 @@ use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
-    EncodedFrame, RequestId, UploadChunk, UploadDisposition, UploadFrame, UploadReply,
-    UploadReplyFrame, UploadStart, VerifiedFrame,
-    grpc::{ClientUploadCodec, UPLOAD_RESOURCE_PATH},
+    RequestId, SessionLimits, UploadChunk, UploadDisposition, UploadFrame, UploadReply,
+    UploadReplyFrame, UploadStart, VerifiedFrame, WireEncodeError, grpc::UPLOAD_RESOURCE_PATH,
 };
 use nervix_models::{DomainName, ResourceName, ResourceUploadIdentity};
 use nervix_primitives::{stream::wrappers::ReceiverStream, sync::mpsc};
@@ -37,16 +36,11 @@ use crate::{
     },
     connection::GrpcConnector,
     error::{ClientError, RequestKind},
-    exchange::SESSION_LIMITS,
     outcome::{CommandOutcome, ResourceUploadOutcome, Routing},
 };
 
 /// Archive bytes one upload frame carries.
 const UPLOAD_CHUNK_BYTES: usize = 64 * 1024;
-
-// A chunk fills at most half a frame, far more room than its frame's envelope needs, so a
-// non-empty chunk always encodes.
-const _: () = assert!(UPLOAD_CHUNK_BYTES <= SESSION_LIMITS.frame_bytes() / 2);
 
 /// Archive construction keeps one bounded read buffer and one bounded write buffer, avoiding
 /// a filesystem worker handoff for every small tar copy and header write.
@@ -107,10 +101,12 @@ impl Client {
                 name: identifier.to_string(),
             })?;
         let archive = UploadArchive::build(directory.as_ref()).await?;
+        let mut admission_possible = false;
         let result =
             nervix_primitives::time::timeout(self.inner.connector.retry_timeout(), async {
                 // How many calls the upload opened, the one under way included.
                 let mut calls = NonZeroU32::MIN;
+                let mut next_limits = None;
                 for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
                     nervix_primitives::task::consume_budget().await;
                     calls = Self::upload_calls_opened(attempt);
@@ -120,16 +116,17 @@ impl Client {
                         resource: resource.clone(),
                         upload_identity: upload_identity.clone(),
                         total_bytes: archive.total_bytes,
-                    }
-                    .encode(&SESSION_LIMITS)
-                    .change_context(ClientError::EncodeRequest {
-                        request: RequestKind::UploadResource,
-                    })?;
+                    };
                     let reader = File::open(&archive.path)
                         .await
                         .change_context(ClientError::BuildUploadArchive)?;
+                    let (channel, session_limits) = {
+                        let exchange = self.inner.exchange.lock().await;
+                        (exchange.channel.clone(), exchange.requests.limits)
+                    };
                     let stream = UploadAttempt {
-                        channel: self.current_channel().await,
+                        channel,
+                        limits: next_limits.take().unwrap_or(session_limits),
                         start,
                         archive: reader,
                     };
@@ -138,13 +135,26 @@ impl Client {
                         stream.send(&self.inner.connector, on_progress.clone()),
                     )
                     .await;
-                    let response = match sent.unwrap_or_else(|_| {
-                        Err(Box::new(Status::deadline_exceeded(
-                            "upload request deadline exceeded",
+                    let sent = sent.unwrap_or_else(|_| {
+                        Err(UploadSendFailure::Transport(Box::new(
+                            Status::deadline_exceeded("upload request deadline exceeded"),
                         )))
-                    }) {
+                    });
+                    if let Err(UploadSendFailure::Transport(status)) = &sent {
+                        admission_possible |= upload_status_is_retryable(status);
+                    }
+                    let response = match sent {
                         Ok(response) => response,
-                        Err(status)
+                        Err(UploadSendFailure::BoundsChanged(limits)) => {
+                            next_limits = Some(limits);
+                            continue;
+                        }
+                        Err(UploadSendFailure::Encode(report)) => {
+                            return Err(report.change_context(ClientError::EncodeRequest {
+                                request: RequestKind::UploadResource,
+                            }));
+                        }
+                        Err(UploadSendFailure::Transport(status))
                             if upload_status_is_retryable(&status)
                                 && self.await_retry(attempt).await =>
                         {
@@ -168,7 +178,7 @@ impl Client {
                                 }
                             }
                         }
-                        Err(status) => {
+                        Err(UploadSendFailure::Transport(status)) => {
                             return Err(Report::new(ClientError::UploadResource(status)));
                         }
                     };
@@ -224,6 +234,9 @@ impl Client {
                     }
                 }
 
+                if admission_possible {
+                    return Err(Report::new(ClientError::RetryDeadline));
+                }
                 let mut exhausted =
                     CommandOutcome::failed_locally("upload redirect loop exceeded".to_string());
                 exhausted.resource_upload = Some(ResourceUploadOutcome {
@@ -238,10 +251,13 @@ impl Client {
             .await;
         match result {
             Ok(Ok(outcome)) => Ok(outcome),
-            Ok(Err(report)) if report.current_context().can_hide_installed_upload() => Err(report
-                .change_context(ClientError::UncertainUpload {
+            Ok(Err(report))
+                if admission_possible || report.current_context().can_hide_installed_upload() =>
+            {
+                Err(report.change_context(ClientError::UncertainUpload {
                     identity: upload_identity,
-                })),
+                }))
+            }
             Ok(Err(report)) => Err(report),
             Err(_) => {
                 let expired = Report::new(ClientError::RetryDeadline);
@@ -399,8 +415,15 @@ impl UploadArchiveEntry {
 /// One attempt to stream an archive: its start frame, then the archive in chunks.
 struct UploadAttempt {
     channel: Channel,
-    start: EncodedFrame<UploadFrame>,
+    limits: SessionLimits,
+    start: UploadStart,
     archive: File,
+}
+
+enum UploadSendFailure {
+    BoundsChanged(SessionLimits),
+    Encode(Report<WireEncodeError>),
+    Transport(Box<Status>),
 }
 
 impl UploadAttempt {
@@ -409,20 +432,30 @@ impl UploadAttempt {
         self,
         connector: &GrpcConnector,
         on_progress: impl Fn(u64) + Send + Sync + 'static,
-    ) -> Result<Response<VerifiedFrame<UploadReplyFrame>>, Box<Status>> {
+    ) -> Result<Response<VerifiedFrame<UploadReplyFrame>>, UploadSendFailure> {
         let Self {
             channel,
+            limits,
             start,
             mut archive,
         } = self;
         let (frames, outbound) =
             mpsc::channel(connector.capabilities().upload_frame_capacity().get());
+        let mut channel = channel;
+        crate::session_open::ready(&mut channel)
+            .await
+            .map_err(|error| {
+                UploadSendFailure::Transport(Box::new(Status::from_error(Box::new(error))))
+            })?;
+        let mut request = Request::new(ReceiverStream::new(outbound));
+        connector.authorize(&mut request);
+        let start = start.encode(&limits).map_err(UploadSendFailure::Encode)?;
         nervix_primitives::task::spawn(async move {
             if frames.send(start).await.is_err() {
                 // The call ended before it took the start frame, and its status says why.
                 return;
             }
-            let mut buffer = vec![0_u8; UPLOAD_CHUNK_BYTES];
+            let mut buffer = vec![0_u8; UPLOAD_CHUNK_BYTES.min(limits.frame_bytes() / 2)];
             loop {
                 nervix_primitives::task::consume_budget().await;
                 let read = match archive.read(&mut buffer).await {
@@ -438,9 +471,8 @@ impl UploadAttempt {
                     break;
                 }
                 on_progress(read.arch_into());
-                let chunk = UploadChunk::encode(&buffer[..read], &SESSION_LIMITS).assured(
-                    "a non-empty chunk of at most half a frame, as a const assertion holds it, \
-                     always encodes",
+                let chunk = UploadChunk::encode(&buffer[..read], &limits).assured(
+                    "a non-empty chunk of at most half the announced frame limit always encodes",
                 );
                 if frames.send(chunk).await.is_err() {
                     // The call ended, and its status says why.
@@ -448,23 +480,43 @@ impl UploadAttempt {
                 }
             }
         });
-        let mut client = tonic::client::Grpc::new(channel)
-            .max_decoding_message_size(SESSION_LIMITS.frame_bytes())
-            .max_encoding_message_size(SESSION_LIMITS.frame_bytes());
-        client
-            .ready()
+        let opening = crate::session_open::open_offered::<UploadFrame, UploadReplyFrame>(
+            &mut channel,
+            request,
+            PathAndQuery::from_static(UPLOAD_RESOURCE_PATH),
+            limits,
+        )
+        .await
+        .map_err(|status| UploadSendFailure::Transport(Box::new(status)))?;
+        let opened = opening.map_err(UploadSendFailure::BoundsChanged)?;
+        let (metadata, mut body, extensions) = opened.into_response().into_parts();
+        let mut headers = metadata.into_headers();
+        let received = body.message().await;
+        let message = match received {
+            Ok(message) => message,
+            Err(mut status) => {
+                let mut failure_headers = std::mem::take(status.metadata_mut()).into_headers();
+                failure_headers.extend(headers.clone());
+                *status.metadata_mut() =
+                    tonic::metadata::MetadataMap::from_headers(failure_headers);
+                return Err(UploadSendFailure::Transport(Box::new(status)));
+            }
+        };
+        let message = message.ok_or_else(|| {
+            UploadSendFailure::Transport(Box::new(Status::internal("Missing response message.")))
+        })?;
+        if let Some(trailers) = body
+            .trailers()
             .await
-            .map_err(|error| Box::new(Status::from_error(Box::new(error))))?;
-        let mut request = Request::new(ReceiverStream::new(outbound));
-        connector.authorize(&mut request);
-        client
-            .client_streaming(
-                request,
-                PathAndQuery::from_static(UPLOAD_RESOURCE_PATH),
-                ClientUploadCodec::new(SESSION_LIMITS),
-            )
-            .await
-            .map_err(Box::new)
+            .map_err(|status| UploadSendFailure::Transport(Box::new(status)))?
+        {
+            headers.extend(trailers.into_headers());
+        }
+        Ok(Response::from_parts(
+            tonic::metadata::MetadataMap::from_headers(headers),
+            message,
+            extensions,
+        ))
     }
 }
 

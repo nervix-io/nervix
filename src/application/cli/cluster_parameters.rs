@@ -17,6 +17,16 @@ use crate::application::cli_values::{HumanBytes, HumanDuration};
 #[derive(clap::Args, Debug, Clone, PartialEq)]
 #[command(next_help_heading = "First-bootstrap cluster parameters")]
 pub struct ClusterParameterArgs {
+    #[arg(long = nervix_models::ForcedRecoveryBudget::NAME, env = "NERVIX_FORCED_RECOVERY_BUDGET", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::ForcedRecoveryBudget, "First-bootstrap seed; change live policy with ALTER CLUSTER SET"))]
+    pub forced_recovery_budget: Option<HumanDuration>,
+    #[arg(long = nervix_models::OwnershipHandoffPollInterval::NAME, env = "NERVIX_OWNERSHIP_HANDOFF_POLL_INTERVAL", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::OwnershipHandoffPollInterval, "First-bootstrap seed; change live policy with ALTER CLUSTER SET"))]
+    pub ownership_handoff_poll_interval: Option<HumanDuration>,
+    #[arg(long = nervix_models::EntityGatePollInterval::NAME, env = "NERVIX_ENTITY_GATE_POLL_INTERVAL", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::EntityGatePollInterval, "First-bootstrap seed; change live policy with ALTER CLUSTER SET"))]
+    pub entity_gate_poll_interval: Option<HumanDuration>,
+    #[arg(long = nervix_models::DomainDrainPollInterval::NAME, env = "NERVIX_DOMAIN_DRAIN_POLL_INTERVAL", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::DomainDrainPollInterval, "First-bootstrap seed; change live policy with ALTER CLUSTER SET"))]
+    pub domain_drain_poll_interval: Option<HumanDuration>,
+    #[arg(long = nervix_models::RuntimeReadinessPropagationBound::NAME, env = "NERVIX_RUNTIME_READINESS_PROPAGATION_BOUND", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RuntimeReadinessPropagationBound, "First-bootstrap seed; change live policy with ALTER CLUSTER SET"))]
+    pub runtime_readiness_propagation_bound: Option<HumanDuration>,
     #[arg(long = nervix_models::TlsCipherSuites::NAME, env = "NERVIX_TLS_CIPHER_SUITES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::TlsCipherSuites, "First-bootstrap comma-separated algorithm names or aliases"))]
     pub tls_cipher_suites: Option<nervix_crypto_policy::TlsCipherSuites>,
     #[arg(long = nervix_models::TlsKeyExchangeGroups::NAME, env = "NERVIX_TLS_KEY_EXCHANGE_GROUPS", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::TlsKeyExchangeGroups, "First-bootstrap comma-separated algorithm names or aliases"))]
@@ -45,6 +55,15 @@ pub struct ClusterParameterArgs {
 impl ClusterParameterArgs {
     pub(super) fn from_seeds(seeds: &nervix_models::ClusterParameterSeedValues) -> Self {
         Self {
+            forced_recovery_budget: seeds.forced_recovery_budget.map(HumanDuration),
+            ownership_handoff_poll_interval: seeds
+                .ownership_handoff_poll_interval
+                .map(HumanDuration),
+            entity_gate_poll_interval: seeds.entity_gate_poll_interval.map(HumanDuration),
+            domain_drain_poll_interval: seeds.domain_drain_poll_interval.map(HumanDuration),
+            runtime_readiness_propagation_bound: seeds
+                .runtime_readiness_propagation_bound
+                .map(HumanDuration),
             tls_cipher_suites: seeds.tls_cipher_suites,
             tls_key_exchange_groups: seeds.tls_key_exchange_groups,
             password_iterations: seeds.password_iterations,
@@ -68,6 +87,26 @@ impl ClusterParameterArgs {
         }
     }
     pub(super) fn render(&self, command_line: &mut CommandLine) {
+        command_line.optional(
+            nervix_models::ForcedRecoveryBudget::NAME,
+            self.forced_recovery_budget,
+        );
+        command_line.optional(
+            nervix_models::OwnershipHandoffPollInterval::NAME,
+            self.ownership_handoff_poll_interval,
+        );
+        command_line.optional(
+            nervix_models::EntityGatePollInterval::NAME,
+            self.entity_gate_poll_interval,
+        );
+        command_line.optional(
+            nervix_models::DomainDrainPollInterval::NAME,
+            self.domain_drain_poll_interval,
+        );
+        command_line.optional(
+            nervix_models::RuntimeReadinessPropagationBound::NAME,
+            self.runtime_readiness_propagation_bound,
+        );
         command_line.optional(nervix_models::TlsCipherSuites::NAME, self.tls_cipher_suites);
         command_line.optional(
             nervix_models::TlsKeyExchangeGroups::NAME,

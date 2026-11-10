@@ -55,6 +55,7 @@ class LeaderRedirect extends Error {
 /** One session: a WebSocket carrying one frame per binary message. */
 class Exchange {
   private nextId = 0n;
+  private frameBytes = 1024;
   private readonly frames: Uint8Array[] = [];
   private readonly waiters: Array<(frame: Uint8Array | Error) => void> = [];
   private failure: Error | null = null;
@@ -75,8 +76,8 @@ class Exchange {
     socket.addEventListener('error', () => this.fail(new Error('the WebSocket failed')));
   }
 
-  static open(uri: string): Promise<Exchange> {
-    return new Promise((resolve, reject) => {
+  static async open(uri: string): Promise<Exchange> {
+    const exchange: Exchange = await new Promise<Exchange>((resolve, reject) => {
       const socket = new WebSocket(uri);
       socket.binaryType = 'arraybuffer';
       socket.addEventListener('open', () => resolve(new Exchange(socket)), { once: true });
@@ -84,6 +85,23 @@ class Exchange {
         once: true,
       });
     });
+    const message = await exchange.receive();
+    if (message.bodyType() !== wire.ServerBody.SessionOpened) {
+      throw new Error('a session starts with its limit announcement');
+    }
+    const opened = member(message.body(new wire.SessionOpened()) as wire.SessionOpened | null);
+    const values = [
+      opened.frameBytes(),
+      opened.transferBytes(),
+      opened.nestingDepth(),
+      opened.collectionEntries(),
+      opened.stringBytes(),
+    ];
+    if (values.some((value) => value === null || value <= 0n)) {
+      throw new Error('the announcement requires five positive limits');
+    }
+    exchange.frameBytes = Number(opened.frameBytes());
+    return exchange;
   }
 
   close(): void {
@@ -124,6 +142,9 @@ class Exchange {
     if (frame instanceof Error) {
       throw frame;
     }
+    if (frame.length > this.frameBytes) {
+      throw new Error('a received frame exceeds this session limit');
+    }
     const buffer = new flatbuffers.ByteBuffer(frame);
     if (!buffer.__has_identifier('NXSM')) {
       throw new Error('a server frame lacks the NXSM identifier');
@@ -154,7 +175,11 @@ class Exchange {
     // A closing socket may already have queued its typed ending. Read that frame to learn why it
     // ended before the close event becomes a transport failure.
     if (this.socket.readyState === WebSocket.OPEN) {
-      this.socket.send(builder.asUint8Array());
+      const frame = builder.asUint8Array();
+      if (frame.length > this.frameBytes) {
+        throw new Error('the request exceeds this session limit');
+      }
+      this.socket.send(frame);
     }
     for (;;) {
       const message = await this.receive();
@@ -1093,6 +1118,10 @@ function submissionLine(id: bigint, outcome: wire.SubmissionOutcome): string {
 function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
   const message = wire.ServerMessage.getRootAsServerMessage(frameBuffer(frame, 'NXSM'));
   switch (message.bodyType()) {
+    case wire.ServerBody.SessionOpened: {
+      const opened = member(message.body(new wire.SessionOpened()) as wire.SessionOpened | null);
+      return [`EVENT SESSION_OPENED frame=${opened.frameBytes()} transfer=${opened.transferBytes()} depth=${opened.nestingDepth()} entries=${opened.collectionEntries()} string=${opened.stringBytes()}`];
+    }
     case wire.ServerBody.Reply: {
       const reply = member(message.body(new wire.Reply()) as wire.Reply | null);
       const id = reply.requestId();

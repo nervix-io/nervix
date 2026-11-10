@@ -44,12 +44,20 @@ use crate::{
     runtime_schema::{ArrowBodyError, RuntimeRecordBatch},
 };
 
-/// How long one unit of a conversion, a window section or a keyspace, is converted again after the
-/// node refused it only for room, before that refusal ends the conversion.
-const ADMISSION_WAIT: Duration = Duration::from_secs(30);
-
-/// How long a refused unit waits before it is converted again.
-const ADMISSION_RETRY_DELAY: Duration = Duration::from_millis(50);
+/// Immutable local conversion policy captured at the restore boundary.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct RestoreAdmissionPolicy {
+    wait: Duration,
+    retry: Duration,
+}
+impl RestoreAdmissionPolicy {
+    pub(super) fn new(settings: &nervix_models::ControlPlaneCapabilities) -> Self {
+        Self {
+            wait: settings.restore_admission_wait(),
+            retry: settings.restore_admission_retry_interval(),
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub(super) enum BranchStateRestoreError {
@@ -155,16 +163,23 @@ fn refused_for_room(failure: &Report<BranchStateRestoreError>) -> bool {
 /// A unit the node refused only for room releases what it holds and is converted again rather than
 /// failing the restore, because the refusal judged nothing. The wait is bounded because the room
 /// may never come: what the restore itself holds can be what fills the budget.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct AdmissionWait {
+    policy: RestoreAdmissionPolicy,
     /// When the node first refused the unit.
     refused_since: Option<Instant>,
 }
 
 impl AdmissionWait {
+    fn new(policy: RestoreAdmissionPolicy) -> Self {
+        Self {
+            policy,
+            refused_since: None,
+        }
+    }
     /// Waits before the unit is converted again after `failure`, or returns the failure that ends
     /// the conversion: any failure but a refusal for room, and a refusal for room once the unit
-    /// has been refused for [`ADMISSION_WAIT`], which is then reported as the node having had no
+    /// has been refused for its captured wait, which is then reported as the node having had no
     /// room, whatever the layer that met the refusal called it.
     async fn retry_after(
         &mut self,
@@ -175,12 +190,12 @@ impl AdmissionWait {
         }
         let now = Instant::now();
         let refused_since = *self.refused_since.get_or_insert(now);
-        if now.duration_since(refused_since) >= ADMISSION_WAIT {
+        if now.duration_since(refused_since) >= self.policy.wait {
             return Err(failure.change_context(BranchStateRestoreError::NoRoom {
-                waited: ADMISSION_WAIT,
+                waited: self.policy.wait,
             }));
         }
-        nervix_primitives::time::sleep(ADMISSION_RETRY_DELAY).await;
+        nervix_primitives::time::sleep(self.policy.retry).await;
         Ok(())
     }
 }
@@ -267,8 +282,9 @@ pub(super) async fn prepare_deduplicator_checkpoint(
     descriptor: &DeduplicatorStateDescriptor,
     groups: &[DescribedSection],
     key_schema: &StdArc<arrow_schema::Schema>,
+    policy: RestoreAdmissionPolicy,
 ) -> Result<StagedArtifact, Report<BranchStateRestoreError>> {
-    let mut wait = AdmissionWait::default();
+    let mut wait = AdmissionWait::new(policy);
     loop {
         nervix_primitives::task::consume_budget().await;
         let converted = convert_keyspace(runtime, archive, descriptor, groups, key_schema).await;
@@ -402,11 +418,12 @@ pub(super) async fn prepare_window_checkpoint(
     descriptor: &WindowStateDescriptor,
     groups: &[DescribedWindowGroup],
     schemas: &WindowStateSchemas,
+    policy: RestoreAdmissionPolicy,
 ) -> Result<StagedArtifact, Report<BranchStateRestoreError>> {
-    let mut wait = AdmissionWait::default();
+    let mut wait = AdmissionWait::new(policy);
     loop {
         nervix_primitives::task::consume_budget().await;
-        let converted = convert_window(runtime, archive, descriptor, groups, schemas).await;
+        let converted = convert_window(runtime, archive, descriptor, groups, schemas, policy).await;
         match converted {
             Ok(checkpoint) => return Ok(checkpoint),
             Err(failure) => wait.retry_after(failure).await?,
@@ -421,6 +438,7 @@ async fn convert_window(
     descriptor: &WindowStateDescriptor,
     groups: &[DescribedWindowGroup],
     schemas: &WindowStateSchemas,
+    policy: RestoreAdmissionPolicy,
 ) -> Result<StagedArtifact, Report<BranchStateRestoreError>> {
     let accumulators = window_accumulators(descriptor, schemas)?;
     let branch = super::steps::remote_branch_key(descriptor.branch.as_ref());
@@ -445,6 +463,7 @@ async fn convert_window(
             &mut checkpoint,
             &group.input,
             &schemas.input,
+            policy,
         )
         .await?;
         seal_argument_columns(
@@ -454,6 +473,7 @@ async fn convert_window(
             &pending,
             &group.arguments,
             &schemas.arguments,
+            policy,
         )
         .await?;
     }
@@ -477,8 +497,9 @@ async fn seal_input_rows(
     checkpoint: &mut WindowCheckpointBuilder,
     section: &DescribedSection,
     schema: &StdArc<arrow_schema::Schema>,
+    policy: RestoreAdmissionPolicy,
 ) -> Result<PendingArguments, Report<BranchStateRestoreError>> {
-    let mut wait = AdmissionWait::default();
+    let mut wait = AdmissionWait::new(policy);
     loop {
         nervix_primitives::task::consume_budget().await;
         let sealed = try_seal_input_rows(runtime, archive, checkpoint, section, schema).await;
@@ -523,8 +544,9 @@ async fn seal_argument_columns(
     pending: &PendingArguments,
     section: &DescribedSection,
     schema: &StdArc<arrow_schema::Schema>,
+    policy: RestoreAdmissionPolicy,
 ) -> Result<(), Report<BranchStateRestoreError>> {
-    let mut wait = AdmissionWait::default();
+    let mut wait = AdmissionWait::new(policy);
     loop {
         nervix_primitives::task::consume_budget().await;
         let sealed =
@@ -604,6 +626,15 @@ fn window_accumulators(
 }
 
 #[cfg(test)]
+impl Default for AdmissionWait {
+    fn default() -> Self {
+        Self::new(RestoreAdmissionPolicy::new(
+            &nervix_models::ControlPlaneCapabilities::default(),
+        ))
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -665,14 +696,17 @@ mod tests {
         wait.retry_after(out_of_memory())
             .await
             .assured("a refusal inside the wait is retried");
-        nervix_primitives::time::advance(ADMISSION_WAIT).await;
+        nervix_primitives::time::advance(
+            nervix_models::ControlPlaneCapabilities::default().restore_admission_wait(),
+        )
+        .await;
         let ended = wait
             .retry_after(out_of_memory())
             .await
             .expect_err("a refusal that outlasts the wait ends the conversion");
         assert!(matches!(
             ended.current_context(),
-            BranchStateRestoreError::NoRoom { waited } if *waited == ADMISSION_WAIT
+            BranchStateRestoreError::NoRoom { waited } if *waited == nervix_models::ControlPlaneCapabilities::default().restore_admission_wait()
         ));
         assert!(
             ended.contains::<AdmissionError>(),

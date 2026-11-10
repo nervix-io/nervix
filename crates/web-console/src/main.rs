@@ -106,7 +106,8 @@ const WEBSOCKET_INITIAL_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const WEBSOCKET_MAX_RECONNECT_DELAY: Duration = Duration::from_secs(5);
 const SUBSCRIPTION_RETRY_DELAY: Duration = Duration::from_secs(1);
 
-/// The limits every frame of the console's session is held to.
+/// Explicit default bounds for isolated console fixtures.
+#[cfg(test)]
 const SESSION_LIMITS: SessionLimits = SessionLimits::DEFAULT;
 
 /// What a request shows when the server answered it with a reply meant for another kind of
@@ -119,11 +120,14 @@ const SESSION_UNAVAILABLE: &str = "websocket session is not available";
 /// The most requests of the console's controls its session keeps outstanding: held until the
 /// session can serve them, or sent and awaiting their reply.
 const MAX_OUTSTANDING_REQUESTS: usize = 256;
-/// The most text those requests carry together.
-const MAX_OUTSTANDING_REQUEST_BYTES: usize = 4 * request_handoff::MAX_WAITING_REQUEST_BYTES;
 // Everything the hand-off holds fits a session that has nothing else outstanding.
 const _: () = assert!(request_handoff::MAX_WAITING_REQUESTS <= MAX_OUTSTANDING_REQUESTS);
-const _: () = assert!(request_handoff::MAX_WAITING_REQUEST_BYTES <= MAX_OUTSTANDING_REQUEST_BYTES);
+
+fn outstanding_text_limit(frame_bytes: usize) -> usize {
+    frame_bytes
+        .checked_mul(4)
+        .assured("four admitted frames fit every supported platform")
+}
 
 /// Why the console did not send a request one of its controls issued. The control shows the
 /// reason where the request's outcome would have been shown.
@@ -841,6 +845,15 @@ struct RefusedRequest {
     refusal: RequestRefusal,
 }
 
+/// An encoding refusal either ends an unsent request or keeps an unresolved execution intact.
+enum EncodingRefusal {
+    Unsent(IssuedRequest),
+    ReplayRetained {
+        reference: CommandExecutionReference,
+        create: Option<CreateCommandContext>,
+    },
+}
+
 /// The requests the session keeps outstanding, and the text they carry.
 #[derive(Default)]
 struct OutstandingLoad {
@@ -865,17 +878,20 @@ impl OutstandingLoad {
 
     /// Whether one more request carrying `bytes` of text stays within the bounds, or which bound
     /// it would cross.
-    fn admits(&self, bytes: usize) -> Result<(), Report<RequestRefusal>> {
+    fn admits(&self, bytes: usize, text_limit: usize) -> Result<(), Report<RequestRefusal>> {
         if self.requests >= MAX_OUTSTANDING_REQUESTS {
             return Err(Report::new(RequestRefusal::TooManyOutstanding {
                 limit: MAX_OUTSTANDING_REQUESTS,
             }));
         }
+        if bytes == 0 {
+            return Ok(());
+        }
         match self.bytes.checked_add(bytes) {
-            Some(total) if total <= MAX_OUTSTANDING_REQUEST_BYTES => Ok(()),
+            Some(total) if total <= text_limit => Ok(()),
             // A sum that overflows is past the bound as well.
             Some(_) | None => Err(Report::new(RequestRefusal::TooMuchOutstandingText {
-                limit: MAX_OUTSTANDING_REQUEST_BYTES,
+                limit: text_limit,
             })),
         }
     }
@@ -888,6 +904,9 @@ impl OutstandingLoad {
 /// and never by arrival order. Unsolicited server messages answer no request, so they never
 /// complete or discard one.
 struct SessionRequests {
+    limits: Option<SessionLimits>,
+    /// Retention follows the last opening while a disconnected generation waits to recover.
+    text_limit: usize,
     /// Availability and bounded backoff of commands whose outcome remains uncertain.
     command_retries: CommandRetries,
     /// The place the next issued request takes.
@@ -900,6 +919,12 @@ struct SessionRequests {
     connection_held: BTreeMap<IssueOrder, HeldConnectionRequest>,
     /// The identity the next request sent on the current connection carries.
     next_request_id: NonZeroU64,
+    /// The writer hands frames over in request-id order, after successful encoding.
+    last_handoff: Option<RequestId>,
+    /// Ordered commands through this issue boundary may have entered an ended connection.
+    unconfirmed_commands: Option<IssueOrder>,
+    /// A retained command that this opening cannot carry; a fresh opening permits another try.
+    replay_waits_for_opening: Option<IssueOrder>,
     /// The requests sent on the current connection that await their terminal reply, by the
     /// identity the reply carries. Identities only increase, so iteration is send order.
     in_flight: BTreeMap<RequestId, SentRequest>,
@@ -918,13 +943,22 @@ struct SessionRequests {
 }
 
 impl SessionRequests {
-    fn new() -> Self {
+    fn new(limits: Option<SessionLimits>) -> Self {
+        let frame_bytes = match limits {
+            Some(limits) => limits.frame_bytes(),
+            None => nervix_models::SessionFrameBytes::DEFAULT,
+        };
         Self {
+            limits,
+            text_limit: outstanding_text_limit(frame_bytes),
             command_retries: CommandRetries::default(),
             next_issue: 0,
             held: BTreeMap::new(),
             connection_held: BTreeMap::new(),
             next_request_id: NonZeroU64::MIN,
+            last_handoff: None,
+            unconfirmed_commands: None,
+            replay_waits_for_opening: None,
             in_flight: BTreeMap::new(),
             transfers: BTreeMap::new(),
             latest_suggestion: None,
@@ -932,6 +966,12 @@ impl SessionRequests {
             leader_confirmed: false,
             attaching: None,
         }
+    }
+
+    fn install_limits(&mut self, limits: SessionLimits) {
+        self.text_limit = outstanding_text_limit(limits.frame_bytes());
+        self.limits = Some(limits);
+        self.replay_waits_for_opening = None;
     }
 
     /// Gives a request the next place in the issue order.
@@ -982,7 +1022,9 @@ impl SessionRequests {
     fn admit(&mut self, issued: IssuedRequest, lane: RequestLane) -> Admission {
         self.supersede_lookup(&issued.request);
         if let RequestLane::Ordered | RequestLane::Connection(ConnectionPriority::Control) = lane
-            && let Err(report) = self.outstanding().admits(issued.request.text_bytes())
+            && let Err(report) = self
+                .outstanding()
+                .admits(issued.request.text_bytes(), self.text_limit)
         {
             return Admission::Refused(Box::new(RefusedRequest {
                 request: issued.request,
@@ -996,7 +1038,8 @@ impl SessionRequests {
                     && self.has_room_in_flight()
                     && (priority == ConnectionPriority::Setup
                         || !self.is_ready()
-                        || self.held.is_empty())
+                        || self.held.is_empty()
+                        || self.ordered_head_waits_for_opening())
             }
         };
         if let ConsoleRequest::AttachTransaction(_) = &issued.request {
@@ -1130,7 +1173,10 @@ impl SessionRequests {
         let Some((connection_order, connection)) = self.connection_held.first_key_value() else {
             return false;
         };
-        if !self.is_ready() || connection.priority == ConnectionPriority::Setup {
+        if !self.is_ready()
+            || connection.priority == ConnectionPriority::Setup
+            || self.ordered_head_waits_for_opening()
+        {
             return true;
         }
         match self.held.first_key_value() {
@@ -1157,7 +1203,9 @@ impl SessionRequests {
                 let Some(entry) = self.held.first_entry() else {
                     break;
                 };
-                if self.command_retries.is_waiting(*entry.key()) {
+                if self.replay_waits_for_opening == Some(*entry.key())
+                    || self.command_retries.is_waiting(*entry.key())
+                {
                     break;
                 }
                 entry.remove_entry()
@@ -1165,6 +1213,59 @@ impl SessionRequests {
             messages.push(self.dispatch(IssuedRequest { order, request }));
         }
         messages
+    }
+
+    fn handed_to_socket(&mut self, request_id: RequestId) {
+        self.last_handoff = Some(request_id);
+    }
+
+    fn ordered_head_waits_for_opening(&self) -> bool {
+        self.replay_waits_for_opening.is_some_and(|blocked| {
+            self.held
+                .first_key_value()
+                .is_some_and(|(order, _)| *order == blocked)
+        })
+    }
+
+    /// A batch may already have reserved later ordered requests before an earlier replay fails
+    /// encoding. Return those requests to their original places before the writer hands them over.
+    fn hold_behind_refused_replay(&mut self, request_id: RequestId) -> bool {
+        let Some(blocked) = self.replay_waits_for_opening else {
+            return false;
+        };
+        let must_wait = self
+            .in_flight
+            .get(&request_id)
+            .and_then(|sent| sent.awaited.as_ref())
+            .is_some_and(|issued| issued.order > blocked && issued.request.is_ordered());
+        if !must_wait {
+            return false;
+        }
+        let issued = self
+            .answer(request_id)
+            .assured("the writer still owns the unsent ordered request it just found");
+        self.hold_again(issued);
+        true
+    }
+
+    fn encoding_refused(&mut self, issued: IssuedRequest) -> EncodingRefusal {
+        let ConsoleRequest::Command { request, purpose } = &issued.request else {
+            return EncodingRefusal::Unsent(issued);
+        };
+        let interrupted = self
+            .unconfirmed_commands
+            .is_some_and(|last| issued.order <= last);
+        if !interrupted && !self.command_retries.is_uncertain(issued.order) {
+            return EncodingRefusal::Unsent(issued);
+        }
+        let reference = request.execution_reference.clone();
+        let create = match purpose {
+            CommandPurpose::Create(context) => Some(context.clone()),
+            _ => None,
+        };
+        self.replay_waits_for_opening = Some(issued.order);
+        self.hold_again(issued);
+        EncodingRefusal::ReplayRetained { reference, create }
     }
 
     /// Holds a request that has to be sent again, in its original place in the issue order.
@@ -1176,6 +1277,8 @@ impl SessionRequests {
     fn clear_held(&mut self) {
         self.held.clear();
         self.command_retries.clear();
+        self.replay_waits_for_opening = None;
+        self.unconfirmed_commands = None;
         let connection_held = std::mem::take(&mut self.connection_held);
         for held in connection_held.into_values() {
             let request = held.request;
@@ -1235,9 +1338,12 @@ impl SessionRequests {
         }
         let assembly = match self.transfers.entry(request_id) {
             Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => {
-                entry.insert(TransferAssembly::new(request_id, &SESSION_LIMITS))
-            }
+            Entry::Vacant(entry) => entry.insert(TransferAssembly::new(
+                request_id,
+                &self
+                    .limits
+                    .assured("ordinary replies follow the checked opening of their connection"),
+            )),
         };
         let appended = assembly.append(part);
         let complete = assembly.is_complete();
@@ -1277,12 +1383,24 @@ impl SessionRequests {
     /// so the server recovers its recorded outcome instead of executing it twice. A request that
     /// belongs to the ended connection ends with it.
     fn end_connection(&mut self) {
+        self.limits = None;
         self.command_retries.connection_ended();
+        self.replay_waits_for_opening = None;
+        let handoff = self.last_handoff.take();
         let in_flight = std::mem::take(&mut self.in_flight);
-        for request in in_flight.into_values() {
+        for (request_id, request) in in_flight {
             let Some(issued) = request.awaited else {
                 continue;
             };
+            if handoff.is_some_and(|last| request_id <= last)
+                && matches!(&issued.request, ConsoleRequest::Command { .. })
+            {
+                let last = match self.unconfirmed_commands {
+                    Some(last) => last.max(issued.order),
+                    None => issued.order,
+                };
+                self.unconfirmed_commands = Some(last);
+            }
             self.hold_interrupted(issued);
         }
         self.held
@@ -2357,7 +2475,7 @@ async fn run_websocket_session(
         ..
     } = signals;
     let mut reconnect_delay = WEBSOCKET_INITIAL_RECONNECT_DELAY;
-    let mut requests = SessionRequests::new();
+    let mut requests = SessionRequests::new(None);
     let mut redirected_url = None::<String>;
     let mut session_auth_token = auth_token.get_untracked();
     loop {
@@ -2367,7 +2485,7 @@ async fn run_websocket_session(
             session_auth_token = next_auth_token.clone();
             redirected_url = None;
             if previous_was_authenticated {
-                requests = SessionRequests::new();
+                requests = SessionRequests::new(None);
                 queued.discard_waiting();
                 upload_base_url.set(web_console_http_base_url());
                 signals.clear_authenticated_view();
@@ -2514,6 +2632,40 @@ async fn credentials_invalid(auth_token: &str) -> bool {
     }
 }
 
+/// Installs exactly this socket's bounds before any ordinary request or observation.
+async fn read_session_opening(
+    socket: &mut WebSocket,
+    signals: WebConsoleSignals,
+    current_auth_token: &str,
+) -> Option<SessionLimits> {
+    // Keep the existing session tick's authentication responsiveness while the first frame waits.
+    let message = loop {
+        if signals.auth_token.get_untracked().as_deref() != Some(current_auth_token) {
+            return None;
+        }
+        let received = socket.next().fuse();
+        let check_auth = wait_for_browser_delay(SUBSCRIPTION_RETRY_DELAY).fuse();
+        futures_util::pin_mut!(received, check_auth);
+        nervix_primitives::unmodeled::futures::select! {
+            message = received => break message,
+            () = check_auth => {}
+        }
+    };
+    if signals.auth_token.get_untracked().as_deref() != Some(current_auth_token) {
+        return None;
+    }
+    let Some(Ok(WebSocketMessage::Bytes(payload))) = message else {
+        return None;
+    };
+    match nervix_client_wire::SessionOpened::verify(Bytes::from(payload)) {
+        Ok(opened) => Some(opened.limits),
+        Err(error) => {
+            leptos::logging::error!("invalid session opening: {error:#}");
+            None
+        }
+    }
+}
+
 /// Reads the frames a connection delivered before it closed, without sending anything on it.
 ///
 /// `None` says no frame arrived, so the connection never opened, as when the server refused its
@@ -2525,8 +2677,9 @@ async fn drain_closed_connection(
     requests: &mut SessionRequests,
     current_auth_token: &str,
 ) -> Option<ConnectionEnd> {
-    let codec = ClientWebSocketCodec::new(SESSION_LIMITS);
-    let mut received = false;
+    let limits = read_session_opening(&mut socket, signals, current_auth_token).await?;
+    requests.install_limits(limits);
+    let codec = ClientWebSocketCodec::new(limits);
     while let Some(Ok(message)) = socket.next().await {
         if signals.auth_token.get_untracked().as_deref() != Some(current_auth_token) {
             return Some(ConnectionEnd::Dropped);
@@ -2537,7 +2690,6 @@ async fn drain_closed_connection(
         let Ok(frame) = codec.decode(WebSocketData::Binary(Bytes::from(payload))) else {
             continue;
         };
-        received = true;
         match receive_frame(signals, state, requests, &frame) {
             SessionStep::Redirect(leader) => return Some(ConnectionEnd::Redirected(leader)),
             // Nothing after a reply that broke the session contract is read.
@@ -2548,10 +2700,7 @@ async fn drain_closed_connection(
             | SessionStep::Reconnect => {}
         }
     }
-    if received {
-        return Some(ConnectionEnd::Dropped);
-    }
-    None
+    Some(ConnectionEnd::Dropped)
 }
 
 /// Serves one connection until it ends.
@@ -2569,7 +2718,12 @@ async fn serve_connection(
     queued: &mut RequestReceiver,
     current_auth_token: &str,
 ) -> ConnectionEnd {
-    let codec = ClientWebSocketCodec::new(SESSION_LIMITS);
+    let Some(limits) = read_session_opening(&mut socket, signals, current_auth_token).await else {
+        return ConnectionEnd::Dropped;
+    };
+    requests.install_limits(limits);
+    queued.set_frame_limit(limits.frame_bytes());
+    let codec = ClientWebSocketCodec::new(limits);
     let opening = signals.connection_opening(signals.session_generation.get_untracked());
     for request in opening {
         if signals.auth_token.get_untracked().as_deref() != Some(current_auth_token) {
@@ -2782,18 +2936,40 @@ async fn send_message(
     requests: &mut SessionRequests,
     message: ClientMessage,
 ) -> bool {
-    let frame = match message.encode(&SESSION_LIMITS) {
+    if requests.hold_behind_refused_replay(message.request_id) {
+        return true;
+    }
+    let frame = match message.encode(&codec.limits()) {
         Ok(frame) => frame,
         Err(error) => {
-            if let Some(unsent) = requests.answer(message.request_id) {
-                requests.command_retries.finished(unsent.order);
-                let reason = format!("the request cannot be sent: {}", error.current_context());
-                fail_request(signals, unsent.request, reason);
+            if let Some(issued) = requests.answer(message.request_id) {
+                match requests.encoding_refused(issued) {
+                    EncodingRefusal::Unsent(unsent) => {
+                        requests.command_retries.finished(unsent.order);
+                        let reason = format!("the request cannot be sent: {error:#}");
+                        fail_request(signals, unsent.request, reason);
+                    }
+                    EncodingRefusal::ReplayRetained { reference, create } => {
+                        let reason = format!(
+                            "command '{reference}' remains unresolved: this connection's bounds \
+                             cannot carry its replay: {error:#}"
+                        );
+                        signals
+                            .terminal_lines
+                            .update(|lines| lines.push(TermLine::error(reason)));
+                        if let Some(context) = create {
+                            signals
+                                .create
+                                .queued_reconnect(context.attempt, context.draft_revision);
+                        }
+                    }
+                }
             }
             return true;
         }
     };
     let payload = codec.encode(frame);
+    requests.handed_to_socket(message.request_id);
     match socket
         .send(WebSocketMessage::Bytes(Vec::from(payload)))
         .await
@@ -2980,6 +3156,7 @@ fn apply_event(
     event: ServerEvent,
 ) -> SessionStep {
     match event {
+        ServerEvent::SessionOpened(_) => SessionStep::Abandon,
         ServerEvent::Leadership(observed) => match observed.leadership {
             Leadership::ServingNode(node) => {
                 signals.terminal_lines.update(|lines| {
@@ -8351,7 +8528,7 @@ mod tests {
                 domain: Some(domain.clone()),
             };
             signals.suggestion_query.set(Some(query));
-            let mut requests = SessionRequests::new();
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
             let suggestion = |value: &str, kind| WireSuggestion {
                 value: value.to_string(),
                 kind,
@@ -8589,7 +8766,7 @@ mod tests {
                 request.client_request(),
                 ClientRequest::InspectTransaction(_)
             ));
-            let mut requests = SessionRequests::new();
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
             let issued = requests.issue(request);
             signals.inspector.requested(issued.order.0);
             let step = apply_reply(
@@ -8821,7 +8998,7 @@ mod tests {
         Owner::new().with(|| {
             let stream = test_stream();
             let signals = subscription_signals(SubscriptionTabState::Open(stream.clone()));
-            let mut requests = SessionRequests::new();
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
 
             interrupt_subscription_tabs(signals);
             signals.subscription_tabs.with_untracked(|tabs| {
@@ -8930,7 +9107,7 @@ mod tests {
         Owner::new().with(|| {
             let signals =
                 subscription_signals(SubscriptionTabState::Interrupted(test_restoration()));
-            let mut requests = SessionRequests::new();
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
             for restoration in signals.begin_restorations() {
                 let issued = requests.issue(restoration);
                 requests.dispatch(issued);
@@ -9148,7 +9325,7 @@ mod tests {
         Owner::new().with(|| {
             let stream = test_stream();
             let signals = subscription_signals(SubscriptionTabState::Closing(Some(stream.clone())));
-            let mut requests = SessionRequests::new();
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
             let issued = requests.issue(ConsoleRequest::SubscriptionStop {
                 tab_id: 1,
                 request: UnsubscribeRequest {
@@ -9186,7 +9363,7 @@ mod tests {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Pending);
             let state = RwSignal::new(ConsoleConnectionState::Connected);
-            let mut requests = SessionRequests::new();
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
             let domain = DomainName::parse("tenant").assured("the test domain name is valid");
             let observed = ServerEvent::DomainClockObserved(DomainClockObserved {
                 domain: domain.clone(),
@@ -9225,7 +9402,7 @@ mod tests {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Pending);
             let state = RwSignal::new(ConsoleConnectionState::Connected);
-            let mut requests = SessionRequests::new();
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
             let ticked = ServerEvent::DomainClockTicked(DomainClockTicked {
                 domain: DomainName::parse("tenant").assured("the test domain name is valid"),
                 tick: DomainClockTickObservation {
@@ -9317,7 +9494,7 @@ mod tests {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Pending);
             let domain = domain_name("tenant");
-            let mut requests = SessionRequests::new();
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
             let attach = requests.issue(ConsoleRequest::DomainClockAttach {
                 request: AttachDomainClockRequest {
                     domain: domain.clone(),
@@ -9382,7 +9559,7 @@ mod tests {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Pending);
             let domain = domain_name("tenant");
-            let mut requests = SessionRequests::new();
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
             let attach = requests.issue(ConsoleRequest::DomainClockAttach {
                 request: AttachDomainClockRequest {
                     domain: domain.clone(),
@@ -9605,7 +9782,7 @@ mod tests {
             attach.client_request(),
             ClientRequest::AttachDomainClock(_)
         ));
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
         let issued = requests.issue(attach);
         assert!(matches!(requests.accept(issued), Admission::Held));
         assert_eq!(requests.held.len(), 1);
@@ -9632,7 +9809,7 @@ mod tests {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Pending);
             signals.active_subscription_tab.set(None);
-            let mut requests = SessionRequests::new();
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
             let stream = test_stream();
             apply_subscribe_outcome(
                 signals,
@@ -9662,7 +9839,7 @@ mod tests {
     fn a_failed_new_subscription_leaves_no_live_tab() {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Pending);
-            let mut requests = SessionRequests::new();
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
             apply_subscribe_outcome(
                 signals,
                 &mut requests,
@@ -9688,7 +9865,7 @@ mod tests {
     fn a_failed_restore_remains_desired_and_reports_its_error() {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Restoring(test_restoration()));
-            let mut requests = SessionRequests::new();
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
             apply_subscribe_outcome(
                 signals,
                 &mut requests,
@@ -9718,7 +9895,7 @@ mod tests {
     fn closing_an_in_flight_restore_deletes_its_late_success() {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Closing(None));
-            let mut requests = SessionRequests::new();
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
             let name = SubscriptionName::parse("live").assured("the test name is valid");
             let handle = SubscriptionHandle {
                 name,
@@ -9766,7 +9943,7 @@ mod tests {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Pending);
             signals.active_subscription_tab.set(None);
-            let mut requests = SessionRequests::new();
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
             let stream = test_stream();
             let domain = DomainName::parse("tenant").assured("the test domain is valid");
             let start = requests.issue(ConsoleRequest::SubscriptionStart {
@@ -9833,7 +10010,7 @@ mod tests {
         Owner::new().with(|| {
             let stream = test_stream();
             let signals = subscription_signals(SubscriptionTabState::Open(stream.clone()));
-            let mut requests = SessionRequests::new();
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
             let late = SubscriptionHandle {
                 name: stream.subscription.name.clone(),
                 generation: NonZeroU64::new(2).assured("two is nonzero"),
@@ -9873,7 +10050,7 @@ mod tests {
                     SubscriptionTabState::Pending
                 };
                 let signals = subscription_signals(state);
-                let mut requests = SessionRequests::new();
+                let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
                 let issued = requests.issue(ConsoleRequest::SubscriptionStart {
                     tab_id: 1,
                     request: SubscribeRequest {
@@ -9967,7 +10144,7 @@ mod tests {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Open(test_stream()));
             let state = RwSignal::new(ConsoleConnectionState::Connected);
-            let mut requests = SessionRequests::new();
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
             let notices = [
                 server_notice(
                     NoticeLevel::Info,
@@ -10034,7 +10211,7 @@ mod tests {
             let stream = test_stream();
             let signals = subscription_signals(SubscriptionTabState::Open(stream.clone()));
             let state = RwSignal::new(ConsoleConnectionState::Connected);
-            let mut requests = SessionRequests::new();
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
             signals.subscription_tabs.update(|tabs| {
                 tabs[0].lines.push(TermLine::output("{\"id\":1}"));
             });
@@ -10137,7 +10314,7 @@ mod tests {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Ended);
             signals.active_subscription_tab.set(None);
-            let mut requests = SessionRequests::new();
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
 
             let request = signals
                 .begin_resubscribe(1)
@@ -10473,7 +10650,7 @@ mod tests {
                     )
                     .assured("no operation of the open test transaction applied"),
                 ));
-                let mut requests = SessionRequests::new();
+                let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
                 let attach = requests.issue(ConsoleRequest::AttachTransaction(
                     AttachTransactionRequest {
                         transaction_id: "transaction".to_string(),
@@ -10526,7 +10703,7 @@ mod tests {
     fn the_session_refuses_requests_past_its_outstanding_bounds_and_reports_them() {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Pending);
-            let mut requests = SessionRequests::new();
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
             requests.confirm_leader();
             for _ in 0..MAX_OUTSTANDING_REQUESTS {
                 let issued = requests.issue(repl_command("SHOW CLUSTER STATUS;"));
@@ -10598,7 +10775,7 @@ mod tests {
                 transaction_id: "transaction".to_string(),
             }),
         ] {
-            let mut requests = SessionRequests::new();
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
             requests.confirm_leader();
             for _ in 0..MAX_IN_FLIGHT_REQUESTS {
                 let issued = requests.issue(repl_command("SHOW CLUSTER STATUS;"));
@@ -10618,7 +10795,7 @@ mod tests {
 
     #[test]
     fn superseding_a_lookup_does_not_release_its_server_request_place() {
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
         for _ in 0..MAX_IN_FLIGHT_REQUESTS {
             let issued = requests.issue(suggest("CREATE "));
             sent(requests.accept(issued));
@@ -10637,7 +10814,7 @@ mod tests {
 
     #[test]
     fn waiting_lookups_keep_the_latest_input_and_each_controls_latest_draft() {
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
         requests.confirm_leader();
         for _ in 0..MAX_IN_FLIGHT_REQUESTS {
             let issued = requests.issue(repl_command("SHOW CLUSTER STATUS;"));
@@ -10684,7 +10861,7 @@ mod tests {
 
     #[test]
     fn a_waiting_transaction_attach_precedes_held_commands_and_releases_them() {
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
         requests.confirm_leader();
         for _ in 0..MAX_IN_FLIGHT_REQUESTS {
             let issued = requests.issue(repl_command("SHOW CLUSTER STATUS;"));
@@ -10715,7 +10892,7 @@ mod tests {
 
     #[test]
     fn waiting_controls_and_ready_commands_share_issue_order() {
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
         requests.confirm_leader();
         for _ in 0..MAX_IN_FLIGHT_REQUESTS {
             let issued = requests.issue(repl_command("SHOW CLUSTER STATUS;"));
@@ -10763,7 +10940,7 @@ mod tests {
 
     #[test]
     fn a_new_connection_replays_commands_and_issues_its_own_local_controls() {
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
         requests.confirm_leader();
         for _ in 0..MAX_IN_FLIGHT_REQUESTS {
             let issued = requests.issue(repl_command("SHOW CLUSTER STATUS;"));
@@ -10795,7 +10972,7 @@ mod tests {
 
     #[test]
     fn a_full_control_backlog_can_restore_its_transaction_before_it_replays() {
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
         for _ in 0..MAX_OUTSTANDING_REQUESTS {
             let issued = requests.issue(repl_command("held command"));
             assert!(matches!(requests.accept(issued), Admission::Held));
@@ -10819,7 +10996,7 @@ mod tests {
 
     #[test]
     fn connection_opening_waits_for_capacity_without_waiting_for_leader_confirmation() {
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
         for _ in 0..MAX_IN_FLIGHT_REQUESTS {
             let issued = requests.issue(ConsoleRequest::SelectDomain(SelectDomainRequest {
                 domain: domain_name("selected"),
@@ -10846,7 +11023,7 @@ mod tests {
 
     #[test]
     fn ordered_requests_beyond_the_in_flight_limit_wait_in_order_for_earlier_replies() {
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
         requests.confirm_leader();
         let mut sent_ids = Vec::new();
         for index in 0..MAX_IN_FLIGHT_REQUESTS {
@@ -10876,9 +11053,158 @@ mod tests {
     }
 
     #[test]
+    fn a_smaller_opening_retains_only_a_command_that_may_have_been_handed_over() {
+        let small = SessionLimits::from(
+            &nervix_models::SessionBounds::resolve(nervix_models::SessionBoundValues {
+                frame_bytes: Some(NonZeroU64::new(1024).assured("positive fixture frame")),
+                ..Default::default()
+            })
+            .assured("the complete fixture bounds validate"),
+        );
+        for handed_over in [false, true] {
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
+            requests.confirm_leader();
+            let issued = requests.issue(repl_command(&"q".repeat(2048)));
+            let order = issued.order;
+            let first = sent(requests.accept(issued));
+            let ClientRequest::Command(original) = &first.request else {
+                panic!("a command frame");
+            };
+            let reference = original.execution_reference.clone();
+            if handed_over {
+                requests.handed_to_socket(first.request_id);
+            }
+            requests.end_connection();
+            requests.install_limits(small);
+            requests.confirm_leader();
+            let replay = requests
+                .release_held()
+                .pop()
+                .assured("the retained command retries");
+            assert!(replay.encode(&small).is_err());
+            let issued = requests
+                .answer(replay.request_id)
+                .assured("the refused frame is still owned");
+            match requests.encoding_refused(issued) {
+                EncodingRefusal::Unsent(issued) => {
+                    assert!(
+                        !handed_over,
+                        "a possible admission cannot become a fresh refusal"
+                    );
+                    assert_eq!(issued.order, order);
+                    assert!(requests.held.is_empty());
+                }
+                EncodingRefusal::ReplayRetained {
+                    reference: retained,
+                    ..
+                } => {
+                    assert!(
+                        handed_over,
+                        "an unhanded request remains definitively unsent"
+                    );
+                    assert_eq!(retained, reference);
+                    assert!(
+                        requests.release_held().is_empty(),
+                        "this immutable opening cannot carry it"
+                    );
+                    assert_eq!(requests.held.len(), 1);
+                    requests.end_connection();
+                    requests.install_limits(SESSION_LIMITS);
+                    requests.confirm_leader();
+                    let resumed = requests
+                        .release_held()
+                        .pop()
+                        .assured("a fresh larger opening retries it");
+                    assert!(resumed.encode(&SESSION_LIMITS).is_ok());
+                    let ClientRequest::Command(resumed) = resumed.request else {
+                        panic!("the same command");
+                    };
+                    assert_eq!(resumed.execution_reference, reference);
+                    assert_eq!(resumed.query, original.query);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_parked_replay_keeps_dispatched_commands_behind_it_and_allows_controls() {
+        let small = SessionLimits::from(
+            &nervix_models::SessionBounds::resolve(nervix_models::SessionBoundValues {
+                frame_bytes: Some(NonZeroU64::new(1024).assured("positive fixture frame")),
+                ..Default::default()
+            })
+            .assured("the fixture bounds validate"),
+        );
+        let query = "q".repeat(2048);
+        let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
+        requests.confirm_leader();
+        let issued = requests.issue(repl_command(&query));
+        let original = sent(requests.accept(issued));
+        requests.handed_to_socket(original.request_id);
+        requests.end_connection();
+        let later = requests.issue(repl_command("later command"));
+        assert!(matches!(requests.accept(later), Admission::Held));
+        requests.install_limits(small);
+        requests.confirm_leader();
+        let batch = requests.release_held();
+        assert_eq!(batch.len(), 2);
+        assert!(batch[0].encode(&small).is_err());
+        let refused = requests
+            .answer(batch[0].request_id)
+            .assured("the writer owns the replay");
+        assert!(matches!(
+            requests.encoding_refused(refused),
+            EncodingRefusal::ReplayRetained { .. }
+        ));
+        assert!(requests.hold_behind_refused_replay(batch[1].request_id));
+        assert_eq!(requests.held.len(), 2);
+        assert!(requests.in_flight.is_empty());
+        let ordered_list = requests.issue(ConsoleRequest::ListDomains);
+        assert!(matches!(requests.accept(ordered_list), Admission::Held));
+        let control = requests.issue(suggest("SHOW "));
+        let control = sent(requests.accept(control));
+        assert!(matches!(control.request, ClientRequest::Suggest(_)));
+        assert!(control.encode(&small).is_ok());
+        assert!(requests.release_held().is_empty());
+        requests.end_connection();
+        requests.install_limits(SESSION_LIMITS);
+        requests.confirm_leader();
+        let resumed = requests.release_held();
+        assert_eq!(resumed.len(), 3);
+        assert_eq!(
+            sent_queries(&resumed[..2]),
+            vec![query.as_str(), "later command"]
+        );
+        assert!(matches!(resumed[2].request, ClientRequest::ListDomains));
+    }
+
+    #[test]
+    fn an_uncertain_answer_survives_a_local_replay_encoding_refusal() {
+        let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
+        let issued = requests.issue(repl_command("SHOW DOMAINS;"));
+        let order = issued.order;
+        let _ = requests.command_retries.wait(order);
+        requests.command_retries.ready(order);
+        assert!(matches!(
+            requests.encoding_refused(issued),
+            EncodingRefusal::ReplayRetained { .. }
+        ));
+        assert_eq!(requests.replay_waits_for_opening, Some(order));
+        assert_eq!(requests.held.len(), 1);
+    }
+
+    #[test]
+    fn text_free_controls_add_no_retention_when_a_new_opening_has_a_smaller_budget() {
+        let mut load = OutstandingLoad::default();
+        load.add_text(8192);
+        assert!(load.admits(0, 4096).is_ok());
+        assert!(load.admits(1, 4096).is_err());
+    }
+
+    #[test]
     fn the_session_bounds_the_text_its_outstanding_requests_carry() {
-        let mut requests = SessionRequests::new();
-        let largest = requests.issue(repl_command(&"a".repeat(MAX_OUTSTANDING_REQUEST_BYTES)));
+        let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
+        let largest = requests.issue(repl_command(&"a".repeat(requests.text_limit)));
         assert!(matches!(requests.accept(largest), Admission::Held));
         let issued = requests.issue(repl_command("b"));
         let Admission::Refused(refused) = requests.accept(issued) else {
@@ -10887,7 +11213,7 @@ mod tests {
         assert_eq!(
             refused.refusal,
             RequestRefusal::TooMuchOutstandingText {
-                limit: MAX_OUTSTANDING_REQUEST_BYTES
+                limit: requests.text_limit
             }
         );
         let issued = requests.issue(ConsoleRequest::ListDomains);
@@ -10973,7 +11299,7 @@ mod tests {
 
     #[test]
     fn a_superseded_completion_request_drops_its_partial_reply() {
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
         let earlier = requests.issue(suggest("SH"));
         let earlier = sent(requests.accept(earlier));
         let part = first_suggestion_part(earlier.request_id);
@@ -10990,7 +11316,7 @@ mod tests {
 
     #[test]
     fn a_superseded_transfer_releases_its_request_place_only_at_its_final_part() {
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
         let issued = requests.issue(suggest("SH"));
         let earlier = sent(requests.accept(issued));
         let issued = requests.issue(suggest("SHOW"));
@@ -11132,7 +11458,7 @@ mod tests {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Pending);
             let state = RwSignal::new(ConsoleConnectionState::Connected);
-            let mut requests = SessionRequests::new();
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
             let retained_resource = || match signals.domain_snapshot.get_untracked() {
                 Some(snapshot) => (
                     snapshot.domain.to_string(),
@@ -11166,7 +11492,7 @@ mod tests {
 
     #[test]
     fn untracked_domain_push_cannot_discard_a_pending_websocket_request() {
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
         let attach = requests.issue(ConsoleRequest::AttachTransaction(
             AttachTransactionRequest {
                 transaction_id: "transaction".to_string(),
@@ -11242,7 +11568,7 @@ mod tests {
 
     #[test]
     fn ordered_requests_wait_for_the_leader_and_keep_their_order_across_a_reconnect() {
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
         let first = requests.issue(repl_command("CREATE SCHEMA first ( value I64 );"));
         let second = requests.issue(repl_command("CREATE SCHEMA second ( value I64 );"));
         assert!(
@@ -11290,7 +11616,7 @@ mod tests {
 
     #[test]
     fn repeated_replay_keeps_every_unanswered_request_and_drops_a_stale_close() {
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
         requests.confirm_leader();
         let first = requests.issue(repl_command("first"));
         let second = requests.issue(repl_command("second"));
@@ -11342,7 +11668,7 @@ mod tests {
         ] {
             Owner::new().with(|| {
                 let signals = subscription_signals(SubscriptionTabState::Pending);
-                let mut requests = SessionRequests::new();
+                let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
                 requests.confirm_leader();
                 let mut first = repl_command("first");
                 let ConsoleRequest::Command { request, .. } = &mut first else {
@@ -11425,7 +11751,7 @@ mod tests {
     fn unknown_command_outcome_retries_with_its_execution_reference() {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Pending);
-            let mut requests = SessionRequests::new();
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
             let issued = requests.issue(repl_command("CREATE SCHEMA pending ( value I64 );"));
             let order = issued.order;
             let ConsoleRequest::Command { request, purpose } = issued.request else {
@@ -11460,7 +11786,7 @@ mod tests {
 
     #[test]
     fn commands_held_for_an_attach_keep_their_issue_order_whatever_order_their_replies_take() {
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
         requests.confirm_leader();
         let first = requests.issue(repl_command("first"));
         let second = requests.issue(repl_command("second"));
@@ -11498,7 +11824,7 @@ mod tests {
 
     #[test]
     fn only_the_latest_completion_request_is_awaited() {
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
         let earlier = requests.issue(suggest("SH"));
         let earlier = sent(requests.accept(earlier));
         let later = requests.issue(suggest("SHOW"));
@@ -11519,7 +11845,7 @@ mod tests {
 
     #[test]
     fn only_the_latest_request_for_each_typed_choice_control_is_awaited() {
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
         let earlier = requests.issue(choice_request(ChoiceControl::DomainPace, 1));
         let earlier = sent(requests.accept(earlier));
         assert!(matches!(earlier.request, ClientRequest::Choice(_)));
@@ -12789,7 +13115,7 @@ mod tests {
     fn create_outcomes_update_domain_resource_and_retry_state_once() {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Pending);
-            let mut requests = SessionRequests::new();
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
 
             signals.create.open(CreateKind::Domain, None, "trigger");
             let (attempt, revision) = signals.create.begin_submission(true);
@@ -12929,7 +13255,7 @@ mod tests {
     fn a_cancelled_create_fails_and_a_reply_of_another_kind_interrupts_its_session() {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Pending);
-            let mut requests = SessionRequests::new();
+            let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
             signals.create.open(CreateKind::User, None, "trigger");
             let (attempt, revision) = signals.create.begin_submission(true);
             let create = requests.issue(ConsoleRequest::Command {

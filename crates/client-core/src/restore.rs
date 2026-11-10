@@ -38,8 +38,9 @@ use handover::RestoreHandover;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     CommandDisposition, EncodedFrame, OutcomeOrigin, RequestId, RestoreChunk, RestoreDisposition,
-    RestoreFrame, RestoreReply, RestoreReplyFrame, RestoreStart, VerifiedFrame,
-    grpc::{ClientRestoreCodec, FrameRejection, RESTORE_BACKUP_PATH},
+    RestoreFrame, RestoreReply, RestoreReplyFrame, RestoreStart, SessionLimits, VerifiedFrame,
+    WireEncodeError,
+    grpc::{FrameRejection, RESTORE_BACKUP_PATH},
 };
 use nervix_models::{ArchiveDigest, CommandExecutionReference, Restore, RestoreArchive};
 use nervix_primitives::{
@@ -54,17 +55,13 @@ use crate::{
     client::{Client, RecoveryDeadline, RecoveryMode, SessionRecovery},
     connection::GrpcConnector,
     error::{ClientError, RequestKind},
-    exchange::{ExchangeEnd, SESSION_LIMITS},
+    exchange::ExchangeEnd,
     outcome::{CommandOutcome, Routing},
     upload::{expand_user_path, upload_status_is_retryable},
 };
 
 /// Archive bytes one restore frame carries.
 const RESTORE_CHUNK_BYTES: usize = 256 * 1024;
-
-// A chunk fills at most half a frame, far more room than its frame's envelope needs, so a
-// non-empty chunk always encodes.
-const _: () = assert!(RESTORE_CHUNK_BYTES <= SESSION_LIMITS.frame_bytes() / 2);
 
 /// The request identity of a restore's start frame. Every attempt is a stream of its own that
 /// exactly one reply answers, so the identity only has to be non-zero.
@@ -249,6 +246,7 @@ impl Client {
         };
         let statement = restore.to_canonical_plexus();
         let frame_timeout = self.inner.connector.request_timeout();
+        let mut next_limits = None;
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
             nervix_primitives::task::consume_budget().await;
             let start = RestoreStart {
@@ -256,11 +254,7 @@ impl Client {
                 execution_reference: reference.clone(),
                 statement: statement.clone(),
                 archive,
-            }
-            .encode(&SESSION_LIMITS)
-            .change_context(ClientError::EncodeRequest {
-                request: RequestKind::Restore,
-            })?;
+            };
             let archive_file = match File::open(&path).await {
                 Ok(archive_file) => archive_file,
                 Err(error) => {
@@ -273,12 +267,17 @@ impl Client {
                     ));
                 }
             };
-            let (channel, generation) = {
+            let (channel, generation, session_limits) = {
                 let exchange = self.inner.exchange.lock().await;
-                (exchange.channel.clone(), exchange.generation.clone())
+                (
+                    exchange.channel.clone(),
+                    exchange.generation.clone(),
+                    exchange.requests.limits,
+                )
             };
             let sent = RestoreStreamAttempt {
                 channel,
+                limits: next_limits.take().unwrap_or(session_limits),
                 start,
                 archive: archive_file,
                 archive_bytes: total_bytes,
@@ -289,6 +288,15 @@ impl Client {
             history.observe_attempt(&sent);
             let response = match sent.result {
                 Ok(response) => response,
+                Err(AttemptFailure::BoundsChanged(limits)) => {
+                    next_limits = Some(limits);
+                    continue;
+                }
+                Err(AttemptFailure::Encode(report)) => {
+                    return Err(report.change_context(ClientError::EncodeRequest {
+                        request: RequestKind::Restore,
+                    }));
+                }
                 Err(AttemptFailure::Read(error)) => {
                     let kind = error.kind();
                     return Err(Report::new(error).change_context(
@@ -426,6 +434,10 @@ impl Client {
 
 /// Why one attempt to stream a restore ended without a reply.
 enum AttemptFailure {
+    /// The peer refused this offer before reading input and supplied its current bounds.
+    BoundsChanged(SessionLimits),
+    /// The start request does not fit this peer's announced bounds.
+    Encode(Report<WireEncodeError>),
     /// The local archive could not be read.
     Read(io::Error),
     /// The call failed, or a frame or the reply did not arrive in time.
@@ -491,7 +503,8 @@ struct RestoreAttemptResult {
 /// One attempt to stream a restore: its start frame, then the archive in chunks.
 struct RestoreStreamAttempt {
     channel: Channel,
-    start: EncodedFrame<RestoreFrame>,
+    limits: SessionLimits,
+    start: RestoreStart,
     archive: File,
     archive_bytes: NonZeroU64,
     frame_timeout: Duration,
@@ -522,6 +535,7 @@ impl RestoreStreamAttempt {
     ) -> Result<Response<VerifiedFrame<RestoreReplyFrame>>, AttemptFailure> {
         let Self {
             channel,
+            limits,
             start,
             archive,
             archive_bytes,
@@ -529,41 +543,48 @@ impl RestoreStreamAttempt {
         } = self;
         let (frames, outbound) =
             mpsc::channel(connector.capabilities().restore_frame_capacity().get());
-        let feeder = nervix_primitives::task::spawn(feed(
-            start,
-            archive,
-            frames,
-            frame_timeout,
-            on_progress,
-            archive_bytes,
-            archive_sent,
-        ));
-        let mut client = tonic::client::Grpc::new(channel)
-            .max_decoding_message_size(SESSION_LIMITS.frame_bytes())
-            .max_encoding_message_size(SESSION_LIMITS.frame_bytes());
-        if let Err(error) = client.ready().await {
-            return Err(AttemptFailure::Transport(Box::new(Status::from_error(
-                Box::new(error),
-            ))));
-        }
+        let mut channel = channel;
         let mut request = Request::new(
             ReceiverStream::new(outbound)
                 .take_while(RestoreQueuedFrame::can_handover)
                 .map(RestoreQueuedFrame::into_frame),
         );
         connector.authorize(&mut request);
+        let opening = async {
+            crate::session_open::ready(&mut channel)
+                .await
+                .map_err(|error| {
+                    AttemptFailure::Transport(Box::new(Status::from_error(Box::new(error))))
+                })?;
+            // A client-streaming peer can withhold response headers until the archive ends.
+            // The feeder bounds each frame, then the caller bounds the final reply; opening
+            // must not impose one frame's deadline on the complete archive.
+            crate::session_open::open_offered::<RestoreFrame, RestoreReplyFrame>(
+                &mut channel,
+                request,
+                PathAndQuery::from_static(RESTORE_BACKUP_PATH),
+                limits,
+            )
+            .await
+            .map_err(|status| AttemptFailure::Transport(Box::new(status)))?
+            .map_err(AttemptFailure::BoundsChanged)
+        };
+        let start = start.encode(&limits).map_err(AttemptFailure::Encode)?;
+        let feeder = nervix_primitives::task::spawn(
+            RestoreFeed {
+                start,
+                archive,
+                frame_timeout,
+                archive_bytes,
+                limits,
+            }
+            .run(frames, on_progress, archive_sent),
+        );
         // Retain tonic's client-streaming response semantics, but keep the response-read phase
         // visible: its local decoder and bounded receiver failures are not remote refusals.
         let call = async {
-            let (metadata, mut body, extensions) = client
-                .streaming(
-                    request,
-                    PathAndQuery::from_static(RESTORE_BACKUP_PATH),
-                    ClientRestoreCodec::new(SESSION_LIMITS),
-                )
-                .await
-                .map_err(|status| AttemptFailure::Transport(Box::new(status)))?
-                .into_parts();
+            let opened = opening.await?;
+            let (metadata, mut body, extensions) = opened.into_response().into_parts();
             let mut headers = metadata.into_headers();
             let message = match body.message().await {
                 Ok(Some(message)) => message,
@@ -629,62 +650,75 @@ impl RestoreStreamAttempt {
 
 /// Feeds the start frame and then the archive's chunks into `frames`, each within
 /// `frame_timeout`.
-async fn feed(
+struct RestoreFeed {
     start: EncodedFrame<RestoreFrame>,
-    mut archive: File,
-    frames: mpsc::Sender<RestoreQueuedFrame>,
+    archive: File,
     frame_timeout: Duration,
-    on_progress: impl Fn(u64) + Send + Sync + 'static,
     archive_bytes: NonZeroU64,
-    archive_sent: Arc<RestoreHandover>,
-) -> Feeding {
-    let start = RestoreQueuedFrame {
-        frame: start,
-        completion: None,
-    };
-    match nervix_primitives::time::timeout(frame_timeout, frames.send(start)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(_)) => return Feeding::CallEnded,
-        Err(_) => return Feeding::Stalled,
-    }
-    let mut buffer = vec![0_u8; RESTORE_CHUNK_BYTES];
-    let mut remaining = archive_bytes.get();
-    let mut completion = Some(archive_sent);
-    loop {
-        nervix_primitives::task::consume_budget().await;
-        let read = match archive.read(&mut buffer).await {
-            Ok(read) => read,
-            Err(error) => return Feeding::ReadFailed(error),
+    limits: SessionLimits,
+}
+
+impl RestoreFeed {
+    async fn run(
+        self,
+        frames: mpsc::Sender<RestoreQueuedFrame>,
+        on_progress: impl Fn(u64) + Send + Sync + 'static,
+        archive_sent: Arc<RestoreHandover>,
+    ) -> Feeding {
+        let Self {
+            start,
+            mut archive,
+            frame_timeout,
+            archive_bytes,
+            limits,
+        } = self;
+        let start = RestoreQueuedFrame {
+            frame: start,
+            completion: None,
         };
-        if read == 0 {
-            return Feeding::Sent;
-        }
-        let chunk = RestoreChunk::encode(&buffer[..read], &SESSION_LIMITS).assured(
-            "a non-empty chunk of at most half a frame, as a const assertion holds it, always \
-             encodes",
-        );
-        let supplied: u64 = read.arch_into();
-        let final_chunk = if remaining == 0 {
-            None
-        } else if supplied >= remaining {
-            // Extra bytes from a file that grew cannot erase knowledge that all declared
-            // bytes might have reached the transport. Only its first such chunk owns the flag.
-            remaining = 0;
-            completion.take()
-        } else {
-            remaining = remaining
-                .checked_sub(supplied)
-                .verified("the chunk is smaller than the remaining declared archive bytes");
-            None
-        };
-        let chunk = RestoreQueuedFrame {
-            frame: chunk,
-            completion: final_chunk,
-        };
-        match nervix_primitives::time::timeout(frame_timeout, frames.send(chunk)).await {
-            Ok(Ok(())) => on_progress(supplied),
+        match nervix_primitives::time::timeout(frame_timeout, frames.send(start)).await {
+            Ok(Ok(())) => {}
             Ok(Err(_)) => return Feeding::CallEnded,
             Err(_) => return Feeding::Stalled,
+        }
+        let mut buffer = vec![0_u8; RESTORE_CHUNK_BYTES.min(limits.frame_bytes() / 2)];
+        let mut remaining = archive_bytes.get();
+        let mut completion = Some(archive_sent);
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let read = match archive.read(&mut buffer).await {
+                Ok(read) => read,
+                Err(error) => return Feeding::ReadFailed(error),
+            };
+            if read == 0 {
+                return Feeding::Sent;
+            }
+            let chunk = RestoreChunk::encode(&buffer[..read], &limits).assured(
+                "a non-empty chunk of at most half the announced frame limit always encodes",
+            );
+            let supplied: u64 = read.arch_into();
+            let final_chunk = if remaining == 0 {
+                None
+            } else if supplied >= remaining {
+                // Extra bytes from a file that grew cannot erase knowledge that all declared
+                // bytes might have reached the transport. Only its first such chunk owns the flag.
+                remaining = 0;
+                completion.take()
+            } else {
+                remaining = remaining
+                    .checked_sub(supplied)
+                    .verified("the chunk is smaller than the remaining declared archive bytes");
+                None
+            };
+            let chunk = RestoreQueuedFrame {
+                frame: chunk,
+                completion: final_chunk,
+            };
+            match nervix_primitives::time::timeout(frame_timeout, frames.send(chunk)).await {
+                Ok(Ok(())) => on_progress(supplied),
+                Ok(Err(_)) => return Feeding::CallEnded,
+                Err(_) => return Feeding::Stalled,
+            }
         }
     }
 }

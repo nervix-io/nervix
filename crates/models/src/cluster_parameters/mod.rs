@@ -128,7 +128,7 @@ pub struct DescribedClusterParameter {
 
 macro_rules! parameter_text {
     ($value:expr, Duration) => {
-        crate::timing_text(*$value)
+        crate::timing_text((*$value).into())
     };
     ($value:expr, Count) => {
         $value.to_string()
@@ -151,6 +151,40 @@ macro_rules! parameter_cli_text {
     };
     ($value:expr, $kind:ident) => {
         parameter_text!($value, $kind)
+    };
+}
+
+// Edge duration inputs retain Duration semantics; the checked class stores their exact compact
+// value. Every other family already uses its canonical value directly.
+macro_rules! parameter_input {
+    ($value:expr, $definition:ident, Duration) => {
+        ClusterParameterDuration::resolve(ClusterParameterKey::$definition, $value)?
+    };
+    ($value:expr, $definition:ident, $kind:ident) => {
+        $value
+    };
+}
+macro_rules! parameter_seed {
+    ($value:expr, $definition:ident, Duration) => {
+        Setting::<$definition>::resolve(
+            $value
+                .map(|value| {
+                    ClusterParameterDuration::resolve(ClusterParameterKey::$definition, value)
+                })
+                .transpose()?,
+            &(),
+        )?
+    };
+    ($value:expr, $definition:ident, $kind:ident) => {
+        Setting::<$definition>::resolve($value, &())?
+    };
+}
+macro_rules! parameter_output {
+    ($value:expr, Duration) => {
+        $value.value().as_duration()
+    };
+    ($value:expr, $kind:ident) => {
+        *$value.value()
     };
 }
 
@@ -224,18 +258,18 @@ macro_rules! parameter_values {
 
         impl ClusterParameterValues {
             pub fn resolve(seed: ClusterParameterSeedValues) -> Result<Self, Report<ClusterParameterError>> {
-                let values = Self { $($field: Setting::resolve(seed.$field, &())?,)+ };
+                let values = Self { $($field: parameter_seed!(seed.$field, $definition, $kind),)+ };
                 values.validate_tls()?;
                 Ok(values)
             }
 
-            $(pub fn $field(&self) -> $value { *self.$field.value() })+
+            $(pub fn $field(&self) -> $value { parameter_output!(self.$field, $kind) })+
 
             /// Validate every proposed value before returning the complete candidate.
             pub fn changed(&self, updates: &ClusterParameterUpdates) -> Result<Self, Report<ClusterParameterError>> {
                 let mut next = *self;
                 for update in updates.iter() {
-                    match update { $(ClusterParameterChange::$definition(value) => { next.$field = Setting::new(*value, &())?; },)+ }
+                    match update { $(ClusterParameterChange::$definition(value) => { next.$field = Setting::new(parameter_input!(*value, $definition, $kind), &())?; },)+ }
                 }
                 next.validate_tls()?;
                 Ok(next)
@@ -249,7 +283,7 @@ macro_rules! parameter_values {
                 vec![$(
                     DescribedClusterParameter {
                         parameter: ClusterParameterKey::$definition,
-                        value: parameter_text!(self.$field.value(), $kind),
+                        value: parameter_text!(&self.$field(), $kind),
                     },
                 )+]
             }
@@ -298,6 +332,11 @@ macro_rules! parameter_values {
 }
 
 parameter_values! {
+    forced_recovery_budget: ForcedRecoveryBudget(Duration) => Duration,
+    ownership_handoff_poll_interval: OwnershipHandoffPollInterval(Duration) => Duration,
+    entity_gate_poll_interval: EntityGatePollInterval(Duration) => Duration,
+    domain_drain_poll_interval: DomainDrainPollInterval(Duration) => Duration,
+    runtime_readiness_propagation_bound: RuntimeReadinessPropagationBound(Duration) => Duration,
     node_unavailability_timeout: NodeUnavailabilityTimeout(Duration) => Duration,
     domain_drain_timeout: DomainDrainTimeout(Duration) => Duration,
     entity_gate_deadline: EntityGateDeadline(Duration) => Duration,

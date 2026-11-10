@@ -2,7 +2,7 @@
 
 use arch_into::ArchInto as _;
 use error_stack::Report;
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::sync::{Arc, StdArc};
 use thiserror::Error;
 
@@ -228,6 +228,18 @@ impl Executor {
     /// The per-operation maxima every decoder and writer bounds itself by.
     pub fn limits(&self) -> &OperationLimits {
         &self.inner.limits
+    }
+
+    /// Groups bulk quanta for one read while leaving room for a preceding batch still in flight.
+    /// The capacity is immutable; deriving this bound reads no admission counters or locks.
+    pub fn bulk_read_batch_bytes(&self, chunks: std::num::NonZeroU32) -> u64 {
+        let pair_capacity = self.budget(MemoryClass::Bulk).capacity_bytes() / 2;
+        self.limits()
+            .bulk_chunk_bytes
+            .as_u64()
+            .checked_mul(u64::from(chunks.get()))
+            .assured("the validated bulk quantum and batch count each fit u32")
+            .min(pair_capacity)
     }
 
     /// Charge `bytes` to `class` without waiting. An operation that cannot be charged is refused

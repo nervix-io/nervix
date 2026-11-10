@@ -274,6 +274,9 @@ impl Arbitrary<'_> {
             replication_lag_threshold: self.entropy.any_u64(),
         };
         nervix_models::NodeCapabilityRecord {
+            operational: nervix_primitives::sync::StdArc::new(
+                self.entropy.node_operational_capabilities(),
+            ),
             identity: self.node_identity(),
             capabilities: nervix_models::NodeCapabilities {
                 interconnect,

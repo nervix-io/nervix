@@ -51,8 +51,6 @@ use crate::{
     resource::ResourceStore,
 };
 
-const INTERCONNECT_TLS_RELOAD_INTERVAL: Duration = Duration::from_secs(1);
-
 #[derive(Clone)]
 pub(in crate::application) struct InterconnectTlsPaths {
     pub(in crate::application) ca: PathBuf,
@@ -111,11 +109,12 @@ pub(in crate::application) async fn reload_interconnect_tls(
     paths: InterconnectTlsPaths,
     initial_fingerprint: blake3::Hash,
     shutdown: CancellationToken,
+    reload_interval: Duration,
 ) {
     let mut applied_fingerprint = initial_fingerprint;
     let mut pending_fingerprint = None;
     let mut reported_failure = None;
-    let mut ticker = interval(INTERCONNECT_TLS_RELOAD_INTERVAL);
+    let mut ticker = interval(reload_interval);
     ticker.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
 
     loop {

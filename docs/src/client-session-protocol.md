@@ -179,7 +179,46 @@ receiver holding the same limits rejects.
 | Collection entries | 262,144 | Entries in one vector. |
 | String | 64 MiB | Bytes in one string. |
 
-Every Nervix server and client uses these defaults. The wire crate refuses a configuration whose
+These are the node capability defaults. Each node advertises its checked values when an
+authenticated session opens. A native session carries five positive decimal metadata values on
+each `Exchange`, `UploadResource`, `RestoreBackup` and `DownloadBackup` response, before any
+ordinary response body is decoded:
+
+| Metadata key | Bound |
+| --- | --- |
+| `nervix-session-frame-bytes` | Frame bytes |
+| `nervix-session-transfer-bytes` | Reassembled reply bytes |
+| `nervix-session-nesting-depth` | Nested table depth |
+| `nervix-session-collection-entries` | Entries per vector |
+| `nervix-session-string-bytes` | String bytes |
+
+Each console session, backup-download and restore WebSocket starts with a `SessionOpened`
+`NXSM` frame carrying the same five values. Its
+opening frame fits within the protocol's 1 KiB announcement bound. The client validates the
+complete announcement before sending requests or decoding ordinary session frames. Missing,
+duplicated or invalid native metadata, or an invalid WebSocket announcement, ends that opening.
+Every reconnect reads a new announcement from the node it reaches. The selected limits belong
+to that exchange: an earlier exchange's reader, queued work or transfer cannot change a later
+exchange's bounds.
+
+Native upload and restore requests offer all five bounds in request metadata. The client captures
+the last announced values with its channel and can stream immediately under that complete offer.
+After authentication, the server checks the offer against its immutable current limits before
+reading any body frame. A match retains the existing streaming cadence and chunk sizes, with
+exactly one terminal response message. A mismatch admits no input and returns `FAILED_PRECONDITION`,
+`nervix-session-bounds-changed: 1`, and the five current response values. The client retries the
+same logical identity and archive under those checked values. That refusal does not erase
+uncertainty from an earlier attempt. A malformed refusal or an accepted response that announces
+different bounds cannot establish the outcome of an already handed-over body.
+
+The download request is a bounded execution reference and fits the
+fixed 1 KiB opening envelope; its response uses that call's own announcement, even when the channel
+reaches a different rolled node. Each companion therefore installs its own checked bounds.
+
+The native client installs the announced frame limit in tonic before polling the response body.
+Its encoder, verifier, transfer assembly and retained subscription frames use the same checked
+limits. The announcement adds no request round trip or per-frame settings lookup. The wire crate
+refuses a configuration whose
 frame limit is outside 1 KiB to 256 MiB, whose transfer limit is below the frame limit, whose
 nesting limit is outside 16 to 128, or whose string limit exceeds the transfer limit. The upper
 bounds keep the verifier's budgets representable in the 32-bit address space of the browser build,
@@ -205,7 +244,8 @@ belongs to a request that changes nothing.
 
 ### One Current Form
 
-The protocol has exactly one current form. Frames carry no version, a session negotiates nothing,
+The protocol has exactly one current form. Frames carry no version; a session announces its
+operational limits without selecting another schema,
 and neither side keeps a compatibility reader for an earlier schema. A changed shape is a
 coordinated change of the server, the Rust client, the binding, the console, the conformance
 clients, and the corpus in one commit. A peer built against another schema meets the ordinary
@@ -561,11 +601,11 @@ flowchart LR
     Decode -- cancel --> Cancel[Answered at once]
     Decode -- submit batch, close producer --> Pumps[Producer tasks]
     Pumps --> Control
-    Ordered --> Control[Control lane: 16 frames]
+    Ordered --> Control[Control lane: capability-derived depth]
     Concurrent --> Control
     Cancel --> Control
     Clocks[Domain clock deliveries] --> Control
-    Deliveries[Subscription deliveries] --> Rows[Subscription lane: 16 frames]
+    Deliveries[Subscription deliveries] --> Rows[Subscription lane: capability-derived depth]
     Control -- always taken first --> Transport
     Rows -- taken while the control lane is empty --> Transport
 ```
@@ -573,9 +613,10 @@ flowchart LR
 ### What A Session Sends First
 
 A session queues its frames on two bounded outbound lanes. Replies, transfer parts, session events,
-and domain clock frames wait on the control lane, which holds 16 frames. The session ending never
+and domain clock frames wait on the control lane. Each lane holds
+`session_queue_memory_bytes / (2 * frame_bytes)` frames, 16 by default. The session ending never
 waits: the transport writes it after the control frames already queued, and nothing after it.
-Subscription rows and the notices about them wait on the subscription lane, which holds 16 frames
+Subscription rows and the notices about them wait on the subscription lane, whose capacity is
 shared by every subscription of the session. The transport always takes a queued control frame first
 and takes subscription frames only while the control lane is empty. A reply, including the reply to
 the unsubscribe that stops a subscription, therefore never waits behind rows the client has not
@@ -1100,13 +1141,15 @@ owns their units and retry counting.
 
 ### What A Session Is Told
 
-Every session receives `LeadershipObserved` first and `DomainsObserved` second, and each again
-whenever it changes; the serving node checks leadership every 250 milliseconds. Leadership is one of
+After its limits announcement, every session receives `LeadershipObserved` and then
+`DomainsObserved`, and each again whenever it changes. The serving node checks leadership at its
+session leadership-check capability, 250 milliseconds by default. Leadership is one of
 three states: the serving node leads, a remote node leads, with whichever of its endpoints discovery
 has established, or no leader is known. Selecting a domain with `SelectDomainRequest` opts the
 session into that domain's observations as well: a `ClusterObserved` summary and a
 `DomainSnapshotObserved` carrying the domain's live graph as a JSON document and its declared
-entities, at once and then every 500 milliseconds. A session that selects no domain receives
+entities, at once and then at its session snapshot capability, 500 milliseconds by default.
+A session that selects no domain receives
 neither. A server notice is text for display with a level and a kind. The kind says what the notice
 reports, so a client routes notices by kind and never by their text:
 
@@ -1167,6 +1210,11 @@ deadline. A client deadline bounds only the client's wait. It never cancels admi
 [Command Completion](./command-completion.md#disconnects-deadlines-and-recovery) owns what the work
 does meanwhile. A client that gives up on an uncertain command keeps its execution reference and can
 recover the outcome later, within the retry validity.
+
+The native client retains uncertainty across attempts of one logical command. A transport
+interruption or `OutcomeUnknown` can precede a replacement session whose smaller bound refuses
+the replay locally. That call returns `UncertainCommand` with the original execution reference
+above the encoding failure; a fresh command refused before handoff remains a local refusal.
 
 The Rust client bounds each connection attempt by `connect_timeout` (10 seconds by default), each
 request by `request_timeout` (120 seconds), and each public call, including all of its retries and
@@ -1398,7 +1446,8 @@ key fields redacted, and is absent exactly when the relay is unbranched. The enc
 selected rows of a relay batch into runs of adjacent rows with the same branch key, so interleaved
 branches produce one frame per run.
 
-A frame holds at most 256 rows and at most the frame limit in bytes. When a row does not fit the
+A frame holds at most the node's rows-per-subscription-frame capability, 256 by default, and at
+most the announced frame limit in bytes. When a row does not fit the
 frame being built, that frame is finished and the row starts the next one. A row that does not fit
 an empty frame cannot be delivered at all; the encoder then reports every selected row of that relay
 batch as skipped with cause `EncodingFailed`, and the subscription stays open. Each subscription
@@ -1428,7 +1477,8 @@ the batch's domain-time snapshot. The selector borrows that executor for the cal
   the subscription's next rows, the session sends `SubscriptionDeliveryLost` with the count, if that
   report itself finds room; otherwise the next rows are discarded too and counted with the rest.
 
-The subscription lane holds 16 frames shared by every subscription of the session. One slow
+The subscription lane's capability-derived capacity is shared by every subscription of the
+session, 16 frames by default. One slow
 `BLOCKING` subscription therefore also holds back the session's other `BLOCKING` subscriptions and
 makes its `DROPPING` ones drop, while replies and session events keep flowing on the control lane.
 
@@ -1560,7 +1610,10 @@ for the event itself. By default one subscription holds at most 32 events and on
 frame limit, 4 MiB, with the event that carries it; all subscriptions together hold four times as
 much, 128 events and 16 MiB of frames with their events. The native client exposes these local
 record, frame-retention and aggregate-multiplier capabilities through `ConnectOptions`; the
-[CLI flags](client-tools-cli.md#connection-capabilities) project the same validated settings. An event that does not fit drops that subscription's
+[CLI flags](client-tools-cli.md#connection-capabilities) project the same validated settings.
+Each exchange installs the byte allowances from its announced frame size while retaining those
+configured counts. Unrepresentable derived retention refuses opening before activating a new
+queue generation. An event that does not fit drops that subscription's
 queued events, reports a consumer overflow, and marks the subscription `DeliveryFailed`; the reader
 that routes replies never waits. An event stops counting once the application reads it, so a
 subscription whose events are read before the next one arrives stays within its own allowance
@@ -1575,8 +1628,8 @@ session to restore subscriptions or clocks it prints why while the client keeps 
 console keeps at most 256 lines and 256 KiB per REPL and per subscription
 tab, and marks where it omitted earlier lines. It keeps the latest 256 commands and 256 KiB of its
 command history and the snapshot of the one domain it observes. It holds at most 64 requests of its
-controls waiting for a connection, carrying at most 4 MiB of text. Connected controls can admit at
-most 256 outstanding requests carrying at most 16 MiB. Setup also restores the retained tabs,
+controls waiting for a connection, carrying at most one announced frame of text (4 MiB by default). Connected controls can admit at
+most 256 outstanding requests carrying at most four announced frames of text (16 MiB by default). The console installs both bounds at every opening and retains the last local retention bound during reconnection; before its first opening the bound comes from the declared default. Its existing session tick continues checking changed credentials while the opening waits, before any ordinary request is admitted. Setup also restores the retained tabs,
 selected domain and clock, and transaction even with a full control backlog, so that backlog can
 recover. Every request kind shares the 64-place in-flight window,
 including lookups, domain selection, restoration and transaction attachment. Connection setup and
@@ -1589,6 +1642,14 @@ Its text and partial reply are released immediately, and later parts are discard
 reassembly; the final part releases its place. Waiting connection-local requests end with that
 connection, while ordered commands retain their issue order and execution references. A request
 past either outstanding bound is not sent, and the control that issued it reports why.
+A command possibly handed to an ended connection keeps its original execution reference and
+issue order if the next peer's smaller bound cannot encode its replay. The console reports that
+the outcome remains unresolved and parks that replay until a fresh opening; it neither labels the
+command failed nor discards a pending backup. Later ordered commands remain behind it, while
+connection controls can progress. Existing retained text is not copied or enlarged when a new
+admission bound is smaller; controls carrying no text may still fit the count bound. A request
+that was never handed over keeps its ordinary local encoding refusal.
+
 
 A reply the console cannot decode or reassemble, or whose body does not answer its request kind,
 ends that session as a protocol violation. The unanswered commands retain their complete requests,
@@ -2106,8 +2167,7 @@ capture request conflicts, and an expired reference cannot admit a replacement e
 Waiting again does not extend server retry validity or the archive's retention. Downloading
 begins only after the summary arrives and has separate per-frame stall bounds.
 
-The node reads the archive only as fast as the client takes frames, at most four frames ahead of
-it, so a slow client holds back reads instead of growing what the node buffers for it. The call is
+The node reads the archive only as fast as the client takes frames, with a queue derived as the per-session memory capability divided by eight frame bounds (at least one slot, four with the defaults). A slow client holds back reads instead of growing what the node buffers for it. The call is
 not bounded by the request deadline, because a transfer can take far longer than a command; the
 Rust client bounds the wait for each frame instead. A download that ends early releases only its own
 hold on the archive, which stays retained for the client to download again. The protocol has no

@@ -54,6 +54,15 @@ pub(crate) struct ScenarioProducers {
     submissions: BTreeMap<String, ScenarioSubmission>,
 }
 
+impl ScenarioProducers {
+    pub(super) fn native(&self, name: &str) -> &Producer {
+        let Some(ScenarioProducer::Native(producer)) = self.producers.get(name) else {
+            panic!("the scenario opens native producer {name}");
+        };
+        producer
+    }
+}
+
 /// The session a step names.
 #[derive(Clone)]
 enum SessionRef {

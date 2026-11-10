@@ -66,7 +66,8 @@ fn a_terminal_restoration_refusal_keeps_the_tabs_rows_and_ends_its_attempts() {
             });
             interrupt_subscription_tabs(signals);
             assert_eq!(signals.begin_restorations().len(), 1);
-            let mut requests = SessionRequests::new();
+            let mut requests =
+                SessionRequests::new(Some(nervix_client_wire::SessionLimits::DEFAULT));
             apply_subscribe_outcome(
                 signals,
                 &mut requests,
@@ -105,7 +106,7 @@ fn a_restoration_refusal_preserves_the_operators_repl_history() {
         });
         interrupt_subscription_tabs(signals);
         assert_eq!(signals.begin_restorations().len(), 1);
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(nervix_client_wire::SessionLimits::DEFAULT));
         apply_subscribe_outcome(
             signals,
             &mut requests,
@@ -132,7 +133,7 @@ fn a_refused_restoration_waits_before_another_attempt_can_be_issued() {
         let signals = subscription_signals(SubscriptionTabState::Open(test_stream()));
         interrupt_subscription_tabs(signals);
         assert_eq!(signals.begin_restorations().len(), 1);
-        let mut requests = SessionRequests::new();
+        let mut requests = SessionRequests::new(Some(nervix_client_wire::SessionLimits::DEFAULT));
         apply_subscribe_outcome(
             signals,
             &mut requests,
@@ -165,7 +166,8 @@ fn transient_refusals_back_off_to_the_ceiling_without_issuing_early_or_in_flight
             let signals = subscription_signals(SubscriptionTabState::Open(test_stream()));
             interrupt_subscription_tabs(signals);
             assert_eq!(signals.begin_restorations().len(), 1);
-            let mut requests = SessionRequests::new();
+            let mut requests =
+                SessionRequests::new(Some(nervix_client_wire::SessionLimits::DEFAULT));
             for delay in [1, 2, 4, 5, 5] {
                 apply_subscribe_outcome(
                     signals,

@@ -93,7 +93,7 @@ impl CommandExecutionPolicy {
         capacity: Option<usize>,
     ) -> Result<Self, Report<nervix_models::ClusterParameterError>> {
         Ok(Self {
-            retry_validity: Setting::resolve(retry_validity, &())?,
+            retry_validity: CommandRetryValidity::resolve_duration(retry_validity)?,
             capacity: Setting::resolve(capacity.map(|value| value.arch_into()), &())?,
         })
     }
@@ -104,7 +104,7 @@ impl CommandExecutionPolicy {
     }
 
     pub fn retry_validity(self) -> Duration {
-        *self.retry_validity.value()
+        self.retry_validity.value().as_duration()
     }
 
     pub fn capacity(self) -> usize {

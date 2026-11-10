@@ -86,9 +86,6 @@ pub(in crate::application) use runtime_application::{
     ApplicationBound, RuntimeStateApplication, apply_current_cluster_runtime_state,
 };
 
-/// How many events a session can fall behind before the bus drops the oldest.
-pub(in crate::application) const SESSION_EVENT_CAPACITY: usize = 256;
-
 /// The session event bus, and the one way a control-plane failure or a cluster transition reaches
 /// the sessions attached to this node.
 ///
@@ -151,6 +148,10 @@ pub struct SessionServiceImpl {
 /// keep an `Arc` of their own have a second owner outside the service, and each names it.
 pub(in crate::application) struct SessionServiceInner {
     pub(in crate::application) licensing: crate::licensing::PolicyHandle,
+    pub(in crate::application) raft_timings: nervix_consensus::RaftTimings,
+    pub(in crate::application) gossip_interval: std::time::Duration,
+    pub(in crate::application) operational: nervix_models::NodeOperationalCapabilities,
+    pub(in crate::application) session_limits: nervix_client_wire::SessionLimits,
     /// Started and shut down by the application, which outlives the service handle.
     pub(in crate::application) cluster: Arc<cluster::ClusterHandle>,
     /// Proposal authority and local observation; leadership is checked for each operation.
@@ -1067,6 +1068,17 @@ fn rebind_resource_before_for(input: &str, cursor: usize) -> Option<ResourceName
 }
 
 impl SessionServiceImpl {
+    pub(in crate::application) fn coordination_rpc_timeout(&self) -> std::time::Duration {
+        nervix_interconnect::RequestDeadline::Coordination.resolve(
+            self.inner.interconnect.request_timeout(),
+            self.inner.interconnect.liveness(),
+        )
+    }
+
+    pub(in crate::application) fn session_limits(&self) -> nervix_client_wire::SessionLimits {
+        self.inner.session_limits
+    }
+
     pub(in crate::application) async fn apply_current_cluster_state(
         &self,
     ) -> error_stack::Result<(), crate::runtime::RuntimeError> {

@@ -309,3 +309,38 @@ pub(crate) fn boxed_session_storage() -> Option<Box<dyn RecordStorage>> {
 
 #[cfg(test)]
 pub(crate) mod in_memory;
+
+/// Why the required opening did not establish bounds for a companion socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub(crate) enum CallOpeningError {
+    #[error("the console connection ended before its session opening")]
+    Transport,
+    #[error("the console session opening did not arrive within the frame timeout")]
+    TimedOut,
+    #[error("the console session opening is invalid")]
+    Invalid,
+}
+
+pub(crate) async fn read_opening<B: Browser>(
+    browser: &B,
+    socket: &mut B::Socket,
+    timeout: Duration,
+) -> Result<nervix_client_wire::SessionLimits, error_stack::Report<CallOpeningError>> {
+    let received = std::pin::pin!(socket.receive());
+    let timeout = std::pin::pin!(browser.wait(timeout));
+    let received = match futures_util::future::select(received, timeout).await {
+        futures_util::future::Either::Left((received, _)) => received,
+        futures_util::future::Either::Right(((), _)) => {
+            return Err(error_stack::Report::new(CallOpeningError::TimedOut));
+        }
+    };
+    match received {
+        Received::Binary(payload) => {
+            let opened = nervix_client_wire::SessionOpened::verify(payload.into())
+                .map_err(|report| report.change_context(CallOpeningError::Invalid))?;
+            Ok(opened.limits)
+        }
+        Received::Text => Err(error_stack::Report::new(CallOpeningError::Invalid)),
+        Received::Ended => Err(error_stack::Report::new(CallOpeningError::Transport)),
+    }
+}

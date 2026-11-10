@@ -49,10 +49,7 @@ use super::{
         ApplicationRevisionParticipants, ApplicationRevisionPhase, wait_for_application_revision,
     },
     domain_lifecycle::DomainAlterError,
-    entity_gate::{
-        ClusterEntityGate, ClusterEntityGateScope, ENTITY_GATE_RELEASE_RETRY_INTERVAL,
-        EntityGateParticipants,
-    },
+    entity_gate::{ClusterEntityGate, ClusterEntityGateScope, EntityGateParticipants},
     session_service::SessionServiceImpl,
     transaction::TransactionStepImpactRecorder,
 };
@@ -63,11 +60,6 @@ use crate::{
     },
     runtime::{OwnershipHandoffError, OwnershipHandoffResult, Runtime},
 };
-
-pub(in crate::application) const FORCED_OWNERSHIP_RECOVERY_BUDGET: Duration =
-    Duration::from_secs(5);
-pub(in crate::application) const OWNERSHIP_HANDOFF_RECONCILIATION_POLL_INTERVAL: Duration =
-    Duration::from_millis(250);
 
 fn ownership_handoff_schedule_fingerprint(
     schedule: &nervix_models::DomainSchedule,
@@ -380,6 +372,7 @@ impl Drop for ClusterOwnershipHandoffPreparations {
 }
 
 pub(in crate::application) struct ForcedOwnershipRecoveryCoordinator<'a> {
+    pub(in crate::application) recovery_budget: Duration,
     pub(in crate::application) runtime: &'a Runtime,
     pub(in crate::application) interconnect: &'a Transport,
     pub(in crate::application) local_node_id: &'a ClusterNodeName,
@@ -442,10 +435,17 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
             preparations.push(async move {
                 let result = match destination_incarnation {
                     Some(destination_incarnation) => {
-                        let deadline = nervix_primitives::time::Instant::now()
-                            + FORCED_OWNERSHIP_RECOVERY_BUDGET;
+                        let deadline =
+                            nervix_primitives::time::Instant::now() + self.recovery_budget;
                         let preparation = async {
                             let request = RemotePrepareForcedOwnershipRecoveryRequest {
+                                recovery_budget: nervix_models::ClusterParameterDuration::try_from(
+                                    self.recovery_budget,
+                                )
+                                .assured(
+                                    "a validated forced-recovery budget fits its exact compact \
+                                     representation",
+                                ),
                                 operation_id: transition_id.clone(),
                                 source: moved.former_owner.clone(),
                                 destination: moved.destination.clone(),
@@ -464,10 +464,16 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
                             }
                             let response = self
                                 .interconnect
-                                .request(&moved.destination, request)
+                                .request_with_timeout(
+                                    &moved.destination,
+                                    request,
+                                    self.recovery_budget,
+                                )
                                 .await
                                 .map_err(|error| {
-                                    OwnershipHandoffError::transport(error.to_string())
+                                    error.change_context(OwnershipHandoffError::Transport(
+                                        "forced-recovery preparation".to_owned(),
+                                    ))
                                 })?;
                             response.map_err(|failure| {
                                 OwnershipHandoffError::participant(failure.to_string())
@@ -476,7 +482,7 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
                         match nervix_primitives::time::timeout_at(deadline, preparation).await {
                             Ok(result) => result,
                             Err(_) => Err(OwnershipHandoffError::deadline(
-                                "state preparation exceeded its five-second budget",
+                                "state preparation exceeded its captured forced-recovery budget",
                             )),
                         }
                     }
@@ -786,6 +792,39 @@ pub(in crate::application) fn planned_relocation_count(
 }
 
 impl SessionServiceImpl {
+    /// Validates the captured request policy before the runtime's installation wait.
+    pub(in crate::application) async fn prepare_local_forced_ownership_recovery(
+        &self,
+        request: RemotePrepareForcedOwnershipRecoveryRequest,
+    ) -> OwnershipHandoffResult<nervix_interconnect::ForcedOwnershipRecoveryPreparation> {
+        if request.destination != *self.inner.consensus.local_node_id() {
+            return Err(OwnershipHandoffError::participant(format!(
+                "forced ownership recovery for {} '{}' targets node '{}' but reached '{}'",
+                request.entity.kind.as_str(),
+                request.entity.identifier.as_str(),
+                request.destination,
+                self.inner.consensus.local_node_id()
+            )));
+        }
+        SessionServiceImpl::verify_ownership_handoff_node_incarnation(
+            &self.live_node_incarnations().await,
+            &request.destination,
+            request.destination_incarnation,
+            "destination",
+        )?;
+        let budget = nervix_models::ForcedRecoveryBudget::resolve_duration(Some(
+            request.recovery_budget.as_duration(),
+        ))
+        .change_context(OwnershipHandoffError::Participant(
+            "the captured forced-recovery budget is invalid".to_owned(),
+        ))?;
+        let deadline = nervix_primitives::time::Instant::now() + budget.value().as_duration();
+        self.inner
+            .runtime
+            .prepare_forced_ownership_recovery(request, deadline)
+            .await
+    }
+
     async fn release_failed_ownership_gate(
         &self,
         gate: ClusterEntityGate,
@@ -1795,7 +1834,13 @@ impl SessionServiceImpl {
                             error = %format_args!("{error:#}"),
                             "ownership handoff participant confirmation is waiting for interconnect"
                         );
-                        sleep(ENTITY_GATE_RELEASE_RETRY_INTERVAL).await;
+                        sleep(
+                            self.inner
+                                .operational
+                                .control_plane
+                                .entity_gate_release_retry_interval(),
+                        )
+                        .await;
                     }
                 }
             }
@@ -2111,7 +2156,7 @@ impl SessionServiceImpl {
             }
             nervix_primitives::select! {
                 _ = self.inner.drain_support_shutdown.cancelled() => return,
-                _ = sleep(ENTITY_GATE_RELEASE_RETRY_INTERVAL) => {}
+                _ = sleep(self.inner.operational.control_plane.entity_gate_release_retry_interval()) => {}
             }
         }
     }
@@ -2296,7 +2341,7 @@ impl SessionServiceImpl {
                     let response = service
                         .inner
                         .interconnect
-                        .request_with_timeout(&node, request, Duration::from_secs(2))
+                        .request_with_timeout(&node, request, self.coordination_rpc_timeout())
                         .await;
                     match response {
                         Ok(response) => response
@@ -2330,7 +2375,15 @@ impl SessionServiceImpl {
     }
 
     pub(in crate::application) async fn run_ownership_handoff_preparation_reconciliation(&self) {
-        sleep(Duration::from_millis(500)).await;
+        if self
+            .inner
+            .drain_support_shutdown
+            .run_until_cancelled(sleep(self.inner.gossip_interval))
+            .await
+            .is_none()
+        {
+            return;
+        }
         let mut observed = None;
         let mut followup_at = None;
         loop {
@@ -2381,7 +2434,7 @@ impl SessionServiceImpl {
             }
             nervix_primitives::select! {
                 _ = self.inner.drain_support_shutdown.cancelled() => return,
-                _ = sleep(OWNERSHIP_HANDOFF_RECONCILIATION_POLL_INTERVAL) => {}
+                _ = sleep(self.cluster_parameters().ownership_handoff_poll_interval()) => {}
             }
         }
     }

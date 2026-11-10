@@ -23,6 +23,7 @@ use std::{borrow::Cow, future::ready};
 use bytes::Bytes;
 use error_stack::Report;
 use futures_util::{Sink, SinkExt as _, Stream, StreamExt as _, stream};
+use meticulous::ResultExt as _;
 use nervix_client_wire::{
     FrameRoot, SessionLimits, VerifiedFrame,
     websocket::{ServerWebSocketCodec, WebSocketCodec, WebSocketData, WebSocketError},
@@ -195,7 +196,14 @@ impl SessionServiceImpl {
             .filter_map(move |message| ready(violations.inbound_frame(&reader_codec, message)))
             .chain(stream::once(ready(InboundFrame::Failed)));
         let inbound = Box::pin(inbound);
-        let (outbound, frames) = outbound::channel(CancellationToken::new());
+        let (outbound, frames) =
+            outbound::channel(CancellationToken::new(), &self.inner.operational.session);
+        let opening = nervix_client_wire::SessionOpened { limits }
+            .encode()
+            .assured("the fixed opening holds five checked scalar bounds");
+        if outbound.send(opening).await.is_err() {
+            return;
+        }
         let writer = self
             .inner
             .service_tasks

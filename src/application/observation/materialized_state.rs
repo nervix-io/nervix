@@ -197,7 +197,7 @@ impl SessionServiceImpl {
                 })?,
             ),
         };
-        let limits = SessionLimits::DEFAULT;
+        let limits = self.inner.session_limits;
         let settings = self.inner.runtime.state_inspection_settings();
         let rows = match &show.page {
             Some(page) => usize::try_from(page.limit.get()).map_err(|error| {

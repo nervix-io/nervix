@@ -437,6 +437,25 @@ test-password-credentials *args: build-deps build-plexus-format build-test-cli b
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/password_credentials.feature {{ quote(args) }}
 
+# Build the focused public settings scenario owner separately from its runtime budget.
+build-control-plane-settings: build-deps build-plexus-format build-test-cli build-deadlock-report
+    cargo test --package nervix-scenarios --test scenarios --no-run
+
+# Check the typed capability and wire-bound owners without building the server graph.
+check-operational-settings:
+    cargo check --package nervix-models --package nervix-client-wire --features nervix-client-wire/grpc
+
+# Check native per-call opening and client bounds without building the server graph.
+check-client-session-open:
+    cargo check --package nervix-client-core --features arrow,autocomplete
+
+# Check public control-plane cadence, session bounds, reconnects and forwarding links.
+test-control-plane-settings *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/cluster/{control_plane_settings,control_plane_settings}.feature") }} {{ quote(args) }}
+
 # Check the node's capability-derived execution and memory settings through its public surface.
 test-execution-capabilities *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash

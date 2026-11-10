@@ -361,7 +361,8 @@ pub(crate) async fn send_upload(server: &str, upload: &TestUpload<'_>) -> io::Re
         };
         frames.push(frame.map_err(io::Error::other)?);
     }
-    let request = authorized(nervix_primitives::stream::iter(frames))?;
+    let mut request = authorized(nervix_primitives::stream::iter(frames))?;
+    nervix_client_wire::grpc::limits::write(request.metadata_mut(), limits);
     let response = client
         .client_streaming(
             request,
@@ -550,7 +551,8 @@ pub(crate) async fn send_restore(
     let path = http::uri::PathAndQuery::from_static(RESTORE_BACKUP_PATH);
     let codec = ClientRestoreCodec::new(limits);
     let Some(chunks) = restore.abandon_after_chunks else {
-        let request = authorized(nervix_primitives::stream::iter(frames))?;
+        let mut request = authorized(nervix_primitives::stream::iter(frames))?;
+        nervix_client_wire::grpc::limits::write(request.metadata_mut(), limits);
         let call = client.client_streaming(request, path, codec);
         let response = match nervix_primitives::time::timeout(RESTORE_REPLY_TIMEOUT, call).await {
             Ok(Ok(response)) => response,
@@ -576,7 +578,8 @@ pub(crate) async fn send_restore(
         nervix_primitives::stream::iter(frames),
         nervix_primitives::stream::pending(),
     );
-    let request = authorized(parts)?;
+    let mut request = authorized(parts)?;
+    nervix_client_wire::grpc::limits::write(request.metadata_mut(), limits);
     let call = client.client_streaming(request, path, codec);
     match nervix_primitives::time::timeout(RESTORE_ABANDON_HOLD, call).await {
         Ok(Ok(response)) => {

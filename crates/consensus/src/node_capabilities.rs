@@ -164,6 +164,7 @@ mod tests {
     fn record(incarnation: u64) -> NodeCapabilityRecord {
         let node = ClusterNodeName::parse("worker").expect("node name");
         NodeCapabilityRecord {
+            operational: Default::default(),
             identity: ClusterNodeIdentity::new(node, ClusterNodeIncarnation::new(incarnation)),
             capabilities: nervix_models::NodeCapabilities {
                 interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
@@ -303,6 +304,13 @@ mod tests {
             .with_max_len(1024)
             .for_each(|bytes: &[u8]| {
                 let record = Arbitrary::new(bytes, Domain::Vocabulary).node_capability_record();
+                let json = serde_json::to_vec(&record)
+                    .expect("the complete current claim has a JSON encoding");
+                assert_eq!(
+                    serde_json::from_slice::<NodeCapabilityRecord>(&json)
+                        .expect("every operational value validates on decode"),
+                    record
+                );
                 let encoded = DurableBatch::encode(&record, 4096)
                     .expect("bounded current claim fits the record budget");
                 let decoded = storage_decode::<NodeCapabilityRecord>(&encoded)

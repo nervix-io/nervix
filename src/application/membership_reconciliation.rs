@@ -33,6 +33,8 @@ pub(super) struct MembershipReconciliation {
     pub proposer: Proposer,
     pub shutdown: CancellationToken,
     pub allow_bootstrap: bool,
+    pub startup_delay: Duration,
+    pub membership_interval: Duration,
     pub parameter_seeds: ClusterParameterValues,
     pub licensing: PolicyHandle,
     pub refusals: watch::Sender<Option<join_supervision::JoinRefusedError>>,
@@ -47,6 +49,8 @@ pub(super) fn spawn(arguments: MembershipReconciliation) -> JoinHandle<()> {
         proposer: proposer_for_parameter_seeding,
         shutdown: membership_reconcile_shutdown,
         allow_bootstrap,
+        startup_delay,
+        membership_interval,
         parameter_seeds,
         licensing: membership_licensing,
         refusals: bootstrap_refusal_sender,
@@ -54,7 +58,13 @@ pub(super) fn spawn(arguments: MembershipReconciliation) -> JoinHandle<()> {
         fault: _fault_for_identity_seeding,
     } = arguments;
     task::spawn(async move {
-        sleep(Duration::from_millis(500)).await;
+        if membership_reconcile_shutdown
+            .run_until_cancelled(sleep(startup_delay))
+            .await
+            .is_none()
+        {
+            return;
+        }
         let mut initialized = false;
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -141,7 +151,7 @@ pub(super) fn spawn(arguments: MembershipReconciliation) -> JoinHandle<()> {
                 .await;
             nervix_primitives::select! {
                 _ = membership_reconcile_shutdown.cancelled() => break,
-                _ = sleep(Duration::from_secs(1)) => {}
+                _ = sleep(membership_interval) => {}
             }
         }
     })

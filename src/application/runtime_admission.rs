@@ -29,12 +29,9 @@ use crate::{
     runtime::{Runtime, RuntimeError},
 };
 
-/// The node's retry cadence for admitting and installing committed runtime state.
-pub(in crate::application) const RUNTIME_STATE_RETRY_INTERVAL: Duration =
-    Duration::from_millis(500);
-
 /// The process-start barrier and runtime-installation sequencer shared by every installation path.
 pub(in crate::application) struct RuntimeAdmission {
+    retry_interval: Duration,
     identity: nervix_models::ClusterNodeIdentity,
     committed_log_index: OnceLock<u64>,
     attempt: Mutex<()>,
@@ -45,14 +42,22 @@ pub(in crate::application) struct RuntimeAdmission {
 }
 
 impl RuntimeAdmission {
-    pub(in crate::application) fn new(identity: nervix_models::ClusterNodeIdentity) -> Self {
+    pub(in crate::application) fn new(
+        identity: nervix_models::ClusterNodeIdentity,
+        timings: nervix_consensus::RaftTimings,
+    ) -> Self {
         Self {
+            retry_interval: timings.runtime_state_retry_interval(),
             identity,
             committed_log_index: OnceLock::new(),
             attempt: Mutex::new(()),
             installation: Mutex::new(()),
             applied_schedule: Mutex::new(None),
         }
+    }
+
+    pub(in crate::application) fn retry_interval(&self) -> Duration {
+        self.retry_interval
     }
 
     /// A session may classify an absent or stopped endpoint as final only after this node has
@@ -126,7 +131,7 @@ impl RuntimeAdmission {
             nervix_primitives::select! {
                 biased;
                 _ = shutdown.cancelled() => return None,
-                _ = nervix_primitives::time::sleep(RUNTIME_STATE_RETRY_INTERVAL) => {},
+                _ = nervix_primitives::time::sleep(self.retry_interval) => {},
             }
         }
         if self.committed_log_index.get().is_some() {
@@ -178,7 +183,7 @@ impl RuntimeAdmission {
                     nervix_primitives::select! {
                         biased;
                         _ = shutdown.cancelled() => return None,
-                        _ = nervix_primitives::time::sleep(RUNTIME_STATE_RETRY_INTERVAL) => {}
+                        _ = nervix_primitives::time::sleep(self.retry_interval) => {}
                     }
                 }
             }
@@ -199,10 +204,13 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn stale_state_keeps_the_last_applied_schedule_as_the_next_predecessor() {
-        let admission = RuntimeAdmission::new(nervix_models::ClusterNodeIdentity::new(
-            ClusterNodeName::parse("node-1").expect("fixture node"),
-            nervix_models::ClusterNodeIncarnation::new(1),
-        ));
+        let admission = RuntimeAdmission::new(
+            nervix_models::ClusterNodeIdentity::new(
+                ClusterNodeName::parse("node-1").expect("fixture node"),
+                nervix_models::ClusterNodeIncarnation::new(1),
+            ),
+            nervix_consensus::RaftTimings::default(),
+        );
         let runtime = Runtime::new();
         let local = ClusterNodeName::parse("node-1").assured("the fixture node name is valid");
         let current = ConsensusRuntimeState {

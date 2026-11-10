@@ -18,7 +18,7 @@
 use std::{convert::Infallible, time::Duration};
 
 use error_stack::Report;
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{NodeCapabilities, Setting, SettingDefinition};
 use thiserror::Error;
 
@@ -118,6 +118,16 @@ impl ShutdownSettings {
 
     pub fn shutdown_timeout(&self) -> Duration {
         *self.shutdown_timeout.value()
+    }
+
+    /// One tenth of the post-drain reserve belongs to each task's cooperative stop.
+    pub fn task_grace_period(&self) -> Duration {
+        (self
+            .shutdown_timeout()
+            .checked_sub(self.drain_timeout())
+            .assured("the resolved drain is no longer than shutdown")
+            / 10)
+            .max(Duration::from_nanos(1))
     }
 
     pub fn drain_timeout(&self) -> Duration {

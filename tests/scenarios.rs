@@ -269,6 +269,7 @@ mod rabbitmq_properties;
 mod relay_partitions;
 mod restarted_voter;
 mod session_protocol;
+mod session_settings;
 mod session_tls;
 mod standalone_transaction;
 mod subscription_restoration;

@@ -20,11 +20,11 @@ use std::{
 
 use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
+use meticulous::ResultExt as _;
 use nervix_client_wire::{
     BackupArchiveStart, BackupDownloadFailure, BackupDownloadFrame, BackupDownloadMessage,
     BackupDownloadRequest, BackupDownloadRequestFrame, EncodedFrame, LeaderRedirect, NodeEndpoints,
-    VerifiedFrame,
-    grpc::{ClientBackupDownloadCodec, DOWNLOAD_BACKUP_PATH},
+    SessionLimits, VerifiedFrame, grpc::DOWNLOAD_BACKUP_PATH,
 };
 use nervix_models::{ArchiveDigest, BackupArchiveSummary, CommandExecutionReference};
 use tempfile::NamedTempFile;
@@ -39,7 +39,6 @@ use url::Url;
 use crate::{
     client::{Client, RecoveryDeadline, RecoveryMode, SessionRecovery},
     error::ClientError,
-    exchange::SESSION_LIMITS,
     outcome::Routing,
     upload::expand_user_path,
 };
@@ -179,7 +178,7 @@ impl Client {
         let encoded = BackupDownloadRequest {
             execution_reference: reference.clone(),
         }
-        .encode(&SESSION_LIMITS);
+        .encode(&SessionLimits::OPENING);
         let request = match encoded {
             Ok(request) => request,
             Err(report) => return Err(report.change_context(BackupDownloadError::EncodeRequest)),
@@ -337,28 +336,33 @@ impl Client {
         channel: Channel,
         request: EncodedFrame<BackupDownloadRequestFrame>,
     ) -> Result<Streaming<VerifiedFrame<BackupDownloadFrame>>, Report<BackupDownloadError>> {
-        let mut client = tonic::client::Grpc::new(channel)
-            .max_decoding_message_size(SESSION_LIMITS.frame_bytes())
-            .max_encoding_message_size(SESSION_LIMITS.frame_bytes());
+        let mut channel = channel;
         let opened =
             nervix_primitives::time::timeout(self.inner.connector.request_timeout(), async {
-                client
-                    .ready()
+                crate::session_open::ready(&mut channel)
                     .await
                     .map_err(|error| Status::from_error(Box::new(error)))?;
-                let mut request = Request::new(request);
-                self.inner.connector.authorize(&mut request);
-                client
-                    .server_streaming(
-                        request,
-                        PathAndQuery::from_static(DOWNLOAD_BACKUP_PATH),
-                        ClientBackupDownloadCodec::new(SESSION_LIMITS),
-                    )
+                let (frames, outbound) = nervix_primitives::sync::mpsc::channel(1);
+                frames
+                    .send(request)
                     .await
+                    .assured("the private opening receiver is live");
+                drop(frames);
+                let mut request = Request::new(
+                    nervix_primitives::stream::wrappers::ReceiverStream::new(outbound),
+                );
+                self.inner.connector.authorize(&mut request);
+                crate::session_open::open::<BackupDownloadRequestFrame, BackupDownloadFrame>(
+                    &mut channel,
+                    request,
+                    PathAndQuery::from_static(DOWNLOAD_BACKUP_PATH),
+                    crate::session_open::OutboundBounds::Opening,
+                )
+                .await
             })
             .await;
         match opened {
-            Ok(Ok(response)) => Ok(response.into_inner()),
+            Ok(Ok(opened)) => Ok(opened.frames),
             Ok(Err(status)) => Err(BackupDownloadError::transport(status)),
             Err(_) => Err(Report::new(BackupDownloadError::Stalled)),
         }
