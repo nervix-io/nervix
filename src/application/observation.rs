@@ -2920,6 +2920,7 @@ mod tests {
                     clock: None,
                 },
                 None,
+                nervix_licensing_vocabulary::Quota::Unlimited,
             )
             .await
             .expect("domain should persist");

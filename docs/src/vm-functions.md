@@ -819,7 +819,7 @@ about vector instructions it supports.
 | Arrow compute kernel | Boolean logic, `STRING`/`BYTES`/`DATETIME` comparisons, `LIKE`/`ILIKE`, `contains`/`starts_with`/`ends_with`, casts, `CASE`/`coalesce`/`nullif` selection, filter/take/zip/interleave, UTC `date_part`, `bitwise_and`/`or`/`xor`, list `sum` per row | Whatever Arrow 58.4's kernels do; Nervix adds none of its own |
 | Explicit SIMD lanes | Checked `+` and `-` over `I8`, `U8`, `I16`, `U16`, `I32`, `U32`, `I64`, and `U64`, checked `*` below 64 bits, integer column-by-scalar `/` and `%` below 64 bits, and `I64` column-by-scalar `/` | `nervix-simd-kernels` selects the vector instructions once per process, with a scalar fallback, and every level computes the same lanes; the [SIMD kernels 07 report](https://app.clickup.com/t/86bc85vc3) and [08 report](https://app.clickup.com/t/86bc85vcf) inspect the generated code |
 | One pass over value buffers | Integer division by a column, `U64` column-by-scalar `/` and `%` and `I64` column-by-scalar `%` with a prepared reciprocal, checked `*` over `I64` and `U64`, checked float arithmetic, numeric comparisons, fixed-width `IN`, `abs`/`sign`/negation, `ceil`/`floor`/`round`/`trunc`, `sqrt`, shifts, classification, fixed-unit `date_trunc`/`date_bin`/`date_add`/`date_diff`, `to_unix`/`from_unix`, `length`/`octet_length`/`bit_length`, ASCII `lower`/`upper`, list `count` | Written so LLVM may auto-vectorize the loop for the target CPU; no claim that it does |
-| Library with runtime SIMD dispatch | JSON structure (simd-json), base64 (base64-simd), hexadecimal (faster-hex), `sha256` (AWS-LC through `nervix-crypto`, with CPU instruction detection) | The library selects instructions at run time; `xxh3_64` selects them when the binary is built |
+| Library with runtime SIMD dispatch | JSON structure (simd-json), base64 (base64-simd), hexadecimal (faster-hex), `sha256` (AWS-LC through the [cryptography boundary](cryptography.md#digests-and-randomness), with CPU instruction detection) | The library selects instructions at run time; `xxh3_64` selects them when the binary is built |
 | Irregular, per row | Transcendental math, `round(value, digits)`, zoned and calendar datetimes, datetime formatting and parsing, Unicode case mapping and NFC, regular expressions, Aho-Corasick, substring and padding functions, `md5`, IP and URL parsing, JSON path walk and conversion, most list functions, UUIDs | Batch API with optimized substeps; scalar work per row |
 
 ### Arrow Kernel Reuse
@@ -1313,7 +1313,9 @@ with bounded groups of the retained input rows and their argument columns as Arr
 converts those groups back into a native snapshot, which the branch task restores as it restores
 any other: every row is re-admitted in order, and the histograms take their delayed removals back.
 The window model digest is the BLAKE3 hash of the window processor's canonical Plexus, so a window
-whose `WIDTH`, `STEP`, state limit or aggregates changed starts empty instead.
+whose `WIDTH`, `STEP`, state limit or aggregates changed starts empty instead. It identifies the
+definition for state matching and authorizes nothing, a non-security purpose the [cryptography
+register](cryptography.md#classification-register) records.
 
 How each ending treats the window:
 

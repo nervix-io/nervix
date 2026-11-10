@@ -135,9 +135,12 @@ outward policy to shared-provider construction. Every new handshake captures its
 while established connections retain their negotiation and the connector retains its driver.
 SDKs that construct their own provider remain inventoried gaps. SQS projects the boundary's typed
 outward choice into Smithy's AWS-LC mode, retaining the SDK's cipher filtering. The interconnect
-has an independent fixed provider. [Cryptography](cryptography.md#algorithm-policy) owns membership
-and the governed-path inventory; connectors still own trust roots, identities and protocol
-negotiation.
+has an independent fixed provider. [Cryptography](cryptography.md#outward-tls-policy) owns
+membership and the governed-path inventory; connectors still own trust roots, identities and
+protocol negotiation. A new connector TLS path takes the committed policy, or joins that
+inventory's driver-owned gaps in the same change. Driver cryptography outside AWS-LC is listed in
+the [inventory](cryptography.md#inventory-outside-aws-lc) with what the later FIPS mode refuses,
+and a connector change adds none.
 An integration crate may depend on the contract, vocabulary, Arrow, and its own driver stack. It
 must not depend on the server, another integration crate, or runtime collectors. Driver libraries
 belong in that integration's manifest, with test-harness dependencies kept separately. A
@@ -3514,6 +3517,11 @@ sequenceDiagram
   `idle_timeout_ms` bounds silence; omission derives three configured ping intervals, or thirty
   seconds without configured pings. Received data and control frames refresh the absolute activity
   deadline; local pings and read cancellation do not. An explicit idle value overrides derivation.
+  The connection that owns the deadline ends itself when it passes: it polls one going-away Close
+  (status `1001`, RFC 6455 section 7.1.7) outside the cooperative budget, writing it only if the
+  transport takes it at once, and is then released. The verdict waits for neither the write nor a
+  reply, so it adds no network wait and never delays the host's reconnect; a write the transport
+  refuses is recovered and reported at `debug`.
   Incoming frame or message overflow fails the read and ends the connection, as `fail_read` declares.
   The host reconnects on its policy. Suspension closes the connection while retaining successful
   handshake payloads, which drain before another connection opens; close clears the queue.
@@ -3873,5 +3881,5 @@ change. The rustls configuration captures the current complete pair for each new
 including a driver-created reconnect; an established connection keeps its snapshot. Policy changes
 do not re-open the connector or alter its retry, quiesce, finish or acknowledgement contract.
 Trust roots, identity and ALPN remain properties of the concrete client configuration.
-[Cryptography](cryptography.md#algorithm-policy) owns the exact governed-path and driver-owned-gap
+[Cryptography](cryptography.md#outward-tls-policy) owns the exact governed-path and driver-owned-gap
 inventory.

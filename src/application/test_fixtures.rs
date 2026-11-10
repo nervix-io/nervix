@@ -92,6 +92,10 @@ impl SessionServiceImpl {
         request: CommandRequest,
         subscriptions: &mut SessionSubscriptions,
     ) -> CommandResponse {
+        // This fixture drives service commands without the application's background tasks.
+        self.inner
+            .licensing
+            .refresh(&self.inner.consensus.observer());
         let admission = RequestAdmission::default();
         self.process_command(request, subscriptions, &admission)
             .await
@@ -286,8 +290,14 @@ fn test_session_service(
         consensus.proposer().local_node_id().clone(),
     );
     let traffic = super::client_traffic::ClientTraffic::new(runtime.metrics().client_traffic());
+    let licensing = crate::licensing::PolicyHandle::new(
+        &consensus.observer(),
+        &runtime.metrics(),
+        ConfiguredFaultInjection::default(),
+    );
     SessionServiceImpl {
         inner: Arc::new(SessionServiceInner {
+            licensing,
             cluster: cluster.clone(),
             consensus: consensus.proposer(),
             consensus_administrator: consensus.administrator(),
@@ -544,7 +554,15 @@ pub(in crate::application) async fn create_test_domain(consensus: &Proposer, raw
     };
 
     for attempt in 0..50 {
-        if consensus.put_domain(state.clone(), None).await.is_ok() {
+        if consensus
+            .put_domain(
+                state.clone(),
+                None,
+                nervix_licensing_vocabulary::Quota::Unlimited,
+            )
+            .await
+            .is_ok()
+        {
             return;
         }
         nervix_primitives::time::sleep(Duration::from_millis(20)).await;
@@ -667,7 +685,7 @@ pub(in crate::application) async fn build_test_service_inner(
     let consensus = consensus.expect("consensus should open");
     consensus
         .administrator()
-        .maybe_initialize()
+        .maybe_initialize(|_| Ok(()))
         .await
         .expect("single-node consensus should initialize");
     // Every service a test builds acts as the leader of its single-node consensus, and a loaded

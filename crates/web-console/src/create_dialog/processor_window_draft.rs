@@ -14,13 +14,11 @@
     nervix::layer(edge, reason = "owns the edges boundary declared above")
 )]
 
-use std::num::NonZeroU64;
-
 use error_stack::Report;
 use nervix_models::{BuiltinFunctionName, WindowBound, WindowStateLimit};
 use strum::Display;
 
-use super::processor_draft::ProcessorDraftError;
+use super::processor_draft::{ProcessorDraftError, positive_byte_size};
 
 /// The window bound a refusal names, spelled as Plexus writes its clause.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Display)]
@@ -93,7 +91,11 @@ impl WindowDraft {
         let step = self.step.build(WindowBoundClause::Step)?;
         let state_limit = match &self.state_size {
             None => WindowStateLimit::Unbounded,
-            Some(size) => WindowStateLimit::MaxBytes(state_size_bytes(size)?),
+            Some(size) => WindowStateLimit::MaxBytes(positive_byte_size(
+                size,
+                ProcessorDraftError::StateSize,
+                ProcessorDraftError::StateSizeZero,
+            )?),
         };
         Ok(WindowParts {
             width,
@@ -122,26 +124,14 @@ impl WindowDraft {
     }
 }
 
-/// The byte count `MAX STATE SIZE` caps a branch's state at, read as the language reads the
-/// clause's byte-size literal.
-fn state_size_bytes(size: &str) -> error_stack::Result<NonZeroU64, ProcessorDraftError> {
-    let bytes = match size.trim().parse::<ubyte::ByteUnit>() {
-        Ok(bytes) => bytes.as_u64(),
-        // The byte-size parser is `no_std`: its refusal is no error type a report can hold, so
-        // the report carries it as a printable attachment.
-        Err(cause) => {
-            return Err(Report::new(ProcessorDraftError::StateSize).attach_printable(cause));
-        }
-    };
-    NonZeroU64::new(bytes).ok_or_else(|| Report::new(ProcessorDraftError::StateSizeZero))
-}
-
 #[cfg(test)]
 #[cfg_attr(
     nervix_lint,
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use std::num::NonZeroU64;
+
     use meticulous::{OptionExt as _, ResultExt as _};
 
     use super::*;

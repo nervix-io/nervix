@@ -28,8 +28,34 @@ impl StateInspection {
         &self,
         encoder: &mut Encoder<'fbb>,
     ) -> Result<WIPOffset<wire::StateInspection<'fbb>>, Report<WireEncodeError>> {
-        let domain = encoder.text("StateInspection.domain", self.entity.domain.as_str())?;
-        let entity = encode_node_ref(encoder, &self.entity.node)?;
+        let entity = match &self.entity {
+            StateInspectionEntity::DomainNode(entity) => {
+                let domain =
+                    encoder.text("DomainNodeInspectionEntity.domain", entity.domain.as_str())?;
+                let node = encode_node_ref(encoder, &entity.node)?;
+                let entity = wire::DomainNodeInspectionEntity::create(
+                    encoder.fbb(),
+                    &wire::DomainNodeInspectionEntityArgs {
+                        domain: Some(domain),
+                        node: Some(node),
+                    },
+                );
+                EncodedUnion::new(
+                    wire::StateInspectionEntity::DomainNodeInspectionEntity,
+                    entity,
+                )
+            }
+            StateInspectionEntity::ClusterLicense => {
+                let entity = wire::ClusterLicenseInspectionEntity::create(
+                    encoder.fbb(),
+                    &wire::ClusterLicenseInspectionEntityArgs::default(),
+                );
+                EncodedUnion::new(
+                    wire::StateInspectionEntity::ClusterLicenseInspectionEntity,
+                    entity,
+                )
+            }
+        };
         let result = match &self.result {
             StateInspectionResult::Page(page) => EncodedUnion::new(
                 wire::StateInspectionResult::StateInspectionPage,
@@ -51,8 +77,8 @@ impl StateInspection {
         Ok(wire::StateInspection::create(
             encoder.fbb(),
             &wire::StateInspectionArgs {
-                domain: Some(domain),
-                entity: Some(entity),
+                entity_type: entity.discriminant,
+                entity: Some(entity.value),
                 result_type: result.discriminant,
                 result: Some(result.value),
             },
@@ -65,9 +91,20 @@ impl StateInspection {
         backing: &Bytes,
         limits: &SessionLimits,
     ) -> Result<Self, Report<WireDecodeError>> {
-        let domain = decoder.name("StateInspection.domain", inspected.domain())?;
-        let node = decode_node_ref(decoder, inspected.entity())?;
-        let entity = DomainNodeRef::new(domain, node);
+        let entity = match inspected.entity_type() {
+            wire::StateInspectionEntity::DomainNodeInspectionEntity => {
+                let entity = inspected
+                    .entity_as_domain_node_inspection_entity()
+                    .assured("the verified union names a domain-node entity");
+                let domain = decoder.name("DomainNodeInspectionEntity.domain", entity.domain())?;
+                let node = decode_node_ref(decoder, entity.node())?;
+                StateInspectionEntity::DomainNode(DomainNodeRef::new(domain, node))
+            }
+            wire::StateInspectionEntity::ClusterLicenseInspectionEntity => {
+                StateInspectionEntity::ClusterLicense
+            }
+            unknown => return Err(decoder.unknown_union("StateInspection.entity", unknown.0)),
+        };
         let result = match inspected.result_type() {
             wire::StateInspectionResult::StateInspectionPage => {
                 let page = inspected

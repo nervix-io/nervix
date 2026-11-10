@@ -328,3 +328,110 @@ Feature: Bounded typed reorderer and correlator state inspection
       | cluster_size |
       | 1            |
       | 3            |
+
+  @processor_state_inspection
+  Scenario Outline: A stopped reorderer or correlator reports every state count as unavailable because no unit runs
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA notification ( region STRING, sequence I64 );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( region string, sequence integer );
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
+      CREATE SCHEMA region_key ( region STRING );
+      CREATE BRANCH by_region SCHEMA region_key TTL 5m;
+      CREATE RELAY incoming SCHEMA notification BRANCHED BY by_region;
+      CREATE RELAY settlements SCHEMA notification BRANCHED BY by_region;
+      CREATE RELAY ordered SCHEMA notification BRANCHED BY by_region;
+      CREATE RELAY settled SCHEMA notification BRANCHED BY by_region;
+      CREATE VHOST edge stopped-state-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/notifications';
+      CREATE HTTP ENDPOINT INGESTOR notifications FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        TO incoming INHERIT ALL BRANCHED BY by_region SET region = message.region
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE REORDERER held_notifications
+        FROM incoming
+        BY input.sequence
+        MAX TIME 10m
+        BRANCHED BY by_region
+        TO ordered INHERIT ALL FLUSH EACH 1h MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+      CREATE CORRELATOR settle_notifications
+        LEFT FROM incoming
+        RIGHT FROM settlements
+        CORRELATE WHERE left.sequence = right.sequence
+        MATCH EARLIEST
+        MAX TIME 10m
+        ON CORRELATION TIMEOUT DROP, DROP
+        BRANCHED BY by_region
+        TO settled
+          SET region = left.region,
+            sequence = left.sequence
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      START;
+      """
+    And http payload is posted to node "node-1" with host "stopped-state-{{test_id}}.example.com" path "/notifications"
+      """
+      {"region":"east","sequence":1}
+      """
+    Given client "reader" is connected to node "node-1"
+    Then within "30s" client "reader" sees reorderer "held_notifications" hold 1 rows
+    And within "30s" client "reader" sees correlator "settle_notifications" hold 1 rows
+    When these Plexus commands are executed on the leader node
+      """
+      DESCRIBE REORDERER held_notifications;
+      """
+    Then the last command output contains
+      """
+      branches: 1
+      rows: 1
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      STOP;
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      DESCRIBE REORDERER held_notifications;
+      """
+    Then the last command output contains
+      """
+      replicated state: true
+      outputs: 1
+      output 0: into=ordered construction=present branch=NODE-WIDE flush=1h max-batch-size=1MiB
+      branches: unavailable (owner_unavailable)
+      rows: unavailable (owner_unavailable)
+      state bytes: unavailable (owner_unavailable)
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      DESCRIBE CORRELATOR settle_notifications;
+      """
+    Then the last command output contains
+      """
+      replicated state: true
+      outputs: 1
+      output 0: into=settled construction=present branch=NODE-WIDE flush=IMMEDIATE
+      branches: unavailable (owner_unavailable)
+      rows: unavailable (owner_unavailable)
+      state bytes: unavailable (owner_unavailable)
+      """
+    When client "reader" submits this Plexus command request
+      """
+      SHOW REORDERER held_notifications STATE FORMAT JSON;
+      """
+    Then the typed inspection refuses the read with "owner_unavailable"
+    When client "reader" submits this Plexus command request
+      """
+      SHOW CORRELATOR settle_notifications STATE FORMAT JSON;
+      """
+    Then the typed inspection refuses the read with "owner_unavailable"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

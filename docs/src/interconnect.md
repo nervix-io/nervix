@@ -62,7 +62,8 @@ one production behavior, which is what every node uses:
   Production bundles use the system clock.
 - **Identity entropy.** The process epoch and relay grant identifiers are drawn from the transport's
   configured entropy, which in production takes AWS-LC's secure random values through
-  `nervix-crypto`. A simulation supplies its deterministic callback through the same seam.
+  `nervix-crypto` ([Digests And Randomness](cryptography.md#digests-and-randomness)). A simulation
+  supplies its deterministic callback through the same seam.
 - **Deadlines.** Every transport deadline is an instant of the boundary's clock,
   `nervix_primitives::time`, whose timers are Tokio's, so it follows the clock of the runtime it
   runs on: connection setup, request and progress timeouts, reconnect backoff, relay grant
@@ -94,12 +95,14 @@ fixed set is TLS 1.3 AES-256-GCM/SHA-384 and AES-128-GCM/SHA-256, with P-256, P-
 X25519MLKEM768 key exchange, in the pinned AWS-LC provider's relative preference order. Each
 client/server bundle checks this membership at construction; a policy failure retains its typed
 cause beneath the TLS configuration error. A peer offering only ChaCha20 or standalone X25519
-fails the rustls handshake. [Cryptography](cryptography.md#algorithm-policy) owns the algorithm
-classification and distinguishes this preparation from a validated FIPS build.
+fails the rustls handshake. [Cryptography](cryptography.md#interconnect-tls) owns the algorithm
+classification, explains why the set is a fixed contract rather than a setting, and distinguishes
+this preparation from a validated FIPS build.
 
 This TLS restriction permits a rolling restart with the preceding full AWS-LC algorithm set:
 both sides offer AES-GCM and P-256. The independent interconnect wire fingerprint and cluster join
-requirements still apply. Outward session and connector TLS keep their existing algorithms.
+requirements still apply. Outward session and connector TLS follow the committed [outward
+policy](cryptography.md#outward-tls-policy) instead, which never reaches the interconnect.
 
 Cluster discovery supplies the current node identity, incarnation, and advertised endpoint for each
 peer. A bootstrap seed, configured or recovered, is the exception: the initiating node knows the
@@ -474,6 +477,10 @@ and the requester bounds the skew between its own readings before the request le
 answer arrived.
 
 ## Wire Contract And Payloads
+
+The current contract includes the free licensing singleton in snapshots, captured domain quotas in
+creation and restore commands, and typed quota refusals in membership verdicts. These shapes advance
+the same fingerprint as every other consensus and prerequisite shape.
 
 All nodes in a running cluster use one current wire contract. A fixed fingerprint covers the set of
 supported operations and their encoded shapes. It is one of the prerequisites every hello carries,
@@ -2382,9 +2389,9 @@ The consensus owner establishes a trace context containing the cluster, node and
 interconnect listener address before it starts OpenRaft. Its captured core events can therefore be
 assigned to one concrete listener when several isolated test clusters reuse the same node names. This
 is diagnostic context; traffic classes, quotas, requests and deadlines keep their own contracts.
-Trace-level contexts on unary Raft receivers carry the same endpoint into their existing API
+Debug-level contexts on unary Raft receivers carry the same endpoint into their existing API
 events, before the core processes the request.
-Vote and pre-vote client trace events also record send and completion boundaries and elapsed
+Vote and pre-vote client debug events also record send and completion boundaries and elapsed
 transport time, including encoding, connection admission and response decoding. The existing
 caller deadline and cancellation still own an exchange that ends before a completion event.
 [Consensus Storage And Replication](consensus-storage-and-replication.md#observability) owns the

@@ -1,5 +1,14 @@
 # Storage Representation Coverage
 
+The `licensing-record-rkyv` property preserves licensing time, Free mode and every retained trust
+document's original bytes, typed document kind, serial and optional working-key identity. The
+consensus state-record properties include the singleton paired with the cluster identity; durable
+recovery refuses an incomplete pair. Raft record generators carry captured bounded or unlimited
+quotas in domain creation and restore effects. Admission-verdict generation includes complete
+licensing refusals, and statement/archive/canonical domains include `DESCRIBE LICENSE`.
+`client-state-inspection` and the shared host inspection property preserve cluster-license scope
+without manufacturing a domain or graph-node identity.
+
 Names drawn from `nervix-arbitrary` include current Plexus keyword spellings where their name
 kind and domain admit them. The [property register](../docs/src/property-testing-and-fuzzing.md)
 records each generated domain's revision and input bounds.

@@ -290,7 +290,7 @@ Native client-core, the CLI and native bindings use `nervix-crypto`'s explicit `
 default, independently of an embedding host's process provider. They are clients rather than members
 of the cluster's policy authority. Browser TLS remains the browser's choice. The interconnect has
 its independent fixed provider, unaffected by outward algorithm changes.
-[Cryptography](cryptography.md#algorithm-policy) owns exact names, aliases, defaults and governed
+[Cryptography](cryptography.md#outward-tls-policy) owns exact names, aliases, defaults and governed
 connector paths; certificate trust and provisioning remain as above.
 
 ### Console WebSocket
@@ -351,7 +351,7 @@ that fails authentication ends with `UNAUTHENTICATED`. The console upgrade prese
 credentials in an `Authorization: Basic` header or, because a browser cannot set headers on a
 WebSocket, as the `auth` query parameter; a failure answers `401` with a `Basic` challenge and never
 upgrades. `GET /console/auth` checks credentials without opening a session. Passwords are verified
-against typed PBKDF2-HMAC-SHA-512 credentials held in consensus, on the node's credentials worker under a 64-byte verification-buffer charge. Stored iteration counts are validated before admission; the committed creation default is 210,000 and the accepted upper bound is 1,000,000. Its isolated CPU class serves only password
+against typed PBKDF2-HMAC-SHA-512 credentials held in consensus ([Password Credentials](cryptography.md#password-credentials)), on the node's credentials worker under a 64-byte verification-buffer charge. Stored iteration counts are validated before admission; the committed creation default is 210,000 and the accepted upper bound is 1,000,000. Its isolated CPU class serves only password
 work, so saturated data, extension or bulk work never delays a login, and concurrent attempts wait
 for it in turn. A node whose credentials class cannot take the verification now answers
 `UNAVAILABLE`, or `503` without an upgrade on the console: the
@@ -527,7 +527,10 @@ takes a domain and branch reference. Ingestor decoded and output fields use the 
 codec-field and relay-field targets. A junction, deduplicator, reorderer, or reingestor asks for
 another input relay with a domain and the first relay reference; candidates have that relay's exact named schema and branch.
 The same dependencies with the output-relay target select the input branch, and with the
-materialized-relay target select only relays with materialized state in that branch. Route
+materialized-relay target select only relays with materialized state in that branch. A generator
+reads no input, so its materialized relay uses the generator-materialized-relay target: with a
+domain alone it offers unbranched relays with materialized state, and with a domain and a branch
+reference the relays with materialized state branched by exactly that branch. Route
 construction of an unbranched or named branch uses the ingestor relay targets, while branch keys
 and record fields use the branch-field and relay-field targets. These processor targets resolve
 against the attached transaction prefix, and their page digests include the selected input
@@ -2588,6 +2591,11 @@ process-bound read origin, complete counts and named sections. A section carries
 `RowSchema`, bounded `NXRB` RowBatch frames, omitted-row count and optional positional watermark
 indices. Watermarks are distinct, non-sensitive datetime columns. Frames conform to their section
 schema, keep branch keys and redaction, and share the verified outer reply's backing bytes.
+
+The entity is a typed choice between a domain node and the cluster license. A domain-node entity
+carries its domain and node reference. A cluster-license entity has neither a domain nor a model
+name. `DESCRIBE LICENSE` uses the same page, unit, origin and Row-section contract, capturing one
+published policy revision and its committed usage. Its single unit belongs to the answering node.
 
 Stateful processor reads use the same envelope. Deduplicators publish `keys`; windows publish
 retained `rows` plus per-branch `header` and `accumulators` sections. Window metadata consumes

@@ -13,8 +13,8 @@
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use tracing::{
-    Metadata, Span, Subscriber, debug, debug_span, info, info_span, subscriber::Interest, trace,
-    trace_span, warn, warn_span,
+    Metadata, Span, Subscriber, debug, debug_span, info, info_span, level_filters::LevelFilter,
+    subscriber::Interest, trace, trace_span, warn, warn_span,
 };
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt as _, registry::LookupSpan};
 
@@ -306,5 +306,47 @@ fn a_returned_message_the_filter_would_always_record_is_never_recorded() {
     assert_eq!(
         Answer::from(ruled.register_callsite(returned)),
         Answer::Never
+    );
+}
+
+/// A scenario run records through one process subscriber, and the `log` bridge hands that
+/// subscriber every record a dependency writes through the `log` crate up to the most verbose
+/// level the filter selects for any target, to be judged one record at a time. Cranelift writes
+/// `trace` records throughout every module it compiles, so a single `trace` directive in the
+/// scenario default made each compile of the scenario WASM guest about six times as long, which on
+/// a loaded runner outlasted the budget a runtime revision has to become prepared and ready.
+#[test]
+fn the_scenario_default_selects_nothing_more_verbose_than_debug() {
+    let directives = LogFilter::scenario_default();
+    let most_verbose = operator_filter(&directives)
+        .into_subscriber()
+        .max_level_hint()
+        .assured("a filter of static directives states its most verbose level");
+    assert!(
+        most_verbose <= LevelFilter::DEBUG,
+        "the scenario default selects {most_verbose}, so the log bridge hands the filter every \
+         dependency record up to that level: '{directives}'"
+    );
+}
+
+/// The vote and pre-vote boundaries and the receiver contexts a failed election is read for stay
+/// in the scenario log, at the level the scenario default selects.
+#[test]
+fn the_scenario_default_records_election_requests_and_their_receivers() {
+    let directives = LogFilter::scenario_default();
+    let log = recorded(operator_filter(&directives).into_subscriber(), || {
+        debug!(target: "nervix_consensus", peer = %"node-2", "sending Raft vote request");
+        debug!(target: "nervix_consensus", peer = %"node-2", "Raft vote request completed");
+        let receiver =
+            debug_span!(target: "nervix_consensus", "receive_raft_vote", node = %"node-1");
+        let _entered = receiver.enter();
+        info!(target: "openraft::raft::api::protocol", "Raft::vote(): rpc");
+    });
+
+    assert!(log.contains("sending Raft vote request"), "{log}");
+    assert!(log.contains("Raft vote request completed"), "{log}");
+    assert!(
+        log.contains("receive_raft_vote{node=node-1}") && log.contains("Raft::vote(): rpc"),
+        "{log}"
     );
 }

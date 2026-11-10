@@ -36,6 +36,7 @@ nervix-crypto = { workspace = true }
 nervix-execution = { workspace = true }
 nervix-interconnect = { workspace = true }
 nervix-licensing-protocol = { workspace = true }
+nervix-licensing-vocabulary = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }

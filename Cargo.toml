@@ -177,6 +177,8 @@ nervix-execution = { workspace = true }
 nervix-expiry-map = { workspace = true }
 nervix-interconnect = { workspace = true }
 nervix-jaq = { workspace = true }
+nervix-licensing-protocol = { workspace = true }
+nervix-licensing-vocabulary = { workspace = true }
 nervix-models = { workspace = true, features = ["arrow"] }
 nervix-plexus = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
@@ -353,6 +355,7 @@ members = [
   "crates/expiry-map",
   "crates/interconnect",
   "crates/licensing-protocol",
+  "crates/licensing-vocabulary",
   "crates/jaq",
   "crates/nervix-wasm",
   "crates/nervix-wasm-protocol",
@@ -616,6 +619,7 @@ nervix-expiry-map = { package = "nervix-expiry-map", path = "crates/expiry-map" 
 nervix-interconnect = { package = "nervix-interconnect", path = "crates/interconnect" }
 nervix-jaq = { package = "nervix-jaq", path = "crates/jaq" }
 nervix-licensing-protocol = { package = "nervix-licensing-protocol", path = "crates/licensing-protocol" }
+nervix-licensing-vocabulary = { path = "crates/licensing-vocabulary" }
 nervix-model-harness = { package = "nervix-model-harness", path = "crates/model-harness" }
 nervix-models = { package = "nervix-models", path = "crates/models" }
 nervix-plexus = { package = "nervix-plexus", path = "crates/plexus", features = [

@@ -10,6 +10,7 @@ use std::{collections::BTreeMap, num::NonZeroUsize};
 use chrono::{DateTime, Utc};
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
+pub use nervix_licensing_vocabulary::Quota;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -28,30 +29,6 @@ pub enum ActivationKind {
 pub enum Capability {
     Enabled,
     Disabled,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Quota {
-    Bounded { value: u64 },
-    Unlimited,
-}
-
-impl Quota {
-    pub const fn admits(self, usage: u64) -> bool {
-        match self {
-            Self::Unlimited => true,
-            Self::Bounded { value } => usage <= value,
-        }
-    }
-
-    pub const fn is_reduction_from(self, previous: Self) -> bool {
-        match (previous, self) {
-            (Self::Unlimited, Self::Bounded { .. }) => true,
-            (Self::Bounded { value: previous }, Self::Bounded { value }) => value < previous,
-            _ => false,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,8 +139,8 @@ impl ConditionDefinition {
     }
 }
 
-pub const CLUSTER_NODES: &str = "cluster.nodes";
-pub const CLUSTER_DOMAINS: &str = "cluster.domains";
+pub const CLUSTER_NODES: &str = nervix_licensing_vocabulary::QuotaName::ClusterNodes.as_str();
+pub const CLUSTER_DOMAINS: &str = nervix_licensing_vocabulary::QuotaName::ClusterDomains.as_str();
 pub const PERSISTENT_ACTIVATIONS: &str = "license.activations.persistent";
 pub const EPHEMERAL_ACTIVATIONS: &str = "license.activations.ephemeral";
 pub const ACTIVATION_KINDS: &str = "activation.kinds";
