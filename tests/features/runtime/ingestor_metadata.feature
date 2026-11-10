@@ -150,7 +150,7 @@ Feature: Typed ingestor metadata
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'client_ingestor' in domain '{{domain}}' reads metadata.missing in its route to 'events', but CLIENT PRODUCER ingestors declare no metadata field"
+    When these Plexus statements fail with "ingestor 'client_ingestor' in domain '{{domain}}' reads metadata.missing in its route to 'events', but CLIENT PRODUCER ingestors declare only metadata.user"
       """
       CREATE CLIENT PRODUCER INGESTOR client_ingestor
         FROM SCHEMA event MODE ACK PARALLEL MAX 64 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s

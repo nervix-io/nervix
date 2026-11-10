@@ -3118,10 +3118,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/application/client_producers/__fuzz__/application__client_producers__link__properties__bolero_producer_link_frames_reach_the_other_end_whole/corpus"
-domain_version = 9
+domain_version = 10
 features = []
 id = "client-producer-link-frames"
-invariant = "Every message that opens a client producer link, every frame its serving node sends and every answer of its owning node, with the schema, limits, batch bytes, clearance, producer description, refusal, outcome, admission state or end reason it carries, reaches the other end whole through the bounded duplex codec under the relay class and payload limit, and nothing stays charged."
+invariant = "Every message that opens a client producer link, every frame its serving node sends and every answer of its owning node, with the authenticated user, schema, limits, batch bytes, clearance, producer description, refusal, outcome, admission state or end reason it carries, reaches the other end whole through the bounded duplex codec under the relay class and payload limit, and nothing stays charged."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-server"
@@ -3133,7 +3133,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/application/client_producers/__fuzz__/application__client_producers__link__properties__bolero_damaged_producer_link_frames_fail_typed_or_decode_to_a_frame/corpus"
-domain_version = 9
+domain_version = 10
 features = []
 id = "client-producer-link-frames-malformed"
 invariant = "A truncated, bit-flipped, overwritten, shortened or trailed frame of a client producer link, a frame read as another direction's type, and arbitrary bytes fail with the codec's typed decode failure, never as work the node could not admit or execute, or decode to a frame that encodes and decodes back to itself, and either way nothing stays charged."

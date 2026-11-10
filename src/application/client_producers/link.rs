@@ -43,7 +43,7 @@ use nervix_interconnect::{
 use nervix_models::{
     ClientProducerAdmission, ClientProducerDescription, ClientProducerEndReason,
     ClientProducerLimits, ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
-    ClusterNodeName, DomainName, IngestorName, SchemaField,
+    ClusterNodeName, DomainName, IngestorName, SchemaField, UserName,
 };
 use nervix_primitives::{
     collections::DashMap,
@@ -109,6 +109,7 @@ impl InterconnectDuplexRequest for OpenClientProducerLink {
 pub(super) enum ClientProducerLinkItem {
     Open {
         key: u64,
+        user: UserName,
         domain: DomainName,
         ingestor: IngestorName,
         expected_fields: Vec<SchemaField>,
@@ -567,6 +568,7 @@ impl ServingLink {
         let item = match command {
             LinkCommand::Open { key, open, reply } => {
                 let ProducerOpen {
+                    user,
                     domain,
                     ingestor,
                     expected_fields,
@@ -576,6 +578,7 @@ impl ServingLink {
                 self.pending.insert(key, reply);
                 ClientProducerLinkItem::Open {
                     key,
+                    user,
                     domain,
                     ingestor,
                     expected_fields,
@@ -848,6 +851,7 @@ impl OwnerLink {
         match item {
             ClientProducerLinkItem::Open {
                 key,
+                user,
                 domain,
                 ingestor,
                 expected_fields,
@@ -856,6 +860,7 @@ impl OwnerLink {
             } => {
                 let (clearance_requests, clearances) = mpsc::unbounded_channel();
                 let request = ClientProducerOpenRequest {
+                    user,
                     domain,
                     ingestor,
                     expected_fields,

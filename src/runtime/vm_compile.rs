@@ -743,6 +743,7 @@ pub(super) fn compile_finalized_output_filter_program(
 pub(super) enum RuntimeFilterScope {
     Ingestor {
         allow_header_reads: bool,
+        metadata: IngestorMetadataDeclaration,
         payload: nervix_models::IngestorPayloadDeclaration,
     },
     Source {
@@ -776,9 +777,7 @@ impl RuntimeFilterScope {
 
     pub(super) const fn allow_metadata(self) -> bool {
         match self {
-            Self::Ingestor {
-                allow_header_reads, ..
-            } => allow_header_reads,
+            Self::Ingestor { metadata, .. } => !metadata.is_empty(),
             Self::Source { allow_metadata, .. } => allow_metadata,
             Self::FinalizedOutput => false,
         }
@@ -840,7 +839,16 @@ pub(super) fn bind_scoped_filter_program(
         VmCompileBinding::writable(scope.namespace(), schema.clone())
             .with_sensitivity(sensitivity.clone()),
     ];
-    if let RuntimeFilterScope::Ingestor { payload, .. } = scope {
+    if let RuntimeFilterScope::Ingestor {
+        metadata, payload, ..
+    } = scope
+    {
+        if let Some(schema) = metadata.arrow_schema() {
+            bindings.push(VmCompileBinding::readonly(
+                INGEST_METADATA_NAMESPACE,
+                StdArc::new(schema),
+            ));
+        }
         local_namespaces.insert(INGEST_PAYLOAD_NAMESPACE.to_string());
         if let Some(binding) = ingestor_payload_binding(payload, parsed) {
             bindings.push(binding);
