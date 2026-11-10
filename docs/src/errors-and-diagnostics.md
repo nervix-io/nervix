@@ -479,9 +479,13 @@ subsections after the boundary table follow this order.
 
 A window route compilation failure retains its compiler report beneath
 `RegistryError::WindowRouteCompile`, which names the domain, processor and output relay.
-`WindowRouteCompileError::CollectionArgumentNullable` names `COLLECT_VEC` and directs an optional
+`WindowRouteCompileError::CollectionArgumentNullable` names the collection function and directs an optional
 argument to `coalesce`. `RegistryError::WindowCollectionMissingBound` names the same route and
 function when neither a message width nor a state limit bounds retained collection.
+The fixed form's bound refusal names its authored `WIDTH` and directs duration or combined
+windows to `COLLECT_VEC`; an intrinsically unrepresentable fixed dimension keeps its typed
+compiler cause. A retained-count disagreement fails before gathering through the window's
+existing emission-failure owner.
 
 ### Boundaries
 

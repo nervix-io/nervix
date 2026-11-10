@@ -553,9 +553,10 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   window route `SET`, `input` only inside their arguments, and `COUNT`, `SUM`, `FIRST`, `LAST`,
   `MIN`, and `MAX` are aggregates there, never list functions. Compute window output from aggregates
   and constants, and prefer the dedicated aggregates (`AVG`, `COUNT_IF`, `ARG_MIN`, `ARG_MAX`, the
-  `*_POP` and `*_SAMP` statistics, `CORR`) over hand-built formulas. Before using `COLLECT_VEC`,
-  check its required argument and bounded-retention rules in that reference; use the documented
-  list functions to consume its result. For `APPROX_COUNT_DISTINCT`,
+  `*_POP` and `*_SAMP` statistics, `CORR`) over hand-built formulas. Before using `COLLECT_VEC` or
+  `COLLECT_ARRAY`, check the reference's required-argument, retention and count-width rules;
+  follow the Generators quickstart for sampled sequences and visible cadence gaps. Use the
+  documented list functions to consume the result. For `APPROX_COUNT_DISTINCT`,
   `APPROX_QUANTILE`, and `APPROX_TOP_K`, read `Approximate Sketches`: the window needs
   `MAX STATE SIZE` after duration `WIDTH` and `STEP`, a branched window a branch with
   `MAX INSTANCES <n> EVICT LRU`, and the precision or capacity sets both accuracy and memory.

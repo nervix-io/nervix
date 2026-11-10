@@ -435,6 +435,13 @@ field. A collecting route needs a message `WIDTH` or `MAX STATE SIZE`. Collectio
 retained argument column with `FIRST` and `LAST`, including through snapshot restore, and its
 values and structure remain visible through the existing state inspection commands.
 
+Use `COLLECT_ARRAY(input.value)` under `WIDTH n MESSAGES` without a duration to produce a required
+`ARRAY` of exactly `n` values. A fixed tensor axis can consume that field directly. The width sets
+the result type; the output schema must match it exactly. A new width requires a new window
+processor. Both collection forms use the existing branch-local retained columns through restart
+and ownership changes. See the [sampled-sequence example](quickstart-generators.md#collect-samples-for-a-fixed-tensor)
+for a generator feeding a count window and an inferencer.
+
 `MAX STATE SIZE <bytes>` caps the live state of each concrete branch. It charges retained Arrow
 input and argument allocations, row handles, branch keys, and the reserved capacity of every
 sketch in every active pane. A row that would exceed the cap, or a row whose aggregate arguments

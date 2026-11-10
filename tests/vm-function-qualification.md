@@ -27,6 +27,7 @@ the cited feature explicitly tests a topology-specific event.
 | Calendar, time zone and formatting | [Calendar datetime](features/runtime/calendar_datetime_functions.feature) | Local-calendar arithmetic, ambiguous local time handling, format validation and domain execution time. |
 | Fixed arrays and vectors | [Array and vector functions](features/runtime/array_vector_functions.feature), [expression semantics](features/runtime/expression_function_semantics.feature) | Fixed widths, ragged and empty vectors, nested element rejection, item count bounds and overflow. |
 | Window retained collection | [Window collection](features/runtime/window_collect.feature), [window recovery](features/runtime/window_processor.feature) | Required exact vectors, nested arrays, watermark/admission ordering, `nth`/`mean` composition, sensitivity, shared argument inspection, state-budget refusal, restart, drain and relocation. |
+| Window fixed collection | [Fixed window collection](features/runtime/window_collect_array.feature) | Width-derived exact arrays, sliding/tumbling branch isolation, nested dimensions, count-bound/nullability/type refusals, restart, relocation and sampled timestamps beside a generator-to-inferencer sequence. |
 | Window exact statistics and sketches | [Window statistics](features/runtime/window_statistics.feature), [window sketches](features/runtime/window_sketches.feature) | Branch-local sliding/tumbling results, typed nulls, contract rejection, eviction and recovery. |
 
 ## Execution contexts and boundaries
