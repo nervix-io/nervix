@@ -187,8 +187,8 @@ fn independent_choice_controls_discard_older_drafts_and_session_generations() {
             control: ChoiceControl::RelayBranch,
             ..pace_context
         };
-        let pace = signals.choices.relay_schema.load;
-        let placement = signals.choices.relay_branch.load;
+        let pace = signals.choice_signals(ChoiceControl::RelaySchema).load;
+        let placement = signals.choice_signals(ChoiceControl::RelayBranch).load;
 
         signals.apply_choice(
             placement_context,
@@ -264,7 +264,10 @@ fn a_reply_fills_only_a_control_of_the_open_form() {
             outcome(relay.clone(), "orders"),
         );
         assert_eq!(
-            signals.choices.subscription_relay.load.get_untracked(),
+            signals
+                .choice_signals(ChoiceControl::SubscriptionRelay)
+                .load
+                .get_untracked(),
             ChoiceLoad::Waiting
         );
         let schema = ChoiceValue::Model(node(ModelKind::Schema, "order_record"));
@@ -274,7 +277,10 @@ fn a_reply_fills_only_a_control_of_the_open_form() {
             outcome(schema, "order_record"),
         );
         assert!(matches!(
-            signals.choices.relay_schema.load.get_untracked(),
+            signals
+                .choice_signals(ChoiceControl::RelaySchema)
+                .load
+                .get_untracked(),
             ChoiceLoad::Ready { .. }
         ));
 
@@ -285,7 +291,10 @@ fn a_reply_fills_only_a_control_of_the_open_form() {
             outcome(relay, "orders"),
         );
         assert!(matches!(
-            signals.choices.subscription_relay.load.get_untracked(),
+            signals
+                .choice_signals(ChoiceControl::SubscriptionRelay)
+                .load
+                .get_untracked(),
             ChoiceLoad::Ready { .. }
         ));
     });
@@ -346,7 +355,7 @@ fn choice_outcomes_keep_missing_stale_and_failed_states_distinct() {
     Owner::new().with(|| {
         let signals = CreateSignals::new();
         signals.open(CreateKind::Domain, None, "trigger");
-        let pace = signals.choices.domain_pace.load;
+        let pace = signals.choice_signals(ChoiceControl::DomainPace).load;
         let revision = signals.revision.get_untracked();
         let context = ChoiceRequestContext {
             control: ChoiceControl::DomainPace,
@@ -428,7 +437,7 @@ fn choice_states_render_hints_and_failures_with_their_own_presentation() {
     super::super::initialize_test_executor();
     Owner::new().with(|| {
         let signals = CreateSignals::new();
-        let load = signals.choices.domain_pace.load;
+        let load = signals.choice_signals(ChoiceControl::DomainPace).load;
         let request_tx = RwSignal::new(None);
         let session_generation = RwSignal::new(1);
         let render = || {
@@ -517,7 +526,7 @@ fn choice_requests_preserve_control_context_and_report_unavailable_channels() {
     Owner::new().with(|| {
         let signals = CreateSignals::new();
         signals.open(CreateKind::Domain, None, "trigger");
-        let pace = signals.choices.domain_pace;
+        let pace = signals.choice_signals(ChoiceControl::DomainPace);
         pace.search.set("wall".to_string());
         let (sender, mut receiver) = request_handoff();
         let request_tx = RwSignal::new(Some(sender));
@@ -767,7 +776,7 @@ fn relay_and_subscription_scope_changes_invalidate_their_references() {
 fn branch_schema_requests_bind_the_captured_domain_and_page_cursor() {
     Owner::new().with(|| {
         let signals = CreateSignals::new();
-        let branch_schema = signals.choices.branch_schema;
+        let branch_schema = signals.choice_signals(ChoiceControl::BranchSchema);
         let (sender, mut receiver) = request_handoff();
         let request_tx = RwSignal::new(Some(sender));
         signals.open(CreateKind::Branch, None, "trigger");
@@ -851,7 +860,7 @@ fn relay_and_subscription_controls_ask_typed_questions_of_the_captured_domain() 
         ] {
             request_choices(signals, control, request_tx, 2, false);
             assert_eq!(
-                signals.choices.of(control).load.get_untracked(),
+                signals.choice_signals(control).load.get_untracked(),
                 ChoiceLoad::MissingPrerequisite(reason)
             );
         }
@@ -866,7 +875,10 @@ fn relay_and_subscription_controls_ask_typed_questions_of_the_captured_domain() 
             false,
         );
         assert_eq!(
-            signals.choices.subscription_field.load.get_untracked(),
+            signals
+                .choice_signals(ChoiceControl::SubscriptionField)
+                .load
+                .get_untracked(),
             ChoiceLoad::MissingPrerequisite("Select a relay to list the fields of its records")
         );
         for (control, target) in [
@@ -1142,22 +1154,24 @@ fn creation_components_render_each_typed_draft_and_accessible_status() {
             );
             any_spawner::Executor::poll_local();
             if signals.open.get_untracked() == Some(CreateKind::Domain) {
-                signals.choices.domain_pace.load.set(ChoiceLoad::Ready {
-                    choices: vec![Choice {
-                        value: ChoiceValue::DomainPace(DomainPaceChoice::Unpaced),
-                        presentation: ChoicePresentation {
-                            label: "UNPACED".to_string(),
-                            detail: Some("No domain clock".to_string()),
-                            group: None,
-                        },
-                    }],
-                    page_cursor: Some("more-pace".to_string()),
-                });
+                signals
+                    .choice_signals(ChoiceControl::DomainPace)
+                    .load
+                    .set(ChoiceLoad::Ready {
+                        choices: vec![Choice {
+                            value: ChoiceValue::DomainPace(DomainPaceChoice::Unpaced),
+                            presentation: ChoicePresentation {
+                                label: "UNPACED".to_string(),
+                                detail: Some("No domain clock".to_string()),
+                                group: None,
+                            },
+                        }],
+                        page_cursor: Some("more-pace".to_string()),
+                    });
             }
             if signals.open.get_untracked() == Some(CreateKind::Subscription) {
                 signals
-                    .choices
-                    .subscription_field
+                    .choice_signals(ChoiceControl::SubscriptionField)
                     .load
                     .set(ChoiceLoad::Ready {
                         choices: vec![Choice {

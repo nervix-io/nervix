@@ -1404,6 +1404,11 @@ section schemas, watermark positions, row frames and continuation. A refused ins
 unsuccessful command disposition while retaining its typed reason. Clients MUST NOT derive success
 from the presence of `state` or parse text to reconstruct rows.
 
+Clients MUST preserve the inspection entity's typed scope. `DomainNodeInspectionEntity` contains
+a domain and node reference; `ClusterLicenseInspectionEntity` contains neither. Native host
+domain/name accessors return absent values for a cluster-license observation, and its entity kind
+is `LICENSE`. The page and Row-section contract is shared by both scopes.
+
 Embedded `NXRB` frames use the existing verified Row/Cell representation and the session transfer
 bound. A retained frame MUST keep its backing bytes alive after its containing outcome is released.
 Clients MUST preserve full integer widths, float bits, datetime values, bytes, nested lists, null

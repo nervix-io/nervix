@@ -2665,9 +2665,22 @@ without waiting, and outside the runtime's cooperative budget. Drivers answer th
 channels, which read as empty once a task has spent its budget even though their answer has
 arrived, so a failure that found more given answers than one budget allows would otherwise leave
 the rest unresolved. A record without an answer, or whose answer failed, stays unresolved and is
-sent again, which is the at-least-once delivery `MODE ACK` promises. The registered Bolero property `connector-confirmation-window` holds the window to a
+sent again, which is the at-least-once delivery `MODE ACK` promises.
+
+A driver can keep trying to deliver a record after the window stopped waiting for it, and so deliver
+its own copy beside the one the host's retry sends. A connector whose driver does ends a failed
+publish another way. It waits for the answers still awaited through `settle_awaited`, which returns
+the failure that would end the publish instead of ending it as `finish` does; it then has its driver
+give up every record the driver still holds, and ends the publish through `fail_once_given_up`. A
+driver answers at once for each record it gives up: with the broker's verdict, where the broker
+answered before the record was given up, and otherwise with the failure of giving it up. The window
+waits for those answers, oldest first, until `ACK TIMEOUT` after the give-up, and then settles the
+publish as `fail` does. A record the broker confirmed before its driver gave it up is therefore
+delivered rather than sent again, and the records left unresolved are ones the driver no longer
+holds. An answer the give-up does not produce within that bound leaves its record unresolved, as
+any missing answer does. The registered Bolero property `connector-confirmation-window` holds the window to a
 reference model of this rule over scripted answers given within, at, past or never by each deadline,
-failed answers and driver failures, and the Shuttle checks of the
+failed answers, driver failures and drivers that give their records up, and the Shuttle checks of the
 [confirmation window](./data-plane-concurrency.md#protocols-and-their-checks) hold its settlement
 while answers arrive concurrently with the publish.
 
@@ -2700,10 +2713,17 @@ producer's `delivery.timeout.ms` to `ACK TIMEOUT`, rounded up to the millisecond
 client's own entry. A Kafka client accepts that librdkafka property under this name alone, so no
 other entry can set it. A
 producer left at librdkafka's five-minute default would keep retrying a record after the publish
-stopped waiting for it, and could deliver that copy beside the one the host's retry sends.
-librdkafka checks message timeouts about once a second, so the producer gives a record up within
-about a second of `ACK TIMEOUT`. An `ACK TIMEOUT` longer than the 2147483647 milliseconds librdkafka
-holds refuses the emitter when it starts. In `MODE NO ACK` the producer taking a record into its queue
+stopped waiting for it, and could deliver that copy beside the one the host's retry sends. The
+bound alone does not prevent that: librdkafka checks message timeouts only about once a second, and
+it still sends a record whose timeout has passed, granting its request a further 100 milliseconds,
+until that check fails the record. A broker that takes writes again within that second would store
+the copy beside the retry's. A confirmed publish that fails therefore gives up every record its
+producer still holds before it ends: it purges what the producer queues or has in flight, without
+waiting inside librdkafka, and ends through `fail_once_given_up`, which settles the report
+librdkafka then gives each purged record. A record the broker took before the purge is confirmed by
+its report and is not sent again; a record already on its way to the broker when the purge runs
+stays ambiguous, like any unanswered record. An `ACK TIMEOUT` longer than the 2147483647
+milliseconds librdkafka holds refuses the emitter when it starts. In `MODE NO ACK` the producer taking a record into its queue
 delivers it, and the client's own delivery bound applies.
 
 The NATS STREAM emitter awaits its `PubAck`s through the window: a `PubAck` confirms a record, a
