@@ -155,6 +155,8 @@ pub(super) fn ProcessorInvocationEditor(
 
 #[cfg(test)]
 mod tests {
+    use nervix_models::ModelKind;
+
     use super::*;
     use crate::create_dialog::CreateKind;
 
@@ -162,7 +164,11 @@ mod tests {
     fn invocation_helpers_keep_function_and_argument_order_in_the_active_route() {
         Owner::new().with(|| {
             let signals = CreateSignals::new();
-            signals.open(CreateKind::Junction, None, "global-create-button");
+            signals.open(
+                CreateKind::Model(ModelKind::Junction),
+                None,
+                "global-create-button",
+            );
             with_invocations(signals, ProcessorFamily::Junction, |items| {
                 items.push(InvocationDraft {
                     function: "first".into(),

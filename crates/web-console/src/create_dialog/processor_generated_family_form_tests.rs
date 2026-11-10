@@ -101,7 +101,7 @@ fn generated_family_forms_render_their_own_sections_and_omit_what_they_do_not_de
     Owner::new().with(|| {
         let signals = CreateSignals::new();
         signals.open(
-            CreateKind::Generator,
+            CreateKind::Model(ModelKind::Generator),
             Some(models()),
             "global-create-button",
         );
@@ -136,7 +136,7 @@ fn generated_family_forms_render_their_own_sections_and_omit_what_they_do_not_de
         );
 
         signals.open(
-            CreateKind::Inferencer,
+            CreateKind::Model(ModelKind::Inferencer),
             Some(models()),
             "global-create-button",
         );
@@ -190,7 +190,7 @@ fn generated_family_forms_render_their_own_sections_and_omit_what_they_do_not_de
         );
 
         signals.open(
-            CreateKind::WasmProcessor,
+            CreateKind::Model(ModelKind::WasmProcessor),
             Some(models()),
             "global-create-button",
         );
@@ -232,7 +232,7 @@ fn a_generator_asks_for_materialized_relays_on_exactly_its_branch_and_routes_by_
     Owner::new().with(|| {
         let signals = CreateSignals::new();
         signals.open(
-            CreateKind::Generator,
+            CreateKind::Model(ModelKind::Generator),
             Some(models()),
             "global-create-button",
         );
@@ -390,7 +390,7 @@ fn inferencer_and_wasm_pickers_ask_for_their_binding_and_the_fields_their_routes
     Owner::new().with(|| {
         let signals = CreateSignals::new();
         signals.open(
-            CreateKind::Inferencer,
+            CreateKind::Model(ModelKind::Inferencer),
             Some(models()),
             "global-create-button",
         );
@@ -498,7 +498,7 @@ fn inferencer_and_wasm_pickers_ask_for_their_binding_and_the_fields_their_routes
         );
 
         signals.open(
-            CreateKind::WasmProcessor,
+            CreateKind::Model(ModelKind::WasmProcessor),
             Some(models()),
             "global-create-button",
         );
@@ -580,7 +580,7 @@ fn submitted_statement(signals: CreateSignals) -> String {
 fn generated_family_submissions_render_their_canonical_statements() {
     Owner::new().with(|| {
         let signals = CreateSignals::new();
-        signals.open(CreateKind::Generator, Some(models()), "global-create-button");
+        signals.open(CreateKind::Model(ModelKind::Generator), Some(models()), "global-create-button");
         signals.generator.update(|draft| {
             draft.name = "synth".into();
             draft.choose_unbranched();
@@ -604,7 +604,7 @@ fn generated_family_submissions_render_their_canonical_statements() {
             "{generator}"
         );
 
-        signals.open(CreateKind::Inferencer, Some(models()), "global-create-button");
+        signals.open(CreateKind::Model(ModelKind::Inferencer), Some(models()), "global-create-button");
         signals.inferencer.update(|draft| {
             draft.name = "running_total".into();
             draft.choose_unbranched();
@@ -653,7 +653,7 @@ fn generated_family_submissions_render_their_canonical_statements() {
         }
 
         signals.open(
-            CreateKind::WasmProcessor,
+            CreateKind::Model(ModelKind::WasmProcessor),
             Some(models()),
             "global-create-button",
         );
@@ -713,7 +713,7 @@ fn a_changed_domain_requires_the_materialized_relay_and_the_binding_again() {
     Owner::new().with(|| {
         let signals = CreateSignals::new();
         signals.open(
-            CreateKind::Generator,
+            CreateKind::Model(ModelKind::Generator),
             Some(models()),
             "global-create-button",
         );
@@ -724,12 +724,12 @@ fn a_changed_domain_requires_the_materialized_relay_and_the_binding_again() {
         });
         signals.change_scope(Some(DomainName::parse("other").assured("valid domain")));
         assert_eq!(
-            refusal(signals, CreateKind::Generator),
+            refusal(signals, CreateKind::Model(ModelKind::Generator)),
             ProcessorDraftError::GeneratorRelayChanged
         );
 
         signals.open(
-            CreateKind::Inferencer,
+            CreateKind::Model(ModelKind::Inferencer),
             Some(models()),
             "global-create-button",
         );
@@ -750,7 +750,7 @@ fn a_changed_domain_requires_the_materialized_relay_and_the_binding_again() {
             draft.select_input(&node(ModelKind::Relay, "features"));
         });
         assert_eq!(
-            refusal(signals, CreateKind::Inferencer),
+            refusal(signals, CreateKind::Model(ModelKind::Inferencer)),
             ProcessorDraftError::Binding(ResourcePinError::ResourceChanged)
         );
         let draft = signals.inferencer.get_untracked();
