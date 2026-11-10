@@ -49,6 +49,12 @@ pub(in crate::runtime) struct CollectedSequence {
 
 impl CollectedSequence {
     /// Capture cooperatively, then gather on the bounded data workers under a relay-memory charge.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the retained run supplies synchronous iteration over \
+                                   immutable row positions; local capture and worker bodies \
+                                   remain analyzed")
+    )]
     pub(in crate::runtime) async fn evaluate<R: RetainedWindowRows>(
         executor: &Executor,
         demand: usize,
@@ -205,6 +211,11 @@ struct SelectionShape {
 impl SelectionShape {
     /// Conservatively cover source data, destination transforms and sliced-array metadata for
     /// every type level, even when sorting leaves one gather run per row.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "maintained Arrow arrays supply immutable type and \
+                                   child-column metadata for the collection's working-set charge")
+    )]
     fn header_bytes(mut array: &dyn Array) -> usize {
         let mut bytes = 0_usize;
         let mut depth = 1_usize;
@@ -240,6 +251,13 @@ impl SelectionShape {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "maintained Arrow arrays supply their types, immutable slices and selected \
+                      buffer sizes; local sizing remains analyzed"
+        )
+    )]
     fn include(
         &mut self,
         array: &dyn Array,
@@ -361,6 +379,13 @@ impl SelectionShape {
         Ok(())
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "Arrow supplies the immutable validity bitmap used to charge the selected \
+                      collection rows"
+        )
+    )]
     fn include_nulls(
         &mut self,
         array: &dyn Array,
