@@ -3765,6 +3765,23 @@ when keys, ingestion timestamps and publication revisions repeat. Keys are filte
 one domain-clock reading without touching the owning keyspace. A changed expiry prefix fences a
 continuation even when no input has published another generation.
 
+During an active partition transition, the coordinator first reads count-only pages with complete
+selected branch-fingerprint catalogs from the captured unit owners. It chooses the current-count
+partition when that partition publishes an installed branch, otherwise its holder. The following
+owner pages exclude copies selected elsewhere before counting, opening window columns or applying
+row limits. Each page also names its complete catalog before exclusion; a membership change from
+the census returns `not_ready`, so installation and forget cannot produce a successful page with
+duplicate or missing copies. Two holders without an installed claimant likewise refuse the read.
+
+The census and keyed selection retain Bulk memory admission, bounded by one session transfer-byte
+budget; transport descriptors keep their existing Bulk bound, and the frontend's existing read
+deadline covers the census and pages together. Reads outside a transition request no catalogs.
+The release, checkpoint fetch, installation and forget protocol is unchanged, and passive snapshots
+use the same retained publications. This adds no publication, lock or recurring-path lookup.
+Deterministic owner tests cover growing, shrinking and a return to one partition, both unit read
+orders, catalog races and admission refusal. Public one- and three-node cases hold claims before
+installation and before forget and verify exact branch/row/byte counts, retained values and paging.
+
 Window inspection reads input and argument views, sequence and lifetime facts, the next duration or
 delayed-removal deadline, and the production state admission charge. Sealed metadata parsing runs
 on the Bulk executor with cancellation; the existing bounded native decoder opens its Arrow

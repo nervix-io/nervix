@@ -30,7 +30,7 @@ use nervix_connector_syslog::SyslogListenerFault;
 use nervix_execution::Executor;
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CommandExecutionReference,
-    DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName, RelayName,
+    DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName, NodeRef, RelayName,
     RemoteRuntimeField, RestoreStep,
 };
 use nervix_primitives::{
@@ -1804,6 +1804,64 @@ impl FaultInjection {
     /// Holds handoff after publishing its force-flush generation, before declaring the hold ready.
     pub fn pause_ownership_handoff_flush(&self, domain: DomainName) {
         self.arm_command_pause(CommandPausePoint::OwnershipHandoffFlush(domain));
+    }
+
+    /// Holds a processor claim after release, before installing its checkpoint.
+    pub fn pause_processor_partition_install(&self, processor: DomainNodeRef) {
+        self.arm_command_pause(CommandPausePoint::ProcessorPartitionInstall(processor));
+    }
+
+    pub async fn wait_for_processor_partition_install(&self, processor: &DomainNodeRef) {
+        self.wait_for_command_pause(&CommandPausePoint::ProcessorPartitionInstall(
+            processor.clone(),
+        ))
+        .await;
+    }
+
+    pub fn release_processor_partition_install(&self, processor: &DomainNodeRef) {
+        self.release_command_pause(&CommandPausePoint::ProcessorPartitionInstall(
+            processor.clone(),
+        ));
+    }
+
+    pub(crate) async fn pause_processor_partition_install_if_armed(
+        &self,
+        domain: &DomainName,
+        processor: &NodeRef,
+    ) {
+        self.pause_command_if_armed(CommandPausePoint::ProcessorPartitionInstall(
+            processor.in_domain(domain),
+        ))
+        .await;
+    }
+
+    /// Holds a processor claim after installation, before asking its holder to forget.
+    pub fn pause_processor_partition_forget(&self, processor: DomainNodeRef) {
+        self.arm_command_pause(CommandPausePoint::ProcessorPartitionForget(processor));
+    }
+
+    pub async fn wait_for_processor_partition_forget(&self, processor: &DomainNodeRef) {
+        self.wait_for_command_pause(&CommandPausePoint::ProcessorPartitionForget(
+            processor.clone(),
+        ))
+        .await;
+    }
+
+    pub fn release_processor_partition_forget(&self, processor: &DomainNodeRef) {
+        self.release_command_pause(&CommandPausePoint::ProcessorPartitionForget(
+            processor.clone(),
+        ));
+    }
+
+    pub(crate) async fn pause_processor_partition_forget_if_armed(
+        &self,
+        domain: &DomainName,
+        processor: &NodeRef,
+    ) {
+        self.pause_command_if_armed(CommandPausePoint::ProcessorPartitionForget(
+            processor.in_domain(domain),
+        ))
+        .await;
     }
 
     pub async fn wait_for_ownership_handoff_flush_pause(&self, domain: &DomainName) {

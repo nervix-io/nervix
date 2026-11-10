@@ -69,6 +69,8 @@ pub(super) enum CommandPausePoint {
     RestoreBranchStateConversion(DomainName),
     IngestorRoutePoll(DomainNodeRef),
     OwnershipHandoffFlush(DomainName),
+    ProcessorPartitionInstall(DomainNodeRef),
+    ProcessorPartitionForget(DomainNodeRef),
     OwnershipHandoffActivation(DomainName),
     GracefulDrain(ClusterNodeName),
     TransactionCommit {
