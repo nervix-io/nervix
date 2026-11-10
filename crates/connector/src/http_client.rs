@@ -246,7 +246,11 @@ mod tests {
     #[nervix_primitives::test]
     async fn a_built_client_takes_a_redirect_as_its_answer_and_sends_nothing_to_its_location()
     -> Result<(), Report<DnsConfigurationError>> {
-        let dns = DnsResolver::load(DnsConfiguration::system()).await?;
+        let dns = DnsResolver::load(
+            DnsConfiguration::system(),
+            nervix_dns::DnsSettings::default(),
+        )
+        .await?;
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("a loopback listener binds");
@@ -274,7 +278,11 @@ mod tests {
     #[nervix_primitives::test]
     async fn a_declared_proxy_carries_every_request_with_the_credentials_its_url_holds()
     -> Result<(), Report<DnsConfigurationError>> {
-        let dns = DnsResolver::load(DnsConfiguration::system()).await?;
+        let dns = DnsResolver::load(
+            DnsConfiguration::system(),
+            nervix_dns::DnsSettings::default(),
+        )
+        .await?;
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("a loopback listener binds");
@@ -319,7 +327,11 @@ mod tests {
     #[nervix_primitives::test]
     async fn a_declared_proxy_is_dialled_without_its_credentials_and_never_shows_them()
     -> Result<(), Report<DnsConfigurationError>> {
-        let dns = DnsResolver::load(DnsConfiguration::system()).await?;
+        let dns = DnsResolver::load(
+            DnsConfiguration::system(),
+            nervix_dns::DnsSettings::default(),
+        )
+        .await?;
         let declared = [entry(
             "proxy",
             "https://egress%20user:se%3Acret@proxy.internal:3128",
@@ -395,7 +407,11 @@ mod tests {
     #[nervix_primitives::test]
     async fn http_client_validates_timeout_configuration()
     -> Result<(), Report<DnsConfigurationError>> {
-        let dns = DnsResolver::load(DnsConfiguration::system()).await?;
+        let dns = DnsResolver::load(
+            DnsConfiguration::system(),
+            nervix_dns::DnsSettings::default(),
+        )
+        .await?;
         let client = HttpClientConfig::new(
             &[ClientConfigEntry {
                 key: "timeout_ms".to_string(),
@@ -428,7 +444,11 @@ mod tests {
     -> Result<(), Report<DnsConfigurationError>> {
         const CHILD: &str = "NERVIX_TEST_HTTP_EMPTY_TRUST_STORE";
         if std::env::var_os(CHILD).is_some() {
-            let dns = DnsResolver::load(DnsConfiguration::system()).await?;
+            let dns = DnsResolver::load(
+                DnsConfiguration::system(),
+                nervix_dns::DnsSettings::default(),
+            )
+            .await?;
             let entries = [entry("timeout_ms", "5000")];
             HttpClientConfig::new(&entries, "HTTP", &dns, &Default::default())
                 .build()
@@ -472,7 +492,11 @@ mod tests {
     #[nervix_primitives::test]
     async fn http_client_keeps_the_shared_tls_configuration_cause()
     -> Result<(), Report<DnsConfigurationError>> {
-        let dns = DnsResolver::load(DnsConfiguration::system()).await?;
+        let dns = DnsResolver::load(
+            DnsConfiguration::system(),
+            nervix_dns::DnsSettings::default(),
+        )
+        .await?;
         let directory = tempfile::tempdir().expect("the TLS fixture directory is writable");
         let ca = directory.path().join("invalid-ca.pem");
         std::fs::write(
@@ -497,7 +521,11 @@ mod tests {
     #[nervix_primitives::test]
     async fn http_client_classifies_invalid_tls_material()
     -> Result<(), Report<DnsConfigurationError>> {
-        let dns = DnsResolver::load(DnsConfiguration::system()).await?;
+        let dns = DnsResolver::load(
+            DnsConfiguration::system(),
+            nervix_dns::DnsSettings::default(),
+        )
+        .await?;
         let root = tempfile::tempdir().expect("temporary TLS directory should open");
         let invalid = root.path().join("invalid.pem");
         std::fs::write(

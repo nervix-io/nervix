@@ -15,10 +15,14 @@ mod capacity;
 mod cluster_parameters;
 mod connector_host;
 mod consensus;
+mod consensus_operations;
+mod database;
 #[cfg(feature = "deloxide")]
 mod diagnostics;
+mod dns;
 mod engines;
 mod execution;
+mod interconnect;
 mod membership;
 mod memory_pressure;
 mod node;

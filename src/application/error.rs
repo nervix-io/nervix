@@ -114,12 +114,20 @@ pub enum AppError {
     CloseStores,
     #[error("invalid memory pressure configuration")]
     InvalidMemoryPressureConfig,
+    #[error("invalid consensus capacities or deadlines")]
+    InvalidConsensusOperations,
     #[error("invalid Raft timings")]
     InvalidRaftTimings,
     #[error("invalid membership settings")]
     InvalidMembershipSettings,
     #[error("invalid capacity settings")]
     InvalidCapacitySettings,
+    #[error("invalid database capacity settings")]
+    InvalidDatabaseSettings,
+    #[error("invalid DNS settings")]
+    InvalidDnsSettings,
+    #[error("invalid interconnect settings")]
+    InvalidTransportSettings,
     #[error("invalid client endpoint byte capacity")]
     InvalidClientEndpointCapacity,
     #[error("invalid execution capacity")]

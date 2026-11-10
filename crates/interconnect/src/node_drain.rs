@@ -60,7 +60,7 @@ impl InterconnectRequest for StoppingNodeDrainRequest {
     const NAME: &'static str = "stopping_node_drain";
     /// Longer than the default shutdown timeout. A stopping node bounds each request by what
     /// remains of its own drain timeout instead.
-    const TIMEOUT: Duration = Duration::from_secs(60);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
 }
 
 #[cfg(all(test, not(any(feature = "shuttle", feature = "turmoil"))))]

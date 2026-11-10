@@ -665,7 +665,7 @@ async fn committed_offset_after_replica_delay(delay: Option<Duration>) {
         ));
         assert_eq!(
             Instant::now(),
-            started + SyncKafkaOffsets::default_timeout(),
+            started + SyncKafkaOffsets::DEADLINE.declared_default(),
             "an absent replica ends the commit at its bounded native operation deadline"
         );
         return;
