@@ -115,9 +115,7 @@ pub(in crate::application) async fn run(service: SessionServiceImpl, shutdown: C
                 if changed.is_err() { break; }
                 notification_due = true;
                 retry_at = Instant::now();
-                if !requests.is_empty() {
-                    service.inner.licensing_requests.expedite();
-                }
+                service.inner.licensing_requests.expedite();
             },
             completed = streams.tasks.join_next(), if !streams.tasks.is_empty() => {
                 if let Some(Err(error)) = completed {

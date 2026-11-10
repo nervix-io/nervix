@@ -557,6 +557,10 @@ test-licensing-free *args: build-deps build-plexus-format build-test-cli build-d
 test-licensing-parser-source source *args:
     cargo test --manifest-path {{ quote(source / "Cargo.toml") }} --lib {{ quote(args) }}
 
+# Verify a production licensing owner directly through an isolated source harness.
+test-licensing-owner-source source *args:
+    cargo test --manifest-path {{ quote(source / "Cargo.toml") }} --lib {{ quote(args) }}
+
 # Verify licensed leader streams, cursor reconciliation and independent polling through HTTPS.
 test-licensing-notifications *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash

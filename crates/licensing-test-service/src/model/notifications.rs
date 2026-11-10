@@ -12,6 +12,7 @@ use axum::{
     http::HeaderMap,
     response::{IntoResponse as _, Sse, sse::Event},
 };
+use error_stack::{Report, ResultExt as _};
 use headers::{Authorization, HeaderMapExt as _, authorization::Bearer};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_licensing_protocol::{
@@ -83,6 +84,14 @@ impl Notifications {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("licensing notification admission refused")]
+struct AdmissionError(ProblemKind);
+
+fn refusal(kind: ProblemKind) -> Report<AdmissionError> {
+    Report::new(AdmissionError(kind))
+}
+
 impl Model {
     pub fn notification_mode(&mut self, mode: StreamMode) {
         self.notifications.mode = mode;
@@ -130,51 +139,55 @@ impl Model {
             trust_serial: 1,
         })
     }
-    fn open_stream(&mut self, id: Uuid, headers: &HeaderMap) -> Result<Admission, ProblemKind> {
+    fn open_stream(
+        &mut self,
+        id: Uuid,
+        headers: &HeaderMap,
+    ) -> Result<Admission, Report<AdmissionError>> {
         self.request_count = self
             .request_count
             .checked_add(1)
             .assured("bounded fixture request count");
         let authorization = headers
             .typed_get::<Authorization<Bearer>>()
-            .ok_or(ProblemKind::SignatureInvalid)?;
+            .ok_or_else(|| refusal(ProblemKind::SignatureInvalid))?;
         let activation = self
             .activations
             .get(&id)
-            .ok_or(ProblemKind::ActivationUnknown)?;
+            .ok_or_else(|| refusal(ProblemKind::ActivationUnknown))?;
         let ticket: StreamTicket = verify(authorization.token(), &activation.public_key, limits())
-            .map_err(|_| ProblemKind::SignatureInvalid)?;
+            .change_context(AdmissionError(ProblemKind::SignatureInvalid))?;
         let common = &ticket.common;
         if ticket.activation_id != id || common.cluster_uid != activation.binding.cluster_uid {
-            return Err(ProblemKind::BindingMismatch);
+            return Err(refusal(ProblemKind::BindingMismatch));
         }
         if common.key_generation != activation.binding.generation {
-            return Err(ProblemKind::GenerationMismatch);
+            return Err(refusal(ProblemKind::GenerationMismatch));
         }
         if common.protocol != 1 || common.aud != self.address {
-            return Err(ProblemKind::InvalidRequest);
+            return Err(refusal(ProblemKind::InvalidRequest));
         }
         if self.notifications.consumed.contains(&common.request_id) {
-            return Err(ProblemKind::RequestConflict);
+            return Err(refusal(ProblemKind::RequestConflict));
         }
         let challenge = self.challenges.remove(common.challenge.expose());
         if !challenge.is_some_and(|challenge| {
             challenge.cluster == common.cluster_uid && challenge.until > self.now
         }) {
-            return Err(ProblemKind::ChallengeInvalid);
+            return Err(refusal(ProblemKind::ChallengeInvalid));
         }
         if self.notifications.consumed.len() >= MAX_ENTRIES {
-            return Err(ProblemKind::RateLimited {
+            return Err(refusal(ProblemKind::RateLimited {
                 retry_after_seconds: 1,
-            });
+            }));
         }
         let last_event = match headers.get("last-event-id") {
             Some(value) => Some(
                 value
                     .to_str()
-                    .map_err(|_| ProblemKind::InvalidRequest)?
-                    .parse()
-                    .map_err(|_| ProblemKind::InvalidRequest)?,
+                    .change_context(AdmissionError(ProblemKind::InvalidRequest))?
+                    .parse::<u64>()
+                    .change_context(AdmissionError(ProblemKind::InvalidRequest))?,
             ),
             None => None,
         };
@@ -311,7 +324,7 @@ pub(crate) async fn events(
     }
     let admission = match state.model.lock().await.open_stream(id, &headers) {
         Ok(admission) => admission,
-        Err(kind) => return problem(kind, None),
+        Err(error) => return problem(error.current_context().0.clone(), None),
     };
     let session = Session {
         model: state.model,
@@ -424,19 +437,53 @@ mod tests {
         let observations = model.notification_observations();
         assert_eq!(observations[0].request_id, ticket.common.request_id);
         assert_eq!(observations[0].last_event, Some(7));
-        assert!(matches!(
-            model.open_stream(id, &headers),
-            Err(ProblemKind::RequestConflict)
-        ));
+        assert!(
+            model
+                .open_stream(id, &headers)
+                .is_err_and(|error| error.current_context().0 == ProblemKind::RequestConflict)
+        );
         drop(admission);
         assert_eq!(model.active_notification_streams(), 0);
-        assert!(matches!(
-            model.open_stream(super::super::id(), &headers),
-            Err(ProblemKind::ActivationUnknown)
-        ));
-        assert!(matches!(
-            model.open_stream(id, &HeaderMap::new()),
-            Err(ProblemKind::SignatureInvalid)
-        ));
+        assert!(
+            model
+                .open_stream(super::super::id(), &headers)
+                .is_err_and(|error| error.current_context().0 == ProblemKind::ActivationUnknown)
+        );
+        assert!(
+            model
+                .open_stream(id, &HeaderMap::new())
+                .is_err_and(|error| error.current_context().0 == ProblemKind::SignatureInvalid)
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn stream_refusals_retain_signature_and_cursor_causes() {
+        let (mut model, signer, id) = activated().await;
+        let mut headers = HeaderMap::new();
+        headers.typed_insert(Authorization::bearer("invalid").assured("header token"));
+        assert!(model.open_stream(id, &headers).is_err_and(|error| {
+            error.current_context().0 == ProblemKind::SignatureInvalid
+                && error.contains::<nervix_licensing_protocol::document::DocumentError>()
+        }));
+        let cluster = model.activations[&id].binding.cluster_uid;
+        let ticket = StreamTicket {
+            common: common(&mut model, cluster).await,
+            activation_id: id,
+            state: CommittedState {
+                applied_decision_revision: 1,
+                applied_conditions_revision: 1,
+                licensing_time: model.now,
+            },
+        };
+        let compact = signer.sign(&ticket, limits()).assured("signed ticket");
+        headers.typed_insert(Authorization::bearer(&compact).assured("signed token"));
+        headers.insert(
+            "last-event-id",
+            "not-a-number".parse().assured("header value"),
+        );
+        assert!(model.open_stream(id, &headers).is_err_and(|error| {
+            error.current_context().0 == ProblemKind::InvalidRequest
+                && error.contains::<std::num::ParseIntError>()
+        }));
     }
 }

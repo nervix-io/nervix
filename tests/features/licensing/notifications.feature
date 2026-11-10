@@ -36,6 +36,34 @@ Feature: Licensing change notifications
       | 1            |
       | 3            |
 
+  Scenario Outline: A notification wakes a foreground refresh retry on <cluster_size> nodes
+    Given an HTTPS licensing test service is available
+    And a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      ACTIVATE LICENSE PERSISTENT WITH KEY 'NVXK-TESTABCD-fixture-secret';
+      """
+    Then the licensing service holds exactly one authenticated notification stream
+    When the licensing service temporarily refuses refresh requests
+    And this Plexus command request begins executing in the background on the leader node
+      """
+      REFRESH LICENSE;
+      """
+    Then the foreground license refresh has reached its retryable refusal
+    When the licensing service resumes with a domain quota of 12
+    Then node "node-1" eventually describes this license without a selected domain
+      """
+      quota cluster.domains: 1 of 12
+      verification: verified
+      """
+    And the background command request succeeds
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Reconnect sync recovers a withheld change on <cluster_size> nodes
     Given an HTTPS licensing test service is available
     And the licensing notification stream is "withholding events"

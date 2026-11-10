@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use cucumber::{given, then, when};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_licensing_test_service::StreamMode;
+use nervix_licensing_test_service::{Model, StreamMode};
 use nervix_primitives::time::{sleep, timeout};
 
 use super::{STATUS_WAIT_BUDGET, ScenarioWorld, current_license, public_license_timestamp};
@@ -158,15 +158,75 @@ async fn change_plan(world: &mut ScenarioWorld) {
         .licensing_service
         .as_ref()
         .verified("fixture started")
+        .configure(update_domain_quota)
+        .await;
+}
+
+fn update_domain_quota(model: &mut Model) {
+    let mut plan = model.conditions();
+    plan.usage.quotas.insert(
+        "cluster.domains".to_owned(),
+        nervix_licensing_protocol::conditions::ConditionValue::Known(
+            nervix_licensing_protocol::conditions::Quota::Bounded { value: 12 },
+        ),
+    );
+    model.plan(plan);
+}
+
+#[when("the licensing service temporarily refuses refresh requests")]
+async fn temporary_refusal(world: &mut ScenarioWorld) {
+    let service = world.licensing_service.as_ref().verified("fixture started");
+    let count = service.requests().await.len();
+    world
+        .placeholders
+        .insert("foreground_refresh_baseline".into(), count.to_string());
+    service
         .configure(|model| {
-            let mut plan = model.conditions();
-            plan.usage.quotas.insert(
-                "cluster.domains".to_owned(),
-                nervix_licensing_protocol::conditions::ConditionValue::Known(
-                    nervix_licensing_protocol::conditions::Quota::Bounded { value: 12 },
-                ),
-            );
-            model.plan(plan);
+            model.refuse(Some(
+                nervix_licensing_protocol::problems::ProblemKind::Unavailable {
+                    retry_after_seconds: 1,
+                },
+            ));
+        })
+        .await;
+}
+
+#[then("the foreground license refresh has reached its retryable refusal")]
+async fn foreground_refusal(world: &mut ScenarioWorld) {
+    let baseline = world
+        .placeholders
+        .get("foreground_refresh_baseline")
+        .verified("the refusal saved its request baseline")
+        .parse::<usize>()
+        .assured("bounded request count");
+    let service = world.licensing_service.as_ref().verified("fixture started");
+    timeout(STATUS_WAIT_BUDGET, async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if service.requests().await[baseline..].iter().any(|request| {
+                matches!(
+                    request,
+                    nervix_licensing_protocol::requests::Request::Refresh { .. }
+                )
+            }) {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .assured("the signed foreground refresh reaches the refusing HTTPS service");
+}
+
+#[when("the licensing service resumes with a domain quota of 12")]
+async fn resume_with_quota(world: &mut ScenarioWorld) {
+    world
+        .licensing_service
+        .as_ref()
+        .verified("fixture started")
+        .configure(|model| {
+            model.refuse(None);
+            update_domain_quota(model);
         })
         .await;
 }
