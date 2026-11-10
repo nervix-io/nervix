@@ -821,6 +821,42 @@ mod tests {
         let claim = |node: &str, incarnation| NodeCapabilityRecord {
             identity: identity(node, incarnation),
             capabilities: NodeCapabilities {
+                interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
+                dns: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
+                    .node_capability_record()
+                    .capabilities
+                    .dns,
+                node_database: nervix_arbitrary::Arbitrary::new(
+                    &[],
+                    nervix_arbitrary::Domain::Vocabulary,
+                )
+                .node_capability_record()
+                .capabilities
+                .node_database,
+                consensus_database: nervix_arbitrary::Arbitrary::new(
+                    &[],
+                    nervix_arbitrary::Domain::Vocabulary,
+                )
+                .node_capability_record()
+                .capabilities
+                .consensus_database,
+                consensus: nervix_arbitrary::Arbitrary::new(
+                    &[],
+                    nervix_arbitrary::Domain::Vocabulary,
+                )
+                .node_capability_record()
+                .capabilities
+                .consensus,
+                engines: nervix_arbitrary::Arbitrary::new(
+                    &[],
+                    nervix_arbitrary::Domain::Vocabulary,
+                )
+                .node_engine_capabilities(),
+                connector_host: nervix_arbitrary::Arbitrary::new(
+                    &[],
+                    nervix_arbitrary::Domain::Vocabulary,
+                )
+                .node_connector_host_capabilities(),
                 cpu_count: NonZeroU64::new(4),
                 memory_bytes: NonZeroU64::new(8 << 30),
                 receive: nervix_interconnect::PeerReceiveSettings::default().bounds(),

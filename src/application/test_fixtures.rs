@@ -755,10 +755,13 @@ pub(in crate::application) async fn build_test_service_inner(
                 identity: cluster.local_node_identity().await,
                 capabilities: nervix_models::NodeCapabilities {
                     interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
-                    dns: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
-                        .node_capability_record()
-                        .capabilities
-                        .dns,
+                    dns: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_capability_record()
+                    .capabilities
+                    .dns,
                     node_database: nervix_arbitrary::Arbitrary::new(
                         &[],
                         nervix_arbitrary::Domain::Vocabulary,

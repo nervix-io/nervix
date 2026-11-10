@@ -206,10 +206,13 @@ mod tests {
                 identity: ClusterNodeIdentity::new(node, ClusterNodeIncarnation::new(incarnation)),
                 capabilities: nervix_models::NodeCapabilities {
                     interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
-                    dns: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
-                        .node_capability_record()
-                        .capabilities
-                        .dns,
+                    dns: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_capability_record()
+                    .capabilities
+                    .dns,
                     node_database: nervix_arbitrary::Arbitrary::new(
                         &[],
                         nervix_arbitrary::Domain::Vocabulary,
@@ -354,7 +357,11 @@ mod tests {
         let unchanged = state.clone();
         let mut changed = first.clone();
         changed.claim.capabilities.engines.vm_inline_row_limit = 42;
-        changed.claim.capabilities.connector_host.retry_jitter_percent = 20;
+        changed
+            .claim
+            .capabilities
+            .connector_host
+            .retry_jitter_percent = 20;
         announce(&mut state, &changed);
         assert_eq!(state, unchanged);
         changed.claim.identity = record(8).claim.identity;
