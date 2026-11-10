@@ -113,7 +113,7 @@ commits, read [Signing In](../../../docs/src/client-tools-web-console.md#signing
 [Inspecting a transaction](../../../docs/src/client-tools-web-console.md#inspecting-a-transaction).
 Read [Layout](../../../docs/src/client-tools-web-console.md#layout) before interpreting footer totals.
 Listener certificates are node provisioning, configured outside Plexus statements.
-For TLS algorithm choices, read [Cryptography](../../../docs/src/cryptography.md#algorithm-policy):
+For TLS algorithm choices, read [Cryptography](../../../docs/src/cryptography.md#outward-tls-policy):
 use ordered string lists with `ALTER CLUSTER SET TLS_CIPHER_SUITES = ('fips'),
 TLS_KEY_EXCHANGE_GROUPS = ('fips');`. Read that chapter before choosing exact names or aliases,
 changing both lists, or promising which connector handshakes are governed. The interconnect keeps
