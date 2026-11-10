@@ -342,6 +342,7 @@ pub struct RedisPubSubEmitter {
 impl EmitterDeclaration for RedisPubSubEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         events: crate::DeclaredEvents::new(&[crate::ConnectorEvent::PublishedWithoutSubscribers]),
+        instancing: crate::EmitterInstancingCapability::Instances,
         // PUBLISH accepts a channel and payload, without transport headers or an envelope.
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::Redis),

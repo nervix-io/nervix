@@ -21,6 +21,7 @@ use nervix_models::{ModelKind, NodeUnitRef, PlacementPolicy, Unit, UnitKind};
 use petgraph::unionfind::UnionFind;
 
 use super::{
+    emitter_units::EmitterUnits,
     graph::{ActiveGraph, ActiveNode},
     ingestor_units::IngestorUnits,
     placement::EffectivePlacementPlan,
@@ -86,6 +87,9 @@ impl UnitLayout {
         if let Some(instancing) = &node.ingestor_units {
             return instancing.unit_layout();
         }
+        if let Some(instancing) = &node.emitter_units {
+            return instancing.unit_layout();
+        }
         if Self::divides_by_partitions(node.kind)
             && let Some(partitions) = node
                 .resolved_branching
@@ -112,7 +116,7 @@ impl UnitLayout {
                 u32::try_from(index).verified("a partition ordinal is below its u16 count"),
             ),
             Self::Instances(_) => Unit::try_instance(index)
-                .verified("the ingestor decision validated its allocation layout"),
+                .verified("the instancing decision validated its allocation layout"),
         }
     }
     pub fn units(self) -> impl Iterator<Item = Unit> {
@@ -147,13 +151,21 @@ impl UnitCorrespondence {
         let singleton_pair = lhs.count() == 1 && rhs.count() == 1;
         let partition_intake = !singleton_pair
             && matches!(&left.ingestor_units, Some(IngestorUnits::PerPartition { relays, .. }) if right.kind == ModelKind::Relay && relays.iter().any(|relay| relay.as_str() == right.identifier.as_str()));
-        let class = if singleton_pair || partition_intake {
+        let partition_emission = !singleton_pair
+            && matches!(&right.emitter_units, Some(EmitterUnits::PerPartition { relays, .. }) if left.kind == ModelKind::Relay && relays.iter().any(|relay| relay.as_str() == left.identifier.as_str()));
+        // A relay maps each partition to one emitter unit by declaration: every partition to a
+        // single emitter, and partition `p` to instance `p mod n` of an emitter with `n`.
+        let declared_emission = left.kind == ModelKind::Relay
+            && right.kind == ModelKind::Emitter
+            && (matches!(lhs, UnitLayout::Partitions(_))
+                || matches!(rhs, UnitLayout::Instances(_)));
+        let class = if singleton_pair || partition_intake || partition_emission {
             HopClass::Identity
         } else if (left.kind == ModelKind::Ingestor || left.kind == ModelKind::Reingestor)
             && rhs.count() > 1
         {
             HopClass::DataDependent
-        } else if matches!(lhs, UnitLayout::Partitions(_)) && right.kind == ModelKind::Emitter {
+        } else if declared_emission {
             HopClass::Fiber
         } else if matches!((lhs, rhs), (UnitLayout::Partitions(a), UnitLayout::Partitions(b)) if a == b)
             && left
@@ -258,8 +270,10 @@ impl UnitPlacementGroups {
             }
         }
         for node in graph.graph.node_weights() {
-            let Some(IngestorUnits::PerPartition { relays, .. }) = &node.ingestor_units else {
-                continue;
+            let relays = match (&node.ingestor_units, &node.emitter_units) {
+                (Some(IngestorUnits::PerPartition { relays, .. }), _)
+                | (_, Some(EmitterUnits::PerPartition { relays, .. })) => relays,
+                _ => continue,
             };
             for relay in relays {
                 connect(

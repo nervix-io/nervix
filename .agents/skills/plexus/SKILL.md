@@ -191,7 +191,10 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 - Isolation: unbranched or a concrete branch key, branch TTL, optional instance limit, and the
   branch's partition count when one relay owner per branch would funnel too much traffic (see
   [Relay Partitions](https://docs.nervix.io/relay.html#relay-partitions)); the count changes only
-  while the domain is stopped.
+  while the domain is stopped. When one emitter would funnel a partitioned branch back into one
+  node, decide its `INSTANCES` (a count or `PER PARTITION`); read
+  [Emitters → Emitter instances](../../../docs/src/emitters.md#emitter-instances) for the per-key
+  ordering it keeps, the entities that run one instance, and placement.
 - Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference,
   WASM fuel and linear-memory budgets, correlation, materialized state, lookup, generation, or
   repartitioning.
@@ -399,8 +402,8 @@ and quiesce semantics in `Control Plane`. Put every interdependent `CREATE`, sup
 deduplicator, reorderer, emitter, ingestor, reingestor, generator, and placement changes;
 Nervix classifies the complete model diff and no user-facing pause command exists. Capacity and
 expression-only junction changes and emitter flush changes are dynamic; relay schema or branching
-changes pause the domain; structural junction, emitter/client/codec/collect/publishing-mode or
-attachment changes, ingestor,
+changes pause the domain; structural junction, emitter/client/codec/collect/publishing-mode,
+instance or attachment changes, ingestor,
 emitter source-predicate, and relay materialized-state changes gate and drain only affected
 entities. Changing emitter `FROM` membership pauses the domain because it changes topology.
 Deduplicator key and reorderer ordering changes also use entity pause; their `MAX TIME` changes are
