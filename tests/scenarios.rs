@@ -6608,7 +6608,29 @@ impl IngestorLogicTransportFixture {
     }
 
     async fn await_ready(self, world: &mut ScenarioWorld) {
-        let _ = world;
+        if let Self::Nats = self {
+            // A successful NATS resume follows its subscription flush. Waiting for that
+            // acknowledgement lets the fixture publish once without using data as a probe.
+            let owner = world
+                .active_session_node
+                .as_deref()
+                .expect("a scheduled ingestor has its owner session");
+            world
+                .cluster()
+                .wait_for_observability_metric_at_least(
+                    owner,
+                    "nervix_ingestor_resumes_total",
+                    &[
+                        format!("domain=\"{}\"", world.domain),
+                        "ingestor=\"logic_ingestor\"".to_owned(),
+                        "outcome=\"ready\"".to_owned(),
+                    ],
+                    1,
+                    Some(Duration::from_secs(5)),
+                )
+                .await
+                .expect("the NATS ingestor must confirm its subscription before publication");
+        }
     }
 
     fn executes_on_scheduled_owner(self) -> bool {
@@ -6816,25 +6838,18 @@ impl IngestorLogicTransportFixture {
             }
             Self::Nats => {
                 let subject = expand_placeholders(world, "logic_notifications_{{test_id}}");
-                let deadline = Instant::now() + Duration::from_secs(5);
-                loop {
-                    nervix_primitives::task::consume_budget().await;
-                    world
-                        .cluster()
-                        .publish_nats_with_headers(&subject, payload, &headers)
-                        .await
-                        .expect("failed to publish ingestor logic nats payload with headers");
-                    if try_capture_any_subscription_payload(world, Duration::from_millis(500)).await
-                    {
-                        return;
-                    }
-                    assert!(
-                        Instant::now() < deadline,
-                        "timed out waiting for ingestor logic nats payload with headers to reach \
-                         the relay subscription"
-                    );
-                    nervix_primitives::time::sleep(Duration::from_millis(100)).await;
-                }
+                world
+                    .cluster()
+                    .publish_nats_with_headers(&subject, payload, &headers)
+                    .await
+                    .expect("failed to publish ingestor logic nats payload with headers");
+                let delivered =
+                    try_capture_any_subscription_payload(world, Duration::from_secs(5)).await;
+                assert!(
+                    delivered,
+                    "timed out waiting for ingestor logic nats payload with headers to reach the \
+                     relay subscription"
+                );
             }
             Self::Mqtt | Self::WebsocketEndpoint | Self::ZeroMq => {
                 panic!("ingestor logic transport fixture '{self:?}' does not support headers")
@@ -18360,6 +18375,27 @@ async fn then_the_background_plexus_execution_is_discarded(world: &mut ScenarioW
         .take()
         .expect("a background Plexus execution must be active");
     drop(task);
+}
+
+#[then(expr = "within {string} the background Plexus execution reaches a terminal outcome")]
+async fn then_the_background_plexus_execution_is_terminal(
+    world: &mut ScenarioWorld,
+    within: String,
+) {
+    let deadline = parse_duration_text(&within).expect("background completion bound is valid");
+    let task = world
+        .background_plexus
+        .take()
+        .expect("a background Plexus execution must be active");
+    let outcome = nervix_primitives::time::timeout(deadline, task)
+        .await
+        .expect("background Plexus execution must finish within its bound")
+        .expect("background Plexus task must not panic");
+    append_cucumber_log_line(if outcome.is_ok() {
+        "background Plexus execution reached a successful terminal outcome"
+    } else {
+        "background Plexus execution reached a failed terminal outcome"
+    });
 }
 
 #[when("the background Plexus execution is canceled")]

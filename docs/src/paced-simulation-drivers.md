@@ -128,6 +128,7 @@ come from `NERVIX_USERNAME` and `NERVIX_PASSWORD` instead.
 | `--sensors` | `3` | Sensors reporting at each tick center; each is a concrete branch |
 | `--burst` | `1` | Readings each sensor reports at each tick center |
 | `--invalid-every` | `0` | Stamp the first reading of every Nth tick before the admission window |
+| `--invalid-from-generation` | `1` | Begin deliberately stale readings in this START generation; use `2` to exercise rejection after a restart |
 | `--consumers` | `1` | Competing consumers of the output emitter |
 | `--consumer-delay` | `0s` | How long the output consumers wait before they attach |
 | `--consumer-leave-after` | none | The last output consumer leaves after this many deliveries |
@@ -142,6 +143,12 @@ come from `NERVIX_USERNAME` and `NERVIX_PASSWORD` instead.
 
 Durations are written like Plexus durations, such as `250ms`, `1s` or `5m`, and byte sizes as a
 count of bytes, `KiB`, `MiB` or `GiB`.
+
+With `--follow-generations`, `--invalid-from-generation 2` keeps deliberate window rejections
+after the first STOP/START boundary. The rejection route acknowledges publication before its
+consumer records the notice; ending that generation can end that separate delivery. This option
+lets a restart exercise retain exact effect checks while injecting its invalid readings in the
+generation it lets finish.
 
 ## Choosing The Pace
 
@@ -177,9 +184,11 @@ longer retains is skipped with a `SKIPPED` line instead of being submitted only 
    without holding up the next tick.
 4. Each consumer decodes a delivery, records its readings in the effect store, and only then
    acknowledges it.
-5. Once it submitted its last tick it waits for the outcomes it still awaits, and for the
-   rejection notices of its completed batches, up to `--deadline`; closes its producer and
-   consumers; detaches the clock; and prints its summary.
+5. Once it submitted its last tick it waits for the outcomes it still awaits, and for a reading
+   effect or rejection notice for every completed reading, up to `--deadline`; closes its producer
+   and consumers; detaches the clock; and prints its summary. A missing effect fails the run even
+   when its submission completed: an error route acknowledges publication of a rejection before
+   the rejection consumer records it.
 
 The drivers take the tick centers from the committed logical origin and `PERIOD`, one center per
 period. Every wait, current logical instant and admission check comes from the attached clock's
@@ -217,7 +226,7 @@ lines for the same run. Errors go to standard error, prefixed with `error:`.
 | `REOPENED generation=… ingestor=… after=…` | The run moved on to a new START generation |
 | `REPLAY tick=… readings=…`, `REPLAY expired\|skipped …` | A replay resubmitted, or could not resubmit, ledger readings |
 | `INSPECT …` | An inspection of the ingestor and the output emitter |
-| `WAITING notices outstanding=…`, `NOTICES missing=…` | The run waits for rejection notices of completed batches |
+| `WAITING effects outstanding=…`, `EFFECTS missing=…` | The run waits for a reading effect or rejection notice for every completed reading |
 | `STOPPING reason=…` | The run stops submitting |
 | `SUMMARY …` | The run ended |
 
@@ -229,7 +238,7 @@ store already held, the START `generations` the run planned in, `ticks_observed`
 
 | Status | Meaning |
 | --- | --- |
-| 0 | Every reading the run submitted completed |
+| 0 | Every reading the run submitted completed and its effect was recorded |
 | 3 | A reading did not complete: it was not admitted, its processing failed, or its outcome is unknown |
 | 2 | The command line, the graph or the domain is not one the simulation can run against |
 | 1 | The run failed on its own side, or outcomes were still outstanding at `--deadline` |

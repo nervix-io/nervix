@@ -196,7 +196,7 @@ Feature: Transaction actual quiescence
     And transaction "{{transaction_id}}" eventually has state "COMMITTED"
     And transaction "{{transaction_id}}" report step 1 eventually records planned quiesce "DOMAIN_PAUSE", actual quiesce "DOMAIN_PAUSE", execution "APPLIED", and outcomes "REQUESTED,CONFIRMED,RELEASED"
     When the transaction commit pause on node "{{old_leader}}" after 1 statement is released
-    Then the background Plexus execution is discarded
+    Then within "30s" the background Plexus execution reaches a terminal outcome
 
   @transaction_actual_quiescence
   Scenario Outline: A failed later step retains the actual pause of the committed prefix

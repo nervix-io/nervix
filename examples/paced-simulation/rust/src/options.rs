@@ -61,6 +61,9 @@ pub struct Options {
     /// Stamp the first reading of every Nth tick before the admission window, deliberately.
     #[arg(long, default_value_t = 0)]
     pub(crate) invalid_every: u64,
+    /// The first START generation in which deliberately stale readings are generated.
+    #[arg(long, default_value_t = NonZeroU64::MIN)]
+    pub(crate) invalid_from_generation: NonZeroU64,
     /// How many competing consumers of the output emitter run.
     #[arg(long, default_value_t = 1)]
     pub(crate) consumers: u32,
@@ -185,6 +188,7 @@ pub(crate) struct Settings {
     pub(crate) sensors: NonZeroU32,
     pub(crate) burst: NonZeroU32,
     pub(crate) invalid_every: Option<NonZeroU64>,
+    pub(crate) invalid_from_generation: NonZeroU64,
     pub(crate) consumers: NonZeroU32,
     pub(crate) consumer_delay: Duration,
     pub(crate) consumer_leave_after: Option<u64>,
@@ -268,6 +272,7 @@ impl TryFrom<Options> for Settings {
             sensors,
             burst,
             invalid_every: NonZeroU64::new(options.invalid_every),
+            invalid_from_generation: options.invalid_from_generation,
             consumers,
             consumer_delay: options.consumer_delay,
             consumer_leave_after: options.consumer_leave_after,

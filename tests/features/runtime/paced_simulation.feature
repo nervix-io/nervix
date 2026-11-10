@@ -135,7 +135,7 @@ Feature: Paced simulation drivers
       """
       START AT NOW TIME RATE 1.0;
       """
-    And the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 300 --sensors 2 --follow-generations --invalid-every 3"
+    And the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 300 --sensors 2 --follow-generations --invalid-every 3 --invalid-from-generation 2"
     Then within "60s" the paced simulation driver prints a line starting with "OUTCOME tick="
     When these Plexus commands are executed on the leader node
       """

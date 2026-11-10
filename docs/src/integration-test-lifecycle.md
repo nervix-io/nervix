@@ -69,6 +69,29 @@ node's files, observes the initially loaded leaf on a fresh connection before re
 replacement leaf after restart. CLI and Rust-client operations verify the supplied CA and endpoint
 name, and the console recorder checks an opened WSS connection to the advertised leader.
 
+## Fixture Readiness And Completion
+
+The ingestor-logic NATS fixture waits for the scheduled instance's successful resume before
+publishing. That resume follows the driver's subscription flush. It publishes each assertion
+record once; relay output is not a signal to publish the same record again.
+
+The Kafka consumer-retirement fixture gives its eight local mock-broker clients a six-second
+session and one-second heartbeat. The mock broker's rebalance delay is the session timeout minus
+one second, so staggered joins fit inside the existing sixty-second first-delivery wait. This
+does not change librdkafka's separate five-second LeaveGroup wait. The fixture still holds broker
+answers during retirement, observes occupied connector workers, delivers through the independent
+HTTP ingestor and waits for every executor job to drain.
+
+A memory-admission fixture constructs its stress payload at the boundary it tests. The Iceberg
+whole-bulk-class case sends a small two-row batch and expands both strings in the emitter after
+relay transfer. Its one-byte collection threshold releases that whole batch, and its assertions
+retain the large staged-byte charge, blocked commit and exact rows after admission is released.
+
+A scenario retaining a background command across a leadership transfer awaits its terminal
+outcome after releasing the held owner, while its peers can still answer it. The successor's
+committed transaction report and the former owner's terminal request are separate observations;
+both precede ending the cluster.
+
 ## Focused Emitter Batch Boundaries
 
 `just test-emitter-batch-boundaries --concurrency 2 --retry 0` selects the one- and three-node

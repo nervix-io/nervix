@@ -9256,7 +9256,7 @@ mod tests {
         }
     }
 
-    fn temp_database() -> Database {
+    pub(super) fn temp_database() -> Database {
         let dir = tempdir().expect("tempdir");
         Database::builder(dir.keep())
             .open()

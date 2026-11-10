@@ -2,6 +2,7 @@
 
 import unittest
 import sys
+import tempfile
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import SimpleNamespace
@@ -173,11 +174,53 @@ class OutcomeTests(unittest.TestCase):
         run.producer = replacement
         run.ledger = Mock()
         with patch.object(driver, "line"):
-            run.await_outcome(submitting, 3, ["reading"], ["rejection"], 64, 12)
+            run.await_outcome(submitting, 3, ["reading", "rejection"], 64, 12)
         self.assertEqual(submitting.outstanding, {"batches": 0, "bytes": 0})
         self.assertEqual(replacement.outstanding, {"batches": 2, "bytes": 128})
-        self.assertEqual(run.awaited_notices, ["rejection"])
-        run.ledger.outcome.assert_called_once_with(["reading"], "completed", "")
+        self.assertEqual(run.awaited_effects, ["reading", "rejection"])
+        run.ledger.outcome.assert_called_once_with(["reading", "rejection"], "completed", "")
+
+
+class EffectDrainTests(unittest.TestCase):
+    def test_completed_readings_and_rejections_both_satisfy_the_drain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = driver.EffectStore(str(Path(directory) / "effects.jsonl"))
+            try:
+                for kind, identity in (("reading", "accepted"), ("rejection", "rejected")):
+                    store.apply(kind, {"kind": kind, "reading_id": identity})
+                self.assertEqual(store.await_effects(["accepted", "rejected"], 0, lambda: False), 0)
+            finally:
+                store.file.close()
+
+    def test_an_expired_drain_reports_a_missing_completed_effect(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = driver.EffectStore(str(Path(directory) / "effects.jsonl"))
+            try:
+                with patch.object(driver, "line") as report:
+                    self.assertEqual(store.await_effects(["missing"], 0, lambda: False), 1)
+                report.assert_any_call("EFFECTS missing=1")
+            finally:
+                store.file.close()
+
+    def test_application_failure_ends_an_effect_wait_without_blocking(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = driver.EffectStore(str(Path(directory) / "effects.jsonl"))
+            try:
+                with patch.object(store.condition, "wait") as wait:
+                    self.assertEqual(store.await_effects(["missing"], 10, lambda: True), 1)
+                wait.assert_not_called()
+            finally:
+                store.file.close()
+
+    def test_deliberate_stale_input_begins_in_its_configured_generation(self):
+        run = driver.Run(SimpleNamespace(invalid_every=3, invalid_from_generation=2,
+                                        sensors=2, burst=1))
+        window = SimpleNamespace(earliest=100, skew=20)
+        before = run.plan(1, 3, 200, window, 3)
+        after = run.plan(2, 3, 200, window, 3)
+        self.assertEqual([reading.stamp for reading in before], ["center", "center"])
+        self.assertEqual([reading.stamp for reading in after], ["before_window", "center"])
+        self.assertEqual([reading.occurred_at for reading in after], [79, 200])
 
 
 class DeliveryTests(unittest.TestCase):

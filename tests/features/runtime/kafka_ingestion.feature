@@ -682,6 +682,10 @@ Feature: Kafka ingestion
   # Each of the eight instances joined the group, so destroying its consumer waits for an answer to
   # its LeaveGroup request, which librdkafka gives five seconds. The retirements hold the node's two
   # connector workers for as long as the broker holds that answer.
+  # The local mock's rebalance delay is its session timeout minus one second. A six-second session
+  # bounds eight staggered joins inside the unchanged sixty-second delivery wait; the driver's
+  # forty-five-second default can spend most of that wait on just one rebalance. Heartbeats every
+  # second keep these live members present. LeaveGroup still has its independent five-second wait.
   @kafka_consumer_retirement
   Scenario Outline: A Kafka ingestor dropped on <cluster_size> nodes retires its consumers on the connector workers while another ingestor delivers
     Given a mock Kafka broker serves topic "retired_{{test_id}}"
@@ -696,7 +700,9 @@ Feature: Kafka ingestion
         FROM WIRE SCHEMA retired_event_wire TO SCHEMA retired_event;
       CREATE RELAY retired_events SCHEMA retired_event UNBRANCHED;
       CREATE KAFKA CLIENT retiring_kafka CONFIG {
-        'bootstrap.servers' = '{{mock_kafka_addr}}'
+        'bootstrap.servers' = '{{mock_kafka_addr}}',
+        'session.timeout.ms' = '6000',
+        'heartbeat.interval.ms' = '1000'
       };
       CREATE KAFKA TOPIC INGESTOR retiring_ingestor
         FROM retiring_kafka TOPIC 'retired_{{test_id}}'
