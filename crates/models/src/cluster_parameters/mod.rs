@@ -17,19 +17,21 @@ use meticulous::ResultExt as _;
 use rkyv::{
     Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize,
     rancor::{Fallible, Source},
-    with::DeserializeWith as _,
 };
 use serde::{Deserialize, Serialize};
 use strum::EnumIter;
 use thiserror::Error;
+use value::ParameterSetting;
 
-use crate::{Setting, SettingDefinition};
+use crate::SettingDefinition;
+#[doc(hidden)]
+pub mod value;
+mod value_archive;
 
 pub(crate) mod archive;
 mod durations;
 mod entity_labels;
 mod limits;
-mod packed_duration;
 mod publication;
 #[cfg(test)]
 mod tests;
@@ -159,27 +161,6 @@ macro_rules! parameter_cli_text {
     };
 }
 
-macro_rules! parameter_setting {
-    ($definition:ident, Duration) => { Setting<packed_duration::DurationDefinition<$definition>> };
-    ($definition:ident, $kind:ident) => { Setting<$definition> };
-}
-macro_rules! parameter_resolve {
-    ($definition:ident, $value:expr, Duration) => {
-        packed_duration::resolve::<$definition>($value, ClusterParameterKey::$definition)
-    };
-    ($definition:ident, $value:expr, $kind:ident) => {
-        Setting::<$definition>::resolve($value, &())
-    };
-}
-macro_rules! parameter_value {
-    ($setting:expr, Duration) => {
-        $setting.value().get()
-    };
-    ($setting:expr, $kind:ident) => {
-        *$setting.value()
-    };
-}
-
 macro_rules! parameter_values {
     ($($field:ident: $definition:ident($value:ty) => $kind:ident,)+) => {
         /// The complete cluster policy. Each field has one class, default and validation owner.
@@ -187,9 +168,9 @@ macro_rules! parameter_values {
         #[serde(deny_unknown_fields)]
         pub struct ClusterParameterValues {
             $(
-                #[serde(with = "archive")]
-                #[rkyv(with = archive::ValidatedSetting)]
-                $field: parameter_setting!($definition, $kind),
+                #[serde(with = "value_archive")]
+                #[rkyv(with = value_archive::ValidatedSetting)]
+                $field: ParameterSetting<$definition>,
             )+
         }
 
@@ -198,7 +179,7 @@ macro_rules! parameter_values {
                 use serde::de::Error as _;
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
-                struct Fields { $(#[serde(with = "archive")] $field: parameter_setting!($definition, $kind),)+ }
+                struct Fields { $(#[serde(with = "value_archive")] $field: ParameterSetting<$definition>,)+ }
                 let fields = Fields::deserialize(deserializer)?;
                 let values = Self {
                     $($field: fields.$field,)+
@@ -213,7 +194,8 @@ macro_rules! parameter_values {
         {
             fn deserialize(&self, deserializer: &mut D) -> Result<ClusterParameterValues, D::Error> {
                 let values = ClusterParameterValues {
-                    $($field: archive::ValidatedSetting::deserialize_with(&self.$field, deserializer)?,)+
+                    $($field: ParameterSetting::from_stored(self.$field.deserialize(deserializer)?)
+                        .map_err(|error| D::Error::new(error.into_error()))?,)+
                 };
                 values.validate_tls().map_err(|error| D::Error::new(error.into_error()))?;
                 Ok(values)
@@ -249,18 +231,18 @@ macro_rules! parameter_values {
 
         impl ClusterParameterValues {
             pub fn resolve(seed: ClusterParameterSeedValues) -> Result<Self, Report<ClusterParameterError>> {
-                let values = Self { $($field: parameter_resolve!($definition, seed.$field, $kind)?,)+ };
+                let values = Self { $($field: ParameterSetting::resolve(seed.$field, &())?,)+ };
                 values.validate_tls()?;
                 Ok(values)
             }
 
-            $(pub fn $field(&self) -> $value { parameter_value!(self.$field, $kind) })+
+            $(pub fn $field(&self) -> $value { self.$field.value() })+
 
             /// Validate every proposed value before returning the complete candidate.
             pub fn changed(&self, updates: &ClusterParameterUpdates) -> Result<Self, Report<ClusterParameterError>> {
                 let mut next = *self;
                 for update in updates.iter() {
-                    match update { $(ClusterParameterChange::$definition(value) => { next.$field = parameter_resolve!($definition, Some(*value), $kind)?; },)+ }
+                    match update { $(ClusterParameterChange::$definition(value) => { next.$field = ParameterSetting::new(*value, &())?; },)+ }
                 }
                 next.validate_tls()?;
                 Ok(next)
@@ -274,7 +256,7 @@ macro_rules! parameter_values {
                 vec![$(
                     DescribedClusterParameter {
                         parameter: ClusterParameterKey::$definition,
-                        value: parameter_text!(&self.$field(), $kind),
+                        value: parameter_text!(&self.$field.value(), $kind),
                     },
                 )+]
             }
@@ -323,6 +305,9 @@ macro_rules! parameter_values {
 }
 
 parameter_values! {
+    licensing_request_timeout: LicensingRequestTimeout(Duration) => Duration,
+    licensing_retry_backoff_max: LicensingRetryBackoffMax(Duration) => Duration,
+    licensing_stream_idle_timeout: LicensingStreamIdleTimeout(Duration) => Duration,
     node_unavailability_timeout: NodeUnavailabilityTimeout(Duration) => Duration,
     domain_drain_timeout: DomainDrainTimeout(Duration) => Duration,
     entity_gate_deadline: EntityGateDeadline(Duration) => Duration,
@@ -481,6 +466,9 @@ impl AlterCluster {
 impl ClusterParameterValues {
     /// The validated bounds a host captures together for one HTTP publication.
     pub fn http_header_limits(&self) -> crate::HttpHeaderLimits {
-        crate::HttpHeaderLimits::new(self.http_header_bytes, self.http_header_fields)
+        crate::HttpHeaderLimits::new(
+            self.http_header_bytes.into(),
+            self.http_header_fields.into(),
+        )
     }
 }

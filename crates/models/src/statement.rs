@@ -51,6 +51,8 @@ pub enum Statement {
     MutateEntityLabels(crate::MutateEntityLabels),
     ShowLabels(crate::ShowLabels),
     AlterCluster(crate::AlterCluster),
+    ActivateLicense(ActivateLicense),
+    RefreshLicense(RefreshLicense),
     CreateDomain(CreateStatement<CreateDomain>),
     CreateUser(CreateStatement<CreateUser>),
     CreateResource(CreateStatement<CreateResource>),
@@ -152,6 +154,8 @@ impl Statement {
             | Self::Drop(_) => true,
             Self::ShowLabels(_)
             | Self::AlterCluster(_)
+            | Self::ActivateLicense(_)
+            | Self::RefreshLicense(_)
             | Self::CreateDomain(_)
             | Self::CreateUser(_)
             | Self::CreateResource(_)
@@ -3011,3 +3015,30 @@ pub struct CreateLookup<Version = u64> {
 #[cfg(test)]
 #[path = "statement_tests.rs"]
 mod tests;
+
+/// An activation credential is transient input; durable execution retains only verified output.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct ActivateLicense {
+    pub kind: nervix_licensing_vocabulary::ActivationKind,
+    pub license_key: String,
+}
+
+impl std::fmt::Debug for ActivateLicense {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ActivateLicense")
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct RefreshLicense;
+
+impl Drop for ActivateLicense {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.license_key);
+    }
+}

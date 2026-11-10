@@ -11,6 +11,9 @@ fn parameters(input: &[u8; 384]) -> ClusterParameterValues {
     let generated = nervix_arbitrary::Arbitrary::new(input, nervix_arbitrary::Domain::Vocabulary)
         .cluster_parameter_values();
     ClusterParameterValues::resolve(ClusterParameterSeedValues {
+        licensing_request_timeout: Some(generated.licensing_request_timeout()),
+        licensing_retry_backoff_max: Some(generated.licensing_retry_backoff_max()),
+        licensing_stream_idle_timeout: Some(generated.licensing_stream_idle_timeout()),
         password_iterations: Some(generated.password_iterations()),
         node_unavailability_timeout: Some(generated.node_unavailability_timeout()),
         domain_drain_timeout: Some(generated.domain_drain_timeout()),

@@ -2516,6 +2516,13 @@ impl SessionServiceImpl {
                 };
                 command_ok(format!("{status}\nnode.initialization={initialization}"))
             }
+            Statement::RefreshLicense(_) => match self.refresh_license().await {
+                Ok(()) => command_ok("License refreshed".to_owned()),
+                Err(error) => command_error(format!("{error:#}")),
+            },
+            Statement::ActivateLicense(_) => {
+                command_error("ACTIVATE LICENSE requires durable command admission".to_owned())
+            }
             Statement::AlterCluster(_) => {
                 command_error("ALTER CLUSTER SET requires durable command admission".to_string())
             }

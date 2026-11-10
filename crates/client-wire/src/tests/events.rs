@@ -2,7 +2,7 @@
 //! events are refused.
 
 use flatbuffers::FlatBufferBuilder;
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{DomainPace, DomainStatus, ModelKind, ModelName, NodeRef};
 
 use super::{
@@ -28,6 +28,7 @@ fn notices_round_trip_at_every_level_and_kind() {
             NoticeKind::ClusterParameters,
             NoticeKind::Runtime,
             NoticeKind::ControlPlane,
+            NoticeKind::Licensing,
         ] {
             let notice = ServerNotice {
                 level,
@@ -320,16 +321,19 @@ fn malformed_events_are_refused() {
             field: "ServerNotice.kind",
         }
     );
+    let undeclared_kind = wire::NoticeKind::ENUM_MAX
+        .checked_add(1)
+        .assured("the current notice kinds leave an undeclared byte");
     let frame = raw_server(notice_frame(
         wire::ServerBody::ServerNotice,
         Some(wire::NoticeLevel::Info),
-        Some(wire::NoticeKind(5)),
+        Some(wire::NoticeKind(undeclared_kind)),
     ));
     assert_eq!(
         decode_error(ServerMessage::decode(&frame)),
         WireDecodeError::UnknownEnumValue {
             field: "ServerNotice.kind",
-            value: 5,
+            value: undeclared_kind,
         }
     );
 }

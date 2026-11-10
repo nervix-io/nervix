@@ -53,6 +53,9 @@ impl Arbitrary<'_> {
             nervix_models::TlsKeyExchangeGroups::parse_names(group_names.iter().copied())
                 .assured("the declared selection includes a TLS 1.2-capable group");
         ClusterParameterValues::resolve(ClusterParameterSeedValues {
+            licensing_request_timeout: Some(parameter_duration(entropy)),
+            licensing_retry_backoff_max: Some(parameter_duration(entropy)),
+            licensing_stream_idle_timeout: Some(parameter_duration(entropy)),
             password_iterations: Some(
                 entropy.boundary_biased(1..=nervix_models::PasswordIterations::MAXIMUM),
             ),

@@ -749,6 +749,8 @@ tags = [
   "@backup_holder_download",
   "@snapshot_receive_admission",
   "@stateful_inferencer_persistence",
+  "@inferencer_handoff_capture",
+  "@inferencer_promoted_acknowledgement",
   "@session_shutdown_ending",
   "@client_wire_restoration_end",
   "@session_shutdown_unread",
@@ -4941,6 +4943,12 @@ workloads = [
   "stress.inferencer-capacity",
   "scenario.inferencer-replica",
   "stress.inferencer-replica",
+  "scenario.inferencer-relocation",
+  "stress.inferencer-relocation",
+  "scenario.inferencer-drain",
+  "stress.inferencer-drain",
+  "scenario.inferencer-fenced-owner",
+  "stress.inferencer-fenced-owner",
 
   "scenario.ingestor-instance-01",
   "stress.ingestor-instance-01",
@@ -5003,6 +5011,8 @@ workloads = [
 [[owner]]
 path = "src/runtime_ack.rs"
 workloads = [
+  "scenario.inferencer-promoted-acknowledgement",
+  "stress.inferencer-promoted-acknowledgement",
   "owner.emitter-branch-retirement",
   "scenario.sqs-parallel-batch",
   "stress.sqs-parallel-batch",
@@ -6509,6 +6519,86 @@ id = "stress.inferencer-replica"
 invariant = "A promoted inference replica continues both branches from at least their confirmed checkpoints."
 invocation = "stress-restore-scenarios"
 scenario = "A promoted inference replica continues both branches from at least their confirmed checkpoints"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Ownership handoff capture of a stateful inferencer's published tensors, the source's final checkpoint writes, the destination's durable preparation and activation, and the branch restore reach the state store's tracked installation locks. Native tensor encoding, pointer publication, async admission and transport waits are outside Deloxide; the carrier Shuttle check and typed transport Turmoil scenario cover their declared boundaries."
+examples = 1
+feature = "tests/features/cluster/inferencer_state_handoff.feature"
+id = "scenario.inferencer-relocation"
+invariant = "Relocating a stateful inferencer moves both branch sums exactly."
+invocation = "scenarios"
+scenario = "Relocating a stateful inferencer moves both branch sums exactly"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Ownership handoff capture of a stateful inferencer's published tensors, the source's final checkpoint writes, the destination's durable preparation and activation, and the branch restore reach the state store's tracked installation locks. Native tensor encoding, pointer publication, async admission and transport waits are outside Deloxide; the carrier Shuttle check and typed transport Turmoil scenario cover their declared boundaries."
+examples = 1
+feature = "tests/features/cluster/inferencer_state_handoff.feature"
+id = "stress.inferencer-relocation"
+invariant = "Relocating a stateful inferencer moves both branch sums exactly."
+invocation = "stress-restore-scenarios"
+scenario = "Relocating a stateful inferencer moves both branch sums exactly"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Ownership handoff capture of a stateful inferencer's published tensors, the source's final checkpoint writes, the destination's durable preparation and activation, and the branch restore reach the state store's tracked installation locks. Native tensor encoding, pointer publication, async admission and transport waits are outside Deloxide; the carrier Shuttle check and typed transport Turmoil scenario cover their declared boundaries."
+examples = 1
+feature = "tests/features/cluster/inferencer_state_handoff.feature"
+id = "scenario.inferencer-drain"
+invariant = "A drained owner hands both inferencer branch sums to its successor."
+invocation = "scenarios"
+scenario = "A drained owner hands both inferencer branch sums to its successor"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Ownership handoff capture of a stateful inferencer's published tensors, the source's final checkpoint writes, the destination's durable preparation and activation, and the branch restore reach the state store's tracked installation locks. Native tensor encoding, pointer publication, async admission and transport waits are outside Deloxide; the carrier Shuttle check and typed transport Turmoil scenario cover their declared boundaries."
+examples = 1
+feature = "tests/features/cluster/inferencer_state_handoff.feature"
+id = "stress.inferencer-drain"
+invariant = "A drained owner hands both inferencer branch sums to its successor."
+invocation = "stress-restore-scenarios"
+scenario = "A drained owner hands both inferencer branch sums to its successor"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Ownership handoff capture of a stateful inferencer's published tensors, the source's final checkpoint writes, the destination's durable preparation and activation, and the branch restore reach the state store's tracked installation locks. Native tensor encoding, pointer publication, async admission and transport waits are outside Deloxide; the carrier Shuttle check and typed transport Turmoil scenario cover their declared boundaries."
+examples = 1
+feature = "tests/features/cluster/inferencer_state_handoff.feature"
+id = "scenario.inferencer-fenced-owner"
+invariant = "A returning former owner is fenced and receives its successor's sums when ownership moves back."
+invocation = "scenarios"
+scenario = "A returning former owner is fenced and receives its successor's sums when ownership moves back"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Ownership handoff capture of a stateful inferencer's published tensors, the source's final checkpoint writes, the destination's durable preparation and activation, and the branch restore reach the state store's tracked installation locks. Native tensor encoding, pointer publication, async admission and transport waits are outside Deloxide; the carrier Shuttle check and typed transport Turmoil scenario cover their declared boundaries."
+examples = 1
+feature = "tests/features/cluster/inferencer_state_handoff.feature"
+id = "stress.inferencer-fenced-owner"
+invariant = "A returning former owner is fenced and receives its successor's sums when ownership moves back."
+invocation = "stress-restore-scenarios"
+scenario = "A returning former owner is fenced and receives its successor's sums when ownership moves back"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "A stateful inferencer resolving the acknowledgement share of each row it forwards, before and after a promoted replica takes over, reaches the acknowledgement root's tracked completion lock, and the promotion reaches the state store's tracked installation locks. Kafka transport waits, native tensor execution and async admission are outside Deloxide."
+examples = 1
+feature = "tests/features/cluster/inferencer_state_acknowledgement.feature"
+id = "scenario.inferencer-promoted-acknowledgement"
+invariant = "Every record a stateful inferencer admits in a batch is acknowledged to its Kafka source, before and after a promoted replica takes over."
+invocation = "scenarios"
+scenario = "Records a promoted inference replica emits are acknowledged to their source"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: A stateful inferencer resolving the acknowledgement share of each row it forwards, before and after a promoted replica takes over, reaches the acknowledgement root's tracked completion lock, and the promotion reaches the state store's tracked installation locks. Kafka transport waits, native tensor execution and async admission are outside Deloxide."
+examples = 1
+feature = "tests/features/cluster/inferencer_state_acknowledgement.feature"
+id = "stress.inferencer-promoted-acknowledgement"
+invariant = "Every record a stateful inferencer admits in a batch is acknowledged to its Kafka source, before and after a promoted replica takes over."
+invocation = "stress-restore-scenarios"
+scenario = "Records a promoted inference replica emits are acknowledged to their source"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]

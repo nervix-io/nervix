@@ -224,32 +224,78 @@ explains why a fresh cluster restored from an archive keeps its own UUID and key
 
 ## Cluster Licensing
 
-A cluster uses the embedded free policy from its first bootstrap. Both current quotas,
-`cluster.nodes` and `cluster.domains`, are unlimited. Node usage counts committed voters and
-learners; domain usage counts committed domain records, including stopped domains. Returning
-members and updates to an existing domain do not consume another slot.
+A cluster starts with the embedded free policy. Its current quotas, `cluster.nodes` and
+`cluster.domains`, are unlimited. Node usage counts committed voters and learners; domain usage
+counts committed domain records, including stopped domains. Returning members and updates to an
+existing domain do not consume another slot. Free mode contacts no licensing service, including
+after restart.
 
 ```plexus
+ACTIVATE LICENSE PERSISTENT WITH KEY 'NVXK-ABCDEFG2-your-secret';
+REFRESH LICENSE;
 DESCRIBE LICENSE;
 ```
 
-Every node answers this read-only command without a selected domain or a leader redirect.
-It reports `mode: free`, `policy: free`, the public cluster identity, committed licensing time,
-`processing: running`, and each quota's committed usage and limit. Followers describe their own
-applied revision. The same observation accompanies the command as a typed state-inspection
-envelope with a cluster-license entity, a single unit and shared Row sections; applications can
-read it without parsing the display text.
+`ACTIVATE LICENSE` selects `PERSISTENT` or `EPHEMERAL`. It runs on the leader without a selected
+domain and outside domain transactions. Nervix uses the credential for the creation request;
+its durable execution retains the verified signed response and the public eight-character key
+identifier. Neither the credential nor the command's source enters that effect or its semantic
+request digest. Reusing the execution reference resumes its recorded outcome. If the service
+already processed creation, Nervix adopts the matching activation through an authenticated refresh.
+`REFRESH LICENSE` runs immediately on the leader, outside domain transactions, and completes when
+the newer signed decision commits or the service or cluster returns a typed refusal.
 
-The immutable published policy is the permission source for each admission. Domain planning
-captures its quota constraint, and the committed creation checks that constraint against the
-actual domain count. Membership admission checks before adding a learner or voter. A refusal
-keeps its typed licensing cause through the owner's error boundary; it does not remove existing
-domains or members. Free mode has no processing stop or next licensing deadline.
+The service is the compiled deployment `https://licensing.nervix.io`. Plexus and node options
+supply no alternative address or trust anchors. HTTPS uses the node resolver and outward TLS
+policy, HTTP/1.1 or HTTP/2, no redirects and no environment proxy. Activation requires the build's
+provisioned licensing trust bundle; an unprovisioned build refuses activation. The
+[shared protocol](licensing-protocol.md#trust-and-provisioning) owns provisioning and verification.
 
-The free licensing record is installed atomically with the first committed cluster identity,
-using that identity's creation timestamp. Replication, snapshots and restart preserve it. Its
-time is a committed fact rather than a read of each answering node's clock. See
-[Licensing Metrics](metrics-and-observability.md#licensing-metrics) for the matching observations.
+The leader signs challenge-bound requests with the cluster key. Lost responses retry the same
+request identity and bytes while its challenge remains valid; a fresh challenge retains that
+identity. Losing leadership cancels the request. The following positive Duration parameters are
+seeded at bootstrap and changed with `ALTER CLUSTER SET`:
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `LICENSING_REQUEST_TIMEOUT` | `30s` | One request, including resolution, TLS and response body |
+| `LICENSING_RETRY_BACKOFF_MAX` | `10m` | Exponential retry ceiling; full jitter starts at the request budget |
+| `LICENSING_STREAM_IDLE_TIMEOUT` | `90s` | Licensing stream idle budget |
+
+Each has its corresponding `--licensing-...` bootstrap flag and `NERVIX_LICENSING_...` environment
+variable. Validated durations retain nanosecond precision across the complete declared range in
+compact inline storage, preserving the Raft command footprint without additional allocations.
+
+Only a committed, verified decision grants licensed usage. The coordinator verifies receipt,
+each replica verifies apply, and recovery and snapshot installation rebuild verification from
+original signed bytes and the independent activation binding. A semantically invalid document
+loads as `degraded`, reports `decision_unverifiable`, grants the free policy and prompts refresh.
+Structural record corruption refuses startup. Revoking a working key prevents new decisions;
+a previously committed decision remains verified with its signing-key-revoked observation.
+
+Licensing time is committed and monotone. The leader proposes physical observations at deadline
+crossings independently of its refresh attempt. The derived refresh state is `licensed fresh`,
+`licensed due`, or `licensed overdue`; a bounded `valid_until` crossing becomes `lapsed freeze`.
+An outage moves no signed deadline, and restart resets none. Freeze keeps existing work running
+and refuses new domain and member usage. Existing domain lifecycle commands and backups remain
+available. A later verified decision can clear the lapse.
+
+Every node answers `DESCRIBE LICENSE` without selecting a domain or redirecting to the leader.
+It reports the mode, policy, public identity, committed time, processing state and quotas. An
+activation adds its binding, public credential identifier, decision and conditions revisions,
+verification, signed deadlines, license facts and refresh state. A follower marks the leader's
+incarnation- and tenure-bound connectivity observation as reported. Connectivity distinguishes
+reachable service, transport outage and non-retryable service refusal, retaining each outage or
+refusal's start and typed cause. Connectivity grants nothing; a failed request renews no deadline.
+A degraded inspection also renders its typed decision-verification rejection.
+The command carries the same observation in a typed cluster-license state-inspection envelope
+with one unit and shared Row sections, so applications need not parse display text.
+
+Admission evaluates a coherent committed observation. Domain planning captures its quota, and
+committed creation checks current usage and lapse before adding a domain. Membership admission
+checks before adding a learner or voter. A typed refusal never removes an existing domain or
+member. [Licensing Metrics](metrics-and-observability.md#licensing-metrics) owns the matching series
+and [notices](client-session-protocol.md#what-a-session-is-told) describe asynchronous warnings.
 
 ## The Prerequisite List Is Closed
 
@@ -585,6 +631,7 @@ describes, defaults included.
 | `--replica-count` | cluster parameter | scheduling |
 | `--tls-cipher-suites`, `--tls-key-exchange-groups` | cluster parameter | outward TLS algorithm policy |
 | `--password-iterations` | cluster parameter | password creation policy |
+| `--licensing-request-timeout`, `--licensing-retry-backoff-max`, `--licensing-stream-idle-timeout` | cluster parameter | licensing coordination |
 | `--state-snapshot-interval` | cluster parameter | runtime |
 | `--domain-drain-timeout`, `--entity-gate-deadline` | cluster parameter | cluster policy |
 | `--max-batch-messages`, `--client-producer-session-bytes`, `--client-consumer-session-bytes`, `--udf-code-bytes`, `--http-header-bytes`, `--http-header-fields`, `--client-batch-rows` | cluster parameter | model and session policy |

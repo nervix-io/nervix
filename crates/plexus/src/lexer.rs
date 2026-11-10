@@ -72,6 +72,9 @@ pub enum Word {
 )]
 #[strum(ascii_case_insensitive, serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum Identifier {
+    LicensingRequestTimeout,
+    LicensingRetryBackoffMax,
+    LicensingStreamIdleTimeout,
     NodeUnavailabilityTimeout,
     DomainDrainTimeout,
     EntityGateDeadline,
@@ -139,6 +142,9 @@ pub enum Identifier {
     If,
     Exists,
     Cluster,
+    Activate,
+    Refresh,
+    Ephemeral,
     License,
     Status,
     Node,

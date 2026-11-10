@@ -33,13 +33,6 @@ const STATES: [&str; 8] = [
     "releasing",
     "degraded",
 ];
-const OUTCOMES: [&str; 5] = [
-    "committed",
-    "rejected_by_cluster",
-    "refused_by_service",
-    "unreachable",
-    "timeout",
-];
 const FAMILIES: [(&str, &str, &[&str]); 8] = [
     (
         "nervix_licensing_state",
@@ -120,7 +113,7 @@ impl Collector for LicensingCollector {
         let current = self.policy.current();
         let leader =
             self.observer.current_leader_now().as_ref() == Some(self.observer.local_node_id());
-        families(&current, leader)
+        families(&current, leader, Some(&self.policy))
     }
 }
 
@@ -155,7 +148,11 @@ fn sample(family: &mut MetricFamily, labels: &[(&str, &str)], value: f64) {
     family.mut_metric().push(metric);
 }
 
-fn families(policy: &LicensingPolicy, leader: bool) -> Vec<MetricFamily> {
+fn families(
+    policy: &LicensingPolicy,
+    leader: bool,
+    observations: Option<&PolicyHandle>,
+) -> Vec<MetricFamily> {
     let mut output = Vec::with_capacity(FAMILIES.len());
     let mut state = family(0, MetricType::GAUGE);
     for name in STATES {
@@ -170,9 +167,43 @@ fn families(policy: &LicensingPolicy, leader: bool) -> Vec<MetricFamily> {
         );
     }
     output.push(state);
-    // No committed decision or deadline exists in the current Free record.
-    output.push(family(1, MetricType::GAUGE));
-    output.push(family(2, MetricType::GAUGE));
+    let mut revision = family(1, MetricType::GAUGE);
+    let mut deadlines = family(2, MetricType::GAUGE);
+    if let Some(initialized) = &policy.snapshot.initialized {
+        if let nervix_consensus::LicensingMode::Activated(activation) = &initialized.record.mode {
+            sample(
+                &mut revision,
+                &[],
+                activation.decision.revision.approx_into(),
+            );
+        }
+        if let Some(Ok(verified)) = &initialized.verification {
+            let timing = &verified.decision.timing;
+            for (name, at) in [
+                ("refresh_after", Some(timing.refresh_after)),
+                ("overdue_at", Some(timing.overdue_at)),
+                ("valid_until", timing.valid_until),
+                ("term_ends_at", Some(timing.term_ends_at)),
+            ] {
+                if let Some(at) = at {
+                    let seconds: f64 = at.timestamp().approx_into();
+                    sample(&mut deadlines, &[("deadline", name)], seconds);
+                }
+            }
+        }
+        if let nervix_consensus::LicensingMode::Activated(activation) = &initialized.record.mode
+            && let Some(expiry) = activation.binding.ephemeral_expires_at
+        {
+            let nanos: f64 = expiry.unix_nanos().approx_into();
+            sample(
+                &mut deadlines,
+                &[("deadline", "ephemeral_expires_at")],
+                nanos / 1_000_000_000.0,
+            );
+        }
+    }
+    output.push(revision);
+    output.push(deadlines);
     let mut time = family(3, MetricType::GAUGE);
     if let Some(initialized) = &policy.snapshot.initialized {
         let nanos: f64 = initialized.record.licensing_time.unix_nanos().approx_into();
@@ -182,11 +213,17 @@ fn families(policy: &LicensingPolicy, leader: bool) -> Vec<MetricFamily> {
     if leader {
         let mut requests = family(4, MetricType::COUNTER);
         for operation in Operation::ALL {
-            for outcome in OUTCOMES {
+            for outcome in super::RequestOutcome::ALL {
                 sample(
                     &mut requests,
-                    &[("operation", operation.as_str()), ("outcome", outcome)],
-                    0.0,
+                    &[
+                        ("operation", operation.as_str()),
+                        ("outcome", outcome.as_str()),
+                    ],
+                    match observations {
+                        Some(handle) => handle.request_count(*operation, outcome).approx_into(),
+                        None => 0.0,
+                    },
                 );
             }
         }
@@ -233,14 +270,14 @@ mod tests {
                     cluster_domains: 0,
                 },
             });
-        let follower = families(&policy, false);
+        let follower = families(&policy, false, None);
         for name in [
             "nervix_licensing_requests_total",
             "nervix_licensing_stream_connected",
         ] {
             assert!(!follower.iter().any(|family| family.name() == name));
             assert!(
-                families(&policy, true)
+                families(&policy, true, None)
                     .iter()
                     .any(|family| family.name() == name && !family.get_metric().is_empty())
             );

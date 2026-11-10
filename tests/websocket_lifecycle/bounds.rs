@@ -1,8 +1,8 @@
-//! Peers that expose the outbound source's handshake and idle bounds.
+//! Peers that expose the outbound source's handshake, idle and message bounds.
 //!
 //! Layer: test harness.
-//! - **Owns.** A bounded handshake flood and a silent connection, observed through real sockets,
-//!   with how the client ended the silent connection.
+//! - **Owns.** A bounded handshake flood, a silent connection and a message above the client's
+//!   limit, observed through real sockets, with how the client ended each connection it gave up.
 //! - **Depends on.** The scenario-local peer and public Plexus statements.
 //! - **Must not know.** Connector queues, connection owners or the host's retry implementation.
 
@@ -34,6 +34,20 @@ async fn bounds_peer(world: &mut ScenarioWorld, behavior: String) {
     world.websocket_peer = Some(peer);
 }
 
+#[given(expr = "a WebSocket bounds peer first sends a {int}-byte message")]
+async fn oversized_message_peer(world: &mut ScenarioWorld, size: usize) {
+    initialize_scenario_identity(world);
+    let port = draw_scenario_port(world, "WebSocket oversized-message peer");
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+        .await
+        .assured("the scenario's reserved WebSocket port is available");
+    world.placeholders.insert(
+        "websocket_peer".to_string(),
+        format!("ws://127.0.0.1:{port}"),
+    );
+    world.websocket_peer = Some(WebsocketPeer::oversized_message(listener, size));
+}
+
 #[then("the WebSocket bounds peer observes a reconnect after the idle bound")]
 async fn idle_reconnect(world: &mut ScenarioWorld) {
     let peer = world
@@ -52,26 +66,52 @@ async fn idle_reconnect(world: &mut ScenarioWorld) {
     );
 }
 
+/// Requires the client to have ended `connection`, a connection the peer never read, with a
+/// Close frame carrying `status` before TCP ended.
+fn assert_closed_with(ending: UnreadEnding, status: CloseCode, connection: &str) {
+    match ending {
+        UnreadEnding::Closed(Some(frame)) => assert_eq!(
+            frame.code, status,
+            "the client ends the {connection} connection with {status:?}, not with {frame:?}"
+        ),
+        UnreadEnding::Closed(None) => {
+            panic!("the client closed the {connection} connection without a status")
+        }
+        UnreadEnding::WithoutClose => {
+            panic!("the client ended the {connection} connection without a Close frame")
+        }
+    }
+}
+
 #[then("the WebSocket bounds peer's silent connection ends with a going-away Close frame")]
 async fn silent_connection_closed(world: &mut ScenarioWorld) {
     let peer = world
         .websocket_peer
         .as_mut()
         .assured("the scenario started its bounds peer");
-    let PeerEvent::SilentConnectionEnded(ending) = peer.next().await else {
+    let PeerEvent::UnreadConnectionEnded(ending) = peer.next().await else {
         panic!("the bounds peer reports how the client ended the connection it never read");
     };
-    match ending {
-        UnreadEnding::Closed(Some(frame)) => assert_eq!(
-            frame.code,
-            CloseCode::Away,
-            "the client leaves a silent connection going away, not with {frame:?}"
-        ),
-        UnreadEnding::Closed(None) => {
-            panic!("the client closed the silent connection without a status")
-        }
-        UnreadEnding::WithoutClose => {
-            panic!("the client ended the silent connection without a Close frame")
-        }
-    }
+    assert_closed_with(ending, CloseCode::Away, "silent");
+}
+
+#[then(
+    "the WebSocket bounds peer's oversized connection ends with a message-too-big Close frame \
+     before the client reconnects"
+)]
+async fn oversized_connection_closed(world: &mut ScenarioWorld) {
+    let peer = world
+        .websocket_peer
+        .as_mut()
+        .assured("the scenario started its bounds peer");
+    let PeerEvent::Connected(_) = peer.next().await else {
+        panic!("the first connection was upgraded");
+    };
+    let PeerEvent::UnreadConnectionEnded(ending) = peer.next().await else {
+        panic!("the oversized connection ends before the client reconnects");
+    };
+    assert_closed_with(ending, CloseCode::Size, "oversized");
+    let PeerEvent::Connected(_) = peer.next().await else {
+        panic!("the client reconnects after the oversized message ends its connection");
+    };
 }
