@@ -609,6 +609,11 @@ receive the same generation. A restart continues from the newest surviving snaps
 model binding and branch incarnation. Inputs admitted after that snapshot have already been
 acknowledged and are not replayed, so recovery can skip those state updates. A graceful stop
 persists the final generation before the branch ends. `STOP` followed by `START` retains it.
+A planned ownership handoff, by `RELOCATE`, a node drain or a placement change, carries the
+generation each branch published at the handoff's freeze, so the new owner continues every branch
+from every input the former owner admitted. An owner loss continues from the newest surviving
+snapshot, or reports the branches it reset; see
+[When The Former Owner Is Gone](shutdown.md#when-the-former-owner-is-gone).
 A [backup](backup-and-restore.md) also carries each active branch's published tensors with their
 shapes, pinned model identity and branch incarnation. Quiesced capture forces publication;
 `WITHOUT PAUSE` captures the latest published generation without a common quiesced boundary.

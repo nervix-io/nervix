@@ -157,7 +157,8 @@ its tests and benchmarks use to build Models from text.
 
 ### The Semantic Catalog
 
-`crates/nervix-vm/src/semantics.rs` is the one catalog of every operation's meaning. Registration
+`crates/nervix-vm/src/semantics.rs` owns every operation's meaning; its focused `semantics/catalog.rs`
+module registers builtin names. Registration
 is a set of exhaustive `match` expressions over closed enums, not a runtime table, so a builtin that
 misses a decision does not compile. For each builtin the catalog and its neighbours decide:
 
@@ -452,6 +453,7 @@ All paths are relative to the repository root.
 | `crates/nervix-vm/src/frontend.rs` | Lowering Models into programs, scope policies, and frontend errors |
 | `crates/nervix-vm/src/program.rs` | `Program`, `Expr`, `FunctionName`, and resolved datetime calls |
 | `crates/nervix-vm/src/semantics.rs` | The semantic catalog: lowerings, semantics, signatures, arm execution, and shared value contracts |
+| `crates/nervix-vm/src/semantics/catalog.rs` | Exhaustive builtin registration, preserving the root descriptor API |
 | `crates/nervix-vm/src/compiler.rs` | Type and sensitivity checking, folding, sharing, register allocation, instruction emission, and optimization |
 | `crates/nervix-vm/src/ir.rs` | `CompiledProgram`, `CompiledPredicate`, instructions, registers, and bindings |
 | `crates/nervix-vm/src/runtime.rs` | Execution, register banks, scalar sharing, conditional arms, the builtin dispatch, and the list, cast, and most string kernels |
@@ -1044,6 +1046,15 @@ The reference owns each family's contract. These notes describe its implementati
   - `list_transpose` gathers the second-level child once, then exchanges the two outer fixed
     levels. Deeper levels remain whole. `first`, `last`, and `nth` select nested list values through
     the same Arrow `take` as scalar elements.
+  - Explicit list arithmetic validates exact numeric leaf types and fixed inner shapes in
+    `semantics/list_arithmetic.rs`. Its runtime owner applies the existing checked numeric kernels
+    to a whole fixed child run; ragged pairs and per-row scalar operands use a segmented pass.
+    One failed lane invalidates its parent message and reports the scalar error kind once per
+    call. Required child values stay physical, while the parent carries null and failure validity.
+    Unsigned absolute value retains the original list. Zero-based vector offsets and unchanged
+    validity are shared; a sliced vector normalizes only its active offset span. Child-field
+    metadata stays with its exact type. No per-row payload value or scalar broadcast column is
+    constructed.
 - **Bytes, encodings, and hashes.** `BYTES` is an Arrow `Binary` column.
   - Encoders check each output's length against the column before encoding.
   - `bytes_from_utf8` reuses the text's buffers without copying.
