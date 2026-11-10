@@ -17,6 +17,7 @@ use std::{cmp::Ordering, collections::BTreeMap};
 use arrow_array::{Float64Array, Int64Array};
 use arrow_buffer::{OffsetBuffer, ScalarBuffer};
 use error_stack::ResultExt as _;
+use nervix_simd_kernels::QuantileRank;
 use ordered_float::OrderedFloat;
 use sorted_vec::SortedVec;
 
@@ -439,17 +440,13 @@ impl BoundedTDigest {
                 .checked_add(centroid.weight)
                 .assured("a branch cannot admit 2^64 rows")
         });
-        if total == 0 {
-            return None;
-        }
-        let maximum_rank = total.checked_sub(1).verified("the centroids are nonempty");
-        let rank = (percentage / 100.0) * maximum_rank.approx_into::<f64>();
+        let rank = QuantileRank::new(percentage, total)?;
         let lower_rank = rank
-            .floor()
+            .lower()
             .checked_approx_into::<u64>()
             .verified("a retained window's percentile rank fits U64");
         let upper_rank = rank
-            .ceil()
+            .upper()
             .checked_approx_into::<u64>()
             .verified("a retained window's percentile rank fits U64");
         let lower = self
@@ -461,8 +458,7 @@ impl BoundedTDigest {
         let upper = self
             .value_at_rank(upper_rank)
             .verified("the upper percentile rank is inside the retained centroids");
-        let fraction = rank.fract();
-        Some(lower * (1.0 - fraction) + upper * fraction)
+        Some(rank.interpolate(lower, upper))
     }
 
     fn value_at_rank(&self, rank: u64) -> Option<f64> {

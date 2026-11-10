@@ -28,9 +28,9 @@ use super::{
     execute_program_in_context_sync, execute_program_sync,
 };
 use crate::{
-    CompileBinding, CompileOptions, CompiledProgram, ErrorCode, RegisterType, RowErrorMask,
-    RuntimeError, SideError, SideErrorReason, TypedArray, TypedBatch, UdfParameter, UdfSignature,
-    UdfSignatures, compile_program_with_options_for_bindings,
+    CastTarget, CompileBinding, CompileOptions, CompiledProgram, ErrorCode, RegisterType,
+    RowErrorMask, RuntimeError, SideError, SideErrorReason, TypedArray, TypedBatch, UdfParameter,
+    UdfSignature, UdfSignatures, compile_program_with_options_for_bindings,
     ir::InstructionKind,
     program::{CastFailure, FunctionName, Span},
     regexp::{PatternSource, RegexpCall},
@@ -926,7 +926,7 @@ fn tolerant_cast_observes_selection(compiled: &CompiledProgram, target: Register
             on_failure: CastFailure::Null,
             ..
         } = &instruction.kind
-            && *cast_target == target
+            && *cast_target == CastTarget::Scalar(target)
         {
             observes = Some(instruction.selection.is_some());
         }

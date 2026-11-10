@@ -39,7 +39,9 @@ nested Arrow `FixedSizeList` level, so `ARRAY<F32, 2, 3>` maps to
 type is recursive, so fixed and variable axes can be mixed, for example
 `VEC<ARRAY<F32, 6>>` and `ARRAY<VEC<STRING>, 4>`.
 
-`ARRAY` and `VEC` are distinct and are never implicitly converted. Every fixed
+`ARRAY` and `VEC` are distinct and are never implicitly converted. An expression converts a list's
+container or element type only explicitly, with `AS` or `TRY_CAST` to the full target list type;
+see [Lists](filter-map-functions.md#lists). Every fixed
 axis must have a positive length no greater than 2147483647, the largest length
 an Arrow `FixedSizeList` carries, fixed arrays must contain exactly that many
 elements at runtime, and dense multidimensional values must retain their nested
