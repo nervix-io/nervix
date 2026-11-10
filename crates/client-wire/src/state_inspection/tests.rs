@@ -742,8 +742,8 @@ impl CraftedUnit {
             let bytes = fbb.create_vector(&[crafted.branch; 32]);
             let branch =
                 wire::Fingerprint::create(&mut fbb, &wire::FingerprintArgs { bytes: Some(bytes) });
-            let checkpoint = match &crafted.checkpoint {
-                Some(checkpoint) => Some(wire::WasmCheckpointFacts::create(
+            let checkpoint = crafted.checkpoint.as_ref().map(|checkpoint| {
+                wire::WasmCheckpointFacts::create(
                     &mut fbb,
                     &wire::WasmCheckpointFactsArgs {
                         generation: checkpoint.generation,
@@ -753,9 +753,8 @@ impl CraftedUnit {
                         required_replicas: Some(1),
                         confirmed_replicas: Some(1),
                     },
-                )),
-                None => None,
-            };
+                )
+            });
             let recovery = match crafted.recovery_generation {
                 Some(generation) => {
                     let request = fbb.create_string("recovery-0003");
