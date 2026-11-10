@@ -354,6 +354,11 @@ Feature: Typed WASM processor state inspection
       SHOW WASM PROCESSOR counting_guest STATE LIMIT 18446744073709551615 FORMAT JSON;
       """
     Then the typed inspection refuses the read with "invalid_limit"
+    When client "reader" submits this Plexus command request
+      """
+      SHOW WASM PROCESSOR counting_guest STATE LIMIT 1 AFTER 'not-a-continuation' FORMAT JSON;
+      """
+    Then the typed inspection refuses the read with "stale_continuation"
 
     Examples:
       | cluster_size | replica_count |

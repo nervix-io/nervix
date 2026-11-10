@@ -658,3 +658,307 @@ fn every_largest_wasm_branch_entry_fits_its_encoded_bound() {
         "{count} largest entries took {table_bytes} bytes"
     );
 }
+
+/// One hand-built `WasmUnitStateFacts` table. A peer can send what the encoder never writes, such
+/// as a zero generation or entries out of branch order, so the decoder refuses it on its own.
+struct CraftedUnit {
+    default_generation: u64,
+    reset: Option<CraftedReset>,
+    entries: u64,
+    branches: Vec<CraftedEntry>,
+}
+
+struct CraftedReset {
+    generation: u64,
+    scope: crate::wire::WasmStateScope,
+}
+
+struct CraftedEntry {
+    branch: u8,
+    checkpoint: Option<CraftedCheckpoint>,
+    recovery_generation: Option<u64>,
+}
+
+struct CraftedCheckpoint {
+    generation: u64,
+    committed_revision: Option<u64>,
+}
+
+impl CraftedUnit {
+    /// Two ordered branch entries with a checkpoint and a recovery, and a ready unbranched reset.
+    fn valid() -> Self {
+        Self {
+            default_generation: 1,
+            reset: Some(CraftedReset {
+                generation: 2,
+                scope: crate::wire::WasmStateScope::WasmUnbranchedScope,
+            }),
+            entries: 2,
+            branches: vec![
+                CraftedEntry {
+                    branch: 1,
+                    checkpoint: Some(CraftedCheckpoint {
+                        generation: 2,
+                        committed_revision: Some(3),
+                    }),
+                    recovery_generation: None,
+                },
+                CraftedEntry {
+                    branch: 2,
+                    checkpoint: None,
+                    recovery_generation: Some(1),
+                },
+            ],
+        }
+    }
+
+    fn decode(
+        &self,
+    ) -> Result<WasmUnitStateInspection, error_stack::Report<crate::WireDecodeError>> {
+        use crate::wire;
+        let mut fbb = flatbuffers::FlatBufferBuilder::new();
+        let reset = match &self.reset {
+            Some(crafted) => {
+                let request = fbb.create_string("reset-0003");
+                let scope =
+                    wire::WasmUnbranchedScope::create(&mut fbb, &wire::WasmUnbranchedScopeArgs {});
+                Some(wire::WasmResetFacts::create(
+                    &mut fbb,
+                    &wire::WasmResetFactsArgs {
+                        request: Some(request),
+                        scope_type: crafted.scope,
+                        scope: Some(scope.as_union_value()),
+                        phase: Some(wire::WasmResetPhase::Ready),
+                        reason: Some(wire::WasmResetReason::Operator),
+                        generation: crafted.generation,
+                        readiness: Some(wire::WasmResetReadiness::Ready),
+                    },
+                ))
+            }
+            None => None,
+        };
+        let mut entries = Vec::new();
+        for crafted in &self.branches {
+            let bytes = fbb.create_vector(&[crafted.branch; 32]);
+            let branch =
+                wire::Fingerprint::create(&mut fbb, &wire::FingerprintArgs { bytes: Some(bytes) });
+            let checkpoint = match &crafted.checkpoint {
+                Some(checkpoint) => Some(wire::WasmCheckpointFacts::create(
+                    &mut fbb,
+                    &wire::WasmCheckpointFactsArgs {
+                        generation: checkpoint.generation,
+                        committed_revision: checkpoint.committed_revision,
+                        latest_revision: checkpoint.committed_revision,
+                        stage: Some(wire::WasmCheckpointStage::ReplicaConfirmed),
+                        required_replicas: Some(1),
+                        confirmed_replicas: Some(1),
+                    },
+                )),
+                None => None,
+            };
+            let recovery = match crafted.recovery_generation {
+                Some(generation) => {
+                    let request = fbb.create_string("recovery-0003");
+                    Some(wire::WasmRecoveryFacts::create(
+                        &mut fbb,
+                        &wire::WasmRecoveryFactsArgs {
+                            generation,
+                            rejection: Some(wire::WasmSavedStateRejection::ApplicationState),
+                            request: Some(request),
+                            outcome: Some(wire::WasmRecoveryOutcome::Recovered),
+                        },
+                    ))
+                }
+                None => None,
+            };
+            entries.push(wire::WasmBranchStateFacts::create(
+                &mut fbb,
+                &wire::WasmBranchStateFactsArgs {
+                    branch: Some(branch),
+                    checkpoint,
+                    recovery,
+                },
+            ));
+        }
+        let branches = fbb.create_vector(&entries);
+        let checkpoints = wire::WasmCheckpointCounts::create(
+            &mut fbb,
+            &wire::WasmCheckpointCountsArgs {
+                total: 1,
+                empty: 0,
+                captured: 0,
+                locally_durable: 0,
+                awaiting_replicas: 0,
+                replica_confirmed: 1,
+                failed: 0,
+            },
+        );
+        let recoveries = wire::WasmRecoveryCounts::create(
+            &mut fbb,
+            &wire::WasmRecoveryCountsArgs {
+                attempted: 0,
+                recovered: 1,
+                failed: 0,
+            },
+        );
+        let unit = wire::WasmUnitStateFacts::create(
+            &mut fbb,
+            &wire::WasmUnitStateFactsArgs {
+                default_generation: self.default_generation,
+                reset,
+                entries: self.entries,
+                checkpoints: Some(checkpoints),
+                recoveries: Some(recoveries),
+                branches: Some(branches),
+            },
+        );
+        fbb.finish_minimal(unit);
+        let table = flatbuffers::root::<wire::WasmUnitStateFacts>(fbb.finished_data())
+            .assured("every table above is complete, so the buffer verifies");
+        super::wasm::decode_unit(crate::codec::Decoder::new(&SessionLimits::DEFAULT), table)
+    }
+
+    fn refusal(&self) -> crate::WireDecodeError {
+        match self.decode() {
+            Ok(decoded) => panic!("a malformed unit decoded: {decoded:?}"),
+            Err(error) => error.current_context().clone(),
+        }
+    }
+}
+
+#[test]
+fn a_peer_wasm_unit_table_is_refused_for_what_the_encoder_never_writes() {
+    let decoded = CraftedUnit::valid()
+        .decode()
+        .assured("the well-formed hand-built unit decodes");
+    assert_eq!(decoded.entries, 2);
+    assert_eq!(decoded.branches.len(), 2);
+    assert!(decoded.reset.is_some());
+
+    let generation = |field| crate::WireDecodeError::InvalidValue {
+        field,
+        kind: "nonzero WASM state generation",
+    };
+    let zero_default = CraftedUnit {
+        default_generation: 0,
+        ..CraftedUnit::valid()
+    };
+    assert_eq!(
+        zero_default.refusal(),
+        generation("WasmUnitStateFacts.default_generation")
+    );
+    let mut zero_reset = CraftedUnit::valid();
+    if let Some(reset) = &mut zero_reset.reset {
+        reset.generation = 0;
+    }
+    assert_eq!(
+        zero_reset.refusal(),
+        generation("WasmResetFacts.generation")
+    );
+    let mut undeclared_scope = CraftedUnit::valid();
+    if let Some(reset) = &mut undeclared_scope.reset {
+        reset.scope = crate::wire::WasmStateScope(9);
+    }
+    assert_eq!(
+        undeclared_scope.refusal(),
+        crate::WireDecodeError::UnknownUnionVariant {
+            field: "WasmResetFacts.scope",
+            discriminant: 9,
+        }
+    );
+    let mut zero_checkpoint = CraftedUnit::valid();
+    zero_checkpoint.branches[0].checkpoint = Some(CraftedCheckpoint {
+        generation: 0,
+        committed_revision: Some(3),
+    });
+    assert_eq!(
+        zero_checkpoint.refusal(),
+        generation("WasmCheckpointFacts.generation")
+    );
+    let mut zero_revision = CraftedUnit::valid();
+    zero_revision.branches[0].checkpoint = Some(CraftedCheckpoint {
+        generation: 2,
+        committed_revision: Some(0),
+    });
+    assert_eq!(
+        zero_revision.refusal(),
+        crate::WireDecodeError::ZeroValue {
+            field: "WasmCheckpointFacts.committed_revision",
+        }
+    );
+    let mut zero_recovery = CraftedUnit::valid();
+    zero_recovery.branches[1].recovery_generation = Some(0);
+    assert_eq!(
+        zero_recovery.refusal(),
+        generation("WasmRecoveryFacts.generation")
+    );
+
+    let mut unordered = CraftedUnit::valid();
+    unordered.branches.reverse();
+    let mut stateless = CraftedUnit::valid();
+    stateless.branches[1].recovery_generation = None;
+    let overcounted = CraftedUnit {
+        entries: 1,
+        ..CraftedUnit::valid()
+    };
+    for (case, unit) in [
+        ("unordered", unordered),
+        ("stateless", stateless),
+        ("overcounted", overcounted),
+    ] {
+        let refusal = unit.refusal();
+        assert!(
+            matches!(
+                refusal,
+                crate::WireDecodeError::InvalidValue {
+                    field: "WasmUnitStateFacts.branches",
+                    ..
+                }
+            ),
+            "{case}: {refusal:?}"
+        );
+    }
+}
+
+#[test]
+fn a_checkpoint_without_a_durability_boundary_renders_its_replica_counts_as_unknown() {
+    let state = WasmUnitStateInspection {
+        default_generation: generation(1),
+        reset: None,
+        entries: 1,
+        checkpoints: WasmCheckpointCounts {
+            total: 1,
+            empty: 1,
+            captured: 0,
+            locally_durable: 0,
+            awaiting_replicas: 0,
+            replica_confirmed: 0,
+            failed: 0,
+        },
+        recoveries: WasmRecoveryCounts {
+            attempted: 0,
+            recovered: 0,
+            failed: 0,
+        },
+        branches: vec![WasmBranchStateInspection {
+            branch: None,
+            checkpoint: Some(WasmCheckpointState {
+                generation: generation(1),
+                committed_revision: None,
+                latest_revision: None,
+                stage: WasmCheckpointStage::Empty,
+                required_replicas: None,
+                confirmed_replicas: None,
+            }),
+            recovery: None,
+        }],
+    };
+    assert_eq!(
+        super::wasm::entry_lines(&state),
+        vec![
+            "checkpoint branch=unbranched generation=1 committed_revision=none \
+             latest_revision=none stage=EMPTY required_replicas=unknown confirmed_replicas=unknown"
+                .to_string()
+        ]
+    );
+}

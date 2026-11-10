@@ -250,6 +250,110 @@ mod tests {
         }
     }
 
+    /// Whatever the property's seeds draw, one page with every kind of fact crosses the owner's
+    /// codec intact: a ready branch-scoped reset, an unbranched checkpoint entry and a branch's
+    /// recovery entry, with entries beyond the page.
+    #[test]
+    fn a_page_with_its_reset_and_both_entry_kinds_round_trips() {
+        let runtime = nervix_primitives::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .assured("ordinary fixture runtime");
+        let generation = |value: u64| {
+            WasmStateGeneration::try_from(value).assured("a positive value is a generation")
+        };
+        let branch = BranchKeyFingerprint::new([5; 32]);
+        let mut reset = WasmStateReset::publishing(
+            CommandExecutionReference::parse("reset-0004").assured("a literal reference"),
+            WasmStateResetScope::Branch(branch),
+            WasmStateResetReason::Guest,
+        );
+        reset.mark_ready();
+        let checkpoint = WasmCheckpointState {
+            generation: generation(2),
+            committed_revision: NonZeroU64::new(4),
+            latest_revision: NonZeroU64::new(5),
+            stage: WasmCheckpointStage::LocallyDurable,
+            required_replicas: Some(1),
+            confirmed_replicas: Some(0),
+        };
+        let recovery = WasmRecoveryInspection {
+            generation: generation(1),
+            rejection: WasmSavedStateRejection::SnapshotEnvelope,
+            request: CommandExecutionReference::parse("recovery-0004")
+                .assured("a literal reference"),
+            outcome: WasmStateRecoveryOutcome::Failed,
+        };
+        let page = WasmUnitStatePage {
+            state: WasmUnitStateInspection {
+                default_generation: generation(1),
+                reset: Some(WasmStateResetInspection {
+                    reset,
+                    generation: generation(2),
+                    readiness: WasmStateResetReadiness::AwaitingUsableExecution,
+                }),
+                entries: 3,
+                checkpoints: WasmCheckpointCounts {
+                    total: 1,
+                    empty: 0,
+                    captured: 0,
+                    locally_durable: 1,
+                    awaiting_replicas: 1,
+                    replica_confirmed: 0,
+                    failed: 0,
+                },
+                recoveries: WasmRecoveryCounts {
+                    attempted: 0,
+                    recovered: 0,
+                    failed: 1,
+                },
+                branches: vec![
+                    WasmBranchStateInspection {
+                        branch: None,
+                        checkpoint: Some(checkpoint),
+                        recovery: None,
+                    },
+                    WasmBranchStateInspection {
+                        branch: Some(branch),
+                        checkpoint: None,
+                        recovery: Some(recovery),
+                    },
+                ],
+            },
+            more: true,
+        };
+        let reply = ReadWasmStatePageResponse {
+            result: Ok(WasmStatePage {
+                origin: StateInspectionOrigin {
+                    node: ClusterNodeIdentity::new(
+                        nervix_models::ClusterNodeName::parse("node-a")
+                            .assured("a literal node name"),
+                        ClusterNodeIncarnation::new(7),
+                    ),
+                    fingerprint: [9; 32],
+                    generation: 2,
+                    revision: 11,
+                    stage: StateInspectionStage::Live,
+                },
+                page,
+            }),
+        };
+        runtime.block_on(async {
+            let executor = Executor::default();
+            let class = <ReadWasmStatePage as InterconnectRequest>::CLASS;
+            let (encoded, _charge) = reply
+                .clone()
+                .encode_rkyv(executor.clone(), class, class.payload_limit(&executor))
+                .await
+                .assured("a bounded reply encodes");
+            let (decoded, _charge) =
+                ReadWasmStatePageResponse::decode_rkyv(executor, class, encoded)
+                    .await
+                    .assured("the reply decodes");
+            assert_eq!(decoded, reply);
+        });
+    }
+
     #[test]
     fn bolero_wasm_state_page_messages_round_trip() {
         let runtime = nervix_primitives::runtime::Builder::new_current_thread()
