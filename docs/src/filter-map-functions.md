@@ -166,7 +166,7 @@ A function that cannot compute its result for a message reports an error of one 
 | --- | --- | --- |
 | `division_by_zero` | An integer division or remainder by zero | `integer division by zero`, `integer remainder by zero` |
 | `overflow` | A result its type or its column cannot hold | `integer addition overflowed`, `date_add result is outside the DATETIME range`, `repeat result exceeds the text one STRING column holds` |
-| `cast_failed` | A value that does not read as the requested type | `cannot cast value to Int64`, `base64_decode input is not valid encoded bytes`, `JSON_VALUE document is not valid JSON` |
+| `cast_failed` | A value that does not read as the requested type | `cannot cast value to Int64`, `cannot cast list element to Int64`, `base64_decode input is not valid encoded bytes`, `JSON_VALUE document is not valid JSON` |
 | `invalid_argument` | An argument outside the function's domain, or a result that is not finite | `floating-point operation produced a non-finite result`, `invalid regular expression: ...`, `vector lengths differ: left has 3, right has 2` |
 
 The sections below name the kind and message of every failure. A failed message yields null for
@@ -529,27 +529,28 @@ for a `division_by_zero`; and `floating-point operation produced a non-finite re
 
 ## Conversions
 
-A value never changes its type implicitly. Two explicit forms convert it to another scalar type.
-They accept the same types and convert every value the same way, and differ only in what a value
-that does not convert does:
+A value never changes its type implicitly. Two explicit forms convert it to another type. They
+accept the same types and convert every value the same way, and differ only in what a value that
+does not convert does:
 
 | Form | Result | A value that does not convert |
 | --- | --- | --- |
 | `<expr> AS <type>` | `<type>`, optional exactly when `<expr>` is | Reports a per-message `cast_failed` error, such as `cannot cast value to Int64`, and yields null for that message, which takes the [error handling](#errors) of its context |
 | `TRY_CAST(<expr> AS <type>)` | Optional `<type>` | Yields a typed null, and the message continues without an error |
 
-`<type>` is a scalar type written with the same spellings in both forms, in any letter case: `U8`
-or `UINT8`, `I8` or `INT8`, `U16` or `UINT16`, `I16` or `INT16`, `U32` or `UINT32`, `I32` or
-`INT32`, `U64` or `UINT64`, `I64` or `INT64`, `F32` or `FLOAT32`, `F64` or `FLOAT64`, `BOOL` or
-`BOOLEAN`, `STRING` or `UTF8`, `BYTES`, and `DATETIME`. Any other name is rejected with
-`unsupported type '<name>'`. Conversions are defined between scalar values only: an `ARRAY` or
-`VEC` type cannot be written as a target, and no conversion is defined for an `ARRAY` or `VEC`
-operand. A `BYTES` value converts only to `BYTES`, which returns it unchanged, and no other type
-converts to `BYTES`; a statement that asks for either is rejected with `BYTES conversions require
-bytes_from_utf8, bytes_to_utf8, base64 or hex functions`, which name the functions that convert
-explicitly. A null operand is not a failure: it converts to a typed null in both forms, so
-`input.amount AS I64` over a message without an `amount` yields null and reports nothing. Test the
-operand to tell a missing value from one that did not convert:
+`<type>` is written with the same spellings in both forms, in any letter case. It is a scalar
+type, `U8` or `UINT8`, `I8` or `INT8`, `U16` or `UINT16`, `I16` or `INT16`, `U32` or `UINT32`,
+`I32` or `INT32`, `U64` or `UINT64`, `I64` or `INT64`, `F32` or `FLOAT32`, `F64` or `FLOAT64`,
+`BOOL` or `BOOLEAN`, `STRING` or `UTF8`, `BYTES`, and `DATETIME`, or a list type, `VEC<...>` or
+`ARRAY<..., n>`, written as a schema field declares it and nested to any depth, as
+[Lists](#lists) describes. Any other name is rejected with `unsupported type '<name>'`. A scalar
+converts only to a scalar type and a list only to a list type. A `BYTES` value converts only to
+`BYTES`, which returns it unchanged, and no other type converts to `BYTES`; a statement that asks
+for either is rejected with `BYTES conversions require bytes_from_utf8, bytes_to_utf8, base64 or
+hex functions`, which name the functions that convert explicitly. A null operand is not a failure:
+it converts to a typed null in both forms, so `input.amount AS I64` over a message without an
+`amount` yields null and reports nothing. Test the operand to tell a missing value from one that did
+not convert:
 
 ```plexus,ignore
 SET amount = TRY_CAST(input.amount AS I64),
@@ -615,6 +616,54 @@ values the table below lists. Converting a value to its own type returns it unch
 | `DATETIME` | An integer type other than `I64` | A count of nanoseconds since `1970-01-01T00:00:00Z` outside the target type's range |
 | `BOOL` | `DATETIME` | Every value |
 | `DATETIME` | `BOOL` | Every value |
+
+### Lists
+
+`AS` and `TRY_CAST` are the one way to change the element type or the container of an `ARRAY` or
+`VEC` value. The target is written out in full, nested exactly as deep as the operand:
+
+```plexus,ignore
+SET readings = input.readings AS VEC<F32>,
+    recent = TRY_CAST(input.readings AS ARRAY<F32, 64>),
+    matrix = TRY_CAST(input.matrix AS ARRAY<F64, 64, 2>)
+```
+
+A list converts level by level, from its outermost container in:
+
+| From | To | Converts |
+| --- | --- | --- |
+| `ARRAY<..., n>` | `VEC<...>` | Every list |
+| `VEC<...>` | `ARRAY<..., n>` | A list of exactly `n` elements |
+| `ARRAY<..., n>` | `ARRAY<..., n>` | Every list |
+| `VEC<...>` | `VEC<...>` | Every list |
+
+The innermost elements convert by the scalar conversion of their pair of types, with the rules the
+tables above give for every value: `VEC<STRING> AS VEC<I64>` reads each element as an integer, and
+`VEC<I64> AS VEC<I8>` fails for an element outside the `I8` range. A list holds no null element, so
+a list one of whose elements does not convert, or one of whose `VEC`s, at any level, does not hold
+the length of the `ARRAY` it becomes, does not convert at all. `AS` then reports a per-message
+`cast_failed` error and yields null for that message, `TRY_CAST` yields a typed null and reports
+nothing, and neither fails the batch. The error names the first defect from the outermost level in,
+`cannot cast a list of length 2 to an ARRAY of length 3`, or else the element type that did not
+convert, `cannot cast list element to Int64`. A null list converts to a typed null in both forms,
+and an empty `VEC` converts to an empty `VEC`. A conversion keeps the list's nesting and the
+number of elements each of its values holds, and converting a list to its own type returns it
+unchanged.
+
+A list conversion that can never succeed is rejected when the statement is applied, under `AS` and
+under `TRY_CAST` alike, with `unsupported_cast`:
+
+| Conversion | Error |
+| --- | --- |
+| A list to a scalar type, `STRING` included | `an ARRAY or VEC value converts only to an ARRAY or VEC type` |
+| A scalar to a list type | `only an ARRAY or VEC value converts to an ARRAY or VEC type` |
+| Lists nested to different depths | `an ARRAY or VEC value nested 1 deep converts only to a type nested 1 deep, found one nested 2 deep` |
+| `ARRAY`s of different lengths, at any level | `an ARRAY of length 2 never converts to an ARRAY of length 3` |
+| `BYTES` elements to another type, or other elements to `BYTES` | `BYTES conversions require bytes_from_utf8, bytes_to_utf8, base64 or hex functions` |
+
+A converted list keeps the sensitivity of its operand, and a converted `ARRAY` binds a fixed-shape
+inferencer input: `INPUTS { "matrix" DENSE TENSOR<F32>[2, 3] = input.rows AS ARRAY<F32, 2, 3> }`
+reads a `VEC<VEC<I64>>` of two rows of three as the tensor.
 
 ## JSON Documents
 
@@ -1851,7 +1900,8 @@ every message; a mismatch reports `invalid_argument`, `vector lengths differ: le
 `mean produced a non-finite result`; `mean` sums its elements in `F64` before it divides, so a sum
 beyond the `F64` range fails even where the mean itself would be finite. `contains` and `overlap`
 use the scalar equality contract: NaN equals no element, and positive and negative zero are equal.
-These functions compare exact element types; they never cast or stringify list elements.
+These functions compare exact element types; they never cast or stringify list elements. A list's
+element type or container changes only through an explicit [`AS` or `TRY_CAST`](#lists).
 
 ### List Arithmetic
 

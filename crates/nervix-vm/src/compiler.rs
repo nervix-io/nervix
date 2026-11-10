@@ -14,6 +14,7 @@ use nervix_primitives::sync::StdArc;
 
 use crate::{
     batch::TypedArray,
+    cast::CastTarget,
     error::{CompileError, CompileErrorCode, SideErrorReason},
     ip_address::{self, IpNetwork, NetworkSource},
     ir::{
@@ -33,7 +34,7 @@ use crate::{
     semantics::{
         ArmExecution, BitwiseOperation, BuiltinLowering, CaseMapping, FloatClass, IntegerBits as _,
         binary_descriptor, binary_output_type, builtin_descriptor, builtin_semantics_for_lowering,
-        builtin_signature, cast_arm_execution, cast_descriptor, expr_semantics, unary_descriptor,
+        builtin_signature, cast_descriptor, expr_semantics, unary_descriptor,
     },
     text_search::ContainsAnyCall,
     url_component,
@@ -2055,10 +2056,11 @@ impl Compiler {
                 on_failure,
             } => {
                 let input = self.compile_expr(inner)?;
-                let target = RegisterType::from_data_type(data_type).verified(
-                    "type inference above rejected every data type that has no register type",
+                let input_type = self.infer_expr_type(inner)?;
+                let target = CastTarget::between(&input_type, data_type).verified(
+                    "type inference above accepted only conversions this pair of types takes",
                 );
-                let dst = self.alloc_temp(target);
+                let dst = self.alloc_temp(target.register_type());
                 self.emit(
                     InstructionKind::Cast {
                         dst,
@@ -2929,8 +2931,12 @@ fn evaluate_set_element(element: &SpannedExpr) -> Result<TypedArray, SetElementD
             on_failure,
         } => {
             let value = evaluate_set_element(expr)?;
-            let target = RegisterType::from_data_type(data_type)
-                .verified("type inference accepted only casts to a register type");
+            let target = CastTarget::between(&value.data_type(), data_type)
+                .verified("type inference accepted only conversions this pair of types takes");
+            // A list is never a constant element of a set.
+            let CastTarget::Scalar(target) = target else {
+                return Err(SetElementDefect::NotConstant);
+            };
             match cast_constant(value, target) {
                 Ok(converted) => Ok(converted),
                 // A tolerant conversion yields a typed null for a value it cannot convert, and no
@@ -4196,10 +4202,8 @@ fn instruction_observes_selection(kind: &InstructionKind) -> bool {
             on_failure,
             ..
         } => {
-            let converts_text = matches!(
-                cast_arm_execution(input.ty, *target),
-                ArmExecution::SelectedRows
-            );
+            let converts_text =
+                matches!(target.arm_execution(input.ty), ArmExecution::SelectedRows);
             cast_descriptor(*on_failure).semantics.can_error || converts_text
         }
         InstructionKind::Builtin { lowering, .. } => {

@@ -550,6 +550,9 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
     `BRANCHED BY ... SET`, which have no error route;
   - `IN` sets hold non-null constants of the operand's exact type, and string positions count from
     1 while `nth`, `slice`, and JSON path indexes count from 0;
+  - a list changes its element type or container only through `AS` or `TRY_CAST` to the full list
+    type, nested as deep as the operand (`input.readings AS ARRAY<F32, 64>`); a `VEC` that does not
+    hold the `ARRAY`'s length fails its message, and a list never converts to a scalar or `STRING`;
   - before shaping an inferencer input or reading a nested list, read `Expression Functions` →
     `Array And Vector Functions` and `Processors` → `Inferencer`; check the fixed shape and literal
     dimensions rather than treating a change of axes as an element-type conversion;
