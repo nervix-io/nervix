@@ -10,6 +10,7 @@
     nervix::layer(language, reason = "owns the language boundary declared above")
 )]
 
+mod entity_reference;
 use std::{
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
     ops::Range,
@@ -22,6 +23,7 @@ use chumsky::{
     prelude::*,
     util::MaybeRef,
 };
+pub(crate) use entity_reference::model_ref;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
