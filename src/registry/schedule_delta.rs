@@ -860,6 +860,7 @@ mod tests {
     #[test]
     fn emitter_flush_is_dynamic_and_client_changes_swap_despite_fingerprint_changes() {
         let emitter = CreateEmitter {
+            instances: nervix_models::EmitterInstances::ONE,
             name: named("event_emitter"),
             from: nervix_models::ProcessorInputs::single(named("events")),
             body: nervix_models::EmitterBody::Codec {

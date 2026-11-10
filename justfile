@@ -648,6 +648,13 @@ test-processor-partitions *args: build-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/processor_partitions.feature {{ quote(args) }}
 
+# Emitter instances against the Kafka test broker, on one and three in-process nodes.
+test-emitter-instances *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/emitter_instances.feature {{ quote(args) }}
+
 # Observe emitter outcomes through public sessions and the owning node's metric endpoint.
 test-emitter-outcomes *args: build-deps
     #!/usr/bin/env bash
@@ -1020,6 +1027,10 @@ bench-window-admission *args:
 # from a new pane for every row to a thousand rows per pane.
 bench-window-sketches *args: build-web-console
     cargo bench --package nervix-server --bench window_sketches --features benchmarks -- {{ args }}
+
+# Measure complete retained collection emissions at 64 and 4,096 rows.
+bench-window-collection *args: build-web-console
+    cargo bench --package nervix-server --bench window_collection --features benchmarks -- {{ args }}
 
 # Measure the checked integer SIMD kernels beside the lane loop they replaced, over one 1,024-lane
 # run each. Extra arguments are forwarded to Criterion.
@@ -3444,6 +3455,7 @@ bench-smoke-bodies:
     cargo bench --profile dev --package nervix-server --bench task_handles --features benchmarks -- target/task-handles-smoke.json
     cargo bench --profile dev --package nervix-server --bench state_replication --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench window_sketches --features benchmarks -- --test
+    cargo bench --profile dev --package nervix-server --bench window_collection --features benchmarks -- --test
     cargo bench --profile dev --package nervix-columnar-json --bench json_encode -- --test
     cargo bench --profile dev --package nervix-simd-kernels --bench constant_division -- --test
     cargo bench --profile dev --package nervix-simd-kernels --bench byte_classes -- --test

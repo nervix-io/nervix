@@ -52,7 +52,7 @@ use nervix_models::{
     InspectionFormat, LookupName, LookupQuery, Model, ModelKind, ModelName, NodeRef, ParseAsType,
     ResourceDescription, ResourceId, ResourceName, ResourceUsage, ResourceVersion,
     ResourceVersionDescription, ResourceVersionEntries, ScheduledNode, SchemaName,
-    UniquelyKindedModel, WasmStateInspection,
+    UniquelyKindedModel, Unit, UnitKind, WasmStateInspection,
 };
 use nervix_vm::window::{WindowAggregateProgram, lower_window_assignments};
 use tracing::{debug, warn};
@@ -85,10 +85,14 @@ use super::{
 };
 use crate::{registry::RegistryError, runtime::RelayPartitioning, runtime_schema};
 
+mod emitter_instances;
 mod ingestor_units;
 mod relay_units;
 
 const REMOTE_DESCRIBE_RELAY_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long DESCRIBE waits for the node that runs an entity, or one of its units, to report the
+/// entity's dataflow status.
+const DATAFLOW_NODE_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A model as `DESCRIBE` reads it: the configuration it was created with, and the schedule entry
 /// that places it while its domain is running.
@@ -948,8 +952,9 @@ impl SessionServiceImpl {
                     domain: domain.clone(),
                     kind: model_kind,
                     name: identifier.clone(),
+                    unit: Unit::SINGLE,
                 },
-                Duration::from_secs(2),
+                DATAFLOW_NODE_STATUS_TIMEOUT,
             )
             .await;
         match response {
@@ -990,6 +995,21 @@ impl SessionServiceImpl {
     ) -> Result<DataflowNodeStatusEnvelope, RemoteOperationFailure> {
         self.prepare_owner_control_request(&request.domain, request.kind, &request.name)
             .await?;
+        if request.kind == ModelKind::Emitter
+            && matches!(request.unit.kind(), UnitKind::Instance(_))
+            && !self.inner.runtime.emitter_unit_is_running(
+                &request.domain,
+                &EmitterName::from(&request.name),
+                request.unit,
+            )
+        {
+            return Err(RemoteOperationFailure::Unavailable {
+                subject: RemoteOperationSubject::Entity {
+                    domain: request.domain.clone(),
+                    entity: NodeRef::new(request.kind, request.name.clone()),
+                },
+            });
+        }
         let health = self.inner.runtime.dataflow_node_status(
             &request.domain,
             request.kind.as_str(),
@@ -1037,7 +1057,9 @@ impl SessionServiceImpl {
         let Some(node) = scheduled_node else {
             return Ok(self.local_runtime_describe(domain, kind, identifier, &metric_kind));
         };
-        if node.is_partitioned() {
+        // Each partition owner, and each owner of an emitter's instances, reports the units it
+        // executes.
+        if node.is_partitioned() || (kind == ModelKind::Emitter && node.is_instanced()) {
             return self
                 .describe_partitioned_runtime(domain, kind, identifier, node)
                 .await;
@@ -1556,12 +1578,20 @@ impl SessionServiceImpl {
             Ok(metrics) => metrics,
             Err(message) => return command_error(format!("{message:#}")),
         };
+        let instances = match (scheduled_domain, scheduled_node.as_ref()) {
+            (Some(scheduled_domain), Some(node)) if node.is_instanced() => {
+                self.emitter_instance_summaries(domain, &emitter, scheduled_domain, node)
+                    .await
+            }
+            _ => Vec::new(),
+        };
         let description = match format_emitter_describe_output(
             &describe.name,
             &emitter,
             &payload,
             scheduled_node.as_ref(),
             Some(&status),
+            &instances,
         ) {
             Ok(description) => description,
             Err(error) => return command_error(error.to_string()),

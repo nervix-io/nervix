@@ -1367,7 +1367,11 @@ pub(super) fn emitter_context() -> EmitterConnectorContext {
     let domain = DomainName::parse("emitter_tests").expect("valid domain");
     let runtime = Runtime::default();
     let emitter = EmitterName::parse("output").assured("fixture emitter name is valid");
-    let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
+    let key = DomainNodeUnitRef::single(DomainNodeRef::node_in(
+        domain.clone(),
+        ModelKind::Emitter,
+        emitter.clone(),
+    ));
     EmitterConnectorContext {
         readiness: runtime.register_emitter_readiness(&key),
         routing: StdArc::new(ArcSwap::from_pointee(DomainRoutingSnapshot::default())),
@@ -1377,6 +1381,7 @@ pub(super) fn emitter_context() -> EmitterConnectorContext {
         interactions: runtime.inner.metrics.register_emitter_interactions(
             &domain,
             &emitter,
+            Unit::SINGLE,
             None,
             nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic),
         ),
@@ -1384,6 +1389,7 @@ pub(super) fn emitter_context() -> EmitterConnectorContext {
         clock: test_domain_clock(&domain),
         domain,
         emitter,
+        unit: Unit::SINGLE,
         error_policies: ErrorPolicies::handled_by_log(),
         udfs: None,
     }

@@ -176,6 +176,7 @@ const MYSQL_BOUNDS: DeclaredBounds = DeclaredBounds {
 impl EmitterDeclaration for MySqlTableEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         events: crate::DeclaredEvents::NONE,
+        instancing: crate::EmitterInstancingCapability::Instances,
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::MySql),
         body: EmitterBodyForm::Values,

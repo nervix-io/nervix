@@ -202,8 +202,7 @@ impl RowExtremes {
         let left_row = rows.retained_row(left);
         let right_row = rows.retained_row(right);
         match order {
-            ExtremeOrder::Arrival => (left_row.timestamp, left_row.sequence)
-                .cmp(&(right_row.timestamp, right_row.sequence)),
+            ExtremeOrder::Arrival => left_row.arrival().cmp(&right_row.arrival()),
             ExtremeOrder::Value => {
                 let left_column = left_row.arguments.demand(demand).first();
                 let right_column = right_row.arguments.demand(demand).first();

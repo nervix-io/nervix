@@ -429,6 +429,12 @@ types, null handling, numerical behavior, errors, and sensitivity, and
 [Approximate Sketches](filter-map-functions.md#approximate-sketches) owns the accuracy, memory, and
 expiry of the sketch aggregates.
 
+`COLLECT_VEC(input.value)` emits the retained argument values as one required vector, with the
+same ordering as `FIRST` and `LAST`. Its argument must be required; use `coalesce` for an optional
+field. A collecting route needs a message `WIDTH` or `MAX STATE SIZE`. Collection shares the
+retained argument column with `FIRST` and `LAST`, including through snapshot restore, and its
+values and structure remain visible through the existing state inspection commands.
+
 `MAX STATE SIZE <bytes>` caps the live state of each concrete branch. It charges retained Arrow
 input and argument allocations, row handles, branch keys, and the reserved capacity of every
 sketch in every active pane. A row that would exceed the cap, or a row whose aggregate arguments

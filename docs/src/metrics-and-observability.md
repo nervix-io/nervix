@@ -599,9 +599,11 @@ prove subscriber processing. An unanswered or failed publish does not count this
 
 Emitter destination observations describe the host's interaction with a connector, separately
 from delivered graph traffic. Both interaction families carry `domain`, `emitter`,
-`physical_node_id`, `connector` and `entity`. Connector names use the vocabulary's display form,
-such as `REDIS`; entities use their declared name, such as `PUBSUB`. `operation` is `publish` or
-`commit`. Each starting emitter registers every operation/outcome child and histogram at zero,
+`physical_node_id`, `instance`, `connector` and `entity`. `instance` is the index of an emitter
+[instance](emitters.md#emitter-instances), or `-` for an emitter that runs one instance, so every
+instance of one emitter on one node keeps its own children. Connector names use the vocabulary's
+display form, such as `REDIS`; entities use their declared name, such as `PUBSUB`. `operation` is
+`publish` or `commit`. Each starting emitter registers every operation/outcome child and histogram at zero,
 even if that connector has no separate commit operation.
 
 `nervix_emitter_publish_attempts_total` records one outcome per nonempty host publish attempt or
@@ -639,13 +641,13 @@ an attempt has no domain timestamp. Each duration line includes its full selecto
 
 ```text
 destination:
-  nervix_emitter_publish_attempts_total{domain="prod",emitter="notifications_out",physical_node_id="node-1",connector="REDIS",entity="PUBSUB",operation="publish",outcome="succeeded"} total=2 wall_rate_per_sec=0.5 domain_rate_per_sec=- wall_rate_ema_1m_per_sec=0.4 wall_rate_ema_15m_per_sec=0.1 domain_rate_ema_1m_per_sec=- domain_rate_ema_15m_per_sec=-
-  nervix_emitter_publish_duration_seconds{domain="prod",emitter="notifications_out",physical_node_id="node-1",connector="REDIS",entity="PUBSUB",operation="publish"} count=2 sum_seconds=0.003
+  nervix_emitter_publish_attempts_total{domain="prod",emitter="notifications_out",physical_node_id="node-1",instance="-",connector="REDIS",entity="PUBSUB",operation="publish",outcome="succeeded"} total=2 wall_rate_per_sec=0.5 domain_rate_per_sec=- wall_rate_ema_1m_per_sec=0.4 wall_rate_ema_15m_per_sec=0.1 domain_rate_ema_1m_per_sec=- domain_rate_ema_15m_per_sec=-
+  nervix_emitter_publish_duration_seconds{domain="prod",emitter="notifications_out",physical_node_id="node-1",instance="-",connector="REDIS",entity="PUBSUB",operation="publish"} count=2 sum_seconds=0.003
 ```
 
 ### Emitter outcomes and lifecycle
 
-These host observations carry the same five identity labels as destination attempts. Every
+These host observations carry the same six identity labels as destination attempts. Every
 bounded child exists at zero when its emitter starts. Counters retain their process-local history
 across task restarts; the failure gauge describes the current task. `DESCRIBE EMITTER` includes
 every family in `destination:`, with its full selector and `total`, or `value` for the gauge.
@@ -684,7 +686,7 @@ unavailability from historical failures and recovery attempts.
 The [Emitter Batching](./emitter-batching.md#inspection-and-tuning) architecture chapter connects
 these observations to packing boundaries, retry ownership and scoped performance measurements.
 
-Payload observations use the same five identity labels as destination attempts. They have no
+Payload observations use the same six identity labels as destination attempts. They have no
 branch-key, record, request or error-text label. Every child exists at zero when its emitter starts.
 `DESCRIBE EMITTER` includes the same totals in its owner-routed `destination:` section.
 

@@ -800,7 +800,14 @@ impl RemoteDispatcher {
             };
             let (batch_ipc, decoded_bytes) = match encoded_body.clone() {
                 Some(bytes) => bytes,
-                None => match batch.batch.encode_arrow_ipc(self.executor()).await {
+                None => match batch
+                    .batch
+                    .encode_arrow_ipc(
+                        self.executor(),
+                        nervix_execution::QueueAdmission::RefuseWhenFull,
+                    )
+                    .await
+                {
                     Ok(bytes) => {
                         let bytes = (bytes, batch_payload_bytes(batch.batch.batch()));
                         encoded_body = Some(bytes.clone());
@@ -963,7 +970,7 @@ pub(super) fn push_remote_runtime_consumer(
     push_remote_scoped_runtime_consumer(consumers, node_id, relay, mode, None);
 }
 
-fn push_remote_scoped_runtime_consumer(
+pub(super) fn push_remote_scoped_runtime_consumer(
     consumers: &mut Vec<RemoteRuntimeConsumer>,
     node_id: &ClusterNodeName,
     relay: &RelayName,
@@ -1749,29 +1756,7 @@ impl Runtime {
                 }
             }
         }
-        for emitter in revision.emitters.emitters() {
-            let node = revision
-                .nodes
-                .get(&NodeRef::new(
-                    ModelKind::Emitter,
-                    ModelName::from(&emitter.name),
-                ))
-                .assured("the emitter plans were decided from this same schedule");
-            let Some(target_node) = node.execution_node() else {
-                continue;
-            };
-            for input in &emitter.inputs {
-                if !owned_relays.contains(&input.relay) || node.executes_on(local_node_id) {
-                    continue;
-                }
-                push_remote_runtime_consumer(
-                    consumers.entry(input.relay.clone()).or_default(),
-                    target_node,
-                    &input.relay,
-                    emitter.mode,
-                );
-            }
-        }
+        Self::push_emitter_remote_consumers(revision, local_node_id, &owned_relays, &mut consumers);
         for plan in revision.entrypoints.reingestors() {
             let identity = NodeRef::new(ModelKind::Reingestor, ModelName::from(&plan.name));
             let node = revision

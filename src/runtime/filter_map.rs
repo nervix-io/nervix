@@ -2364,6 +2364,7 @@ mod tests {
             ("normalized", ParseAsType::String),
         ]);
         let emitter = CreateEmitter {
+            instances: nervix_models::EmitterInstances::ONE,
             name: named("kafka_notifications"),
             from: ProcessorInputs::single(named("notifications")),
             body: nervix_models::EmitterBody::Codec {

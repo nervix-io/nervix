@@ -14,11 +14,11 @@
 
 use ahash::HashSet;
 use arrow_schema::DataType;
-use error_stack::Report;
-use nervix_models::{CreateSchema, ProcessorOutput};
+use error_stack::{Report, ResultExt as _};
+use nervix_models::{CreateSchema, CreateWindowProcessor, ProcessorOutput, WindowStateLimit};
 use nervix_vm::{
     CompileOptions,
-    program::{FieldRef, Program, SpannedNode},
+    program::{FieldRef, Program, SpannedNode, WindowAggregateFunction},
     window::{
         CompiledWindowRoute, WindowAggregateExpr, WindowAggregateProgram, WindowRouteSchemas,
     },
@@ -44,6 +44,7 @@ pub(in crate::registry) fn validate_window_route_types(
     context: ModelValidationContext<'_, '_>,
     output: &ProcessorOutput,
     aggregate: &WindowAggregateProgram,
+    processor: &CreateWindowProcessor,
     output_schema: &CreateSchema,
     input_schema: &CreateSchema,
     branch_schema: Option<&CreateSchema>,
@@ -60,6 +61,19 @@ pub(in crate::registry) fn validate_window_route_types(
         domain, identifier, ..
     } = context;
     for (demand_index, demand) in compiled.demands.iter().enumerate() {
+        if demand
+            .functions
+            .contains(&WindowAggregateFunction::CollectVec)
+            && processor.width.messages.is_none()
+            && let WindowStateLimit::Unbounded = processor.state_limit
+        {
+            return Err(Report::new(RegistryError::WindowCollectionMissingBound {
+                domain: domain.clone(),
+                processor: identifier.clone(),
+                route: output.relay.clone(),
+                function: WindowAggregateFunction::CollectVec,
+            }));
+        }
         for (argument_index, argument) in demand.arguments.iter().enumerate() {
             if contains_bytes(&argument.data_type) {
                 return Err(Report::new(RegistryError::WindowArgumentContainsBytes {
@@ -125,12 +139,10 @@ pub(in crate::registry) fn compile_window_route(
         },
         &udf_compile_options(models, CompileOptions::default()),
     )
-    .map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!("window output '{}' compile failed: {error:#}", output.relay),
-        })
+    .change_context(RegistryError::WindowRouteCompile {
+        domain: domain.clone(),
+        processor: identifier.clone(),
+        route: output.relay.clone(),
     })
 }
 

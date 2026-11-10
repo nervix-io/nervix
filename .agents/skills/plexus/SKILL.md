@@ -187,7 +187,10 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 - Isolation: unbranched or a concrete branch key, branch TTL, optional instance limit, and the
   branch's partition count when one relay owner per branch would funnel too much traffic (see
   [Relay Partitions](https://docs.nervix.io/relay.html#relay-partitions)); the count changes only
-  while the domain is stopped.
+  while the domain is stopped. When one emitter would funnel a partitioned branch back into one
+  node, decide its `INSTANCES` (a count or `PER PARTITION`); read
+  [Emitters → Emitter instances](../../../docs/src/emitters.md#emitter-instances) for the per-key
+  ordering it keeps, the entities that run one instance, and placement.
 - Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference,
   WASM fuel and linear-memory budgets, correlation, materialized state, lookup, generation, or
   repartitioning.
@@ -398,8 +401,8 @@ and quiesce semantics in `Control Plane`. Put every interdependent `CREATE`, sup
 deduplicator, reorderer, emitter, ingestor, reingestor, generator, and placement changes;
 Nervix classifies the complete model diff and no user-facing pause command exists. Capacity and
 expression-only junction changes and emitter flush changes are dynamic; relay schema or branching
-changes pause the domain; structural junction, emitter/client/codec/collect/publishing-mode or
-attachment changes, ingestor,
+changes pause the domain; structural junction, emitter/client/codec/collect/publishing-mode,
+instance or attachment changes, ingestor,
 emitter source-predicate, and relay materialized-state changes gate and drain only affected
 entities. Changing emitter `FROM` membership pauses the domain because it changes topology.
 Deduplicator key and reorderer ordering changes also use entity pause; their `MAX TIME` changes are
@@ -553,7 +556,9 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   window route `SET`, `input` only inside their arguments, and `COUNT`, `SUM`, `FIRST`, `LAST`,
   `MIN`, and `MAX` are aggregates there, never list functions. Compute window output from aggregates
   and constants, and prefer the dedicated aggregates (`AVG`, `COUNT_IF`, `ARG_MIN`, `ARG_MAX`, the
-  `*_POP` and `*_SAMP` statistics, `CORR`) over hand-built formulas. For `APPROX_COUNT_DISTINCT`,
+  `*_POP` and `*_SAMP` statistics, `CORR`) over hand-built formulas. Before using `COLLECT_VEC`,
+  check its required argument and bounded-retention rules in that reference; use the documented
+  list functions to consume its result. For `APPROX_COUNT_DISTINCT`,
   `APPROX_QUANTILE`, and `APPROX_TOP_K`, read `Approximate Sketches`: the window needs
   `MAX STATE SIZE` after duration `WIDTH` and `STEP`, a branched window a branch with
   `MAX INSTANCES <n> EVICT LRU`, and the precision or capacity sets both accuracy and memory.

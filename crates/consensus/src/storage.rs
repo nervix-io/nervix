@@ -95,12 +95,14 @@ const KEY_INSTALLING: &[u8] = b"installing";
 const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
-const KEYSPACE_LOGS: &str = "raft_inferencer_description_epoch_engine_host_infrastructure_logs";
-const KEYSPACE_META: &str = "raft_inferencer_description_epoch_engine_host_infrastructure_meta";
+const KEYSPACE_LOGS: &str =
+    "raft_inferencer_description_epoch_engine_host_infrastructure_instances_logs";
+const KEYSPACE_META: &str =
+    "raft_inferencer_description_epoch_engine_host_infrastructure_instances_meta";
 const KEYSPACE_STATE_MACHINE: &str =
-    "raft_inferencer_description_epoch_engine_host_infrastructure_state";
+    "raft_inferencer_description_epoch_engine_host_infrastructure_instances_state";
 const KEYSPACE_SNAPSHOT: &str =
-    "raft_inferencer_description_epoch_engine_host_infrastructure_snapshots";
+    "raft_inferencer_description_epoch_engine_host_infrastructure_instances_snapshots";
 const KEY_CLUSTER_IDENTITY: &[u8] = b"K";
 const KEY_LICENSING: &[u8] = b"L";
 /// Working memory reserved for ordinary metadata and log storage relative to its operation unit.
@@ -234,7 +236,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    ClusterState = 27,
+    ClusterState = 28,
 }
 
 #[derive(Debug)]

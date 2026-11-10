@@ -82,12 +82,13 @@ Each partition owner holds:
 A producer resolves its key's partition once, when it binds a concrete branch, and sends that
 branch's batches to the owner of that partition. An owner accepts a batch from another node only for
 a partition it owns, and only when the key it decodes lands in that partition. Each partition owner
-fans its batches out to every runtime consumer and every session subscription of the relay, so a
-consumer and a subscription receive every partition. One key's records pass through one partition
+fans its batches out to the relay's runtime consumers of that partition and to every session
+subscription of the relay, so a whole-relay consumer and a subscription receive every partition. One key's records pass through one partition
 owner, which keeps their order; records of different keys in different partitions are not ordered
 with each other. Processors and generators of the branch run one unit per partition, each reading
-its own partition (see [Processors](processors.md#partitioned-processing)); emitters stay single
-units that read every partition of their input relays.
+its own partition (see [Processors](processors.md#partitioned-processing)). An emitter reads every
+partition of its input relays unless it declares [instances](emitters.md#emitter-instances): then
+each partition owner delivers that partition only to the instance that serves it.
 
 `SHOW CLUSTER STATUS` prints one schedule line per partition of a partitioned relay, naming the
 partition after the relay, such as

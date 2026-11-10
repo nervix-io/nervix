@@ -244,8 +244,10 @@ mod emitter_lifecycle;
 mod emitter_ordering_group;
 mod emitter_publishing;
 mod emitter_record_writes;
+mod emitter_remote_consumers;
 mod emitter_retry;
 mod emitter_supervision;
+mod emitter_swap;
 mod emitter_task;
 mod emitter_task_programs;
 mod emitter_values;
@@ -797,6 +799,9 @@ mod window_accumulator;
 #[cfg(feature = "benchmarks")]
 #[doc(hidden)]
 pub use window_accumulator::benchmark as window_sketch_benchmark;
+#[cfg(feature = "benchmarks")]
+#[doc(hidden)]
+pub use window_accumulator::collection_benchmark as window_collection_benchmark;
 mod published_processor_state_inspection;
 mod window_archive;
 #[cfg(test)]
