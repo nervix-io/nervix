@@ -191,7 +191,7 @@ fn current_archives_refuse_duplicate_and_unordered_keys_in_maps_and_key_sets() {
         .windows(b"team/a".len())
         .position(|bytes| bytes == b"team/a")
         .assured("the archive contains the first current key's literal bytes");
-    for replacement in [b'b', b'c'] {
+    for replacement in *b"bc" {
         let mut malformed = map_archive.clone();
         malformed[map_position + b"team/".len()] = replacement;
         assert!(rkyv::from_bytes::<EntityLabels, rkyv::rancor::Error>(&malformed).is_err());
@@ -241,7 +241,7 @@ fn bolero_label_mutations_match_an_independent_map_after_every_operation() {
     bolero::check!().with_type::<[u8; 128]>().for_each(|input| {
         let mut actual = EntityLabels::default();
         let mut expected = BTreeMap::<String, String>::new();
-        for operation in input.chunks_exact(4) {
+        for operation in input.as_chunks::<4>().0 {
             let key = format!("key-{}", operation[0] % 4);
             let mutation = if operation[1] % 2 == 0 {
                 let value = format!("Δ {} / {}", operation[2], operation[3]);

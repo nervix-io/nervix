@@ -14,7 +14,7 @@
 use nervix_client_wire::CommandRequest;
 use nervix_models::{
     AckMode, CreateDeduplicator, CreateEmitter, CreateJunction, CreateRelay, CreateSchema,
-    DomainName, Model, ModelName, Statement, TransactionLifecycle,
+    DomainName, Model, ModelName, Statement, TransactionLifecycle, TransactionPosition,
 };
 
 use super::super::{
@@ -55,12 +55,21 @@ async fn entity_label_commands_apply_and_inspect_the_candidate_without_queueing_
         assert_eq!(committed.labels().get("owner"), Some("Platform"));
         assert_eq!(committed.labels().get("empty"), Some(""));
         assert_eq!(committed.labels().get("region"), None);
-        for query in [
-            "BEGIN;",
-            "SET LABELS ON SCHEMA labelled { 'owner' = 'Staged' };",
+        for (query, position) in [
+            ("BEGIN;", None),
+            (
+                "SET LABELS ON SCHEMA labelled { 'owner' = 'Staged' };",
+                Some(0),
+            ),
         ] {
             let result = service
-                .test_command(test_command_request(query, "default"), &mut subscriptions)
+                .test_command(
+                    CommandRequest {
+                        expected_transaction_position: position.map(TransactionPosition::new),
+                        ..test_command_request(query, "default")
+                    },
+                    &mut subscriptions,
+                )
                 .await;
             assert!(result.succeeded(), "{query}: {}", result.message);
         }
@@ -81,7 +90,10 @@ async fn entity_label_commands_apply_and_inspect_the_candidate_without_queueing_
         assert_eq!(staged.labels().get("owner"), Some("Staged"));
         let reverted = service
             .test_command(
-                test_command_request("REVERT;", "default"),
+                CommandRequest {
+                    expected_transaction_position: Some(TransactionPosition::new(1)),
+                    ..test_command_request("REVERT;", "default")
+                },
                 &mut subscriptions,
             )
             .await;

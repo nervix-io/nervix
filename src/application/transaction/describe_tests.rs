@@ -212,9 +212,9 @@ async fn describe_transaction_is_refused_inside_a_multi_statement_request() {
     .await;
     assert!(!appended_with_inspection.succeeded());
     assert!(
-        appended_with_inspection
-            .message
-            .contains("DESCRIBE TRANSACTION and SHOW TRANSACTIONS must be executed separately"),
+        appended_with_inspection.message.contains(
+            "DESCRIBE TRANSACTION, SHOW TRANSACTIONS and SHOW LABELS must be executed separately"
+        ),
         "{}",
         appended_with_inspection.message
     );
