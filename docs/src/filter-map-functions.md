@@ -1918,6 +1918,7 @@ with `... cannot retain BYTES in aggregate demand <n> argument <m>`.
 | `MIN(value)`, `MAX(value)` | numeric, `BOOL`, `STRING`, or `DATETIME` | the argument's type | no row has a value |
 | `FIRST(value)`, `LAST(value)` | any | the argument's type | no row has a value |
 | `COLLECT_VEC(value)` | any required value | required `VEC<value type>` | never; a window emits only while it retains a row |
+| `COLLECT_ARRAY(value)` | any required value; count-only `WIDTH n MESSAGES` | required `ARRAY<value type, n>` | never; each emission retains exactly `n` rows |
 | `ARG_MIN(value, key)`, `ARG_MAX(value, key)` | any value; a numeric, `BOOL`, `STRING`, or `DATETIME` key | the value's type | no row has both a value and a key |
 | `VAR_POP(value)`, `STDDEV_POP(value)` | numeric | `F64` | no row has a value |
 | `VAR_SAMP(value)`, `STDDEV_SAMP(value)` | numeric | `F64` | fewer than two rows have a value |
@@ -1937,6 +1938,16 @@ when the processor is applied; use `coalesce` to choose its explicit value. A co
 requires a message `WIDTH` or `MAX STATE SIZE`; a duration alone does not bound its retained values.
 List functions such as `nth`, `mean`, `slice`, and `dot` can consume the result in the same route.
 
+`COLLECT_ARRAY` uses the same required argument, order, sensitivity and retained sequence. It is
+accepted only under `WIDTH n MESSAGES` with no duration bound. Its length comes from that width,
+independently of the assigned field: a field of another length is an exact-type error. A duration
+or combined bound is refused when the processor is applied; use `COLLECT_VEC` for those windows.
+With `WIDTH 64 MESSAGES`, collecting `[input.cpu, input.mem]` yields `ARRAY<F32, 64, 2>` when both
+inputs are required `F32` values. Collecting a vector adds a fixed outer level and retains the
+vector inside it. The width and every necessarily present nested fixed dimension must fit Arrow's
+signed 32-bit field lengths. Actual output bytes still pass the node's decoded and encoded relay
+limits; a byte or admission refusal follows the existing window emission-failure policy.
+
 The [approximate sketches](#approximate-sketches) describe the last three table entries.
 
 **Nulls.** A row contributes to an aggregate only when every argument that aggregate reads is
@@ -1944,14 +1955,14 @@ present, so a null argument contributes nothing. `COUNT` is the exception: it co
 row whatever its argument holds, so `SUM(input.amount) / COUNT(input.amount)` is not the mean of an
 optional field; use `AVG`. A window emits only while it retains at least one row, so an aggregate
 whose arguments are all required always has a value, except the sample statistics and `CORR`, which
-can be undefined in any window. `COUNT`, `COUNT_IF`, `COLLECT_VEC`, `APPROX_COUNT_DISTINCT`, and `APPROX_TOP_K` are
+can be undefined in any window. `COUNT`, `COUNT_IF`, `COLLECT_VEC`, `COLLECT_ARRAY`, `APPROX_COUNT_DISTINCT`, and `APPROX_TOP_K` are
 never optional; `VAR_SAMP`, `STDDEV_SAMP`, `COVAR_SAMP`, and `CORR` are always optional; every other
 aggregate is optional exactly when an argument it reads is. Assign an aggregate that can be null to
 an `OPTIONAL` field or give it a value with `COALESCE`; assigning it to a required field is rejected
 when the processor is applied.
 
 **Order and ties.** `MIN`, `MAX`, `ARG_MIN`, and `ARG_MAX` return the earliest admitted row among
-rows with equal keys. `FIRST`, `LAST`, and `COLLECT_VEC` order rows by their ingestion low watermark,
+rows with equal keys. `FIRST`, `LAST`, `COLLECT_VEC`, and `COLLECT_ARRAY` order rows by their ingestion low watermark,
 then by admission. Element zero of a collection equals `FIRST` and its last element equals `LAST`
 over the same argument. `BOOL` orders `false` before `true`, `STRING` orders by bytes, and floating-point keys
 order NaN above every other value and treat both zeros as equal.
@@ -1996,7 +2007,7 @@ field that is not sensitive.
 arguments share it: `AVG`, the variances, and the standard deviations of one argument share a
 `moments` structure; the covariances and `CORR` of one argument pair, in the same order, share
 `co_moments`; `COUNT_IF`, `BOOL_AND`, and `BOOL_OR` share a `truth_counter`; `ARG_MIN` and `ARG_MAX`
-share `arg_extremes`; `MIN` and `MAX` share `extremes`; `FIRST`, `LAST`, and `COLLECT_VEC` share a `sequence`;
+share `arg_extremes`; `MIN` and `MAX` share `extremes`; `FIRST`, `LAST`, `COLLECT_VEC`, and `COLLECT_ARRAY` share a `sequence`;
 `APPROX_QUANTILE` calls with one argument and capacity share a `quantile_sketch`; and
 `PERCENTILE_LINEAR_HISTOGRAM` calls with one argument, bucket count, bounds, and delay share a
 `linear_histogram`. `DESCRIBE WINDOW PROCESSOR` lists every structure with the functions it serves
@@ -2222,6 +2233,7 @@ errors. `T` is the argument's type, and a list is an `ARRAY` or a `VEC`.
 | `BOOL_AND`, `BOOL_OR` | `BOOL` | [Window Aggregates](#window-aggregates) |
 | `SUM`, `MIN`, `MAX`, `FIRST`, `LAST` | the argument's type | [Window Aggregates](#window-aggregates) |
 | `COLLECT_VEC` | required `VEC` of the argument's exact type | [Window Aggregates](#window-aggregates) |
+| `COLLECT_ARRAY` | required `ARRAY` of the argument's exact type and the count-only window width | [Window Aggregates](#window-aggregates) |
 | `ARG_MIN`, `ARG_MAX` | the value's type | [Window Aggregates](#window-aggregates) |
 | `AVG`, `VAR_POP`, `VAR_SAMP`, `STDDEV_POP`, `STDDEV_SAMP`, `COVAR_POP`, `COVAR_SAMP`, `CORR` | `F64` | [Window Aggregates](#window-aggregates) |
 | `PERCENTILE_LINEAR_HISTOGRAM` | `F64` | [Linear Histogram Percentiles](#linear-histogram-percentiles) |
