@@ -553,6 +553,13 @@ test-licensing-free *args: build-deps build-plexus-format build-test-cli build-d
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input "$(pwd)/tests/features/licensing/*.feature" {{ quote(args) }}
 
+# Ephemeral expiry closes the licensing stop gate; a new activation lifts it.
+test-licensing-expiry *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/licensing/ephemeral_expiry{,}.feature") }} {{ quote(args) }}
+
 # Cluster identity, replication and restore checks use the native session client.
 test-cluster-identity *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash

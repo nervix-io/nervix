@@ -1125,6 +1125,7 @@ fn create_domain_effect(arbitrary: &mut Arbitrary<'_>) -> CommandExecutionEffect
             start_version: 0,
             last_start: DomainStartPoint::Resume,
             clock: None,
+            stop_cause: None,
             ..found
         }
     };
@@ -1589,6 +1590,7 @@ fn restore_step_effect(
             let state = DomainState {
                 status: DomainStatus::Stopped,
                 clock: None,
+                stop_cause: None,
                 ..archived
             };
             let resources = arbitrary.records(restored_resource);
@@ -2090,6 +2092,7 @@ fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> Consens
         CommandVariant::StopDomain => ConsensusCommand::StopDomain {
             domain_id: arbitrary.rule_name(),
             mutation: optional_lease(arbitrary),
+            cause: arbitrary.stop_cause(),
         },
         CommandVariant::PauseDomain => ConsensusCommand::PauseDomain {
             domain_id: arbitrary.rule_name(),

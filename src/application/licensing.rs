@@ -9,6 +9,7 @@ mod client;
 mod clock;
 mod coordinator;
 mod request_turn;
+pub(in crate::application) mod stop_gate;
 pub(in crate::application) use coordinator::run;
 pub(in crate::application) use request_turn::LicensingRequests;
 pub mod test_support;
@@ -57,10 +58,11 @@ impl SessionServiceImpl {
             .licensing_snapshot()
             .initialized
             .ok_or_else(|| Report::new(LicensingOperationError::Uninitialized))?;
-        if matches!(
-            state.record.mode,
-            nervix_consensus::LicensingMode::Activated(_)
-        ) {
+        // An ephemeral activation whose stop gate closed activates again (specification §7.6);
+        // every other existing activation refuses a new one.
+        if let nervix_consensus::LicensingMode::Activated(_) = state.record.mode
+            && state.record.processing_stop().is_none()
+        {
             return Err(
                 Report::new(nervix_consensus::LicenseDecisionError::AlreadyActivated)
                     .change_context(LicensingOperationError::Rejected),

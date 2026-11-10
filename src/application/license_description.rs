@@ -236,8 +236,8 @@ impl SessionServiceImpl {
                     nervix_consensus::LicensingMode::Activated(_) => "activated",
                 };
                 let processing = match policy.processing_stop() {
-                    None => "running",
-                    Some(reason) => match reason {},
+                    None => "running".to_owned(),
+                    Some(reason) => format!("stopped by licensing: {reason}"),
                 };
                 let conditions_not_understood = match &initialized.verification {
                     Some(Ok(verified)) => u64::try_from(verified.conditions_not_understood)

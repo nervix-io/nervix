@@ -366,6 +366,7 @@ impl Harness {
             start_version: 0,
             last_start: DomainStartPoint::Resume,
             clock: None,
+            stop_cause: None,
         }
     }
     /// Copy one generation's sections into this store the way an arriving transfer does.

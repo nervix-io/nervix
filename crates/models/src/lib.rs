@@ -412,18 +412,18 @@ pub use statement::{
     DescribeJunction, DescribeLicense, DescribeLookup, DescribePlacement, DescribeReingestor,
     DescribeRelay, DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf,
     DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig, DomainPace, DomainStartPoint,
-    DomainState, DomainStatus, DomainTick, DrainNode, DropModel, DropNode, EndpointKind,
-    EndpointType, ErrorPolicies, GeneralErrorPolicy, IngestTimestampSource, InspectionFormat,
-    LookupQuery, MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, PartitionSeed,
-    RefreshLicense, RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
-    RelocationPreferenceStrategy, RelocationSelection, RelocationUnitSelection, ResolvedBranching,
-    ResolvedCodecWireFormat, RetryPolicy, ShowClusterStatus, ShowCreate, ShowEmitters,
-    ShowIngestors, ShowPlacements, ShowProcessorState, ShowRelayMaterializedState,
-    ShowTransactions, ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
-    SignalingWaitStep, SignalingWireFormat, StartDomain, StateInspectedProcessor,
-    StateInspectionPageRequest, Statement, StopDomain, SubscriptionBinding,
-    SubscriptionDeliveryBehavior, SubscriptionLiteral, UncordonNode, UniquelyKindedModel,
-    UploadResource, VhostTlsResource, WireSchemaLookup, default_relay_buffer,
+    DomainState, DomainStatus, DomainStopCause, DomainTick, DrainNode, DropModel, DropNode,
+    EndpointKind, EndpointType, ErrorPolicies, GeneralErrorPolicy, IngestTimestampSource,
+    InspectionFormat, LookupQuery, MaterializedRelayState, MessageErrorPolicy, Model, ModelKind,
+    PartitionSeed, RefreshLicense, RelayBranching, Relocation, RelocationMember,
+    RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
+    RelocationUnitSelection, ResolvedBranching, ResolvedCodecWireFormat, RetryPolicy,
+    ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowPlacements, ShowProcessorState,
+    ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SignalingProtobufConfig,
+    SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat, StartDomain,
+    StateInspectedProcessor, StateInspectionPageRequest, Statement, StopDomain,
+    SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, UncordonNode,
+    UniquelyKindedModel, UploadResource, VhostTlsResource, WireSchemaLookup, default_relay_buffer,
 };
 pub use timestamp::{AtomicTimestamp, Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};
@@ -442,7 +442,7 @@ pub use window_model_digest::WindowModelDigest;
 mod licensing;
 pub use licensing::{
     LicensingConnectionState, LicensingConnectivity, LicensingConnectivityPublication,
-    LicensingTransportFailure,
+    LicensingStopReason, LicensingTransportFailure,
 };
 
 /// The existing host's single relay admission budget. The runtime settings owner adopts this

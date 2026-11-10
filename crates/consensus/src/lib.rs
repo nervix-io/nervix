@@ -422,6 +422,8 @@ pub struct TransactionControlSnapshot {
     pub resources: ResourceVersionStatus,
     /// The restore whose incomplete state generation prevents this domain from starting.
     pub restore_installation: Option<nervix_models::CommandExecutionReference>,
+    /// The closed licensing stop gate, which prevents every domain from starting.
+    pub licensing_stop: Option<nervix_models::LicensingStopReason>,
 }
 
 #[derive(
@@ -518,6 +520,7 @@ pub enum ConsensusCommand {
     StopDomain {
         domain_id: DomainName,
         mutation: Option<Box<DomainMutationLease>>,
+        cause: nervix_models::DomainStopCause,
     },
     PauseDomain {
         domain_id: DomainName,
@@ -693,6 +696,12 @@ pub enum ConsensusConflict {
     LicensingQuota {
         #[source]
         refusal: nervix_licensing_vocabulary::LicensingRefusal,
+    },
+    /// The closed licensing stop gate refuses every change that would make a domain run.
+    #[error("licensing stopped processing")]
+    LicensingStop {
+        #[source]
+        reason: nervix_models::LicensingStopReason,
     },
     #[error("the capability claim's node has not joined the committed membership")]
     CapabilityNodeNotAdmitted,
@@ -1690,6 +1699,7 @@ impl StateMachineData {
             return false;
         };
         domain.status = DomainStatus::Running;
+        domain.stop_cause = None;
         domain.start_version = domain
             .start_version
             .checked_add(1)
@@ -1706,10 +1716,18 @@ impl StateMachineData {
         true
     }
 
-    fn commit_domain_stop(&mut self, domain_id: &DomainName) -> bool {
+    fn commit_domain_stop(
+        &mut self,
+        domain_id: &DomainName,
+        cause: nervix_models::DomainStopCause,
+    ) -> bool {
         let Some(domain) = self.domains.get_mut(domain_id) else {
             return false;
         };
+        // A stop that finds the domain already stopped keeps the cause of the stop that ended it.
+        if domain.status != DomainStatus::Stopped {
+            domain.stop_cause = Some(cause);
+        }
         domain.status = DomainStatus::Stopped;
         domain.clock = None;
         let paced = domain.config.pace.is_paced();
@@ -2073,7 +2091,9 @@ impl ConsensusError {
             return report.to_string();
         };
         match error {
-            Self::Conflict(ConsensusConflict::LicensingQuota { .. }) => format!("{report:#}"),
+            Self::Conflict(
+                ConsensusConflict::LicensingQuota { .. } | ConsensusConflict::LicensingStop { .. },
+            ) => format!("{report:#}"),
             Self::Storage => match report.downcast_ref::<io::Error>() {
                 Some(source) => format!("consensus storage failed: {source}"),
                 None => error.to_string(),
@@ -3200,6 +3220,7 @@ impl Observer {
                 .domain_restore_installations
                 .get(domain)
                 .map(|installation| installation.execution().clone()),
+            licensing_stop: state.licensing_stop(),
         }
     }
     pub async fn current_revision(&self) -> u64 {
@@ -3694,11 +3715,19 @@ impl Proposer {
                     ConsensusConflict::LicensingQuota { refusal } => Some(*refusal),
                     _ => None,
                 };
-                match refusal {
-                    Some(refusal) => {
+                // The typed licensing cause stays beneath the fixed conflict outcome.
+                let stop = match &reason {
+                    ConsensusConflict::LicensingStop { reason } => Some(*reason),
+                    _ => None,
+                };
+                match (refusal, stop) {
+                    (Some(refusal), _) => {
                         Err(Report::new(refusal).change_context(ConsensusError::Conflict(reason)))
                     }
-                    None => Err(Report::new(ConsensusError::Conflict(reason))),
+                    (None, Some(stop)) => {
+                        Err(Report::new(stop).change_context(ConsensusError::Conflict(reason)))
+                    }
+                    (None, None) => Err(Report::new(ConsensusError::Conflict(reason))),
                 }
             }
             ConsensusResponse::Transaction(_) | ConsensusResponse::OrphanedPauseRecovery(_) => {
@@ -4026,12 +4055,14 @@ impl Proposer {
         &self,
         domain_id: DomainName,
         mutation: Option<&DomainMutationLease>,
+        cause: nervix_models::DomainStopCause,
     ) -> error_stack::Result<(), ConsensusError> {
         let response = self
             .inner
             .client_write(ConsensusCommand::StopDomain {
                 domain_id,
                 mutation: mutation.cloned().map(Box::new),
+                cause,
             })
             .await?;
         Self::applied_response(response.data)
@@ -6237,6 +6268,13 @@ fn apply_consensus_command_at(
             {
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
+            if domain.status != DomainStatus::Stopped
+                && let Some(reason) = state.licensing_stop()
+            {
+                return AppliedConsensusCommand::conflict(ConsensusConflict::LicensingStop {
+                    reason,
+                });
+            }
             if let Err(reason) = validate_domain_mutation(state, &domain.id, mutation.as_deref()) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
@@ -6260,6 +6298,11 @@ fn apply_consensus_command_at(
             if let Err(reason) = restore::validate_restored_domain_start(state, domain_id) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
+            if let Some(reason) = state.licensing_stop() {
+                return AppliedConsensusCommand::conflict(ConsensusConflict::LicensingStop {
+                    reason,
+                });
+            }
             if let Err(reason) = validate_domain_mutation(state, domain_id, mutation.as_deref()) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
@@ -6268,11 +6311,12 @@ fn apply_consensus_command_at(
         ConsensusCommand::StopDomain {
             domain_id,
             mutation,
+            cause,
         } => {
             if let Err(reason) = validate_domain_mutation(state, domain_id, mutation.as_deref()) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
-            changes.domains_changed = state.commit_domain_stop(domain_id);
+            changes.domains_changed = state.commit_domain_stop(domain_id, *cause);
         }
         ConsensusCommand::PauseDomain {
             domain_id,
@@ -6294,6 +6338,16 @@ fn apply_consensus_command_at(
         } => {
             if let Err(reason) = restore::validate_restored_domain_start(state, domain_id) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
+            }
+            if state
+                .domains
+                .get(domain_id)
+                .is_some_and(|domain| domain.status == DomainStatus::Paused)
+                && let Some(reason) = state.licensing_stop()
+            {
+                return AppliedConsensusCommand::conflict(ConsensusConflict::LicensingStop {
+                    reason,
+                });
             }
             if let Err(reason) = validate_domain_mutation(state, domain_id, mutation.as_deref()) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
@@ -7441,6 +7495,14 @@ fn validate_transaction_step_effect(
             reason: reason.to_string(),
         }));
     }
+    if matches!(effect, TransactionStepEffect::StartDomain { .. })
+        && let Some(reason) = state.licensing_stop()
+    {
+        return Err(Report::new(TransactionMutationError::LicensingStop {
+            id: transaction.id.clone(),
+            reason,
+        }));
+    }
     match validate_domain_planning_inputs(state, effect.inputs()) {
         Err(reason) => Err(Report::new(TransactionMutationError::StepConflict {
             id: transaction.id.clone(),
@@ -7521,7 +7583,8 @@ fn apply_transaction_step_effect(
                 state.commit_domain_start(inputs.domain(), start, clock, authority);
         }
         TransactionStepEffect::StopDomain { inputs } => {
-            changes.domains_changed = state.commit_domain_stop(inputs.domain());
+            changes.domains_changed =
+                state.commit_domain_stop(inputs.domain(), nervix_models::DomainStopCause::Operator);
         }
         TransactionStepEffect::CreateResourceCatalog { identifier, .. } => {
             state.resources.ensure_catalog(domain, identifier);
@@ -8328,6 +8391,7 @@ mod tests {
             start_version: 7,
             last_start: DomainStartPoint::Resume,
             clock: None,
+            stop_cause: None,
         }
     }
 
@@ -9123,6 +9187,7 @@ mod tests {
             &ConsensusCommand::StopDomain {
                 domain_id: domain_id.clone(),
                 mutation: None,
+                cause: nervix_models::DomainStopCause::Operator,
             },
         );
         let stopped = state
@@ -9196,6 +9261,7 @@ mod tests {
             &ConsensusCommand::StopDomain {
                 domain_id: domain_id.clone(),
                 mutation: None,
+                cause: nervix_models::DomainStopCause::Operator,
             },
         );
         let mut changes = StateMachineChanges::default();

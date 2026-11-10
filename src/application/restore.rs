@@ -171,6 +171,7 @@ impl SessionServiceImpl {
         request: &RestoreRequest,
         verified: &VerifiedArchive,
     ) -> Result<RestoreReport, Report<RestoreRefusal>> {
+        self.refuse_resume_under_licensing_stop(&request.restore)?;
         let plan = self
             .plan_restore(&request.restore, verified, &BTreeSet::new())
             .await?;
@@ -351,12 +352,28 @@ impl SessionServiceImpl {
         restore: &Restore,
         verified: &VerifiedArchive,
     ) -> Result<RestorePlan, Report<RestoreRefusal>> {
+        self.refuse_resume_under_licensing_stop(restore)?;
         let plan = self
             .plan_restore(restore, verified, &BTreeSet::new())
             .await?;
         self.plan_model_runs(&plan, user, verified, restore.state)
             .await?;
         Ok(plan)
+    }
+
+    /// A restore that would run its domains is refused before admission while the licensing stop
+    /// gate is closed. A restore already admitted is not: if the gate closes while it applies, its
+    /// last step leaves the domains stopped with the licensing cause.
+    fn refuse_resume_under_licensing_stop(
+        &self,
+        restore: &Restore,
+    ) -> Result<(), Report<RestoreRefusal>> {
+        if restore.lifecycle == RestoreLifecycle::Resume
+            && let Some(reason) = self.committed_licensing_stop()
+        {
+            return Err(Report::new(RestoreRefusal::LicensingStop { reason }));
+        }
+        Ok(())
     }
 
     /// Admits the restore, or joins its earlier admission, retains the archive this stream staged

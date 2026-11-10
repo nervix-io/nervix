@@ -1310,6 +1310,7 @@ mod tests {
                 start_version: 0,
                 last_start: nervix_models::DomainStartPoint::Resume,
                 clock: None,
+                stop_cause: None,
             },
         );
         runtime.sync_domains(&domains);

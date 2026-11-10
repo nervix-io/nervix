@@ -141,7 +141,9 @@ For activation, refresh, `DESCRIBE LICENSE`, effective policy, credential handli
 [Node Settings → Cluster Licensing](../../../docs/src/node-settings.md#cluster-licensing) and
 [Licensing Metrics](../../../docs/src/metrics-and-observability.md#licensing-metrics).
 Keep licensing commands cluster-scoped and obtain credentials and trust provisioning externally;
-Plexus supplies no service-address or trust-anchor override.
+Plexus supplies no service-address or trust-anchor override. The same section owns ephemeral
+expiry and the stop gate: an expired ephemeral cluster refuses `START` and new usage until a new
+`ACTIVATE LICENSE`, and the domains licensing stopped still need an explicit `START` afterwards.
 For source UUID inspection and restore behavior, read
 [Backup And Restore](../../../docs/src/backup-and-restore.md#what-a-restore-recreates).
 For authentication refusals and retry behavior, follow

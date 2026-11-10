@@ -88,6 +88,10 @@ pub(in crate::application) enum RestoreRefusal {
     },
     #[error("the restore cannot be applied to this cluster")]
     Plan,
+    #[error("RESUME cannot run the restored domains: licensing stopped processing: {reason}")]
+    LicensingStop {
+        reason: nervix_models::LicensingStopReason,
+    },
     #[error("the models of domain '{domain}' do not form a valid configuration")]
     ModelRun { domain: DomainName },
     #[error("materialized state of relay '{entity}' in domain '{domain}' could not be prepared")]

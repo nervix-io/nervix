@@ -383,6 +383,7 @@ pub(crate) fn apply_restore_step(
                 },
             )?;
             let lifecycle = applying_restore(state, reference)?.restore.lifecycle;
+            let licensing_stop = state.licensing_stop();
             let restored = state
                 .domains
                 .get_mut(domain)
@@ -405,8 +406,19 @@ pub(crate) fn apply_restore_step(
                             domain: domain.clone(),
                         }));
                     }
-                    restored.status = nervix_models::DomainStatus::Running;
-                    restored.clock = clock.clone();
+                    // A licensing stop gate that closed while the restore applied keeps every
+                    // domain from running: the installation completes and the domain stays
+                    // stopped with the licensing cause, as the leader's stop would leave it.
+                    match licensing_stop {
+                        Some(reason) => {
+                            restored.stop_cause =
+                                Some(nervix_models::DomainStopCause::Licensing(reason));
+                        }
+                        None => {
+                            restored.status = nervix_models::DomainStatus::Running;
+                            restored.clock = clock.clone();
+                        }
+                    }
                     changes.domains_changed = true;
                 }
             }
@@ -732,6 +744,7 @@ mod tests {
             start_version: 3,
             last_start: DomainStartPoint::Resume,
             clock: None,
+            stop_cause: None,
         }
     }
 

@@ -329,17 +329,22 @@ impl LicensingRecord {
         expected_revision: Option<u64>,
         environment: &LicensingEnvironment,
     ) -> error_stack::Result<Self, LicenseDecisionError> {
-        let previous = match &self.mode {
-            LicensingMode::Free => {
-                if expected_revision.is_some() {
-                    return Err(Report::new(LicenseDecisionError::NotActivated));
+        let previous = match (&self.mode, expected_revision) {
+            (LicensingMode::Free, None) => None,
+            (LicensingMode::Free, Some(_)) => {
+                return Err(Report::new(LicenseDecisionError::NotActivated));
+            }
+            // A new activation supersedes only an ephemeral one whose stop gate closed, which
+            // activates again or never runs (specification §7.6); it never re-commits that one.
+            (LicensingMode::Activated(activation), None) => {
+                if self.processing_stop().is_none()
+                    || activation.binding.activation_id == binding.activation_id
+                {
+                    return Err(Report::new(LicenseDecisionError::AlreadyActivated));
                 }
                 None
             }
-            LicensingMode::Activated(activation) => {
-                if expected_revision.is_none() {
-                    return Err(Report::new(LicenseDecisionError::AlreadyActivated));
-                }
+            (LicensingMode::Activated(activation), Some(_)) => {
                 if &activation.binding != binding {
                     return Err(Report::new(LicenseDecisionError::Binding));
                 }
@@ -352,9 +357,13 @@ impl LicensingRecord {
         if StoredTrustDocument::retained(&trust)? != documents {
             return Err(Report::new(LicenseDecisionError::Metadata));
         }
-        let committed = match self.verify(identity, environment) {
-            Some(Ok(verified)) => Some(verified),
-            Some(Err(_)) | None => None,
+        // Only a refresh of the committed activation is ordered against its committed decision.
+        let committed = match previous {
+            Some(_) => match self.verify(identity, environment) {
+                Some(Ok(verified)) => Some(verified),
+                Some(Err(_)) | None => None,
+            },
+            None => None,
         };
         let protocol_binding = binding.protocol_binding(identity);
         let verified = trust

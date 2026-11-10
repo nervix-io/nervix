@@ -193,6 +193,11 @@ pub(crate) enum TransactionPlanningError {
         domain: DomainName,
         execution: CommandExecutionReference,
     },
+    #[error("domain '{domain}' cannot start: licensing stopped processing: {reason}")]
+    LicensingStop {
+        domain: DomainName,
+        reason: nervix_models::LicensingStopReason,
+    },
     #[error("domain '{domain}' start generation overflowed")]
     DomainStartGenerationOverflow { domain: DomainName },
     #[error("resource '{resource}' already exists")]
@@ -285,6 +290,7 @@ impl TransactionPlanningError {
             | Self::DomainAlreadyRunning { .. }
             | Self::DomainAlreadyStopped { .. }
             | Self::RestoreInstallation { .. }
+            | Self::LicensingStop { .. }
             | Self::DomainStartGenerationOverflow { .. }
             | Self::ResourceAlreadyExists { .. }
             | Self::ResourceNotFound { .. }

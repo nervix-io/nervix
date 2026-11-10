@@ -66,17 +66,55 @@ impl SignedFixture {
         .assured("actual root signatures verify")
     }
     pub(crate) fn binding(&self, received: &ReceivedLicenseDecision) -> ActivationBinding {
+        self.binding_of(nervix_models::ActivationKind::Persistent, received)
+    }
+    pub(crate) fn binding_of(
+        &self,
+        kind: nervix_models::ActivationKind,
+        received: &ReceivedLicenseDecision,
+    ) -> ActivationBinding {
         LicensingRecord::free(self.identity.public().created_at)
             .prepare_activation(
                 &self.identity.public(),
-                nervix_models::ActivationKind::Persistent,
+                kind,
                 "TESTABCD".to_owned(),
                 received,
                 &self.environment,
             )
             .assured("fixture decision matches independent identity")
     }
-    fn state(&self) -> StateMachineData {
+    /// The fixture decision as an ephemeral activation `activation` created `created` seconds
+    /// after the fixture's creation instant, ending `lifetime` seconds after its creation and
+    /// issued one second after it.
+    pub(crate) fn ephemeral_decision(
+        &self,
+        activation: u128,
+        created: u64,
+        lifetime: u64,
+    ) -> Decision {
+        let later = |at: Timestamp, seconds: u64| {
+            at.checked_add(std::time::Duration::from_secs(seconds))
+                .assured("bounded fixture instants fit the timestamp coordinate")
+        };
+        let origin = Timestamp::try_from(self.decision.activation.created_at)
+            .assured("the fixture creation instant fits the timestamp coordinate");
+        let created_at = later(origin, created);
+        let expires_at = later(created_at, lifetime);
+        let issued_at = later(created_at, 1);
+        let refresh_after = later(issued_at, 60);
+        let overdue_at = later(refresh_after, 120);
+        let mut decision = self.decision.clone();
+        decision.activation.activation_id = uuid::Uuid::from_u128(activation);
+        decision.activation.kind = nervix_models::ActivationKind::Ephemeral;
+        decision.activation.created_at = created_at.into_datetime();
+        decision.activation.ephemeral_expires_at = Some(expires_at.into_datetime());
+        decision.timing.ephemeral_expires_at = Some(expires_at.into_datetime());
+        decision.issued_at = issued_at.into_datetime();
+        decision.timing.refresh_after = refresh_after.into_datetime();
+        decision.timing.overdue_at = overdue_at.into_datetime();
+        decision
+    }
+    pub(crate) fn state(&self) -> StateMachineData {
         let mut state = StateMachineData {
             licensing_environment: Arc::new(self.environment.clone()),
             ..StateMachineData::default()

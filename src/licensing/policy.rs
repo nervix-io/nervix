@@ -13,16 +13,14 @@
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::LicensingSnapshot;
 use nervix_licensing_protocol::conditions::{Capability, FREE_POLICY, UsageConditions};
-use nervix_licensing_vocabulary::{LicensingRefusal, Quota, QuotaConstraint, QuotaName};
-use nervix_models::Timestamp;
+use nervix_licensing_vocabulary::{
+    AdmissionState, LicensingRefusal, Quota, QuotaConstraint, QuotaName,
+};
+use nervix_models::{LicensingStopReason, Timestamp};
 
 /// The current catalog contains no capabilities. A future catalog entry supplies its own name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityName {}
-
-/// Current free mode has no processing-stop reason.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StopReason {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LicensingPolicy {
@@ -69,6 +67,11 @@ pub fn evaluate_policy(snapshot: LicensingSnapshot) -> LicensingPolicy {
             }
             Some(Err(_)) | None => policy.state = PolicyState::Degraded,
         }
+        // The stop gate derives from the committed binding alone, so it holds whatever the
+        // decision's verification: an ephemeral cluster never falls back to the free policy.
+        if let Some(reason) = initialized.record.processing_stop() {
+            policy.state = PolicyState::Stopped { reason };
+        }
     }
     policy
 }
@@ -80,6 +83,10 @@ pub enum PolicyState {
     LicensedDue,
     LicensedOverdue,
     Lapsed,
+    /// The licensing stop gate is closed: processing stops and no new usage is admitted.
+    Stopped {
+        reason: LicensingStopReason,
+    },
     Degraded,
 }
 
@@ -126,6 +133,7 @@ impl LicensingPolicy {
             PolicyState::LicensedDue => "licensed_due",
             PolicyState::LicensedOverdue => "licensed_overdue",
             PolicyState::Lapsed => "lapsed",
+            PolicyState::Stopped { .. } => "stopped",
             PolicyState::Degraded => "degraded",
         }
     }
@@ -160,9 +168,15 @@ impl LicensingPolicy {
         requested: u64,
         replacement: bool,
     ) -> error_stack::Result<QuotaConstraint, LicensingRefusal> {
-        if self.state == PolicyState::Lapsed && !replacement && requested > 0 {
+        // A closed stop gate admits nothing, replacements included (specification §13.2).
+        let refused = match self.state {
+            PolicyState::Stopped { .. } => Some(AdmissionState::Stopped),
+            PolicyState::Lapsed if !replacement && requested > 0 => Some(AdmissionState::Lapsed),
+            _ => None,
+        };
+        if let Some(state) = refused {
             return Err(error_stack::Report::new(LicensingRefusal {
-                state: nervix_licensing_vocabulary::AdmissionState::Lapsed,
+                state,
                 condition: name,
                 limit: current_usage,
                 current_usage,
@@ -176,8 +190,11 @@ impl LicensingPolicy {
         .admit(current_usage, requested, replacement)
     }
 
-    pub fn processing_stop(&self) -> Option<StopReason> {
-        None
+    pub fn processing_stop(&self) -> Option<LicensingStopReason> {
+        match self.state {
+            PolicyState::Stopped { reason } => Some(reason),
+            _ => None,
+        }
     }
 }
 
@@ -209,6 +226,43 @@ mod tests {
                     QuotaConstraint {
                         name,
                         quota: Quota::Unlimited
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_closed_stop_gate_admits_nothing_and_reports_its_reason() {
+        let mut policy = evaluate_policy(LicensingSnapshot {
+            initialized: None,
+            revision: None,
+            usage: nervix_licensing_protocol::impact::UsageSnapshot {
+                cluster_nodes: 3,
+                cluster_domains: 2,
+            },
+        });
+        let reason = LicensingStopReason::EphemeralExpired {
+            expired_at: Timestamp::from_unix_nanos(1_700_000_000_000_000_000),
+        };
+        policy.state = PolicyState::Stopped { reason };
+        assert_eq!(policy.state_name(), "stopped");
+        assert_eq!(policy.display_state(), "stopped");
+        assert_eq!(policy.processing_stop(), Some(reason));
+        for name in QuotaName::ALL {
+            // Unlimited conditions, replacements and empty requests are refused alike.
+            for (replacement, requested) in [(false, 1), (true, 1), (false, 0)] {
+                let Err(refusal) = policy.admit(name, 2, requested, replacement) else {
+                    panic!("a closed gate admits no usage");
+                };
+                assert_eq!(
+                    *refusal.current_context(),
+                    LicensingRefusal {
+                        state: AdmissionState::Stopped,
+                        condition: name,
+                        limit: 2,
+                        current_usage: 2,
+                        requested,
                     }
                 );
             }
