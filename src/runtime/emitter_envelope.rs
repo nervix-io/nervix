@@ -307,6 +307,7 @@ impl CompiledEnvelope {
             ENVELOPE_NAMESPACE,
             &bindings,
             context.udfs,
+            context.settings,
         )
         .change_context_lazy(|| EmitterEnvelopeError::Lookups {
             emitter: emitter.clone(),

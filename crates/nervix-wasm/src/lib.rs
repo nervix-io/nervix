@@ -19,6 +19,7 @@
     )
 )]
 
+mod settings;
 use std::{
     convert::Infallible,
     num::NonZeroU64,
@@ -42,6 +43,9 @@ use nervix_primitives::unmodeled::sync::atomic::{AtomicBool, Ordering};
 use nervix_recovery::NoReceiver as _;
 use nervix_wasm_protocol as protocol;
 pub use nervix_wasm_protocol::SavedStateRejection;
+pub use settings::{
+    WasmEngineSettings, WasmEngineSettingsError, WasmMemoryReservationBytes, WasmStackBytes,
+};
 use thiserror::Error;
 use wasmtime::{
     Caller, Config, Engine, Instance, InstancePre, Linker, Memory, Module, OptLevel,
@@ -517,6 +521,7 @@ unsafe impl Allocator for GuestBufferAllocator<'_> {
 
 #[derive(Debug, Clone)]
 pub struct WasmRuntimeConfig {
+    pub engine: WasmEngineSettings,
     pub optimize: bool,
     pub epoch_tick_interval: Duration,
     pub epoch_deadline_ticks: u64,
@@ -526,6 +531,7 @@ pub struct WasmRuntimeConfig {
 impl Default for WasmRuntimeConfig {
     fn default() -> Self {
         Self {
+            engine: WasmEngineSettings::default(),
             optimize: true,
             epoch_tick_interval: DEFAULT_EPOCH_TICK_INTERVAL,
             epoch_deadline_ticks: DEFAULT_EPOCH_DEADLINE_TICKS,
@@ -550,7 +556,9 @@ impl WasmRuntime {
         // Modules already compile independently on the node's bulk workers. Letting each
         // Cranelift invocation fan out across the global CPU pool can starve Raft and Tokio
         // executor threads when several nodes or branch instances initialize together.
-        wasmtime_config.parallel_compilation(false);
+        wasmtime_config.parallel_compilation(config.engine.parallel_compilation());
+        wasmtime_config.max_wasm_stack(config.engine.stack_bytes());
+        wasmtime_config.memory_reservation(config.engine.memory_reservation_bytes());
         wasmtime_config.cranelift_opt_level(if config.optimize {
             OptLevel::Speed
         } else {
@@ -3383,6 +3391,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn oversized_guest_input_is_rejected_before_calling_guest() {
         let runtime = WasmRuntime::new(WasmRuntimeConfig {
+            engine: WasmEngineSettings::default(),
             optimize: false,
             epoch_tick_interval: Duration::from_millis(1),
             epoch_deadline_ticks: 1,
@@ -5048,6 +5057,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn epoch_driver_yields_cpu_bound_guest_to_async_executor() {
         let runtime = WasmRuntime::new(WasmRuntimeConfig {
+            engine: WasmEngineSettings::default(),
             optimize: true,
             epoch_tick_interval: Duration::from_micros(100),
             epoch_deadline_ticks: 1,

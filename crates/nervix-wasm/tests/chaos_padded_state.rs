@@ -59,6 +59,7 @@ fn padded_state_wat(bytes: usize) -> String {
 
 async fn compiled_guest() -> CompiledWasmProcessor {
     let runtime = WasmRuntime::new(WasmRuntimeConfig {
+        engine: nervix_wasm::WasmEngineSettings::default(),
         optimize: false,
         epoch_tick_interval: Duration::from_millis(5),
         epoch_deadline_ticks: 2_000,

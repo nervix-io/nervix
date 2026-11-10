@@ -56,6 +56,7 @@ async fn runtime_report_chain_admitted_client_batch_log() {
             output_sensitivity: schema.vm_sensitivity(),
         },
         RuntimeVmCompileContext {
+            settings: nervix_vm::VmSettings::default(),
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
             current_branching: &ResolvedBranching::unbranched(),

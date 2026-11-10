@@ -1556,9 +1556,11 @@ stateDiagram-v2
 
 A consumer must stay bounded however fast rows arrive, and must never let an unread event hold back
 a reply. The Rust client charges each subscription event for the whole frame its rows keep alive and
-for the event itself. One subscription holds at most 32 events and one frame of the frame limit,
-4 MiB, with the event that carries it; all subscriptions together hold four times as much, 128
-events and 16 MiB of frames with their events. An event that does not fit drops that subscription's
+for the event itself. By default one subscription holds at most 32 events and one frame of the
+frame limit, 4 MiB, with the event that carries it; all subscriptions together hold four times as
+much, 128 events and 16 MiB of frames with their events. The native client exposes these local
+record, frame-retention and aggregate-multiplier capabilities through `ConnectOptions`; the
+[CLI flags](client-tools-cli.md#connection-capabilities) project the same validated settings. An event that does not fit drops that subscription's
 queued events, reports a consumer overflow, and marks the subscription `DeliveryFailed`; the reader
 that routes replies never waits. An event stops counting once the application reads it, so a
 subscription whose events are read before the next one arrives stays within its own allowance

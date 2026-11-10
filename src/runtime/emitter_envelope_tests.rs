@@ -37,6 +37,7 @@ impl CompileFixture {
 
     fn context(&self) -> RuntimeVmCompileContext<'_> {
         RuntimeVmCompileContext {
+            settings: nervix_vm::VmSettings::default(),
             available_materialized_streams: &self.streams,
             available_lookups: &self.lookups,
             current_branching: &self.branching,

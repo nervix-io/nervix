@@ -442,6 +442,7 @@ mod tests {
                 sensitivity: VmSchemaSensitivity::default(),
             },
             RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
                 current_branching: &ResolvedBranching::unbranched(),
@@ -543,6 +544,7 @@ mod tests {
                 sensitivity: VmSchemaSensitivity::default(),
             },
             RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
                 current_branching: &ResolvedBranching::unbranched(),

@@ -100,7 +100,7 @@ pub(super) fn compile_correlator_where_program(
     left_schema: StdArc<arrow_schema::Schema>,
     right_relays: &[RelayName],
     right_schema: StdArc<arrow_schema::Schema>,
-    udfs: Option<&UdfExecutor>,
+    options: VmCompileOptions,
 ) -> error_stack::Result<CompiledCorrelatorWhereProgram, ProcessorCompileError> {
     let parsed = lower_route_construction(
         &RouteConstruction {
@@ -126,7 +126,7 @@ pub(super) fn compile_correlator_where_program(
         left_schema.clone(),
         VmSchemaSensitivity::default(),
         bindings,
-        runtime_udf_compile_options(udfs, VmCompileOptions::default()),
+        options,
     )
     .change_context_lazy(|| ProcessorCompileError::CorrelateWhereCompile {
         processor: processor.clone(),
@@ -207,6 +207,7 @@ impl CorrelatorOutputCompileContext<'_> {
             "output",
             &bindings,
             self.runtime.udfs,
+            self.runtime.settings,
         )
         .change_context_lazy(invalid_output)?;
         if let Some(lookup_binding) = lookup_binding {
@@ -1366,7 +1367,13 @@ mod tests {
             left_schema.arrow_schema(),
             &[named("right_profiles")],
             right_schema.arrow_schema(),
-            None,
+            runtime_udf_compile_options(
+                None,
+                VmCompileOptions {
+                    settings: nervix_vm::VmSettings::default(),
+                    ..VmCompileOptions::default()
+                },
+            ),
         )
         .expect("correlator WHERE should compile");
         let now = Timestamp::now();
@@ -1492,6 +1499,7 @@ mod tests {
                  right.score WHERE relay_state.profiles.status != \"blocked\"",
             ),
             runtime: RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &materialized_specs,
                 available_lookups: &HashMap::default(),
                 current_branching: &branching,
@@ -1653,7 +1661,13 @@ mod tests {
                 schema.arrow_schema(),
                 &[named("right_profiles")],
                 schema.arrow_schema(),
-                None,
+                runtime_udf_compile_options(
+                    None,
+                    VmCompileOptions {
+                        settings: nervix_vm::VmSettings::default(),
+                        ..VmCompileOptions::default()
+                    }
+                ),
             )),
             "correlator 'join_profiles' requires both LEFT and RIGHT inputs"
         );
@@ -1673,6 +1687,7 @@ mod tests {
             output_sensitivity: VmSchemaSensitivity::default(),
             construction: &where_only,
             runtime: RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &materialized_streams,
                 available_lookups: &lookups,
                 current_branching: &ResolvedBranching::unbranched(),

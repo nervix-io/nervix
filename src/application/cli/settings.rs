@@ -135,6 +135,10 @@ use crate::application::{error::AppError, node_settings::NodeSettings};
 #[derive(clap::Args, Debug, Clone, PartialEq)]
 pub struct SettingsArgs {
     #[command(flatten)]
+    pub connector_host: super::connector_host::ConnectorHostArgs,
+    #[command(flatten)]
+    pub engines: super::engines::EngineArgs,
+    #[command(flatten)]
     pub cluster_parameters: super::cluster_parameters::ClusterParameterArgs,
     #[command(flatten)]
     pub consensus: ConsensusArgs,
@@ -199,16 +203,29 @@ impl TryFrom<SettingsArgs> for NodeSettings {
             .capacity
             .peer_receive()
             .change_context(AppError::InvalidPeerReceiveSettings)?;
+        let mut runtime = args
+            .runtime
+            .settings()
+            .change_context(AppError::InvalidStateInspectionSettings)?;
+        runtime.connector_host = args
+            .connector_host
+            .settings()
+            .change_context(AppError::InvalidConnectorHostSettings)?;
+        runtime.vm = args
+            .engines
+            .settings()
+            .change_context(AppError::InvalidVmSettings)?;
+        runtime.wasm_engine = args
+            .engines
+            .wasm_settings()
+            .change_context(AppError::InvalidWasmEngineSettings)?;
         Ok(Self {
             parameter_seeds,
             raft,
             raft_retention: args.consensus.retention(),
             membership,
             scheduling: args.scheduling.settings(),
-            runtime: args
-                .runtime
-                .settings()
-                .change_context(AppError::InvalidStateInspectionSettings)?,
+            runtime,
             transactions: args.transactions.limits(),
             commands: args.transactions.commands(),
             memory_pressure,
@@ -229,6 +246,13 @@ impl TryFrom<SettingsArgs> for NodeSettings {
 impl From<&NodeSettings> for SettingsArgs {
     fn from(settings: &NodeSettings) -> Self {
         Self {
+            connector_host: super::connector_host::ConnectorHostArgs::from_settings(
+                &settings.runtime.connector_host,
+            ),
+            engines: super::engines::EngineArgs::from_settings(
+                &settings.runtime.vm,
+                &settings.runtime.wasm_engine,
+            ),
             cluster_parameters: super::cluster_parameters::ClusterParameterArgs::from_seeds(
                 &settings.parameter_seeds,
             ),
@@ -257,6 +281,8 @@ impl SettingsArgs {
     /// Every option these settings hold, written as the command line reads it back.
     pub fn command_line(&self) -> Vec<String> {
         let mut command_line = CommandLine::default();
+        self.connector_host.render(&mut command_line);
+        self.engines.render(&mut command_line);
         self.cluster_parameters.render(&mut command_line);
         self.consensus.render(&mut command_line);
         self.membership.render(&mut command_line);

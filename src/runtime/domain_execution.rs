@@ -886,6 +886,7 @@ impl Runtime {
             BoundMessageErrorRoutes::bind(
                 revision.message_errors.clone(),
                 MessageErrorRouteBindingContext {
+                    vm_settings: self.inner.vm_settings,
                     relay_services: &relay_services,
                     materialized_stream_specs: &materialized_stream_specs,
                     lookups: &lookup_runtimes,
@@ -916,6 +917,7 @@ impl Runtime {
         }
 
         let execution_build_deps = ExecutionBuildDeps {
+            vm_settings: self.inner.vm_settings,
             domain,
             relay_schemas: &relay_schemas,
             relay_branchings: &relay_branchings,
@@ -930,8 +932,15 @@ impl Runtime {
                 continue;
             };
             let mut prepared = Some(
-                GeneratorTaskSpec::bind(domain, generator, first, &relay_services, &udf_executor)
-                    .change_context_lazy(build)?,
+                GeneratorTaskSpec::bind(
+                    domain,
+                    generator,
+                    first,
+                    &relay_services,
+                    &udf_executor,
+                    self.inner.vm_settings,
+                )
+                .change_context_lazy(build)?,
             );
             while let Some(unit) = units.next() {
                 let mut spec = if units.peek().is_some() {

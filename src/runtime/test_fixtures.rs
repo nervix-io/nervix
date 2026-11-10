@@ -227,6 +227,7 @@ pub(super) fn compile_window_aggregate_for_test(
         &output_relay,
         &relay_schemas,
         None,
+        nervix_vm::VmSettings::default(),
     )
     .expect("window aggregate should compile")
 }
@@ -607,6 +608,7 @@ impl TestWindow {
             &output_relay,
             &relay_schemas,
             None,
+            nervix_vm::VmSettings::default(),
         )
         .expect("the test window route should compile");
         let sketch_layout = compiled

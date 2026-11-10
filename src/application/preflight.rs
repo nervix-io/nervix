@@ -217,6 +217,8 @@ impl Preflight<'_> {
             .resolve(executor.limits())
             .change_context(PreflightError::PeerReceiveLimits)?;
         let capabilities = nervix_models::NodeCapabilities {
+            engines: self.settings.runtime.engine_capabilities(),
+            connector_host: self.settings.runtime.connector_host.capabilities(),
             cpu_count,
             memory_bytes,
             receive: peer_receive.bounds(),

@@ -43,7 +43,11 @@ impl ServedExchange {
     fn connect() -> (Client, Self) {
         let (frames, requests) = mpsc::channel(8);
         let pending = Arc::new(Mutex::new(PendingReplies::new()));
-        let exchange = detached_exchange(frames, pending.clone(), SessionEvents::new().emitters);
+        let exchange = detached_exchange(
+            frames,
+            pending.clone(),
+            SessionEvents::new(crate::ClientCapabilities::default()).emitters,
+        );
         let reader = ExchangeReader::new(
             pending,
             exchange.emitters.clone(),

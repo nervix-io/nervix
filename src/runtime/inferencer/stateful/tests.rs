@@ -409,6 +409,7 @@ async fn native_refusal_keeps_the_previous_generation_and_other_branches_indepen
             }],
             &state,
             None,
+            nervix_vm::VmSettings::default(),
         )
         .await
         .expect("INITIAL is prepared on the bounded workers"),

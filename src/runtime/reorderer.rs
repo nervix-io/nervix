@@ -767,6 +767,7 @@ mod tests {
             &[expression("input.sequence")],
             input_schema.arrow_schema(),
             None,
+            nervix_vm::VmSettings::default(),
         )
         .expect("reorderer key program should compile");
         let records = vec![

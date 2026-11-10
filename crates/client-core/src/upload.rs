@@ -48,9 +48,6 @@ const UPLOAD_CHUNK_BYTES: usize = 64 * 1024;
 // non-empty chunk always encodes.
 const _: () = assert!(UPLOAD_CHUNK_BYTES <= SESSION_LIMITS.frame_bytes() / 2);
 
-/// Upload frames queued for the stream before the archive reader waits for the transport.
-const UPLOAD_FRAME_CAPACITY: usize = 8;
-
 /// Archive construction keeps one bounded read buffer and one bounded write buffer, avoiding
 /// a filesystem worker handoff for every small tar copy and header write.
 const ARCHIVE_BUFFER_BYTES: usize = 1024 * 1024;
@@ -149,7 +146,7 @@ impl Client {
                         Ok(response) => response,
                         Err(status)
                             if upload_status_is_retryable(&status)
-                                && Self::await_retry(attempt).await =>
+                                && self.await_retry(attempt).await =>
                         {
                             debug!(
                                 upload_identity = %upload_identity,
@@ -215,7 +212,7 @@ impl Client {
                             self.follow_leader(leader, RecoveryDeadline::RetryBudget)
                                 .await?;
                         }
-                        Routing::AwaitElection if Self::await_retry(attempt).await => {
+                        Routing::AwaitElection if self.await_retry(attempt).await => {
                             debug!(
                                 upload_identity = %upload_identity,
                                 calls = calls.get(),
@@ -418,7 +415,8 @@ impl UploadAttempt {
             start,
             mut archive,
         } = self;
-        let (frames, outbound) = mpsc::channel(UPLOAD_FRAME_CAPACITY);
+        let (frames, outbound) =
+            mpsc::channel(connector.capabilities().upload_frame_capacity().get());
         nervix_primitives::task::spawn(async move {
             if frames.send(start).await.is_err() {
                 // The call ended before it took the start frame, and its status says why.

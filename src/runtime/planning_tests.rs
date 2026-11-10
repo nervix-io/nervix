@@ -363,11 +363,16 @@ fn eager_binding_prepares_every_processor_family_before_publication() {
         wasm,
         correlator,
     ];
-    let processors = materialize_nodes(&nodes, &relay_schemas, None)
-        .assured("all processor fixtures use exact compatible schemas")
-        .into_iter()
-        .map(|processor| (processor.processor.clone(), processor))
-        .collect();
+    let processors = materialize_nodes(
+        &nodes,
+        &relay_schemas,
+        None,
+        nervix_vm::VmSettings::default(),
+    )
+    .assured("all processor fixtures use exact compatible schemas")
+    .into_iter()
+    .map(|processor| (processor.processor.clone(), processor))
+    .collect();
     let mut template = junction_branch_template("published_revision", "incoming");
     template.processors = processors;
 
@@ -378,6 +383,7 @@ fn eager_binding_prepares_every_processor_family_before_publication() {
         &HashMap::default(),
         &HashMap::default(),
         None,
+        nervix_vm::VmSettings::default(),
     )
     .assured("every processor program binds before the revision is published");
 
@@ -499,6 +505,7 @@ fn eager_binding_classifies_incomplete_published_inputs() {
         &HashMap::default(),
         &HashMap::default(),
         None,
+        nervix_vm::VmSettings::default(),
     )
     .expect_err("an input relay without its compiled schema must fail binding");
     assert!(matches!(
@@ -513,6 +520,7 @@ fn eager_binding_classifies_incomplete_published_inputs() {
         &HashMap::default(),
         &HashMap::default(),
         None,
+        nervix_vm::VmSettings::default(),
     )
     .expect_err("an input relay without resolved branching must fail binding");
     assert!(matches!(
@@ -535,6 +543,7 @@ fn eager_binding_classifies_incomplete_published_inputs() {
         &HashMap::default(),
         &HashMap::default(),
         None,
+        nervix_vm::VmSettings::default(),
     )
     .expect_err("every additional input relay must have a compiled schema");
     assert!(matches!(
@@ -557,6 +566,7 @@ fn eager_binding_classifies_incomplete_published_inputs() {
         &HashMap::default(),
         &HashMap::default(),
         None,
+        nervix_vm::VmSettings::default(),
     )
     .expect_err("every additional input relay must have resolved branching");
     assert!(matches!(
@@ -596,6 +606,7 @@ fn eager_binding_classifies_incomplete_published_inputs() {
         &HashMap::default(),
         &HashMap::default(),
         None,
+        nervix_vm::VmSettings::default(),
     )
     .expect_err("a correlator must publish a left input relay");
     assert!(matches!(
@@ -610,6 +621,7 @@ fn eager_binding_classifies_incomplete_published_inputs() {
         &HashMap::default(),
         &HashMap::default(),
         None,
+        nervix_vm::VmSettings::default(),
     )
     .expect_err("a correlator must publish a right input relay");
     assert!(matches!(
@@ -624,6 +636,7 @@ fn eager_binding_classifies_incomplete_published_inputs() {
         &HashMap::default(),
         &HashMap::default(),
         None,
+        nervix_vm::VmSettings::default(),
     )
     .expect_err("a correlator left relay must have a compiled schema");
     assert!(matches!(
@@ -638,6 +651,7 @@ fn eager_binding_classifies_incomplete_published_inputs() {
         &HashMap::default(),
         &HashMap::default(),
         None,
+        nervix_vm::VmSettings::default(),
     )
     .expect_err("a correlator right relay must have a compiled schema");
     assert!(matches!(
@@ -652,6 +666,7 @@ fn eager_binding_classifies_incomplete_published_inputs() {
         &HashMap::default(),
         &HashMap::default(),
         None,
+        nervix_vm::VmSettings::default(),
     )
     .expect_err("an output relay without its compiled schema must fail binding");
     assert!(matches!(
@@ -672,6 +687,7 @@ fn eager_binding_classifies_incomplete_published_inputs() {
         &HashMap::default(),
         &HashMap::default(),
         None,
+        nervix_vm::VmSettings::default(),
     )
     .expect_err("a processor without an input relay must fail binding");
     assert!(matches!(
@@ -904,6 +920,7 @@ fn window_materialization_classifies_output_contract_failures() {
         })],
         &HashMap::default(),
         None,
+        nervix_vm::VmSettings::default(),
     )
     .expect_err("a window processor without an output must fail");
     assert!(matches!(
@@ -926,6 +943,7 @@ fn window_materialization_classifies_output_contract_failures() {
         })],
         &HashMap::default(),
         None,
+        nervix_vm::VmSettings::default(),
     )
     .expect_err("window output inheritance must fail lowering");
     assert!(matches!(
@@ -945,6 +963,7 @@ fn window_materialization_classifies_output_contract_failures() {
         })],
         &HashMap::default(),
         None,
+        nervix_vm::VmSettings::default(),
     )
     .expect_err("window output without runtime schemas must fail compilation");
     assert!(matches!(
@@ -956,9 +975,13 @@ fn window_materialization_classifies_output_contract_failures() {
 
 #[test]
 fn inferencer_materialization_requires_an_input_and_schema() {
-    let missing_input =
-        materialize_nodes(&[inferencer_node(Vec::new())], &HashMap::default(), None)
-            .expect_err("an inferencer without input must fail");
+    let missing_input = materialize_nodes(
+        &[inferencer_node(Vec::new())],
+        &HashMap::default(),
+        None,
+        nervix_vm::VmSettings::default(),
+    )
+    .expect_err("an inferencer without input must fail");
     assert!(matches!(
         missing_input.current_context(),
         PlanningError::MissingInputRelay {
@@ -971,6 +994,7 @@ fn inferencer_materialization_requires_an_input_and_schema() {
         &[inferencer_node(vec![named("features")])],
         &HashMap::default(),
         None,
+        nervix_vm::VmSettings::default(),
     )
     .expect_err("an inferencer input without a runtime schema must fail");
     assert!(matches!(
@@ -1031,6 +1055,7 @@ fn processor_instance_materialization_requires_an_input_relay() {
         &HashMap::default(),
         &HashMap::default(),
         None,
+        nervix_vm::VmSettings::default(),
     )
     .expect_err("a processor instance without input must fail planning");
 
@@ -1098,8 +1123,13 @@ fn inferencer_input_mappings_compile_when_template_is_materialized() {
     let mut relay_schemas = HashMap::default();
     relay_schemas.insert(input_relay, input_schema);
 
-    let error = materialize_nodes(&[node], &relay_schemas, None)
-        .expect_err("invalid INPUTS mapping must fail template materialization");
+    let error = materialize_nodes(
+        &[node],
+        &relay_schemas,
+        None,
+        nervix_vm::VmSettings::default(),
+    )
+    .expect_err("invalid INPUTS mapping must fail template materialization");
 
     assert!(matches!(
         error.current_context(),
@@ -2332,8 +2362,13 @@ fn window_route_demands_are_offset_by_the_routes_written_before_them() {
     relay_schemas.insert(totals_relay.clone(), totals_schema);
     relay_schemas.insert(extremes_relay.clone(), extremes_schema);
 
-    let mut templates = materialize_nodes(&[node], &relay_schemas, None)
-        .expect("two-route window processor must materialize");
+    let mut templates = materialize_nodes(
+        &[node],
+        &relay_schemas,
+        None,
+        nervix_vm::VmSettings::default(),
+    )
+    .expect("two-route window processor must materialize");
 
     let template = templates.pop().expect("one template per spec");
     let RelayProcessorOperationTemplate::WindowProcessor {

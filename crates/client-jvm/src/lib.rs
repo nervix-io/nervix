@@ -17,6 +17,7 @@
     nervix::context(outside, reason = "JNI calls run on the calling JVM thread")
 )]
 
+mod connection_options;
 mod error;
 mod handles;
 mod marshal;

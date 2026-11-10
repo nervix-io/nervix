@@ -39,6 +39,13 @@ fn claim(incarnation: u64, bytes: u64) -> NodeCapabilityRecord {
             ClusterNodeIncarnation::new(incarnation),
         ),
         capabilities: NodeCapabilities {
+            engines: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
+                .node_engine_capabilities(),
+            connector_host: nervix_arbitrary::Arbitrary::new(
+                &[],
+                nervix_arbitrary::Domain::Vocabulary,
+            )
+            .node_connector_host_capabilities(),
             cpu_count: None,
             memory_bytes: None,
             receive: receive(bytes).bounds(),

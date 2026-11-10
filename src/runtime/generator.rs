@@ -100,6 +100,7 @@ impl GeneratorTaskSpec {
         unit: Unit,
         services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
         udfs: &UdfExecutor,
+        vm_settings: nervix_vm::VmSettings,
     ) -> error_stack::Result<Self, GeneratorError> {
         let start = || GeneratorError::Start {
             domain: domain.clone(),
@@ -130,6 +131,7 @@ impl GeneratorTaskSpec {
                     branch: source_branch_schema.clone(),
                 },
                 Some(udfs),
+                vm_settings,
             )
             .change_context_lazy(start)?;
             routes.push(GeneratorTaskRouteSpec::new(route, program, output_services));
@@ -1309,6 +1311,7 @@ mod tests {
                 }),
             },
             None,
+            nervix_vm::VmSettings::default(),
         )
         .expect("generator set program must compile");
 
@@ -1428,6 +1431,7 @@ mod tests {
                 }),
             },
             None,
+            nervix_vm::VmSettings::default(),
         )
         .expect_err("a sensitive branch value cannot initialize a non-sensitive output");
 
