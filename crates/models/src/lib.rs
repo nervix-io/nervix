@@ -71,6 +71,7 @@ mod schedule;
 mod schema;
 mod schema_fingerprint;
 mod settings;
+mod show_wasm_state;
 mod state_branch_selection;
 mod state_inspection;
 mod state_inspection_settings;
@@ -386,6 +387,7 @@ pub use schema::{
 };
 pub use schema_fingerprint::SchemaFingerprint;
 pub use settings::{ClusterParameters, Prerequisites, Setting, SettingClass, SettingDefinition};
+pub use show_wasm_state::ShowWasmProcessorState;
 pub use state_branch_selection::{
     ResolvedStateBranchSelection, StateBranchField, StateBranchSelection, StateBranchSelectionError,
 };
@@ -419,11 +421,11 @@ pub use statement::{
     RelocationPreferenceStrategy, RelocationSelection, RelocationUnitSelection, ResolvedBranching,
     ResolvedCodecWireFormat, RetryPolicy, ShowClusterStatus, ShowCreate, ShowEmitters,
     ShowIngestors, ShowPlacements, ShowProcessorState, ShowRelayMaterializedState,
-    ShowTransactions, ShowUdfs, ShowWasmProcessorState, SignalingProtobufConfig,
-    SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat, StartDomain,
-    StateInspectedProcessor, StateInspectionPageRequest, Statement, StopDomain,
-    SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, UncordonNode,
-    UniquelyKindedModel, UploadResource, VhostTlsResource, WireSchemaLookup, default_relay_buffer,
+    ShowTransactions, ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
+    SignalingWaitStep, SignalingWireFormat, StartDomain, StateInspectedProcessor,
+    StateInspectionPageRequest, Statement, StopDomain, SubscriptionBinding,
+    SubscriptionDeliveryBehavior, SubscriptionLiteral, UncordonNode, UniquelyKindedModel,
+    UploadResource, VhostTlsResource, WireSchemaLookup, default_relay_buffer,
 };
 pub use timestamp::{AtomicTimestamp, Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};

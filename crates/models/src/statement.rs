@@ -40,8 +40,9 @@ use crate::{
     IngestQuiesceMode, IngestorName, JsonType, JunctionName, LookupName, ModelName, NodeRef,
     PlacementName, ProcessorOutput, ProcessorOutputs, RebindResource, ReingestorName, RelayName,
     ReordererName, RequestedResourceVersion, ResetWasmState, ResourceName, Restore, SchemaName,
-    SignalingProtocolName, SubscriptionName, Timestamp, TransactionInspectionRequest, UdfName,
-    Unit, UserName, VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
+    ShowWasmProcessorState, SignalingProtocolName, SubscriptionName, Timestamp,
+    TransactionInspectionRequest, UdfName, Unit, UserName, VhostName, WasmProcessorName,
+    WindowProcessorName, WireSchemaName,
 };
 
 #[derive(
@@ -478,18 +479,6 @@ pub enum StateInspectedProcessor {
     Correlator(CorrelatorName),
     Deduplicator(DeduplicatorName),
     WindowProcessor(WindowProcessorName),
-}
-
-/// `SHOW WASM PROCESSOR ... STATE`: one bounded read of a WASM processor's committed guest-state
-/// facts, with the inspection clauses every state read shares.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub struct ShowWasmProcessorState {
-    pub processor: WasmProcessorName,
-    pub selection: Option<crate::StateBranchSelection>,
-    pub page: Option<StateInspectionPageRequest>,
-    pub format: InspectionFormat,
 }
 
 #[derive(
