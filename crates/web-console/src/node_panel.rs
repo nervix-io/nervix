@@ -48,6 +48,7 @@ impl ClusterEvent {
             NoticeKind::ClusterParameters => "cluster-parameters",
             NoticeKind::Runtime => "runtime",
             NoticeKind::ControlPlane => "control-plane",
+            NoticeKind::Licensing => "licensing",
         }
     }
 
@@ -93,6 +94,7 @@ impl ClusterEventLog {
             NoticeKind::Leadership
             | NoticeKind::ClusterParameters
             | NoticeKind::Runtime
+            | NoticeKind::Licensing
             | NoticeKind::ControlPlane => EntryKey::Single { id },
         };
         if let Some((index, _, existing)) = self.entries.get_full_mut(&key) {

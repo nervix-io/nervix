@@ -1,4 +1,9 @@
-//! Current signed-document fixtures shared by rule and representation checks.
+//! Current signed-document fixtures shared by rule, storage and representation checks.
+//!
+//! Layer: test harness.
+//! - **Owns.** Real per-run signers and complete current document fixtures.
+//! - **Depends on.** The production protocol and cryptographic owners.
+//! - **Must not know.** Services, runtime policy, consensus mutation or scheduling.
 
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
@@ -145,6 +150,12 @@ pub struct Fixture {
     pub roots: [DocumentSigner; 3],
     pub working: DocumentSigner,
     pub cluster: DocumentSigner,
+}
+
+impl Default for Fixture {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Fixture {

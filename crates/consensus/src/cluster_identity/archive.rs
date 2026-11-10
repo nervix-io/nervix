@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use super::{ArchivedClusterIdentityRecord, ClusterIdentityRecord};
 
-pub(super) struct UuidBytes;
+pub(crate) struct UuidBytes;
 
 impl ArchiveWith<Uuid> for UuidBytes {
     type Archived = <[u8; 16] as Archive>::Archived;
@@ -125,6 +125,7 @@ where
             cluster_uid: UuidBytes::deserialize_with(&self.cluster_uid, deserializer)?,
             created_at: self.created_at.deserialize(deserializer)?,
             key_generation: self.key_generation.deserialize(deserializer)?,
+            ever_activated: self.ever_activated.deserialize(deserializer)?,
             current_key: self.current_key.deserialize(deserializer)?,
             retired_key: self.retired_key.deserialize(deserializer)?,
             pending_key: self.pending_key.deserialize(deserializer)?,

@@ -1661,6 +1661,7 @@ fn notice_kind_label(kind: NoticeKind) -> &'static str {
         NoticeKind::ClusterParameters => "cluster parameters",
         NoticeKind::Runtime => "runtime",
         NoticeKind::ControlPlane => "control plane",
+        NoticeKind::Licensing => "licensing",
     }
 }
 

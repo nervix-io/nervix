@@ -214,6 +214,10 @@ impl CommandExecutionTransactionTarget {
 )]
 pub enum CommandExecutionTransactionOperation {
     Queue(Box<TransactionStatementRequest>),
+    /// A statement refused before retaining its source or Model, after preceding operations run.
+    RefuseUnqueueable {
+        statement_label: String,
+    },
     Commit {
         /// The whole-transaction preview the requesting client expected this commit to apply.
         /// Absent when the request itself opened the transaction or appended to it, because
@@ -254,6 +258,10 @@ pub enum CommandExecutionEffect {
     Statement {
         source: String,
         statement: Box<Statement>,
+    },
+    ActivateLicense {
+        binding: Box<crate::ActivationBinding>,
+        decision: Box<crate::ReceivedLicenseDecision>,
     },
     CreateUser {
         if_not_exists: bool,
@@ -472,6 +480,7 @@ impl CommandExecution {
                 | CommandExecutionEffect::Transaction { .. }
                 | CommandExecutionEffect::Statement { .. }
                 | CommandExecutionEffect::CreateUser { .. }
+                | CommandExecutionEffect::ActivateLicense { .. }
                 | CommandExecutionEffect::DropNode { .. }
                 | CommandExecutionEffect::Restore(_),
             )
@@ -490,6 +499,7 @@ impl CommandExecution {
                 | CommandExecutionEffect::TransactionRequest(_)
                 | CommandExecutionEffect::Statement { .. }
                 | CommandExecutionEffect::CreateUser { .. }
+                | CommandExecutionEffect::ActivateLicense { .. }
                 | CommandExecutionEffect::DropNode { .. },
             )
             | None => None,
@@ -521,6 +531,7 @@ impl CommandExecution {
                 | CommandExecutionEffect::Transaction { .. }
                 | CommandExecutionEffect::Statement { .. }
                 | CommandExecutionEffect::CreateUser { .. }
+                | CommandExecutionEffect::ActivateLicense { .. }
                 | CommandExecutionEffect::DropNode { .. }
                 | CommandExecutionEffect::Restore(_) => None,
             },
@@ -546,6 +557,7 @@ impl CommandExecution {
                 | CommandExecutionEffect::TransactionRequest(_)
                 | CommandExecutionEffect::Statement { .. }
                 | CommandExecutionEffect::DropNode { .. }
+                | CommandExecutionEffect::ActivateLicense { .. }
                 | CommandExecutionEffect::Restore(_) => None,
             },
             CommandExecutionState::Finished { request, .. } => match &request.evidence {
@@ -643,6 +655,7 @@ impl CommandExecution {
             | CommandExecutionEffect::Transaction { .. }
             | CommandExecutionEffect::Statement { .. }
             | CommandExecutionEffect::DropNode { .. }
+            | CommandExecutionEffect::ActivateLicense { .. }
             | CommandExecutionEffect::Restore(_) => CommandExecutionRequestEvidence::Statement,
         };
         Some(Self {
