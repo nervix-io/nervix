@@ -22,9 +22,8 @@ use serde::{Deserialize, Serialize};
 use strum::EnumIter;
 use thiserror::Error;
 
-use crate::{Setting, SettingDefinition};
+use crate::{Setting, SettingDefinition, settings::archive};
 
-pub(crate) mod archive;
 mod durations;
 mod limits;
 mod publication;
