@@ -1,7 +1,7 @@
-//! Shared licensing quota values.
+//! Shared licensing activation and quota values.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** The bounded and unlimited quota value and its arithmetic.
+//! - **Owns.** Activation kinds, the bounded and unlimited quota value and its arithmetic.
 //! - **Depends on.** Serialization and primitive value types.
 //! - **Must not know.** Policies, cryptography, Models, consensus or network I/O.
 
@@ -14,6 +14,27 @@ use error_stack::Report;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// The lifetime class of an activation, shared by statements and signed documents.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivationKind {
+    Persistent,
+    Ephemeral,
+}
 
 #[derive(
     Clone,
