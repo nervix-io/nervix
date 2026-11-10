@@ -3775,20 +3775,22 @@ channel, the bounded channel that already carries its checkpoint and stop comman
 The request is scoped by the `NodeUnitRef` of the inspected processor unit and the concrete branch
 key. The unit task answers a `SelectStateBranches` command from its own branch registry by cloning
 the selected live tasks' handles in canonical branch order, without waiting for any branch, so
-input dispatch is never held behind the branches' answers. The reader then sends each selected
-branch task one `Inspect` command with its skip, row and byte bounds, and waits on a `oneshot`
-reply. The branch loop serves commands before its next input batch, buffer deadline or force flush,
-so it answers between two batches: an immutable copy of row views over the Arrow batches it holds,
-bounded by the requested rows and bytes before anything is copied, the complete row and byte counts
-of the branch, its lifetime and the number of events it has handled. The copy borrows nothing the
-task keeps mutable and changes neither what the branch holds nor when or in which order it releases
-it. A task that ended, or that stopped serving commands while it drains, drops the request, and
-the reader refuses the read as `owner_unavailable` rather than waiting. The command channel's
-capacity of one bounds what the request queues, and the inspection read deadline,
-`StateInspectionReadTimeout`, bounds the reader's whole wait, from the unit selection to the last
-branch's answer; a reply to a reader that left is discarded. Gathering the copies into Arrow
-columns runs on the bounded Bulk executor after the branch tasks answered, admitted before any
-column is built.
+input dispatch is never held behind the branches' answers. While the unit task's restore is pending,
+the branches its lifecycle names are not installed yet and hold rows no branch task can copy, so it
+refuses the selection as unrestored, which the read reports as `not_ready`, rather than selecting
+fewer branches than the unit holds. The reader then sends each selected branch task one `Inspect`
+command with its skip, row and byte bounds, and waits on a `oneshot` reply. The branch loop serves
+commands before its next input batch, buffer deadline or force flush, so it answers between two
+batches: an immutable copy of row views over the Arrow batches it holds, bounded by the requested
+rows and bytes before anything is copied, the complete row and byte counts of the branch, its
+lifetime and the number of events it has handled. The copy borrows nothing the task keeps mutable
+and changes neither what the branch holds nor when or in which order it releases it. A task that
+ended, or that stopped serving commands while it drains, drops the request, and the reader refuses
+the read as `owner_unavailable` rather than waiting. The command channel's capacity of one bounds
+what the request queues, and the inspection read deadline, `StateInspectionReadTimeout`, bounds the
+reader's whole wait, from the unit selection to the last branch's answer; a reply to a reader that
+left is discarded. Gathering the copies into Arrow columns runs on the bounded Bulk executor after
+the branch tasks answered, admitted before any column is built.
 
 Answering takes the branch task time proportional to the batches a reorderer's routes hold and the
 records a correlator's sides hold, plus the copied rows: a reorderer counts the rows of each held
@@ -3805,7 +3807,12 @@ copy: every answered copy holds exactly the whole batches the task had taken, in
 request the task no longer takes is refused, and a task that ended answers nothing. The request
 makes no cross-location memory-ordering claim, so it has no Loom model. The one- and three-node
 public scenarios exercise the local and remote owner pages, interleaved branches, paging, stale
-continuations and inspection during steady input.
+continuations, inspection during steady input and the `DESCRIBE` counts of a stopped processor.
+Owner tests cover the rest of the typed refusals: a unit task whose restore is pending refuses the
+selection and its owner page asks no branch task; the coordinator reports that refusal as
+`not_ready`; and a received page whose body disagrees with its descriptor or with the read, by its
+columns, column types, row count, digest, length or byte bound, is refused before any of its rows
+is used.
 
 ## Retained Emitter Lifecycle
 

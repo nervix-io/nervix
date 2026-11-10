@@ -3500,6 +3500,11 @@ sequenceDiagram
   `idle_timeout_ms` bounds silence; omission derives three configured ping intervals, or thirty
   seconds without configured pings. Received data and control frames refresh the absolute activity
   deadline; local pings and read cancellation do not. An explicit idle value overrides derivation.
+  The connection that owns the deadline ends itself when it passes: it polls one going-away Close
+  (status `1001`, RFC 6455 section 7.1.7) outside the cooperative budget, writing it only if the
+  transport takes it at once, and is then released. The verdict waits for neither the write nor a
+  reply, so it adds no network wait and never delays the host's reconnect; a write the transport
+  refuses is recovered and reported at `debug`.
   Incoming frame or message overflow fails the read and ends the connection, as `fail_read` declares.
   The host reconnects on its policy. Suspension closes the connection while retaining successful
   handshake payloads, which drain before another connection opens; close clears the queue.

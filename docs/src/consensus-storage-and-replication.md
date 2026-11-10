@@ -621,16 +621,19 @@ node name and concrete local interconnect address. OpenRaft captures that contex
 its core. Parallel isolated clusters may use the same node names; the listener address distinguishes
 their core events in a shared log. The span belongs to that consensus lifetime and exposes no
 command, record or credential values.
-The unary append, vote and pre-vote receivers also establish trace-level contexts with the same
+The unary append, vote and pre-vote receivers also establish debug-level contexts with the same
 local node and listener address. When detailed tracing is selected, their existing OpenRaft API
 events distinguish arrival at the Raft API from processing by that node's core. The annotations
 change no request, deadline or retry policy.
-Vote and pre-vote clients emit trace-level send and completion events with the local endpoint,
+Vote and pre-vote clients emit debug-level send and completion events with the local endpoint,
 peer, vote, request deadline, elapsed transport time and result. The elapsed measurement spans
 encoding, connection admission, the exchange and response decoding. An outer OpenRaft timeout may
 cancel the request before its completion event; its timeout event remains the outcome in that
 case. These infrequent requests take one additional monotonic-clock reading when they begin;
-completion timing and result formatting are evaluated only when their trace event is enabled.
+completion timing and result formatting are evaluated only when their debug event is enabled.
+Selecting them therefore never needs a `trace` directive, which would make the process's log
+bridge hand every dependency's `trace` record to the filter (see [the scenario tracing
+default](integration-test-lifecycle.md#how-failure-reaches-ci-output)).
 
 Durable record decoding and recovered catalog checks preserve decoding or nested report causes
 inside the standard-error carrier that the storage trait accepts. The carrier's ordinary rendering

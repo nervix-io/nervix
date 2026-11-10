@@ -429,6 +429,31 @@ impl RunningProcessor {
             .expect("the processor keeps its response")
     }
 
+    /// The branches the processor names for an inspection that reads `selection`, in the order it
+    /// names them, or its refusal.
+    async fn inspected_branches(
+        &self,
+        selection: nervix_models::StateInspectionBranchSelection,
+    ) -> error_stack::Result<Vec<Option<BranchKey>>, BranchStateReadError> {
+        let (response, answer) = oneshot::channel();
+        self.commands
+            .send(ProcessorNodeCommand::SelectStateBranches {
+                selection,
+                response,
+            })
+            .await
+            .expect("the processor takes its command");
+        let selected = timeout(WAIT, answer)
+            .await
+            .expect("the processor answers its command")
+            .expect("the processor keeps its response")?;
+        let mut keys = Vec::with_capacity(selected.branches.len());
+        for branch in selected.branches {
+            keys.push(branch.key);
+        }
+        Ok(keys)
+    }
+
     async fn handoff(self) -> Vec<ProcessorBranchHandoff> {
         let (response, handoffs) = oneshot::channel();
         self.commands
@@ -943,4 +968,94 @@ async fn handed_over_branches_resume_only_under_the_lifecycle_they_belong_to() {
         instances.states().is_empty() && instances.version() == 0 && last_persisted_lru_lsm == 0,
         "a failed attempt installs nothing"
     );
+}
+
+/// The branches a pending restore has not installed hold rows no branch task can copy yet, so the
+/// processor refuses to name the branches any inspection reads, selecting none of them, rather than
+/// answering with fewer branches than its lifecycle names. Once a later attempt installs every
+/// branch, it names them in canonical order and exactly the branch a read selects.
+#[nervix_primitives::test]
+async fn a_processor_restoring_its_branches_refuses_to_name_the_branches_an_inspection_reads() {
+    use nervix_models::StateInspectionBranchSelection as Selection;
+
+    let fixture = OpenWindowFixture::new();
+    let directory = tempfile::tempdir().expect("the state directory opens");
+    let executor = single_worker_executor();
+    let (runtime, domain) = fixture.runtime(executor.clone(), &directory);
+    let alpha = string_branch_key("tenant", "alpha");
+    let beta = string_branch_key("tenant", "beta");
+    let beta_fingerprint = beta
+        .as_ref()
+        .expect("a string branch key is concrete")
+        .fingerprint();
+    fixture
+        .store_checkpoints(
+            &runtime,
+            &domain,
+            5,
+            &[
+                OpenBranch {
+                    key: alpha.clone(),
+                    incarnation: 3,
+                    latency: 10,
+                },
+                OpenBranch {
+                    key: beta.clone(),
+                    incarnation: 4,
+                    latency: 100,
+                },
+            ],
+        )
+        .await;
+    let filled = FilledCpuClass::fill(&executor, nervix_execution::CpuClass::Bulk).await;
+    let input = RelayBroadcast::with_capacity(nonzero_capacity(4));
+    let processor = fixture.start(&runtime, &domain, &input, Vec::new());
+
+    for selection in [
+        Selection::All,
+        Selection::Unbranched,
+        Selection::Branch(beta_fingerprint),
+    ] {
+        let refusal = processor
+            .inspected_branches(selection)
+            .await
+            .expect_err("a processor that has not restored its branches names none of them");
+        assert!(
+            matches!(refusal.current_context(), BranchStateReadError::Unrestored),
+            "the selection is refused as unrestored, found {refusal:?}"
+        );
+    }
+
+    filled.release().await;
+    let restored = processor.restored_lifecycle().await;
+    assert_eq!(
+        branch_lifetimes(&restored),
+        vec![(alpha.clone(), 3), (beta.clone(), 4)],
+        "the later attempt installs every branch its lifecycle names"
+    );
+    assert_eq!(
+        processor
+            .inspected_branches(Selection::All)
+            .await
+            .expect("a restored processor names its branches"),
+        vec![alpha.clone(), beta.clone()],
+        "a read of all branches names every restored branch in canonical order"
+    );
+    assert_eq!(
+        processor
+            .inspected_branches(Selection::Branch(beta_fingerprint))
+            .await
+            .expect("a restored processor names the branch a read selects"),
+        vec![beta.clone()],
+        "a read of one branch names exactly that branch"
+    );
+    assert_eq!(
+        processor
+            .inspected_branches(Selection::Unbranched)
+            .await
+            .expect("a restored processor answers a read of its unbranched state"),
+        Vec::<Option<BranchKey>>::new(),
+        "a branched processor holds no unbranched state"
+    );
+    processor.stop().await;
 }
