@@ -1,13 +1,16 @@
-//! Read-only inspection of committed and transaction candidate entity labels.
+//! Session command adaptation of committed and transaction candidate entity-label inspections.
 //!
-//! Layer: control plane.
-//! - **Owns.** Selecting one coherent metadata view and rendering its typed result.
-//! - **Depends on.** Applied consensus captures and the existing pure transaction planner.
+//! Layer: edges.
+//! - **Owns.** Selecting the requested metadata view and rendering its session command outcome.
+//! - **Depends on.** The session adapter, applied consensus captures and the pure transaction planner.
 //! - **Must not know.** Session framing, codec internals or runtime task lifecycle.
 
 #![cfg_attr(
     nervix_lint,
-    nervix::layer(control_plane, reason = "owns metadata inspection selection")
+    nervix::layer(
+        edge,
+        reason = "adapts typed metadata inspections to session command outcomes"
+    )
 )]
 
 use error_stack::{Report, ResultExt as _};
