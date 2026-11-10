@@ -1,5 +1,5 @@
 //! Repository tooling, outside the product layer order.
-//! Owns: the syntax count of authored cryptography that does not come from AWS-LC.
+//! Owns: the syntax rule that finds authored cryptography not coming from AWS-LC.
 //! Depends on: the shared source parser, original token spans and the product scope it declares.
 //! Must not know: resolved compiler paths, Cargo manifests, the dependency graph or a per-site
 //! exemption catalog.
@@ -17,8 +17,9 @@ use super::{
     SourceSite, impl_item_attributes, item_attributes, product, test_only, trait_item_attributes,
 };
 
-/// The count this rule contributes to, named as the gate's baseline names it.
-const RULE: &str = "non_aws_lc_crypto";
+/// The rule every site carries. The gate refuses each one rather than counting it: authored
+/// cryptography outside AWS-LC has no baseline, unlike the product graph's dependency edges.
+pub(super) const RULE: &str = "authored_non_aws_lc_crypto";
 
 /// The `nervix-crypto` boundary: the one crate that may draw entropy or build the TLS provider.
 const BOUNDARY: &str = "crates/crypto/";
