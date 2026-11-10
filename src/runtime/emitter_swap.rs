@@ -61,7 +61,7 @@ impl Runtime {
             old_emitter
         };
         let units =
-            self.processor_units_to_swap(domain, entity, &revision, replace_all, local_node_id);
+            self.processor_units_to_swap(domain, entity, revision, replace_all, local_node_id);
         for unit in units {
             nervix_primitives::task::consume_budget().await;
             let owner = NodeUnitRef::new(entity.clone(), unit);
