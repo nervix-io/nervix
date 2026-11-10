@@ -728,6 +728,7 @@ mod coordination;
 mod relay_grant_capacity;
 mod relay_owners;
 mod resolver;
+mod stream_opening;
 
 use resolver::{localhost_identity, test_resolver};
 
@@ -1087,6 +1088,7 @@ async fn rejected_stream_opening_retains_the_transport_cause() {
         RequestError::Stream { .. }
     ));
     assert!(error.contains::<TransportError>());
+    assert!(!error.contains::<RemoteOperationFailureKind>());
 
     transport_a.shutdown().await;
     transport_b.shutdown().await;

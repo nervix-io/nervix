@@ -1355,6 +1355,14 @@ captures keep only their selected row views and shared Arrow carriers. Publicati
 row payload or a whole relay for an established update. Snapshot archives and storage ownership
 retain the current container and backup contract.
 
+Description and fetch are separate bounded exchanges. If the selected owner replaces its sealed
+generation between them, fetch reports the typed not-ready outcome instead of substituting bytes
+or retaining another generation. A withdrawn assignment reports unavailable. Materialized
+dependency reads feed these outcomes into their declared wait, skip or default policy, as they do
+for absence at description time; a later read describes the current generation again. Transfer
+I/O, framing, length, digest and decoding failures remain errors. Generator reads retain their own
+failure-and-retry contract and never reuse a generation that the current owner did not authorize.
+
 A stopped backup selects materialized checkpoint readers alongside its other state from one
 immutable database view. Those readers keep the selected namespace, metadata and chunks through
 bounded group conversion, even if a later publication replaces or reclaims the generation.

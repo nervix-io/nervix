@@ -75,7 +75,7 @@ pub use observation::{
     ConnectionDirection, ConnectionFailureReason, RelayAdmissionOutcome, RequestOutcome,
     StreamResetReason, TransferDirection, TransportCounters, TransportSnapshot,
 };
-pub use operation::{RemoteOperationFailure, RemoteOperationSubject};
+pub use operation::{RemoteOperationFailure, RemoteOperationFailureKind, RemoteOperationSubject};
 pub use partition_transition::{
     PartitionCatalogKey, PartitionCatalogShard, PartitionClaimOutcome, PartitionClaimStep,
     PartitionClaimSubject, PartitionTransitionAnswer, PartitionTransitionRequest,

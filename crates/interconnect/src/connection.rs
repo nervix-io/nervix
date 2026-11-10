@@ -105,8 +105,8 @@ pub(crate) mod stream_slots;
 mod targets;
 
 use body::{
-    read_body, read_body_in_free_room, read_body_into, send_body, send_decode_refusal,
-    send_response, send_static_error,
+    read_body, read_body_in_free_room, read_body_into, read_error_response, send_body,
+    send_decode_refusal, send_response, send_static_error,
 };
 use dial::{DialedStream, OutboundDial};
 pub(crate) use duplex::FrameReader;
@@ -2794,18 +2794,14 @@ impl ClientConnection {
             let response = response.await.map_err(TransportError::from)?;
             let status = response.status();
             if !status.is_success() {
-                let message = read_body(
+                return Err(read_error_response(
                     &state.executor,
-                    response_class.memory_class(),
+                    response_class,
                     response_limit,
                     state.options.progress_timeout,
-                    response.into_body(),
+                    response,
                 )
-                .await?;
-                return Err(Report::new(TransportError::RemoteRejected {
-                    status: status.as_u16(),
-                    message: String::from_utf8_lossy(message.as_ref()).into_owned(),
-                }));
+                .await);
             }
             let content_length = response
                 .headers()
