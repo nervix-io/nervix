@@ -324,7 +324,8 @@ pub trait InterconnectRequest: RkyvMessage {
     const NAME: &'static str;
     const CLASS: PoolClass = PoolClass::Commands;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Shared;
-    const TIMEOUT: Duration;
+    /// The shared transport request budget; operations with a distinct deadline override it.
+    const TIMEOUT: Duration = super::DEFAULT_REQUEST_TIMEOUT;
 
     /// Discovery requests are permitted before the first live-membership view exists.
     const REQUIRES_LIVE_TARGET: bool = true;
@@ -2029,7 +2030,6 @@ impl InterconnectRequest for DescribeIngestorRequest {
     type Response = Result<IngestorDescribeEnvelope, RemoteOperationFailure>;
 
     const NAME: &'static str = "describe_ingestor";
-    const TIMEOUT: Duration = Duration::from_secs(10);
 }
 
 impl InterconnectRequest for CaptureOwnershipHandoffStateRequest {

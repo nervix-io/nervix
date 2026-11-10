@@ -26,7 +26,6 @@ impl InterconnectRequest for DescribeInferencerRequest {
     type Response = Result<InferencerStateSummary, RemoteOperationFailure>;
 
     const NAME: &'static str = "describe_inferencer";
-    const TIMEOUT: std::time::Duration = crate::DEFAULT_REQUEST_TIMEOUT;
 }
 
 #[cfg(all(test, not(any(feature = "shuttle", feature = "turmoil"))))]
