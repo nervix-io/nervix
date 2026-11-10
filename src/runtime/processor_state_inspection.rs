@@ -21,6 +21,8 @@
     )
 )]
 
+use std::collections::BTreeSet;
+
 use arrow_array::{TimestampNanosecondArray, UInt32Array};
 use arrow_schema::FieldRef;
 use error_stack::ResultExt as _;
@@ -522,8 +524,24 @@ pub(crate) struct ProcessorStatePageBounds {
     pub(crate) bytes: u64,
 }
 
+/// The ordinary branch selector and, only during repartitioning, copies selected elsewhere.
+pub(crate) struct ProcessorStateSelection {
+    pub(crate) branch: StateInspectionBranchSelection,
+    pub(crate) partition_exclusions: Option<BTreeSet<BranchKeyFingerprint>>,
+}
+
+impl From<StateInspectionBranchSelection> for ProcessorStateSelection {
+    fn from(branch: StateInspectionBranchSelection) -> Self {
+        Self {
+            branch,
+            partition_exclusions: None,
+        }
+    }
+}
+
 /// One execution unit's page of the rows its reorderer or correlator branches hold.
 pub(crate) struct ProcessorStatePage {
+    pub(crate) partition_catalog: Option<BTreeSet<BranchKeyFingerprint>>,
     /// The exact cut the page was read from: every selected branch's identity, lifetime and handled
     /// events.
     pub(crate) fingerprint: [u8; 32],
@@ -606,7 +624,7 @@ impl Runtime {
         domain: &DomainName,
         processor: &NodeRef,
         unit: Unit,
-        selection: StateInspectionBranchSelection,
+        selection: ProcessorStateSelection,
         after: Option<(Option<BranchKeyFingerprint>, u64)>,
         bounds: ProcessorStatePageBounds,
     ) -> error_stack::Result<ProcessorStatePage, ProcessorStatePageError> {
@@ -616,6 +634,9 @@ impl Runtime {
                     domain, processor, unit, selection, after, bounds,
                 )
                 .await;
+        }
+        if selection.partition_exclusions.is_some() {
+            return Err(Report::new(ProcessorStatePageError::Columns));
         }
         let commands = {
             let execution = self
@@ -633,7 +654,7 @@ impl Runtime {
         let (response, selected) = oneshot::channel();
         commands
             .send(ProcessorNodeCommand::SelectStateBranches {
-                selection,
+                selection: selection.branch,
                 response,
             })
             .await
@@ -736,6 +757,7 @@ impl Runtime {
             .processor_state_sections(processor.kind, copies)
             .await?;
         Ok(ProcessorStatePage {
+            partition_catalog: None,
             fingerprint: digest.finish(),
             generation,
             counts,
