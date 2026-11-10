@@ -19,6 +19,7 @@ use super::{
     ChoiceControl, ChoiceControlSignals, ChoiceLoad, CodecFormatDraft, CreateSignals,
     RequestSender, event_target_value,
     ingestor_route_draft::{AssignmentDraft, MessageErrorDraft},
+    placement_draft::CorridorSide,
     processor_draft::StatePolicyDraft,
     request_choices,
 };
@@ -133,7 +134,7 @@ pub(super) fn selected_choice(
     control: ChoiceControl,
     value: &ChoiceValue,
 ) -> bool {
-    if control.form() == super::CreateKind::Emitter {
+    if control.form() == super::CreateKind::Model(ModelKind::Emitter) {
         return signals.emitter_selected(control, value);
     }
     match (control, value) {
@@ -143,6 +144,14 @@ pub(super) fn selected_choice(
         (ChoiceControl::PlacementPolicy, ChoiceValue::PlacementPolicy(value)) => {
             signals.placement.get().policy == *value
         }
+        (ChoiceControl::PlacementFromMember, ChoiceValue::Model(node)) => signals
+            .placement
+            .get()
+            .selects_member(CorridorSide::From, node),
+        (ChoiceControl::PlacementToMember, ChoiceValue::Model(node)) => signals
+            .placement
+            .get()
+            .selects_member(CorridorSide::To, node),
         (ChoiceControl::BranchSchema, ChoiceValue::Model(node)) => {
             signals.structured.get().branch.selects_schema(node)
         }
@@ -370,7 +379,7 @@ pub(super) fn selected_choice(
 /// Applies `value` to the draft `control` edits. A value of another kind than the control asks
 /// for changes nothing.
 pub(super) fn select_choice(signals: CreateSignals, control: ChoiceControl, value: ChoiceValue) {
-    if control.form() == super::CreateKind::Emitter {
+    if control.form() == super::CreateKind::Model(ModelKind::Emitter) {
         signals.select_emitter_choice(control, value);
         return;
     }
@@ -381,6 +390,16 @@ pub(super) fn select_choice(signals: CreateSignals, control: ChoiceControl, valu
         }
         (ChoiceControl::PlacementPolicy, ChoiceValue::PlacementPolicy(value)) => {
             signals.placement.update(|draft| draft.policy = value);
+        }
+        (ChoiceControl::PlacementFromMember, ChoiceValue::Model(node)) => {
+            signals
+                .placement
+                .update(|draft| draft.add_member(CorridorSide::From, &node));
+        }
+        (ChoiceControl::PlacementToMember, ChoiceValue::Model(node)) => {
+            signals
+                .placement
+                .update(|draft| draft.add_member(CorridorSide::To, &node));
         }
         (ChoiceControl::BranchSchema, ChoiceValue::Model(node)) => {
             signals

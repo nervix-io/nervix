@@ -479,9 +479,13 @@ subsections after the boundary table follow this order.
 
 A window route compilation failure retains its compiler report beneath
 `RegistryError::WindowRouteCompile`, which names the domain, processor and output relay.
-`WindowRouteCompileError::CollectionArgumentNullable` names `COLLECT_VEC` and directs an optional
+`WindowRouteCompileError::CollectionArgumentNullable` names the collection function and directs an optional
 argument to `coalesce`. `RegistryError::WindowCollectionMissingBound` names the same route and
 function when neither a message width nor a state limit bounds retained collection.
+The fixed form's bound refusal names its authored `WIDTH` and directs duration or combined
+windows to `COLLECT_VEC`; an intrinsically unrepresentable fixed dimension keeps its typed
+compiler cause. A retained-count disagreement fails before gathering through the window's
+existing emission-failure owner.
 
 State inspection and WASM reset resolve `BRANCH KEY { field = literal, ... }` through the shared
 `StateBranchSelection` vocabulary before reading or resetting state. Its typed
@@ -1466,8 +1470,11 @@ operating system refusing a bind because another socket holds the address.
 
 ### Connector Status Observation
 
-An outbound WebSocket peer's Close is a typed read failure preserving its status code and reason;
-an end without a status has its own typed state. Transport failures keep the WebSocket driver's
+An outbound WebSocket peer's Close preserves its status code and reason as a typed resume failure
+during signaling, or a read failure after readiness. A Close without a status has its own typed
+state, distinct from an ended stream. The signaling engine reports that distinction to its caller;
+the outbound connection flushes the queued reply within the one-second control-frame budget before
+returning the resume failure. Transport failures keep the WebSocket driver's
 error beneath `IngestorError::Read`. A locally initiated close whose handshake exceeds its one-second
 budget keeps a typed timeout beneath the suspend or close context. The broker host retains a read
 failure and its growing retry delay across successful reconnects until a batch is accepted. A

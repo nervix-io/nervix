@@ -48,7 +48,7 @@ CREATE WINDOW PROCESSOR customer_order_window
 COMMIT;
 ```
 
-- The aggregate functions are `COUNT`, `COUNT_IF`, `SUM`, `AVG`, `MIN`, `MAX`, `FIRST`, `LAST`, `COLLECT_VEC`,
+- The aggregate functions are `COUNT`, `COUNT_IF`, `SUM`, `AVG`, `MIN`, `MAX`, `FIRST`, `LAST`, `COLLECT_VEC`, `COLLECT_ARRAY`,
   `ARG_MIN`, `ARG_MAX`, `BOOL_AND`, `BOOL_OR`, `VAR_POP`, `VAR_SAMP`, `STDDEV_POP`, `STDDEV_SAMP`,
   `COVAR_POP`, `COVAR_SAMP`, `CORR`, and `PERCENTILE_LINEAR_HISTOGRAM`, and the approximate
   `APPROX_COUNT_DISTINCT`, `APPROX_QUANTILE`, and `APPROX_TOP_K`. Aggregate calls also participate
@@ -61,6 +61,10 @@ COMMIT;
 - `COLLECT_VEC` returns the retained amounts as one list in `FIRST`-to-`LAST` order. It requires a
   required argument and either a message `WIDTH` or `MAX STATE SIZE`. Choose a null default with
   `coalesce` before collecting an optional field.
+- For a fixed-length consumer, choose `WIDTH n MESSAGES` without a duration and assign
+  `COLLECT_ARRAY(input.amount)` to an `ARRAY<I64, n>` field. See
+  [collecting generator samples](quickstart-generators.md#collect-samples-for-a-fixed-tensor)
+  for a complete fixed-tensor pipeline and its sample timestamps.
 - `input.<field>` is valid **only** inside aggregate arguments; a bare `customer = input.customer`
   is rejected. Aggregates cannot be nested.
 - `WIDTH` equal to `STEP` makes the windows tumbling (no overlap); a smaller `STEP` slides them.

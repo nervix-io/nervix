@@ -4,8 +4,8 @@
 //!
 //! - **Owns.** Outbound transport requirements and configuration, DNS-backed resume within the
 //!   client's `connect_timeout_ms`, the typed refusal of an upgrade answer that contradicts the
-//!   request's subprotocol offer, signaling before readiness, accepted-frame storage, payload
-//!   delivery, and suspend and close operations.
+//!   request's subprotocol offer, signaling before readiness and the ending of a connection whose
+//!   handshake fails, accepted-frame storage, payload delivery, and suspend and close operations.
 //! - **Depends on.** The ingestor contract, typed plans and host services, compiled signaling engine,
 //!   vocabulary values, execution primitives, TLS configuration, and WebSocket transport.
 //! - **Must not know.** Configuration Models, Plexus, runtime collectors, relays, branches,
@@ -58,7 +58,8 @@ use tokio_tungstenite::{
 };
 
 use crate::{
-    CompiledSignalingProtocol, SignalingDataEmitter, WebsocketDataFrame, WebsocketSignalingSession,
+    CompiledSignalingProtocol, SignalingDataEmitter, WebsocketDataFrame, WebsocketSignalingError,
+    WebsocketSignalingSession,
 };
 
 const WEBSOCKETS: ConnectorKind = ConnectorKind::Websockets;
@@ -254,7 +255,7 @@ pub struct WebsocketsConnectionIngestor {
 mod connection;
 mod handshake;
 mod pings;
-use connection::{WebsocketConnection, WebsocketRead};
+use connection::{ConnectionEnding, WebsocketConnection, WebsocketRead};
 
 enum WebsocketPingOutcome {
     Sent,
@@ -485,12 +486,36 @@ impl IngestorConnector for WebsocketsConnectionIngestor {
             let mut pending = self.pending.for_handshake();
             let sink = pending.sink(headers.clone());
             let session = WebsocketSignalingSession::new(protocol.clone());
-            self.pending = pending
-                .complete(session.run(&mut relay, &sink))
-                .await
-                .change_context(IngestorError::Resume {
-                    connector: WEBSOCKETS.keyword(),
-                })?;
+            let handshake = pending.complete(session.run(&mut relay, &sink)).await;
+            match handshake {
+                Ok(completed) => self.pending = completed,
+                Err(mut failure) => {
+                    // The attempt's handoff went with the failed handshake. A peer Close has
+                    // already queued its exact reply; give it the same bounded flush as a Close
+                    // after readiness. Every other failure keeps its immediate Close offer.
+                    if let WebsocketSignalingError::PeerClosed { .. }
+                    | WebsocketSignalingError::PeerClosedWithoutStatus =
+                        failure.current_context()
+                    {
+                        let answered =
+                            timeout(WEBSOCKETS_CONTROL_FRAME_BUDGET, relay.flush()).await;
+                        failure = match answered {
+                            Ok(Ok(())) => failure,
+                            Ok(Err(error)) => failure.attach_printable(error),
+                            Err(error) => failure.attach_printable(error),
+                        };
+                    } else {
+                        let ending = ConnectionEnding::from(failure.current_context());
+                        ending.offer(
+                            &mut relay,
+                            "offering a WebSocket peer whose signaling handshake failed a Close",
+                        );
+                    }
+                    return Err(failure.change_context(IngestorError::Resume {
+                        connector: WEBSOCKETS.keyword(),
+                    }));
+                }
+            }
         }
         self.connection = Some(WebsocketConnection::new(
             relay,
@@ -820,6 +845,32 @@ mod tests {
             IngestorResume::Ready
         );
         (ingestor, peer)
+    }
+
+    /// An ingestor whose client runs `signaling` against a loopback listener that has accepted
+    /// nothing yet, so the caller plays the peer of the upgrade and of the handshake.
+    pub(super) async fn signaling_ingestor(
+        mut config: Vec<ClientConfigEntry>,
+        signaling: Arc<CompiledSignalingProtocol>,
+    ) -> (WebsocketsConnectionIngestor, TcpListener) {
+        let fixture = DnsFixture::start().await;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .assured("a loopback TCP port is available");
+        let address = listener.local_addr().assured("the listener is bound");
+        config.extend(endpoint(format!("ws://{address}/socket")));
+        let plan = WebsocketsConnectionIngestorPlan::new(
+            config,
+            WebsocketsUpgradeHeaders::default(),
+            Some(signaling),
+            fixture.resolver,
+            Default::default(),
+        )
+        .assured("the endpoint is valid");
+        let ingestor = WebsocketsConnectionIngestor::open(&plan, 0)
+            .await
+            .assured("the ingestor opens");
+        (ingestor, listener)
     }
 
     #[nervix_primitives::test]
@@ -1521,3 +1572,6 @@ mod tests {
 
 #[cfg(test)]
 mod connection_tests;
+
+#[cfg(test)]
+mod failed_handshake_tests;

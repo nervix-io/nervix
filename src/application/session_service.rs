@@ -869,6 +869,7 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
         | ChoiceTarget::ProcessorInputBranchRelay
         | ChoiceTarget::ProcessorMaterializedRelay
         | ChoiceTarget::GeneratorMaterializedRelay
+        | ChoiceTarget::PlacementMember
         | ChoiceTarget::EmitterHttpRequestReference
         | ChoiceTarget::EmitterKafkaTopicReference
         | ChoiceTarget::EmitterPulsarTopicReference
@@ -1170,6 +1171,7 @@ impl SessionServiceImpl {
             | ChoiceTarget::ProcessorInputBranchRelay
             | ChoiceTarget::ProcessorMaterializedRelay
             | ChoiceTarget::GeneratorMaterializedRelay
+            | ChoiceTarget::PlacementMember
             | ChoiceTarget::EmitterHttpRequestReference
             | ChoiceTarget::EmitterKafkaTopicReference
             | ChoiceTarget::EmitterPulsarTopicReference

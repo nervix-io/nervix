@@ -137,6 +137,7 @@ route errors, ACK attribution, and branch ownership.
 | Delivery latency and latest watermark | `ElapsedHistogram`, `ElapsedLayout`, `latest_instant`, `elapsed_nanos` over `&[i64]` | Relay delivery observations feed retained metrics handles at processor, reingestor, and emitter inputs; HDR bucket scatter and Prometheus local recording remain scalar |
 | Paced-domain admission | `AdmissionKernel::admit` returns packed bytes | `DomainAdmissionWindow::admit_column` supplies reached centers and period; ingest groups select Arrow rows, timestamp metadata, and ACK sidecars together |
 | Window admission and retraction | `RunValidity`, signed/unsigned sums, boolean counts, non-finite masks, compensated sums, moments, co-moments, bucket indexes, typed reverse visits | `ArgumentColumn` resolves type and validity once per run; branch-owned accumulators admit, retract, and rebuild retained rows; deque updates, scatter, and sketches remain irregular |
+| List statistics | Non-finite masks, moments, `RunMoments::variance` with `Estimator`, `QuantileRank` | The VM's `list_var_pop` through `list_quantile` mask a batch's child buffer once and fold each list's slice as one run; quantile selection and the `list_argmin` and `list_argmax` scans remain typed scalar work |
 | VM failure packing | `FlagPacker::pack`, `WORD_LANES`, `lane_mask` | `numeric::Lanes` computes blocks of up to 1,024 lanes and packs one failure byte per lane; explicit arithmetic kernels already return failure words |
 | Selection bitmaps | Arrow `BooleanBuffer` operations, `collect_bool`, `set_indices`, filter/take | VM predicates exclude null and failed rows; runtime selection and ingest branch masks retain packed form; required-output validation ORs inverted validity buffers |
 | Checked integer arithmetic | `CheckedArithmetic`, `LaneOperands`, `CheckedLanes` | VM integer operators pass two runs or a shared operand; every signed/unsigned width has checked sums and differences, with widened products below 64 bits |
@@ -188,7 +189,9 @@ Validity readers carry a bitmap and its bit offset and count present rows by pop
 counts combine value and validity words. Signed/unsigned 64-bit sums accumulate low and high
 32-bit halves in vector lanes, periodically reducing them to exact `i128` before lane overflow.
 Smaller integer sums and generic min/max use typed scalar folds. Non-finite `F32`/`F64` inputs
-produce column bitmaps. Bucket-index calculation and subsequent histogram scatter remain typed
+produce column bitmaps. The divisor a variance takes, `Estimator`, and the rank an exact quantile
+interpolates at, `QuantileRank`, are defined beside the moments, so the window aggregates and the
+VM's list statistics divide and interpolate by one rule. Bucket-index calculation and subsequent histogram scatter remain typed
 scalar work. Sketch admission reuses a run key buffer; BLAKE3, t-digest insertion, and candidate
 updates are not turned into lane-wise kernels.
 
