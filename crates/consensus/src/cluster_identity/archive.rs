@@ -48,7 +48,7 @@ impl<D: Fallible + ?Sized> DeserializeWith<<[u8; 16] as Archive>::Archived, Uuid
     }
 }
 
-pub(super) struct KeyIdentity;
+pub(crate) struct KeyIdentity;
 
 impl ArchiveWith<KeyId> for KeyIdentity {
     type Archived = ArchivedString;
