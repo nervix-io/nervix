@@ -518,3 +518,13 @@ A changed generation, source lifetime, committed control revision or captured ro
 resume as stale. See [Inspect Materialized State](./relay.md#inspect-materialized-state) for clause
 order and [the protocol](./client-session-protocol.md#materialized-state-inspection-envelope) for
 wire ownership and reply bounds.
+
+## Listener Lifetimes
+
+Sessions are carried by connections subject to the serving node's
+[Listener Bounds](node-settings.md#listener-bounds). The gRPC transport limits request concurrency
+and HTTP/2 streams, applies request-handler response deadlines, and reaps unresponsive ping peers.
+Established streaming responses retain their session lifetime. WebSocket upgrades retain their
+socket's connection lease; console frame/message bounds remain those of the session protocol. The node
+WebSocket size flags apply to ingest endpoints. Idle expiry observes read and write progress. A transport close remains a transport
+failure, and command recovery follows the existing execution-identity contract.

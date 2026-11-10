@@ -6778,3 +6778,8 @@ selections = ["deloxide-stress-restore"]
 gap = "The new per-template client/server cache mutex serializes one bounded config clone and provider replacement. Public outward TLS policy scenarios and the production-owner Shuttle check cover policy/capture behavior in ordinary and modeled modes. Diagnostic campaigns are deliberately unrun under the live Task Execution Template's temporary Deloxide CI/local cost policy; no tracked-lock execution evidence is claimed."
 path = "crates/tls/src/lib.rs"
 workloads = []
+
+[[owner]]
+gap = "The diagnostic-node workload reaches successful HTTP input and its retained accounting guard. Slow bodies, capacity refusal and cancellation racing allocation observation are qualified by the ordinary listener scenarios and the production-owner Shuttle check; those interleavings are outside detector evidence. The selected accounting mutex holds no I/O, await, copy or graph dispatch."
+path = "src/application/listener_input.rs"
+workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
