@@ -57,6 +57,9 @@ pub(in crate::application) enum ConfiguredQuestion {
     ProcessorCompatibleInputRelays(NodeRef),
     ProcessorInputBranchRelays(NodeRef),
     ProcessorMaterializedRelays(NodeRef),
+    /// Relays with materialized state on exactly a generator's branch: unbranched ones for
+    /// `None`, and ones branched by the named branch otherwise.
+    GeneratorMaterializedRelays(Option<BranchName>),
     EmitterEntity(nervix_models::EmitterEntityKind),
     EmitterCatalog,
     EmitterCodecs,
@@ -131,6 +134,9 @@ impl<'a> ConfiguredQuery<'a> {
                     request.dependencies(),
                     ConfiguredQuestion::ProcessorMaterializedRelays,
                 );
+            }
+            ChoiceTarget::GeneratorMaterializedRelay => {
+                return Self::generator_materialized_relays(request.dependencies());
             }
             ChoiceTarget::EmitterHttpRequestReference
             | ChoiceTarget::EmitterKafkaTopicReference
@@ -289,6 +295,35 @@ impl<'a> ConfiguredQuery<'a> {
         })
     }
 
+    /// A generator's materialized relays: the domain alone asks for unbranched ones, and the
+    /// domain followed by a branch for ones branched by exactly that branch.
+    fn generator_materialized_relays(dependencies: &'a [ChoiceSelection]) -> Option<Self> {
+        match dependencies {
+            [
+                ChoiceSelection {
+                    value: ChoiceValue::Domain(domain),
+                },
+            ] => Some(Self {
+                domain,
+                question: ConfiguredQuestion::GeneratorMaterializedRelays(None),
+            }),
+            [
+                ChoiceSelection {
+                    value: ChoiceValue::Domain(domain),
+                },
+                ChoiceSelection {
+                    value: ChoiceValue::Model(branch),
+                },
+            ] if branch.kind == ModelKind::Branch => Some(Self {
+                domain,
+                question: ConfiguredQuestion::GeneratorMaterializedRelays(Some(BranchName::from(
+                    &branch.identifier,
+                ))),
+            }),
+            _ => None,
+        }
+    }
+
     fn processor_relays(
         dependencies: &'a [ChoiceSelection],
         question: impl FnOnce(NodeRef) -> ConfiguredQuestion,
@@ -379,7 +414,8 @@ impl ConfiguredChoices {
             | ConfiguredQuestion::IngestRelays(_)
             | ConfiguredQuestion::ProcessorCompatibleInputRelays(_)
             | ConfiguredQuestion::ProcessorInputBranchRelays(_)
-            | ConfiguredQuestion::ProcessorMaterializedRelays(_) => self.models(question, &search),
+            | ConfiguredQuestion::ProcessorMaterializedRelays(_)
+            | ConfiguredQuestion::GeneratorMaterializedRelays(_) => self.models(question, &search),
             ConfiguredQuestion::EmitterEntity(_)
             | ConfiguredQuestion::EmitterCatalog
             | ConfiguredQuestion::EmitterCodecs
@@ -484,6 +520,12 @@ impl ConfiguredChoices {
                 (ConfiguredQuestion::ProcessorMaterializedRelays(_), Model::Relay(relay))
                     if relay.materialized_state.is_some()
                         && input.is_some_and(|source| source.branching == relay.branching) =>
+                {
+                    ModelCandidate::relay(relay)?
+                }
+                (ConfiguredQuestion::GeneratorMaterializedRelays(branch), Model::Relay(relay))
+                    if relay.materialized_state.is_some()
+                        && relay.branching.branch() == branch.as_ref() =>
                 {
                     ModelCandidate::relay(relay)?
                 }
@@ -1225,6 +1267,118 @@ mod tests {
             "",
         );
         assert!(matches!(missing, Err(ChoiceStatus::MissingContext)));
+    }
+
+    #[test]
+    fn generator_questions_offer_materialized_relays_on_exactly_the_generator_branch() {
+        let tenant = BranchName::parse("by_tenant").assured("valid branch");
+        let region = BranchName::parse("by_region").assured("valid branch");
+        let models = vec![
+            schema(
+                "notification",
+                vec![field("tenant", ParseAsType::String, false, false)],
+            ),
+            branch("by_tenant", None),
+            branch("by_region", None),
+            relay(
+                "tenant_state",
+                "notification",
+                RelayBranching::branched_by(tenant.clone()),
+                Some(MaterializedRelayState::LastByTimestamp),
+            ),
+            relay(
+                "tenant_plain",
+                "notification",
+                RelayBranching::branched_by(tenant.clone()),
+                None,
+            ),
+            relay(
+                "region_state",
+                "notification",
+                RelayBranching::branched_by(region),
+                Some(MaterializedRelayState::LastByTimestamp),
+            ),
+            relay(
+                "flat_state",
+                "notification",
+                RelayBranching::unbranched(),
+                Some(MaterializedRelayState::LastByTimestamp),
+            ),
+            relay(
+                "flat_plain",
+                "notification",
+                RelayBranching::unbranched(),
+                None,
+            ),
+        ];
+        let configured = ConfiguredChoices::new(
+            domain(),
+            models,
+            ResourceVersionStatus::default(),
+            Vec::new(),
+        );
+        let branch_ref = NodeRef::new(ModelKind::Branch, &tenant);
+        /// One generator lookup: the dependencies it sends, the question they ask, and the relays
+        /// that question offers.
+        struct Case {
+            dependencies: Vec<ChoiceSelection>,
+            question: ConfiguredQuestion,
+            relays: Vec<&'static str>,
+        }
+        let cases = [
+            Case {
+                dependencies: vec![ChoiceSelection {
+                    value: ChoiceValue::Domain(domain()),
+                }],
+                question: ConfiguredQuestion::GeneratorMaterializedRelays(None),
+                relays: vec!["flat_state"],
+            },
+            Case {
+                dependencies: vec![
+                    ChoiceSelection {
+                        value: ChoiceValue::Domain(domain()),
+                    },
+                    ChoiceSelection {
+                        value: ChoiceValue::Model(branch_ref.clone()),
+                    },
+                ],
+                question: ConfiguredQuestion::GeneratorMaterializedRelays(Some(tenant.clone())),
+                relays: vec!["tenant_state"],
+            },
+        ];
+        for case in cases {
+            let request = ChoiceLookupRequest::new(
+                ChoiceTarget::GeneratorMaterializedRelay,
+                case.dependencies,
+                String::new(),
+            );
+            assert_eq!(
+                ConfiguredQuery::of(&request).map(|query| query.question),
+                Some(case.question.clone())
+            );
+            let actual: Vec<_> = configured
+                .resolve(&case.question, "")
+                .assured("valid generator question")
+                .choices
+                .into_iter()
+                .map(|choice| choice.presentation.label)
+                .collect();
+            assert_eq!(actual, case.relays);
+        }
+        // A relay reference is no generator branch.
+        let relay_dependency = ChoiceLookupRequest::new(
+            ChoiceTarget::GeneratorMaterializedRelay,
+            vec![
+                ChoiceSelection {
+                    value: ChoiceValue::Domain(domain()),
+                },
+                ChoiceSelection {
+                    value: ChoiceValue::Model(relay_node("tenant_state")),
+                },
+            ],
+            String::new(),
+        );
+        assert!(ConfiguredQuery::of(&relay_dependency).is_none());
     }
 
     #[test]

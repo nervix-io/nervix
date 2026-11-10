@@ -16,10 +16,11 @@ use error_stack::{Report, ResultExt as _};
 use indexmap::IndexMap;
 use meticulous::ResultExt as _;
 use nervix_models::{
-    ClusterNodeName, ClusterSchedule, DomainName, DomainSchedule, DynamicModelUpdate, FlushPolicy,
-    KafkaPartitionSchedule, ModelKind, ModelName, NodeRef, NodeUnitRef, OwnershipStateComponent,
-    OwnershipStateRecoveryOutcome, OwnershipTransition, ResolvedBranching, ScheduledNode,
-    SchemaFingerprint, StatePurge, Unit, WasmStateGenerations, WasmStateReset,
+    BranchName, BranchPartitionEpoch, ClusterNodeName, ClusterSchedule, DomainName, DomainSchedule,
+    DynamicModelUpdate, FlushPolicy, KafkaPartitionSchedule, ModelKind, ModelName, NodeRef,
+    NodeUnitRef, OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipTransition,
+    ResolvedBranching, ScheduledNode, SchemaFingerprint, StatePurge, Unit, WasmStateGenerations,
+    WasmStateReset,
 };
 use nervix_primitives::sync::Arc;
 use thiserror::Error;
@@ -110,6 +111,44 @@ pub(crate) struct ExecutionNode {
     pub(crate) ownership_state_components: Vec<OwnershipStateComponent>,
     pub(crate) gate_relays: Vec<nervix_models::RelayName>,
     pub(crate) executes_on_every_cluster_node: bool,
+    /// The transition this node's branch is in while keys placed under its previous partition
+    /// count may lie outside their partition, for a node that keeps state per key.
+    pub(crate) partition_transition: Option<NodePartitionTransition>,
+}
+
+/// The partition transition one node that keeps state per key executes in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NodePartitionTransition {
+    pub(crate) branch: BranchName,
+    pub(crate) epoch: nervix_models::PartitionEpochNumber,
+    /// The count the epoch's previous count placed keys by.
+    pub(crate) previous: nervix_models::BranchPartitions,
+    /// The units beyond the current count's this node stays scheduled as for the keys the
+    /// previous count placed there.
+    pub(crate) holding: Vec<Unit>,
+}
+
+impl NodePartitionTransition {
+    fn of(node: &ScheduledNode, schedule: &DomainSchedule) -> Option<Self> {
+        if !node.keeps_state_per_key() {
+            return None;
+        }
+        let branch = node.partition_branch()?;
+        let epoch = schedule.partition_epochs.get(branch)?;
+        let transition = epoch.transition.as_ref()?;
+        Some(Self {
+            branch: branch.clone(),
+            epoch: epoch.number,
+            previous: transition.previous,
+            holding: epoch.holding_units(),
+        })
+    }
+
+    /// Whether `unit` holds only keys the previous count placed there: no producer places a key
+    /// in it under the current count.
+    pub(crate) fn is_holding(&self, unit: Unit) -> bool {
+        self.holding.contains(&unit)
+    }
 }
 
 /// The complete pinned model and ordered STATE declaration define one tensor-state lifetime.
@@ -171,6 +210,16 @@ impl ExecutionNode {
                 std::slice::from_ref(&node.identity()),
             ),
             executes_on_every_cluster_node: node.config.executes_on_every_cluster_node(),
+            partition_transition: NodePartitionTransition::of(node, schedule),
+        }
+    }
+
+    /// Whether this node is scheduled as `unit` only for the keys its branch's previous partition
+    /// count placed there.
+    pub(crate) fn is_holding_unit(&self, unit: Unit) -> bool {
+        match &self.partition_transition {
+            Some(transition) => transition.is_holding(unit),
+            None => false,
         }
     }
 
@@ -289,6 +338,9 @@ pub(crate) struct ExecutionRevision {
     pub(crate) processors: BranchedNodeSpecs,
     pub(crate) message_errors: MessageErrorRouteSpecs,
     pub(crate) ownership_handoff_fingerprint: [u8; 32],
+    /// The partition epoch of every branch whose count changed since it was created; a branch
+    /// absent here is in its first epoch, with every key in its partition.
+    pub(crate) partition_epochs: BTreeMap<BranchName, BranchPartitionEpoch>,
 }
 
 impl ExecutionRevision {
@@ -307,7 +359,7 @@ impl ExecutionRevision {
     ) -> error_stack::Result<Arc<Self>, ExecutionRevisionError> {
         let domain = &schedule.domain;
         for node in schedule.nodes.values() {
-            if !node.units_match_declaration() {
+            if !node.units_match_declaration(&schedule.holding_units_of(node)) {
                 return Err(Report::new(ExecutionRevisionError::UnitDeclaration {
                     domain: domain.clone(),
                     node: node.identity(),
@@ -361,6 +413,7 @@ impl ExecutionRevision {
             processors,
             message_errors,
             ownership_handoff_fingerprint,
+            partition_epochs: schedule.partition_epochs.clone(),
         }))
     }
 
@@ -463,13 +516,17 @@ impl ExecutionRevision {
                 units: node.units.iter().collect(),
             })
             .collect::<Vec<_>>();
-        let encoded = serde_json::to_vec(&(&schedule.domain, nodes, &schedule.placement_groups))
-            .map_err(|error| {
-                Report::new(ExecutionRevisionError::RevisionIdentity {
-                    domain: schedule.domain.clone(),
-                })
-                .attach_printable(error)
-            })?;
+        // Partition epochs are part of the source: a retirement may end a transition without
+        // changing any node's units.
+        let epochs = schedule.partition_epochs.iter().collect::<Vec<_>>();
+        let encoded =
+            serde_json::to_vec(&(&schedule.domain, nodes, &schedule.placement_groups, epochs))
+                .map_err(|error| {
+                    Report::new(ExecutionRevisionError::RevisionIdentity {
+                        domain: schedule.domain.clone(),
+                    })
+                    .attach_printable(error)
+                })?;
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"nervix/execution-revision/source-schedule");
         hasher.update(&encoded);
@@ -545,6 +602,11 @@ pub(crate) enum DynamicExecutionUpdate {
         policy: FlushPolicy,
     },
     VhostTlsVersion,
+    /// The partition transition of the branch dividing `node` retired: the node's units stop
+    /// claiming keys in place, and the units that held only the previous count's keys end.
+    PartitionTransitionRetired {
+        node: NodeRef,
+    },
 }
 
 impl From<DynamicModelUpdate> for DynamicExecutionUpdate {
@@ -562,6 +624,9 @@ impl From<DynamicModelUpdate> for DynamicExecutionUpdate {
                 policy: config.flush_policy.clone(),
             },
             DynamicModelUpdate::VhostTlsVersion { .. } => Self::VhostTlsVersion,
+            DynamicModelUpdate::PartitionTransitionRetired { node } => {
+                Self::PartitionTransitionRetired { node }
+            }
         }
     }
 }

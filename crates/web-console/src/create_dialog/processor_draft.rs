@@ -1,5 +1,5 @@
-//! Incomplete visual junction, deduplicator, reorderer, window processor, correlator and
-//! reingestor state until it becomes a semantic Model.
+//! Incomplete visual junction, deduplicator, reorderer, window processor, correlator,
+//! reingestor, generator, inferencer and WASM processor state until it becomes a semantic Model.
 //!
 //! Layer: edges.
 //!
@@ -8,7 +8,7 @@
 //!   stages, the scoped references their pickers insert, and their conversion to current semantic
 //!   Models.
 //! - **Depends on.** Typed vocabulary, expression parsing, and the shared input list, window,
-//!   correlator and route drafts.
+//!   correlator, generator, inferencer, WASM processor and route drafts.
 //! - **Must not know.** Registry state, runtime execution, or session transport.
 
 #![cfg_attr(
@@ -16,15 +16,17 @@
     nervix::layer(edge, reason = "owns the edges boundary declared above")
 )]
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, num::NonZeroU64};
 
 use error_stack::{Report, ResultExt as _};
 use nervix_models::{
     AckMode, BranchName, BranchSelection, CorrelatorName, CreateCorrelator, CreateDeduplicator,
-    CreateJunction, CreateReingestor, CreateReorderer, CreateWindowProcessor, DeduplicatorName,
-    Expression, FieldName, FieldReference, FieldScope, JunctionName, MaterializedStateDependency,
-    MaterializedStatePolicy, Model, ModelKind, NodeRef, ProcessorInputs, ProcessorOutputs,
-    ReingestorName, RelayName, ReordererName, WindowProcessorName,
+    CreateGenerator, CreateInferencer, CreateJunction, CreateReingestor, CreateReorderer,
+    CreateWasmProcessor, CreateWindowProcessor, DeduplicatorName, Expression, FieldName,
+    FieldReference, FieldScope, GeneratorName, InferencerName, JunctionName,
+    MaterializedStateDependency, MaterializedStatePolicy, Model, ModelKind, NodeRef,
+    ProcessorInputs, ProcessorOutputs, ReingestorName, RelayName, ReordererName,
+    RequestedResourceVersion, WasmProcessorName, WindowProcessorName,
 };
 use nervix_plexus::parse_expression;
 use strum::Display;
@@ -36,9 +38,14 @@ use super::{
         AssignmentDraft, IngestRouteDraft, IngestRouteDraftError, SetOnlyEmission,
     },
     inserted_reference::InsertedReference,
+    processor_binding_draft::ProcessorBindingDraft,
     processor_correlator_draft::{CorrelationSide, CorrelatorDraft},
+    processor_generator_draft::GeneratorDraft,
+    processor_inferencer_draft::{InferencerDraft, TensorList, TensorPosition},
     processor_input_draft::{InputList, InputListDraft},
+    processor_wasm_draft::WasmDraft,
     processor_window_draft::{WindowBoundClause, WindowDraft},
+    resource_pin_draft::ResourcePinError,
 };
 
 /// The processor kinds the shared visual processor form creates.
@@ -52,6 +59,10 @@ pub(super) enum ProcessorFamily {
     Window,
     Correlator,
     Reingestor,
+    Generator,
+    Inferencer,
+    #[strum(serialize = "WASM processor")]
+    Wasm,
 }
 
 impl ProcessorFamily {
@@ -63,8 +74,47 @@ impl ProcessorFamily {
             | Self::Deduplicator
             | Self::Reorderer
             | Self::Window
-            | Self::Correlator => true,
+            | Self::Correlator
+            | Self::Generator
+            | Self::Inferencer
+            | Self::Wasm => true,
             Self::Reingestor => false,
+        }
+    }
+
+    /// Whether the family reads relay inputs, with their acknowledgement mode. A generator reads
+    /// the materialized state of one relay instead, on its own cadence.
+    pub(super) fn reads_inputs(self) -> bool {
+        match self {
+            Self::Junction
+            | Self::Deduplicator
+            | Self::Reorderer
+            | Self::Window
+            | Self::Correlator
+            | Self::Reingestor
+            | Self::Inferencer
+            | Self::Wasm => true,
+            Self::Generator => false,
+        }
+    }
+
+    /// Whether the family declares an ordered list of materialized dependencies. A generator's
+    /// one materialized relay is its source instead.
+    pub(super) fn declares_state_dependencies(self) -> bool {
+        self.reads_inputs()
+    }
+
+    /// Whether the family's routes offer the concrete branch's key fields to assign beside the
+    /// fields they generate, as generator, inferencer and WASM processor routes do.
+    pub(super) fn offers_branch_key_references(self) -> bool {
+        match self {
+            Self::Generator | Self::Inferencer | Self::Wasm => true,
+            Self::Junction
+            | Self::Deduplicator
+            | Self::Reorderer
+            | Self::Window
+            | Self::Correlator
+            | Self::Reingestor => false,
         }
     }
 
@@ -74,7 +124,13 @@ impl ProcessorFamily {
         match self {
             Self::Deduplicator => Some(KeyClause::DeduplicateOn),
             Self::Reorderer => Some(KeyClause::By),
-            Self::Junction | Self::Window | Self::Correlator | Self::Reingestor => None,
+            Self::Junction
+            | Self::Window
+            | Self::Correlator
+            | Self::Reingestor
+            | Self::Generator
+            | Self::Inferencer
+            | Self::Wasm => None,
         }
     }
 
@@ -86,6 +142,9 @@ impl ProcessorFamily {
             Self::Window => "Window processor name",
             Self::Correlator => "Correlator name",
             Self::Reingestor => "Reingestor name",
+            Self::Generator => "Generator name",
+            Self::Inferencer => "Inferencer name",
+            Self::Wasm => "WASM processor name",
         }
     }
 
@@ -98,11 +157,14 @@ impl ProcessorFamily {
             Self::Window => Some("Window processor branch"),
             Self::Correlator => Some("Correlator branch"),
             Self::Reingestor => None,
+            Self::Generator => Some("Generator branch"),
+            Self::Inferencer => Some("Inferencer branch"),
+            Self::Wasm => Some("WASM processor branch"),
         }
     }
 
     /// The input list the draft's primary relays form: a correlator's left side, and the `FROM`
-    /// list of every other family.
+    /// list of every other family that reads inputs.
     pub(super) fn primary_input_list(self) -> InputList {
         match self {
             Self::Correlator => InputList::Left,
@@ -110,7 +172,10 @@ impl ProcessorFamily {
             | Self::Deduplicator
             | Self::Reorderer
             | Self::Window
-            | Self::Reingestor => InputList::From,
+            | Self::Reingestor
+            | Self::Generator
+            | Self::Inferencer
+            | Self::Wasm => InputList::From,
         }
     }
 
@@ -122,14 +187,26 @@ impl ProcessorFamily {
             | Self::Deduplicator
             | Self::Reorderer
             | Self::Window
-            | Self::Reingestor => false,
+            | Self::Reingestor
+            | Self::Generator
+            | Self::Inferencer
+            | Self::Wasm => false,
         }
     }
 
     /// Whether the family declares a node-wide `FILTER WHERE`. A correlator filters each side on
-    /// its own.
+    /// its own, and a generator reads no input to filter.
     pub(super) fn filters_input(self) -> bool {
-        !self.reads_right_side()
+        match self {
+            Self::Junction
+            | Self::Deduplicator
+            | Self::Reorderer
+            | Self::Window
+            | Self::Reingestor
+            | Self::Inferencer
+            | Self::Wasm => true,
+            Self::Correlator | Self::Generator => false,
+        }
     }
 
     pub(super) fn route_contract(self) -> RouteContract {
@@ -138,7 +215,8 @@ impl ProcessorFamily {
                 RouteContract::Transforming
             }
             Self::Window => RouteContract::WindowSetOnly,
-            Self::Correlator => RouteContract::FlushedSetOnly,
+            Self::Correlator | Self::Generator | Self::Inferencer => RouteContract::FlushedSetOnly,
+            Self::Wasm => RouteContract::GuestSetOnly,
         }
     }
 }
@@ -152,6 +230,8 @@ pub(super) enum RouteContract {
     FlushedSetOnly,
     /// `SET` and `WHERE` alone, emitted on the window's `WIDTH` and `STEP`.
     WindowSetOnly,
+    /// `SET` and `WHERE` alone, emitted when the WASM guest returns output.
+    GuestSetOnly,
 }
 
 impl RouteContract {
@@ -159,7 +239,7 @@ impl RouteContract {
     pub(super) fn transforms(self) -> bool {
         match self {
             Self::Transforming => true,
-            Self::FlushedSetOnly | Self::WindowSetOnly => false,
+            Self::FlushedSetOnly | Self::WindowSetOnly | Self::GuestSetOnly => false,
         }
     }
 
@@ -167,7 +247,7 @@ impl RouteContract {
     pub(super) fn flushes(self) -> bool {
         match self {
             Self::Transforming | Self::FlushedSetOnly => true,
-            Self::WindowSetOnly => false,
+            Self::WindowSetOnly | Self::GuestSetOnly => false,
         }
     }
 }
@@ -277,6 +357,9 @@ enum ProcessorStage {
     Window(WindowDraft),
     Correlator(CorrelatorDraft),
     Reingestor,
+    Generator(GeneratorDraft),
+    Inferencer(InferencerDraft),
+    Wasm(WasmDraft),
 }
 
 impl ProcessorStage {
@@ -288,6 +371,9 @@ impl ProcessorStage {
             ProcessorFamily::Window => Self::Window(WindowDraft::default()),
             ProcessorFamily::Correlator => Self::Correlator(CorrelatorDraft::default()),
             ProcessorFamily::Reingestor => Self::Reingestor,
+            ProcessorFamily::Generator => Self::Generator(GeneratorDraft::default()),
+            ProcessorFamily::Inferencer => Self::Inferencer(InferencerDraft::default()),
+            ProcessorFamily::Wasm => Self::Wasm(WasmDraft::default()),
         }
     }
 
@@ -299,6 +385,9 @@ impl ProcessorStage {
             Self::Window(_) => ProcessorFamily::Window,
             Self::Correlator(_) => ProcessorFamily::Correlator,
             Self::Reingestor => ProcessorFamily::Reingestor,
+            Self::Generator(_) => ProcessorFamily::Generator,
+            Self::Inferencer(_) => ProcessorFamily::Inferencer,
+            Self::Wasm(_) => ProcessorFamily::Wasm,
         }
     }
 }
@@ -497,7 +586,10 @@ impl ProcessorDraft {
             ProcessorStage::Junction
             | ProcessorStage::Window(_)
             | ProcessorStage::Correlator(_)
-            | ProcessorStage::Reingestor => None,
+            | ProcessorStage::Reingestor
+            | ProcessorStage::Generator(_)
+            | ProcessorStage::Inferencer(_)
+            | ProcessorStage::Wasm(_) => None,
         }
     }
 
@@ -507,7 +599,10 @@ impl ProcessorDraft {
             ProcessorStage::Junction
             | ProcessorStage::Window(_)
             | ProcessorStage::Correlator(_)
-            | ProcessorStage::Reingestor => None,
+            | ProcessorStage::Reingestor
+            | ProcessorStage::Generator(_)
+            | ProcessorStage::Inferencer(_)
+            | ProcessorStage::Wasm(_) => None,
         }
     }
 
@@ -539,6 +634,118 @@ impl ProcessorDraft {
             return None;
         };
         Some(correlator)
+    }
+
+    /// The materialized relay and cadence of a generator draft.
+    pub(super) fn generator(&self) -> Option<&GeneratorDraft> {
+        let ProcessorStage::Generator(generator) = &self.stage else {
+            return None;
+        };
+        Some(generator)
+    }
+
+    pub(super) fn generator_mut(&mut self) -> Option<&mut GeneratorDraft> {
+        let ProcessorStage::Generator(generator) = &mut self.stage else {
+            return None;
+        };
+        Some(generator)
+    }
+
+    /// The model binding and tensors of an inferencer draft.
+    pub(super) fn inferencer(&self) -> Option<&InferencerDraft> {
+        let ProcessorStage::Inferencer(inferencer) = &self.stage else {
+            return None;
+        };
+        Some(inferencer)
+    }
+
+    pub(super) fn inferencer_mut(&mut self) -> Option<&mut InferencerDraft> {
+        let ProcessorStage::Inferencer(inferencer) = &mut self.stage else {
+            return None;
+        };
+        Some(inferencer)
+    }
+
+    /// The guest binding, limits and policies of a WASM processor draft.
+    pub(super) fn wasm(&self) -> Option<&WasmDraft> {
+        let ProcessorStage::Wasm(wasm) = &self.stage else {
+            return None;
+        };
+        Some(wasm)
+    }
+
+    pub(super) fn wasm_mut(&mut self) -> Option<&mut WasmDraft> {
+        let ProcessorStage::Wasm(wasm) = &mut self.stage else {
+            return None;
+        };
+        Some(wasm)
+    }
+
+    /// The resource binding of an inferencer or WASM processor draft.
+    pub(super) fn binding(&self) -> Option<&ProcessorBindingDraft> {
+        match &self.stage {
+            ProcessorStage::Inferencer(inferencer) => Some(&inferencer.binding),
+            ProcessorStage::Wasm(wasm) => Some(&wasm.binding),
+            ProcessorStage::Junction
+            | ProcessorStage::Deduplicator(_)
+            | ProcessorStage::Reorderer(_)
+            | ProcessorStage::Window(_)
+            | ProcessorStage::Correlator(_)
+            | ProcessorStage::Reingestor
+            | ProcessorStage::Generator(_) => None,
+        }
+    }
+
+    pub(super) fn binding_mut(&mut self) -> Option<&mut ProcessorBindingDraft> {
+        match &mut self.stage {
+            ProcessorStage::Inferencer(inferencer) => Some(&mut inferencer.binding),
+            ProcessorStage::Wasm(wasm) => Some(&mut wasm.binding),
+            ProcessorStage::Junction
+            | ProcessorStage::Deduplicator(_)
+            | ProcessorStage::Reorderer(_)
+            | ProcessorStage::Window(_)
+            | ProcessorStage::Correlator(_)
+            | ProcessorStage::Reingestor
+            | ProcessorStage::Generator(_) => None,
+        }
+    }
+
+    /// The relay whose branch the draft's routes keep: a generator's materialized relay, and the
+    /// first input relay of every other family.
+    pub(super) fn current_source_relay(&self) -> Option<&RelayName> {
+        match self.generator() {
+            Some(generator) => generator.current_relay(),
+            None => self.from.current_first(),
+        }
+    }
+
+    /// The relay whose branch the draft's routes keep, or the prerequisite the draft still lacks
+    /// before it: `input_missing` for an input relay, or `state_missing` for a generator's
+    /// materialized relay.
+    pub(super) fn source_relay_or(
+        &self,
+        input_missing: &'static str,
+        state_missing: &'static str,
+    ) -> Result<&RelayName, &'static str> {
+        match self.current_source_relay() {
+            Some(relay) => Ok(relay),
+            None if self.family().reads_inputs() => Err(input_missing),
+            None => Err(state_missing),
+        }
+    }
+
+    /// Selects `node` as a generator's materialized relay. The routes are offered by that relay's
+    /// branch, so a changed relay requires them again.
+    pub(super) fn select_generator_relay(&mut self, node: &NodeRef) {
+        let changed = match self.generator_mut() {
+            Some(generator) => generator.select_relay(node),
+            None => false,
+        };
+        if changed {
+            for route in &mut self.routes {
+                route.invalidate_references();
+            }
+        }
     }
 
     /// The draft's `list`: its primary list, or a correlator's right side.
@@ -626,6 +833,36 @@ impl ProcessorDraft {
         self.insert_into_last_assignment(&side.reference(field));
     }
 
+    /// Appends `field` of a generator's materialized relay, read through its `relay_state` scope,
+    /// to the last assignment of the active route.
+    pub(super) fn insert_state_reference(&mut self, field: FieldName) {
+        let relay = match self.generator() {
+            Some(generator) => generator.current_relay().cloned(),
+            None => None,
+        };
+        let Some(relay) = relay else {
+            return;
+        };
+        let reference = InsertedReference::Field(FieldReference::scoped(
+            FieldScope::RelayState { relay },
+            field,
+        ));
+        self.insert_into_last_assignment(&reference);
+    }
+
+    /// Appends `field` of the concrete branch's key to the last assignment of the active route.
+    pub(super) fn insert_branch_key_reference(&mut self, field: FieldName) {
+        let reference = InsertedReference::Field(FieldReference::scoped(FieldScope::Branch, field));
+        self.insert_into_last_assignment(&reference);
+    }
+
+    /// Appends the generated field `field`, an inferencer's output tensor or a WASM guest's
+    /// output column, to the last assignment of the active route.
+    pub(super) fn insert_generated_reference(&mut self, field: FieldName) {
+        let reference = InsertedReference::Field(FieldReference::scoped(FieldScope::Bare, field));
+        self.insert_into_last_assignment(&reference);
+    }
+
     /// Appends `field` of `side`'s record to a correlator's `CORRELATE WHERE`.
     pub(super) fn insert_correlation_reference(&mut self, side: CorrelationSide, field: FieldName) {
         if let Some(correlator) = self.correlator_mut() {
@@ -666,11 +903,19 @@ impl ProcessorDraft {
         if let Some(correlator) = self.correlator_mut() {
             correlator.invalidate_relays();
         }
+        if let Some(generator) = self.generator_mut() {
+            generator.invalidate();
+        }
     }
 
+    /// Requires every reference the draft selected again: the branch, the relays, and the
+    /// resource and version an inferencer or WASM processor binds.
     pub(super) fn invalidate_references(&mut self) {
         self.branching.invalidate();
         self.invalidate_relays();
+        if let Some(binding) = self.binding_mut() {
+            binding.invalidate();
+        }
     }
 
     pub(super) fn active_state(&self) -> Option<&StateDependencyDraft> {
@@ -746,8 +991,11 @@ impl ProcessorDraft {
     }
 
     /// The complete semantic Model of the processor kind this draft creates, or the first missing
-    /// or invalid choice in form order.
-    pub(super) fn build(&self) -> error_stack::Result<Model, ProcessorDraftError> {
+    /// or invalid choice in form order. A resource binding keeps its requested version, `LATEST`
+    /// included, until the server applies the statement.
+    pub(super) fn build(
+        &self,
+    ) -> error_stack::Result<Model<RequestedResourceVersion>, ProcessorDraftError> {
         match &self.stage {
             ProcessorStage::Junction => Ok(Model::Junction(self.build_junction()?)),
             ProcessorStage::Deduplicator(keyed) => {
@@ -761,6 +1009,13 @@ impl ProcessorDraft {
                 Ok(Model::Correlator(self.build_correlator(correlator)?))
             }
             ProcessorStage::Reingestor => Ok(Model::Reingestor(self.build_reingestor()?)),
+            ProcessorStage::Generator(generator) => {
+                Ok(Model::Generator(self.build_generator(generator)?))
+            }
+            ProcessorStage::Inferencer(inferencer) => {
+                Ok(Model::Inferencer(self.build_inferencer(inferencer)?))
+            }
+            ProcessorStage::Wasm(wasm) => Ok(Model::WasmProcessor(self.build_wasm(wasm)?)),
         }
     }
 
@@ -900,6 +1155,85 @@ impl ProcessorDraft {
         })
     }
 
+    /// A generator, whose source is one materialized relay rather than inputs, and whose routes
+    /// keep that relay's branch.
+    fn build_generator(
+        &self,
+        generator: &GeneratorDraft,
+    ) -> error_stack::Result<CreateGenerator, ProcessorDraftError> {
+        let name = GeneratorName::parse(self.name.trim())
+            .map_err(|cause| cause.change_context(ProcessorDraftError::GeneratorName))?;
+        let branching = self.branching.build(self.family())?;
+        let source = generator.build()?;
+        let output = self.build_output()?;
+        Ok(CreateGenerator {
+            labels: Default::default(),
+            name,
+            materialized_relay: source.relay,
+            branched_by: branching,
+            each: source.each,
+            output_routes: output.routes,
+        })
+    }
+
+    fn build_inferencer(
+        &self,
+        inferencer: &InferencerDraft,
+    ) -> error_stack::Result<CreateInferencer<RequestedResourceVersion>, ProcessorDraftError> {
+        let name = InferencerName::parse(self.name.trim())
+            .map_err(|cause| cause.change_context(ProcessorDraftError::InferencerName))?;
+        let branching = self.branching.build(self.family())?;
+        let input = self.build_input()?;
+        let model = inferencer.build()?;
+        let output = self.build_output()?;
+        Ok(CreateInferencer {
+            labels: Default::default(),
+            name,
+            from: input.inputs,
+            output_routes: output.routes,
+            branched_by: branching,
+            resource: model.binding.resource,
+            resource_version: model.binding.version,
+            file: model.binding.file,
+            inputs: model.inputs,
+            state: model.state,
+            output_schema: model.output_schema,
+            mode: self.mode,
+            filter_where: input.filter,
+            materialized_state: output.state,
+        })
+    }
+
+    fn build_wasm(
+        &self,
+        wasm: &WasmDraft,
+    ) -> error_stack::Result<CreateWasmProcessor<RequestedResourceVersion>, ProcessorDraftError>
+    {
+        let name = WasmProcessorName::parse(self.name.trim())
+            .map_err(|cause| cause.change_context(ProcessorDraftError::WasmProcessorName))?;
+        let branching = self.branching.build(self.family())?;
+        let input = self.build_input()?;
+        let guest = wasm.build()?;
+        let output = self.build_output()?;
+        let global_error_policy = wasm.global_error_policy()?;
+        Ok(CreateWasmProcessor {
+            labels: Default::default(),
+            name,
+            from: input.inputs,
+            output_routes: output.routes,
+            branched_by: branching,
+            resource: guest.binding.resource,
+            resource_version: guest.binding.version,
+            file: guest.binding.file,
+            limits: guest.limits,
+            global_error_policy,
+            rejected_state_policy: wasm.rejected_state,
+            mode: self.mode,
+            filter_where: input.filter,
+            materialized_state: output.state,
+        })
+    }
+
     /// The ordered inputs with their predicates and collection, and the node filter.
     fn build_input(&self) -> error_stack::Result<ProcessorInputParts, ProcessorDraftError> {
         let inputs = self.from.build(InputList::From)?;
@@ -939,6 +1273,7 @@ impl ProcessorDraft {
                 RouteContract::WindowSetOnly => {
                     route.build_set_only(SetOnlyEmission::WindowCadence)
                 }
+                RouteContract::GuestSetOnly => route.build_set_only(SetOnlyEmission::GuestOutput),
             };
             routes.push({
                 let mapping_input = built;
@@ -959,6 +1294,24 @@ impl ProcessorDraft {
             routes: ProcessorOutputs::new(routes),
         })
     }
+}
+
+/// A positive byte count, read as the language reads a byte-size literal: `unreadable` when the
+/// text is no byte size, and `zero` when it is a size of no bytes.
+pub(super) fn positive_byte_size(
+    text: &str,
+    unreadable: ProcessorDraftError,
+    zero: ProcessorDraftError,
+) -> error_stack::Result<NonZeroU64, ProcessorDraftError> {
+    let bytes = match text.trim().parse::<ubyte::ByteUnit>() {
+        Ok(bytes) => bytes.as_u64(),
+        // The byte-size parser is `no_std`: its refusal is no error type a report can hold, so
+        // the report carries it as a printable attachment.
+        Err(cause) => {
+            return Err(Report::new(unreadable).attach_printable(cause));
+        }
+    };
+    NonZeroU64::new(bytes).ok_or_else(|| Report::new(zero))
 }
 
 /// The checked inputs and node filter every processor family declares.
@@ -987,6 +1340,12 @@ pub(super) enum ProcessorDraftError {
     WindowProcessorName,
     #[error("Correlator name is invalid")]
     CorrelatorName,
+    #[error("Generator name is invalid")]
+    GeneratorName,
+    #[error("Inferencer name is invalid")]
+    InferencerName,
+    #[error("WASM processor name is invalid")]
+    WasmProcessorName,
     #[error("Add at least one {} relay", .list.relays())]
     Inputs { list: InputList },
     #[error("{} {index}: choose a relay", .list.input())]
@@ -1034,6 +1393,40 @@ pub(super) enum ProcessorDraftError {
     TimeoutRelayChanged { side: CorrelationSide },
     #[error("The selected branch belongs to a changed context; select it again")]
     BranchChanged,
+    #[error("Choose the generator's materialized relay")]
+    GeneratorRelay,
+    #[error("The materialized relay belongs to a changed context; select it again")]
+    GeneratorRelayChanged,
+    #[error("Enter EACH as a positive domain-clock period, such as 100ms")]
+    Each,
+    #[error("{0}")]
+    Binding(ResourcePinError),
+    #[error("Enter the FILE inside the selected resource version")]
+    File,
+    #[error("Add at least one {list} tensor")]
+    Tensors { list: TensorList },
+    #[error("{tensor}: enter the model's tensor name")]
+    TensorName { tensor: TensorPosition },
+    #[error("{tensor} axis {axis}: enter a positive whole size, or choose DYNAMIC or BATCH")]
+    TensorDimension { tensor: TensorPosition, axis: usize },
+    #[error("{tensor}: enter a valid mapping expression")]
+    TensorExpression { tensor: TensorPosition },
+    #[error("{tensor}: enter the model's state input name")]
+    StateInput { tensor: TensorPosition },
+    #[error("{tensor}: enter the model's state output name it comes FROM")]
+    StateOutput { tensor: TensorPosition },
+    #[error("{tensor}: choose INITIAL ZEROS or an INITIAL constant")]
+    StateInitial { tensor: TensorPosition },
+    #[error("{tensor}: enter a valid INITIAL constant expression")]
+    StateConstant { tensor: TensorPosition },
+    #[error("Enter MAX FUEL as a whole number greater than zero")]
+    MaxFuel,
+    #[error("Enter MAX MEMORY as a byte size such as 64MiB")]
+    MaxMemory,
+    #[error("MAX MEMORY must be greater than zero")]
+    MaxMemoryZero,
+    #[error("Choose ON GLOBAL ERROR LOG or IGNORE")]
+    GlobalError,
     #[error("Materialized dependency {index}: choose a relay")]
     StateRelay { index: usize },
     #[error(
@@ -1113,8 +1506,7 @@ mod tests {
     }
 
     fn statement(draft: &ProcessorDraft) -> Statement {
-        let model: Model<RequestedResourceVersion> =
-            draft.build().assured("the draft is complete").into();
+        let model = draft.build().assured("the draft is complete");
         Statement::Create(CreateStatement::new(Box::new(model), draft.if_not_exists))
     }
 
@@ -1543,6 +1935,9 @@ mod tests {
                 ProcessorFamily::Window => ModelKind::WindowProcessor,
                 ProcessorFamily::Correlator => ModelKind::Correlator,
                 ProcessorFamily::Reingestor => ModelKind::Reingestor,
+                ProcessorFamily::Generator => ModelKind::Generator,
+                ProcessorFamily::Inferencer => ModelKind::Inferencer,
+                ProcessorFamily::Wasm => ModelKind::WasmProcessor,
             };
             assert_eq!(draft.family(), family);
             assert_eq!(

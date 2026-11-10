@@ -140,6 +140,10 @@ command returned no inspection. Check `rejection` against `InspectionRejection` 
 page fields. A refusal has no counts or units; a successful empty page has zero counts.
 `json` preserves the complete typed envelope.
 
+`DESCRIBE LICENSE;` uses this envelope for cluster scope: `entity_kind` is `"LICENSE"`, while
+`domain` and `entity_name` are `None`. Its summary and quota rows describe the answering node's
+committed policy. The command also works without selecting a domain.
+
 Complete `counts` cover the selected cut. Units carry their own counts, owner, ordered
 replicas, captured origin, `InspectionUnitKind` and `index`. `InspectionStage` distinguishes live and stored
 state. Sections expose schemas, omitted rows and positional watermark columns. Resume the opaque
@@ -293,8 +297,15 @@ attaches again on its next session, and reports the clock again with a `STATE` e
 
 When the new session refuses for now to attach the clock again, a `RESTORATION_FAILED` event carries
 the same `RestorationFailure` a subscription's does, with `IN_TRANSACTION`, `REJECTED` or `FAILED` as
-its cause, and the session tries again after the wait it names. A clock whose domain was removed
-ends with `ENDED`, and its `end_reason` is `DOMAIN_REMOVED`.
+its cause, the refusal message and a positive retry wait in nanoseconds. Keep following the clock:
+the library retries and reports `STATE` when the attachment is restored. The suite provokes an
+`IN_TRANSACTION` refusal before these checks:
+
+```python
+{{#include ../../tests/client_conformance/python/suite/cluster/test_clocks.py:clock_restoration_failed}}
+```
+
+A clock whose domain was removed ends with `ENDED`, and its `end_reason` is `DOMAIN_REMOVED`.
 
 `DETACH DOMAIN CLOCK;` stops following it.
 

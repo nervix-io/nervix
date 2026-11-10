@@ -113,6 +113,11 @@ Nervix records these raw metric families:
   physical node
 - `nervix_branch_evictions_total`: total concrete branches evicted on the physical node, split by
   `reason="lru"` or `reason="ttl"`
+- `nervix_branch_partition_epoch`: the partition epoch a branch executes in on the physical node
+- `nervix_branch_partition_keys_pending`: concrete keys the physical node's units still have to move
+  while their branch changes its partition count
+- `nervix_branch_partition_keys_claimed_total`: total concrete keys the physical node's units claimed
+  from the unit a previous partition count placed them in
 - `nervix_ingestor_quiesce_buffered_records`: raw payloads currently retained in an ingestor's
   per-instance quiesce buffers, including a payload that is draining until its messages enter
   their ingest group
@@ -304,6 +309,36 @@ no refusal event to these four reasons. No execution identity, domain or user ap
 
 See [Bounded History And Expired Identities](./client-session-protocol.md#bounded-history-and-expired-identities)
 for retention and admission semantics.
+
+## Licensing Metrics
+
+The `nervix_licensing_` families expose the published policy and process-local admission events.
+Label values come from fixed declarations, with every applicable labelled child initialized to
+zero. Replicated gauges describe the exporting node's applied state; use the leader's values for
+a cluster total. Sum refusal-counter rates across nodes as leadership moves. A process restart
+resets its counters.
+
+| Suffix | Kind and labels | Free policy |
+| --- | --- | --- |
+| `state` | Gauge, `state`: `free`, `licensed_fresh`, `licensed_due`, `licensed_overdue`, `lapsed`, `stopped`, `releasing`, `degraded` | `free` is 1; the other states are 0. |
+| `decision_revision` | Gauge | Absent until a committed decision exists. |
+| `deadline_timestamp_seconds` | Gauge, `deadline`: `refresh_after`, `overdue_at`, `valid_until`, `term_ends_at`, `ephemeral_expires_at`, `next_grant` | A sample is absent when its deadline does not exist. |
+| `licensing_time_seconds` | Gauge | The committed licensing timestamp as Unix seconds, present after first installation. |
+| `requests_total` | Counter, `operation` and `outcome` | On the leader, every operation/outcome pair starts at 0. |
+| `stream_connected` | Gauge | On the leader, 0. |
+| `transitions_active` | Gauge | 0. |
+| `over_limit` | Gauge, catalog `condition` | Every cluster quota starts at 0. |
+| `admissions_refused_total` | Counter, catalog `condition` and refusal `state` | Every cluster quota/refusal-state pair starts at 0. |
+
+Request operations are `activation.create`, `activation.refresh`, `activation.release`,
+`activation.rotate_key` and `events.subscribe`. Outcomes are `committed`, `rejected_by_cluster`,
+`refused_by_service`, `unreachable` and `timeout`. Refusal states are `within_grace`, `over_limit`,
+`lapsed` and `stopped`. Connectivity and request families are leader-local. Free mode supplies no
+decision or deadline and makes no licensing request. The shipped unlimited quotas produce no
+admission refusals.
+
+See [Cluster Licensing](node-settings.md#cluster-licensing) for `DESCRIBE LICENSE` and the
+committed node/domain usage definitions.
 
 ## Client Ingestors
 
@@ -776,6 +811,18 @@ Prometheus exposes branch lifecycle state without a concrete branch-key label:
   once when branch eviction begins on that physical node, even if multiple local graph nodes hold
   the key. `reason="lru"` is a `MAX INSTANCES ... EVICT LRU` capacity eviction; `reason="ttl"` is
   idle expiration.
+- `nervix_branch_partition_epoch{domain,branch,physical_node_id}` is the partition epoch the branch
+  executes in on that physical node: `1` until its first partition count change, then one more for
+  each committed change.
+- `nervix_branch_partition_keys_pending{domain,branch,physical_node_id}` is a gauge of the concrete
+  keys the physical node's units of the branch's deduplicators, window and WASM processors,
+  inferencers that declare state and materialized relays still have to move while the branch changes its partition count: the keys
+  each holds that the current count places in another unit, and the keys each is claiming. It is
+  `0` once every key lies in its partition; the summed value across the cluster is what
+  `DESCRIBE BRANCH` reports as `keys pending`.
+- `nervix_branch_partition_keys_claimed_total{domain,branch,physical_node_id}` counts each key the
+  physical node's units claimed from the unit the previous count placed it in; within one epoch,
+  the summed value across the cluster is what `DESCRIBE BRANCH` reports as `keys claimed`.
 
 Normal shutdown, schedule replacement, and runtime detachment reduce the live gauge but do not
 increment the eviction counter. Relay branch presence and its TTL or LRU decisions exist only on

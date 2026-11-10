@@ -498,6 +498,22 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             ),
         ),
         (
+            "server_command_license_refused.nxsm",
+            reply(
+                22,
+                ReplyBody::Command(Box::new({
+                    let mut outcome = command_outcome(CommandDisposition::Failed);
+                    outcome.state = Some(Box::new(crate::StateInspection {
+                        entity: crate::StateInspectionEntity::ClusterLicense,
+                        result: crate::StateInspectionResult::Rejected(
+                            crate::StateInspectionRejection::NotReady,
+                        ),
+                    }));
+                    outcome
+                })),
+            ),
+        ),
+        (
             "server_command_redirect.nxsm",
             command(
                 2,
@@ -2049,12 +2065,17 @@ fn the_checked_in_corpus_is_what_the_encoder_writes_and_reads() {
 }
 
 fn render_state_inspection(state: &crate::StateInspection, lines: &mut Vec<String>) {
-    lines.push(format!(
-        "STATE domain={} kind={:?} name={}",
-        state.entity.domain.as_str(),
-        state.entity.kind(),
-        state.entity.identifier()
-    ));
+    match &state.entity {
+        crate::StateInspectionEntity::DomainNode(entity) => lines.push(format!(
+            "STATE domain={} kind={:?} name={}",
+            entity.domain,
+            entity.kind(),
+            entity.identifier()
+        )),
+        crate::StateInspectionEntity::ClusterLicense => {
+            lines.push("STATE scope=cluster_license kind=LICENSE".to_string())
+        }
+    }
     let crate::StateInspectionResult::Page(page) = &state.result else {
         let crate::StateInspectionResult::Rejected(reason) = &state.result else {
             unreachable!()

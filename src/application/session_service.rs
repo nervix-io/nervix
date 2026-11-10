@@ -150,6 +150,7 @@ pub struct SessionServiceImpl {
 /// through a `SessionServiceImpl` handle and therefore hold their values directly. The ones that
 /// keep an `Arc` of their own have a second owner outside the service, and each names it.
 pub(in crate::application) struct SessionServiceInner {
+    pub(in crate::application) licensing: crate::licensing::PolicyHandle,
     /// Started and shut down by the application, which outlives the service handle.
     pub(in crate::application) cluster: Arc<cluster::ClusterHandle>,
     /// Proposal authority and local observation; leadership is checked for each operation.
@@ -859,6 +860,7 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
         | ChoiceTarget::ProcessorCompatibleInputRelay
         | ChoiceTarget::ProcessorInputBranchRelay
         | ChoiceTarget::ProcessorMaterializedRelay
+        | ChoiceTarget::GeneratorMaterializedRelay
         | ChoiceTarget::EmitterHttpRequestReference
         | ChoiceTarget::EmitterKafkaTopicReference
         | ChoiceTarget::EmitterPulsarTopicReference
@@ -1148,6 +1150,7 @@ impl SessionServiceImpl {
             | ChoiceTarget::ProcessorCompatibleInputRelay
             | ChoiceTarget::ProcessorInputBranchRelay
             | ChoiceTarget::ProcessorMaterializedRelay
+            | ChoiceTarget::GeneratorMaterializedRelay
             | ChoiceTarget::EmitterHttpRequestReference
             | ChoiceTarget::EmitterKafkaTopicReference
             | ChoiceTarget::EmitterPulsarTopicReference
@@ -1458,7 +1461,9 @@ impl SessionServiceImpl {
             matches!(
                 parsed.statement,
                 ClientStatement::Server(
-                    Statement::ShowClusterStatus(_) | Statement::DescribeCluster(_)
+                    Statement::ShowClusterStatus(_)
+                        | Statement::DescribeCluster(_)
+                        | Statement::DescribeLicense(_)
                 )
             )
         });

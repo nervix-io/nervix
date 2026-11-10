@@ -1708,11 +1708,15 @@ moves its exact hard group; an unqualified member selects all its declared units
 [Control Plane](./control-plane.md) for activation and [Typed States And Validation
 Boundaries](./typed-states.md) for required state.
 
-`ALTER BRANCH <branch> SET PARTITIONS <n>` on a domain that is running or paused is refused before
-anything is committed with `TransactionPlanningError::BranchPartitionsRequireStoppedDomain`, which
-names the operation, the domain and the branch and states the stopped-domain path, such as `branch
-'by_tenant' changes its partition count only while its domain is stopped: STOP domain 'payments',
-run ALTER BRANCH, then START it`. A domain build whose committed schedule lacks a unit its relay
+`ALTER BRANCH <branch> SET PARTITIONS <n>` to a count other than the current one, while the branch's
+previous partition count still has keys to move, is refused before anything is committed with
+`TransactionPlanningError::BranchPartitionsStillMoving`, which names the operation, the domain, the
+branch and both counts, such as `branch 'by_tenant' in domain 'payments' is still moving keys placed
+under its previous partition count 4 to its current count 8; change its partition count again once
+DESCRIBE BRANCH reports no previous partitions`. A claim that cannot move a key, because its holder's
+owner does not answer or refuses, keeps the key's records parked and tries again; it reports a
+`PartitionClaimError` naming the entity and unit at `warn`. `DESCRIBE BRANCH` reports `keys pending:
+unavailable` with the `TransitionHoldingsError` that names the unit whose owner did not answer. A domain build whose committed schedule lacks a unit its relay
 needs reports `ExecutionBuildError::RelayUnitNotScheduled`, naming the relay and the unit.
 
 The domain-wide placement editor retains typed name and positive-integer rank parse failures
@@ -2609,7 +2613,7 @@ Finding that Core is already uniform is an ordinary completion outcome carrying 
 effective and committed records; it proposes no additional membership entry, even when a preceding
 joint observation became stale before Core handled the request.
 
-Trace-level vote and pre-vote transport completion events record the existing nested result before
+Debug-level vote and pre-vote transport completion events record the existing nested result before
 its foreign-error conversion, beside the local listener, peer and elapsed time. A transport error
 and a peer's typed refusal therefore remain distinguishable in the diagnostic. Cancellation by
 OpenRaft can end the exchange before that event; its own timeout then records the outcome. These
@@ -3389,6 +3393,15 @@ subscriber's maximum level stays the filter's, and an event the filter refuses c
 without the rule. The scenario run's subscriber, which writes
 `tests/logs/scenarios.log`, applies the same rule to its own default.
 
+The subscriber's maximum level is also the level up to which the `log` crate hands it every record a
+dependency writes, to be judged one record at a time. Cranelift writes `trace` records throughout
+every WASM module and every Roto UDF it compiles, so a filter that selects `trace` for any target
+makes each such compile several times as long: about six times for the 1.77 MB guest of the scenario
+suite. A node compiles the module of a WASM processor it installs before it reports the revision
+prepared, so under such a filter a large module can outlast the budget a revision has to become
+prepared and ready. The scenario run's default therefore selects nothing above `debug`, and the
+consensus vote boundaries and receiver contexts it collects are recorded at `debug`.
+
 The node drops Lapin's report of a message its broker returned. Lapin logs every
 returned message at `warn` under the target `lapin::returned_messages`, with the whole message, its
 body and properties included. The node drops that target's `info`, `warn` and `error` events; its
@@ -3919,6 +3932,25 @@ A consensus namespace/state-encoding mismatch requires recreation before any cre
 read; a user backup record with a different version fails its header check before decoding.
 Executor refusal continues to mean that credentials were not judged, reported as UNAVAILABLE
 or HTTP 503 without changing failure pacing. Wrong passwords remain authentication refusals.
+
+### Licensing Admission Refusals
+
+`LicensingRefusal` retains the quota name, effective limit, current usage, requested amount and
+refusal state. Quota arithmetic creates its report at the refusal; policy handles preserve it,
+and the admission owner adds its domain or membership context with `change_context`. It keeps
+the typed cause until the reporting boundary. Membership verdicts and Raft responses project
+their fixed typed outcomes only where they are constructed; refusal metrics borrow the cause
+and refusal logs render the complete report. Under a bounded quota, checked addition
+refuses an overflowing request rather than wrapping its usage below the limit.
+
+A domain-quota refusal changes no domain record. Concurrent proposals check the committed count
+when they apply, so a stale successful preflight cannot oversubscribe the quota. Restore creation
+uses the same constraint. Existing-domain updates and `IF NOT EXISTS` observations retain their
+ordinary outcomes.
+
+A membership-quota refusal is carried in the leader's typed admission verdict for that node run.
+The joining node's existing supervision reports it and stops the refused newcomer. Licensing never
+removes a committed member, and a returning member does not consume another quota slot.
 
 ## Startup Execution Capacity
 

@@ -18,7 +18,9 @@ use std::fmt;
 use arrow_array::builder::BinaryBuilder;
 use arrow_buffer::BooleanBuffer;
 use error_stack::ResultExt as _;
-use nervix_connector::{IngestMetadataFailure, IngestMetadataRow, IngestMetadataValues};
+use nervix_connector::{
+    IngestMessageMetadata, IngestMetadataFailure, IngestMetadataRow, IngestMetadataValues,
+};
 use nervix_models::{IngestorMetadataDeclaration, IngestorMetadataField, IngestorMetadataType};
 
 use super::*;
@@ -180,8 +182,8 @@ pub(super) enum IngestMetadataError {
 /// Which of an ingestor's declared metadata fields its programs read, so that its ingest groups
 /// build the columns of those fields and of no other.
 ///
-/// The ingestor's route programs and its `TIMESTAMP AT metadata.<field>` decide it once, when the
-/// ingestor binds them, and every group of the ingestor shares it. A group of an ingestor that
+/// The ingestor's arrival filter, routes and `TIMESTAMP AT metadata.<field>` decide it once, when
+/// the ingestor binds them, and every group of the ingestor shares it. A group of an ingestor that
 /// reads no field visits no metadata value and builds no metadata column.
 #[derive(Debug)]
 pub(super) struct IngestMetadataProjection {
@@ -834,20 +836,23 @@ impl IngestMetadataBuilders {
 
 impl IngestFilterMapMetadata {
     /// The metadata of `rows` messages that arrived without transport headers or integration
-    /// fields, as every row of a client batch does.
+    /// fields, for test fixtures that read neither namespace.
     #[cfg(test)]
     pub(super) fn headerless(rows: usize) -> IngestMetadataResult<Self> {
-        Self::client_batch(IngestMetadataProjection::none(), 0, rows)
+        Self::client_batch(
+            IngestMetadataProjection::none(),
+            &nervix_connector::NoIngestMetadata(0),
+            rows,
+        )
     }
 
     pub(super) fn client_batch(
         projection: Arc<IngestMetadataProjection>,
-        bytes: usize,
+        fields: &dyn IngestMessageMetadata,
         rows: usize,
     ) -> IngestMetadataResult<Self> {
         let mut builders = IngestMetadataBuilders::new(projection, rows);
-        let fields = nervix_connector::NoIngestMetadata(bytes);
-        let row = IngestMetadataRow::headers(&nervix_connector::NoIngestHeaders, &fields);
+        let row = IngestMetadataRow::headers(&nervix_connector::NoIngestHeaders, fields);
         for _ in 0..rows {
             builders.append(&row, Some(rows))?;
         }

@@ -39,6 +39,16 @@ def subscription_opening_refusal(harness: Harness) -> Iterator[Harness]:
 
 
 @pytest.fixture
+def clock_attachment_refusal(harness: Harness) -> Iterator[Harness]:
+    """Clears unused clock refusals even when the test fails."""
+
+    try:
+        yield harness
+    finally:
+        harness.clear_clock_attachment_refusals()
+
+
+@pytest.fixture
 def session(cluster: Cluster) -> Iterator[nx.Session]:
     """A session in the scenario's domain, released when the test ends."""
 

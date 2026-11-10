@@ -166,6 +166,19 @@ three nodes. Preparation includes the console, ONNX fixtures/runtime, WASM guest
 used for resource uploads and completion. Additional arguments reach the runner unchanged; the
 complete ordinary suite, completion walks and concurrency checks retain their separate verdicts.
 
+## Focused WebSocket Connection Checks
+
+`just test-websockets-runtime` selects the outbound connection declarations, bounds and
+delayed-handoff features through the ordinary one- and three-node harness. It prepares the console,
+ONNX runtime, WASM guests, formatter, CLI and deadlock reporter. Arguments such as `--name`, `--concurrency` and
+`--retry` reach the runner unchanged; broad scenario and CI runs retain their full prerequisites.
+
+The delayed-handoff fixture occupies the real decoder workers, observes its payload waiting in
+their bounded queue, and releases the workers after the configured idle bound. Its holds release
+on drop even when a step fails. The responsive peer accepts one connection and releases the next
+payload only after a client ping. Its stop result is retained until node teardown and port release
+finish, then asserted, so a connection failure remains visible and does not prevent cleanup.
+
 ## Delayed Consensus Heartbeat Answers
 
 The leader-lease regression uses a testing-only control on each follower's consensus probe. The
@@ -3663,9 +3676,18 @@ by one across the runner's entire cluster tier. The scenario performs the action
 `NERVIX-SUITE-CONFIRMED <sequence> <action>` to the runner's standard input. Requests and
 confirmations are single ASCII lines, at most 256 bytes including the newline. The declared action
 `refuse-next-subscription-opening` arms every node to refuse its next subscription
-opening as unavailable, since a restored session can reach any seed. The second declared action,
-`clear-subscription-opening-refusals`, clears any unused refusals on every node; the fault fixture
-requests it in teardown even when the test failed, so a refusal cannot reach a later test.
+opening as unavailable, since a restored session can reach any seed.
+`refuse-next-clock-attachment` similarly refuses each node's next clock attachment with the typed
+`InTransaction` attach refusal. The client ordinarily defers restoration while it holds a
+transaction, so this testing-build fault makes the refusal observable on demand without changing
+that client policy. `clear-subscription-opening-refusals` and `clear-clock-attachment-refusals`
+clear the respective unused refusals on every node. Each fault fixture requests its clearing
+action in teardown even when the test failed, so a refusal cannot reach a later test. The clock
+test reads the initial unpaced clock from the attach reply's cached snapshot, cuts its relay,
+arms the refusal before restoring the relay, and asserts `INTERRUPTED`, `RESTORATION_FAILED`
+with cause/message/positive wait, then the
+restored `STATE` of the same domain and generation. Extra refused attempts may precede that state
+when reconnection visits another armed node.
 An unknown action, malformed or repeated sequence, failed action or undelivered confirmation fails
 the scenario. The host
 adapter waits at most 120 seconds for its exact confirmation; the scenario's whole-run deadline
@@ -3678,9 +3700,9 @@ teardowns, including on failure. The JVM suite's `Actions` adapter writes each r
 deadline, so one daemon thread reads confirmations, a line of at most 256 bytes at a time, into a
 one-line queue that the waiting request reads within its 120 seconds. Once input ends, a line
 outgrows its bound or reading fails, every later request fails at once. A test's
-`Actions.Refusals` resource clears an armed refusal when it closes, including after a failed
-assertion. Hosts reuse this exchange without another dependency; it is a test harness contract,
-with no product endpoint.
+`Actions.Refusals` and `Actions.ClockRefusals` resources clear their armed refusals when they close,
+including after a failed assertion. Hosts reuse this exchange without another dependency; it is a
+test harness contract, with no product endpoint.
 
 The step that reads the run waits for the runner to end, for the duration the step names and never
 longer than 600 seconds, so a suite that stops making progress fails with its own report inside the
@@ -4416,8 +4438,9 @@ shard's `scenario-logs-<I>` artifact carries its `tests/logs`.
 Server processes write their logs into their own temporary directories, and a failure quotes the
 tail it needs.
 
-The scenario tracing default enables the consensus owner's trace contexts and vote send/completion
-events, while retaining the replication module's debug selection and OpenRaft's existing filter.
+The scenario tracing default enables the consensus owner's receiver contexts and vote
+send/completion events at `debug`, while retaining the replication module's debug selection and
+OpenRaft's existing filter.
 The concrete local listener distinguishes same-named nodes in parallel isolated clusters. Vote
 events retain the peer, vote, deadline, elapsed transport time and existing result; receiver
 contexts identify the node whose Raft API accepted the request. These infrequent election events
@@ -4427,6 +4450,24 @@ enable OpenRaft debug events to compare received append gaps and API-to-core pro
 neither a passing replay nor a final leader snapshot establishes why an earlier election stalled.
 Compare the same cluster's request, processing and reply boundaries with runner load and scheduler
 evidence; the Cucumber task's stall detector does not observe every node worker.
+
+The default selects nothing more verbose than `debug`, which
+`the_scenario_default_selects_nothing_more_verbose_than_debug` in
+`src/application/tracing_setup_filter_tests.rs` holds. A scenario run records through one process
+subscriber, and the `log` bridge that subscriber installs hands it every record a dependency writes
+through the `log` crate, up to the most verbose level the filter selects for any target, to be
+judged one record at a time. Cranelift writes `trace` records throughout every module it compiles,
+and a node compiles the module of a WASM processor it installs before it reports the revision
+prepared: after a restart or a restore, and on every node other than the one whose transaction
+validated the module. From 3 November 2026 the default selected `nervix_consensus=trace` for the
+vote events, and one compile of the suite's 1.77 MB Rust guest took 23.8 to 26.7 seconds on a
+development host where it takes 4.2 to 4.6 seconds with the default at `debug` or with no
+subscriber. CI shards spent about 31 seconds on it on an otherwise idle core, and longer under
+load, against the 40 seconds a revision has to become prepared and ready: the scenario cluster's
+10-second node-unavailability timeout plus the 30-second readiness propagation bound. `CREATE
+SUBSCRIPTION` after a cluster restart or a restore then timed out waiting for the revision to become
+ready, and a transaction step on three nodes timed out waiting for its followers to prepare it. An
+explicit `RUST_LOG` that selects `trace` anywhere brings that cost back for its run.
 
 The materialized input round and the delayed-coordinator publication observation each own a
 `BackupPhase`. It captures the existing 120-second deadline before dispatching the operation through

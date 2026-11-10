@@ -36,6 +36,8 @@ use nervix_models::{
 use nervix_primitives::sync::Arc;
 
 use super::{
+    materialized::ArchivedMaterializedUnit,
+    partitions::{RegroupedLifecycle, RestoredPartitions},
     prepare::{RestoredBranchDeclarations, VerifiedArchive, create_statements},
     runner::{RestoreSteps, StepFailure},
 };
@@ -49,8 +51,27 @@ use crate::{
         session_service::SessionServiceImpl,
     },
     registry::{PlannedDomain, RestorePlan},
-    runtime::{RESTORE_STATE_CHUNK_BYTES, RestoredRuntimeState, StagedArtifact},
+    runtime::{
+        RESTORE_STATE_CHUNK_BYTES, RESTORE_STATE_WORKING_BYTES, RestoredRuntimeState,
+        StagedArtifact,
+    },
 };
+
+/// What restoring the regrouped state of one domain's divided entities reads.
+struct RegroupedState<'a> {
+    domain: &'a PlannedDomain,
+    archive: &'a VerifiedArchive,
+    authority: &'a RestoreStateAuthority,
+    scheduled: &'a nervix_models::DomainSchedule,
+    partitions: &'a RestoredPartitions<'a>,
+}
+
+/// Every archived branch lifecycle of one divided entity, with the archive length they take.
+#[derive(Default)]
+struct ArchivedLifecycles {
+    records: Vec<nervix_backup::BranchLifecycleRecord>,
+    length: u64,
+}
 
 /// The steps of one admitted restore, taking effect in consensus and the stores this leader
 /// writes.
@@ -145,6 +166,9 @@ impl SessionServiceImpl {
             RestoreStep::CreateDomain(target) => {
                 let domain = planned_domain(plan, target)?;
                 let effect = RestoreStepEffect::Domain {
+                    domain_quota: self
+                        .admit_domain_creation(target, true)
+                        .map_err(|error| StepFailure::Failed(format!("{error:#}")))?,
                     state: Box::new(domain.state.clone()),
                     resources: domain.resources.clone(),
                 };
@@ -230,11 +254,31 @@ impl SessionServiceImpl {
                 lifecycles.push(lifecycle);
             }
         }
+        // A branch's partitions divide some entities: their archived state is restored in the unit
+        // the restored count places each key in, whichever unit archived it.
+        let partitions = scheduled
+            .map(|scheduled| RestoredPartitions::of(scheduled, archive.states_for(&domain.source)));
         // Stage lifecycle before guest saves; the published generation contains both at once.
         for first_lifecycle in [true, false] {
             nervix_primitives::task::consume_budget().await;
             if state == RestoreState::ConfigurationOnly {
                 break;
+            }
+            if let (Some(partitions), Some(scheduled)) = (partitions.as_ref(), scheduled) {
+                let regrouped = RegroupedState {
+                    domain,
+                    archive,
+                    authority: &authority,
+                    scheduled,
+                    partitions,
+                };
+                if first_lifecycle {
+                    self.install_regrouped_lifecycles(&regrouped, &mut inventories)
+                        .await?;
+                } else {
+                    self.install_regrouped_materialized(&regrouped, &mut inventories)
+                        .await?;
+                }
             }
             for (index, archived) in archive.states_for(&domain.source).iter().enumerate() {
                 nervix_primitives::task::consume_budget().await;
@@ -357,6 +401,27 @@ impl SessionServiceImpl {
                 else {
                     tracing::warn!(domain = %domain.target, entity = %reference.identifier, "skipped state for an entity absent from the restored schedule");
                     continue;
+                };
+                let unit = match partitions.as_ref() {
+                    Some(partitions) => {
+                        let regrouped_kind = matches!(
+                            archived,
+                            DescribedRuntimeState::BranchLifecycle { .. }
+                                | DescribedRuntimeState::Materialized { .. }
+                        );
+                        if regrouped_kind && partitions.divided(&reference).is_some() {
+                            // Restored per unit of the restored count, before or after this pass.
+                            continue;
+                        }
+                        let Some(unit) =
+                            partitions.section_unit(&reference, unit, branch_fingerprint.as_ref())
+                        else {
+                            tracing::debug!(domain = %domain.target, entity = %reference.identifier, "skipped a key's state that a copy in the key's own unit supersedes");
+                            continue;
+                        };
+                        unit
+                    }
+                    None => unit,
                 };
                 let Some(placed_unit) = node.units.get(&unit) else {
                     tracing::warn!(domain = %domain.target, entity = %reference.identifier, "skipped state for a unit absent from the restored schedule");
@@ -532,30 +597,15 @@ impl SessionServiceImpl {
                     length,
                     digest,
                 };
-                for owner_or_replica in &placed_unit.assigned_nodes {
-                    nervix_primitives::task::consume_budget().await;
-                    let inventory = inventories.entry(owner_or_replica.clone()).or_default();
-                    inventory.checkpoints =
-                        inventory.checkpoints.checked_add(1).ok_or_else(|| {
-                            StepFailure::Failed(
-                                "restore checkpoint count exceeds address space".to_string(),
-                            )
-                        })?;
-                    inventory.payload_bytes =
-                        inventory.payload_bytes.checked_add(length).ok_or_else(|| {
-                            StepFailure::Failed(
-                                "restore state length exceeds address space".to_string(),
-                            )
-                        })?;
-                    self.install_restored_checkpoint_on(
-                        owner_or_replica,
-                        &authority,
-                        checkpoint.clone(),
-                        artifact.clone(),
-                        offset,
-                    )
-                    .await?;
-                }
+                self.install_restored_checkpoint_on_assigned(
+                    &mut inventories,
+                    &placed_unit.assigned_nodes,
+                    &authority,
+                    &checkpoint,
+                    &artifact,
+                    offset,
+                )
+                .await?;
             }
         }
         // No published checkpoint changes until every compatible section has staged successfully.
@@ -586,6 +636,215 @@ impl SessionServiceImpl {
             }
         }
         Ok(authority)
+    }
+
+    /// Installs `checkpoint`, staged in `artifact` from `offset`, on every node `assigned` names,
+    /// counting it in each node's inventory.
+    async fn install_restored_checkpoint_on_assigned(
+        &self,
+        inventories: &mut std::collections::BTreeMap<ClusterNodeName, RestoreStateInventory>,
+        assigned: &[ClusterNodeName],
+        authority: &RestoreStateAuthority,
+        checkpoint: &RestoredRuntimeState,
+        artifact: &Arc<StagedArtifact>,
+        offset: u64,
+    ) -> Result<(), StepFailure> {
+        for owner_or_replica in assigned {
+            nervix_primitives::task::consume_budget().await;
+            let inventory = inventories.entry(owner_or_replica.clone()).or_default();
+            inventory.checkpoints = inventory.checkpoints.checked_add(1).ok_or_else(|| {
+                StepFailure::Failed("restore checkpoint count exceeds address space".to_string())
+            })?;
+            inventory.payload_bytes = inventory
+                .payload_bytes
+                .checked_add(checkpoint.length)
+                .ok_or_else(|| {
+                    StepFailure::Failed("restore state length exceeds address space".to_string())
+                })?;
+            self.install_restored_checkpoint_on(
+                owner_or_replica,
+                authority,
+                checkpoint.clone(),
+                artifact.clone(),
+                offset,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Installs, for every entity a branch's partitions divide, one branch lifecycle per unit of
+    /// the restored count: every archived entry whose key that unit owns, from whichever unit
+    /// archived it.
+    async fn install_regrouped_lifecycles(
+        &self,
+        regrouped: &RegroupedState<'_>,
+        inventories: &mut std::collections::BTreeMap<ClusterNodeName, RestoreStateInventory>,
+    ) -> Result<(), StepFailure> {
+        let mut entities = std::collections::BTreeMap::<NodeRef, ArchivedLifecycles>::new();
+        for archived in regrouped.archive.states_for(&regrouped.domain.source) {
+            let DescribedRuntimeState::BranchLifecycle { lifecycle, record } = archived else {
+                continue;
+            };
+            let reference = NodeRef::new(lifecycle.owner_kind, lifecycle.entity.clone());
+            let Some(node) = regrouped.partitions.divided(&reference) else {
+                continue;
+            };
+            if lifecycle.schema != node.schema_fingerprint {
+                tracing::warn!(domain = %regrouped.domain.target, entity = %reference.identifier, "skipped state with a mismatched schema fingerprint");
+                continue;
+            }
+            let entity = entities.entry(reference).or_default();
+            entity.records.push(lifecycle.clone());
+            entity.length = entity.length.checked_add(record.length).ok_or_else(|| {
+                StepFailure::Failed("restore state length exceeds address space".to_string())
+            })?;
+        }
+        for (reference, archived) in entities {
+            nervix_primitives::task::consume_budget().await;
+            let node = regrouped
+                .partitions
+                .divided(&reference)
+                .verified("only entities a branch's partitions divide were gathered");
+            // A unit's regrouped lifecycle holds entries of the entity's archived lifecycles, whose
+            // native form takes no more than this bound for all of them together.
+            let entries = archived.length.checked_mul(8).ok_or_else(|| {
+                StepFailure::Failed("restore state length exceeds address space".to_string())
+            })?;
+            let maximum = entries
+                .checked_add(RESTORE_STATE_WORKING_BYTES)
+                .ok_or_else(|| {
+                    StepFailure::Failed("restore state length exceeds address space".to_string())
+                })?;
+            let units =
+                RegroupedLifecycle::regroup(self.inner.runtime.executor(), node, archived.records)
+                    .await
+                    .map_err(|error| StepFailure::Failed(format!("{error:#}")))?;
+            for lifecycle in units {
+                nervix_primitives::task::consume_budget().await;
+                let Some(placed_unit) = node.units.get(&lifecycle.unit) else {
+                    continue;
+                };
+                let artifact = lifecycle
+                    .stage(&self.inner.runtime, &reference.identifier, maximum)
+                    .await
+                    .map_err(|error| StepFailure::Failed(format!("{error:#}")))?;
+                let checkpoint = RestoredRuntimeState {
+                    placement: StatePlacementEnvelope {
+                        domain: regrouped.domain.target.clone(),
+                        state: RuntimeState::BranchLru {
+                            schema: lifecycle.schema,
+                        },
+                        kind: reference.kind,
+                        identifier: reference.identifier.clone(),
+                        unit: lifecycle.unit,
+                        branch_key: None,
+                    },
+                    branch_fingerprint: None,
+                    revision: lifecycle.revision,
+                    length: artifact.length(),
+                    digest: artifact.digest(),
+                };
+                self.install_restored_checkpoint_on_assigned(
+                    inventories,
+                    &placed_unit.assigned_nodes,
+                    regrouped.authority,
+                    &checkpoint,
+                    &artifact,
+                    0,
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Installs, for every materialized relay a branch's partitions divide, one checkpoint per
+    /// unit of the restored count: every archived row whose key that unit owns, from whichever unit
+    /// archived it.
+    async fn install_regrouped_materialized(
+        &self,
+        regrouped: &RegroupedState<'_>,
+        inventories: &mut std::collections::BTreeMap<ClusterNodeName, RestoreStateInventory>,
+    ) -> Result<(), StepFailure> {
+        let relays = ArchivedMaterializedUnit::of_divided_relays(
+            regrouped.archive.states_for(&regrouped.domain.source),
+            regrouped.partitions,
+        );
+        for (reference, mut archived) in relays {
+            nervix_primitives::task::consume_budget().await;
+            let node = regrouped
+                .partitions
+                .divided(&reference)
+                .verified("only relays a branch's partitions divide were gathered");
+            let Some(schema) = regrouped
+                .domain
+                .materialized_schemas
+                .get(&reference.identifier)
+            else {
+                continue;
+            };
+            let declarations = Arc::new(
+                RestoredBranchDeclarations::of(regrouped.scheduled, &reference)
+                    .map_err(|error| StepFailure::Failed(format!("{error:#}")))?,
+            );
+            let mut revision = 0_u64;
+            let mut stored_schema = None;
+            for source in &archived {
+                revision = revision.max(source.descriptor.revision);
+                stored_schema = Some(source.descriptor.schema);
+            }
+            let Some(stored_schema) = stored_schema else {
+                continue;
+            };
+            for (unit, placed_unit) in &node.units {
+                nervix_primitives::task::consume_budget().await;
+                // The unit's own archived rows come first, so a key archived twice keeps them.
+                archived.sort_by_key(|source| source.descriptor.unit != *unit);
+                let artifact = super::materialized::prepare_regrouped_materialized_checkpoint(
+                    &self.inner.runtime,
+                    regrouped.archive,
+                    &archived,
+                    *unit,
+                    node,
+                    schema.clone(),
+                    declarations.clone(),
+                )
+                .await
+                .map_err(|error| StepFailure::Failed(format!("{error:#}")))?;
+                let Some(artifact) = artifact else {
+                    continue;
+                };
+                let artifact = Arc::new(artifact);
+                let checkpoint = RestoredRuntimeState {
+                    placement: StatePlacementEnvelope {
+                        domain: regrouped.domain.target.clone(),
+                        state: RuntimeState::MaterializedRelay {
+                            schema: stored_schema
+                                .materialized_at(regrouped.domain.state.start_version),
+                        },
+                        kind: reference.kind,
+                        identifier: reference.identifier.clone(),
+                        unit: *unit,
+                        branch_key: None,
+                    },
+                    branch_fingerprint: None,
+                    revision,
+                    length: artifact.length(),
+                    digest: artifact.digest(),
+                };
+                self.install_restored_checkpoint_on_assigned(
+                    inventories,
+                    &placed_unit.assigned_nodes,
+                    regrouped.authority,
+                    &checkpoint,
+                    &artifact,
+                    0,
+                )
+                .await?;
+            }
+        }
+        Ok(())
     }
 
     async fn install_restored_checkpoint_on(
@@ -729,6 +988,7 @@ impl SessionServiceImpl {
 
     /// The failure a consensus refusal of a restore step stands for.
     async fn consensus_step_failure(&self, error: &Report<ConsensusError>) -> StepFailure {
+        self.inner.licensing.record_refusal(error);
         if let ConsensusError::LeadershipLost { observed } = error.current_context() {
             let redirect = self.not_leader_response("", observed.clone()).await;
             return StepFailure::LeadershipLost(Box::new(redirect));

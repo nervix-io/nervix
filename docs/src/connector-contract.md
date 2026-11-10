@@ -135,9 +135,12 @@ outward policy to shared-provider construction. Every new handshake captures its
 while established connections retain their negotiation and the connector retains its driver.
 SDKs that construct their own provider remain inventoried gaps. SQS projects the boundary's typed
 outward choice into Smithy's AWS-LC mode, retaining the SDK's cipher filtering. The interconnect
-has an independent fixed provider. [Cryptography](cryptography.md#algorithm-policy) owns membership
-and the governed-path inventory; connectors still own trust roots, identities and protocol
-negotiation.
+has an independent fixed provider. [Cryptography](cryptography.md#outward-tls-policy) owns
+membership and the governed-path inventory; connectors still own trust roots, identities and
+protocol negotiation. A new connector TLS path takes the committed policy, or joins that
+inventory's driver-owned gaps in the same change. Driver cryptography outside AWS-LC is listed in
+the [inventory](cryptography.md#inventory-outside-aws-lc) with what the later FIPS mode refuses,
+and a connector change adds none.
 An integration crate may depend on the contract, vocabulary, Arrow, and its own driver stack. It
 must not depend on the server, another integration crate, or runtime collectors. Driver libraries
 belong in that integration's manifest, with test-harness dependencies kept separately. A
@@ -935,7 +938,7 @@ thing for every connector:
 
 A read that waits for whatever the peer sends next is bounded by the protocol's keep-alive or by
 `idle_timeout_ms`, and a write by `timeout_ms` or the retry policy. A key's value is a positive whole
-number of milliseconds no longer than about 146 years, the vocabulary's `ClientDeadline` rule, and
+number of milliseconds no longer than about 292 years, the vocabulary's `ClientDeadline` rule, and
 the connector contract's `ConfiguredDeadline` reads each key once, so no connector parses its own. A
 connector that dials for itself and reads `connect_timeout_ms` allows 30 seconds where the client
 leaves the key out, and so does a listener that bounds the TLS handshake of a connection it accepted
@@ -1582,7 +1585,12 @@ returns; see [Confirmed acknowledgements](#confirmed-acknowledgements).
 
 A client ingestor's plan is not a connector plan: it carries the input schema, its compiled form, the
 producer policy of window, ACK timeout, and retry backoff, and the endpoint contract digest producers
-attach to. It declares no header model or metadata field and supports only `SUSPEND`.
+attach to. It declares no header model and supports only `SUSPEND`. Its first metadata field is
+`user: STRING`, the canonical user name authenticated by the producer's opening session. The
+session supplies that typed identity to the local or forwarded open; the endpoint retains it per
+attachment and the batch projection supplies it on every row, independently of payload fields.
+As with other metadata fields, its schema type is optional; an authenticated producer always
+supplies the value. Producers sharing a forwarding link keep their individual identities.
 
 Every ingestor entity declares its required, non-sensitive `payload` fields beside its metadata.
 All declare `bytes: U64`; `CLIENT PRODUCER` also declares `rows: U64`. The registry validates the
@@ -1647,7 +1655,7 @@ read context. They never become absent values. The generic retained row and Arro
 `U32` through quiesce and projection without widening it; the FIFO sequence number stays text.
 
 The host projects metadata lazily. When an ingestor binds its programs, the host records which
-declared fields its route programs and its `TIMESTAMP AT metadata.<field>` read, and every ingest
+declared fields its arrival filter, route programs and `TIMESTAMP AT metadata.<field>` read, and every ingest
 group of the ingestor builds Arrow columns for those fields and no others. A group of an ingestor
 that reads none visits no metadata value at all. A message whose value for a read field is
 unrepresentable or invalid is refused once its ingestor's `FILTER WHERE` has kept it and before
@@ -3499,7 +3507,19 @@ sequenceDiagram
   data reads. Protocol control frames remain transport concerns.
   `idle_timeout_ms` bounds silence; omission derives three configured ping intervals, or thirty
   seconds without configured pings. Received data and control frames refresh the absolute activity
-  deadline; local pings and read cancellation do not. An explicit idle value overrides derivation.
+  deadline; regular local pings and read cancellation do not. An explicit idle value overrides
+  derivation. At expiry, two ping intervals without an inbound frame or successfully written client
+  ping establish a missed client interval. The connection writes one catch-up ping and allows one
+  existing idle-bound response window from its successful write. This window survives cancelled
+  reads and is never renewed by further pings or another local delay; an inbound frame restores
+  ordinary activity tracking. The ping write keeps its fixed one-second bound. The same rule
+  applies to an explicit idle value; without client pings the physical activity deadline is retained
+  across handoff and cancellation. On-schedule pings keep the ordinary silent-peer bound.
+  The connection that owns the deadline ends itself once the peer is judged silent: it polls one
+  going-away Close (status `1001`, RFC 6455 section 7.1.7) outside the cooperative budget, writing it only if the
+  transport takes it at once, and is then released. The verdict waits for neither the write nor a
+  reply, so it adds no network wait and never delays the host's reconnect; a write the transport
+  refuses is recovered and reported at `debug`.
   Incoming frame or message overflow fails the read and ends the connection, as `fail_read` declares.
   The host reconnects on its policy. Suspension closes the connection while retaining successful
   handshake payloads, which drain before another connection opens; close clears the queue.
@@ -3859,5 +3879,5 @@ change. The rustls configuration captures the current complete pair for each new
 including a driver-created reconnect; an established connection keeps its snapshot. Policy changes
 do not re-open the connector or alter its retry, quiesce, finish or acknowledgement contract.
 Trust roots, identity and ALPN remain properties of the concrete client configuration.
-[Cryptography](cryptography.md#algorithm-policy) owns the exact governed-path and driver-owned-gap
+[Cryptography](cryptography.md#outward-tls-policy) owns the exact governed-path and driver-owned-gap
 inventory.

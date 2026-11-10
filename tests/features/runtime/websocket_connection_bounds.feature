@@ -113,6 +113,7 @@ Feature: Outbound WebSocket connection bounds
       """
       "user_id":43
       """
+    And the WebSocket bounds peer's silent connection ends with a going-away Close frame
 
     Examples:
       | cluster_size |

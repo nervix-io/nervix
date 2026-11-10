@@ -1202,6 +1202,11 @@ public final class Probe {
     }
 
     static void runInspection(Session session) throws Exception {
+        try (var outcome = session.handle.command("DESCRIBE LICENSE;", null); var license = outcome.stateInspection()) {
+            require(license.domain() == null && license.entityName() == null, "cluster licensing scope");
+            require(license.entityKind().equals("LICENSE") && license.counts().rows() == 3 && license.counts().branches() == 0, "typed licensing observation");
+            report("INSPECTION license rows=3");
+        }
         Nervix.Inspection inspection;
         try (var outcome = session.handle.command(
                 "SHOW RELAY events MATERIALIZED STATE FOR UNBRANCHED LIMIT 1 FORMAT JSON;", null)) {

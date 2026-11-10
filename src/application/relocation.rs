@@ -450,6 +450,7 @@ impl SessionServiceImpl {
             domain,
             &graph,
             &schedulable_nodes,
+            current,
             planning.capabilities(),
         );
         let planned = (!moved.is_empty()).then(|| {
@@ -578,12 +579,14 @@ impl SessionServiceImpl {
     }
 
     /// The assignment the scheduler would choose today, used to fill replica slots the former
-    /// owner and existing replicas leave open.
+    /// owner and existing replicas leave open. `current` is the schedule in force, whose
+    /// partition epochs the desired schedule continues.
     fn desired_domain_schedule(
         &self,
         domain: &DomainName,
         graph: &ActiveGraph,
         schedulable_nodes: &BTreeSet<ClusterNodeName>,
+        current: &DomainSchedule,
         capabilities: &std::collections::BTreeMap<ClusterNodeName, nervix_models::NodeCapabilities>,
     ) -> DomainSchedule {
         let cluster_nodes = schedulable_nodes.iter().cloned().collect::<Vec<_>>();
@@ -594,6 +597,7 @@ impl SessionServiceImpl {
                 &cluster_nodes,
                 usize::try_from(self.cluster_parameters().replica_count())
                     .assured("the committed count fits a supported target"),
+                Some(current),
                 self.inner.runtime.scheduler_mode(),
                 capabilities,
             )
@@ -605,6 +609,7 @@ impl SessionServiceImpl {
                 &cluster_nodes,
                 usize::try_from(self.cluster_parameters().replica_count())
                     .assured("the committed count fits a supported target"),
+                Some(current),
                 capabilities,
             )
         }

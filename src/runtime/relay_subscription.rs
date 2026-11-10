@@ -43,9 +43,11 @@ impl RelaySubscriptionDefinition {
     }
 }
 
+/// Subscribers read rows and their branch keys, which are the same under any partition count, so
+/// a change of the count leaves the definition they attached to unchanged.
 impl PartialEq for RelaySubscriptionDefinition {
     fn eq(&self, other: &Self) -> bool {
-        *self.payload == *other.payload && self.branching == other.branching
+        *self.payload == *other.payload && self.branching.same_key_as(&other.branching)
     }
 }
 

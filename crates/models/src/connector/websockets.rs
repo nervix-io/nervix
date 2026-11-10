@@ -141,7 +141,8 @@ const WEBSOCKETS_CONNECTION_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Clause("the signaling protocol's TIMEOUT"),
         },
         DeclaredWait {
-            wait: "reading the next frame",
+            wait: "reading the next frame, including one catch-up response window after a missed \
+                   client ping",
             bound: WaitBound::Key {
                 key: DeadlineKey::IdleTimeout,
                 omitted: OmittedDeadline::Derived(

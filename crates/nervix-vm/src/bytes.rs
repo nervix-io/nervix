@@ -224,6 +224,8 @@ pub(crate) fn sha256(input: &BinaryArray, errors: &mut RowErrors, span: Span) ->
     output.finish()
 }
 
+/// Non-security XXH3: the stable hash `xxh3_64()` exposes for partitioning, bucketing and change
+/// detection; collision-resistant hashing uses `sha256()`.
 pub(crate) fn xxh3_64(input: &BinaryArray) -> UInt64Array {
     let mut output = UInt64Builder::new();
     for row in 0..input.len() {

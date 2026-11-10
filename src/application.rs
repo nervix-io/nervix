@@ -121,10 +121,7 @@ use ownership_handoff::{FORCED_OWNERSHIP_RECOVERY_BUDGET, ForcedOwnershipRecover
 use public_listener::{PublicListener, PublicListenerKind};
 #[cfg(feature = "testing")]
 use scheduling::VOTER_OBSERVATION_GRACE;
-use scheduling::{
-    KafkaPartitionWatcherKey, KafkaPartitionWatcherTask, LEADER_KAFKA_PARTITION_WATCH_INTERVAL,
-    StartupVoterObservations,
-};
+use scheduling::{StartupVoterObservations, run_kafka_partition_watchers};
 use session::grpc::SessionGrpcService;
 pub use session_service::SessionServiceImpl;
 use session_service::{
@@ -177,6 +174,9 @@ mod http_endpoint;
 mod interconnect_relay;
 mod join_supervision;
 mod leader_redirect;
+mod license_description;
+mod licensing_admission;
+mod membership_reconciliation;
 mod model_mutation;
 mod model_validation;
 mod node_capabilities;
@@ -186,6 +186,7 @@ mod node_settings;
 mod observability_http;
 mod observation;
 mod ownership_handoff;
+mod partition_transition;
 mod placement_groups;
 mod preflight;
 pub use nervix_execution::{
@@ -821,6 +822,16 @@ impl Application {
             consensus.verified("startup assigns this handle before it reaches this point");
         let interconnect =
             interconnect.verified("startup assigns this handle before it reaches this point");
+        let licensing = crate::licensing::PolicyHandle::new(
+            &consensus.observer(),
+            &runtime.metrics(),
+            fault_injection.clone(),
+        );
+        crate::licensing::metrics::register(
+            &runtime.metrics(),
+            licensing.clone(),
+            consensus.observer(),
+        );
         let mut interconnect_rx = interconnect_rx;
         let runtime_admission = Arc::new(runtime_admission::RuntimeAdmission::new(
             cluster.local_node_identity().await,
@@ -836,6 +847,11 @@ impl Application {
             .metrics()
             .install_node_observations(node_observations.clone());
         let mut background_tasks = Vec::new();
+        background_tasks.push(nervix_primitives::task::spawn(
+            licensing
+                .clone()
+                .follow(consensus.observer(), shutdown.clone()),
+        ));
         background_tasks.push(node_capabilities::spawn(
             consensus.proposer(),
             cluster.clone(),
@@ -866,8 +882,6 @@ impl Application {
         let cluster_for_membership_reconcile = cluster.clone();
         let administrator_for_membership_reconcile = consensus.administrator();
         let proposer_for_parameter_seeding = consensus.proposer();
-        #[cfg(feature = "testing")]
-        let fault_for_identity_seeding = fault_injection.clone();
         let membership_reconcile_shutdown = shutdown.clone();
         let interconnect_tls_transport = interconnect.clone();
         let interconnect_tls_shutdown = shutdown.clone();
@@ -883,6 +897,8 @@ impl Application {
             .await;
         }));
         let (join_refusal_sender, join_refusal) = watch::channel(None);
+        let bootstrap_refusal_sender = join_refusal_sender.clone();
+        let bootstrap_refusal_coordinator = shutdown_coordinator.clone();
         if has_bootstrap_candidates {
             let supervision = JoinSupervision {
                 transport: interconnect.clone(),
@@ -917,76 +933,20 @@ impl Application {
                 controller.run(memory_runtime, memory_shutdown).await;
             }));
         }
-        background_tasks.push(nervix_primitives::task::spawn(async move {
-            sleep(Duration::from_millis(500)).await;
-            let mut initialized = false;
-            loop {
-                nervix_primitives::task::consume_budget().await;
-                if membership_reconcile_shutdown.is_cancelled() {
-                    break;
-                }
-                if allow_bootstrap && !initialized {
-                    match administrator_for_membership_reconcile
-                        .maybe_initialize()
-                        .await
-                    {
-                        Ok(did_initialize) => {
-                            initialized = did_initialize;
-                        }
-                        Err(error) => {
-                            warn!(error = %format_args!("{error:#}"), "raft bootstrap attempt failed");
-                        }
-                    }
-                }
-                if let Err(error) = cluster_identity::seed(
-                    &proposer_for_parameter_seeding,
-                    #[cfg(feature = "testing")]
-                    &fault_for_identity_seeding,
-                ).await {
-                    warn!(error = %format_args!("{error:#}"), "failed to seed cluster identity");
-                }
-                if allow_bootstrap
-                    && proposer_for_parameter_seeding.cluster_identity().is_some()
-                    && proposer_for_parameter_seeding
-                        .cluster_parameters()
-                        .is_none()
-                    && proposer_for_parameter_seeding
-                        .current_leader()
-                        .await
-                        .as_ref()
-                        == Some(proposer_for_parameter_seeding.local_node_id())
-                    && let Err(error) = proposer_for_parameter_seeding
-                        .seed_cluster_parameters(parameter_seeds)
-                        .await
-                {
-                    warn!(
-                        error = format!("{error:#}"),
-                        "failed to seed cluster parameters"
-                    );
-                }
-                if let Some(record) = proposer_for_parameter_seeding.cluster_parameters() {
-                    cluster_for_membership_reconcile
-                        .publish_cluster_parameters(record, false)
-                        .await;
-                }
-                if let Err(error) = administrator_for_membership_reconcile
-                    .reconcile_nodes(cluster_for_membership_reconcile.gossip_state())
-                    .await
-                {
-                    warn!(error = %format_args!("{error:#}"), "raft membership reconciliation failed");
-                }
-                // Published whether or not a membership change failed: the verdicts were judged
-                // before any change was attempted, and a node that stopped leading withdraws them.
-                let verdicts = administrator_for_membership_reconcile.admission_verdicts();
-                cluster_for_membership_reconcile
-                    .publish_admission_verdicts(verdicts.as_ref())
-                    .await;
-                nervix_primitives::select! {
-                    _ = membership_reconcile_shutdown.cancelled() => break,
-                    _ = sleep(Duration::from_secs(1)) => {}
-                }
-            }
-        }));
+        background_tasks.push(membership_reconciliation::spawn(
+            membership_reconciliation::MembershipReconciliation {
+                cluster: cluster_for_membership_reconcile,
+                administrator: administrator_for_membership_reconcile,
+                proposer: proposer_for_parameter_seeding,
+                shutdown: membership_reconcile_shutdown,
+                allow_bootstrap,
+                parameter_seeds,
+                licensing: licensing.clone(),
+                refusals: bootstrap_refusal_sender,
+                coordinator: bootstrap_refusal_coordinator,
+                fault: fault_injection.clone(),
+            },
+        ));
         let certificates = HttpsListenerCertificates::new(
             &resource_store,
             &fault_injection,
@@ -1006,6 +966,7 @@ impl Application {
                 resource_store,
                 https_certificates: certificates,
                 runtime: runtime.clone(),
+                licensing,
                 runtime_admission: runtime_admission.clone(),
                 initialization: Arc::new(node_initialization::NodeInitialization::default()),
                 admission_shutdown: shutdown_coordinator.admission_token(),
@@ -1562,11 +1523,13 @@ impl Application {
                                 else {
                                     continue;
                                 };
+                                let current_domain = current_schedule.domain(&domain);
                                 #[cfg(feature = "testing")]
                                 let mut schedule = graph.schedule_for_domain_with_mode(
                                     &domain,
                                     &schedulable_node_ids,
                                     usize::try_from(automatic_schedule_input.runtime_state().parameters.verified("scheduling starts after parameter seeding").values.replica_count()).assured("the committed replica count fits a supported target"),
+                                    current_domain,
                                     scheduler_mode,
                                  &scheduling_capabilities,);
                                 #[cfg(not(feature = "testing"))]
@@ -1574,8 +1537,9 @@ impl Application {
                                     &domain,
                                     &schedulable_node_ids,
                                     usize::try_from(automatic_schedule_input.runtime_state().parameters.verified("scheduling starts after parameter seeding").values.replica_count()).assured("the committed replica count fits a supported target"),
-                                 &scheduling_capabilities,);
-                                let current_domain = current_schedule.domain(&domain);
+                                    current_domain,
+                                    &scheduling_capabilities,
+                                );
                                 let mut failover_existing = current_domain.cloned();
                                 if let Some(existing) = &mut failover_existing {
                                     let failover_moves =
@@ -2124,8 +2088,10 @@ impl Application {
 
         service.register_wasm_state_reset_service(shutdown.clone())?;
         service.register_wasm_state_recovery_interconnect_handler()?;
+        service.register_partition_transition_handler()?;
         service.register_stopping_node_drain_handler()?;
         service.register_wasm_state_recovery_coordinator(shutdown.clone());
+        service.register_partition_transition_retirement(shutdown.clone());
 
         let entity_drain_service = service.clone();
         interconnect
@@ -2660,34 +2626,7 @@ impl Application {
         let kafka_schedule_service = service.clone();
         let kafka_schedule_shutdown = shutdown.clone();
         background_tasks.push(nervix_primitives::task::spawn(async move {
-            let mut schedule_rx = kafka_schedule_service.inner.consensus.subscribe_schedule();
-            let mut tasks: HashMap<KafkaPartitionWatcherKey, KafkaPartitionWatcherTask> =
-                HashMap::new();
-
-            loop {
-                nervix_primitives::task::consume_budget().await;
-                let schedule = kafka_schedule_service
-                    .inner
-                    .consensus
-                    .current_schedule()
-                    .await;
-                kafka_schedule_service
-                    .reconcile_kafka_partition_watchers(&schedule, &mut tasks)
-                    .await;
-                nervix_primitives::select! {
-                    _ = kafka_schedule_shutdown.cancelled() => break,
-                    changed = schedule_rx.changed() => {
-                        if changed.is_err() {
-                            break;
-                        }
-                    }
-                    _ = sleep(LEADER_KAFKA_PARTITION_WATCH_INTERVAL) => {}
-                }
-            }
-
-            for (_, watcher) in tasks {
-                watcher.task.stop().await;
-            }
+            run_kafka_partition_watchers(kafka_schedule_service, kafka_schedule_shutdown).await;
         }));
 
         let (interconnect_relay_payload_lane, interconnect_relay_payload_rx) =

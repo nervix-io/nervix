@@ -80,7 +80,7 @@ fn bolero_scheduled_units_round_trip_through_current_storage_shape() {
             let mut node = rkyv::from_bytes::<ScheduledNode, rkyv::rancor::Error>(&generated)
                 .assured("the generated current node reads in the tested crate instance");
             assert!(
-                node.units_match_declaration(),
+                node.units_match_declaration(&[]),
                 "the generator must construct the node's declared current units"
             );
             for placement in node.units.values_mut() {
@@ -95,13 +95,57 @@ fn bolero_scheduled_units_round_trip_through_current_storage_shape() {
                     transition.destination = owner;
                 }
             }
-            let schedule = DomainSchedule::new(domain("prod"), [node], Vec::new());
+            let schedule = DomainSchedule::new(domain("prod"), [node], Vec::new())
+                .with_partition_epochs(generated_partition_epochs(&mut arbitrary));
             let archived = rkyv::to_bytes::<rkyv::rancor::Error>(&schedule)
                 .expect("a current schedule archives");
             let decoded = rkyv::from_bytes::<DomainSchedule, rkyv::rancor::Error>(&archived)
                 .expect("a current schedule reads from its archive");
             assert_eq!(decoded, schedule);
         });
+}
+
+/// A branch's partition count of one to sixteen partitions, the boundaries included.
+fn generated_partitions(arbitrary: &mut Arbitrary<'_>) -> crate::BranchPartitions {
+    let count = arbitrary.entropy().boundary_biased(1..=16);
+    let count = u16::try_from(count).assured("a count of at most sixteen fits u16");
+    crate::BranchPartitions::Direct(
+        std::num::NonZeroU16::new(count).assured("the generated count is at least one"),
+    )
+}
+
+/// The partition epochs of up to two branches: each in a later epoch, settled or in a transition
+/// from another count.
+fn generated_partition_epochs(
+    arbitrary: &mut Arbitrary<'_>,
+) -> std::collections::BTreeMap<crate::BranchName, crate::BranchPartitionEpoch> {
+    let mut epochs = std::collections::BTreeMap::new();
+    for name in ["by_tenant", "by_region"] {
+        if !arbitrary.entropy().flag() {
+            continue;
+        }
+        let number = arbitrary.entropy().boundary_biased(2..=u64::MAX);
+        let number = crate::PartitionEpochNumber::new(
+            std::num::NonZeroU64::new(number).assured("the generated epoch is at least two"),
+        );
+        let partitions = generated_partitions(arbitrary);
+        let transition = if arbitrary.entropy().flag() {
+            Some(crate::PartitionTransition {
+                previous: generated_partitions(arbitrary),
+            })
+        } else {
+            None
+        };
+        epochs.insert(
+            named::<crate::BranchName>(name),
+            crate::BranchPartitionEpoch {
+                number,
+                partitions,
+                transition,
+            },
+        );
+    }
+    epochs
 }
 
 fn named<N>(raw: &str) -> N

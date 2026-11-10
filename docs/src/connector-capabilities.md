@@ -14,7 +14,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | CLIENT PRODUCER | Compare `CLIENT CONSUMER`: modes, ingest payload facts. Native Arrow batches cross an application session; producers submit batches and consumers explicitly acknowledge delivery attempts, with no broker envelope. |
+| Entity | CLIENT PRODUCER | Compare `CLIENT CONSUMER`: modes, ingest metadata, ingest payload facts. Native Arrow batches cross an application session; producers submit batches and consumers explicitly acknowledge delivery attempts, with no broker envelope. |
 | Reference | SCHEMA &lt;schema&gt; |  |
 | Locator and validation rule | Not offered: The body references the native schema; there is no external topic, queue or table to locate. |  |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
@@ -23,7 +23,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Connector events | None declared. |  |
 | Instancing | single |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
-| Metadata | Not offered: Application batches have no broker envelope, peer address or external message attributes; the native schema describes each row. |  |
+| Metadata | metadata.user: STRING OPTIONAL |  |
 | Payload facts | payload.bytes: U64<br>payload.rows: U64 |  |
 | Every live node | no; scheduled owner |  |
 | Position class | none |  |
@@ -328,7 +328,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
 | Buffers | accepted signaling frames retained for ingestor reads: set by handshake_buffer_capacity messages (default 16), each at most max_message_size bytes; when full, holds back what fills it<br>one accepted frame waiting for handoff room: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>the incoming message assembled by the transport: set by max_message_size bytes (default 67108864), with each frame bounded by max_frame_size bytes (default 16777216); when exceeded, fails the read and reconnects on the retry policy |  |
-| Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: `idle_timeout_ms`; when omitted, three ping_interval_ms intervals, or 30 s without configured pings<br>writing a configured ping: fixed 1s<br>close: fixed 1s |  |
+| Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame, including one catch-up response window after a missed client ping: `idle_timeout_ms`; when omitted, three ping_interval_ms intervals, or 30 s without configured pings<br>writing a configured ping: fixed 1s<br>close: fixed 1s |  |
 | Driver limits | The opening upgrade response carries at most 124 header fields, and at most 64 KiB arrives before its head ends; a larger response fails that connection attempt.<br>The response head arrives within 512 reads that, after the 64th, average at least 128 bytes; a peer that trickles it fails that connection attempt. |  |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |  |
 

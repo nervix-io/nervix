@@ -300,8 +300,7 @@ impl CreateInferencer {
     pub fn execution_mode(
         &self,
     ) -> error_stack::Result<InferencerExecutionMode, InferencerTensorSchemaError> {
-        let mut execution_mode = None;
-        for (tensor, schema) in self
+        let tensors = self
             .inputs
             .iter()
             .map(|mapping| (mapping.tensor.as_str(), &mapping.schema))
@@ -314,10 +313,24 @@ impl CreateInferencer {
                 self.state
                     .iter()
                     .map(|binding| (binding.input.as_str(), &binding.schema)),
-            )
-        {
+            );
+        InferencerExecutionMode::of_tensors(tensors, !self.state.is_empty())
+    }
+}
+
+impl InferencerExecutionMode {
+    /// The mode tensors of these shapes run in: once for each admitted message when no tensor
+    /// declares `BATCH`, or once for each batch when every tensor declares exactly one `BATCH`
+    /// axis. A `stateful` inferencer carries state from one row to the next, so none of its
+    /// tensors may declare `BATCH`.
+    pub fn of_tensors<'a>(
+        tensors: impl IntoIterator<Item = (&'a str, &'a InferencerTensorSchema)>,
+        stateful: bool,
+    ) -> error_stack::Result<Self, InferencerTensorSchemaError> {
+        let mut execution_mode = None;
+        for (tensor, schema) in tensors {
             let batch_axis_count = schema.batch_axis_count();
-            if !self.state.is_empty() && batch_axis_count != 0 {
+            if stateful && batch_axis_count != 0 {
                 return Err(Report::new(InferencerTensorSchemaError::BatchWithState {
                     tensor: tensor.to_string(),
                 }));

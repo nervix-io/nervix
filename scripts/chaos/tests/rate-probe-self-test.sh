@@ -5,30 +5,46 @@ chaos_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 script_dir="${chaos_dir}"
 # shellcheck source=../tool-images.sh
 source "${chaos_dir}/tool-images.sh"
+# shellcheck source=../docker-event-recording.sh
+source "${chaos_dir}/docker-event-recording.sh"
 # shellcheck source=../link-degradation.sh
 source "${chaos_dir}/link-degradation.sh"
+# shellcheck source=../verifier-self-check.sh
+source "${chaos_dir}/verifier-self-check.sh"
 CHAOS_PROBE_IMAGE="${chaos_probe_image}"
 scenario=rate-probe-self-test
 run_id="rate-probe-check-$$-${RANDOM}"
-tmp_dir="${CHAOS_RATE_PROBE_ARTIFACTS:-$(mktemp -d)}"
-mkdir -p "${tmp_dir}"
+# Other runs sharing the daemon: volumes under a run label of their own, which this self-test's
+# recording never follows, publish the unrelated events of the stalled-launch control.
+noise_run_id="${run_id}-noise"
+# The probes' raw streams and records. Inside a verifier self-check they are written straight into
+# the evidence directory the check names, so a deadline or a signal that ends the check before this
+# self-test's own exit trap finishes still leaves every record written until then with the check's
+# controller.
+if [[ -n "${CHAOS_RATE_PROBE_ARTIFACTS:-}" ]]; then
+    tmp_dir="${CHAOS_RATE_PROBE_ARTIFACTS}"
+    mkdir -p "${tmp_dir}"
+elif [[ -n "${CHAOS_SELF_TEST_EVIDENCE:-}" ]]; then
+    tmp_dir="${CHAOS_SELF_TEST_EVIDENCE}/rate-probe"
+    mkdir -p "${CHAOS_SELF_TEST_EVIDENCE}"
+    mkdir "${tmp_dir}"
+else
+    tmp_dir="$(mktemp -d)"
+fi
 
-# A failed self-test keeps its probes' raw streams and records: in the evidence directory that the
-# verifier self-check names, or where they are.
+# A passing self-test removes its probes' raw streams and records; a failed one keeps them where
+# they were written.
 cleanup() {
     local status=$?
+    docker_event_recording_stop
     "${chaos_dir}/cleanup.sh" --run-id "${run_id}" --quiet >/dev/null 2>&1 || true
+    "${chaos_dir}/cleanup.sh" --run-id "${noise_run_id}" --quiet >/dev/null 2>&1 || true
     [[ -z "${CHAOS_RATE_PROBE_ARTIFACTS:-}" ]] || return 0
     if [[ "${status}" -eq 0 ]]; then
         rm -rf "${tmp_dir}"
         return 0
     fi
-    local retained="${tmp_dir}"
-    if [[ -n "${CHAOS_SELF_TEST_EVIDENCE:-}" ]] && mkdir -p "${CHAOS_SELF_TEST_EVIDENCE}" \
-        && mv "${tmp_dir}" "${CHAOS_SELF_TEST_EVIDENCE}/rate-probe"; then
-        retained="${CHAOS_SELF_TEST_EVIDENCE}/rate-probe"
-    fi
-    printf 'rate probe self-test evidence retained in %s\n' "${retained}" >&2
+    printf 'rate probe self-test evidence retained in %s\n' "${tmp_dir}" >&2
 }
 trap cleanup EXIT
 fail() { printf 'rate probe self-test failed: %s\n' "$*" >&2; exit 1; }
@@ -39,6 +55,17 @@ for image in "${CHAOS_PROBE_IMAGE}" "${chaos_nettools_image}"; do
             || fail "pinned tool image ${image} is unavailable"
     fi
 done
+# Recorded before anything carries it, so the verifier self-check's controller removes the
+# namespace owners and helpers when a deadline or a signal ends this self-test before its cleanup.
+chaos_verifier_register_run "${run_id}"
+# A failed helper's Docker events come from the live recording of the run label it carries, as a
+# run's probes read them from the run's own recording. It starts before anything carries the label,
+# and its subscriber has the verifier self-check's bound.
+recording_status=0
+docker_event_recording_start "${tmp_dir}" docker-events.ndjson "${run_id}" "${CHAOS_PROBE_IMAGE}" \
+    "${chaos_verifier_self_check_seconds}" || recording_status=$?
+[[ "${recording_status}" -eq 0 ]] \
+    || fail "the live Docker event recording did not start (status ${recording_status})"
 docker network create --label "io.nervix.chaos.run=${run_id}" "${run_id}" >/dev/null
 # Namespace owners live until cleanup, independently of how long the controls take on this
 # worker. Each probe keeps its own bound; an owner must not expire between controls.
@@ -67,6 +94,16 @@ epoch_ms() {
     nanoseconds="$(date +%s%N)"
     printf '%s\n' "$((nanoseconds / 1000000))"
 }
+# Publishes 320 Docker events that belong to nothing this self-test owns: 160 volumes of the noise
+# run label, each created and removed. The daemon replays only its 256 most recent events, so a
+# replay through docker events --since no longer holds what preceded them.
+publish_unrelated_events() {
+    # The positional parameters belong to the inner shell, not this one.
+    # shellcheck disable=SC2016
+    seq 1 160 | xargs -P 8 -I '{}' sh -c \
+        'docker volume create --label "io.nervix.chaos.run=$1" "$1-$2" >/dev/null && docker volume rm "$1-$2" >/dev/null' \
+        noise "${noise_run_id}" '{}'
+}
 
 # Invoke the production Docker commands. Only the deliberate unreachable control and the ping
 # controls of a slow start and a stalled sample shorten a bound; the partial-payload control changes
@@ -91,7 +128,8 @@ run_bounded() {
                 sleep 6
                 ;;
             ping-launch-stall)
-                # Docker creates the helper, but its start outlasts the launch bound.
+                # Docker creates the helper, but its start outlasts the launch bound. Meanwhile
+                # other runs on the daemon publish more events than its replay buffer holds.
                 local create=(docker create)
                 for i in "${!arguments[@]}"; do
                     if ((i > 1)) && [[ "${arguments[i]}" != --detach ]]; then
@@ -99,6 +137,7 @@ run_bounded() {
                     fi
                 done
                 "${create[@]}" >/dev/null || return $?
+                publish_unrelated_events
                 sleep 4
                 return 124
                 ;;
@@ -303,6 +342,9 @@ jq -e '.launch_status == 0 and .wait_status == 0 and .helper_exit_code == 0 and 
     || fail 'a slow helper start was counted against its sample'
 jq -e '.sent == 40' "${tmp_dir}/ping-slow-start.json" >/dev/null \
     || fail 'a slow helper start lost its sample'
+# The noise volumes' label is recorded before any of them exists, so the verifier self-check's
+# controller removes those a deadline or a signal leaves between their creation and removal.
+chaos_verifier_register_run "${noise_run_id}"
 for test_case in ping-launch-stall ping-sample-stall; do
     if (set -e; link_ping "${tmp_dir}/${test_case}.txt" sender receiver baseline) \
         >"${tmp_dir}/${test_case}.failure.txt" 2>&1; then
@@ -317,6 +359,16 @@ jq -e '.launch_status == 124 and .wait_status == null and .sample_started_uptime
     and .sender == "sender" and .receiver == "receiver" and .launch_seconds == 60
     and .sample_seconds == 30' "${tmp_dir}/ping-launch-stall.probe.json" >/dev/null \
     || fail 'a stalled helper start lost Docker state, events or removal'
+# The control held: the unrelated events pushed the stalled helper's creation out of the daemon's
+# replay buffer, so only a live recording can still hold it.
+stalled_helper="$(cat "${tmp_dir}/ping-launch-stall.helper-id.txt")"
+stalled_requested_s="$(jq '.requested_unix_ns / 1000000000 | floor' "${tmp_dir}/ping-launch-stall.probe.json")"
+replayed_events="$(timeout --foreground --kill-after=5s 20s docker events --format '{{json .}}' \
+    --filter "container=${stalled_helper}" --since "${stalled_requested_s}" --until "$(($(date +%s) + 1))")" \
+    || fail 'the daemon did not replay its buffered events'
+if jq -s -e 'any(.[]; .Action == "create")' <<<"${replayed_events}" >/dev/null; then
+    fail "the unrelated events did not push the stalled helper's creation out of the daemon's replay buffer"
+fi
 grep -q 'its sample did not end within its 30 s bound (wait exited 124); the sample began [0-9.]* s after the launch' \
     "${tmp_dir}/ping-sample-stall.failure.txt" || fail 'a stalled sample lost its stage'
 jq -e '.launch_status == 0 and .wait_status == 124 and .shared_clock and .launch_ms >= 0
@@ -344,6 +396,14 @@ jq -e '.launch_status == 125 and .wait_status == null and .docker_state.status =
     and .removal_status == 0 and any(.docker_events[]; .action == "destroy")' \
     "${tmp_dir}/ping-launch-refusal.probe.json" >/dev/null \
     || fail 'a refused helper launch lost Docker state, events or removal'
+# Every failed helper's events are the live recording's window of that helper, which recorded
+# markers bracket from before its launch through its removal.
+for test_case in ping-launch-stall ping-sample-stall ping-launch-refusal; do
+    helper="$(cat "${tmp_dir}/${test_case}.helper-id.txt")"
+    jq -e --arg helper "${helper}" '.verdict == "covered" and .selector == {container: $helper}' \
+        "${tmp_dir}/${test_case}.helper-events.recording.json" >/dev/null \
+        || fail "${test_case} did not keep its helper's events from a covered window of the live recording"
+done
 for test_case in ping-exit ping-logs-failure ping-removal-failure; do
     if (set -e; link_ping "${tmp_dir}/${test_case}.txt" sender receiver baseline) \
         >"${tmp_dir}/${test_case}.failure.txt" 2>&1; then

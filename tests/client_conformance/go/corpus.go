@@ -1342,11 +1342,19 @@ func corpus(directory string) error {
 }
 
 func stateInspectionLines(state *session.StateInspection) ([]string, error) {
-	entity := state.Entity(nil)
-	if entity == nil || entity.Kind() == nil {
-		return nil, errors.New("inspection lacks entity")
+	var lines []string
+	switch state.EntityType() {
+	case session.StateInspectionEntityDomainNodeInspectionEntity:
+		scope := new(session.DomainNodeInspectionEntity)
+		if err := union(state.Entity, scope); err != nil { return nil, err }
+		entity := scope.Node(nil)
+		if entity == nil || entity.Kind() == nil { return nil, errors.New("inspection lacks node identity") }
+		lines = []string{fmt.Sprintf("STATE domain=%s kind=%s name=%s", scope.Domain(), session.EnumNamesModelKind[*entity.Kind()], entity.Name())}
+	case session.StateInspectionEntityClusterLicenseInspectionEntity:
+		lines = []string{"STATE scope=cluster_license kind=LICENSE"}
+	default:
+		return nil, errors.New("inspection has unknown entity scope")
 	}
-	lines := []string{fmt.Sprintf("STATE domain=%s kind=%s name=%s", state.Domain(), session.EnumNamesModelKind[*entity.Kind()], entity.Name())}
 	if state.ResultType() == session.StateInspectionResultStateInspectionRefused {
 		refused := new(session.StateInspectionRefused)
 		if err := union(state.Result, refused); err != nil {

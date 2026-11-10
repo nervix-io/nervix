@@ -1292,6 +1292,7 @@ mod tests {
             .collect(),
             processors: HashMap::default(),
             wasm_state_reset: None,
+            partition_transition: None,
         };
         let inputs = [
             RelayRecordBatch::single(
@@ -1458,6 +1459,7 @@ mod tests {
             .collect(),
             processors: HashMap::default(),
             wasm_state_reset: None,
+            partition_transition: None,
         };
         let mut instances =
             BranchInstanceRegistry::<Option<BranchKey>, Mutex<BranchRuntime>>::new();
@@ -1637,6 +1639,7 @@ mod tests {
                     .collect(),
                     processors: HashMap::default(),
                     wasm_state_reset: None,
+                    partition_transition: None,
                 },
                 ack_boundary: BranchInstanceAckBoundary::Reingestor(AckMode::Attached),
                 flush_policy: RuntimeFlushPolicy::Immediate,

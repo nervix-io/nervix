@@ -107,6 +107,10 @@ command returned no inspection. Check `rejection()` against `InspectionRejection
 page fields. A refusal has no counts or units; a successful empty page has zero counts.
 `json()` preserves the complete typed envelope.
 
+`DESCRIBE LICENSE;` uses this envelope for cluster scope: `entityKind()` is `"LICENSE"`, while
+`domain()` and `entityName()` are `null`. Its summary and quota rows describe the answering node's
+committed policy. The command also works without selecting a domain.
+
 Complete `counts()` cover the selected cut. Units carry their own counts, owner, ordered
 replicas, captured origin, `InspectionUnitKind` and `index()`. `InspectionStage` distinguishes live and stored
 state. Sections expose schemas, omitted rows and positional watermark columns. Resume the opaque
@@ -208,8 +212,17 @@ combine its ticks with the preceding generation.
 {{#include ../../tests/client_conformance/java/suite/cluster/ClockTests.java:clock_generations}}
 ```
 
-A session gap preserves the last snapshot while the session restores its attachment. Detach
-explicitly when the application no longer follows it.
+A session gap reports `INTERRUPTED` and preserves the last snapshot while the session restores its
+attachment. A temporary refusal reports `RESTORATION_FAILED` with a `RestorationFailure`: its
+typed cause, message and positive retry wait in nanoseconds. The library keeps trying; read the
+restored `STATE` without attaching again. The suite provokes an `IN_TRANSACTION` refusal before
+these checks:
+
+```java
+{{#include ../../tests/client_conformance/java/suite/cluster/ClockTests.java:clock_restoration_failed}}
+```
+
+Detach explicitly when the application no longer follows it.
 
 ```java
 {{#include ../../tests/client_conformance/java/suite/cluster/ClockTests.java:detach_clock}}

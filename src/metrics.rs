@@ -37,7 +37,8 @@ use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_dataflow_graph::{DataflowBranchStatistics, DataflowMetricRef, DataflowStatistics};
 use nervix_models::{
     BranchKeyFingerprint, BranchName, ClusterNodeName, DomainName, DomainNodeRef, EmitterName,
-    IngestorName, ModelKind, ModelName, NodeUnitRef, RelayName, Timestamp, Unit,
+    IngestorName, ModelKind, ModelName, NodeUnitRef, PartitionEpochNumber, RelayName, Timestamp,
+    Unit,
 };
 use nervix_primitives::{
     collections::{DashMap, dash_map::Entry},
@@ -92,6 +93,9 @@ const DELIVERY_LATENCY_SECONDS: &str = "delivery_latency_seconds";
 const RELAY_BUFFER_LEN: &str = "relay_buffer_len";
 const BRANCH_INSTANCES: &str = "branch_instances";
 const BRANCH_EVICTIONS_TOTAL: &str = "branch_evictions_total";
+const BRANCH_PARTITION_EPOCH: &str = "branch_partition_epoch";
+const BRANCH_PARTITION_KEYS_PENDING: &str = "branch_partition_keys_pending";
+const BRANCH_PARTITION_KEYS_CLAIMED_TOTAL: &str = "branch_partition_keys_claimed_total";
 const INGESTOR_QUIESCE_BUFFERED_RECORDS: &str = "ingestor_quiesce_buffered_records";
 const INGESTOR_QUIESCE_BUFFERED_BYTES: &str = "ingestor_quiesce_buffered_bytes";
 const INGESTOR_QUIESCE_DROPPED_TOTAL: &str = "ingestor_quiesce_dropped_total";
@@ -1692,6 +1696,9 @@ struct PrometheusMetrics {
     relay_buffer_len: HistogramVec,
     branch_instances: IntGaugeVec,
     branch_evictions_total: IntCounterVec,
+    branch_partition_epoch: IntGaugeVec,
+    branch_partition_keys_pending: IntGaugeVec,
+    branch_partition_keys_claimed_total: IntCounterVec,
     ingestor_quiesce_buffered_records: IntGaugeVec,
     ingestor_quiesce_buffered_bytes: IntGaugeVec,
     ingestor_quiesce_dropped_total: IntCounterVec,
@@ -1869,6 +1876,45 @@ impl PrometheusMetrics {
             "the metric name, help text and label names are constants that satisfy Prometheus \
              naming rules",
         );
+        let branch_partition_epoch = IntGaugeVec::new(
+            Opts::new(
+                BRANCH_PARTITION_EPOCH,
+                "The partition epoch a branch executes in on this Nervix node.",
+            )
+            .namespace("nervix"),
+            BRANCH_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
+        let branch_partition_keys_pending = IntGaugeVec::new(
+            Opts::new(
+                BRANCH_PARTITION_KEYS_PENDING,
+                "Concrete branch keys this Nervix node's units still have to move while their \
+                 branch changes its partition count: keys held outside their partition and keys \
+                 being claimed.",
+            )
+            .namespace("nervix"),
+            BRANCH_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
+        let branch_partition_keys_claimed_total = IntCounterVec::new(
+            Opts::new(
+                BRANCH_PARTITION_KEYS_CLAIMED_TOTAL,
+                "Total concrete branch keys this Nervix node's units claimed from the partition a \
+                 previous partition count placed them in.",
+            )
+            .namespace("nervix"),
+            BRANCH_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let branch_evictions_total = IntCounterVec::new(
             Opts::new(
                 BRANCH_EVICTIONS_TOTAL,
@@ -2038,6 +2084,18 @@ impl PrometheusMetrics {
             );
         registry
             .register(Box::new(branch_instances.clone()))
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
+        for collector in [&branch_partition_epoch, &branch_partition_keys_pending] {
+            registry.register(Box::new(collector.clone())).assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
+        }
+        registry
+            .register(Box::new(branch_partition_keys_claimed_total.clone()))
             .assured(
                 "this registry is built here and each metric is registered once under a distinct \
                  name",
@@ -2344,6 +2402,9 @@ impl PrometheusMetrics {
             relay_buffer_len,
             branch_instances,
             branch_evictions_total,
+            branch_partition_epoch,
+            branch_partition_keys_pending,
+            branch_partition_keys_claimed_total,
             ingestor_quiesce_buffered_records,
             ingestor_quiesce_buffered_bytes,
             ingestor_quiesce_dropped_total,
@@ -3926,6 +3987,64 @@ impl RuntimeMetrics {
         }
     }
 
+    /// Records the partition epoch `branch` executes in on this node.
+    pub(crate) fn set_branch_partition_epoch(
+        &self,
+        domain: &DomainName,
+        branch: &BranchName,
+        physical_node_id: Option<&ClusterNodeName>,
+        number: PartitionEpochNumber,
+    ) {
+        let number = i64::try_from(number.get())
+            .assured("an epoch advances once per committed partition count change, below 2^63");
+        self.series
+            .prometheus
+            .branch_partition_epoch
+            .with_label_values(&[
+                domain.as_str(),
+                branch.as_str(),
+                physical_node_label(physical_node_id),
+            ])
+            .set(number);
+    }
+
+    /// Changes the keys this node's units of `branch` still have to move by `delta`.
+    pub(crate) fn add_branch_partition_keys_pending(
+        &self,
+        domain: &DomainName,
+        branch: &BranchName,
+        physical_node_id: Option<&ClusterNodeName>,
+        delta: i64,
+    ) {
+        self.series
+            .prometheus
+            .branch_partition_keys_pending
+            .with_label_values(&[
+                domain.as_str(),
+                branch.as_str(),
+                physical_node_label(physical_node_id),
+            ])
+            .add(delta);
+    }
+
+    /// Counts one key of `branch` a unit on this node claimed.
+    pub(crate) fn observe_branch_partition_key_claimed(
+        &self,
+        domain: &DomainName,
+        branch: &BranchName,
+        physical_node_id: Option<&ClusterNodeName>,
+    ) {
+        self.series
+            .prometheus
+            .branch_partition_keys_claimed_total
+            .with_label_values(&[
+                domain.as_str(),
+                branch.as_str(),
+                physical_node_label(physical_node_id),
+            ])
+            .inc();
+    }
+
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -4283,6 +4402,14 @@ impl RuntimeMetrics {
 
     pub fn prometheus_text(&self) -> String {
         self.series.prometheus.text()
+    }
+
+    /// Composition installs an independent observation collector on the node's shared registry.
+    pub(crate) fn register_collector(
+        &self,
+        collector: Box<dyn Collector>,
+    ) -> prometheus::Result<()> {
+        self.series.prometheus.registry.register(collector)
     }
 
     pub(crate) fn record_restore_staging(&self, observation: RestoreStagingObservation) {

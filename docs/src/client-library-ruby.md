@@ -116,6 +116,10 @@ command returned no inspection. Check `rejection` against `InspectionRejection` 
 page fields. A refusal has no counts or units; a successful empty page has zero counts.
 `json` preserves the complete typed envelope.
 
+`DESCRIBE LICENSE;` uses this envelope for cluster scope: `entity_kind` is `'LICENSE'`, while
+`domain` and `entity_name` are `nil`. Its summary and quota rows describe the answering node's
+committed policy. The command also works without selecting a domain.
+
 Complete `counts` cover the selected cut. Units carry their own counts, owner, ordered
 replicas, captured origin, `InspectionUnitKind` and `index`. `InspectionStage` distinguishes live and stored
 state. Sections expose schemas, omitted rows and positional watermark columns. Resume the opaque
@@ -212,6 +216,15 @@ to the generation and paced mapping it names:
 
 ```ruby
 {{#include ../../tests/client_conformance/ruby/suite/cluster/clocks_test.rb:clock_tick}}
+```
+
+A session gap reports `INTERRUPTED`. If the next session temporarily refuses the attachment,
+`RESTORATION_FAILED` carries a `RestorationFailure` with its typed cause, message and positive retry
+wait in nanoseconds. The library keeps the attachment desired and retries until a `STATE` reports
+its restoration. The suite provokes an `IN_TRANSACTION` refusal before these checks:
+
+```ruby
+{{#include ../../tests/client_conformance/ruby/suite/cluster/clocks_test.rb:clock_restoration_failed}}
 ```
 
 `STOP` and `START` establish a new mapping. `DETACH DOMAIN CLOCK` ends the attachment. Snapshots

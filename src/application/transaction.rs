@@ -688,6 +688,7 @@ pub(in crate::application) fn transaction_statement_label(statement: &Statement)
         | Statement::DescribeClient(_)
         | Statement::DescribeJunction(_)
         | Statement::DescribeDeduplicator(_)
+        | Statement::DescribeBranch(_)
         | Statement::DescribeReingestor(_)
         | Statement::DescribeCorrelator(_)
         | Statement::DescribeReorderer(_)
@@ -698,7 +699,8 @@ pub(in crate::application) fn transaction_statement_label(statement: &Statement)
         | Statement::DescribePlacement(_)
         | Statement::DescribeRelocation(_)
         | Statement::DescribeTransaction(_)
-        | Statement::DescribeCluster(_) => "DESCRIBE",
+        | Statement::DescribeCluster(_)
+        | Statement::DescribeLicense(_) => "DESCRIBE",
         _ => "statement",
     }
 }

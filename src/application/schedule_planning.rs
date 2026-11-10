@@ -146,6 +146,7 @@ impl DomainSchedulePlanningSnapshot {
                     domain,
                     &self.cluster_nodes,
                     self.replica_count,
+                    current,
                     self.mode.scheduler_mode(),
                     &self.capabilities,
                 );
@@ -154,6 +155,7 @@ impl DomainSchedulePlanningSnapshot {
                     domain,
                     &self.cluster_nodes,
                     self.replica_count,
+                    current,
                     &self.capabilities,
                 );
                 SessionServiceImpl::merge_existing_schedule_data(
@@ -654,7 +656,7 @@ mod tests {
         service
             .inner
             .consensus
-            .put_domain(changed_domain, None)
+            .put_domain(changed_domain, None, service.domain_quota())
             .await
             .assured("the single-node test consensus accepts the domain update");
         let error = service

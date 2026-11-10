@@ -27,6 +27,10 @@ use crate::{ClusterNodeIdentity, ClusterNodeName, PrerequisiteMismatch};
 pub enum AdmissionVerdict {
     /// The run can run beside every live voter the leader accepted before it.
     Accepted,
+    /// A newcomer would exceed the cluster's published node quota.
+    QuotaRefused {
+        refusal: nervix_licensing_vocabulary::LicensingRefusal,
+    },
     /// The run cannot run beside `voter`, a live voter the leader accepted before it. The mismatch
     /// is seen from that voter: `local` is the voter's value and `peer` the run's.
     Refused {

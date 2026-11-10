@@ -65,6 +65,7 @@ pub(super) fn scheduled_snapshot(
         &domain,
         std::slice::from_ref(&node),
         0,
+        None,
         &crate::registry::uniform_capabilities(std::slice::from_ref(&node)),
     );
     TransactionPlanningSnapshot {
@@ -106,41 +107,100 @@ pub(super) fn preserve_schedule(
     }
 }
 
-#[test]
-fn a_partition_count_change_is_planned_only_on_a_stopped_domain() {
-    let alter = Statement::AlterBranch(nervix_models::AlterBranch {
+fn set_partitions(count: std::num::NonZeroU16) -> Statement {
+    Statement::AlterBranch(nervix_models::AlterBranch {
         branch: named("by_tenant"),
         operations: vec![nervix_models::AlterBranchOperation::SetPartitions {
-            partitions: nervix_models::BranchPartitions::Direct(nonzero!(2u16)),
+            partitions: nervix_models::BranchPartitions::Direct(count),
         }],
-    });
-    let operation = TransactionOperationNumber::from_index(0).assured("the first index fits");
-    for status in [DomainStatus::Running, DomainStatus::Paused] {
-        let error =
-            ensure_branch_partitions_change_is_stopped(&domain_state(status), &alter, operation)
-                .expect_err("a running or paused domain keeps its partition counts");
-        let TransactionPlanningError::BranchPartitionsRequireStoppedDomain {
-            branch, domain, ..
-        } = error.current_context()
-        else {
-            panic!("the refusal names the stopped-domain path: {error:?}");
-        };
-        assert_eq!(branch.as_str(), "by_tenant");
-        assert_eq!(domain.as_str(), "default");
-        assert!(
-            format!("{error:#}").contains(
-                "branch 'by_tenant' changes its partition count only while its domain is stopped: \
-                 STOP domain 'default', run ALTER BRANCH, then START it"
+    })
+}
+
+fn schedule_moving_by_tenant_from_four_to_eight() -> DomainSchedule {
+    DomainSchedule::new(named("default"), Vec::new(), Vec::new()).with_partition_epochs(
+        std::collections::BTreeMap::from([(
+            named("by_tenant"),
+            nervix_models::BranchPartitionEpoch::changed(
+                None,
+                nervix_models::BranchPartitions::Direct(nonzero!(4u16)),
+                nervix_models::BranchPartitions::Direct(nonzero!(8u16)),
             ),
-            "{error:#}"
-        );
-    }
-    ensure_branch_partitions_change_is_stopped(
-        &domain_state(DomainStatus::Stopped),
-        &alter,
+        )]),
+    )
+}
+
+#[test]
+fn a_partition_count_change_is_planned_while_no_previous_count_is_moving() {
+    let operation = TransactionOperationNumber::from_index(0).assured("the first index fits");
+    let domain = named("default");
+    ensure_branch_partitions_change_is_settled(
+        &domain,
+        None,
+        &set_partitions(nonzero!(2u16)),
         operation,
     )
-    .expect("a stopped domain accepts a partition count change");
+    .expect("a domain without a schedule accepts a partition count change");
+    let settled = DomainSchedule::new(named("default"), Vec::new(), Vec::new());
+    ensure_branch_partitions_change_is_settled(
+        &domain,
+        Some(&settled),
+        &set_partitions(nonzero!(2u16)),
+        operation,
+    )
+    .expect("a branch in its first epoch accepts a partition count change");
+    let retired_schedule = schedule_moving_by_tenant_from_four_to_eight();
+    let mut retired = retired_schedule.clone();
+    for epoch in retired.partition_epochs.values_mut() {
+        *epoch = epoch.retired();
+    }
+    ensure_branch_partitions_change_is_settled(
+        &domain,
+        Some(&retired),
+        &set_partitions(nonzero!(16u16)),
+        operation,
+    )
+    .expect("a retired transition accepts the next partition count change");
+}
+
+#[test]
+fn a_partition_count_change_is_refused_while_the_previous_count_still_moves_keys() {
+    let operation = TransactionOperationNumber::from_index(0).assured("the first index fits");
+    let domain = named("default");
+    let moving = schedule_moving_by_tenant_from_four_to_eight();
+    let error = ensure_branch_partitions_change_is_settled(
+        &domain,
+        Some(&moving),
+        &set_partitions(nonzero!(16u16)),
+        operation,
+    )
+    .expect_err("a moving branch keeps its count until its transition retires");
+    let TransactionPlanningError::BranchPartitionsStillMoving {
+        branch,
+        domain: refused_domain,
+        previous,
+        current,
+        ..
+    } = error.current_context()
+    else {
+        panic!("the refusal names the moving transition: {error:?}");
+    };
+    assert_eq!(branch.as_str(), "by_tenant");
+    assert_eq!(refused_domain.as_str(), "default");
+    assert_eq!((*previous, *current), (4, 8));
+    assert!(
+        format!("{error:#}").contains(
+            "branch 'by_tenant' in domain 'default' is still moving keys placed under its \
+             previous partition count 4 to its current count 8"
+        ),
+        "{error:#}"
+    );
+    ensure_branch_partitions_change_is_settled(
+        &domain,
+        Some(&moving),
+        &set_partitions(nonzero!(8u16)),
+        operation,
+    )
+    .expect("setting the count already in force changes nothing and is accepted");
 }
 
 fn wasm_reset_fixture() -> (
@@ -561,6 +621,7 @@ fn stopped_schedule_move_keeps_the_execution_gate_without_reporting_a_pause() {
                     &domain,
                     std::slice::from_ref(&destination),
                     0,
+                    None,
                     &crate::registry::uniform_capabilities(std::slice::from_ref(&destination)),
                 )
             }),
@@ -663,6 +724,7 @@ fn entity_pause_report_and_execution_share_the_exact_affected_graph() {
                     &domain,
                     std::slice::from_ref(&cluster_node),
                     0,
+                    None,
                     &crate::registry::uniform_capabilities(std::slice::from_ref(&cluster_node)),
                 )
             }),
@@ -792,6 +854,7 @@ fn schedule_reassignment_raises_a_dynamic_change_to_an_entity_pause() {
                     &domain,
                     std::slice::from_ref(&destination),
                     0,
+                    None,
                     &crate::registry::uniform_capabilities(std::slice::from_ref(&destination)),
                 )
             }),
@@ -848,6 +911,7 @@ fn schedule_rebuild_raises_entity_creation_to_a_domain_pause() {
                     &domain,
                     std::slice::from_ref(&cluster_node),
                     0,
+                    None,
                     &crate::registry::uniform_capabilities(std::slice::from_ref(&cluster_node)),
                 )
             }),
@@ -912,6 +976,7 @@ fn drop_recreate_retains_both_sides_of_a_rewired_graph() {
                     &domain,
                     std::slice::from_ref(&cluster_node),
                     0,
+                    None,
                     &crate::registry::uniform_capabilities(std::slice::from_ref(&cluster_node)),
                 )
             }),

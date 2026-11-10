@@ -25,7 +25,7 @@ use nervix_dataflow_graph::{
 #[cfg(test)]
 use nervix_models::ScheduledNode;
 use nervix_models::{
-    ConcreteBranchCoverage, CreateSchema, DomainName, DomainSchedule, ImpactEdgeKind,
+    BranchName, ConcreteBranchCoverage, CreateSchema, DomainName, DomainSchedule, ImpactEdgeKind,
     ImpactNodeCoverage, IngestorInput, Model, ModelIndex, ModelKind, ModelName, NodeRef,
     ParseAsType, RelayName, ResolvedBranching, SchemaField, SchemaFingerprint,
 };
@@ -80,6 +80,38 @@ impl ActiveGraph {
 
     pub(in crate::registry) fn placement_plan(&self) -> PlacementPlan {
         self.placement.plan(self)
+    }
+
+    /// The branches at least one of whose entities keeps durable state per key: a deduplicator,
+    /// window or WASM processor or an inferencer that declares state it branches, or a
+    /// materialized relay it branches. Only such a branch has keys to move between units when its
+    /// partition count changes.
+    pub(in crate::registry) fn branches_with_keyed_state(
+        &self,
+    ) -> std::collections::BTreeSet<BranchName> {
+        let mut branches = std::collections::BTreeSet::new();
+        for node in self.graph.node_weights() {
+            if !node.config.keeps_state_per_key() {
+                continue;
+            }
+            if let Some(branch) = node.partition_branch() {
+                branches.insert(branch.clone());
+            }
+        }
+        branches
+    }
+
+    /// The partition count every branch this graph declares places its keys by.
+    pub(in crate::registry) fn branch_partitions(
+        &self,
+    ) -> std::collections::BTreeMap<BranchName, nervix_models::BranchPartitions> {
+        let mut partitions = std::collections::BTreeMap::new();
+        for node in self.graph.node_weights() {
+            if let Model::Branch(declaration) = node.config.as_ref() {
+                partitions.insert(declaration.name.clone(), declaration.partitions);
+            }
+        }
+        partitions
     }
 
     pub(crate) fn node(&self, kind: ModelKind, identifier: &ModelName) -> Option<&ActiveNode> {
@@ -551,6 +583,15 @@ impl ActiveNode {
         super::unit_placement::UnitLayout::of(self)
             .units()
             .collect()
+    }
+
+    /// The branch whose partition count divides this node into units: none for a node whose kind
+    /// a branch's partitions do not divide, or that is unbranched.
+    pub(in crate::registry) fn partition_branch(&self) -> Option<&BranchName> {
+        if !super::unit_placement::UnitLayout::divides_by_partitions(self.kind) {
+            return None;
+        }
+        self.resolved_branching.as_ref()?.branch()
     }
 
     /// How this node is addressed: the kind it is and the name it carries, together.

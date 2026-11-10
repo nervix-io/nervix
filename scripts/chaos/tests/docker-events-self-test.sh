@@ -21,6 +21,8 @@ fail() {
 source "${chaos_dir}/docker-event-recording.sh"
 # shellcheck source=../tool-images.sh
 source "${chaos_dir}/tool-images.sh"
+# shellcheck source=../verifier-self-check.sh
+source "${chaos_dir}/verifier-self-check.sh"
 
 docker_events_self_test_cleanup() {
     docker_event_recording_stop
@@ -307,6 +309,16 @@ docker_event_recording_finish diagnostics/docker-events.recording.json 67108864 
     || never_started_status=$?
 [[ "${never_started_status}" -eq 2 ]] \
     || fail "closing a recording that never started returned ${never_started_status}, expected 2"
+# Nor does it cover a window: the controller places no marker and writes neither events nor bounds.
+never_started_status=0
+docker_event_window "$(date +%s%N)" "${tmp_dir}/never-started.ndjson" --role node \
+    2>"${tmp_dir}/never-started.txt" || never_started_status=$?
+[[ "${never_started_status}" -eq 2 ]] \
+    || fail "a window of a recording that never started returned ${never_started_status}, expected 2"
+[[ ! -e "${tmp_dir}/never-started.ndjson" && ! -e "${tmp_dir}/never-started.recording.json" ]] \
+    || fail 'a window of a recording that never started wrote events or bounds'
+grep -Fq 'no live Docker event recording started' "${tmp_dir}/never-started.txt" \
+    || fail 'a window of a recording that never started did not say so'
 
 # The recorder against the local daemon. A run-labeled node is killed, the daemon then publishes
 # 320 unrelated volume events, and the node is started again: the window must still hold the kill.
@@ -315,6 +327,9 @@ mkdir -p "${live_dir}/diagnostics"
 # Markers are created from a local image only, as the runner resolves its pinned probe image first.
 docker image inspect "${chaos_probe_image}" >/dev/null 2>&1 \
     || docker pull --quiet "${chaos_probe_image}" >/dev/null
+# The verifier self-check's controller removes what the live run label owns when a deadline or a
+# signal ends this self-test before its own cleanup.
+chaos_verifier_register_run "${live_run_id}"
 start_status=0
 docker_event_recording_start "${live_dir}" diagnostics/docker-events.ndjson "${live_run_id}" \
     "${chaos_probe_image}" 300 || start_status=$?
@@ -324,11 +339,16 @@ live_node="$(docker run --detach \
     --label io.nervix.chaos.role=node "${chaos_probe_image}" sleep 300)"
 fault_ns="$(date +%s%N)"
 docker kill --signal KILL "${live_node}" >/dev/null
+# The noise volumes carry a run label of their own: the recorder, which follows only the live run
+# label, still counts none of their events, and the verifier self-check's controller removes any
+# that a deadline or a signal leaves between their creation and removal.
+noise_run_id="${live_run_id}-noise"
+chaos_verifier_register_run "${noise_run_id}"
 # The positional parameters belong to the inner shell, not this one.
 # shellcheck disable=SC2016
 seq 1 160 | xargs -P 8 -I '{}' sh -c \
-    'docker volume create "$1-$2" >/dev/null && docker volume rm "$1-$2" >/dev/null' \
-    noise "${noise_prefix}" '{}'
+    'docker volume create --label "io.nervix.chaos.run=$1" "$2-$3" >/dev/null && docker volume rm "$2-$3" >/dev/null' \
+    noise "${noise_run_id}" "${noise_prefix}" '{}'
 docker start "${live_node}" >/dev/null
 docker_event_window "${fault_ns}" "${live_dir}/node-events.ndjson" --role node \
     || fail 'the live recording did not cover the fault'

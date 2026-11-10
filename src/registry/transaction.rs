@@ -175,13 +175,16 @@ pub(crate) enum TransactionPlanningError {
     #[error("domain '{domain}' is already stopped")]
     DomainAlreadyStopped { domain: DomainName },
     #[error(
-        "branch '{branch}' changes its partition count only while its domain is stopped: STOP \
-         domain '{domain}', run ALTER BRANCH, then START it"
+        "branch '{branch}' in domain '{domain}' is still moving keys placed under its previous \
+         partition count {previous} to its current count {current}; change its partition count \
+         again once DESCRIBE BRANCH reports no previous partitions"
     )]
-    BranchPartitionsRequireStoppedDomain {
+    BranchPartitionsStillMoving {
         operation: TransactionOperationNumber,
         domain: DomainName,
         branch: BranchName,
+        previous: u16,
+        current: u16,
     },
     #[error(
         "domain '{domain}' restore state installation is incomplete for execution '{execution}'"
@@ -273,7 +276,7 @@ impl TransactionPlanningError {
             | Self::ModelPreflight { operation, .. }
             | Self::ExternalModelValidation { operation }
             | Self::UdfPreparation { operation }
-            | Self::BranchPartitionsRequireStoppedDomain { operation, .. } => Some(*operation),
+            | Self::BranchPartitionsStillMoving { operation, .. } => Some(*operation),
             Self::ResetIdentityMissing { operation } => Some(*operation),
             Self::ClusterParametersUnseeded
             | Self::DomainNotFound { .. }
@@ -838,7 +841,12 @@ impl Registry {
                 continue;
             }
 
-            ensure_branch_partitions_change_is_stopped(domain_state, statement, number)?;
+            ensure_branch_partitions_change_is_settled(
+                domain,
+                current_schedule.as_ref(),
+                statement,
+                number,
+            )?;
             let operation = model_operation(domain, statement, number)?;
             let is_if_not_exists_noop = match statement {
                 Statement::Create(create) if create.if_not_exists => {
@@ -1086,30 +1094,43 @@ fn ensure_domain_not_paused(
     Ok(())
 }
 
-/// A branch's partition count decides which unit of every relay it branches owns each key, and a
-/// running domain has no mechanism to move keys between units, so `ALTER BRANCH … SET PARTITIONS`
-/// is accepted only while the branch's domain is stopped. Its next `START` schedules the new units.
-fn ensure_branch_partitions_change_is_stopped(
-    domain: &ControlDomainState,
+/// `ALTER BRANCH … SET PARTITIONS` begins the branch's next partition epoch on a running, paused
+/// or stopped domain alike. While keys placed under the epoch's previous count may still lie
+/// outside their partition, a change to yet another count is refused, so every key keeps exactly
+/// one unit that may hold it outside its partition: the unit its previous count placed it in.
+fn ensure_branch_partitions_change_is_settled(
+    domain: &DomainName,
+    schedule: Option<&DomainSchedule>,
     statement: &Statement,
     operation: TransactionOperationNumber,
 ) -> Result<(), Report<TransactionPlanningError>> {
     let Statement::AlterBranch(alter) = statement else {
         return Ok(());
     };
-    if !alter.sets_partitions() {
+    let Some(requested) = alter.requested_partitions() else {
+        return Ok(());
+    };
+    let Some(schedule) = schedule else {
+        return Ok(());
+    };
+    let Some(epoch) = schedule.partition_epochs.get(&alter.branch) else {
+        return Ok(());
+    };
+    let Some(transition) = &epoch.transition else {
+        return Ok(());
+    };
+    if requested == epoch.partitions {
         return Ok(());
     }
-    match domain.status {
-        DomainStatus::Stopped => Ok(()),
-        DomainStatus::Running | DomainStatus::Paused => Err(Report::new(
-            TransactionPlanningError::BranchPartitionsRequireStoppedDomain {
-                operation,
-                domain: domain.id.clone(),
-                branch: alter.branch.clone(),
-            },
-        )),
-    }
+    Err(Report::new(
+        TransactionPlanningError::BranchPartitionsStillMoving {
+            operation,
+            domain: domain.clone(),
+            branch: alter.branch.clone(),
+            previous: transition.previous.count().get(),
+            current: epoch.partitions.count().get(),
+        },
+    ))
 }
 
 fn model_operation(

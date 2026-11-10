@@ -169,10 +169,13 @@ rendered as `unit=partition:<p>` after its node, while a node with one unit name
 transaction report folds those identities to their logical node when attributing ownership and its
 affected subgraph, so moving one partition gates its relay. A schedule rebuild can raise a narrower
 model change to `DOMAIN_PAUSE`. `ALTER BRANCH ... SET PARTITIONS` is a `BranchPartitions` change,
-which needs a domain pause and which the registry accepts only while the domain is stopped, where it
-plans as `DYNAMIC` and takes effect at the next `START`; see
-[Relay Partitions](./relay.md#relay-partitions). In
-a stopped domain, a model or resource rebinding has no running work to pause and reports
+which pauses only the entities its branch reaches: the schedule's next partition epoch replaces the
+branch's relays, the processors and generators it divides into partitions and every producer into
+and consumer of those relays in an `ENTITY_PAUSE` swap, and a stopped domain plans it as `DYNAMIC`;
+see [Relay Partitions](./relay.md#changing-the-partition-count). The leader's retirement of a
+transition is an automatic `DYNAMIC` schedule change: every unit that keeps running ends its claims
+in place, and the holding units, which hold nothing by then, end without pausing anything. In a
+stopped domain, a model or resource rebinding has no running work to pause and reports
 `DYNAMIC`, although the changed configuration still matters at the next start. Explicit `START`
 and `STOP` are individual `NO_PAUSE` steps with lifecycle effects; they determine whether later
 model steps plan against a running or stopped domain. [Resource Versions And Bindings](./resource-versions.md#classification-and-state-effects)

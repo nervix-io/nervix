@@ -841,6 +841,13 @@ owners:
   display, and every client runtime's conformance probe reading an attached clock. Single
   scenarios cover the CLI restoring a clock after a transport loss and a reconnected console
   restoring its attachment.
+- Every host suite's `client_suites.feature` rows over HTTP and HTTPS, on one and three nodes,
+  inject a testing-build `InTransaction` attach refusal after a relay cut. Python, JVM, Ruby, C
+  and C++ each read `INTERRUPTED`, then `RESTORATION_FAILED` with the cause, message and positive
+  retry wait, then the restored `STATE` of the same domain and generation. The
+  [declared action exchange](integration-test-lifecycle.md#client-suites) clears unused node
+  refusals during teardown. This exercises the public binding event path without changing the
+  client's policy of deferring restoration while its session holds a transaction.
 - The paced branch-buffering outline checks both tenant keys and both sequence values under
   one-minute logical flush and collection at rate 1200. Each window still closes 50 ms after it
   opens, while a physical clock would hold it for a minute, so the ten-second physical receive

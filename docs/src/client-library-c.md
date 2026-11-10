@@ -101,6 +101,8 @@ captured with the same read. C++ uses the same handle with its usual RAII owner.
 ### Read Materialized State
 
 `SHOW RELAY <relay> MATERIALIZED STATE` returns its typed result with the command's outcome.
+`DESCRIBE LICENSE;` uses the same result for cluster scope. Its JSON has
+`"scope": "cluster_license"`, and its three rows contain the summary and cluster quotas.
 `nx_outcome_inspection` retains that result as an `nx_inspection` you own: it outlives the outcome
 and is released with `nx_inspection_free`. `nx_inspection_counts` reads the branches, rows and bytes
 of the complete selected cut, and returns false for a refused read, whose outcome is a failed
@@ -250,6 +252,16 @@ copying the mapping arithmetic.
 
 ```c
 {{#include ../../tests/client_conformance/c/suite/contract.h:clock_project}}
+```
+
+After `NX_CLOCK_EVENT_INTERRUPTED`, a temporarily refused attachment reports
+`NX_CLOCK_EVENT_RESTORATION_FAILED` with its typed cause, borrowed message and positive retry wait
+in nanoseconds. The library keeps retrying; a later `STATE` restores the clock without another
+application attach. This example runs independently in both C and C++ and follows a scenario's
+injected `IN_TRANSACTION` refusal:
+
+```c
+{{#include ../../tests/client_conformance/c/suite/contract.h:clock_restoration_failed}}
 ```
 
 ## Publish Through A Client Ingestor

@@ -100,6 +100,10 @@ mod archive_count_tests;
 mod cluster_identity;
 mod cluster_parameters;
 mod command_execution;
+mod licensing;
+pub use licensing::{
+    ClusterLicensingState, LicensingMode, LicensingRecord, LicensingSnapshot, StoredTrustDocument,
+};
 mod node_capabilities;
 #[cfg(any(test, feature = "testing"))]
 pub use append_submission_fault::AppendSubmissionFailure;
@@ -481,6 +485,7 @@ pub enum ConsensusCommand {
     PutDomain {
         domain: Box<DomainState>,
         mutation: Option<Box<DomainMutationLease>>,
+        domain_quota: nervix_licensing_vocabulary::Quota,
     },
     StartDomain {
         domain_id: DomainName,
@@ -658,6 +663,11 @@ pub enum ConsensusResponse {
     Error,
 )]
 pub enum ConsensusConflict {
+    #[error("licensing refused this state change")]
+    LicensingQuota {
+        #[source]
+        refusal: nervix_licensing_vocabulary::LicensingRefusal,
+    },
     #[error("the capability claim's node has not joined the committed membership")]
     CapabilityNodeNotAdmitted,
     #[error("the capability claim's incarnation is fenced or already has a different claim")]
@@ -1515,6 +1525,7 @@ impl ReportedAdmissionRefusals {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct StateMachineData {
     cluster_identity: Option<Arc<ClusterIdentityRecord>>,
+    licensing: Option<Arc<LicensingRecord>>,
     parameters: Option<ClusterParameterRecord>,
     password_work: Option<nervix_models::PasswordCost>,
     last_applied_log_id: Option<LogIdOf>,
@@ -2031,6 +2042,7 @@ impl ConsensusError {
             return report.to_string();
         };
         match error {
+            Self::Conflict(ConsensusConflict::LicensingQuota { .. }) => format!("{report:#}"),
             Self::Storage => match report.downcast_ref::<io::Error>() {
                 Some(source) => format!("consensus storage failed: {source}"),
                 None => error.to_string(),
@@ -3573,7 +3585,16 @@ impl Proposer {
         match response {
             ConsensusResponse::Applied => Ok(()),
             ConsensusResponse::Conflict(reason) => {
-                Err(Report::new(ConsensusError::Conflict(reason)))
+                let refusal = match &reason {
+                    ConsensusConflict::LicensingQuota { refusal } => Some(*refusal),
+                    _ => None,
+                };
+                match refusal {
+                    Some(refusal) => {
+                        Err(Report::new(refusal).change_context(ConsensusError::Conflict(reason)))
+                    }
+                    None => Err(Report::new(ConsensusError::Conflict(reason))),
+                }
             }
             ConsensusResponse::Transaction(_) | ConsensusResponse::OrphanedPauseRecovery(_) => {
                 Err(Report::new(ConsensusError::UnexpectedResponse))
@@ -3862,10 +3883,12 @@ impl Proposer {
         &self,
         domain: DomainState,
         mutation: Option<&DomainMutationLease>,
+        domain_quota: nervix_licensing_vocabulary::Quota,
     ) -> error_stack::Result<(), ConsensusError> {
         let response = self
             .inner
             .client_write(ConsensusCommand::PutDomain {
+                domain_quota,
                 domain: Box::new(domain),
                 mutation: mutation.cloned().map(Box::new),
             })
@@ -4393,7 +4416,12 @@ impl Administrator {
         }
     }
 
-    pub async fn maybe_initialize(&self) -> error_stack::Result<bool, ConsensusError> {
+    pub async fn maybe_initialize(
+        &self,
+        admit: impl Fn(u64) -> error_stack::Result<(), nervix_licensing_vocabulary::LicensingRefusal>
+        + Send
+        + Sync,
+    ) -> error_stack::Result<bool, ConsensusError> {
         let _membership_mutation = self.inner.membership_mutation.lock().await;
         if self
             .inner
@@ -4405,6 +4433,7 @@ impl Administrator {
             return Ok(false);
         }
 
+        admit(0).map_err(|report| report.change_context(ConsensusError::Startup))?;
         let mut nodes = BTreeMap::new();
         nodes.insert(
             self.inner.local_node_id.clone(),
@@ -4432,6 +4461,9 @@ impl Administrator {
     pub async fn reconcile_nodes(
         &self,
         gossip: impl Future<Output = GossipState>,
+        admit: impl Fn(u64) -> error_stack::Result<(), nervix_licensing_vocabulary::LicensingRefusal>
+        + Send
+        + Sync,
     ) -> error_stack::Result<(), ConsensusError> {
         let mut reported_refusals = self.inner.membership_mutation.lock().await;
         let gossip = gossip.await;
@@ -4453,12 +4485,16 @@ impl Administrator {
             let MembershipPlan {
                 mutations,
                 refusals,
-                verdicts,
+                mut verdicts,
             } = current.automatic_mutations(&gossip, &admission_fences);
             reported_refusals.report(&refusals);
             self.inner
                 .admission_verdicts
-                .send_replace(Some(AdmissionVerdicts::new(metrics.current_term, verdicts)));
+                .send_replace(Some(AdmissionVerdicts::new(
+                    metrics.current_term,
+                    verdicts.clone(),
+                )));
+            let mut quota_refused = BTreeSet::new();
             for mutation in mutations {
                 nervix_primitives::task::consume_budget().await;
                 match mutation {
@@ -4494,6 +4530,37 @@ impl Administrator {
                         }
                     }
                     MembershipMutation::AddLearner { node_id, endpoint } => {
+                        let (new_member, count) = {
+                            let committed = self.inner.store.inner.state();
+                            let membership = committed.last_membership.membership();
+                            (
+                                membership.get_node(&node_id).is_none(),
+                                u64::try_from(membership.nodes().count())
+                                    .assured("a materialized membership fits u64"),
+                            )
+                        };
+                        if new_member && let Err(refusal) = admit(count) {
+                            quota_refused.insert(node_id.clone());
+                            let run = gossip
+                                .latest_admission_candidates()
+                                .get(&node_id)
+                                .verified(
+                                    "a learner mutation names a candidate from this gossip cut",
+                                )
+                                .identity();
+                            // Publish only the fixed membership verdict; the report stays at its reporting boundary.
+                            verdicts.insert(
+                                run,
+                                AdmissionVerdict::QuotaRefused {
+                                    refusal: *refusal.current_context(),
+                                },
+                            );
+                            self.inner.admission_verdicts.send_replace(Some(
+                                AdmissionVerdicts::new(metrics.current_term, verdicts.clone()),
+                            ));
+                            tracing::warn!(node = %node_id, error = %format_args!("{refusal:#}"), "licensing refused a new cluster member");
+                            continue;
+                        }
                         let operation = if current.node(&node_id).is_some() {
                             format!("wait for learner '{node_id}' to catch up at {endpoint}")
                         } else {
@@ -4524,6 +4591,13 @@ impl Administrator {
                         }
                     }
                     MembershipMutation::ChangeVoters { voters } => {
+                        let voters = voters
+                            .difference(&quota_refused)
+                            .cloned()
+                            .collect::<BTreeSet<_>>();
+                        if voters == current.voter_ids() {
+                            continue;
+                        }
                         let operation = format!("promote voters {voters:?}");
                         let proposed_under = self.inner.leader_tenure();
                         let membership = timeout(
@@ -4904,7 +4978,7 @@ impl ProtocolReceiver {
 
     #[tracing::instrument(
         name = "receive_raft_append",
-        level = "trace",
+        level = "debug",
         skip_all,
         fields(node = %self.inner.local_node_id, local_addr = %self.inner.interconnect.local_addr()),
     )]
@@ -4917,7 +4991,7 @@ impl ProtocolReceiver {
 
     #[tracing::instrument(
         name = "receive_raft_vote",
-        level = "trace",
+        level = "debug",
         skip_all,
         fields(node = %self.inner.local_node_id, local_addr = %self.inner.interconnect.local_addr()),
     )]
@@ -4930,7 +5004,7 @@ impl ProtocolReceiver {
 
     #[tracing::instrument(
         name = "receive_raft_pre_vote",
-        level = "trace",
+        level = "debug",
         skip_all,
         fields(node = %self.inner.local_node_id, local_addr = %self.inner.interconnect.local_addr()),
     )]
@@ -5281,7 +5355,7 @@ where
         self.connectivity.check().map_err(unreachable_err)?;
         let rpc_timeout = option.hard_ttl();
         let started = Instant::now();
-        tracing::trace!(
+        tracing::debug!(
             node = %self.local_node_id,
             local_addr = %self.interconnect.local_addr(),
             peer = %self.target,
@@ -5298,7 +5372,7 @@ where
                     rpc_timeout,
                 )
                 .await;
-            tracing::trace!(
+            tracing::debug!(
                 node = %self.local_node_id,
                 local_addr = %self.interconnect.local_addr(),
                 peer = %self.target,
@@ -5330,7 +5404,7 @@ where
         self.connectivity.check().map_err(unreachable_err)?;
         let rpc_timeout = option.hard_ttl();
         let started = Instant::now();
-        tracing::trace!(
+        tracing::debug!(
             node = %self.local_node_id,
             local_addr = %self.interconnect.local_addr(),
             peer = %self.target,
@@ -5347,7 +5421,7 @@ where
                     rpc_timeout,
                 )
                 .await;
-            tracing::trace!(
+            tracing::debug!(
                 node = %self.local_node_id,
                 local_addr = %self.interconnect.local_addr(),
                 peer = %self.target,
@@ -6028,7 +6102,11 @@ fn apply_consensus_command_at(
             changes.schedule_changed = true;
         }
         ConsensusCommand::ReconcileOwnershipHandoffPreparations { .. } => {}
-        ConsensusCommand::PutDomain { domain, mutation } => {
+        ConsensusCommand::PutDomain {
+            domain,
+            mutation,
+            domain_quota,
+        } => {
             if domain.status != DomainStatus::Stopped
                 && let Err(reason) = restore::validate_restored_domain_start(state, &domain.id)
             {
@@ -6036,6 +6114,13 @@ fn apply_consensus_command_at(
             }
             if let Err(reason) = validate_domain_mutation(state, &domain.id, mutation.as_deref()) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
+            }
+            if !state.domains.contains_key(&domain.id)
+                && let Err(refusal) = licensing::admit_domain(state, *domain_quota)
+            {
+                return AppliedConsensusCommand::conflict(ConsensusConflict::LicensingQuota {
+                    refusal: *refusal.current_context(),
+                });
             }
             state.domains.insert(domain.id.clone(), (**domain).clone());
             changes.domains_changed = true;
@@ -6176,6 +6261,13 @@ fn apply_consensus_command_at(
             if let Err(error) =
                 restore::apply_restore_step(state, reference, step, effect, &mut changes)
             {
+                if let Some(refusal) =
+                    error.downcast_ref::<nervix_licensing_vocabulary::LicensingRefusal>()
+                {
+                    return AppliedConsensusCommand::conflict(ConsensusConflict::LicensingQuota {
+                        refusal: *refusal,
+                    });
+                }
                 return AppliedConsensusCommand::conflict(format!("{error:#}"));
             }
         }
@@ -8100,7 +8192,7 @@ mod tests {
         DomainSchedule::new(domain(raw), Vec::new(), Vec::new())
     }
 
-    fn running_domain_state(raw: &str) -> DomainState {
+    pub(super) fn running_domain_state(raw: &str) -> DomainState {
         DomainState {
             id: domain(raw),
             config: DomainConfig {
@@ -9410,6 +9502,7 @@ mod tests {
         let domain_change = apply_consensus_command(
             &mut state,
             &ConsensusCommand::PutDomain {
+                domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                 domain: Box::new(running_domain_state("tenant")),
                 mutation: None,
             },
@@ -9756,6 +9849,7 @@ mod tests {
         let blocked = apply_consensus_command(
             &mut state,
             &ConsensusCommand::PutDomain {
+                domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                 domain: Box::new(running_domain_state("tenant")),
                 mutation: None,
             },
@@ -9816,6 +9910,7 @@ mod tests {
         let authorized = apply_consensus_command(
             &mut state,
             &ConsensusCommand::PutDomain {
+                domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                 domain: Box::new(running_domain_state("tenant")),
                 mutation: Some(Box::new(first_lease.clone())),
             },
@@ -9824,6 +9919,7 @@ mod tests {
         let independent_write = apply_consensus_command(
             &mut state,
             &ConsensusCommand::PutDomain {
+                domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                 domain: Box::new(running_domain_state("independent")),
                 mutation: None,
             },
@@ -9885,6 +9981,7 @@ mod tests {
         let stale = apply_consensus_command(
             &mut state,
             &ConsensusCommand::PutDomain {
+                domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                 domain: Box::new(running_domain_state("tenant")),
                 mutation: Some(Box::new(first_lease)),
             },

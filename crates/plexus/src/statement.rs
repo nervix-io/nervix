@@ -36,6 +36,7 @@ pub fn statement_parser<'src>()
             .map(|create| Statement::Create(create.map_body(Model::Placement).map_body(Box::new))),
         crate::describe_deduplicator::describe_deduplicator_parser()
             .map(Statement::DescribeDeduplicator),
+        crate::describe_branch::describe_branch_parser().map(Statement::DescribeBranch),
         crate::describe_domain::describe_domain_parser().map(Statement::DescribeDomain),
         crate::describe_endpoint::describe_endpoint_parser().map(Statement::DescribeEndpoint),
         crate::describe_client::describe_client_parser().map(Statement::DescribeClient),
@@ -137,6 +138,7 @@ pub fn statement_parser<'src>()
         crate::drop_stmt::drop_parser().map(Statement::Drop),
         crate::show_cluster_status::show_cluster_status_parser().map(Statement::ShowClusterStatus),
         crate::describe_cluster::describe_cluster_parser().map(Statement::DescribeCluster),
+        crate::describe_license::describe_license_parser().map(Statement::DescribeLicense),
         crate::show_transactions::show_transactions_parser().map(Statement::ShowTransactions),
         crate::describe_transaction::describe_transaction_parser()
             .map(Statement::DescribeTransaction),

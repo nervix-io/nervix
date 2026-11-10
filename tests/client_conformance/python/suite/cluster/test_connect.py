@@ -1,8 +1,9 @@
-"""Connecting to the cluster: authentication, every TLS requirement against the TLS session
-listener, the certificate authority, seeds and timeouts, and the typed failure of a wrong password,
-a missing certificate authority and a cluster no seed reaches."""
+"""Connecting to the cluster: authentication and TLS requirements on both listener transports,
+certificate trust, seeds and timeouts, and typed connection failures."""
 
 from __future__ import annotations
+
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -10,7 +11,7 @@ import nervix_client as nx
 from support import Cluster, completed, deadline, unused_port
 
 
-def test_a_session_opens_over_tls_with_the_certificate_authority(cluster: Cluster) -> None:
+def test_a_session_opens_with_the_certificate_authority(cluster: Cluster) -> None:
     authority = cluster.ca_certificate
     server, domain = cluster.server, cluster.domain
     username, password = cluster.username, cluster.password
@@ -28,8 +29,12 @@ def test_a_session_opens_over_tls_with_the_certificate_authority(cluster: Cluste
     # ANCHOR_END: connect
 
 
-def test_every_tls_requirement_reaches_the_tls_listener(cluster: Cluster) -> None:
+def test_every_tls_requirement_matches_the_listener_transport(cluster: Cluster) -> None:
     for requirement in (nx.Tls.PREFERRED, nx.Tls.REQUIRED):
+        if requirement == nx.Tls.REQUIRED and urlsplit(cluster.server).scheme == "http":
+            with pytest.raises(nx.ConnectError):
+                nx.Session(cluster.server, tls=requirement, cancel=deadline())
+            continue
         with nx.Session(
             cluster.server,
             domain=cluster.domain,
@@ -46,7 +51,18 @@ def test_every_tls_requirement_reaches_the_tls_listener(cluster: Cluster) -> Non
         nx.Session(plaintext, tls=nx.Tls.REQUIRED)
 
 
-def test_a_session_that_does_not_trust_the_listener_fails_to_connect(cluster: Cluster) -> None:
+def test_connection_trust_matches_the_listener_transport(cluster: Cluster) -> None:
+    if urlsplit(cluster.server).scheme == "http":
+        # A plaintext listener needs no certificate authority; authentication still applies.
+        with nx.Session(
+            cluster.server,
+            domain=cluster.domain,
+            username=cluster.username,
+            password=cluster.password,
+            cancel=deadline(),
+        ) as session:
+            completed(session, "LIST DOMAINS;")
+        return
     # The one server refuses the handshake at once; the timeouts only bound a hang.
     with pytest.raises(nx.ConnectError) as untrusted:
         nx.Session(
@@ -79,7 +95,8 @@ def test_a_wrong_password_is_refused(cluster: Cluster) -> None:
 
 
 def test_a_seed_reaches_the_cluster_when_the_server_does_not(cluster: Cluster) -> None:
-    unreachable = f"https://127.0.0.1:{unused_port()}"
+    scheme = urlsplit(cluster.server).scheme
+    unreachable = f"{scheme}://127.0.0.1:{unused_port()}"
     # ANCHOR: seeds
     with nx.Session(
         unreachable,

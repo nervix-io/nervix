@@ -399,7 +399,11 @@ impl VerifiedArchive {
             let Some(node) = schedule.nodes.get(&entity) else {
                 continue;
             };
-            if node.schema_fingerprint != schema || !node.units.contains_key(&unit) {
+            // A branch's partitions place an archived key in the unit the restored count gives it,
+            // whichever unit archived it, so every archived unit of such an entity is restored.
+            if node.schema_fingerprint != schema
+                || (!node.units.contains_key(&unit) && node.partition_branch().is_none())
+            {
                 continue;
             }
             let declarations = match resolved.entry(NodeUnitRef::new(entity.clone(), unit)) {

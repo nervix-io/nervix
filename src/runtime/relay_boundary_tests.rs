@@ -114,10 +114,12 @@ async fn runtime_report_chain_detached_relay_delivery_log() {
 #[nervix_primitives::test]
 async fn relay_task_stops_classify_join_failures_by_task_kind() {
     let (state_shutdown, _state_shutdown_rx) = watch::channel(false);
+    let (commands, _command_rx) = mpsc::channel(1);
     let state = RelayStateTask {
         shutdown: state_shutdown,
         unit: Unit::SINGLE,
         task: nervix_primitives::task::spawn(async { panic!("state task fixture failed") }),
+        commands,
     };
     let state_error = state
         .stop(Duration::from_secs(1))
@@ -153,10 +155,12 @@ async fn relay_task_stops_classify_join_failures_by_task_kind() {
 async fn relay_task_stops_classify_drain_timeouts_by_task_kind() {
     let grace = Duration::from_millis(1);
     let (state_shutdown, _state_shutdown_rx) = watch::channel(false);
+    let (commands, _command_rx) = mpsc::channel(1);
     let state = RelayStateTask {
         shutdown: state_shutdown,
         unit: Unit::SINGLE,
         task: nervix_primitives::task::spawn(std::future::pending()),
+        commands,
     };
     let state_error = state
         .stop(grace)
@@ -2210,6 +2214,8 @@ async fn relay_state_shutdown_drains_every_ready_batch() {
             state,
             retention: RelayRetention::default(),
             receiver,
+            transition: None,
+            parked_capacity: 1,
         },
     );
     let acme = string_branch_key("tenant", "acme");
