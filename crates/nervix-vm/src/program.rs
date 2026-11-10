@@ -572,6 +572,15 @@ pub enum FunctionName {
     Min,
     Max,
     Mean,
+    ListAdd,
+    ListSub,
+    ListMul,
+    ListDiv,
+    ListAddScalar,
+    ListSubScalar,
+    ListMulScalar,
+    ListDivScalar,
+    ListAbs,
     Dot,
     Distance,
     Sum,
@@ -899,6 +908,7 @@ pub enum WindowAggregateFunction {
     Avg,
     BoolAnd,
     BoolOr,
+    CollectVec,
     Corr,
     Count,
     CountIf,
@@ -974,6 +984,7 @@ impl WindowAggregateFunction {
             Self::Avg
             | Self::BoolAnd
             | Self::BoolOr
+            | Self::CollectVec
             | Self::Count
             | Self::CountIf
             | Self::First
@@ -999,6 +1010,7 @@ impl WindowAggregateFunction {
             | Self::ApproxTopK
             | Self::BoolAnd
             | Self::BoolOr
+            | Self::CollectVec
             | Self::Count
             | Self::CountIf
             | Self::First
@@ -1146,6 +1158,15 @@ impl FunctionName {
             "min" => Self::Min,
             "max" => Self::Max,
             "mean" => Self::Mean,
+            "list_add" => Self::ListAdd,
+            "list_sub" => Self::ListSub,
+            "list_mul" => Self::ListMul,
+            "list_div" => Self::ListDiv,
+            "list_add_scalar" => Self::ListAddScalar,
+            "list_sub_scalar" => Self::ListSubScalar,
+            "list_mul_scalar" => Self::ListMulScalar,
+            "list_div_scalar" => Self::ListDivScalar,
+            "list_abs" => Self::ListAbs,
             "dot" => Self::Dot,
             "distance" => Self::Distance,
             "sum" => Self::Sum,
@@ -1276,6 +1297,15 @@ impl FunctionName {
             Self::Min => "min",
             Self::Max => "max",
             Self::Mean => "mean",
+            Self::ListAdd => "list_add",
+            Self::ListSub => "list_sub",
+            Self::ListMul => "list_mul",
+            Self::ListDiv => "list_div",
+            Self::ListAddScalar => "list_add_scalar",
+            Self::ListSubScalar => "list_sub_scalar",
+            Self::ListMulScalar => "list_mul_scalar",
+            Self::ListDivScalar => "list_div_scalar",
+            Self::ListAbs => "list_abs",
             Self::Dot => "dot",
             Self::Distance => "distance",
             Self::Sum => "sum",

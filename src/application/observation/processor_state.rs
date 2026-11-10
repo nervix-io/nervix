@@ -46,7 +46,7 @@ use crate::{
     },
     client_row::{ArrowRowBatch, write_runtime_value},
     runtime::{
-        BranchKey, ProcessorStatePageBounds, ProcessorStatePageError,
+        BranchKey, ProcessorStatePageBounds, ProcessorStatePageError, ProcessorStateSelection,
         state_inspection_exchange::{
             ProcessorPageSection, ReceivedProcessorPage, receive_processor_page,
             stream_processor_page,
@@ -54,6 +54,8 @@ use crate::{
     },
     state_inspection_cursor::StateInspectionCursor,
 };
+
+mod partition;
 
 /// One section of a processor's state before the owner appends its own columns: which section it
 /// is, the payload fields its rows carry, and, for a reorderer, whether each order key carries
@@ -69,6 +71,7 @@ struct SectionLayout {
 struct ProcessorLayout {
     node: ScheduledNode,
     sections: Vec<SectionLayout>,
+    moving_partitions: Option<nervix_models::BranchPartitions>,
 }
 
 /// A section's complete fields, as the owner names and types the columns it appends.
@@ -219,7 +222,7 @@ fn processor_layout(
     schedule: &DomainSchedule,
     processor: &NodeRef,
 ) -> Result<ProcessorLayout, StateInspectionRejection> {
-    match processor.kind {
+    let mut layout = match processor.kind {
         ModelKind::Reorderer => {
             let reorderer = schedule
                 .scheduled::<CreateReorderer>(processor.identifier.clone())
@@ -234,6 +237,7 @@ fn processor_layout(
                 .collect();
             Ok(ProcessorLayout {
                 node: reorderer.node.clone(),
+                moving_partitions: None,
                 sections: vec![SectionLayout {
                     section: ProcessorStateSection::Pending,
                     payload,
@@ -249,6 +253,7 @@ fn processor_layout(
             let right = relay_schema_fields(schedule, correlator.config.right.relays())?;
             Ok(ProcessorLayout {
                 node: correlator.node.clone(),
+                moving_partitions: None,
                 sections: vec![
                     SectionLayout {
                         section: ProcessorStateSection::Left,
@@ -277,6 +282,7 @@ fn processor_layout(
                 .collect();
             Ok(ProcessorLayout {
                 node: deduplicator.node.clone(),
+                moving_partitions: None,
                 sections: vec![SectionLayout {
                     section: ProcessorStateSection::Keys,
                     payload: Vec::new(),
@@ -286,7 +292,16 @@ fn processor_layout(
         }
         ModelKind::WindowProcessor => window_layout(schedule, processor),
         _ => Err(StateInspectionRejection::UnknownEntity),
+    }?;
+    if let ModelKind::Deduplicator | ModelKind::WindowProcessor = processor.kind
+        && let Some(ResolvedBranching::Branched {
+            branch, partitions, ..
+        }) = &layout.node.resolved_branching
+        && schedule.partition_transition_of(branch).is_some()
+    {
+        layout.moving_partitions = Some(*partitions);
     }
+    Ok(layout)
 }
 
 fn window_layout(
@@ -347,6 +362,7 @@ fn window_layout(
     }
     Ok(ProcessorLayout {
         node: window.node.clone(),
+        moving_partitions: None,
         sections,
     })
 }
@@ -757,6 +773,9 @@ impl SessionServiceImpl {
     ) -> Result<StateInspectionPage, StateInspectionRejection> {
         let plan = self.processor_inspection_plan(domain, show).await?;
         let incarnations = self.live_node_incarnations().await;
+        let partitions = self
+            .capture_partition_inspection(&plan, &incarnations)
+            .await?;
         let local = self.inner.consensus.local_node_id();
         let mut units = plan.layout.node.units.iter().collect::<Vec<_>>();
         units.sort_by_key(|(unit, _)| **unit);
@@ -783,6 +802,10 @@ impl SessionServiceImpl {
                 .ok_or(StateInspectionRejection::OwnerUnavailable)?;
             let (skip, after) = resume_position(plan.cursor.as_ref(), **unit);
             let allowed = budget.allowed_rows(progress.closed, skip);
+            let partition_exclusions = match &partitions {
+                Some(partitions) => Some(partitions.exclusions(**unit)?),
+                None => None,
+            };
             let request = ReadProcessorStatePage {
                 domain: domain.clone(),
                 processor: plan.processor.clone(),
@@ -790,12 +813,16 @@ impl SessionServiceImpl {
                 control_revision: plan.control_revision,
                 schema: plan.layout.node.schema_fingerprint,
                 selection: plan.selection,
+                partition_exclusions,
                 after,
                 max_rows: u64::try_from(allowed).assured("a row limit fits u64"),
                 max_bytes: u64::try_from(budget.bytes).assured("the session byte limit fits u64"),
                 target: ClusterNodeIdentity::new(owner.clone(), incarnation),
             };
             let page = self.processor_unit_page(request, &plan).await?;
+            if let Some(partitions) = &partitions {
+                partitions.validate(**unit, page.descriptor.partition_catalog.as_ref())?;
+            }
             let replicas = unit_replicas(&plan.layout.node, placement, &owner);
             let descriptor = &page.descriptor;
             digest_unit_identity(
@@ -1034,7 +1061,10 @@ impl SessionServiceImpl {
                 &request.domain,
                 &request.processor,
                 request.unit,
-                request.selection,
+                ProcessorStateSelection {
+                    branch: request.selection,
+                    partition_exclusions: request.partition_exclusions,
+                },
                 request.after,
                 ProcessorStatePageBounds {
                     rows,
@@ -1083,6 +1113,7 @@ impl SessionServiceImpl {
             });
         }
         let descriptor = ProcessorStatePageDescriptor {
+            partition_catalog: page.partition_catalog,
             origin: StateInspectionOrigin {
                 node: local,
                 fingerprint: page.fingerprint,
@@ -1183,6 +1214,7 @@ impl SessionServiceImpl {
                             control_revision: state.revision,
                             schema: node.schema_fingerprint,
                             selection: StateInspectionBranchSelection::All,
+                            partition_exclusions: None,
                             after: None,
                             max_rows: 0,
                             max_bytes: 0,

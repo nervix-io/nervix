@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 
 use arrow_schema::{DataType, Field, Schema};
 use error_stack::{Report, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_primitives::sync::StdArc;
 use sorted_vec::SortedSet;
 use thiserror::Error;
@@ -152,6 +153,11 @@ pub enum WindowRouteCompileError {
     ArgumentCompile,
     #[error("window aggregate argument program inferred no '{field}' argument")]
     ArgumentColumn { field: String },
+    #[error("{} requires a required argument; use coalesce before collecting an optional value", .function.plexus_name())]
+    CollectionArgumentNullable {
+        demand: usize,
+        function: WindowAggregateFunction,
+    },
     #[error("window aggregate output schema is missing field '{field}'")]
     OutputField { field: String },
     #[error("window aggregate SET field '{field}' failed to compile")]
@@ -189,6 +195,7 @@ impl WindowAggregateFunction {
             | Self::Avg
             | Self::BoolAnd
             | Self::BoolOr
+            | Self::CollectVec
             | Self::Corr
             | Self::Count
             | Self::CountIf
@@ -412,6 +419,12 @@ impl CompiledWindowExpr {
     }
 }
 
+/// The inferred facts needed to bind one argument, without retaining its name a second time.
+struct ArgumentType {
+    data_type: DataType,
+    nullable: bool,
+}
+
 /// The program that evaluates every argument of a route's demands, and where each argument lands.
 struct CompiledArguments {
     program: nervix_primitives::sync::Arc<CompiledProgram>,
@@ -469,11 +482,33 @@ impl CompiledArguments {
                 inferred.data_type.clone(),
                 inferred.nullable,
             ));
-            types.insert(inferred.field, inferred.data_type);
+            types.insert(
+                inferred.field,
+                ArgumentType {
+                    data_type: inferred.data_type,
+                    nullable: inferred.nullable,
+                },
+            );
         }
         let mut demands = Vec::with_capacity(program.demands().len());
         for demand in program.demands() {
             let first = argument_column(&types, demand.id, 0)?;
+            if demand
+                .functions
+                .contains(&WindowAggregateFunction::CollectVec)
+            {
+                let inferred = types
+                    .get(&first.field)
+                    .verified("argument_column just found this field in the inferred arguments");
+                if inferred.nullable {
+                    return Err(Report::new(
+                        WindowRouteCompileError::CollectionArgumentNullable {
+                            demand: demand.id,
+                            function: WindowAggregateFunction::CollectVec,
+                        },
+                    ));
+                }
+            }
             let arguments = match &demand.arguments {
                 WindowArguments::Single(_) => WindowArguments::Single(first),
                 WindowArguments::Pair { .. } => WindowArguments::Pair {
@@ -510,19 +545,19 @@ impl CompiledArguments {
 
 /// The argument program column of one demand argument, `position` counting from zero.
 fn argument_column(
-    types: &BTreeMap<String, DataType>,
+    types: &BTreeMap<String, ArgumentType>,
     demand: usize,
     position: usize,
 ) -> Result<WindowArgumentColumn, Report<WindowRouteCompileError>> {
     let field = argument_field_name(demand, position);
-    let Some(data_type) = types.get(&field) else {
+    let Some(inferred) = types.get(&field) else {
         return Err(Report::new(WindowRouteCompileError::ArgumentColumn {
             field,
         }));
     };
     Ok(WindowArgumentColumn {
         field,
-        data_type: data_type.clone(),
+        data_type: inferred.data_type.clone(),
     })
 }
 
@@ -798,5 +833,52 @@ mod tests {
             &scalar,
         ));
         assert!(message.contains("window aggregate array cannot be assigned to Float64"));
+    }
+
+    #[test]
+    fn collection_has_a_required_vector_type_and_shares_its_sequence_demand() {
+        use meticulous::ResultExt as _;
+
+        let input = schema(&[("value", DataType::Int64, false)]);
+        let vector = DataType::List(StdArc::new(Field::new("item", DataType::Int64, false)));
+        let output = schema(&[
+            ("collected", vector.clone(), false),
+            ("first_value", DataType::Int64, false),
+            ("last_value", DataType::Int64, false),
+        ]);
+        let route = compile(
+            "collected = COLLECT_VEC(input.value), first_value = FIRST(input.value), last_value = \
+             LAST(input.value)",
+            &input,
+            &output,
+        )
+        .assured("required I64 arguments produce a required I64 vector and exact endpoints");
+        assert_eq!(route.demands.len(), 1);
+        assert_eq!(
+            route.demands[0].storage,
+            WindowAggregateStorageKind::Sequence
+        );
+        assert_eq!(route.demands[0].arguments.iter().count(), 1);
+        let names = route.demands[0]
+            .functions
+            .iter()
+            .map(|function| function.plexus_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["COLLECT_VEC", "FIRST", "LAST"]);
+        assert_eq!(route.invocations.len(), 3);
+        let invocation = &route.invocations[0];
+        assert_eq!(invocation.invocation.function.plexus_name(), "COLLECT_VEC");
+        assert_eq!(invocation.output_type, vector);
+
+        let optional = schema(&[("value", DataType::Int64, true)]);
+        let message = failure(compile(
+            "collected = COLLECT_VEC(input.value)",
+            &optional,
+            &schema(&[("collected", invocation.output_type.clone(), false)]),
+        ));
+        assert!(
+            message.contains("COLLECT_VEC requires a required argument; use coalesce"),
+            "{message}"
+        );
     }
 }

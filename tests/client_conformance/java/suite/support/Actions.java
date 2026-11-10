@@ -25,6 +25,8 @@ import java.util.concurrent.TimeUnit;
 public final class Actions {
     private static final String REFUSE_NEXT_OPENING = "refuse-next-subscription-opening";
     private static final String CLEAR_REFUSALS = "clear-subscription-opening-refusals";
+    private static final String REFUSE_NEXT_CLOCK = "refuse-next-clock-attachment";
+    private static final String CLEAR_CLOCK_REFUSALS = "clear-clock-attachment-refusals";
     /** The longest request or confirmation line, its newline included. */
     private static final int LINE_BYTES = 256;
     private static final long WAIT_SECONDS = 120;
@@ -59,6 +61,23 @@ public final class Actions {
             if (!armed) return;
             armed = false;
             SCENARIO.perform(CLEAR_REFUSALS);
+        }
+    }
+
+    /** One test's clock-attachment refusals; closing clears every refusal still unused. */
+    public static final class ClockRefusals implements AutoCloseable {
+        private boolean armed;
+
+        /** Arms every node to refuse its next clock attachment as in-transaction. */
+        public void refuseNextClockAttachment() {
+            armed = true;
+            SCENARIO.perform(REFUSE_NEXT_CLOCK);
+        }
+
+        @Override public void close() {
+            if (!armed) return;
+            armed = false;
+            SCENARIO.perform(CLEAR_CLOCK_REFUSALS);
         }
     }
 

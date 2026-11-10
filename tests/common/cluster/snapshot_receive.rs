@@ -53,9 +53,12 @@ impl Cluster {
             TransportClock::system(),
         )
         .map_err(io::Error::other)?;
-        let dns = DnsResolver::load(DnsConfiguration::system())
-            .await
-            .map_err(|error| io::Error::other(format!("{error:#}")))?;
+        let dns = DnsResolver::load(
+            DnsConfiguration::system(),
+            nervix_dns::DnsSettings::default(),
+        )
+        .await
+        .map_err(|error| io::Error::other(format!("{error:#}")))?;
         let port = SnapshotProbePort(next_port()?);
         let (transport, _incoming) = Transport::bind(
             std::net::SocketAddr::from(([127, 0, 0, 1], port.0)),

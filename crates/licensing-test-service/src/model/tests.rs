@@ -1,0 +1,140 @@
+//! The fixture must exercise real trust, binding and retry identity before it tests a cluster.
+
+use nervix_licensing_protocol::trust::{DecisionVerification, TrustState};
+
+use super::*;
+
+fn fixture() -> Model {
+    let now = DateTime::parse_from_rfc3339("2026-11-10T12:00:00Z")
+        .assured("fixed fixture timestamp")
+        .with_timezone(&Utc);
+    Model::new(
+        Url::parse("https://127.0.0.1:12345").assured("fixture URL"),
+        now,
+    )
+    .assured("fixture model builds")
+}
+
+async fn bytes(response: Response) -> Vec<u8> {
+    axum::body::to_bytes(response.into_body(), crate::MAX_BODY_BYTES)
+        .await
+        .assured("fixture response is bounded")
+        .to_vec()
+}
+
+async fn common(model: &mut Model) -> RequestCommon {
+    let cluster_uid = id();
+    let response = model.challenge(
+        &serde_json::to_vec(&ChallengeRequest { cluster_uid })
+            .assured("challenge request serializes"),
+    );
+    let challenge: ChallengeResponse =
+        serde_json::from_slice(&bytes(response).await).assured("typed challenge response");
+    RequestCommon {
+        protocol: 1,
+        request_id: id(),
+        challenge: challenge.challenge,
+        sent_at: model.now,
+        aud: model.address.clone(),
+        cluster_uid,
+        display_name: "scenario".to_owned(),
+        client: ClientDescription {
+            product: ClientProduct::NervixServer,
+            version: "test".to_owned(),
+        },
+        key_generation: 1,
+        trust_held: TrustHeld {
+            working_keys: Vec::new(),
+            revocation_serials: Vec::new(),
+            succession_serials: Vec::new(),
+        },
+    }
+}
+
+#[nervix_primitives::test]
+async fn a_lost_creation_response_reuses_one_signed_decision_and_one_capacity_slot() {
+    let mut model = fixture();
+    let cluster = signer().assured("cluster signer");
+    let request = Request::Create {
+        common: common(&mut model).await,
+        license_key: model.license_key.clone(),
+        kind: ActivationKind::Persistent,
+        cluster_key: cluster.public_key().clone(),
+    };
+    let compact = cluster
+        .sign(&request, limits())
+        .assured("cluster signs its creation");
+    model.script(Fault::LoseResponse);
+    let (first, fault) = model.answer("/v1/activations", compact.as_bytes());
+    assert!(matches!(fault, Some(Fault::LoseResponse)));
+    assert_eq!(first.status(), 201);
+    let original = bytes(first).await;
+    let (retry, _) = model.answer("/v1/activations", compact.as_bytes());
+    assert_eq!(bytes(retry).await, original);
+    assert_eq!(model.activation_count(), 1);
+    assert_eq!(model.requests, vec![request.clone(), request.clone()]);
+    let answer: DecisionResponse = serde_json::from_slice(&original).assured("service response");
+    let trust = TrustState::build(&model.bundle, &answer.trust, limits())
+        .assured("real two-root signature chain");
+    let decision = trust
+        .verify_decision(&answer.decision, DecisionVerification::Apply, limits())
+        .assured("real working-key signature");
+    assert_eq!(
+        decision.decision().activation.cluster_uid,
+        request.common().cluster_uid
+    );
+    assert_eq!(
+        decision.decision().activation.cluster_key_kid,
+        *cluster.key_id()
+    );
+    assert_eq!(decision.decision().in_reply_to, request.common().request_id);
+}
+
+#[nervix_primitives::test]
+async fn a_signed_tampering_script_is_distinct_from_a_broken_signature() {
+    for fault in [
+        Tamper::Cluster,
+        Tamper::Service,
+        Tamper::Signature,
+        Tamper::UnauthorizedKey,
+        Tamper::RevokedKey,
+    ] {
+        let mut model = fixture();
+        let cluster = signer().assured("cluster signer");
+        let request = Request::Create {
+            common: common(&mut model).await,
+            license_key: model.license_key.clone(),
+            kind: ActivationKind::Persistent,
+            cluster_key: cluster.public_key().clone(),
+        };
+        model.script(Fault::Tamper(fault));
+        let compact = cluster.sign(&request, limits()).assured("signed request");
+        let (response, _) = model.answer("/v1/activations", compact.as_bytes());
+        let answer: DecisionResponse =
+            serde_json::from_slice(&bytes(response).await).assured("typed response");
+        let trust =
+            TrustState::build(&model.bundle, &answer.trust, limits()).assured("real trust chain");
+        let result = trust.verify_decision(&answer.decision, DecisionVerification::Apply, limits());
+        match fault {
+            Tamper::Signature | Tamper::UnauthorizedKey | Tamper::RevokedKey => {
+                assert!(result.is_err())
+            }
+            Tamper::Cluster => assert_ne!(
+                result
+                    .assured("properly signed wrong binding")
+                    .decision()
+                    .activation
+                    .cluster_uid,
+                request.common().cluster_uid
+            ),
+            Tamper::Service => assert_ne!(
+                result
+                    .assured("properly signed wrong service")
+                    .decision()
+                    .service,
+                model.address
+            ),
+            _ => unreachable!(),
+        }
+    }
+}

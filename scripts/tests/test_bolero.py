@@ -162,6 +162,7 @@ class InventoryTests(unittest.TestCase):
             "password-credentials-malformed",
             "runtime-ingestor-metric-layouts",
             "models-ingestor-instancing",
+            "models-emitter-instancing",
             "interconnect-intake-units",
             "typed-runner-lease",
             "typed-runner-policy",
@@ -375,6 +376,7 @@ class InventoryTests(unittest.TestCase):
             "runtime-state-snapshots-malformed",
             "runtime-state-store-checkpoints",
             "runtime-window-snapshots",
+            "runtime-window-collection",
             "runtime-window-snapshots-malformed",
             "runtime-window-sealed-checkpoints",
             "runtime-arrow-bodies",
@@ -389,6 +391,7 @@ class InventoryTests(unittest.TestCase):
             "jaq-native-numbers",
             "jaq-yaml-string-values",
             "node-settings-command-line",
+            "client-capabilities-command-line",
             "remote-relay-rows",
             "remote-relay-rows-malformed",
             "relay-wire-messages",
@@ -410,6 +413,7 @@ class InventoryTests(unittest.TestCase):
             "vm-decimal-rounding-integers",
             "vm-list-conversions",
             "vm-list-conversion-lengths",
+            "vm-list-arithmetic",
             "approx-into-rounding",
             "approx-into-exact",
             "simd-json-escapes",
@@ -471,6 +475,7 @@ class InventoryTests(unittest.TestCase):
             "dns-operation-budget",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
+            "nervix-cli",
             "nervix-benchmark",
             "nervix-connector-nats",
             "nervix-client-core",
@@ -536,7 +541,7 @@ class InventoryTests(unittest.TestCase):
                 target.test_target,
                 {
                     "lib", "test:representations", "test:connectors", "test:columns",
-                    "test:fields", "test:metrics_report_properties", "bin:nervix-web-console",
+                    "test:fields", "test:metrics_report_properties", "bin:nervix-cli", "bin:nervix-web-console",
                 },
             )
             self.assertEqual(target.corpus.parent.name, target.test.replace("::", "__"))
@@ -548,47 +553,53 @@ class InventoryTests(unittest.TestCase):
         }
         for target, version in {
             "benchmark-metrics-report": 1,
-            "node-settings-command-line": 8,
-            "ingestor-describe-envelope": 11,
-            "plexus-model": 61,
-            "plexus-archive-model": 64,
-            "plexus-statement": 67,
-            "plexus-statement-text": 66,
-            "plexus-format-document": 66,
-            "plexus-format-text": 65,
-            "models-archived-models": 65,
-            "registry-archived-models": 55,
-            "consensus-state-records": 60,
-            "consensus-state-corruption": 60,
-            "consensus-raft-records": 59,
-            "registry-stored-models": 48,
-            "registry-stored-models-corruption": 48,
-            "cluster-identity-record-rkyv": 1,
-            "node-capability-records": 2,
+            "ingestor-describe-envelope": 12,
+            "plexus-model": 63,
+            "plexus-archive-model": 66,
+            "plexus-statement": 70,
+            "plexus-statement-text": 69,
+            "plexus-format-document": 69,
+            "plexus-format-text": 68,
+            "models-archived-models": 68,
+            "registry-archived-models": 57,
+            "consensus-state-records": 65,
+            "consensus-state-corruption": 65,
+            "consensus-raft-records": 64,
+            "registry-stored-models": 50,
+            "registry-stored-models-corruption": 50,
+            "cluster-identity-record-rkyv": 2,
+            "node-capability-records": 5,
+            "node-settings-command-line": 11,
             "inferencer-tensor-columns": 1,
             "inferencer-state-snapshots": 1,
-            "backup-inferencer-values": 2,
-            "backup-inferencer-malformed": 2,
-            "backup-record-manifest": 17,
-            "backup-complete-archives": 17,
-            "backup-malformed-records": 17,
-            "backup-corrupt-archives": 18,
+            "backup-inferencer-values": 3,
+            "backup-inferencer-malformed": 3,
+            "backup-record-manifest": 19,
+            "backup-complete-archives": 19,
+            "backup-malformed-records": 19,
+            "backup-corrupt-archives": 20,
             "backup-capture-wire": 3,
             "backup-capture-wire-malformed": 3,
             "backup-section-mapping": 4,
+            "runtime-window-collection": 1,
+            "runtime-window-snapshots": 5,
+            "runtime-window-sealed-checkpoints": 5,
+            "backup-window-groups": 5,
 
             "inferencer-state-snapshots-malformed": 1,
             "inferencer-native-snapshot-projection": 1,
-            "console-emitter-drafts": 6,
-            "console-processor-drafts": 7,
-            "client-requests": 12,
+            "console-emitter-drafts": 8,
+            "console-processor-drafts": 8,
+            "client-requests": 13,
+            "client-producer-link-frames": 11,
+            "client-producer-link-frames-malformed": 11,
         }.items():
             with self.subTest(target=target):
                 self.assertEqual(versions[target], version)
 
     def test_state_inspection_representations_are_bounded_pairs(self) -> None:
         targets = {target.id: target for target in bolero.load_inventory().targets}
-        for name, version in (("client-state-inspection", 6), ("state-inspection-cursor", 7)):
+        for name, version in (("client-state-inspection", 7), ("state-inspection-cursor", 8)):
             with self.subTest(target=name):
                 self.assertEqual(targets[name].domain_version, version)
                 self.assertEqual(targets[name].max_input_bytes, 512)

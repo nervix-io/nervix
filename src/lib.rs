@@ -70,8 +70,8 @@ pub(crate) mod task_shutdown;
 #[cfg(feature = "testing")]
 pub use fault_injection::{
     BackupCutBoundary, DomainResumeBoundary, FaultInjection, ForeignExecutionObservation,
-    ModelPublicationRefusalKind, RestoreStagingKind, StandaloneTransactionBoundary,
-    WasmCheckpointWindow, WasmStateResetRequestError,
+    ModelPublicationRefusalKind, RelayCapabilityRefusal, RestoreStagingKind,
+    StandaloneTransactionBoundary, WasmCheckpointWindow, WasmStateResetRequestError,
 };
 #[cfg(feature = "testing")]
 pub use registry::SchedulerMode;
@@ -93,6 +93,16 @@ pub struct ConfiguredFaultInjection {
 
 #[cfg(not(feature = "testing"))]
 impl ConfiguredFaultInjection {
+    pub(crate) fn licensing_clock_changes(
+        &self,
+    ) -> Option<nervix_primitives::sync::watch::Receiver<std::time::Duration>> {
+        None
+    }
+
+    pub(crate) const fn licensing_clock_offset(&self) -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
+
     pub(crate) const fn licensing_quota(
         &self,
         _name: nervix_licensing_vocabulary::QuotaName,
@@ -108,3 +118,5 @@ impl ConfiguredFaultInjection {
         None
     }
 }
+
+pub use application::licensing::ConfiguredLicensingTestSupport;

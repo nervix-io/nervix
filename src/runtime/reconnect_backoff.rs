@@ -56,6 +56,7 @@ pub(in crate::runtime) struct RuntimeReconnectBackoff {
     pub(super) initial: Duration,
     pub(super) next: Duration,
     pub(super) max: Duration,
+    pub(super) settings: nervix_connector::RetryBackoffSettings,
 }
 
 impl Default for RuntimeReconnectBackoff {
@@ -64,16 +65,21 @@ impl Default for RuntimeReconnectBackoff {
             initial: Duration::from_millis(250),
             next: Duration::from_millis(250),
             max: Duration::from_secs(30),
+            settings: nervix_connector::RetryBackoffSettings::default(),
         }
     }
 }
 
 impl RuntimeReconnectBackoff {
-    pub(in crate::runtime) fn from_policy(policy: ParsedRetryPolicy) -> Self {
+    pub(in crate::runtime) fn from_policy(
+        policy: ParsedRetryPolicy,
+        settings: nervix_connector::RetryBackoffSettings,
+    ) -> Self {
         Self {
             initial: policy.backoff,
             next: policy.backoff,
             max: policy.max_backoff,
+            settings,
         }
     }
 
@@ -87,14 +93,7 @@ impl RuntimeReconnectBackoff {
 
     pub(in crate::runtime) fn take_next_delay(&mut self) -> Duration {
         let delay = self.next;
-        // Saturation is the policy here: the backoff doubles until it reaches the configured
-        // ceiling and stays there, so a doubling that leaves `Duration` clamps to that ceiling.
-        let doubled = nervix_primitives::expect_lint!(
-            nervix::clamped_arithmetic,
-            "retry doubling clamps to the configured ceiling even beyond Duration MAX",
-            self.next.saturating_mul(2)
-        );
-        self.next = doubled.min(self.max);
+        self.next = self.settings.next_delay(self.next, self.max);
         delay
     }
 

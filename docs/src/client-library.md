@@ -105,7 +105,7 @@ Every call is bounded by `ConnectOptions`: `connect_timeout` for each connection
 seconds by default), `request_timeout` for each request (120 seconds), and `retry_timeout` for the
 call with all of its retries and redirects (120 seconds). `BACKUP` uses `backup_wait_timeout`
 instead for its command wait and reply (ten minutes), shared across every domain cut, redirect and
-reconnect. All four durations must be between one millisecond and 24 hours. A call whose deadline passes before a
+reconnect. All deadline and retry-backoff durations must be between one millisecond and 24 hours. A call whose deadline passes before a
 command's outcome is known fails with `ClientError::UncertainCommand`, which names the execution
 reference. An `https://` server is verified only against `ca_certificate_pem`: the client loads no
 system roots, so a TLS connection needs the certificate authority that signed the server's
@@ -122,6 +122,16 @@ outcome unknown, so the execution reference or upload identity is read from the 
 and the cause from the frame beneath it. The client decides retries, session recovery and
 uncertainty from those typed contexts, and a caller needs no text to decide either; `{report:#}`
 renders the whole chain for display.
+
+`ConnectOptions` also owns `retry_backoff` and `retry_max_backoff` (100 ms and 1 s by default),
+positive subscription record/frame retention and aggregate retention multipliers, and upload and
+restore frame queue capacities. The native client's `ClientCapabilities::from_options` validates
+these values and all derived byte bounds once. Retry delays double within the selected ceiling;
+the base cannot exceed it. Subscription defaults retain 32 events and one frame per subscription,
+with four times those bounds in total. Upload and restore each queue eight frames by default.
+The [CLI capability table](client-tools-cli.md#connection-capabilities) lists the corresponding
+Rust field names with hyphens in place of underscores and their complete bounds.
+
 
 Native connections resolve a hostname through Hickory. By default the client loads the host's
 resolver configuration and hosts file once at connection setup. `ConnectOptions::dns` can name a
@@ -433,7 +443,7 @@ belong to the client rather than to one session, so a reader keeps calling them 
 - `next_server_event()` never opens a session itself. Notices end with the session that delivered
   them, including the ones not read yet, and the stream continues with the notices of the next
   session. Each `ServerEvent` carries the notice's `level`, its `kind` (`NoticeKind::Membership`,
-  `Leadership`, `ClusterParameters`, `Runtime` or `ControlPlane`) and its display text; a reader
+  `Leadership`, `ClusterParameters`, `Runtime`, `ControlPlane` or `Licensing`) and its display text; a reader
   routes notices by `kind` and never by their text.
 
 A failed read leaves its stream open. `ClientError::EventOverflow` from `next_server_event()` means

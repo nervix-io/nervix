@@ -12,7 +12,7 @@ Feature: Window processor runtime behavior
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA window_input (tenant STRING, value I64);
-      CREATE SCHEMA window_output (tenant STRING, first_value I64, samples I64);
+      CREATE SCHEMA window_output (tenant STRING, first_value I64, samples I64, collected VEC<I64>);
       CREATE WIRE JSON SCHEMA window_wire MODE STRICT (tenant string, value integer);
       CREATE WIRE JSON CODEC window_codec FROM WIRE SCHEMA window_wire TO SCHEMA window_input;
       CREATE SCHEMA tenant_key (tenant STRING);
@@ -32,7 +32,7 @@ Feature: Window processor runtime behavior
         TO window_outputs
           SET tenant = FIRST(input.tenant),
               first_value = FIRST(input.value),
-              samples = COUNT(input.value)
+              samples = COUNT(input.value), collected = COLLECT_VEC(input.value)
           ON MESSAGE ERROR LOG;
       START;
       SHOW CLUSTER STATUS;
@@ -73,8 +73,8 @@ Feature: Window processor runtime behavior
       """
     Then within "60s" the relay subscription receives payloads containing all fragments
       """
-      key={"tenant":"acme"} | "first_value":10 | "samples":3
-      key={"tenant":"beta"} | "first_value":100 | "samples":3
+      key={"tenant":"acme"} | "first_value":10 | "samples":3 | "collected":[10,20,30]
+      key={"tenant":"beta"} | "first_value":100 | "samples":3 | "collected":[100,200,300]
       """
 
   @metrics_checkpoint_handoff @deloxide_stress_restore
@@ -89,7 +89,7 @@ Feature: Window processor runtime behavior
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA window_input (tenant STRING, value I64);
-      CREATE SCHEMA window_output (tenant STRING, first_value I64, samples I64);
+      CREATE SCHEMA window_output (tenant STRING, first_value I64, samples I64, collected VEC<I64>);
       CREATE WIRE JSON SCHEMA window_wire MODE STRICT (tenant string, value integer);
       CREATE WIRE JSON CODEC window_codec FROM WIRE SCHEMA window_wire TO SCHEMA window_input;
       CREATE SCHEMA tenant_key (tenant STRING);
@@ -109,7 +109,7 @@ Feature: Window processor runtime behavior
         TO window_outputs
           SET tenant = FIRST(input.tenant),
               first_value = FIRST(input.value),
-              samples = COUNT(input.value)
+              samples = COUNT(input.value), collected = COLLECT_VEC(input.value)
           ON MESSAGE ERROR LOG;
       CREATE SUBSCRIPTION window_subscription TO window_outputs;
       START;
@@ -148,8 +148,8 @@ Feature: Window processor runtime behavior
       """
     Then within "60s" the relay subscription receives payloads containing all fragments
       """
-      key={"tenant":"acme"} | "first_value":10 | "samples":3
-      key={"tenant":"beta"} | "first_value":100 | "samples":3
+      key={"tenant":"acme"} | "first_value":10 | "samples":3 | "collected":[10,20,30]
+      key={"tenant":"beta"} | "first_value":100 | "samples":3 | "collected":[100,200,300]
       """
 
   Scenario Outline: Tumbling message windows emit non-overlapping aggregates per branch
@@ -379,7 +379,8 @@ Feature: Window processor runtime behavior
         CREATE SCHEMA metric_summary (
         tenant STRING,
         sample_count I64,
-        total_latency I64
+        total_latency I64,
+        collected <collected_type>
       );
         CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         tenant string,
@@ -409,7 +410,7 @@ Feature: Window processor runtime behavior
         STEP 3 MESSAGES
         BRANCHED BY by_metric_ingestor
         TO metric_summaries
-        SET tenant = FIRST(input.tenant), sample_count = COUNT(input.latency), total_latency = SUM(input.latency)
+        SET tenant = FIRST(input.tenant), sample_count = COUNT(input.latency), total_latency = SUM(input.latency), collected = COLLECT_VEC(input.latency)
         ON MESSAGE ERROR LOG;
         START;
       """
@@ -446,16 +447,16 @@ Feature: Window processor runtime behavior
       """
     Then within "10s" the relay subscription receives payloads containing all fragments
       """
-      key={"tenant":"acme"} | "tenant":"acme" | "sample_count":3 | "total_latency":60
-      key={"tenant":"beta"} | "tenant":"beta" | "sample_count":3 | "total_latency":600
+      key={"tenant":"acme"} | "tenant":"acme" | "sample_count":3 | "total_latency":60 | "collected":[10,20,30]
+      key={"tenant":"beta"} | "tenant":"beta" | "sample_count":3 | "total_latency":600 | "collected":[100,200,300]
       """
     And the relay subscription does not receive a payload within "500ms"
 
     Examples:
-      | cluster_size | replica_count |
-      | 1            | 0             |
-      | 3            | 0             |
-      | 3            | 1             |
+      | cluster_size | replica_count | collected_type |
+      | 1            | 0             | VEC<I64>       |
+      | 3            | 0             | VEC<I64>       |
+      | 3            | 1             | VEC<I64>       |
 
   Scenario Outline: Linear histogram percentiles are configured declaratively in aggregate expressions
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"

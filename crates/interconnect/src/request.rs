@@ -44,11 +44,10 @@ use super::{
     ActivateOwnershipHandoffStateRequest, CaptureOwnershipHandoffStateRequest,
     ConfirmOwnershipHandoffStateRequest, ControlEnvelope, DescribeIngestorRequest,
     DiscardOwnershipHandoffStateRequest, DomainClockProgressRequest,
-    ForcedOwnershipRecoveryPreparation, IngestorDescribeEnvelope, MAX_CONCURRENT_HEALTH_PROBES,
-    OwnershipHandoffCheckpoint, OwnershipHandoffResponse, PoolClass,
-    PrepareForcedOwnershipRecoveryRequest, PrepareOwnershipHandoffStateRequest,
-    ReconcileOwnershipHandoffPreparationsRequest, RemoteOperationFailure, Transport,
-    TransportError, wire,
+    ForcedOwnershipRecoveryPreparation, IngestorDescribeEnvelope, OwnershipHandoffCheckpoint,
+    OwnershipHandoffResponse, PoolClass, PrepareForcedOwnershipRecoveryRequest,
+    PrepareOwnershipHandoffStateRequest, ReconcileOwnershipHandoffPreparationsRequest,
+    RemoteOperationFailure, Transport, TransportError, wire,
 };
 use crate::{
     connection::{
@@ -324,7 +323,7 @@ pub trait InterconnectRequest: RkyvMessage {
     const NAME: &'static str;
     const CLASS: PoolClass = PoolClass::Commands;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Shared;
-    const TIMEOUT: Duration;
+    const DEADLINE: crate::RequestDeadline;
 
     /// Discovery requests are permitted before the first live-membership view exists.
     const REQUIRES_LIVE_TARGET: bool = true;
@@ -345,7 +344,7 @@ impl InterconnectRequest for ApplicationHealthProbe {
     const NAME: &'static str = "application_health_probe";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
-    const TIMEOUT: Duration = Duration::from_secs(1);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Liveness;
 }
 
 /// The application progress one process incarnation has reached for control-plane completion.
@@ -447,7 +446,7 @@ impl InterconnectRequest for ApplicationRevisionRequest {
     const NAME: &'static str = "application_revision";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
-    const TIMEOUT: Duration = Duration::from_secs(2);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 }
 
 /// One process incarnation's application progress, reported to the Raft leader it observes.
@@ -479,7 +478,7 @@ impl InterconnectRequest for ApplicationProgressReport {
     const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
     /// A report carries the record a revision query answers, over the same progress subquota, so it
     /// has the query's deadline.
-    const TIMEOUT: Duration = ApplicationRevisionRequest::TIMEOUT;
+    const DEADLINE: crate::RequestDeadline = ApplicationRevisionRequest::DEADLINE;
 }
 
 /// The live process incarnations a leader currently requires for command completion, and the
@@ -505,7 +504,7 @@ impl InterconnectRequest for ApplicationCompletionPeersRequest {
     const NAME: &'static str = "application_completion_peers";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
-    const TIMEOUT: Duration = Duration::from_secs(2);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 }
 
 /// Where one process incarnation's HTTPS listener stands against a requested runtime revision.
@@ -551,7 +550,7 @@ impl InterconnectRequest for HttpsListenerInstallationRequest {
     const NAME: &'static str = "https_listener_installation";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
-    const TIMEOUT: Duration = Duration::from_secs(2);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 }
 
 /// Opens progress delivery after this receiver installed the addressed clock authority.
@@ -588,7 +587,7 @@ impl InterconnectRequest for DomainClockAttachRequest {
             reason = "clock attachment and progress requests must share one attempt deadline"
         )
     )]
-    const TIMEOUT: Duration = DomainClockProgressRequest::TIMEOUT;
+    const DEADLINE: crate::RequestDeadline = DomainClockProgressRequest::DEADLINE;
 }
 
 impl InterconnectRequest for DomainClockProgressRequest {
@@ -597,7 +596,7 @@ impl InterconnectRequest for DomainClockProgressRequest {
     const NAME: &'static str = "domain_clock_progress";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
-    const TIMEOUT: Duration = Duration::from_secs(2);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 }
 
 /// A typed request that opens one ordered bidirectional frame stream.
@@ -615,7 +614,7 @@ pub trait InterconnectDuplexRequest: RkyvMessage {
     const CLASS: PoolClass;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Shared;
     /// How long opening the stream may take. It is not a bound on the stream's lifetime.
-    const SETUP_TIMEOUT: Duration;
+    const SETUP_DEADLINE: crate::RequestDeadline;
     const REQUIRES_LIVE_TARGET: bool = true;
 }
 
@@ -624,27 +623,8 @@ pub trait InterconnectStreamRequest: RkyvMessage {
     const NAME: &'static str;
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Shared;
-    /// The declared fallback opening deadline; configured callers pass their remaining deadline.
-    ///
-    /// ```
-    /// use nervix_interconnect::{InterconnectStreamRequest, ReadMaterializedStatePage};
-    /// use nervix_models::{SettingDefinition, StateInspectionReadTimeout};
-    /// assert_eq!(ReadMaterializedStatePage::default_timeout(),
-    ///            StateInspectionReadTimeout::default_value(&()));
-    /// ```
-    ///
-    /// ```compile_fail
-    /// use nervix_interconnect::{InterconnectStreamRequest, ReadMaterializedStatePage};
-    /// let seconds: u64 = ReadMaterializedStatePage::default_timeout();
-    /// ```
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            recurring,
-            reason = "request drivers read the pure declaration for each stream opening"
-        )
-    )]
-    fn default_timeout() -> Duration;
+    /// The operation's relative budget, resolved by its transport from configured settings.
+    const DEADLINE: crate::RequestDeadline;
     const REQUIRES_LIVE_TARGET: bool = true;
 
     /// Bind a coordinated stream to the authenticated peer process before its handler runs.
@@ -933,82 +913,28 @@ struct RequestQuotas {
     capacities: [usize; RequestSubquota::COUNT],
 }
 
-// Per-node admission limits for reserved request classes. These cap requests across all peers and
-// connections on one node, separately for inbound and outbound flow. They are independent policy
-// inputs from the per-connection HTTP/2 stream partition owned by `connection`.
-const PER_NODE_RESERVED_REQUEST_MINIMUM: usize = 1;
-const PER_NODE_STANDARD_REQUEST_LIMIT: usize = 8;
-const PER_NODE_COMPLETION_REQUEST_LIMIT: usize = 4;
-const _: () = assert!(
-    PER_NODE_RESERVED_REQUEST_MINIMUM > 0
-        && PER_NODE_STANDARD_REQUEST_LIMIT > 0
-        && PER_NODE_COMPLETION_REQUEST_LIMIT > 0
-        && MAX_CONCURRENT_HEALTH_PROBES > 0,
-    "per-node request policy inputs must be nonzero",
-);
-const _: () = assert!(
-    PER_NODE_STANDARD_REQUEST_LIMIT >= PER_NODE_RESERVED_REQUEST_MINIMUM
-        && PER_NODE_COMPLETION_REQUEST_LIMIT >= PER_NODE_RESERVED_REQUEST_MINIMUM
-        && MAX_CONCURRENT_HEALTH_PROBES >= PER_NODE_RESERVED_REQUEST_MINIMUM,
-    "each per-node request limit must include the reserved minimum",
-);
-
 impl RequestQuotas {
-    fn new(capacity: usize) -> Self {
-        let standard = capacity.clamp(
-            PER_NODE_RESERVED_REQUEST_MINIMUM,
-            PER_NODE_STANDARD_REQUEST_LIMIT,
-        );
-        let completion = capacity.clamp(
-            PER_NODE_RESERVED_REQUEST_MINIMUM,
-            PER_NODE_COMPLETION_REQUEST_LIMIT,
-        );
+    fn new(options: &crate::TransportOptions) -> Self {
+        let capacity = options.incoming_queue_capacity;
+        // Each reserve is independent; a full general queue never consumes liveness or completion.
+        let standard = options.request_quota.min(capacity).max(1);
+        let append = options.append_request_quota.min(capacity).max(1);
+        let completion = options.completion_request_quota.min(capacity).max(1);
+        let liveness = options.max_concurrent_health_probes;
         Self {
             shared: StdArc::new(Semaphore::new(capacity)),
-            append: StdArc::new(Semaphore::new(capacity.clamp(
-                PER_NODE_RESERVED_REQUEST_MINIMUM,
-                PER_NODE_STANDARD_REQUEST_LIMIT,
-            ))),
-            resource: StdArc::new(Semaphore::new(capacity.clamp(
-                PER_NODE_RESERVED_REQUEST_MINIMUM,
-                PER_NODE_STANDARD_REQUEST_LIMIT,
-            ))),
-            snapshot: StdArc::new(Semaphore::new(capacity.clamp(
-                PER_NODE_RESERVED_REQUEST_MINIMUM,
-                PER_NODE_STANDARD_REQUEST_LIMIT,
-            ))),
-            discovery: StdArc::new(Semaphore::new(capacity.clamp(
-                PER_NODE_RESERVED_REQUEST_MINIMUM,
-                PER_NODE_STANDARD_REQUEST_LIMIT,
-            ))),
-            liveness: StdArc::new(Semaphore::new(MAX_CONCURRENT_HEALTH_PROBES)),
-            progress: StdArc::new(Semaphore::new(capacity.clamp(
-                PER_NODE_RESERVED_REQUEST_MINIMUM,
-                PER_NODE_STANDARD_REQUEST_LIMIT,
-            ))),
-            admission: StdArc::new(Semaphore::new(capacity.clamp(
-                PER_NODE_RESERVED_REQUEST_MINIMUM,
-                PER_NODE_STANDARD_REQUEST_LIMIT,
-            ))),
-            cancellation: StdArc::new(Semaphore::new(capacity.clamp(
-                PER_NODE_RESERVED_REQUEST_MINIMUM,
-                PER_NODE_COMPLETION_REQUEST_LIMIT,
-            ))),
-            terminal: StdArc::new(Semaphore::new(capacity.clamp(
-                PER_NODE_RESERVED_REQUEST_MINIMUM,
-                PER_NODE_COMPLETION_REQUEST_LIMIT,
-            ))),
+            append: StdArc::new(Semaphore::new(append)),
+            resource: StdArc::new(Semaphore::new(standard)),
+            snapshot: StdArc::new(Semaphore::new(standard)),
+            discovery: StdArc::new(Semaphore::new(standard)),
+            liveness: StdArc::new(Semaphore::new(liveness)),
+            progress: StdArc::new(Semaphore::new(standard)),
+            admission: StdArc::new(Semaphore::new(standard)),
+            cancellation: StdArc::new(Semaphore::new(completion)),
+            terminal: StdArc::new(Semaphore::new(completion)),
             capacities: [
-                capacity,
-                standard,
-                standard,
-                standard,
-                standard,
-                MAX_CONCURRENT_HEALTH_PROBES,
-                standard,
-                standard,
-                completion,
-                completion,
+                capacity, append, standard, standard, standard, liveness, standard, standard,
+                completion, completion,
             ],
         }
     }
@@ -1064,13 +990,16 @@ fn subquota_belongs_to_class(subquota: RequestSubquota, class: PoolClass) -> boo
 }
 
 impl RequestState {
-    pub(crate) fn new(capacity: usize, observations: Arc<TransportObservations>) -> Self {
+    pub(crate) fn new(
+        options: &crate::TransportOptions,
+        observations: Arc<TransportObservations>,
+    ) -> Self {
         Self {
             handlers: ArcSwap::from_pointee(HandlerTable::default()),
             live_nodes: ArcSwapOption::empty(),
             membership_changed: Notify::new(),
-            outbound: RequestQuotas::new(capacity),
-            inbound: RequestQuotas::new(capacity),
+            outbound: RequestQuotas::new(options),
+            inbound: RequestQuotas::new(options),
             observations,
         }
     }
@@ -1634,6 +1563,18 @@ impl RequestState {
 }
 
 impl Transport {
+    pub fn request_deadline<M: InterconnectRequest>(&self) -> Duration {
+        M::DEADLINE.resolve(self.inner.request_timeout(), self.liveness())
+    }
+    pub fn stream_request_deadline<M: InterconnectStreamRequest>(&self) -> Duration {
+        M::DEADLINE.resolve(self.inner.request_timeout(), self.liveness())
+    }
+    pub fn duplex_setup_deadline<M: InterconnectDuplexRequest>(&self) -> Duration {
+        M::SETUP_DEADLINE.resolve(self.inner.request_timeout(), self.liveness())
+    }
+}
+
+impl Transport {
     pub fn register_handler<M, H, F>(
         &self,
         handler: H,
@@ -1736,7 +1677,7 @@ impl Transport {
                     class: M::CLASS,
                     subquota: M::SUBQUOTA,
                     body,
-                    timeout: M::SETUP_TIMEOUT,
+                    timeout: self.duplex_setup_deadline::<M>(),
                     admission,
                 },
             )
@@ -1757,7 +1698,8 @@ impl Transport {
     where
         M: InterconnectRequest,
     {
-        self.request_with_timeout(node, message, M::TIMEOUT).await
+        self.request_with_timeout(node, message, self.request_deadline::<M>())
+            .await
     }
 
     pub async fn request_stream<M>(
@@ -1768,7 +1710,7 @@ impl Transport {
     where
         M: InterconnectStreamRequest,
     {
-        self.request_stream_with_timeout(node, message, M::default_timeout())
+        self.request_stream_with_timeout(node, message, self.stream_request_deadline::<M>())
             .await
     }
 
@@ -1863,7 +1805,12 @@ impl Transport {
     where
         M: InterconnectRequest,
     {
-        self.request_with_fence(node, message, M::TIMEOUT, peer_process_epoch)
+        self.request_with_fence(
+            node,
+            message,
+            self.request_deadline::<M>(),
+            peer_process_epoch,
+        )
     }
 
     async fn request_with_fence<M, F>(
@@ -2029,7 +1976,7 @@ impl InterconnectRequest for DescribeIngestorRequest {
     type Response = Result<IngestorDescribeEnvelope, RemoteOperationFailure>;
 
     const NAME: &'static str = "describe_ingestor";
-    const TIMEOUT: Duration = Duration::from_secs(10);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Request;
 }
 
 impl InterconnectRequest for CaptureOwnershipHandoffStateRequest {
@@ -2037,7 +1984,7 @@ impl InterconnectRequest for CaptureOwnershipHandoffStateRequest {
 
     const NAME: &'static str = "capture_ownership_handoff_state";
     const CLASS: PoolClass = PoolClass::Replication;
-    const TIMEOUT: Duration = Duration::from_secs(60);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -2049,7 +1996,7 @@ impl InterconnectRequest for PrepareOwnershipHandoffStateRequest {
 
     const NAME: &'static str = "prepare_ownership_handoff_state";
     const CLASS: PoolClass = PoolClass::Replication;
-    const TIMEOUT: Duration = Duration::from_secs(60);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -2061,7 +2008,7 @@ impl InterconnectRequest for ConfirmOwnershipHandoffStateRequest {
 
     const NAME: &'static str = "confirm_ownership_handoff_state";
     const CLASS: PoolClass = PoolClass::Replication;
-    const TIMEOUT: Duration = Duration::from_secs(60);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -2073,7 +2020,7 @@ impl InterconnectRequest for PrepareForcedOwnershipRecoveryRequest {
 
     const NAME: &'static str = "prepare_forced_ownership_recovery";
     const CLASS: PoolClass = PoolClass::Replication;
-    const TIMEOUT: Duration = Duration::from_secs(60);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
 }
 
 impl InterconnectRequest for ActivateOwnershipHandoffStateRequest {
@@ -2081,7 +2028,7 @@ impl InterconnectRequest for ActivateOwnershipHandoffStateRequest {
 
     const NAME: &'static str = "activate_ownership_handoff_state";
     const CLASS: PoolClass = PoolClass::Replication;
-    const TIMEOUT: Duration = Duration::from_secs(60);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -2093,7 +2040,7 @@ impl InterconnectRequest for DiscardOwnershipHandoffStateRequest {
 
     const NAME: &'static str = "discard_ownership_handoff_state";
     const CLASS: PoolClass = PoolClass::Replication;
-    const TIMEOUT: Duration = Duration::from_secs(60);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -2105,7 +2052,7 @@ impl InterconnectRequest for ReconcileOwnershipHandoffPreparationsRequest {
 
     const NAME: &'static str = "reconcile_ownership_handoff_preparations";
     const CLASS: PoolClass = PoolClass::Replication;
-    const TIMEOUT: Duration = Duration::from_secs(60);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -2132,10 +2079,7 @@ mod tests {
         const NAME: &'static str = "test_bulk_decode";
         const CLASS: PoolClass = PoolClass::Bulk;
         const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-        #[inline]
-        fn default_timeout() -> Duration {
-            Duration::from_secs(5)
-        }
+        const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
     }
 
     #[nervix_primitives::test]
@@ -2208,7 +2152,10 @@ mod tests {
         assert_eq!(ApplicationHealthProbe::NAME, "application_health_probe");
         assert_eq!(ApplicationHealthProbe::CLASS, PoolClass::Management);
         assert_eq!(ApplicationHealthProbe::SUBQUOTA, RequestSubquota::Liveness);
-        assert_eq!(ApplicationHealthProbe::TIMEOUT, Duration::from_secs(1));
+        assert_eq!(
+            ApplicationHealthProbe::DEADLINE.declared_default(),
+            Duration::from_secs(1)
+        );
     }
 
     #[test]
@@ -2233,7 +2180,7 @@ mod tests {
             RequestSubquota::Progress
         );
         assert_eq!(
-            HttpsListenerInstallationRequest::TIMEOUT,
+            HttpsListenerInstallationRequest::DEADLINE.declared_default(),
             Duration::from_secs(2)
         );
     }
@@ -2258,7 +2205,10 @@ mod tests {
             ApplicationRevisionRequest::SUBQUOTA,
             RequestSubquota::Progress
         );
-        assert_eq!(ApplicationRevisionRequest::TIMEOUT, Duration::from_secs(2));
+        assert_eq!(
+            ApplicationRevisionRequest::DEADLINE.declared_default(),
+            Duration::from_secs(2)
+        );
 
         assert_receipt_response::<ApplicationProgressReport>();
         assert_eq!(ApplicationProgressReport::NAME, "application_progress");
@@ -2267,7 +2217,10 @@ mod tests {
             ApplicationProgressReport::SUBQUOTA,
             RequestSubquota::Progress
         );
-        assert_eq!(ApplicationProgressReport::TIMEOUT, Duration::from_secs(2));
+        assert_eq!(
+            ApplicationProgressReport::DEADLINE.declared_default(),
+            Duration::from_secs(2)
+        );
     }
 
     #[test]
@@ -2347,7 +2300,10 @@ mod tests {
             DomainClockProgressRequest::SUBQUOTA,
             RequestSubquota::Progress
         );
-        assert_eq!(DomainClockProgressRequest::TIMEOUT, Duration::from_secs(2));
+        assert_eq!(
+            DomainClockProgressRequest::DEADLINE.declared_default(),
+            Duration::from_secs(2)
+        );
     }
 
     #[test]
@@ -2382,19 +2338,51 @@ mod tests {
     }
 
     #[test]
+    fn configured_append_capacity_refuses_excess_without_consuming_other_reserves() {
+        let settings = crate::TransportSettings::resolve(crate::TransportSettingValues {
+            max_peers: Some(16),
+            request_quota: Some(4),
+            ..Default::default()
+        })
+        .assured("a four-request quota fits node admission");
+        let options = settings.options(None, None);
+        let quotas = RequestQuotas::new(&options);
+        let held: Vec<_> = (0..4)
+            .map(|_| {
+                quotas
+                    .try_admit(RequestSubquota::Append)
+                    .assured("declared append room")
+            })
+            .collect();
+        assert!(quotas.try_admit(RequestSubquota::Append).is_none());
+        assert!(quotas.try_admit(RequestSubquota::Liveness).is_some());
+        assert!(quotas.try_admit(RequestSubquota::Cancellation).is_some());
+        assert!(quotas.try_admit(RequestSubquota::Shared).is_some());
+        drop(held);
+        assert!(quotas.try_admit(RequestSubquota::Append).is_some());
+    }
+
+    #[test]
     fn liveness_quota_supports_the_node_health_probe_limit() {
-        let quotas = RequestQuotas::new(1);
+        let options = crate::TransportOptions {
+            incoming_queue_capacity: 1,
+            ..Default::default()
+        };
+        let quotas = RequestQuotas::new(&options);
 
         assert_eq!(
             quotas.liveness.available_permits(),
-            super::super::MAX_CONCURRENT_HEALTH_PROBES,
+            options.max_concurrent_health_probes,
             "health capacity must not shrink with the general incoming request queue"
         );
     }
 
     #[test]
     fn every_target_is_live_until_membership_is_published() {
-        let requests = RequestState::new(1, Arc::new(TransportObservations::default()));
+        let requests = RequestState::new(
+            &crate::TransportOptions::default(),
+            Arc::new(TransportObservations::default()),
+        );
         let node_a = ClusterNodeName::parse("node-a")
             .assured("the test node name follows the public node-name grammar");
         let node_b = ClusterNodeName::parse("node-b")

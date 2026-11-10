@@ -1330,6 +1330,8 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "itoa",
  "matchit",
  "memchr",
@@ -1337,7 +1339,10 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
+ "serde_json",
+ "serde_path_to_error",
  "sync_wrapper",
+ "tokio",
  "tower",
  "tower-layer",
  "tower-service",
@@ -6851,12 +6856,14 @@ version = "0.1.0-dev"
 dependencies = [
  "arch-into",
  "ariadne 0.5.1",
+ "bolero",
  "byte-unit",
  "clap",
  "clap_complete",
  "error-stack",
  "humantime",
  "meticulous",
+ "nervix-arbitrary",
  "nervix-backup",
  "nervix-client-core",
  "nervix-dns",
@@ -7669,6 +7676,7 @@ dependencies = [
  "fjall",
  "futures-util",
  "imbl",
+ "indexmap 2.14.2",
  "meticulous",
  "nervix-arbitrary",
  "nervix-crypto",
@@ -7694,6 +7702,7 @@ dependencies = [
  "tokio",
  "tracing",
  "ubyte",
+ "url",
  "uuid",
  "zeroize",
 ]
@@ -7781,6 +7790,7 @@ dependencies = [
  "indexmap 2.14.2",
  "meticulous",
  "nervix-crypto",
+ "nervix-models",
  "nervix-primitives",
  "nervix-test-environment",
  "reqwest 0.12.28",
@@ -7916,6 +7926,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-licensing-test-service"
+version = "0.1.0-dev"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "error-stack",
+ "futures-util",
+ "hyper-util",
+ "meticulous",
+ "nervix-crypto",
+ "nervix-licensing-protocol",
+ "nervix-primitives",
+ "nervix-recovery",
+ "rcgen",
+ "reqwest 0.13.5",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio-rustls",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "nervix-licensing-vocabulary"
 version = "0.1.0-dev"
 dependencies = [
@@ -7969,8 +8008,10 @@ dependencies = [
  "strum 0.26.3",
  "thiserror 2.0.21",
  "toml 0.8.2",
+ "ubyte",
  "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -8189,6 +8230,8 @@ dependencies = [
  "nervix-dns",
  "nervix-execution",
  "nervix-interconnect",
+ "nervix-licensing-protocol",
+ "nervix-licensing-test-service",
  "nervix-models",
  "nervix-plexus",
  "nervix-primitives",
@@ -8347,6 +8390,7 @@ dependencies = [
  "prost-types 0.13.5",
  "protox",
  "rcgen",
+ "reqwest 0.13.5",
  "rkyv",
  "rstest",
  "rustls",
@@ -8381,6 +8425,7 @@ dependencies = [
  "url",
  "uuid",
  "webpki-roots 1.0.11",
+ "zeroize",
 ]
 
 [[package]]
@@ -11809,6 +11854,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a93142f0367a4cc53ae0fead1bcda39e85beccfad3dcd717656cacab94b12985"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "serde_path_to_error"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10a9ff822e371bb5403e391ecd83e182e0e77ba7f6fe0160b795797109d1b457"
+dependencies = [
+ "itoa",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]

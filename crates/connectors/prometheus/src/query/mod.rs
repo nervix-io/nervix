@@ -297,7 +297,11 @@ mod tests {
     #[nervix_primitives::test]
     async fn prometheus_ingestor_opens_only_with_a_config_its_client_declares()
     -> Result<(), Report<nervix_dns::DnsConfigurationError>> {
-        let dns = DnsResolver::load(nervix_dns::DnsConfiguration::system()).await?;
+        let dns = DnsResolver::load(
+            nervix_dns::DnsConfiguration::system(),
+            nervix_dns::DnsSettings::default(),
+        )
+        .await?;
         let plan = |config: Vec<ClientConfigEntry>| PrometheusQueryIngestorPlan {
             tls_policy: Default::default(),
             config,

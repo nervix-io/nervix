@@ -29,9 +29,9 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector_syslog::SyslogListenerFault;
 use nervix_execution::Executor;
 use nervix_models::{
-    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CommandExecutionReference,
-    DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName, RelayName,
-    RemoteRuntimeField, RestoreStep,
+    BranchKeyFingerprint, ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName,
+    CommandExecutionReference, DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind,
+    ModelName, NodeRef, RelayName, RemoteRuntimeField, RestoreStep,
 };
 use nervix_primitives::{
     collections::DashMap,
@@ -51,6 +51,7 @@ mod backup_cut;
 #[cfg(test)]
 mod backup_cut_tests;
 mod client_inspection;
+mod clock_attachment;
 mod cluster_identity;
 mod command_pause_point;
 mod command_reconciliation;
@@ -80,6 +81,7 @@ mod pause;
 mod relay_memory;
 mod relay_partition_fanout;
 mod relay_slicing;
+pub use relay_slicing::RelayCapabilityRefusal;
 mod relocation_commit;
 mod resource_discovery;
 mod resource_publication;
@@ -187,6 +189,7 @@ pub struct FaultInjection {
 #[derive(Debug)]
 struct FaultInjectionState {
     licensing_quotas: watch::Sender<[Option<u64>; 2]>,
+    licensing_clock_offset: watch::Sender<std::time::Duration>,
     orphaned_domain_pauses: orphaned_domain_pause::OrphanedDomainPauses,
     /// One bounded command-reply script per scenario domain, absent from ordinary builds.
     command_reply_scripts: DashMap<DomainName, CommandReplyScript, RandomState>,
@@ -209,6 +212,9 @@ struct FaultInjectionState {
     /// One-shot, node-local refusals of the next subscription a node is asked to open, each removed
     /// when its node delivers it.
     refused_subscription_openings: DashMap<ClusterNodeName, (), RandomState>,
+    /// One-shot, node-local clock attachment refusals, consumed by the next attach or cleared
+    /// by the host test's teardown.
+    refused_clock_attachments: DashMap<ClusterNodeName, (), RandomState>,
     wasm_reset_publication_authority_losses:
         DashMap<DomainName, WasmResetPublicationAuthorityLoss, RandomState>,
     failed_wasm_reset_publications: DashMap<DomainName, WasmResetPublicationFailure, RandomState>,
@@ -534,6 +540,7 @@ impl Default for FaultInjection {
         Self {
             inner: Arc::new(FaultInjectionState {
                 licensing_quotas: watch::channel([None; 2]).0,
+                licensing_clock_offset: watch::channel(std::time::Duration::ZERO).0,
                 orphaned_domain_pauses: orphaned_domain_pause::OrphanedDomainPauses::default(),
                 command_reply_scripts: DashMap::default(),
                 emitter_faults: DashMap::default(),
@@ -545,6 +552,7 @@ impl Default for FaultInjection {
                 refused_runtime_installations: DashMap::default(),
                 refused_interest_visibility: DashMap::default(),
                 refused_subscription_openings: DashMap::default(),
+                refused_clock_attachments: DashMap::default(),
                 wasm_reset_publication_authority_losses: DashMap::default(),
                 failed_wasm_reset_publications: DashMap::default(),
                 failed_entity_gate_engagements: DashMap::default(),
@@ -1776,6 +1784,54 @@ impl FaultInjection {
         pause.release();
     }
 
+    /// Holds a concrete branch before creating its buffer and arming its flush deadline.
+    pub fn pause_ingestor_branch_buffer(
+        &self,
+        ingestor: DomainNodeRef,
+        branch: BranchKeyFingerprint,
+    ) {
+        self.arm_command_pause(CommandPausePoint::IngestorBranchBuffer(ingestor, branch));
+    }
+
+    pub async fn wait_for_ingestor_branch_buffer_pause(
+        &self,
+        ingestor: &DomainNodeRef,
+        branch: BranchKeyFingerprint,
+    ) {
+        self.wait_for_command_pause(&CommandPausePoint::IngestorBranchBuffer(
+            ingestor.clone(),
+            branch,
+        ))
+        .await;
+    }
+
+    pub fn release_ingestor_branch_buffer_pause(
+        &self,
+        ingestor: &DomainNodeRef,
+        branch: BranchKeyFingerprint,
+    ) {
+        self.release_command_pause(&CommandPausePoint::IngestorBranchBuffer(
+            ingestor.clone(),
+            branch,
+        ));
+    }
+
+    pub(crate) async fn pause_ingestor_branch_buffer_if_armed(
+        &self,
+        domain: &DomainName,
+        ingestor: &NodeRef,
+        branch: Option<BranchKeyFingerprint>,
+    ) {
+        let Some(branch) = branch else {
+            return;
+        };
+        self.pause_command_if_armed(CommandPausePoint::IngestorBranchBuffer(
+            ingestor.in_domain(domain),
+            branch,
+        ))
+        .await;
+    }
+
     /// Holds one route after accepting its input and before observing handoff or flush state.
     pub fn pause_ingestor_route_poll(&self, ingestor: DomainNodeRef) {
         self.arm_command_pause(CommandPausePoint::IngestorRoutePoll(ingestor));
@@ -1804,6 +1860,64 @@ impl FaultInjection {
     /// Holds handoff after publishing its force-flush generation, before declaring the hold ready.
     pub fn pause_ownership_handoff_flush(&self, domain: DomainName) {
         self.arm_command_pause(CommandPausePoint::OwnershipHandoffFlush(domain));
+    }
+
+    /// Holds a processor claim after release, before installing its checkpoint.
+    pub fn pause_processor_partition_install(&self, processor: DomainNodeRef) {
+        self.arm_command_pause(CommandPausePoint::ProcessorPartitionInstall(processor));
+    }
+
+    pub async fn wait_for_processor_partition_install(&self, processor: &DomainNodeRef) {
+        self.wait_for_command_pause(&CommandPausePoint::ProcessorPartitionInstall(
+            processor.clone(),
+        ))
+        .await;
+    }
+
+    pub fn release_processor_partition_install(&self, processor: &DomainNodeRef) {
+        self.release_command_pause(&CommandPausePoint::ProcessorPartitionInstall(
+            processor.clone(),
+        ));
+    }
+
+    pub(crate) async fn pause_processor_partition_install_if_armed(
+        &self,
+        domain: &DomainName,
+        processor: &NodeRef,
+    ) {
+        self.pause_command_if_armed(CommandPausePoint::ProcessorPartitionInstall(
+            processor.in_domain(domain),
+        ))
+        .await;
+    }
+
+    /// Holds a processor claim after installation, before asking its holder to forget.
+    pub fn pause_processor_partition_forget(&self, processor: DomainNodeRef) {
+        self.arm_command_pause(CommandPausePoint::ProcessorPartitionForget(processor));
+    }
+
+    pub async fn wait_for_processor_partition_forget(&self, processor: &DomainNodeRef) {
+        self.wait_for_command_pause(&CommandPausePoint::ProcessorPartitionForget(
+            processor.clone(),
+        ))
+        .await;
+    }
+
+    pub fn release_processor_partition_forget(&self, processor: &DomainNodeRef) {
+        self.release_command_pause(&CommandPausePoint::ProcessorPartitionForget(
+            processor.clone(),
+        ));
+    }
+
+    pub(crate) async fn pause_processor_partition_forget_if_armed(
+        &self,
+        domain: &DomainName,
+        processor: &NodeRef,
+    ) {
+        self.pause_command_if_armed(CommandPausePoint::ProcessorPartitionForget(
+            processor.in_domain(domain),
+        ))
+        .await;
     }
 
     pub async fn wait_for_ownership_handoff_flush_pause(&self, domain: &DomainName) {
@@ -2742,6 +2856,16 @@ impl FaultInjection {
         pause.wait_until_reached().await;
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "one scenario-owned command pause selects at most one waiting attempt",
+            key = "one armed CommandPausePoint",
+            bound = "one keyed read and conditional removal; one claimed waiter; guards end \
+                     before the test-controlled wait and scenario teardown releases the pause"
+        )
+    )]
     async fn pause_command_if_armed(&self, point: CommandPausePoint) {
         let Some(pause) = self
             .inner

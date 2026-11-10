@@ -495,6 +495,10 @@ const ICEBERG_BOUNDS: DeclaredBounds = DeclaredBounds {
 impl EmitterDeclaration for IcebergTableEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         events: crate::DeclaredEvents::NONE,
+        // One writer stages the rows and commits each snapshot of the table.
+        instancing: crate::EmitterInstancingCapability::Single {
+            reason: crate::SingleEmitterReason::OneTableWriter,
+        },
         headers: None,
         reference: EmitterReferenceKind::StorageClient(&[
             ConnectorKind::S3,

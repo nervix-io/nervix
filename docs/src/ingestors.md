@@ -588,8 +588,9 @@ General notes:
   field is optional and none is sensitive
 - a route expression may read any declared field; `CREATE` and `ALTER` refuse a route that reads a
   field its entity does not declare, naming the ingestor, the route's relay and the fields the
-  entity does declare. `FILTER WHERE` reads headers but not `metadata.<field>`
-- an ingestor builds a metadata column only for the fields its route expressions or its
+  entity does declare. `FILTER WHERE` reads the same declared metadata fields and, when the
+  entity offers headers, its headers
+- an ingestor builds a metadata column only for the fields its arrival filter, route expressions or
   `TIMESTAMP AT metadata.<field>` read; an ingestor that reads none visits no metadata values and
   builds no metadata columns
 - a message whose connector hands over a value its field's declared type cannot hold, such as a
@@ -900,7 +901,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Connector events | None declared. |
 | Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
-| Metadata | Not offered: Application batches have no broker envelope, peer address or external message attributes; the native schema describes each row. |
+| Metadata | metadata.user: STRING OPTIONAL |
 | Payload facts | payload.bytes: U64<br>payload.rows: U64 |
 | Every live node | no; scheduled owner |
 | Position class | none |
@@ -936,11 +937,19 @@ Every clause is required and there are no defaults:
 
 Timestamp selection, `FILTER WHERE`, route construction, `WHERE`, branch construction, route
 `FLUSH`, `ON MESSAGE ERROR`, and `ON GENERAL ERROR` behave as for every ingestor; `message` and
-`input` read the submitted row. Client batches carry no transport headers or metadata, so
-`read_header`, `read_headers`, and `metadata.*` are unavailable. The ingestor executes on its one
-scheduled cluster node. A producer is opened on a session that any live node may serve, and that
+`input` read the submitted row. `metadata.user` is the opening session's authenticated user name,
+shared by every row of every batch that producer submits. It is a `STRING` field with the metadata
+namespace's optional type, and an authenticated producer always supplies it. The name is canonical
+lowercase, including when the application signed in with uppercase letters. A submitted field
+cannot replace this identity. `FILTER WHERE metadata.user = 'alice'` selects Alice's batches;
+`SET who = metadata.user` copies the identity into an optional `STRING` output field.
+
+Client batches carry no transport headers and refuse `read_header` and `read_headers`.
+The ingestor executes on its one scheduled cluster node. A producer is opened on a session that
+any live node may serve, and that
 node forwards the producer's batches to the ingestor's node; a console session, like every console
-session, is served only by the leader.
+session, is served only by the leader. Forwarding preserves each producer's authenticated identity
+independently, including when producers of different users share the same node-to-node link.
 
 `ALTER CLIENT PRODUCER INGESTOR ... SET FROM SCHEMA ...` replaces the complete ingestor body, and
 `SET QUIESCE SUSPEND` restates the only quiesce mode. `SHOW CREATE INGESTOR` renders the
@@ -2743,7 +2752,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | yes |
 | Position class | none |
 | Acknowledgement confirmation | none |
-| Buffers | UDP datagrams admitted after a fixed 65,535-byte receive scratch buffer: set by max_message_size; when full, drops and counts what does not fit<br>TCP and TLS frame assembly across unlimited connections (max_message_size + 11 bytes per connection; an oversized frame closes only that connection): unbounded<br>completed TCP and TLS frames waiting for the intake queue (one frame per connection, at most max_message_size bytes; unlimited connections): unbounded<br>frames read from TCP and TLS connections: at most 64 frames; when full, holds back what fills it |
+| Buffers | UDP datagrams admitted after a fixed 65,535-byte receive scratch buffer: set by max_message_size; when full, drops and counts what does not fit<br>TCP and TLS frame assembly across unlimited connections (max_message_size + 11 bytes per connection; an oversized frame closes only that connection): unbounded<br>completed TCP and TLS frames waiting for the intake queue (one frame per connection, at most max_message_size bytes; unlimited connections): unbounded<br>frames read from TCP and TLS connections: set by node capability syslog-intake-queue-capacity; when full, holds back what fills it |
 | Network waits | the TLS handshake of an accepted connection: `connect_timeout_ms`; 30s when omitted<br>reading a connection: `idle_timeout_ms`; unbounded when omitted |
 | Driver limits | Datagrams wait in the kernel's UDP receive buffer, which drops what does not fit. |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |
@@ -3583,7 +3592,13 @@ one accepted frame can wait for room, and the transport can assemble a message w
 message and frame limits. If a full handoff prevents signaling from completing, the signaling
 `TIMEOUT` fails that connection and clears its undelivered handshake data before retrying. An
 oversized incoming frame or message also ends the connection with a transient read failure;
-reconnection supplies no durable replay guarantee.
+reconnection supplies no durable replay guarantee. Ending it sends the peer a Close frame with
+status `1009` (message too big) if the connection takes the frame at once. A frame that breaks the
+WebSocket framing rules ends the connection the same way with status `1002` (protocol error), and
+message text or a Close reason that is not valid UTF-8 with `1007` (invalid frame payload data). As
+with the idle deadline, Nervix waits neither to write the frame nor for the peer's reply, so the
+Close never delays the reconnect. A connection whose TCP has already ended or failed is released
+without a Close.
 
 For `ws` and `wss`, each initial connection and resume resolves the URL host through the node's
 asynchronous resolver. It tries the returned addresses in order within the configured

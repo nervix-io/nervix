@@ -182,6 +182,7 @@ impl CompileBinding {
 }
 
 struct Compiler {
+    settings: crate::VmSettings,
     readable_namespaces: HashSet<CompileNamespace>,
     writable_namespaces: HashSet<String>,
     default_passthrough_namespace: String,
@@ -338,6 +339,7 @@ pub enum OutputMode {
 
 #[derive(Debug, Clone)]
 pub struct CompileOptions {
+    pub settings: crate::VmSettings,
     pub optimize_temp_registers: bool,
     pub output_mode: OutputMode,
     pub allow_sensitive_output: bool,
@@ -352,6 +354,7 @@ pub struct CompileOptions {
 impl Default for CompileOptions {
     fn default() -> Self {
         Self {
+            settings: crate::VmSettings::default(),
             optimize_temp_registers: true,
             output_mode: OutputMode::PassthroughByName,
             allow_sensitive_output: false,
@@ -369,6 +372,7 @@ impl Default for CompileOptions {
 /// construction. Predicate callers may configure only expression evaluation behavior.
 #[derive(Debug, Clone)]
 pub struct PredicateCompileOptions {
+    pub settings: crate::VmSettings,
     pub optimize_temp_registers: bool,
     pub allow_header_reads: bool,
     pub udf_signatures: UdfSignatures,
@@ -378,6 +382,7 @@ pub struct PredicateCompileOptions {
 impl Default for PredicateCompileOptions {
     fn default() -> Self {
         Self {
+            settings: crate::VmSettings::default(),
             optimize_temp_registers: true,
             allow_header_reads: false,
             udf_signatures: UdfSignatures::default(),
@@ -532,6 +537,9 @@ impl Compiler {
         }
         let first_type = self.infer_expr_type(&args[0])?;
         match function {
+            WindowAggregateFunction::CollectVec => Ok(DataType::List(StdArc::new(Field::new(
+                "item", first_type, false,
+            )))),
             WindowAggregateFunction::ApproxCountDistinct => {
                 if !Self::is_window_orderable(&first_type) {
                     return Err(Report::new(CompileError {
@@ -812,6 +820,7 @@ impl Compiler {
 
         Ok((
             Self {
+                settings: crate::VmSettings::default(),
                 readable_namespaces,
                 writable_namespaces,
                 default_passthrough_namespace,
@@ -955,6 +964,7 @@ impl Compiler {
     }
 
     fn apply_options(&mut self, options: &CompileOptions) {
+        self.settings = options.settings;
         self.allow_header_reads = options.allow_header_reads;
         self.header_writes = options.header_writes;
         self.udf_signatures.clone_from(&options.udf_signatures);
@@ -1586,6 +1596,7 @@ impl Compiler {
                     let window_function = invocation.function;
                     if let WindowAggregateFunction::ApproxCountDistinct
                     | WindowAggregateFunction::ApproxTopK
+                    | WindowAggregateFunction::CollectVec
                     | WindowAggregateFunction::Count
                     | WindowAggregateFunction::CountIf = window_function
                     {
@@ -2423,7 +2434,7 @@ impl Compiler {
         args: &[SpannedExpr],
         span: Span,
     ) -> error_stack::Result<BuiltinPlan, CompileError> {
-        let Some(descriptor) = builtin_descriptor(function) else {
+        let Some(mut descriptor) = builtin_descriptor(function) else {
             return Err(Report::new(CompileError {
                 code: CompileErrorCode::UnknownFunction,
                 message: format!(
@@ -2441,6 +2452,13 @@ impl Compiler {
         let output_type = builtin_signature(function, &arg_types, span)?;
         let output_type = RegisterType::from_data_type(&output_type)
             .verified("type inference above rejected every data type that has no register type");
+        if let BuiltinLowering::ContainsAny(ContainsAnyCall::Dynamic { .. }) =
+            &mut descriptor.lowering
+        {
+            descriptor.lowering = BuiltinLowering::ContainsAny(ContainsAnyCall::Dynamic {
+                capacity: self.settings.pattern_sets_per_batch(),
+            });
+        }
         if let BuiltinLowering::Regexp(call) = descriptor.lowering {
             return self.compile_regexp_call(call.function, args, output_type);
         }
@@ -2533,10 +2551,10 @@ impl Compiler {
         let trailing = args.get(2..).unwrap_or(&[]);
         let call = match fold_constant_expr(pattern)? {
             Some(FoldedValue::NonNull(ScalarValue::Utf8(constant))) => {
-                RegexpCall::with_constant_pattern(function, &constant)
+                RegexpCall::with_constant_pattern_and_settings(function, &constant, self.settings)
             }
             Some(FoldedValue::NonNull(_) | FoldedValue::Null(_)) | None => {
-                RegexpCall::reading_pattern_argument(function)
+                RegexpCall::reading_pattern_argument_with_settings(function, self.settings)
             }
         };
         let mut inputs = Vec::with_capacity(args.len());
@@ -3399,6 +3417,15 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
         | FunctionName::Min
         | FunctionName::Max
         | FunctionName::Mean
+        | FunctionName::ListAdd
+        | FunctionName::ListSub
+        | FunctionName::ListMul
+        | FunctionName::ListDiv
+        | FunctionName::ListAddScalar
+        | FunctionName::ListSubScalar
+        | FunctionName::ListMulScalar
+        | FunctionName::ListDivScalar
+        | FunctionName::ListAbs
         | FunctionName::Dot
         | FunctionName::Distance
         | FunctionName::Datetime(_) => None,
@@ -3585,6 +3612,7 @@ pub fn compile_predicate_with_options_for_bindings(
         output_sensitivity,
         bindings,
         CompileOptions {
+            settings: options.settings,
             optimize_temp_registers: options.optimize_temp_registers,
             output_mode: OutputMode::PassthroughByName,
             allow_sensitive_output: false,
@@ -3905,6 +3933,7 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
     }
 
     Ok(CompiledProgram {
+        settings: options.settings,
         input_schema,
         output_schema,
         inputs: compiler.inputs,

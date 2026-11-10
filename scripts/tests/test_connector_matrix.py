@@ -42,6 +42,7 @@ def declarations():
             "headers": {"layout": "ordered_repeats", "names": "exact",
                         "layout_meaning": "every header in the order it was written",
                         "names_meaning": "a name matches only itself", "values": None},
+            "instancing": "INSTANCES <count> | INSTANCES PER PARTITION",
             "batch": "optional", "batch_maximum": None, "frame_limits": None,
             "body": "ENCODE USING <codec>", "batch_transformation": False,
             "envelope": [], "properties": [], "value_contract": None,
@@ -179,6 +180,15 @@ class ConnectorMatrixTests(unittest.TestCase):
                       "<br>non-transparent framing: a payload without LF |", text)
         self.assertIn("A batch is written as one frame within the frame limits", text)
         self.assertNotIn("No additional protocol maximum is declared", text)
+
+    def test_emitter_instancing_states_the_declared_capability_or_its_reason(self):
+        surface = declarations()
+        text = matrix.render_matrix(surface, reasons())
+        self.assertIn("| Instancing | INSTANCES &lt;count&gt; \\| INSTANCES PER PARTITION |", text)
+
+        surface["emit"][0]["instancing"] = "single: commit through one table writer"
+        text = matrix.render_matrix(surface, reasons())
+        self.assertIn("| Instancing | single: commit through one table writer |", text)
 
     def test_compiled_export_is_atomic_and_keeps_the_previous_complete_input_on_failure(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -276,6 +276,8 @@ impl DeclaredPublishing {
 pub struct EmitterEntityCapabilities {
     /// The transport observations its connector may count through the host.
     pub events: crate::DeclaredEvents,
+    /// Whether its emitters may declare `INSTANCES`, or run one instance for a declared reason.
+    pub instancing: crate::EmitterInstancingCapability,
     /// What the `write_header` calls of an emitter's record become on the message it publishes,
     /// or `None` where its messages carry no transport headers.
     pub headers: Option<HeaderModel>,

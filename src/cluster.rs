@@ -68,6 +68,7 @@ use tracing::{debug, info, warn};
 use crate::runtime::AdvertisedSubscriptionInterest;
 use crate::runtime::SubscriptionInterestIndex;
 
+mod licensing;
 mod membership;
 mod parameters;
 mod peer_health_watcher;
@@ -836,7 +837,8 @@ impl InterconnectRequest for GossipExchange {
     const NAME: &'static str = "gossip_exchange";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Discovery;
-    const TIMEOUT: Duration = Duration::from_secs(1);
+    const DEADLINE: nervix_interconnect::RequestDeadline =
+        nervix_interconnect::RequestDeadline::Control;
     const REQUIRES_LIVE_TARGET: bool = false;
 }
 
@@ -1898,6 +1900,9 @@ fn to_gossip_node(node_id: &ChitchatId, state: &NodeState) -> Option<GossipNode>
         .get(KEY_CLUSTER_PARAMETERS)
         .and_then(|text| serde_json::from_str(text).ok());
     Some(GossipNode {
+        licensing: state
+            .get(licensing::KEY_LICENSING_CONNECTIVITY)
+            .and_then(|text| serde_json::from_str(text).ok()),
         parameters,
         node_id: identity.node_id().clone(),
         incarnation: identity.incarnation(),

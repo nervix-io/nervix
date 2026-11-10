@@ -11,6 +11,15 @@ parameter is refused where it is written.
 `just test-unit-binary <executable> <filters>` replays a compiled unit-test executable without
 rebuilding it; its evidence applies only to the source inputs that produced that executable.
 
+`just test-partition-state-inspection --concurrency 1 --retry 0` selects the eight one- and
+three-node deduplicator/window cases for growing and shrinking a running branch. The native server
+assets, formatter, CLI and report tool are prepared through the usual recipes. Domain-scoped
+one-shot claim controls hold the released checkpoint before installation and the installed branch
+before forget; ordinary fault cleanup releases either hold after a failure. Inspections still use
+the public client and assert one partition per key, exact counts and byte charges, retained values
+of two tenants, and one-row continuations. The absolute feature pattern starts discovery in the
+feature's directory and leaves scenario startup, execution and teardown budgets unchanged.
+
 `just test-partition-placement [feature]` runs the placement scenarios with the native node assets,
 Plexus formatter, CLI and deadlock report tool prepared. Its default input is
 `tests/features/cluster/partition_placement.feature`; select
@@ -1374,6 +1383,15 @@ keys, took six to eight and a half minutes in every kache-backed job, and found 
 had not already published.
 
 ## Product Deadlines And Harness Deadlines
+
+TTL lifecycle scenarios account for the expiry scan as well as the idle duration. Relay and
+processor owners expire branches on scans; observing a branch neither scans nor refreshes it.
+The production scan cadence is 30 seconds, so a 30-second TTL and a 60-second observation leave
+almost no margin when the first scan precedes the branch's expiry and the next scan runs late.
+Focused TTL scenarios configure the existing branch expiration scan override to 100 milliseconds
+before cluster startup, keeping the declared TTL and the absence assertions intact. The stateful
+inferencer TTL outline uses this cadence on one and three nodes and still requires both returning
+branches to start from `INITIAL` after their relay presence and retained state have disappeared.
 
 Two kinds of deadline meet in every scenario.
 
@@ -3676,9 +3694,18 @@ by one across the runner's entire cluster tier. The scenario performs the action
 `NERVIX-SUITE-CONFIRMED <sequence> <action>` to the runner's standard input. Requests and
 confirmations are single ASCII lines, at most 256 bytes including the newline. The declared action
 `refuse-next-subscription-opening` arms every node to refuse its next subscription
-opening as unavailable, since a restored session can reach any seed. The second declared action,
-`clear-subscription-opening-refusals`, clears any unused refusals on every node; the fault fixture
-requests it in teardown even when the test failed, so a refusal cannot reach a later test.
+opening as unavailable, since a restored session can reach any seed.
+`refuse-next-clock-attachment` similarly refuses each node's next clock attachment with the typed
+`InTransaction` attach refusal. The client ordinarily defers restoration while it holds a
+transaction, so this testing-build fault makes the refusal observable on demand without changing
+that client policy. `clear-subscription-opening-refusals` and `clear-clock-attachment-refusals`
+clear the respective unused refusals on every node. Each fault fixture requests its clearing
+action in teardown even when the test failed, so a refusal cannot reach a later test. The clock
+test reads the initial unpaced clock from the attach reply's cached snapshot, cuts its relay,
+arms the refusal before restoring the relay, and asserts `INTERRUPTED`, `RESTORATION_FAILED`
+with cause/message/positive wait, then the
+restored `STATE` of the same domain and generation. Extra refused attempts may precede that state
+when reconnection visits another armed node.
 An unknown action, malformed or repeated sequence, failed action or undelivered confirmation fails
 the scenario. The host
 adapter waits at most 120 seconds for its exact confirmation; the scenario's whole-run deadline
@@ -3691,9 +3718,9 @@ teardowns, including on failure. The JVM suite's `Actions` adapter writes each r
 deadline, so one daemon thread reads confirmations, a line of at most 256 bytes at a time, into a
 one-line queue that the waiting request reads within its 120 seconds. Once input ends, a line
 outgrows its bound or reading fails, every later request fails at once. A test's
-`Actions.Refusals` resource clears an armed refusal when it closes, including after a failed
-assertion. Hosts reuse this exchange without another dependency; it is a test harness contract,
-with no product endpoint.
+`Actions.Refusals` and `Actions.ClockRefusals` resources clear their armed refusals when they close,
+including after a failed assertion. Hosts reuse this exchange without another dependency; it is a
+test harness contract, with no product endpoint.
 
 The step that reads the run waits for the runner to end, for the duration the step names and never
 longer than 600 seconds, so a suite that stops making progress fails with its own report inside the

@@ -53,7 +53,7 @@ impl TransportState {
         delivery: RelayDelivery,
     ) {
         let deadline = Instant::now()
-            .checked_add(RELAY_CANCELLATION_RETRY_WINDOW)
+            .checked_add(self.options.relay_cancellation_retry_window())
             .assured("the fixed relay cancellation retry window fits the monotonic clock");
         let mut backoff = self.options.reconnect_backoff;
         loop {
@@ -89,7 +89,7 @@ impl TransportState {
                 return;
             }
             let retry_at = now
-                .checked_add(backoff)
+                .checked_add(self.options.retry_delay(backoff))
                 .assured("a configured relay retry delay fits the monotonic clock")
                 .min(deadline);
             nervix_primitives::select! {
@@ -373,7 +373,8 @@ impl TransportState {
             failure: Option<String>,
         }
 
-        let mut interval = nervix_primitives::time::interval(RELAY_PROGRESS_INTERVAL);
+        let mut interval =
+            nervix_primitives::time::interval(nervix_models::HOST_RELAY_ALIVE_INTERVAL);
         interval.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -397,7 +398,7 @@ impl TransportState {
                     let target = registration.registrar.node_id().clone();
                     let ack_id = registration.ack_id;
                     let result = timeout(
-                        RELAY_PROGRESS_SEND_TIMEOUT,
+                        state.options.relay_progress_send_timeout(),
                         state.send(
                             &target,
                             Envelope::Ack(registration.resolution(RemoteAckOutcome::Alive)),
@@ -408,7 +409,8 @@ impl TransportState {
                         Ok(Ok(())) => None,
                         Ok(Err(error)) => Some(error.to_string()),
                         Err(_) => Some(format!(
-                            "relay progress send exceeded {RELAY_PROGRESS_SEND_TIMEOUT:?}"
+                            "relay progress send exceeded {:?}",
+                            state.options.relay_progress_send_timeout()
                         )),
                     };
                     ProgressReport {
@@ -440,7 +442,7 @@ impl TransportState {
     }
 
     pub(super) async fn retire_idle_relay_channels(self) {
-        let mut interval = nervix_primitives::time::interval(RELAY_CHANNEL_SWEEP_INTERVAL);
+        let mut interval = nervix_primitives::time::interval(self.options.relay_retention.sweep());
         interval.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -742,7 +744,7 @@ impl TransportState {
         let expiry = CancellationToken::new();
         let grant = RelayGrant {
             expires_at: Instant::now()
-                .checked_add(RELAY_GRANT_LIFETIME)
+                .checked_add(self.options.relay_grant_lifetime())
                 .assured("the fixed relay grant lifetime fits the monotonic clock"),
             reservation,
             admission: StdArc::clone(&record),
@@ -786,10 +788,11 @@ impl TransportState {
             }
         }
         let expiring_owner = relay_owner.clone();
+        let grant_lifetime = self.options.relay_grant_lifetime();
         self.tasks.spawn(async move {
             nervix_primitives::select! {
                 _ = expiry.cancelled() => {}
-                _ = sleep(RELAY_GRANT_LIFETIME) => {
+                _ = sleep(grant_lifetime) => {
                     expiring_owner.expire_grant(grant_id, Instant::now());
                 }
             }

@@ -154,7 +154,12 @@ impl RelayChannelWatermarks {
                                    attempts under the protocol guard it already holds; its \
                                    effects belong to that owner")
     )]
-    pub(super) fn expire(&mut self, now: Instant, in_use: impl Fn(&RelayChannelKey) -> bool) {
+    pub(super) fn expire(
+        &mut self,
+        now: Instant,
+        retention: Duration,
+        in_use: impl Fn(&RelayChannelKey) -> bool,
+    ) {
         let mut expired = Vec::new();
         for (position, channel) in &self.order {
             let retained = self
@@ -164,7 +169,7 @@ impl RelayChannelWatermarks {
             let idle = now
                 .checked_duration_since(retained.watermark.last_reconciled_at())
                 .unwrap_or(Duration::ZERO);
-            if idle < RELAY_CHANNEL_RETENTION {
+            if idle < retention {
                 break;
             }
             if !in_use(channel) {

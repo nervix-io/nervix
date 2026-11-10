@@ -207,6 +207,15 @@ to the generation and paced mapping it names:
 {{#include ../../tests/client_conformance/ruby/suite/cluster/clocks_test.rb:clock_tick}}
 ```
 
+A session gap reports `INTERRUPTED`. If the next session temporarily refuses the attachment,
+`RESTORATION_FAILED` carries a `RestorationFailure` with its typed cause, message and positive retry
+wait in nanoseconds. The library keeps the attachment desired and retries until a `STATE` reports
+its restoration. The suite provokes an `IN_TRANSACTION` refusal before these checks:
+
+```ruby
+{{#include ../../tests/client_conformance/ruby/suite/cluster/clocks_test.rb:clock_restoration_failed}}
+```
+
 `STOP` and `START` establish a new mapping. `DETACH DOMAIN CLOCK` ends the attachment. Snapshots
 already returned remain usable after the session closes.
 

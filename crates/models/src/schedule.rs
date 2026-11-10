@@ -592,16 +592,31 @@ impl ScheduledNode {
         }
         match config {
             Model::Ingestor(ingestor) => match ingestor.input.instances() {
-                Some(crate::IngestorInstances::Count(count)) => (0..count.get())
-                    .map(|index| {
-                        Unit::try_instance(index)
-                            .assured("the validated allocation layout bounds the instance index")
-                    })
-                    .collect(),
+                Some(crate::IngestorInstances::Count(count)) => Self::instance_units(count),
                 _ => vec![Unit::SINGLE],
+            },
+            // A partition-following emitter takes its inputs' partition count, which the registry
+            // resolves and installs; a counted emitter's units follow from its declaration alone.
+            Model::Emitter(emitter) => match emitter.instances {
+                crate::EmitterInstances::Count(count) if count.get() > 1 => {
+                    Self::instance_units(count)
+                }
+                crate::EmitterInstances::Count(_) | crate::EmitterInstances::PerPartition => {
+                    vec![Unit::SINGLE]
+                }
             },
             _ => vec![Unit::SINGLE],
         }
+    }
+
+    /// The `Instance(0..count)` units a validated count declares.
+    fn instance_units(count: std::num::NonZeroU64) -> Vec<Unit> {
+        (0..count.get())
+            .map(|index| {
+                Unit::try_instance(index)
+                    .assured("the validated allocation layout bounds the instance index")
+            })
+            .collect()
     }
 
     fn branch_partitions_for(
@@ -625,10 +640,13 @@ impl ScheduledNode {
     /// Whether the scheduled identities match the current declaration together with `holding`,
     /// the units a partition transition of this node's branch keeps scheduled beyond the current
     /// count. Ingestor units also depend on resolved construction references and are validated by
-    /// their entrypoint plan.
+    /// their entrypoint plan, and the units of an emitter that declares instances depend on its
+    /// inputs' partitions and are validated by its execution plan.
     pub fn units_match_declaration(&self, holding: &[Unit]) -> bool {
-        if matches!(self.config.as_ref(), Model::Ingestor(_)) {
-            return true;
+        match self.config.as_ref() {
+            Model::Ingestor(_) => return true,
+            Model::Emitter(emitter) if !emitter.instances.is_one() => return true,
+            _ => {}
         }
         let declared = match Self::branch_partitions_for(
             self.config.as_ref(),
@@ -676,6 +694,13 @@ impl ScheduledNode {
             }
         }
         self
+    }
+
+    /// Whether this node is scheduled as instance units.
+    pub fn is_instanced(&self) -> bool {
+        self.units
+            .keys()
+            .any(|unit| matches!(unit.kind(), crate::UnitKind::Instance(_)))
     }
 
     /// Whether this node is scheduled as several partition units.

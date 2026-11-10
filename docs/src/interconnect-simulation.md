@@ -901,3 +901,17 @@ leaving no failure record. Under that shared load the sweep ran past its 25-minu
 last test, the receiver restart group, which then passed its 64 seeds alone in 2m30s.
 
 The inferencer checkpoint transport scenario (`transport::materialized::inferencer_branch_state_transfers_reconnect_to_the_replacement_owner`, seeds 51 and 53) uses the production authenticated state description and bulk fetch paths. It partitions a multi-chunk fetch, repairs the link, replaces the transport owner, then checks complete distinct bytes for two branches at each revision and their length and digest. Its opaque payload oracle qualifies transport continuity; the native snapshot codec properties separately qualify shapes, incarnations and exact F32 bits.
+
+## Declared Window And Deadline Regression
+
+`transport::infrastructure::declared_windows_and_rpc_deadlines_survive_latency_loss_and_repair`
+uses committed seed 141. Two production transports advertise 4 KiB stream and 16 KiB connection
+receive windows, a two-second request budget and a four-request local reserve. A 128 KiB echo
+crosses both windows under 5–10ms message latency and the harness's normal TCP buffering. Holding all bytes
+must end the next RPC at its configured deadline. A partition then prevents success, and repair
+must restore exact payload delivery and return transport reservations on shutdown.
+
+The scenario uses the existing 30s simulated, 50,000-step and 90s wall bounds. It targets the risk
+that a configured deadline remains a default constant or that peer SETTINGS stall a transfer
+larger than the advertised windows. The fixed regression seed is qualification of that case,
+without claiming a wider seed campaign.

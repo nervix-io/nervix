@@ -284,13 +284,9 @@ impl Runtime {
             .chain(described.iter().map(|(placement, _)| placement.clone()))
             .collect::<HashSet<_>>();
         for placement in expected.difference(&captured) {
-            let stored = match self.inner.state_store.as_ref() {
-                Some(store) => store
-                    .latest_snapshot(placement)
-                    .change_context(OwnershipHandoffError::Persistence)?,
-                None => None,
-            };
-            let snapshot = if let Some(snapshot) = stored {
+            nervix_primitives::task::consume_budget().await;
+            let latest = self.uncaptured_handoff_checkpoint(placement).await?;
+            let snapshot = if let Some(snapshot) = latest {
                 snapshot
             } else if source_is_passive {
                 self.empty_ownership_handoff_snapshot(placement)?
@@ -357,5 +353,31 @@ impl Runtime {
                 },
             )
             .collect())
+    }
+
+    /// The checkpoint a handoff carries for an expected placement that no walk of the frozen
+    /// entity's state captured.
+    ///
+    /// A stateful inferencer branch keeps its tensors only in its routed publication, which the
+    /// freeze has just made current: it reflects every input the source admitted before the hold,
+    /// while the store holds at most the last periodic snapshot. The capture encodes that
+    /// publication, and falls back to the store only for a branch without a routed state, as in a
+    /// stopped domain. Every other placement carries the newest checkpoint on this node's storage.
+    pub(super) async fn uncaptured_handoff_checkpoint(
+        &self,
+        placement: &RuntimeStatePlacement,
+    ) -> OwnershipHandoffResult<Option<PersistedRuntimeStateEntry>> {
+        if placement.state.kind() == RuntimeStateKind::Inferencer {
+            return self
+                .capture_state_checkpoint(placement, None)
+                .await
+                .change_context(OwnershipHandoffError::Persistence);
+        }
+        let Some(store) = self.inner.state_store.as_ref() else {
+            return Ok(None);
+        };
+        store
+            .latest_snapshot(placement)
+            .change_context(OwnershipHandoffError::Persistence)
     }
 }

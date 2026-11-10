@@ -332,7 +332,10 @@ fn claim_through_hold_and_partition(run: ScenarioRun) -> Result<(), SimulationEr
                         .await;
                     assert!(unanswered(&outcome), "held release outcome: {outcome:?}");
                     assert!(
-                        ended_within(started, PartitionTransitionRequest::TIMEOUT),
+                        ended_within(
+                            started,
+                            transport.request_deadline::<PartitionTransitionRequest>()
+                        ),
                         "the held release ended after {:?}",
                         started.elapsed()
                     );
@@ -371,7 +374,10 @@ fn claim_through_hold_and_partition(run: ScenarioRun) -> Result<(), SimulationEr
                         "partitioned forget outcome: {outcome:?}"
                     );
                     assert!(
-                        ended_within(started, PartitionTransitionRequest::TIMEOUT),
+                        ended_within(
+                            started,
+                            transport.request_deadline::<PartitionTransitionRequest>()
+                        ),
                         "the partitioned forget ended after {:?}",
                         started.elapsed()
                     );

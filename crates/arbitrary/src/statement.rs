@@ -168,6 +168,8 @@ pub enum StatementVariant {
     DescribeTransaction,
     DescribeCluster,
     DescribeLicense,
+    ActivateLicense,
+    RefreshLicense,
     AlterBranch,
     DescribeBranch,
     AlterCluster,
@@ -242,6 +244,8 @@ impl StatementVariant {
             Statement::DescribeTransaction(_) => Self::DescribeTransaction,
             Statement::DescribeCluster(_) => Self::DescribeCluster,
             Statement::DescribeLicense(_) => Self::DescribeLicense,
+            Statement::ActivateLicense(_) => Self::ActivateLicense,
+            Statement::RefreshLicense(_) => Self::RefreshLicense,
         }
     }
 }
@@ -271,6 +275,7 @@ enum EmitterOperationForm {
     SetFlush,
     SetGeneralError,
     Envelope,
+    SetInstances,
 }
 
 /// One targeted change an emitter's envelope takes.
@@ -785,6 +790,19 @@ impl Arbitrary<'_> {
             }
             StatementVariant::DescribeCluster => Statement::DescribeCluster(DescribeCluster),
             StatementVariant::DescribeLicense => Statement::DescribeLicense(DescribeLicense),
+            StatementVariant::ActivateLicense => {
+                Statement::ActivateLicense(nervix_models::ActivateLicense {
+                    kind: if self.entropy().flag() {
+                        nervix_models::ActivationKind::Persistent
+                    } else {
+                        nervix_models::ActivationKind::Ephemeral
+                    },
+                    license_key: self.non_empty_string(),
+                })
+            }
+            StatementVariant::RefreshLicense => {
+                Statement::RefreshLicense(nervix_models::RefreshLicense)
+            }
         }
     }
 
@@ -1239,6 +1257,9 @@ impl Arbitrary<'_> {
         if !plexus || !capabilities.envelope.is_empty() || !capabilities.properties.is_empty() {
             forms.push(EmitterOperationForm::Envelope);
         }
+        if !plexus || capabilities.instancing.refusal(kind).is_none() {
+            forms.push(EmitterOperationForm::SetInstances);
+        }
         forms
     }
 
@@ -1307,6 +1328,9 @@ impl Arbitrary<'_> {
             },
             EmitterOperationForm::Envelope => AlterEmitterOperation::AlterEnvelope {
                 alteration: Box::new(self.envelope_alteration(kind)),
+            },
+            EmitterOperationForm::SetInstances => AlterEmitterOperation::SetInstances {
+                instances: self.emitter_instances_of(kind),
             },
         }
     }

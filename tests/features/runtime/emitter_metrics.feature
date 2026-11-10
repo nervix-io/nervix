@@ -302,7 +302,7 @@ Feature: Emitter metrics
       """
     And DESCRIBE EMITTER "metrics_out" from every node contains
       """
-      nervix_emitter_publish_attempts_total{domain="{{domain}}",emitter="metrics_out",physical_node_id="{{metrics_owner}}",connector="REDIS",entity="PUBSUB",operation="publish",outcome="succeeded"} total=2
+      nervix_emitter_publish_attempts_total{domain="{{domain}}",emitter="metrics_out",physical_node_id="{{metrics_owner}}",instance="-",connector="REDIS",entity="PUBSUB",operation="publish",outcome="succeeded"} total=2
       """
 
     Examples:
@@ -433,7 +433,7 @@ Feature: Emitter metrics
       """
     And DESCRIBE EMITTER "bad_answer" from every node contains
       """
-      nervix_emitter_publish_attempts_total{domain="{{domain}}",emitter="bad_answer",physical_node_id="{{metrics_owner}}",connector="ZEROMQ",entity="PUSH",operation="publish",outcome="violation"} total=1
+      nervix_emitter_publish_attempts_total{domain="{{domain}}",emitter="bad_answer",physical_node_id="{{metrics_owner}}",instance="-",connector="ZEROMQ",entity="PUSH",operation="publish",outcome="violation"} total=1
       """
 
     Examples:
@@ -508,7 +508,7 @@ Feature: Emitter metrics
     And HTTP receiver "rejections" has captured exactly 2 requests
     And DESCRIBE EMITTER "rejected_out" from every node contains
       """
-      nervix_emitter_records_rejected_total{domain="{{domain}}",emitter="rejected_out",physical_node_id="{{rejection_owner}}",connector="HTTP",entity="REQUEST",code="external"} total=1
+      nervix_emitter_records_rejected_total{domain="{{domain}}",emitter="rejected_out",physical_node_id="{{rejection_owner}}",instance="-",connector="HTTP",entity="REQUEST",code="external"} total=1
       """
 
     Examples:

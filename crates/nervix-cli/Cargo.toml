@@ -12,7 +12,7 @@ workspace = true
 arch-into = { workspace = true }
 ariadne = { workspace = true }
 byte-unit = { workspace = true }
-clap = { workspace = true, features = ["derive", "env"] }
+clap = { workspace = true, features = ["derive", "env", "string"] }
 clap_complete = { workspace = true }
 error-stack = { workspace = true }
 humantime = { workspace = true }
@@ -33,4 +33,6 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 
 [dev-dependencies]
+bolero = { workspace = true }
+nervix-arbitrary = { workspace = true }
 url = { workspace = true }

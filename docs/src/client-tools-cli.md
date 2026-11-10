@@ -52,7 +52,7 @@ server options and their environment variables.
 | `--cursor <OFFSET>` | | end of input | UTF-8 byte offset in `--suggest` input |
 | `--execution-reference <REFERENCE>` | | | with `--command` or a node administration subcommand, send the command under the execution reference the CLI printed for an earlier uncertain run of it, which recovers that run's outcome |
 | `--upload-identity <IDENTITY>` | | | with a `--command` that is one `UPLOAD RESOURCE`, send it under the upload identity the CLI printed for an earlier uncertain run of it, which recovers that run's outcome |
-| `--backup-wait-timeout <DURATION>` | | `10m` | overall wait of one `BACKUP` command across its cuts, redirects and reconnects, from one millisecond through 24 hours; applies to `backup`, `--command` and the REPL |
+| `--backup-wait-timeout <DURATION>` | `NERVIX_CLI_BACKUP_WAIT_TIMEOUT` | `10m` | overall wait of one `BACKUP` command across its cuts, redirects and reconnects, from one millisecond through 24 hours; applies to `backup`, `--command` and the REPL |
 
 There is no general CLI configuration file and no `--version` flag. `--server`, `--domain`, and the
 TLS options have no environment-variable equivalents. The DNS options select the resolver used by
@@ -63,6 +63,38 @@ from `NERVIX_PASSWORD` so it need not appear in shell history.
 The table above is the short version. [nervix-cli Reference](nervix-cli-reference.md) is printed by
 the binary itself while this book is built, so it is the authoritative list of every option and
 subcommand for this release.
+
+## Connection Capabilities
+
+The native client's local capabilities are available in the REPL, one-shot commands and
+subcommands. Every option below has the environment form `NERVIX_CLI_` followed by its uppercase
+name with underscores. The typed native client definitions supply both help and runtime defaults.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--connect-timeout` | 10 s | deadline of each connection attempt |
+| `--request-timeout` | 120 s | deadline of each request |
+| `--retry-timeout` | 120 s | total request recovery deadline across redirects and retries |
+| `--backup-wait-timeout` | 10 min | total wait for a backup, including recovery |
+| `--retry-backoff` | 100 ms | initial reconnect/recovery delay |
+| `--retry-max-backoff` | 1 s | ceiling for doubled retry delays |
+| `--subscription-record-capacity` | 32 | events retained per subscription |
+| `--subscription-retained-frames` | 1 | frame-limit units of bytes retained per subscription, including each event's header |
+| `--subscriptions-retained-in-full` | 4 | multiplier for the aggregate subscription record and byte bounds |
+| `--upload-frame-capacity` | 8 | queued outbound resource-upload frames |
+| `--restore-frame-capacity` | 8 | queued outbound restore frames |
+
+Durations accept one millisecond through 24 hours. The backoff base cannot exceed its ceiling.
+Capacities must be positive, fit the native channel bound and produce addressable aggregate byte
+and record limits. Validation happens before connection or credential prompting. Increasing a
+capacity permits more retained memory; it does not change wire-frame limits or server policy.
+Overflow still ends only the affected subscription with `ConsumerOverflow`, preserving other events.
+
+For a slow connection, for example:
+
+```bash
+nervix-cli --connect-timeout 30s --request-timeout 3m --retry-timeout 5m --retry-max-backoff 2s
+```
 
 ## Modes
 
@@ -263,7 +295,8 @@ A server notice prints as `[events] <kind> <level>: <message>`, labelled by the 
 sent with it: `membership` when the connected node sees a node join, leave or restart as a new
 incarnation, `leadership` for that node's Raft transitions and the membership operations it
 proposes, `cluster parameters` when it installs a committed parameter revision, `runtime` for a
-runtime failure of any node and `control plane` for a control-plane failure of the connected node.
+runtime failure of any node, `control plane` for a control-plane failure of the connected node,
+and `licensing` for a licensing lifecycle observation or policy warning.
 The level is `INFO`, `WARN` or `ERROR`.
 
 The carried kind selects this label; the message is display text. A configuration mutation or a

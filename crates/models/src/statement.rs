@@ -49,6 +49,8 @@ use crate::{
 )]
 pub enum Statement {
     AlterCluster(crate::AlterCluster),
+    ActivateLicense(ActivateLicense),
+    RefreshLicense(RefreshLicense),
     CreateDomain(CreateStatement<CreateDomain>),
     CreateUser(CreateStatement<CreateUser>),
     CreateResource(CreateStatement<CreateResource>),
@@ -148,6 +150,8 @@ impl Statement {
             | Self::RebindResource(_)
             | Self::Drop(_) => true,
             Self::AlterCluster(_)
+            | Self::ActivateLicense(_)
+            | Self::RefreshLicense(_)
             | Self::CreateDomain(_)
             | Self::CreateUser(_)
             | Self::CreateResource(_)
@@ -1969,6 +1973,20 @@ impl BranchPartitions {
         }
     }
 
+    /// The units of a relay of this branch that instance `instance` of an emitter with `instances`
+    /// instances serves: every partition `p` with `p mod instances = instance`, and the `Single`
+    /// unit of a branch of one partition, which instance 0 serves. An unbranched relay serves as a
+    /// branch of one partition.
+    pub fn units_served_by(self, instance: u64, instances: std::num::NonZeroU64) -> Vec<Unit> {
+        let mut served = Vec::new();
+        for (ordinal, unit) in (0_u64..).zip(self.units()) {
+            if ordinal % instances.get() == instance {
+                served.push(unit);
+            }
+        }
+        served
+    }
+
     /// The unit that owns a key whose seed is `seed`: the `Single` unit of a branch of one
     /// partition, and `Partition(seed mod n)` of a branch of n partitions.
     pub fn unit_of(self, seed: PartitionSeed) -> Unit {
@@ -2950,3 +2968,30 @@ pub struct CreateLookup<Version = u64> {
 #[cfg(test)]
 #[path = "statement_tests.rs"]
 mod tests;
+
+/// An activation credential is transient input; durable execution retains only verified output.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct ActivateLicense {
+    pub kind: nervix_licensing_vocabulary::ActivationKind,
+    pub license_key: String,
+}
+
+impl std::fmt::Debug for ActivateLicense {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ActivateLicense")
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct RefreshLicense;
+
+impl Drop for ActivateLicense {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.license_key);
+    }
+}

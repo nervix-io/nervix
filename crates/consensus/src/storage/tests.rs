@@ -1,6 +1,7 @@
 //! Recovery and publication checks through the Raft storage traits.
 
 mod cluster_identity_tests;
+mod licensing_tests;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -278,6 +279,7 @@ struct Harness {
     directory: TempDir,
     store: FjallStore,
     executor: Executor,
+    licensing: crate::LicensingEnvironment,
 }
 
 impl Harness {
@@ -300,16 +302,25 @@ impl Harness {
         Self::with_executor(Executor::default()).await
     }
     async fn with_executor(executor: Executor) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::with_licensing(executor, crate::LicensingEnvironment::default()).await
+    }
+    async fn with_licensing(
+        executor: Executor,
+        licensing: crate::LicensingEnvironment,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let store = FjallStore::from_database(
             Database::builder(directory.path()).open()?,
             executor.clone(),
+            crate::RaftOperationSettings::default(),
+            licensing.clone(),
         )
         .await?;
         Ok(Self {
             directory,
             store,
             executor,
+            licensing,
         })
     }
     async fn reopen(self) -> Result<Self, Box<dyn std::error::Error>> {
@@ -317,17 +328,21 @@ impl Harness {
             directory,
             store,
             executor,
+            licensing,
         } = self;
         drop(store);
         let store = FjallStore::from_database(
             Database::builder(directory.path()).open()?,
             executor.clone(),
+            crate::RaftOperationSettings::default(),
+            licensing.clone(),
         )
         .await?;
         Ok(Self {
             directory,
             store,
             executor,
+            licensing,
         })
     }
     fn node() -> ClusterNodeName {
@@ -1317,9 +1332,10 @@ async fn log_entry_stream_reads_a_large_range_in_separate_chunks() -> TestResult
 
 #[nervix_primitives::test]
 async fn log_entry_stream_yields_at_the_entry_count_bound() -> TestResult {
-    let entry_count = MAX_APPEND_BATCH_ENTRIES
-        .checked_add(1)
-        .assured("one more than the fixed append entry bound fits in u64");
+    let entry_count =
+        <crate::AppendBatchEntries as nervix_models::SettingDefinition>::default_value(&())
+            .checked_add(1)
+            .assured("one more than the fixed append entry bound fits in u64");
     let mut harness = Harness::new().await?;
     harness.append(entry_count).await?;
     assert!(
@@ -1330,7 +1346,9 @@ async fn log_entry_stream_yields_at_the_entry_count_bound() -> TestResult {
     let mut reader = harness.store.get_log_reader().await;
     let entries = reader.entries_stream(..).await;
     tokio::pin!(entries);
-    for expected in 1..=MAX_APPEND_BATCH_ENTRIES {
+    for expected in
+        1..=<crate::AppendBatchEntries as nervix_models::SettingDefinition>::default_value(&())
+    {
         nervix_primitives::task::consume_budget().await;
         let entry = entries
             .next()
@@ -2761,10 +2779,16 @@ async fn current_record_storage_requires_its_metadata() -> TestResult {
         directory,
         store,
         executor,
+        licensing: _,
     } = harness;
     drop(store);
-    let result =
-        FjallStore::from_database(Database::builder(directory.path()).open()?, executor).await;
+    let result = FjallStore::from_database(
+        Database::builder(directory.path()).open()?,
+        executor,
+        crate::RaftOperationSettings::default(),
+        crate::LicensingEnvironment::default(),
+    )
+    .await;
     assert!(matches!(result, Err(error) if error.to_string().contains("recreate")));
     Ok(())
 }
@@ -2774,7 +2798,13 @@ async fn current_consensus_storage_rejects_an_unknown_keyspace() -> TestResult {
     let directory = TempDir::new()?;
     let database = Database::builder(directory.path()).open()?;
     database.keyspace("unrecognized", KeyspaceCreateOptions::default)?;
-    let result = FjallStore::from_database(database, Executor::default()).await;
+    let result = FjallStore::from_database(
+        database,
+        Executor::default(),
+        crate::RaftOperationSettings::default(),
+        crate::LicensingEnvironment::default(),
+    )
+    .await;
     let Err(error) = result else {
         panic!("an unknown keyspace cannot supply the current consensus storage contract");
     };

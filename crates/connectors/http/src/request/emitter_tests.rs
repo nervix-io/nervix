@@ -333,9 +333,12 @@ async fn emitter_with(
     proxy: Option<&str>,
     ca: Option<&std::path::Path>,
 ) -> HttpRequestEmitter {
-    let dns = DnsResolver::load(nervix_dns::DnsConfiguration::system())
-        .await
-        .assured("the host resolver configuration loads in tests");
+    let dns = DnsResolver::load(
+        nervix_dns::DnsConfiguration::system(),
+        nervix_dns::DnsSettings::default(),
+    )
+    .await
+    .assured("the host resolver configuration loads in tests");
     let mut declared = vec![ClientConfigEntry {
         key: "timeout_ms".to_string(),
         value: "10000".to_string(),
@@ -903,11 +906,14 @@ async fn emitter_resolving_through(
     )
     .assured("the temporary directory is writable");
     std::fs::write(&hosts_file, hosts).assured("the temporary directory is writable");
-    let dns = DnsResolver::load(nervix_dns::DnsConfiguration {
-        resolver_configuration,
-        hosts_file,
-        name_servers: nervix_dns::NameServers::Explicit(vec![server]),
-    })
+    let dns = DnsResolver::load(
+        nervix_dns::DnsConfiguration {
+            resolver_configuration,
+            hosts_file,
+            name_servers: nervix_dns::NameServers::Explicit(vec![server]),
+        },
+        nervix_dns::DnsSettings::default(),
+    )
     .await
     .assured("the test's resolver configuration is valid");
     let timeout_ms = timeout.as_millis().to_string();

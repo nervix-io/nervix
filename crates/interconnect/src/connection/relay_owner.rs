@@ -156,6 +156,7 @@ pub(super) struct RelayPeerCapacity {
     /// Channel watermarks retained. Options validation keeps it above `attempts`, so a full set
     /// always holds the watermark of a channel with no attempt outstanding.
     pub(super) watermarks: usize,
+    pub(super) retention: Duration,
 }
 
 impl RelayPeerCapacity {
@@ -163,11 +164,13 @@ impl RelayPeerCapacity {
         Self {
             attempts: options.incoming_queue_capacity,
             watermarks: options.relay_channel_watermark_capacity,
+            retention: options.relay_retention.retention(),
         }
     }
 }
 
 pub(super) struct RelayPeerOwner {
+    retention: Duration,
     state: Mutex<RelayPeerProtocol>,
     capacity: usize,
     created_at: Instant,
@@ -200,6 +203,7 @@ impl RelayPeerOwner {
         observations: Arc<TransportObservations>,
     ) -> Self {
         Self {
+            retention: capacity.retention,
             state: Mutex::new(RelayPeerProtocol {
                 run: RelayPeerRun::Starting,
                 grants: BTreeMap::new(),
@@ -486,7 +490,7 @@ impl RelayPeerOwner {
             && now
                 .checked_duration_since(self.created_at)
                 .assured("the peer sweep follows owner creation")
-                >= RELAY_CHANNEL_RETENTION
+                >= self.retention
         {
             state.run = RelayPeerRun::Ended;
             self.closed.cancel();
@@ -496,7 +500,7 @@ impl RelayPeerOwner {
         }
         let protocol = &mut *state;
         let attempts = &protocol.attempts;
-        protocol.watermarks.expire(now, |channel| {
+        protocol.watermarks.expire(now, self.retention, |channel| {
             RelayPeerProtocol::holds_attempt(attempts, channel)
         });
         // Terminal outcomes whose replies were lost remain available throughout reconciliation.
@@ -508,7 +512,7 @@ impl RelayPeerOwner {
                 if now
                     .checked_duration_since(entry.last_progress())
                     .assured("a relay sweep follows the attempt's progress")
-                    >= RELAY_CHANNEL_RETENTION
+                    >= self.retention
                 {
                     Some(entry.clone())
                 } else {
@@ -527,7 +531,7 @@ impl RelayPeerOwner {
             if now
                 .checked_duration_since(attempt.last_progress)
                 .assured("a relay sweep follows outbound progress")
-                >= RELAY_CHANNEL_RETENTION
+                >= self.retention
             {
                 expired_outbound.push(key.clone());
             }

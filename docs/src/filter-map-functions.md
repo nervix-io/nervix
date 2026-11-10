@@ -502,6 +502,10 @@ and yields null for that message, instead of wrapping, saturating, or producing 
 Only that message fails: every other message in the batch is computed as usual, and a message's
 result never depends on the other messages in its batch.
 
+Operators and scalar numeric functions accept scalar values. For element-wise list arithmetic,
+use the explicit [list arithmetic functions](#list-arithmetic); scalar broadcasting has its own
+named functions.
+
 - Integer `+`, `-`, and `*` report an `overflow` error when the exact result does not fit the operand
   type, so `-` over `U8`, `U16`, `U32`, or `U64` operands fails when the right operand is larger.
 - Integer `/` truncates toward zero. A zero divisor reports a `division_by_zero` error, and dividing
@@ -1835,8 +1839,8 @@ any element is null, the constructed container is null; schema elements themselv
 A fixed `ARRAY` has at least one element, so `[]` and `array()` are rejected.
 
 The functions below take `ARRAY` or `VEC` values described in
-[Schemas And Codecs](schemas-and-codecs.md#internal-schemas), and a function of two lists accepts an
-`ARRAY` and a `VEC`, or fixed arrays of different widths, together. The elements of a
+[Schemas And Codecs](schemas-and-codecs.md#internal-schemas). Their individual contracts determine
+which container combinations and lengths are accepted. The elements of a
 multidimensional `ARRAY` are its outermost items. A null container produces a null result,
 including for binary functions when either container is null.
 
@@ -1855,6 +1859,9 @@ including for binary functions when either container is null.
 | `mean(list)` | numeric | optional `F64` | Arithmetic mean. An empty list returns null; integer inputs round to `F64` for the calculation |
 | `dot(left, right)` | numeric | element type | Dot product of two lists of one element type. Empty lists return zero. Integer multiplication and accumulation are checked at the element type |
 | `distance(left, right)` | numeric | `F64` | Euclidean distance of two lists of one element type. Empty lists return zero; integer inputs round to `F64` for the calculation |
+| `list_add(left, right)`, `list_sub(left, right)`, `list_mul(left, right)`, `list_div(left, right)` | numeric, including fixed nested `ARRAY`s | `ARRAY` or `VEC` | Element-wise arithmetic with exact matching element types and shapes |
+| `list_add_scalar(list, value)`, `list_sub_scalar(list, value)`, `list_mul_scalar(list, value)`, `list_div_scalar(list, value)` | numeric, including fixed nested `ARRAY`s | same list type | Apply the exact numeric scalar to every leaf element |
+| `list_abs(list)` | numeric, including fixed nested `ARRAY`s | same list type | Apply scalar absolute value to every numeric leaf |
 
 `nth` counts from `0`, unlike string positions: `nth(input.values, 0)` is the same element as
 `first(input.values)`. A function whose elements the table narrows rejects any other element type
@@ -1880,6 +1887,36 @@ beyond the `F64` range fails even where the mean itself would be finite. `contai
 use the scalar equality contract: NaN equals no element, and positive and negative zero are equal.
 These functions compare exact element types; they never cast or stringify list elements. A list's
 element type or container changes only through an explicit [`AS` or `TRY_CAST`](#lists).
+
+### List Arithmetic
+
+The `list_` arithmetic functions preserve numeric types and every fixed inner dimension. Two
+`ARRAY` operands return an `ARRAY` and must have equal widths when the statement is applied.
+If either operand is a `VEC`, the result is a `VEC`, and each message's lengths must match.
+A nested `VEC` is refused; inner `ARRAY` shapes must match exactly.
+
+The `_scalar` functions take a scalar of exactly the innermost numeric type, with the list on the
+left: `list_sub_scalar(values, adjustment)` subtracts `adjustment` from each value. They explicitly
+broadcast that scalar through every fixed dimension. A null list or scalar produces a null list.
+An empty vector produces an empty vector without evaluating an element operation.
+
+Each element follows its scalar operation: integer division truncates toward zero, integer
+arithmetic is checked, and floating arithmetic rejects a non-finite result. `list_abs` follows
+`abs`, including signed-minimum overflow and the positive absolute value of negative zero.
+The first failing element reports one error for that message and makes its result null; the
+other messages continue. Arguments preserve sensitivity, and unselected conditional arms report
+no errors from these calls.
+
+| Failure | Kind and message |
+| --- | --- |
+| Unequal lengths with a `VEC` operand | `invalid_argument`: `vector lengths differ: left has 3, right has 2` |
+| Integer addition, subtraction or multiplication outside its type | `overflow`, such as `integer addition overflowed` |
+| Integer division by zero | `division_by_zero`: `integer division by zero` |
+| Signed minimum divided by `-1`, or its absolute value | `overflow`: `integer division overflowed` or `integer absolute value overflowed` |
+| Non-finite floating arithmetic or absolute value | `invalid_argument`: `floating-point operation produced a non-finite result` or `floating-point absolute value produced a non-finite result` |
+
+These names also denote list operations in a window route, where they can consume a list-valued
+aggregate result without shadowing the window aggregate names.
 
 In a [window route](#window-aggregates), `count`, `sum`, `first`, `last`, `min`, and `max` are always
 window aggregates, like every other aggregate name. They take a per-row expression over `input` and
@@ -1915,6 +1952,7 @@ with `... cannot retain BYTES in aggregate demand <n> argument <m>`.
 | `AVG(value)` | numeric | `F64` | no row has a value |
 | `MIN(value)`, `MAX(value)` | numeric, `BOOL`, `STRING`, or `DATETIME` | the argument's type | no row has a value |
 | `FIRST(value)`, `LAST(value)` | any | the argument's type | no row has a value |
+| `COLLECT_VEC(value)` | any required value | required `VEC<value type>` | never; a window emits only while it retains a row |
 | `ARG_MIN(value, key)`, `ARG_MAX(value, key)` | any value; a numeric, `BOOL`, `STRING`, or `DATETIME` key | the value's type | no row has both a value and a key |
 | `VAR_POP(value)`, `STDDEV_POP(value)` | numeric | `F64` | no row has a value |
 | `VAR_SAMP(value)`, `STDDEV_SAMP(value)` | numeric | `F64` | fewer than two rows have a value |
@@ -1926,22 +1964,31 @@ with `... cannot retain BYTES in aggregate demand <n> argument <m>`.
 | `APPROX_QUANTILE(value, percentile, capacity)` | numeric; constant percentile 0–100 and capacity 32–4096 | `F64` | no row has a value |
 | `APPROX_TOP_K(value, k, capacity)` | numeric, `BOOL`, `STRING`, or `DATETIME`; constants `1 <= k <= capacity <= 4096` | `VEC<value type>` | never; empty when no row contributes |
 
-The [approximate sketches](#approximate-sketches) describe the last three.
+`COLLECT_VEC` returns every retained argument value, ordered by ingestion low watermark and then
+admission, as `FIRST` and `LAST` are. It preserves the argument's exact type: collecting an
+`ARRAY<F32, 2>` produces `VEC<ARRAY<F32, 2>>`, and collecting a `VEC` adds one list level. The
+argument must be required, because list elements are never null. An optional argument is refused
+when the processor is applied; use `coalesce` to choose its explicit value. A collecting route
+requires a message `WIDTH` or `MAX STATE SIZE`; a duration alone does not bound its retained values.
+List functions such as `nth`, `mean`, `slice`, and `dot` can consume the result in the same route.
+
+The [approximate sketches](#approximate-sketches) describe the last three table entries.
 
 **Nulls.** A row contributes to an aggregate only when every argument that aggregate reads is
 present, so a null argument contributes nothing. `COUNT` is the exception: it counts every retained
 row whatever its argument holds, so `SUM(input.amount) / COUNT(input.amount)` is not the mean of an
 optional field; use `AVG`. A window emits only while it retains at least one row, so an aggregate
 whose arguments are all required always has a value, except the sample statistics and `CORR`, which
-can be undefined in any window. `COUNT`, `COUNT_IF`, `APPROX_COUNT_DISTINCT`, and `APPROX_TOP_K` are
+can be undefined in any window. `COUNT`, `COUNT_IF`, `COLLECT_VEC`, `APPROX_COUNT_DISTINCT`, and `APPROX_TOP_K` are
 never optional; `VAR_SAMP`, `STDDEV_SAMP`, `COVAR_SAMP`, and `CORR` are always optional; every other
 aggregate is optional exactly when an argument it reads is. Assign an aggregate that can be null to
 an `OPTIONAL` field or give it a value with `COALESCE`; assigning it to a required field is rejected
 when the processor is applied.
 
 **Order and ties.** `MIN`, `MAX`, `ARG_MIN`, and `ARG_MAX` return the earliest admitted row among
-rows with equal keys. `FIRST` and `LAST` order rows by their ingestion low watermark, then by
-admission. `BOOL` orders `false` before `true`, `STRING` orders by bytes, and floating-point keys
+rows with equal keys. `FIRST`, `LAST`, and `COLLECT_VEC` order rows by their ingestion low watermark,
+then by admission. Element zero of a collection equals `FIRST` and its last element equals `LAST`
+over the same argument. `BOOL` orders `false` before `true`, `STRING` orders by bytes, and floating-point keys
 order NaN above every other value and treat both zeros as equal.
 
 **Population and sample.** `VAR_POP`, `STDDEV_POP`, and `COVAR_POP` divide by the number of
@@ -1971,7 +2018,9 @@ a non-finite argument is reported by the first function, in alphabetical order, 
 that reads it, such as `AVG requires finite floating-point arguments`. At emission, a `SUM` that
 does not fit its type, such as `SUM of the window does not fit Float32`, or a statistic that
 overflows `F64` fails the window: every retained row's acknowledgement fails, the window is
-cleared, and routes the window emitted before the failing one keep their output.
+cleared, and routes the window emitted before the failing one keep their output. The same rule
+applies when a collected list cannot be built or exceeds the node's relay output limits; that is a
+window emission failure before publication, with its typed cause retained.
 
 **Sensitivity.** An aggregate is sensitive when an argument reads a sensitive field, including
 `COUNT`, `COUNT_IF`, `APPROX_COUNT_DISTINCT`, and `APPROX_TOP_K`, whose results do not contain the
@@ -1982,7 +2031,7 @@ field that is not sensitive.
 arguments share it: `AVG`, the variances, and the standard deviations of one argument share a
 `moments` structure; the covariances and `CORR` of one argument pair, in the same order, share
 `co_moments`; `COUNT_IF`, `BOOL_AND`, and `BOOL_OR` share a `truth_counter`; `ARG_MIN` and `ARG_MAX`
-share `arg_extremes`; `MIN` and `MAX` share `extremes`; `FIRST` and `LAST` share a `sequence`;
+share `arg_extremes`; `MIN` and `MAX` share `extremes`; `FIRST`, `LAST`, and `COLLECT_VEC` share a `sequence`;
 `APPROX_QUANTILE` calls with one argument and capacity share a `quantile_sketch`; and
 `PERCENTILE_LINEAR_HISTOGRAM` calls with one argument, bucket count, bounds, and delay share a
 `linear_histogram`. `DESCRIBE WINDOW PROCESSOR` lists every structure with the functions it serves
@@ -2054,16 +2103,17 @@ measured accuracy beyond the exactness above.
 
 ## Limits
 
-Every limit an expression can reach is fixed by Nervix rather than configured, except the window
-state size a window processor declares:
+Expression rejection limits are fixed by Nervix. A window processor declares its state-size bound;
+local execution admission and caches follow the node's
+[engine capabilities](./node-settings.md#engine-and-connector-host-capabilities).
 
 | Limit | Bound | Reached by |
 | --- | --- | --- |
 | Text or octets one `STRING` or `BYTES` column holds | 2,147,483,647 bytes for the results of one call in one batch | The functions of [Result Size](#result-size), which fail each message that does not fit with `overflow`, and [`format_datetime`](#writing-values), which fails the batch |
 | Parts of one `split` result | 65,536 | `split`, with `overflow` |
 | LIKE pattern | 4,096 bytes | `like` and `ilike`, with `invalid_argument` |
-| `contains_any` set | 128 non-null patterns and 65,536 bytes of pattern text; 64 distinct sets prepared per batch | `contains_any`, with `invalid_argument` |
-| Compiled regular expression | 10 MiB; 64 compiled patterns cached per call | Regular-expression functions, with `invalid_argument` |
+| `contains_any` set | 128 non-null patterns and 65,536 bytes of pattern text | `contains_any`, with `invalid_argument` |
+| Compiled regular expression | 10 MiB | Regular-expression functions, with `invalid_argument` |
 | JSON document | 16,777,216 bytes and 128 levels of nesting | `JSON_VALUE` and `JSON_EXISTS`, with `invalid_argument`; `TRY_JSON_VALUE` yields null |
 | JSON path | 64 steps; array index up to 4,294,967,295 | Rejected when the statement is parsed |
 | `DATETIME` | `1677-09-21T00:12:43.145224192Z` through `2262-04-11T23:47:16.854775807Z`, in nanoseconds | Datetime functions and conversions, with `overflow` |
@@ -2083,7 +2133,7 @@ Two measured facts, from the [VM batch-size sweep](plexus-overview.md) and from 
 workloads below, shape what an expression costs:
 
 - Per-message cost falls steeply up to about a thousand messages per batch and then flattens.
-  Batches above 1,024 messages execute on the node's data workers, whose admission and hand-off
+  With the default inline limit, batches above 1,024 messages execute on the node's data workers, whose admission and hand-off
   cost more than a small batch does to execute.
 - An expression costs what its functions do for the messages that evaluate them. Inside a
   conditional arm, some operations run only for the messages that select the arm, so their cost
@@ -2199,9 +2249,12 @@ errors. `T` is the argument's type, and a list is an `ARRAY` or a `VEC`.
 | `mean` | optional `F64` | [Array And Vector Functions](#array-and-vector-functions) |
 | `dot` | element type | [Array And Vector Functions](#array-and-vector-functions) |
 | `distance` | `F64` | [Array And Vector Functions](#array-and-vector-functions) |
+| `list_add`, `list_sub`, `list_mul`, `list_div` | `ARRAY` or `VEC` | [List Arithmetic](#list-arithmetic) |
+| `list_add_scalar`, `list_sub_scalar`, `list_mul_scalar`, `list_div_scalar`, `list_abs` | same list type | [List Arithmetic](#list-arithmetic) |
 | `COUNT`, `COUNT_IF`, `APPROX_COUNT_DISTINCT` | `I64` | [Window Aggregates](#window-aggregates) |
 | `BOOL_AND`, `BOOL_OR` | `BOOL` | [Window Aggregates](#window-aggregates) |
 | `SUM`, `MIN`, `MAX`, `FIRST`, `LAST` | the argument's type | [Window Aggregates](#window-aggregates) |
+| `COLLECT_VEC` | required `VEC` of the argument's exact type | [Window Aggregates](#window-aggregates) |
 | `ARG_MIN`, `ARG_MAX` | the value's type | [Window Aggregates](#window-aggregates) |
 | `AVG`, `VAR_POP`, `VAR_SAMP`, `STDDEV_POP`, `STDDEV_SAMP`, `COVAR_POP`, `COVAR_SAMP`, `CORR` | `F64` | [Window Aggregates](#window-aggregates) |
 | `PERCENTILE_LINEAR_HISTOGRAM` | `F64` | [Linear Histogram Percentiles](#linear-histogram-percentiles) |

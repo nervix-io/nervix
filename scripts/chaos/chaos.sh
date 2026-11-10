@@ -103,8 +103,9 @@ stale-follower  Offline follower, survivor log compaction and snapshot catch-up 
 former-owner-restart  Former owner restarted behind peer-side isolation before startup admission (three-node)
 cluster-restart  Every node SIGKILLed and started from its own volume
                  topologies: one-node (--nodes 1), three-node (--nodes 3, default)
-stateful  Interleaved branches through a deduplicator, a window, materialized relay state and a
-          checkpointed WASM processor, held at an observed durability milestone, then one fault
+stateful  Interleaved branches through a deduplicator, a window, materialized relay state, a
+          checkpointed WASM processor and a stateful inferencer, held at an observed durability
+          milestone, then one fault
           faults: none (default), owner-crash, owner-pause, owner-partition, cluster-restart
           topologies: one-node (--nodes 1: none, cluster-restart), three-node (--nodes 3, default)
 endpoints  HTTP intake under MODE ACK through every node's listener into two domains that share one

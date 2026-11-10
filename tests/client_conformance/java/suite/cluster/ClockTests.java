@@ -4,6 +4,8 @@ import static org.junit.jupiter.api.Assertions.*;
 import static io.nervix.client.suite.support.Cluster.*;
 import io.nervix.client.Nervix;
 import io.nervix.client.suite.support.Cluster;
+import io.nervix.client.suite.support.Actions;
+import io.nervix.client.suite.support.Relay;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Order;
@@ -14,6 +16,54 @@ import org.junit.jupiter.api.Test;
 @Tag("cluster")
 @Order(1)
 public final class ClockTests {
+    @Test
+    void aRefusedClockRestorationReportsItsCauseAndRecovers() throws Exception {
+        var cluster = new Cluster();
+        try (var relay = new Relay(cluster.leader);
+             var following = cluster.connect(relay.uri(), cluster.domain);
+             var refusals = new Actions.ClockRefusals(); var cancel = deadline()) {
+            completed(following, "ATTACH DOMAIN CLOCK;");
+            long generation;
+            try (var initial = following.domainClock(cluster.domain)) {
+                assertNotNull(initial);
+                assertEquals(Nervix.ClockState.UNPACED, initial.state());
+                generation = initial.generation();
+            }
+            relay.cut();
+            refusals.refuseNextClockAttachment();
+            relay.restore();
+            // ANCHOR: clock_restoration_failed
+            try (var interrupted = following.nextClockEvent(cancel)) {
+                assertEquals(Nervix.ClockEventKind.INTERRUPTED, interrupted.kind());
+                assertEquals(cluster.domain, interrupted.domain());
+            }
+            try (var refused = following.nextClockEvent(cancel)) {
+                assertEquals(Nervix.ClockEventKind.RESTORATION_FAILED, refused.kind());
+                assertEquals(cluster.domain, refused.domain());
+                var failure = refused.restorationFailure();
+                assertNotNull(failure);
+                assertEquals(Nervix.RestorationCause.IN_TRANSACTION, failure.cause());
+                assertFalse(failure.message().isEmpty());
+                assertTrue(failure.waitNanos() > 0);
+            }
+            // The library keeps the attachment desired and retries the refused attempt.
+            boolean restored = false;
+            while (!restored) try (var event = following.nextClockEvent(cancel)) {
+                assertEquals(cluster.domain, event.domain());
+                if (event.kind() == Nervix.ClockEventKind.STATE) {
+                    assertEquals(Nervix.ClockState.UNPACED, event.state());
+                    assertEquals(generation, event.generation());
+                    restored = true;
+                } else {
+                    assertEquals(Nervix.ClockEventKind.RESTORATION_FAILED, event.kind());
+                    assertEquals(Nervix.RestorationCause.IN_TRANSACTION, event.restorationFailure().cause());
+                }
+            }
+            // ANCHOR_END: clock_restoration_failed
+            completed(following, "DETACH DOMAIN CLOCK;");
+        }
+    }
+
     @Test
     void readsProjectsAndFollowsClockGenerationsThroughStopAndStart() throws Exception {
         var cluster = new Cluster();

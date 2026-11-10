@@ -15,8 +15,8 @@ use nervix_execution::Executor;
 use nervix_models::Timestamp;
 use nervix_primitives::sync::{Arc, StdArc};
 use nervix_vm::{
-    CompileBinding, CompileOptions, CompiledProgram, ExecutionContext, INLINE_ROW_LIMIT,
-    OutputMode, RuntimeError, SMALL_SET_CAPACITY, SemanticScopePolicy, TypedArray, TypedBatch,
+    CompileBinding, CompileOptions, CompiledProgram, ExecutionContext, OutputMode, RuntimeError,
+    SMALL_SET_CAPACITY, SemanticScopePolicy, TypedArray, TypedBatch, VmInlineRowLimit,
     compile_program_with_options_for_bindings, execute_program_with_selection_in_context,
     lower_route_construction,
     program::{Program, SpannedNode},
@@ -26,6 +26,9 @@ use thiserror::Error;
 #[path = "vm/workloads.rs"]
 mod workloads;
 
+#[path = "vm/list_arithmetic.rs"]
+mod list_arithmetic;
+
 #[path = "vm/list_conversions.rs"]
 mod list_conversions;
 
@@ -33,7 +36,7 @@ mod list_conversions;
 #[path = "vm/allocation_probe.rs"]
 mod allocation_probe;
 
-/// Row counts spanning `INLINE_ROW_LIMIT` so the sweep shows both the
+/// Row counts spanning `VmInlineRowLimit::DEFAULT` so the sweep shows both the
 /// amortization curve below it and the cost of the executor hop above it.
 const SWEEP_ROW_COUNTS: [usize; 8] = [1, 8, 64, 256, 1_024, 4_096, 16_384, 65_536];
 
@@ -974,7 +977,7 @@ fn compile_correlate_output() -> Arc<CompiledProgram> {
 
 /// Rows in a numeric kernel batch. The batch stays at the inline execution threshold, so a
 /// measurement is the kernels themselves rather than the blocking-pool hop a larger batch takes.
-const NUMERIC_KERNEL_ROWS: usize = INLINE_ROW_LIMIT;
+const NUMERIC_KERNEL_ROWS: usize = VmInlineRowLimit::DEFAULT;
 
 /// How many rows of a numeric kernel batch hold operands that make every checked operation in the
 /// program fail, which is what separates the kernel's clean path from its error reporting.
@@ -1840,7 +1843,7 @@ fn numeric_kernel_benches(c: &mut Criterion) {
 
 /// Rows in a datetime kernel batch, which stays at the inline execution threshold like a numeric
 /// kernel batch.
-const DATETIME_KERNEL_ROWS: usize = INLINE_ROW_LIMIT;
+const DATETIME_KERNEL_ROWS: usize = VmInlineRowLimit::DEFAULT;
 
 fn datetime_schema() -> StdArc<Schema> {
     StdArc::new(Schema::new(vec![
@@ -2152,7 +2155,7 @@ fn calendar_kernel_benches(c: &mut Criterion) {
 
 /// Rows in every membership benchmark batch. It stays at the inline limit so no batch pays the
 /// executor hop.
-const MEMBERSHIP_KERNEL_ROWS: usize = INLINE_ROW_LIMIT;
+const MEMBERSHIP_KERNEL_ROWS: usize = VmInlineRowLimit::DEFAULT;
 
 /// Set sizes on both sides of `SMALL_SET_CAPACITY`, where a set stops comparing a value with each
 /// element and looks it up by key instead.
@@ -2266,7 +2269,7 @@ fn membership_kernel_benches(c: &mut Criterion) {
 
 /// Rows in every network benchmark batch. It stays at the inline limit so no batch pays the
 /// executor hop.
-const NETWORK_KERNEL_ROWS: usize = INLINE_ROW_LIMIT;
+const NETWORK_KERNEL_ROWS: usize = VmInlineRowLimit::DEFAULT;
 
 fn network_schema() -> StdArc<Schema> {
     StdArc::new(Schema::new(vec![
@@ -2393,7 +2396,7 @@ fn network_kernel_benches(c: &mut Criterion) {
 
 /// Rows in every JSON extraction benchmark batch. It stays at the inline limit so no batch pays
 /// the executor hop.
-const JSON_EXTRACTION_ROWS: usize = INLINE_ROW_LIMIT;
+const JSON_EXTRACTION_ROWS: usize = VmInlineRowLimit::DEFAULT;
 
 /// Four columns holding the same documents, so a program reading one field from each parses every
 /// document four times while a program reading four fields from one column parses it once.
@@ -2628,7 +2631,7 @@ fn compile_conditional(program: &ConditionalProgram) -> Arc<CompiledProgram> {
 /// The batch is the largest the VM executes inline, so no hop to the executor's workers blurs what
 /// the arm itself costs; the batch-size sweep above covers the hop.
 fn conditional_arm_benches(c: &mut Criterion) {
-    const ROWS: usize = INLINE_ROW_LIMIT;
+    const ROWS: usize = VmInlineRowLimit::DEFAULT;
 
     let runtime = benchmark_runtime();
     let mut group = c.benchmark_group("conditional_arm");
@@ -2866,6 +2869,7 @@ criterion_group!(
     json_extraction_benches,
     string_search_benches,
     workloads::workload_shape_benches,
+    list_arithmetic::benches,
     list_conversions::list_conversion_benches
 );
 criterion_main!(benches);

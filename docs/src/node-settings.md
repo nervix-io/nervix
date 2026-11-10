@@ -79,8 +79,8 @@ The bulk window must fit HTTP/2's connection limit for every stream and have its
 budget behind it before listening. These options govern inter-node delivery independently of
 public client admission. Change a claim by restarting the node with new overrides.
 
-`DESCRIBE CLUSTER` shows each live incarnation's committed CPU count, memory bytes and four receive
-bounds, pending claims, and retained departed records. Its `cluster-effective receive bounds` are
+`DESCRIBE CLUSTER` shows each live incarnation's committed CPU count, memory bytes, four receive
+bounds and its engine/connector host capabilities, pending claims, and retained departed records. Its `cluster-effective receive bounds` are
 the componentwise minimum of matching live committed claims. Individual sends use their receiver's
 claim, so one smaller peer does not shrink traffic between larger peers. The interconnect chapter
 owns refusal, re-slicing, bootstrap transfer and flow-control behavior; the placement chapter owns
@@ -90,6 +90,116 @@ the capacity score and its precedence.
 The independent capability controller refreshes them on the existing half-second runtime retry
 cadence, including when another domain's leader reconciliation is busy. This separates committed
 capacity from its local adoption without a second configuration authority.
+
+## Transport, Resolver And Database Capacities
+
+These are Nervix node capabilities. Provision them as server options, or with the matching
+`NERVIX_` environment variable formed by uppercasing the option and replacing hyphens with
+underscores. Restart a node to change its claim; `DESCRIBE CLUSTER` reports the committed claim
+of each live incarnation, including its interconnect, DNS, database and consensus values.
+The startup log records the same resolved values. They change local capacity and pacing,
+without adding a prerequisite or changing graph acceptance.
+
+| Server option | Default | Meaning |
+| --- | --- | --- |
+| `--interconnect-max-peers` | 64 | Other node identities this transport can retain |
+| `--interconnect-concurrent-handshakes` | 32 | Concurrent transport handshakes |
+| `--interconnect-incoming-queue-capacity` | 1,024 | General request and relay admission capacity |
+| `--interconnect-request-quota` | Derived | Independent ordinary and append reserves: two requests per declared peer, bounded by the incoming queue |
+| `--interconnect-stream-receive-window` | 64 KiB | Advertised HTTP/2 receive credit per non-bulk stream |
+| `--interconnect-connection-receive-window` | 256 KiB | Advertised HTTP/2 receive credit per non-bulk connection |
+| `--interconnect-connection-setup-timeout` | 5s | One DNS, TCP, TLS and binding budget |
+| `--interconnect-request-timeout` | 10s | Transport request budget and the base of typed RPC deadlines |
+| `--interconnect-progress-timeout` | 5s | Time without transfer progress |
+| `--interconnect-reconnect-backoff` | 200ms | First reconnect delay |
+| `--interconnect-max-reconnect-backoff` | 5s | Reconnect ceiling, at least the first delay |
+| `--interconnect-reconnect-jitter-permille` | 0 | Downward jitter in thousandths, from 0 through 1,000 |
+| `--dns-cache-entries` | 4,096 | Cached name/type answers |
+| `--dns-positive-max-ttl` | 1h | Positive DNS TTL ceiling |
+| `--dns-negative-max-ttl` | 30s | Negative DNS TTL ceiling |
+| `--dns-hook-lookup-budget` | 30s | Lookup budget for client libraries without an operation deadline |
+| `--dns-address-family-policy` | `dual-stack` | DNS queries: `dual-stack`, `ipv4` or `ipv6` |
+| `--dns-trust-negative-answers` | `true` | Trust a name server's negative response without asking the next server |
+| `--database-cache-bytes` | 32 MiB | Node database cache |
+| `--database-journal-bytes` | 512 MiB | Node database journal capacity, at least 64 MiB |
+| `--database-workers` | Derived | Available CPU count capped at four; one when unknown |
+| `--raft-database-cache-bytes` | 32 MiB | Dedicated consensus database cache |
+| `--raft-database-journal-bytes` | 512 MiB | Consensus database journal capacity, at least 64 MiB |
+| `--raft-database-workers` | Derived | Same CPU derivation, independently overridable |
+
+Counts, receive windows and deadlines must be positive and fit their engines. HTTP/2 windows
+are at most 2³¹−1 bytes. The options are validated before opening stores or binding listeners.
+Database cache capacities count alongside executor budgets in the startup memory check.
+
+Connection capacity derives from both directions of every pool: twelve connections per declared
+peer, 768 by default. Watermark capacity is eight times the incoming queue. Health-probe fan-out
+and DNS lookup concurrency each equal `interconnect-max-peers`. Completion reserves are at least
+one and otherwise one per sixteen peers, bounded by the incoming queue.
+
+The default ordinary and append request reserves are now 128, replacing eight for the whole node.
+An append stream retains its admission throughout its lifetime, so eight cannot serve nine
+followers. Liveness admission increases from 32 to 64 with the default peer count. Each traffic
+reserve remains independent; a full general queue cannot consume health or cancellation capacity.
+An explicit lower request quota is reported as configured and refusal is a typed capacity outcome.
+
+Typed RPCs derive their deadlines from the request budget: control one tenth, coordination one
+fifth, setup one half, ordinary requests one, snapshot operations three, checkpoint transfers six,
+and recovery twelve. A caller's remaining operation deadline still governs explicitly bounded
+work. The application-health probe instead follows the running cluster liveness policy below.
+
+Transport ping and application-health budgets follow the installed, Raft-committed
+`NODE_UNAVAILABILITY_TIMEOUT`: ping interval one half, ping timeout one quarter and probe timeout
+one tenth. At `4s`, `DESCRIBE CLUSTER` shows `ping-interval=2s ping-timeout=1s
+probe-timeout=400ms`. Installing a revision updates established HTTP/2 connections as well as
+future probes. A policy update adjusts an outstanding ping's deadline while retaining that ping.
+The per-node line derives from its published running revision, so an unapplied commit is not
+presented as installed.
+
+Relay reconciliation retains channels for twice the host's total admission bound and sweeps at
+one tenth of that retention: 600s and 60s under the current 300s host contract. These are
+projections of the host's one policy input, without independent flags. An idle sender rotates its
+channel at the host bound, before its receiver can forget the watermark. The runtime settings
+owner retains authority over host admission and acknowledgement cadence.
+
+### Consensus Capacities
+
+These options have the same node-capability change procedure and environment-variable convention.
+
+| Server option | Default |
+| --- | --- |
+| `--raft-append-batch-entries` | 256 |
+| `--raft-outstanding-append-batches` | 16 |
+| `--raft-outstanding-append-bytes` | 16 MiB |
+| `--raft-append-idle-bound` | 5s |
+| `--raft-snapshot-transfer-timeout` | 30s |
+| `--raft-membership-mutation-timeout` | 10s |
+| `--raft-retention-interval` | 5s |
+| `--raft-retention-admission-timeout` | 30s |
+| `--raft-purge-batch-entries` | 1 |
+| `--raft-api-channel-capacity` | 65,536 |
+| `--raft-notification-channel-capacity` | 65,536 |
+| `--raft-state-machine-channel-capacity` | 1,024 |
+| `--raft-api-batch-capacity` | 4,096 |
+| `--raft-event-capacity` | 256 |
+| `--raft-replication-backoff` | 200ms |
+| `--raft-replication-backoff-maximum` | 1s |
+| `--raft-membership-step-down-delay` | 150ms |
+
+The append byte window must hold the executor's largest replication batch. A stream stalls only
+when it has outstanding work and neither receives an answer nor sends accepted bytes throughout
+the idle bound. Heartbeat response waits keep their lease budget; they do not borrow the data
+stream's storage deadline.
+
+The duration options in this table use positive whole milliseconds and reject fractions rather than
+rounding the configured value in the engine.
+The default replication retry series remains 200ms, 400ms, 800ms, then 1s at its ceiling.
+
+Retention admission polls at the smaller of the retention interval divided by 100 and its
+admission timeout divided by 600, with a one-millisecond engine floor: 50ms by default. Snapshot
+replication lag is twice the snapshot entry threshold, saturating only at the integer ceiling
+and remaining strictly greater than that threshold; the threshold cannot be `u64::MAX`.
+Snapshot chunks follow the executor's bulk chunk bound. The replication chapter owns durability,
+whole-transfer deadlines and the explicit maintained OpenRaft configuration.
 
 ## Permanent Cluster Identity
 
@@ -114,32 +224,78 @@ explains why a fresh cluster restored from an archive keeps its own UUID and key
 
 ## Cluster Licensing
 
-A cluster uses the embedded free policy from its first bootstrap. Both current quotas,
-`cluster.nodes` and `cluster.domains`, are unlimited. Node usage counts committed voters and
-learners; domain usage counts committed domain records, including stopped domains. Returning
-members and updates to an existing domain do not consume another slot.
+A cluster starts with the embedded free policy. Its current quotas, `cluster.nodes` and
+`cluster.domains`, are unlimited. Node usage counts committed voters and learners; domain usage
+counts committed domain records, including stopped domains. Returning members and updates to an
+existing domain do not consume another slot. Free mode contacts no licensing service, including
+after restart.
 
 ```plexus
+ACTIVATE LICENSE PERSISTENT WITH KEY 'NVXK-ABCDEFG2-your-secret';
+REFRESH LICENSE;
 DESCRIBE LICENSE;
 ```
 
-Every node answers this read-only command without a selected domain or a leader redirect.
-It reports `mode: free`, `policy: free`, the public cluster identity, committed licensing time,
-`processing: running`, and each quota's committed usage and limit. Followers describe their own
-applied revision. The same observation accompanies the command as a typed state-inspection
-envelope with a cluster-license entity, a single unit and shared Row sections; applications can
-read it without parsing the display text.
+`ACTIVATE LICENSE` selects `PERSISTENT` or `EPHEMERAL`. It runs on the leader without a selected
+domain and outside domain transactions. Nervix uses the credential for the creation request;
+its durable execution retains the verified signed response and the public eight-character key
+identifier. Neither the credential nor the command's source enters that effect or its semantic
+request digest. Reusing the execution reference resumes its recorded outcome. If the service
+already processed creation, Nervix adopts the matching activation through an authenticated refresh.
+`REFRESH LICENSE` runs immediately on the leader, outside domain transactions, and completes when
+the newer signed decision commits or the service or cluster returns a typed refusal.
 
-The immutable published policy is the permission source for each admission. Domain planning
-captures its quota constraint, and the committed creation checks that constraint against the
-actual domain count. Membership admission checks before adding a learner or voter. A refusal
-keeps its typed licensing cause through the owner's error boundary; it does not remove existing
-domains or members. Free mode has no processing stop or next licensing deadline.
+The service is the compiled deployment `https://licensing.nervix.io`. Plexus and node options
+supply no alternative address or trust anchors. HTTPS uses the node resolver and outward TLS
+policy, HTTP/1.1 or HTTP/2, no redirects and no environment proxy. Activation requires the build's
+provisioned licensing trust bundle; an unprovisioned build refuses activation. The
+[shared protocol](licensing-protocol.md#trust-and-provisioning) owns provisioning and verification.
 
-The free licensing record is installed atomically with the first committed cluster identity,
-using that identity's creation timestamp. Replication, snapshots and restart preserve it. Its
-time is a committed fact rather than a read of each answering node's clock. See
-[Licensing Metrics](metrics-and-observability.md#licensing-metrics) for the matching observations.
+The leader signs challenge-bound requests with the cluster key. Lost responses retry the same
+request identity and bytes while its challenge remains valid; a fresh challenge retains that
+identity. Losing leadership cancels the request. The following positive Duration parameters are
+seeded at bootstrap and changed with `ALTER CLUSTER SET`:
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `LICENSING_REQUEST_TIMEOUT` | `30s` | One request, including resolution, TLS and response body |
+| `LICENSING_RETRY_BACKOFF_MAX` | `10m` | Exponential retry ceiling; full jitter starts at the request budget |
+| `LICENSING_STREAM_IDLE_TIMEOUT` | `90s` | Licensing stream idle budget |
+
+Each has its corresponding `--licensing-...` bootstrap flag and `NERVIX_LICENSING_...` environment
+variable. Validated durations retain nanosecond precision across the complete declared range in
+compact inline storage, preserving the Raft command footprint without additional allocations.
+
+Only a committed, verified decision grants licensed usage. The coordinator verifies receipt,
+each replica verifies apply, and recovery and snapshot installation rebuild verification from
+original signed bytes and the independent activation binding. A semantically invalid document
+loads as `degraded`, reports `decision_unverifiable`, grants the free policy and prompts refresh.
+Structural record corruption refuses startup. Revoking a working key prevents new decisions;
+a previously committed decision remains verified with its signing-key-revoked observation.
+
+Licensing time is committed and monotone. The leader proposes physical observations at deadline
+crossings independently of its refresh attempt. The derived refresh state is `licensed fresh`,
+`licensed due`, or `licensed overdue`; a bounded `valid_until` crossing becomes `lapsed freeze`.
+An outage moves no signed deadline, and restart resets none. Freeze keeps existing work running
+and refuses new domain and member usage. Existing domain lifecycle commands and backups remain
+available. A later verified decision can clear the lapse.
+
+Every node answers `DESCRIBE LICENSE` without selecting a domain or redirecting to the leader.
+It reports the mode, policy, public identity, committed time, processing state and quotas. An
+activation adds its binding, public credential identifier, decision and conditions revisions,
+verification, signed deadlines, license facts and refresh state. A follower marks the leader's
+incarnation- and tenure-bound connectivity observation as reported. Connectivity distinguishes
+reachable service, transport outage and non-retryable service refusal, retaining each outage or
+refusal's start and typed cause. Connectivity grants nothing; a failed request renews no deadline.
+A degraded inspection also renders its typed decision-verification rejection.
+The command carries the same observation in a typed cluster-license state-inspection envelope
+with one unit and shared Row sections, so applications need not parse display text.
+
+Admission evaluates a coherent committed observation. Domain planning captures its quota, and
+committed creation checks current usage and lapse before adding a domain. Membership admission
+checks before adding a learner or voter. A typed refusal never removes an existing domain or
+member. [Licensing Metrics](metrics-and-observability.md#licensing-metrics) owns the matching series
+and [notices](client-session-protocol.md#what-a-session-is-told) describe asynchronous warnings.
 
 ## The Prerequisite List Is Closed
 
@@ -193,7 +349,8 @@ It refuses to start at the first check that fails, exiting with status `1` and
    hierarchy, or its physical memory when no group limit is smaller. It derives the execution
    settings, client byte credit, omitted receive limits and memory-pressure watermarks from these
    capacities. Every memory pool counts once, including independent active state reads and retained
-   state-read cache. Their total plus producer and consumer node credit must fit known memory.
+   state-read cache. Their total plus producer and consumer node credit and the configured node and
+   consensus database caches must fit known memory.
    A failed detector leaves capacity unknown and uses the declared capacity-independent defaults.
 3. It creates its database directory and its temporary directory when they are absent, proves each
    writable with a probe file it removes again, and measures the total size of the volume each
@@ -462,6 +619,7 @@ describes, defaults included.
 | `--replica-count` | cluster parameter | scheduling |
 | `--tls-cipher-suites`, `--tls-key-exchange-groups` | cluster parameter | outward TLS algorithm policy |
 | `--password-iterations` | cluster parameter | password creation policy |
+| `--licensing-request-timeout`, `--licensing-retry-backoff-max`, `--licensing-stream-idle-timeout` | cluster parameter | licensing coordination |
 | `--state-snapshot-interval` | cluster parameter | runtime |
 | `--domain-drain-timeout`, `--entity-gate-deadline` | cluster parameter | cluster policy |
 | `--max-batch-messages`, `--client-producer-session-bytes`, `--client-consumer-session-bytes`, `--udf-code-bytes`, `--http-header-bytes`, `--http-header-fields`, `--client-batch-rows` | cluster parameter | model and session policy |
@@ -483,6 +641,48 @@ no explicit pair, the node runs no memory-pressure supervisor. `--memory-limit` 
 `--restore-staging-max-bytes` have no default value either: without them the node detects its
 memory limit and derives its restore-staging quota from its database volume, as
 [The Startup Preflight](#the-startup-preflight) describes.
+
+### Engine And Connector Host Capabilities
+
+These values are local `NodeCapabilities`. Changing them requires restarting that node; they do
+not alter a graph's stored execution contract. Each flag has an environment twin formed as
+`NERVIX_` plus its uppercase name with underscores.
+
+| Server option | Default | Owner and bound |
+| --- | --- | --- |
+| `--vm-inline-row-limit` | 1024 rows | VM admission; zero sends every nonempty batch through the executor |
+| `--vm-regex-search-cache-bytes` | 2 MiB | positive, addressable lazy-DFA cache per compiled regex |
+| `--vm-dynamic-pattern-cache-capacity` | 64 patterns | positive, per call site and compiled program |
+| `--vm-pattern-sets-per-batch` | 64 sets | positive, per dynamic `contains_any` call and batch |
+| `--wasm-stack-bytes` | 512 KiB | positive, addressable stack per WASM invocation |
+| `--wasm-memory-reservation-bytes` | 4 GiB on 64-bit hosts; 10 MiB on 32-bit hosts | virtual address reservation per guest memory; zero permits relocatable growth |
+| `--connector-retry-multiplier` | 2 | positive multiplier applied between reconnect attempts |
+| `--connector-retry-jitter-percent` | 0 | 0 through 100 percent added to the next multiplied delay, within the declared cap |
+| `--kafka-domain-assignment-retry` | 100 ms | positive retry cadence while a domain-offset assignment is unavailable |
+| `--kafka-partition-watch-interval` | 1 s | positive topology inspection cadence |
+| `--syslog-intake-queue-capacity` | 64 frames | positive, within the native channel permit bound; stream intake backpressures when full |
+| `--syslog-read-chunk-bytes` | 8 KiB | positive, addressable bytes per stream read, further limited by the frame bound |
+
+The two Kafka durations accept at most `u32::MAX` whole seconds. VM programs carry the compiling
+node's resolved settings into prepared regex calls and execution. Extension calls still use
+Extension workers regardless of the inline threshold. Deterministic row-defect limits, including
+compiled regex size and `contains_any` input limits, remain fixed across nodes.
+
+Engine and connector host values are part of the incarnation-bound Raft capability claim and
+appear in the resolved startup log and `DESCRIBE CLUSTER`. The current record uses one consensus
+storage identity and wire fingerprint. A database in another stored shape fails to open and must
+be recreated for this alpha build. Nodes speak the same current shape; their local capability
+values may differ during a rolling restart.
+
+WASM parallel compilation is explicitly disabled: independent module compilations already run
+on bounded Bulk workers, so nested compilation fan-out cannot escape that admission boundary.
+Stack and address reservation do not replace a processor's declared linear-memory or fuel limits.
+
+The connector retry law preserves the initial delay and ceiling of `RETRY POLICY`; it changes
+only later delays. Kafka, MQTT and the shared ingestor/emitter host receive the same law.
+External broker timeouts, connection pools, keep-alive and request behavior remain declared client
+`CONFIG` keys or entity clauses. Read the owning connector section in
+[Ingestors](ingestors.md) or [Emitters](emitters.md) before choosing those values.
 
 ### Validation Before Any I/O
 
@@ -745,6 +945,13 @@ one millisecond and observe the refusal naming the settings, and restart a node 
 three-node cluster with such a setting, through the harness step that names a setting for one
 node, before restarting it with a valid one. Converting and validating the options takes no lock
 and adds no lifecycle path, so the deadlock detector has nothing of it to observe.
+
+The relay-capability scenarios preserve both concrete branches, exactly-once output and confirmed
+acknowledgements across raised and lowered receive bounds. The oversized-row case observes both
+branch refusals before submitting its fitting batch. A producer's first negative acknowledgement
+does not establish that every branch buffer has flushed. Controlled examples stagger the branch
+buffers' deadlines to exercise that distinction, while keeping the same subsequent delivery and
+producer-completion assertions.
 
 The prerequisite record, its compatibility rule, its gossip text and the order `DESCRIBE CLUSTER`
 lists it in have unit tests beside the record, and the record's gossip text has a registered Bolero
