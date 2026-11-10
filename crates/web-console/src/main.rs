@@ -55,9 +55,9 @@ use nervix_dataflow_graph::{
 };
 use nervix_models::{
     CommandExecutionReference, CreateSubscription, DomainName, DomainPace, DomainStatus, ModelKind,
-    RelayName, ResourceDescription, ResourceEntryContent, ResourceManifestEntry, ResourceUsage,
-    ResourceVersionDescription, ResourceVersionEntries, Statement, SubscriptionName, Timestamp,
-    TransactionLifecycle, TransactionStatus, expression_to_plexus,
+    ModelName, RelayName, ResourceDescription, ResourceEntryContent, ResourceManifestEntry,
+    ResourceUsage, ResourceVersionDescription, ResourceVersionEntries, Statement, SubscriptionName,
+    Timestamp, TransactionLifecycle, TransactionStatus, expression_to_plexus,
 };
 use nervix_plexus::client_statement::{
     ClientStatement, parse_client_statement, parse_client_statements, parse_use_domain,
@@ -4660,7 +4660,10 @@ fn Sidebar(
                     <span aria-hidden="true">"＋"</span>
                     <span>"Create resource in this domain"</span>
                 </button>
-                <NavHeader title="Schemas" count=move || entities_for(EntityKind::Model(ModelKind::Schema)).len().to_string() kind="schemas" open=schemas_open />
+                <div class="nav-section">
+                    <NavHeader title="Schemas" count=move || entities_for(EntityKind::Model(ModelKind::Schema)).len().to_string() kind="schemas" open=schemas_open />
+                    <SidebarCreateAction id="sidebar-create-schema" kind=CreateKind::Model(ModelKind::Schema) create=create active_domain=active_domain />
+                </div>
                 <Show when=move || schemas_open.get() fallback=|| ()>
                     <For
                         each=move || entities_for(EntityKind::Model(ModelKind::Schema))
@@ -4668,7 +4671,10 @@ fn Sidebar(
                         children={|entity| view! { <NavItem name=entity.name meta=entity.detail kind="schemas" on_click=|| () /> }}
                     />
                 </Show>
-                <NavHeader title="Wire Schemas" count=move || wire_schema_entities().len().to_string() kind="wire" open=wire_open />
+                <div class="nav-section">
+                    <NavHeader title="Wire Schemas" count=move || wire_schema_entities().len().to_string() kind="wire" open=wire_open />
+                    <SidebarCreateMenu id="sidebar-create-wire-schema" label="wire schema" kinds=&WIRE_SCHEMA_FAMILIES create=create active_domain=active_domain />
+                </div>
                 <Show when=move || wire_open.get() fallback=|| ()>
                     <For
                         each=wire_schema_entities
@@ -4676,7 +4682,10 @@ fn Sidebar(
                         children={|entity| view! { <NavItem name=entity.name meta=entity.detail kind="wire" on_click=|| () /> }}
                     />
                 </Show>
-                <NavHeader title="Codecs" count=move || entities_for(EntityKind::Model(ModelKind::Codec)).len().to_string() kind="codecs" open=codecs_open />
+                <div class="nav-section">
+                    <NavHeader title="Codecs" count=move || entities_for(EntityKind::Model(ModelKind::Codec)).len().to_string() kind="codecs" open=codecs_open />
+                    <SidebarCreateAction id="sidebar-create-codec" kind=CreateKind::Model(ModelKind::Codec) create=create active_domain=active_domain />
+                </div>
                 <Show when=move || codecs_open.get() fallback=|| ()>
                     <For
                         each=move || entities_for(EntityKind::Model(ModelKind::Codec))
@@ -4720,7 +4729,10 @@ fn Sidebar(
                         }}
                     />
                 </Show>
-                <NavHeader title="Clients" count=move || entities_for(EntityKind::Model(ModelKind::Client)).len().to_string() kind="resources" open=clients_open />
+                <div class="nav-section">
+                    <NavHeader title="Clients" count=move || entities_for(EntityKind::Model(ModelKind::Client)).len().to_string() kind="resources" open=clients_open />
+                    <SidebarCreateAction id="sidebar-create-client" kind=CreateKind::Model(ModelKind::Client) create=create active_domain=active_domain />
+                </div>
                 <Show when=move || clients_open.get() fallback=|| ()>
                     <For
                         each=move || entities_for(EntityKind::Model(ModelKind::Client))
@@ -4728,7 +4740,10 @@ fn Sidebar(
                         children={|entity| view! { <NavItem name=entity.name meta=entity.detail kind="resources" on_click=|| () /> }}
                     />
                 </Show>
-                <NavHeader title="Vhosts" count=move || entities_for(EntityKind::Model(ModelKind::Vhost)).len().to_string() kind="resources" open=vhosts_open />
+                <div class="nav-section">
+                    <NavHeader title="Vhosts" count=move || entities_for(EntityKind::Model(ModelKind::Vhost)).len().to_string() kind="resources" open=vhosts_open />
+                    <SidebarCreateAction id="sidebar-create-vhost" kind=CreateKind::Model(ModelKind::Vhost) create=create active_domain=active_domain />
+                </div>
                 <Show when=move || vhosts_open.get() fallback=|| ()>
                     <For
                         each=move || entities_for(EntityKind::Model(ModelKind::Vhost))
@@ -4736,7 +4751,10 @@ fn Sidebar(
                         children={|entity| view! { <NavItem name=entity.name meta=entity.detail kind="resources" on_click=|| () /> }}
                     />
                 </Show>
-                <NavHeader title="Endpoints" count=move || entities_for(EntityKind::Model(ModelKind::Endpoint)).len().to_string() kind="resources" open=endpoints_open />
+                <div class="nav-section">
+                    <NavHeader title="Endpoints" count=move || entities_for(EntityKind::Model(ModelKind::Endpoint)).len().to_string() kind="resources" open=endpoints_open />
+                    <SidebarCreateAction id="sidebar-create-endpoint" kind=CreateKind::Model(ModelKind::Endpoint) create=create active_domain=active_domain />
+                </div>
                 <Show when=move || endpoints_open.get() fallback=|| ()>
                     <For
                         each=move || entities_for(EntityKind::Model(ModelKind::Endpoint))
@@ -4811,6 +4829,94 @@ fn NavHeader(
             <span class="section-chevron">{move || if open.get() { "⌄" } else { "›" }}</span>
             <span>{title}</span>
             <strong>{move || count()}</strong>
+        </button>
+    }
+}
+
+/// The action beside a sidebar heading that opens the form of that heading's family in the
+/// selected domain, and takes the focus back when the form closes.
+#[component]
+fn SidebarCreateAction(
+    id: &'static str,
+    kind: CreateKind,
+    create: CreateSignals,
+    active_domain: RwSignal<Option<DomainName>>,
+) -> impl IntoView {
+    let label = format!("Create {} in this domain", kind.label());
+    view! {
+        <button
+            id=id
+            class="nav-create"
+            type="button"
+            title=label.clone()
+            aria-label=label
+            on:click=move |_| create.open(kind, active_domain.get_untracked(), id)
+        >
+            "＋"
+        </button>
+    }
+}
+
+/// The wire-schema families, one per declared wire format, which the wire-schema heading's create
+/// action offers.
+const WIRE_SCHEMA_FAMILIES: [CreateKind; 3] = [
+    CreateKind::Model(ModelKind::WireJsonSchema),
+    CreateKind::Model(ModelKind::WireCborSchema),
+    CreateKind::Model(ModelKind::WireAvroSchema),
+];
+
+/// The action beside a sidebar heading whose entities come in several families: it asks which
+/// family to create, then opens that form in the selected domain.
+#[component]
+fn SidebarCreateMenu(
+    id: &'static str,
+    label: &'static str,
+    kinds: &'static [CreateKind],
+    create: CreateSignals,
+    active_domain: RwSignal<Option<DomainName>>,
+) -> impl IntoView {
+    let open = RwSignal::new(false);
+    let choose = Callback::new(move |kind: CreateKind| {
+        open.set(false);
+        create.open(kind, active_domain.get_untracked(), id);
+    });
+    let title = format!("Create {label} in this domain");
+    view! {
+        <button
+            id=id
+            class="nav-create"
+            type="button"
+            aria-haspopup="menu"
+            aria-expanded=move || open.get().to_string()
+            title=title.clone()
+            aria-label=title
+            on:click=move |_| open.update(|value| *value = !*value)
+        >
+            "＋"
+        </button>
+        <div
+            class="popup-menu sidebar-create-menu"
+            class:open=move || open.get()
+            role="menu"
+            on:keydown=move |event: ev::KeyboardEvent| {
+                if event.key() == "Escape" {
+                    open.set(false);
+                }
+            }
+        >
+            {kinds
+                .iter()
+                .map(|kind| view! { <SidebarCreateMenuItem kind=*kind choose=choose /> })
+                .collect_view()}
+        </div>
+    }
+}
+
+#[component]
+fn SidebarCreateMenuItem(kind: CreateKind, choose: Callback<CreateKind>) -> impl IntoView {
+    view! {
+        <button type="button" role="menuitem" data-create-kind=kind.key() on:click=move |_| choose.run(kind)>
+            {kind.menu_entry().name}
         </button>
     }
 }
@@ -6150,6 +6256,23 @@ fn GraphPanel(
                                     "SUBSCRIBE"
                                 </button>
                             </Show>
+                            <Show when=move || selected_action_target.get().and_then(|target| target.placement_member).is_some() fallback=|| ()>
+                                <button
+                                    type="button"
+                                    data-action="place"
+                                    on:click=move |_| {
+                                        if let Some(target) = selected_action_target.get()
+                                            && let Some(member) = target.placement_member
+                                            && let Some(domain) = active_domain.get_untracked()
+                                        {
+                                            selected_action_target.set(None);
+                                            create.open_placement_from(domain, member, "graph-search");
+                                        }
+                                    }
+                                >
+                                    "PLACE"
+                                </button>
+                            </Show>
                         </div>
                     </section>
                 </div>
@@ -7160,23 +7283,35 @@ struct GraphActionTarget {
     show_create_command: String,
     /// The relay a SUBSCRIBE action opens the subscription form for.
     relay: Option<RelayName>,
+    /// The runtime node a PLACE action starts a placement corridor from.
+    placement_member: Option<ModelName>,
 }
 
 impl GraphActionTarget {
+    /// A node's actions. PLACE is offered for a drawn ingestor, processor or emitter, the runtime
+    /// nodes a placement rule names; a client is configuration, not a runtime node. An ingestor
+    /// that runs on every cluster node is refused by the rule's validation, which the form shows.
     fn node(node: &GraphViewNode) -> Self {
         let kind = node.command_kind();
         let name = node.label.clone();
+        let placement_member = match node.kind {
+            NodeKind::Client => None,
+            NodeKind::Ingestor | NodeKind::Processor | NodeKind::Emitter => {
+                ModelName::parse(&name).ok()
+            }
+        };
         Self {
             kind,
             name: name.clone(),
             describe_command: describe_command(kind, &name),
             show_create_command: format!("SHOW CREATE {kind} {name};"),
             relay: None,
+            placement_member,
         }
     }
 
-    /// A relay's actions. SUBSCRIBE is offered for a relay whose drawn label names it, which is
-    /// every relay the server draws.
+    /// A relay's actions. SUBSCRIBE and PLACE are offered for a relay whose drawn label names it,
+    /// which is every relay the server draws.
     fn relay(relay: &GraphViewRelay) -> Self {
         let name = relay.label.clone();
         Self {
@@ -7185,6 +7320,7 @@ impl GraphActionTarget {
             describe_command: Some(format!("DESCRIBE RELAY {name};")),
             show_create_command: format!("SHOW CREATE RELAY {name};"),
             relay: RelayName::parse(&name).ok(),
+            placement_member: ModelName::parse(&name).ok(),
         }
     }
 }
@@ -11845,6 +11981,48 @@ mod tests {
     }
 
     #[test]
+    fn the_place_action_starts_corridors_from_runtime_nodes_and_relays_but_not_clients() {
+        let junction = view_node(
+            "junction:normalize",
+            DataflowNodeRole::Processor {
+                processor: DataflowProcessorKind::Junction,
+            },
+            None,
+            &[],
+        );
+        assert_eq!(
+            GraphActionTarget::node(&junction).placement_member,
+            Some(ModelName::parse("normalize").assured("valid name"))
+        );
+        let ingestor = view_node(
+            "ingestor:intake",
+            DataflowNodeRole::Ingestor {
+                transport: "MQTT".to_string(),
+            },
+            None,
+            &[],
+        );
+        assert_eq!(
+            GraphActionTarget::node(&ingestor).placement_member,
+            Some(ModelName::parse("intake").assured("valid name"))
+        );
+        let client = view_node(
+            "client:broker",
+            DataflowNodeRole::Client {
+                transport: "MQTT".to_string(),
+            },
+            None,
+            &[],
+        );
+        assert_eq!(GraphActionTarget::node(&client).placement_member, None);
+        let relay = view_relay("relay:orders", None, &[]);
+        assert_eq!(
+            GraphActionTarget::relay(&relay).placement_member,
+            Some(ModelName::parse("orders").assured("valid name"))
+        );
+    }
+
+    #[test]
     fn node_command_kind_comes_from_the_typed_processor() {
         let reingestor = view_node(
             "reingestor:replay",
@@ -12529,6 +12707,9 @@ mod tests {
         let target = match control {
             ChoiceControl::DomainPace => nervix_client_wire::ChoiceTarget::DomainPace,
             ChoiceControl::PlacementPolicy => nervix_client_wire::ChoiceTarget::PlacementPolicy,
+            ChoiceControl::PlacementFromMember | ChoiceControl::PlacementToMember => {
+                nervix_client_wire::ChoiceTarget::PlacementMember
+            }
             ChoiceControl::BranchSchema
             | ChoiceControl::RelaySchema
             | ChoiceControl::CodecSchema => nervix_client_wire::ChoiceTarget::Schema,

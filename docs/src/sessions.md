@@ -427,6 +427,11 @@ same pair. Decoded fields and output fields use the existing codec-field and rel
 A generator's materialized-relay target requires a domain alone for an unbranched generator, or the
 domain then a branch model reference for a branched one, and offers only relays with materialized
 state on exactly that branch declaration.
+The placement-member target requires a domain and offers the runtime nodes a placement rule may
+name as a `FROM` or `TO` member, ordered by name with each candidate's kind as its detail. It applies
+the rule that validates a placement's members: an ingestor that executes on every cluster node, an
+entity that is not a runtime node, and a name that more than one eligible entity shares are not
+offered.
 Emitter reference targets use each entity's declared client connector choices; client consumers
 select a schema instead. The Iceberg catalog target uses the entity's catalog-client declaration.
 An emitter's encoding-codec target requires a domain and selects encoding-capable codecs; output
@@ -437,8 +442,9 @@ and error-relay targets require the domain followed by every selected input rela
 only candidates whose branch matches every input, with materialized state required for the state
 target. Schema-field choices require the domain and schema reference and keep schema field order.
 Their page digests include all selected input definitions and the referenced field schema.
-Placement requires exactly one domain-pace dependency. Schema, wire-schema, branch, relay, VHOST,
-signaling-protocol, resource, and codec lookups require exactly one domain reference. A
+Domain pace and placement policy take no dependency. Schema, wire-schema, branch, relay, VHOST,
+signaling-protocol, resource, codec, and placement-member lookups require exactly one domain
+reference. A
 relay-field lookup requires that domain reference followed by a relay model reference, and returns
 the fields of the relay's records in the order its schema declares them; the other configuration
 lookups order their models by name. A codec-field lookup requires the domain followed by a codec

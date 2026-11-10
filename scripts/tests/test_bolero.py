@@ -466,6 +466,7 @@ class InventoryTests(unittest.TestCase):
             "console-endpoint-drafts",
             "console-emitter-drafts",
             "console-processor-drafts",
+            "console-placement-drafts",
             "runtime-window-sketch-panes",
             "kafka-partition-offsets",
             "kafka-destination-partitions",
@@ -591,7 +592,7 @@ class InventoryTests(unittest.TestCase):
             "inferencer-native-snapshot-projection": 1,
             "console-emitter-drafts": 7,
             "console-processor-drafts": 7,
-            "client-requests": 13,
+            "client-requests": 14,
             "client-producer-link-frames": 11,
             "client-producer-link-frames-malformed": 11,
         }.items():

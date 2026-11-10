@@ -136,28 +136,49 @@ it after a leader change. Its `PACED` state and advancing ticks establish restor
 
 ## Creating Entities From Forms
 
-The top bar's **Create** menu opens keyboard-accessible forms for domains, users, resource
-catalogs, schemas, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps, Roto UDFs,
-relays, branches, ingestors, junctions, deduplicators, reorderers, window processors, correlators,
-reingestors, generators, inferencers, WASM processors, emitters, and subscriptions. The resource
-group in the sidebar also provides a contextual create action. A form keeps its unfinished draft
-when it closes, restores focus to the action that opened it, reports validation and server
-failures inline, and shows the canonical Plexus statement before submission.
+The top bar's **Create** menu opens keyboard-accessible forms for domains, placement rules, users,
+resource catalogs, schemas, wire schemas, branches, relays, subscriptions, codecs, signaling
+protocols, clients, VHOSTs, endpoints, hash maps, Roto UDFs, ingestors, emitters, junctions,
+deduplicators, reorderers, window processors, correlators, reingestors, generators, inferencers,
+and WASM processors: every current creation statement, as [Creation Coverage](#creation-coverage)
+lists. Contextual actions open the same forms in the selected domain: the **＋** beside the
+**Schemas**, **Wire Schemas**, **Codecs**, **Clients**, **Vhosts** and **Endpoints** sidebar
+headings, whose wire-schema action asks for the JSON, CBOR or AVRO format; the resource group's
+**Create resource in this domain**; and the execution graph's **PLACE** and **SUBSCRIBE** item
+actions. A form keeps its unfinished draft when it closes, restores focus to the action that opened
+it, reports validation and server failures inline, and shows the canonical Plexus statement before
+submission.
 An expression typed into a form, such as a filter, a `WHERE` predicate, an assigned value or an
 invocation argument, reads exactly as it does in a typed statement: its [string literals](filter-map-functions.md#literals) are verbatim, so a
 backslash is an ordinary character.
-The domain form supports paced and unpaced clocks, period and skew for a paced clock, placement
-policy, and `IF NOT EXISTS`. User and resource forms support their corresponding names and the
-same creation modifier.
+The domain form supports paced and unpaced clocks, period and skew for a paced clock, and
+`IF NOT EXISTS`. User and resource forms support their corresponding names and the same creation
+modifier.
 
-Pace and placement are typed choices supplied by the session server. They are searchable and
-paged independently, and the placement lookup carries the selected pace as a typed dependency.
-Loading and no matches have separate neutral messages. A missing prerequisite, such as a captured
+Pace and placement policy are typed choices supplied by the session server. They are searchable and
+paged independently, and neither depends on another selection. Loading and no matches have separate
+neutral messages. A missing prerequisite, such as a captured
 domain or a selected relay for its field list, shows a neutral hint naming what to choose. A stale
 choice page shows a neutral message and **Retry**, which requests a fresh first page. Lookup,
-session-channel, and unreadable-reply failures remain alerts. These states apply to the domain,
-branch, relay, and subscription forms. An edit, dialog close, or replacement session makes an
+session-channel, and unreadable-reply failures remain alerts. These states apply to every form's
+server-backed choices. An edit, dialog close, or replacement session makes an
 older reply ineligible to change the form.
+
+A placement form creates a named [placement rule](placement.md) in its captured domain. Its
+coverage is **Entire domain**, which writes `DOMAIN WIDE`, or **Corridor**, which writes `FROM` and
+`TO` members. Each side's members come from a searchable, paged list of the runtime nodes a rule may
+name, decided by the same rule that validates a placement: ingestors that execute on every cluster
+node, entities that are not runtime nodes, and names that more than one eligible entity shares are
+not offered, and each candidate shows its kind. The list includes runtime nodes staged earlier in
+the attached transaction. Members are kept in the order they were chosen, can be moved and removed,
+and appear once per side; that order is the order the rule writes. All four policies are offered on
+one page, and `RANK` is an optional positive whole number. A side without members, `RANK 0` or a
+rank beyond 64 bits is refused inline before submission. A member selected before the draft moved
+to another domain stays listed but must be selected again, and a member the server no longer has,
+or a policy a covered hop does not permit, is reported inline from the server's refusal while the
+draft stays editable. Switching a corridor to the entire domain keeps its members, so switching back
+restores them. The graph's **PLACE** action on a runtime node or relay opens a new corridor draft
+whose first `FROM` member is that item.
 
 A resource draft captures the selected domain the first time it opens. If the console later
 selects another domain, reopening the retained draft keeps its captured scope and offers **Use
@@ -437,6 +458,40 @@ The canonical preview and submission use the existing command path, including tr
 prefixes, final registry validation and reconnect recovery. See [Emitters](emitters.md) for the
 entity-specific types, sensitivity rules, external provisioning and delivery guarantees.
 
+### Creation Coverage
+
+Every creation family has exactly one form, and the console's dispatch over families is keyed by
+the vocabulary's own Model kinds beside the four statements outside it, so a kind the vocabulary
+gains does not build until the console decides its form. No family uses a whole-command text box
+as its form; where a contract is source text, the form embeds an editor for exactly that text.
+
+| Statement | Form | Variants the form offers | Embedded text editors |
+| --- | --- | --- | --- |
+| `CREATE DOMAIN` | Domain | `UNPACED`, `PACED` with period and skew | — |
+| `CREATE USER` | User | — | — |
+| `CREATE RESOURCE` | Resource | — | — |
+| `CREATE SUBSCRIPTION` | Subscription | a session subscription to one relay | filter expression |
+| `CREATE PLACEMENT` | Placement | `DOMAIN WIDE`, corridor `FROM` / `TO`, all four policies | — |
+| `CREATE SCHEMA` | Schema | every internal scalar type with vector and array layers | — |
+| `CREATE WIRE JSON`, `CBOR`, `AVRO SCHEMA` | Wire schema, one per format | each format's wire types, `STRICT` and `LOOSE` | — |
+| `CREATE BRANCH` | Branch | key schema, TTL, partitions, LRU eviction | — |
+| `CREATE RELAY` | Relay | `UNBRANCHED`, `BRANCHED BY`, materialized state | — |
+| `CREATE ... CODEC` | Codec | declared wire schemas, `SYSLOG`, every JAQ-native format, Protobuf | jaq programs |
+| `CREATE SIGNALING PROTOCOL` | Signaling protocol | JSON, YAML, TOML, XML, CBOR, RAW, Protobuf | jaq programs |
+| `CREATE ... CLIENT` | Client | every connector with a client declaration | `CONFIG` values, passed through |
+| `CREATE VHOST` | VHOST | hostnames, optional TLS binding | — |
+| `CREATE ... ENDPOINT` | Endpoint | `HTTP`, `WEBSOCKETS` with optional signaling | — |
+| `CREATE HASH MAP` | Hash map | resource version, codec and key | — |
+| `CREATE UDF` | Roto UDF | typed arguments and source tests | Roto source |
+| `CREATE ... INGESTOR` | Ingestor | every declared ingestor connector and entity | expressions |
+| `CREATE ... EMITTER` | Emitter | every declared emitter connector and entity | expressions |
+| `CREATE JUNCTION`, `DEDUPLICATOR`, `REORDERER`, `WINDOW PROCESSOR`, `CORRELATOR`, `REINGESTOR`, `GENERATOR`, `INFERENCER`, `WASM PROCESSOR` | One form per processor family | each family's inputs, state, routes and policies | expressions |
+
+The sections above give each form's optional clauses. A transaction can stage a whole graph through
+these forms: each create is queued at its position in the attached transaction, later forms offer
+what earlier ones staged, the transaction inspector supplies the commit basis, and the attached
+transaction and its queued creates survive the console following a new leader.
+
 ## The Execution Graph
 
 ![The execution graph for the quickstart pipeline](images/console-graph.png)
@@ -507,6 +562,9 @@ into the REPL and runs it, so the console never does anything you could not have
 - **SHOW CREATE** — the Plexus that declares it
 - **SUBSCRIBE** — relays only; opens the subscription form described below for that relay, whose
   tab runs the same `CREATE SUBSCRIPTION` the REPL accepts
+- **PLACE** — ingestors, processors, emitters and relays; opens a new corridor placement draft
+  whose first `FROM` member is that item, described in
+  [Creating Entities From Forms](#creating-entities-from-forms)
 
 ### Node Health
 
