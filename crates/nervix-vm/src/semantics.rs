@@ -361,6 +361,7 @@ pub enum BuiltinLowering {
     First,
     Count,
     Nth,
+    ListShape(crate::program::ListShapeFunction),
     Contains,
     Cos,
     StartsWith,
@@ -907,6 +908,7 @@ pub const fn builtin_arm_execution(lowering: &BuiltinLowering) -> ArmExecution {
         | BuiltinLowering::First
         | BuiltinLowering::Count
         | BuiltinLowering::Nth
+        | BuiltinLowering::ListShape(_)
         | BuiltinLowering::Contains
         | BuiltinLowering::StartsWith
         | BuiltinLowering::EndsWith
@@ -1062,6 +1064,7 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
         | BuiltinLowering::First
         | BuiltinLowering::Last
         | BuiltinLowering::Nth
+        | BuiltinLowering::ListShape(_)
         | BuiltinLowering::IsNan
         | BuiltinLowering::IsFinite
         | BuiltinLowering::IsInfinite
@@ -1769,14 +1772,15 @@ fn builtin_output_type(
         }
         BuiltinLowering::First | BuiltinLowering::Last => {
             require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
-            list_element_type(function, &arg_types[0], ListElements::Scalar, span)
+            list_element_type(function, &arg_types[0], ListElements::Any, span)
         }
         BuiltinLowering::Nth => {
             require_builtin_arity_exact(function, arg_types, 2, span.clone())?;
             let index = require_supported_register_type(function, &arg_types[1], span.clone())?;
             require_integral_arg(function, index, span.clone())?;
-            list_element_type(function, &arg_types[0], ListElements::Scalar, span)
+            list_element_type(function, &arg_types[0], ListElements::Any, span)
         }
+        BuiltinLowering::ListShape(function) => function.output_type(arg_types, span.into()),
         BuiltinLowering::Sum => {
             require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
             let element =
@@ -2116,9 +2120,7 @@ fn require_matching_operand_types(
 enum ListElements {
     /// Every supported element, including a nested `ARRAY` or `VEC` value.
     Any,
-    /// Scalar and datetime elements only. `first`, `last` and `nth` select one element out of the
-    /// list's value column, which execution supports only for these elements, so a nested element
-    /// is rejected when the statement is applied instead of failing every batch it meets.
+    /// Ordered scalar and datetime elements only, for comparisons and extrema.
     Scalar,
 }
 

@@ -184,7 +184,8 @@ Feature: Stateful inference state lifetimes
 
   @stateful_inferencer_persistence @deloxide_stress_restore
   Scenario Outline: TTL eviction starts returning inferencer branches from INITIAL
-    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    Given branched relay expiration scan interval is configured as "100ms"
+    And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"

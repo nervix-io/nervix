@@ -1090,7 +1090,36 @@ impl SessionServiceImpl {
                     }),
             };
         }
-        self.inner
+        enum FailurePhase {
+            Preparation,
+            Committed,
+            Abort,
+        }
+        let failure_phase = match &action {
+            RemoteWasmStateResetRuntimeAction::Prepare {
+                published: false, ..
+            } => FailurePhase::Preparation,
+            RemoteWasmStateResetRuntimeAction::Prepare {
+                published: true, ..
+            }
+            | RemoteWasmStateResetRuntimeAction::ActivateCommittedSchedule => {
+                FailurePhase::Committed
+            }
+            RemoteWasmStateResetRuntimeAction::Abort => FailurePhase::Abort,
+        };
+        let failure_context = || match failure_phase {
+            FailurePhase::Preparation => WasmStateResetError::Prepare {
+                processor: processor.clone(),
+            },
+            FailurePhase::Committed => WasmStateResetError::CommittedNotUsable {
+                processor: processor.clone(),
+            },
+            FailurePhase::Abort => WasmStateResetError::Abort {
+                processor: processor.clone(),
+            },
+        };
+        let response = self
+            .inner
             .interconnect
             .request(
                 node,
@@ -1103,17 +1132,13 @@ impl SessionServiceImpl {
                     action,
                 },
             )
-            .await
-            .change_context_lazy(|| WasmStateResetError::CommittedNotUsable {
-                processor: processor.clone(),
-            })?
-            .result
-            .map_err(|failure| {
-                Report::new(WasmStateResetError::CommittedNotUsable {
-                    processor: processor.clone(),
-                })
-                .attach_printable(failure)
-            })
+            .await;
+        match response {
+            Ok(response) => response
+                .result
+                .map_err(|failure| Report::new(failure).change_context(failure_context())),
+            Err(error) => Err(error.change_context(failure_context())),
+        }
     }
 
     pub(in crate::application) async fn handle_wasm_state_reset_runtime_request(
