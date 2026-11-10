@@ -86,6 +86,7 @@ def main() -> int:
     wall_time_owners = {
         ROOT / "crates/models/src/timestamp.rs",
         ROOT / "src/application/domain_clock.rs",
+        ROOT / "src/application/licensing/clock.rs",
         ROOT / "src/cluster.rs",
         # A joining node bounds its clock's skew to each peer it handshakes with.
         ROOT / "src/cluster/prerequisites.rs",
@@ -171,6 +172,7 @@ def main() -> int:
         ROOT / "crates/plexus/src/parser_support.rs",
         ROOT / "crates/plexus/src/statement.rs",
         ROOT / "src/application/domain_clock.rs",
+        ROOT / "src/application/licensing/clock.rs",
         ROOT / "src/runtime/domain_clock.rs",
         ROOT / "src/runtime/ingestion_time.rs",
         ROOT / "src/runtime/ingestor_quiesce.rs",
