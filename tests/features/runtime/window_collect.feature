@@ -271,6 +271,10 @@ Feature: Window collection of retained values
       key={"tenant":"east"} | "values":["x","xxx"]
       """
     And within "30s" client "reader" sees window "history_window" hold 1 rows
+    And within "30s" client "reader" sees window "history_window" section "rows" rows matching
+      """
+      {"branch":{"tenant":"west"},"fields":{"tenant":"west","value":"xx","sequence":0,"argument_0":"xx"}}
+      """
     And the last processor state section "rows" rows match
       """
       {"branch":{"tenant":"west"},"fields":{"tenant":"west","value":"xx","sequence":0,"argument_0":"xx"}}
