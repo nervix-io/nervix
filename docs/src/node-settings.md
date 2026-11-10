@@ -91,6 +91,116 @@ The independent capability controller refreshes them on the existing half-second
 cadence, including when another domain's leader reconciliation is busy. This separates committed
 capacity from its local adoption without a second configuration authority.
 
+## Transport, Resolver And Database Capacities
+
+These are Nervix node capabilities. Provision them as server options, or with the matching
+`NERVIX_` environment variable formed by uppercasing the option and replacing hyphens with
+underscores. Restart a node to change its claim; `DESCRIBE CLUSTER` reports the committed claim
+of each live incarnation, including its interconnect, DNS, database and consensus values.
+The startup log records the same resolved values. They change local capacity and pacing,
+without adding a prerequisite or changing graph acceptance.
+
+| Server option | Default | Meaning |
+| --- | --- | --- |
+| `--interconnect-max-peers` | 64 | Other node identities this transport can retain |
+| `--interconnect-concurrent-handshakes` | 32 | Concurrent transport handshakes |
+| `--interconnect-incoming-queue-capacity` | 1,024 | General request and relay admission capacity |
+| `--interconnect-request-quota` | Derived | Independent ordinary and append reserves: two requests per declared peer, bounded by the incoming queue |
+| `--interconnect-stream-receive-window` | 64 KiB | Advertised HTTP/2 receive credit per non-bulk stream |
+| `--interconnect-connection-receive-window` | 256 KiB | Advertised HTTP/2 receive credit per non-bulk connection |
+| `--interconnect-connection-setup-timeout` | 5s | One DNS, TCP, TLS and binding budget |
+| `--interconnect-request-timeout` | 10s | Transport request budget and the base of typed RPC deadlines |
+| `--interconnect-progress-timeout` | 5s | Time without transfer progress |
+| `--interconnect-reconnect-backoff` | 200ms | First reconnect delay |
+| `--interconnect-max-reconnect-backoff` | 5s | Reconnect ceiling, at least the first delay |
+| `--interconnect-reconnect-jitter-permille` | 0 | Downward jitter in thousandths, from 0 through 1,000 |
+| `--dns-cache-entries` | 4,096 | Cached name/type answers |
+| `--dns-positive-max-ttl` | 1h | Positive DNS TTL ceiling |
+| `--dns-negative-max-ttl` | 30s | Negative DNS TTL ceiling |
+| `--dns-hook-lookup-budget` | 30s | Lookup budget for client libraries without an operation deadline |
+| `--dns-address-family-policy` | `dual-stack` | DNS queries: `dual-stack`, `ipv4` or `ipv6` |
+| `--dns-trust-negative-answers` | `true` | Trust a name server's negative response without asking the next server |
+| `--database-cache-bytes` | 32 MiB | Node database cache |
+| `--database-journal-bytes` | 512 MiB | Node database journal capacity, at least 64 MiB |
+| `--database-workers` | Derived | Available CPU count capped at four; one when unknown |
+| `--raft-database-cache-bytes` | 32 MiB | Dedicated consensus database cache |
+| `--raft-database-journal-bytes` | 512 MiB | Consensus database journal capacity, at least 64 MiB |
+| `--raft-database-workers` | Derived | Same CPU derivation, independently overridable |
+
+Counts, receive windows and deadlines must be positive and fit their engines. HTTP/2 windows
+are at most 2³¹−1 bytes. The options are validated before opening stores or binding listeners.
+Database cache capacities count alongside executor budgets in the startup memory check.
+
+Connection capacity derives from both directions of every pool: twelve connections per declared
+peer, 768 by default. Watermark capacity is eight times the incoming queue. Health-probe fan-out
+and DNS lookup concurrency each equal `interconnect-max-peers`. Completion reserves are at least
+one and otherwise one per sixteen peers, bounded by the incoming queue.
+
+The default ordinary and append request reserves are now 128, replacing eight for the whole node.
+An append stream retains its admission throughout its lifetime, so eight cannot serve nine
+followers. Liveness admission increases from 32 to 64 with the default peer count. Each traffic
+reserve remains independent; a full general queue cannot consume health or cancellation capacity.
+An explicit lower request quota is reported as configured and refusal is a typed capacity outcome.
+
+Typed RPCs derive their deadlines from the request budget: control one tenth, coordination one
+fifth, setup one half, ordinary requests one, snapshot operations three, checkpoint transfers six,
+and recovery twelve. A caller's remaining operation deadline still governs explicitly bounded
+work. The application-health probe instead follows the running cluster liveness policy below.
+
+Transport ping and application-health budgets follow the installed, Raft-committed
+`NODE_UNAVAILABILITY_TIMEOUT`: ping interval one half, ping timeout one quarter and probe timeout
+one tenth. At `4s`, `DESCRIBE CLUSTER` shows `ping-interval=2s ping-timeout=1s
+probe-timeout=400ms`. Installing a revision updates established HTTP/2 connections as well as
+future probes. A policy update adjusts an outstanding ping's deadline while retaining that ping.
+The per-node line derives from its published running revision, so an unapplied commit is not
+presented as installed.
+
+Relay reconciliation retains channels for twice the host's total admission bound and sweeps at
+one tenth of that retention: 600s and 60s under the current 300s host contract. These are
+projections of the host's one policy input, without independent flags. An idle sender rotates its
+channel at the host bound, before its receiver can forget the watermark. The runtime settings
+owner retains authority over host admission and acknowledgement cadence.
+
+### Consensus Capacities
+
+These options have the same node-capability change procedure and environment-variable convention.
+
+| Server option | Default |
+| --- | --- |
+| `--raft-append-batch-entries` | 256 |
+| `--raft-outstanding-append-batches` | 16 |
+| `--raft-outstanding-append-bytes` | 16 MiB |
+| `--raft-append-idle-bound` | 5s |
+| `--raft-snapshot-transfer-timeout` | 30s |
+| `--raft-membership-mutation-timeout` | 10s |
+| `--raft-retention-interval` | 5s |
+| `--raft-retention-admission-timeout` | 30s |
+| `--raft-purge-batch-entries` | 1 |
+| `--raft-api-channel-capacity` | 65,536 |
+| `--raft-notification-channel-capacity` | 65,536 |
+| `--raft-state-machine-channel-capacity` | 1,024 |
+| `--raft-api-batch-capacity` | 4,096 |
+| `--raft-event-capacity` | 256 |
+| `--raft-replication-backoff` | 200ms |
+| `--raft-replication-backoff-maximum` | 1s |
+| `--raft-membership-step-down-delay` | 150ms |
+
+The append byte window must hold the executor's largest replication batch. A stream stalls only
+when it has outstanding work and neither receives an answer nor sends accepted bytes throughout
+the idle bound. Heartbeat response waits keep their lease budget; they do not borrow the data
+stream's storage deadline.
+
+The duration options in this table use positive whole milliseconds and reject fractions rather than
+rounding the configured value in the engine.
+The default replication retry series remains 200ms, 400ms, 800ms, then 1s at its ceiling.
+
+Retention admission polls at the smaller of the retention interval divided by 100 and its
+admission timeout divided by 600, with a one-millisecond engine floor: 50ms by default. Snapshot
+replication lag is twice the snapshot entry threshold, saturating only at the integer ceiling
+and remaining strictly greater than that threshold; the threshold cannot be `u64::MAX`.
+Snapshot chunks follow the executor's bulk chunk bound. The replication chapter owns durability,
+whole-transfer deadlines and the explicit maintained OpenRaft configuration.
+
 ## Permanent Cluster Identity
 
 The first leader commits a permanent UUID and signing key for the cluster. `DESCRIBE CLUSTER;`
@@ -193,7 +303,8 @@ It refuses to start at the first check that fails, exiting with status `1` and
    hierarchy, or its physical memory when no group limit is smaller. It derives the execution
    settings, client byte credit, omitted receive limits and memory-pressure watermarks from these
    capacities. Every memory pool counts once, including independent active state reads and retained
-   state-read cache. Their total plus producer and consumer node credit must fit known memory.
+   state-read cache. Their total plus producer and consumer node credit and the configured node and
+   consensus database caches must fit known memory.
    A failed detector leaves capacity unknown and uses the declared capacity-independent defaults.
 3. It creates its database directory and its temporary directory when they are absent, proves each
    writable with a probe file it removes again, and measures the total size of the volume each
@@ -799,6 +910,13 @@ one millisecond and observe the refusal naming the settings, and restart a node 
 three-node cluster with such a setting, through the harness step that names a setting for one
 node, before restarting it with a valid one. Converting and validating the options takes no lock
 and adds no lifecycle path, so the deadlock detector has nothing of it to observe.
+
+The relay-capability scenarios preserve both concrete branches, exactly-once output and confirmed
+acknowledgements across raised and lowered receive bounds. The oversized-row case observes both
+branch refusals before submitting its fitting batch. A producer's first negative acknowledgement
+does not establish that every branch buffer has flushed. Controlled examples stagger the branch
+buffers' deadlines to exercise that distinction, while keeping the same subsequent delivery and
+producer-completion assertions.
 
 The prerequisite record, its compatibility rule, its gossip text and the order `DESCRIBE CLUSTER`
 lists it in have unit tests beside the record, and the record's gossip text has a registered Bolero

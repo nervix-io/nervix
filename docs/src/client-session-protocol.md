@@ -1762,6 +1762,10 @@ message. The four outcomes keep the boundary's four facts apart:
   unresolved, `OwnerLost` when the node that executes it, or the connection to that node, was lost.
 
 A transport receipt is never an outcome, and a reply is never sent before the outcome is decided.
+`Rejected` can be decided when one branch's acknowledgement fails, while another branch of the
+same submission still holds buffered work. It is not a flush or drain barrier. Later submissions
+follow the configured route buffering too, so their rows can share a branch buffer with those
+remaining rows.
 The session never replays a batch: the client decides, and only a temporary refusal is safe to send
 again unchanged.
 

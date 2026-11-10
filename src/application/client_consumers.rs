@@ -64,7 +64,8 @@ impl InterconnectDuplexRequest for OpenConsumerStream {
     const NAME: &'static str = "client_consumer_stream";
     const CLASS: PoolClass = PoolClass::Relay;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Shared;
-    const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+    const SETUP_DEADLINE: nervix_interconnect::RequestDeadline =
+        nervix_interconnect::RequestDeadline::Setup;
 }
 
 #[derive(Debug, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]

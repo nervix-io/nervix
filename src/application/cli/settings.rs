@@ -15,6 +15,18 @@
 
 use std::fmt;
 
+pub(super) fn capability_help<D>(description: &str, default: impl fmt::Display) -> String
+where
+    D: nervix_models::SettingDefinition<Class = nervix_models::NodeCapabilities>,
+{
+    match D::DERIVATION {
+        Some(derivation) => {
+            format!("{description}. Node capability. Default: {default}; {derivation}")
+        }
+        None => format!("{description}. Node capability. Default: {default}"),
+    }
+}
+
 pub(super) fn parameter_seed_help(
     parameter: nervix_models::ClusterParameterKey,
     description: &str,
@@ -135,6 +147,14 @@ use crate::application::{error::AppError, node_settings::NodeSettings};
 #[derive(clap::Args, Debug, Clone, PartialEq)]
 pub struct SettingsArgs {
     #[command(flatten)]
+    pub database: super::database::DatabaseArgs,
+    #[command(flatten)]
+    pub consensus_operations: super::consensus_operations::ConsensusOperationArgs,
+    #[command(flatten)]
+    pub dns: super::dns::DnsArgs,
+    #[command(flatten)]
+    pub interconnect: super::interconnect::InterconnectArgs,
+    #[command(flatten)]
     pub connector_host: super::connector_host::ConnectorHostArgs,
     #[command(flatten)]
     pub engines: super::engines::EngineArgs,
@@ -203,6 +223,14 @@ impl TryFrom<SettingsArgs> for NodeSettings {
             .capacity
             .peer_receive()
             .change_context(AppError::InvalidPeerReceiveSettings)?;
+        let interconnect = args
+            .interconnect
+            .settings()
+            .change_context(AppError::InvalidTransportSettings)?;
+        let dns = args
+            .dns
+            .settings(interconnect.max_peers())
+            .change_context(AppError::InvalidDnsSettings)?;
         let mut runtime = args
             .runtime
             .settings()
@@ -220,9 +248,26 @@ impl TryFrom<SettingsArgs> for NodeSettings {
             .wasm_settings()
             .change_context(AppError::InvalidWasmEngineSettings)?;
         Ok(Self {
+            node_database: args
+                .database
+                .node()
+                .change_context(AppError::InvalidDatabaseSettings)?,
+            consensus_database: args
+                .database
+                .consensus()
+                .change_context(AppError::InvalidDatabaseSettings)?,
+            dns,
+            consensus_operations: args
+                .consensus_operations
+                .settings()
+                .change_context(AppError::InvalidConsensusOperations)?,
             parameter_seeds,
+            interconnect,
             raft,
-            raft_retention: args.consensus.retention(),
+            raft_retention: args
+                .consensus
+                .retention()
+                .change_context(AppError::InvalidConsensusOperations)?,
             membership,
             scheduling: args.scheduling.settings(),
             runtime,
@@ -246,6 +291,18 @@ impl TryFrom<SettingsArgs> for NodeSettings {
 impl From<&NodeSettings> for SettingsArgs {
     fn from(settings: &NodeSettings) -> Self {
         Self {
+            database: super::database::DatabaseArgs::from_settings(
+                &settings.node_database,
+                &settings.consensus_database,
+            ),
+            consensus_operations:
+                super::consensus_operations::ConsensusOperationArgs::from_settings(
+                    &settings.consensus_operations,
+                ),
+            dns: super::dns::DnsArgs::from_settings(&settings.dns),
+            interconnect: super::interconnect::InterconnectArgs::from_settings(
+                &settings.interconnect,
+            ),
             connector_host: super::connector_host::ConnectorHostArgs::from_settings(
                 &settings.runtime.connector_host,
             ),
@@ -284,7 +341,11 @@ impl SettingsArgs {
         self.connector_host.render(&mut command_line);
         self.engines.render(&mut command_line);
         self.cluster_parameters.render(&mut command_line);
+        self.interconnect.render(&mut command_line);
+        self.dns.render(&mut command_line);
         self.consensus.render(&mut command_line);
+        self.consensus_operations.render(&mut command_line);
+        self.database.render(&mut command_line);
         self.membership.render(&mut command_line);
         self.scheduling.render(&mut command_line);
         self.runtime.render(&mut command_line);

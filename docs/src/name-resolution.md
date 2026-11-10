@@ -66,6 +66,11 @@ seam where the Turmoil build substitutes simulated names, as
 
 ## Resolver Lifetime
 
+Resolver construction takes the file-source configuration and the resolved DNS policy as separate
+inputs. The server supplies its node settings; native clients and test fixtures explicitly
+select the declaration defaults. File-source configuration remains a small value in client
+connection options, with no added handle allocation or enlarged shared handle slot.
+
 A node loads its resolver once, at startup, as the last check of its
 [startup preflight](./node-settings.md#the-startup-preflight): after the TLS material of its client
 listeners, and before it binds any listener, reads its interconnect credentials or opens a store.
@@ -744,3 +749,18 @@ keeps its owner and resolver. Replacing a broken transport resolves again under 
 while retained queue URLs, TLS material, pending confirmations and staged commits are not rebuilt.
 RabbitMQ still passively verifies its known destination during recovery under the same connect
 budget, preserving the refusal to write to a queue or exchange that no longer exists.
+
+## Resolver Capacity Settings
+
+The node's declared DNS policy selects cache capacity, positive and negative TTL ceilings,
+DNS address families, negative-answer trust and the client-hook budget. Their server options,
+validation and restart procedure are listed in
+[Node Settings](node-settings.md#transport-resolver-and-database-capacities).
+Concurrent DNS lookups derive from the declared interconnect peer count, 64 by default; waiting
+for a lookup slot still spends the caller's existing operation budget. Hook adapters, including
+Redis, read the budget from their supplied resolver. Literal addresses and hosts-file answers
+retain their resolution order independently of the DNS query-family selection.
+
+The committed incarnation-bound capability record reports the policy loaded for each node.
+A changed file or override takes effect with the next node run; it does not silently replace a
+resolver that existing clients retain.

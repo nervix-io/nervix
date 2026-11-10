@@ -55,7 +55,7 @@ use crate::{
     raft_record::{EntryRecord, LogIdRecord, StoredMembershipRecord, VoteRecord},
     read_key,
     records::{Records, ResourceRecords, ScheduleRecords},
-    replication::{MAX_APPEND_BATCH_ENTRIES, append_batch_target_bytes},
+    replication::append_batch_target_bytes,
     snapshot::{
         KEY_MANIFEST, SealedSnapshot, SectionWriter, SnapshotGenerations, SnapshotManifest,
         SnapshotManifestRecord, SnapshotRetention, SnapshotSection, generation_prefix,
@@ -232,7 +232,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    ClusterState = 25,
+    ClusterState = 27,
 }
 
 #[derive(Debug)]
@@ -729,6 +729,7 @@ impl AppliedRange {
 pub(super) struct StoreState {
     db: Database,
     pub(super) executor: Executor,
+    append_batch_entries: u64,
     admission: WorkingSetAdmission,
     pub(super) faults: StorageFault,
     failed: AtomicBool,
@@ -1427,7 +1428,7 @@ impl StoreInner {
                         (start, end),
                         LogReadLimit::Bounded {
                             bytes: append_batch_target_bytes(&inner.executor),
-                            entries: MAX_APPEND_BATCH_ENTRIES,
+                            entries: inner.append_batch_entries,
                         },
                     )?;
                     let continuation = decoded.continuation;
@@ -1458,8 +1459,12 @@ pub(super) struct FjallStore {
 }
 
 impl FjallStore {
-    pub(super) async fn from_database(db: Database, executor: Executor) -> io::Result<Self> {
-        Self::from_database_with_fault(db, executor, StorageFault::default()).await
+    pub(super) async fn from_database(
+        db: Database,
+        executor: Executor,
+        operations: crate::RaftOperationSettings,
+    ) -> io::Result<Self> {
+        Self::from_database_with_fault(db, executor, StorageFault::default(), operations).await
     }
 
     #[cfg(feature = "testing")]
@@ -1467,14 +1472,16 @@ impl FjallStore {
         db: Database,
         executor: Executor,
         fault: StorageFault,
+        operations: crate::RaftOperationSettings,
     ) -> io::Result<Self> {
-        Self::from_database_with_fault(db, executor, fault).await
+        Self::from_database_with_fault(db, executor, fault, operations).await
     }
 
     async fn from_database_with_fault(
         db: Database,
         executor: Executor,
         fault: StorageFault,
+        operations: crate::RaftOperationSettings,
     ) -> io::Result<Self> {
         let admission = WorkingSetAdmission::new(&executor)?;
         let WorkingSet { reservation, turn } =
@@ -1550,6 +1557,7 @@ impl FjallStore {
                                 shared: Arc::new(StoreState {
                                     db,
                                     executor: store_executor,
+                                    append_batch_entries: *operations.append_batch_entries.value(),
                                     admission,
                                     faults: fault,
                                     failed: AtomicBool::new(false),
@@ -1958,7 +1966,7 @@ impl RaftLogReader<TypeConfig> for FjallLogReader {
                     bounds,
                     LogReadLimit::Bounded {
                         bytes: append_batch_target_bytes(&inner.executor),
-                        entries: MAX_APPEND_BATCH_ENTRIES,
+                        entries: inner.append_batch_entries,
                     },
                 )?;
                 Ok(decoded.entries)

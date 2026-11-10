@@ -541,8 +541,8 @@ changes one part of its entity's body, an envelope clause or the properties, or 
 construction where it stands, including the typed `payload` expression scope and a
 `RESET WASM PROCESSOR ... STATE` that names its processor and scope and takes its domain from
 the transaction, as the step effect and commit plan step keep it too. The database also stores
-incarnation-bound node capability claims under record-family tag `C`. Its state metadata
-requires the current `ClusterState` encoding, 25, including the cluster identity reference,
+incarnation-bound node capability claims under record-family tag `C`, including transport, DNS, database, consensus, engine and connector host capacities. Its state metadata
+requires the current `ClusterState` encoding, 27, including the cluster identity reference,
 committed cluster parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,
@@ -821,3 +821,24 @@ limits as `u64` words and the Model archive. Readers validate the complete decod
 those recorded limits; a permissive node-local default cannot reinterpret the stored policy.
 The consensus state and a backup domain cut carry their own committed policy publication, so
 snapshot/replay and restore validate metadata under the policy captured with that configuration.
+## Declared Engine And Database Capacities
+
+[Node Settings](node-settings.md#consensus-capacities) lists the local consensus capacity and
+pacing options. The composition root supplies them to storage, the append network factory,
+retention and membership operations. The node and dedicated consensus database each receive
+explicit cache, journal and worker options through their existing bounded storage-executor job.
+Automatic journal persistence, full synchronization of every acknowledged Raft append, storage
+ordering, independent databases and orderly shutdown remain unchanged.
+
+The maintained OpenRaft configuration explicitly selects active queue capacities, API/append
+batch bounds, retry backoff, purge size, pre-vote, tick/heartbeat/election operation, leadership
+restoration, removed-member step-down and snapshot policy. Its snapshot chunk bound follows the
+same executor bulk chunk owner as Nervix's transfer path. The library's retained deprecated
+chunk-sender field is not used by Nervix. Replication lag follows twice the snapshot entry threshold
+and remains greater than it. A whole snapshot transfer keeps one configured deadline.
+
+The current capability record includes transport, resolver, database and consensus projections.
+Its larger announcement is boxed within its one command variant, keeping the existing 256-byte
+inline Raft payload guard for all commands. No other Raft command gains a boxing allocation.
+The current keyspace names and interconnect fingerprint identify this representation. A database
+from another shape must be recreated; there is no alternate reader or migration path.

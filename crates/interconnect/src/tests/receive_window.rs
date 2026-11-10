@@ -33,10 +33,7 @@ struct WindowedBulkStream;
 impl InterconnectStreamRequest for WindowedBulkStream {
     const NAME: &'static str = "test_windowed_bulk_stream";
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    #[inline]
-    fn default_timeout() -> Duration {
-        Duration::from_secs(10)
-    }
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Request;
 }
 
 #[nervix_primitives::test]
@@ -217,10 +214,8 @@ struct UnbackedBulkStream;
 impl InterconnectStreamRequest for UnbackedBulkStream {
     const NAME: &'static str = "test_unbacked_bulk_stream";
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    #[inline]
-    fn default_timeout() -> Duration {
-        Duration::from_millis(500)
-    }
+    const DEADLINE: crate::RequestDeadline =
+        crate::RequestDeadline::Explicit(Duration::from_millis(500));
 }
 
 /// A node whose windows are all held sends no further bulk request: the request waits for a

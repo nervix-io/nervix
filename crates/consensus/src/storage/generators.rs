@@ -1966,7 +1966,7 @@ pub(super) fn command(arbitrary: &mut Arbitrary<'_>) -> ConsensusCommand {
 fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> ConsensusCommand {
     match variant {
         CommandVariant::AnnounceNodeCapabilities => ConsensusCommand::AnnounceNodeCapabilities {
-            record: node_capability_record(arbitrary),
+            record: Box::new(node_capability_record(arbitrary)),
         },
         CommandVariant::InstallClusterIdentity => ConsensusCommand::InstallClusterIdentity {
             identity: Box::new(crate::cluster_identity::tests::identity(arbitrary)),

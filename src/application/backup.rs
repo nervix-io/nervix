@@ -55,7 +55,6 @@ use nervix_consensus::{
     CommandExecution, ConfigurationCapture, ConsensusError, LeadershipObservation,
 };
 use nervix_execution::{ChargedBytes, Executor, MemoryClass};
-use nervix_interconnect::InterconnectStreamRequest as _;
 use nervix_models::{
     ArchiveDigest, Backup, BackupArchiveSummary, BackupCapture, BackupCut, BackupDomainSummary,
     BackupQuiesceCounters, BackupResources, BackupScope, ClusterNodeName,
@@ -1069,11 +1068,15 @@ impl SessionServiceImpl {
                 }
             }
         };
-        let mut body =
-            nervix_primitives::time::timeout(FetchCapturedSection::default_timeout(), opening)
-                .await
-                .map_err(|_| error("captured section opening exceeded its deadline".to_string()))?
-                .change_context_lazy(failure_context)?;
+        let mut body = nervix_primitives::time::timeout(
+            self.inner
+                .interconnect
+                .stream_request_deadline::<FetchCapturedSection>(),
+            opening,
+        )
+        .await
+        .map_err(|_| error("captured section opening exceeded its deadline".to_string()))?
+        .change_context_lazy(failure_context)?;
         if body.content_length() != section.length {
             return Err(error(
                 "captured section length differs from its inventory".to_string(),
