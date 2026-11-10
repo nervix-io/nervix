@@ -682,14 +682,16 @@ mod tests {
         std::fs::write(&resolver_configuration, "options timeout:1 attempts:1\n")
             .expect("the resolver configuration can be written");
         std::fs::write(&hosts_file, "").expect("the hosts file can be written");
-        let dns = DnsResolver::load(nervix_dns::DnsConfiguration {
-            resolver_configuration,
-            hosts_file,
-            name_servers: nervix_dns::NameServers::Explicit(vec![std::net::SocketAddr::from((
-                [127, 0, 0, 1],
-                53,
-            ))]),
-        })
+        let dns = DnsResolver::load(
+            nervix_dns::DnsConfiguration {
+                resolver_configuration,
+                hosts_file,
+                name_servers: nervix_dns::NameServers::Explicit(vec![std::net::SocketAddr::from(
+                    ([127, 0, 0, 1], 53),
+                )]),
+            },
+            nervix_dns::DnsSettings::default(),
+        )
         .await
         .expect("the fixture configuration is valid");
         (files, dns)

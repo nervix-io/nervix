@@ -10,8 +10,6 @@
     nervix::layer(engine, reason = "owns Kafka start wire contracts")
 )]
 
-use std::time::Duration;
-
 use nervix_models::ClusterNodeIdentity;
 use rkyv::{Archive, Deserialize, Serialize};
 
@@ -60,5 +58,6 @@ impl InterconnectRequest for KafkaStartRequest {
                       of introducing an independent timeout"
         )
     )]
-    const TIMEOUT: Duration = FetchStateCheckpoint::TRANSFER_TIMEOUT;
+    const DEADLINE: crate::RequestDeadline =
+        <FetchStateCheckpoint as crate::InterconnectStreamRequest>::DEADLINE;
 }

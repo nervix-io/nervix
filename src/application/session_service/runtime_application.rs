@@ -160,6 +160,7 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                 }
             }
             cluster.publish_cluster_parameters(parameters, false).await;
+            interconnect.install_cluster_parameters(parameters.values);
             runtime.install_cluster_parameters(parameters.values);
             registry.install_cluster_parameters(parameters.values);
             #[cfg(feature = "testing")]

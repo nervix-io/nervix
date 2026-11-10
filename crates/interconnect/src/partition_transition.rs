@@ -19,8 +19,6 @@
     )
 )]
 
-use std::time::Duration;
-
 use nervix_models::{
     BranchKeyFingerprint, BranchName, DomainName, NodeRef, PartitionEpochNumber,
     RemoteRuntimeField, RemoteRuntimeRecordMetadata, Timestamp, Unit,
@@ -28,7 +26,7 @@ use nervix_models::{
 use rkyv::{Archive, Deserialize, Serialize};
 
 use crate::{
-    InterconnectRequest, RemoteOperationFailure, RequestSubquota,
+    InterconnectRequest, RemoteOperationFailure, RequestDeadline, RequestSubquota,
     runtime_state::{StatePlacementEnvelope, StateSnapshotEnvelope},
 };
 
@@ -167,7 +165,7 @@ impl InterconnectRequest for PartitionTransitionRequest {
     const SUBQUOTA: RequestSubquota = RequestSubquota::Shared;
     /// A release stops the key's branch, which drains its pending work and persists its final
     /// state within the branch's shutdown grace, before the answer can describe that state.
-    const TIMEOUT: Duration = Duration::from_secs(10);
+    const DEADLINE: RequestDeadline = RequestDeadline::Request;
 }
 
 #[cfg(all(test, not(any(feature = "shuttle", feature = "turmoil"))))]

@@ -16,8 +16,6 @@
     )
 )]
 
-use std::time::Duration;
-
 use nervix_models::{
     CommandExecutionReference, CoordinationIdentity, DomainName, ModelName, RemoteRuntimeField,
     WasmSavedStateRejection, WasmStateResetReason, WasmStateResetScope,
@@ -107,7 +105,7 @@ impl InterconnectRequest for WasmStateResetRuntimeRequest {
     const NAME: &'static str = "wasm_state_reset_runtime";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Admission;
-    const TIMEOUT: Duration = Duration::from_secs(60);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -120,7 +118,7 @@ impl InterconnectRequest for CoordinateWasmStateResetRequest {
     const NAME: &'static str = "coordinate_wasm_state_reset";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Admission;
-    const TIMEOUT: Duration = Duration::from_secs(120);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Recovery;
 }
 
 impl InterconnectRequest for RecoverWasmProcessorStateRequest {
@@ -129,5 +127,5 @@ impl InterconnectRequest for RecoverWasmProcessorStateRequest {
     const NAME: &'static str = "recover_wasm_processor_state";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Admission;
-    const TIMEOUT: Duration = Duration::from_secs(120);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Recovery;
 }
