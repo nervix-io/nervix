@@ -1053,7 +1053,7 @@ fn transaction_target(arbitrary: &mut Arbitrary<'_>) -> CommandExecutionTransact
 fn transaction_request_operation(
     arbitrary: &mut Arbitrary<'_>,
 ) -> CommandExecutionTransactionOperation {
-    match arbitrary.entropy().byte() % 3 {
+    match arbitrary.entropy().byte() % 4 {
         0 => {
             let request_reference = arbitrary.execution_reference();
             let expected_position = any_count(arbitrary);
@@ -1064,7 +1064,13 @@ fn transaction_request_operation(
         1 => CommandExecutionTransactionOperation::Commit {
             expected_preview: optional(arbitrary, Arbitrary::transaction_preview_identity),
         },
-        _ => CommandExecutionTransactionOperation::Revert,
+        2 => CommandExecutionTransactionOperation::Revert,
+        _ => CommandExecutionTransactionOperation::RefuseUnqueueable {
+            statement_label: arbitrary
+                .entropy()
+                .pick(["CREATE USER", "CREATE DOMAIN", "BACKUP"])
+                .to_owned(),
+        },
     }
 }
 

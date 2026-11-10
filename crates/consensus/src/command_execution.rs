@@ -214,6 +214,10 @@ impl CommandExecutionTransactionTarget {
 )]
 pub enum CommandExecutionTransactionOperation {
     Queue(Box<TransactionStatementRequest>),
+    /// A statement refused before retaining its source or Model, after preceding operations run.
+    RefuseUnqueueable {
+        statement_label: String,
+    },
     Commit {
         /// The whole-transaction preview the requesting client expected this commit to apply.
         /// Absent when the request itself opened the transaction or appended to it, because

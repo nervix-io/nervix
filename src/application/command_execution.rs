@@ -349,12 +349,23 @@ impl PersistentCommandRequest {
                             PersistentCommandRequestError::NonServerTransactionStatement,
                         ));
                     };
-                    if !is_queueable_transaction_statement(statement) {
+                    if matches!(
+                        statement,
+                        Statement::ActivateLicense(_) | Statement::RefreshLicense(_)
+                    ) {
                         return Err(Report::new(
                             PersistentCommandRequestError::UnqueueableStatement {
                                 statement: transaction_statement_label(statement),
                             },
                         ));
+                    }
+                    if !is_queueable_transaction_statement(statement) {
+                        durable_operations.push(
+                            CommandExecutionTransactionOperation::RefuseUnqueueable {
+                                statement_label: transaction_statement_label(statement).to_owned(),
+                            },
+                        );
+                        continue;
                     }
                     let Some(position) = command.expected_transaction_position else {
                         return Err(Report::new(
@@ -1682,6 +1693,57 @@ mod tests {
     }
 
     #[test]
+    fn unqueueable_user_creation_keeps_only_the_refusal_and_following_operation() {
+        let operation = SessionCommandOperation::Queue(PendingSessionCommand {
+            request_reference: CommandExecutionReference::parse("transaction.request")
+                .assured("the reference is valid"),
+            expected_transaction_position: Some(0),
+            source: "CREATE USER operator WITH PASSWORD 'fixture-password'".to_owned(),
+            statement: ClientStatement::Server(Statement::CreateUser(CreateStatement::new(
+                CreateUser {
+                    name: UserName::parse("operator").assured("the name is valid"),
+                    password: "fixture-password".to_owned(),
+                },
+                false,
+            ))),
+            domain: Some(domain()),
+        });
+        let request = PersistentCommandRequest::transaction(
+            &[
+                operation,
+                SessionCommandOperation::Commit {
+                    expected_preview: None,
+                },
+            ],
+            domain(),
+            "BEGIN; CREATE USER operator WITH PASSWORD 'fixture-password'; COMMIT",
+            None,
+            CommandExecutionTransactionTarget::New {
+                id: "fixture".to_owned(),
+                activity: nervix_consensus::TransactionActivity::from_timeout(
+                    Timestamp::from_unix_nanos(1),
+                    Duration::from_secs(30),
+                ),
+            },
+        )
+        .assured("the request preserves the transaction prefix and its refusal");
+        let PersistentCommandRequestBody::Transaction(request) = request.body else {
+            panic!("the request is a transaction")
+        };
+        assert_eq!(
+            request.operations,
+            vec![
+                CommandExecutionTransactionOperation::RefuseUnqueueable {
+                    statement_label: "CREATE USER".to_owned()
+                },
+                CommandExecutionTransactionOperation::Commit {
+                    expected_preview: None
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn durable_transaction_preparation_rejects_credentials_before_retaining_a_body() {
         let statements = [
             Statement::ActivateLicense(nervix_models::ActivateLicense {
@@ -1689,13 +1751,6 @@ mod tests {
                 license_key: "fixture-secret".to_owned(),
             }),
             Statement::RefreshLicense(nervix_models::RefreshLicense),
-            Statement::CreateUser(CreateStatement::new(
-                CreateUser {
-                    name: UserName::parse("operator").assured("fixture user name is valid"),
-                    password: "fixture-password".to_owned(),
-                },
-                false,
-            )),
         ];
         for statement in statements {
             let operation = SessionCommandOperation::Queue(PendingSessionCommand {

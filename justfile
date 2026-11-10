@@ -534,6 +534,14 @@ test-licensing-owners *args: build-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-server --lib -- licensing:: {{ quote(args) }}
 
+# Verify durable transaction refusal projection and the preceding BEGIN through their owners.
+test-command-transaction-owners *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-server --lib application::command_execution::tests:: -- {{ quote(args) }}
+    cargo test --package nervix-server --lib application::transaction::tests::process_command_rejects_domain_and_user_creation_inside_a_transaction -- --exact {{ quote(args) }}
+
 # Free-policy and quota checks use the native session client.
 test-licensing-free *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash
@@ -4556,6 +4564,11 @@ toolchains-install:
 # unit and documentation tests. The walk itself is a separate gate, `plexus-completion-walk`.
 test-plexus *args:
     cargo test --package nervix-plexus --package nervix-plexus-format --all-targets -- {{ args }}
+
+# Keep the lexer and generated identifier domain in agreement through their production owners.
+test-plexus-keywords:
+    cargo test --package nervix-plexus --lib lexer::tests::the_generators_spell_a_name_like_every_keyword -- --exact
+    cargo test --package nervix-arbitrary --lib tests::a_name_spells_every_keyword -- --exact
 
 # Verify the backup and restore completion clauses and their public suggestion ordering.
 test-plexus-backup-completion:
