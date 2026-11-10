@@ -227,6 +227,12 @@ impl EmitterUnitPlan {
     }
 }
 
+/// The planned inputs of an emitter and the Arrow schema they share.
+struct DecidedInputs {
+    inputs: Vec<EmitterInputPlan>,
+    schema: StdArc<arrow_schema::Schema>,
+}
+
 /// The units of one input relay that one unit of an emitter reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EmitterInputUnits {
@@ -269,6 +275,52 @@ impl EmitterExecutionPlan {
     /// Whether `unit` serves no unit of any input relay, so it runs nothing.
     pub(crate) fn is_idle(&self, unit: Unit) -> bool {
         self.units.is_idle(unit, &self.inputs)
+    }
+
+    /// The planned inputs of `emitter` in written order, with their source filters, and the
+    /// schema they share.
+    fn decide_inputs(
+        emitter: &CreateEmitter,
+        activation: &DomainActivationPlan,
+    ) -> error_stack::Result<DecidedInputs, EmitterExecutionPlanError> {
+        let mut source_filters = BTreeMap::new();
+        for source_filter in emitter.from.where_clauses() {
+            source_filters.insert(&source_filter.relay, &source_filter.where_clause);
+        }
+        let mut inputs = Vec::with_capacity(emitter.from.relays().len());
+        let mut input_schema = None;
+        for relay in emitter.from.relays() {
+            let planned = activation.relays.get(relay).ok_or_else(|| {
+                Report::new(EmitterExecutionPlanError::MissingRelay {
+                    emitter: emitter.name.clone(),
+                    relay: relay.clone(),
+                })
+            })?;
+            if input_schema.is_none() {
+                input_schema = Some(planned.schema.arrow_schema());
+            }
+            let from_where = match source_filters.get(relay) {
+                Some(expression) => Some(LoweredFilter::input(expression).change_context(
+                    EmitterExecutionPlanError::SourceFilter {
+                        emitter: emitter.name.clone(),
+                        relay: relay.clone(),
+                    },
+                )?),
+                None => None,
+            };
+            inputs.push(EmitterInputPlan {
+                relay: relay.clone(),
+                from_where,
+                retention: planned.retention,
+                partitions: planned.branching.partitions(),
+            });
+        }
+        let schema = input_schema.ok_or_else(|| {
+            Report::new(EmitterExecutionPlanError::MissingInput {
+                emitter: emitter.name.clone(),
+            })
+        })?;
+        Ok(DecidedInputs { inputs, schema })
     }
 
     /// The unit plan the scheduled `units` of `emitter` form, refused unless they are exactly the
@@ -341,43 +393,10 @@ impl EmitterExecutionPlan {
             emitter: emitter.name.clone(),
         })?;
 
-        let mut source_filters = BTreeMap::new();
-        for source_filter in emitter.from.where_clauses() {
-            source_filters.insert(&source_filter.relay, &source_filter.where_clause);
-        }
-        let mut inputs = Vec::with_capacity(emitter.from.relays().len());
-        let mut input_schema = None;
-        for relay in emitter.from.relays() {
-            let planned = activation.relays.get(relay).ok_or_else(|| {
-                Report::new(EmitterExecutionPlanError::MissingRelay {
-                    emitter: emitter.name.clone(),
-                    relay: relay.clone(),
-                })
-            })?;
-            if input_schema.is_none() {
-                input_schema = Some(planned.schema.arrow_schema());
-            }
-            let from_where = match source_filters.get(relay) {
-                Some(expression) => Some(LoweredFilter::input(expression).change_context(
-                    EmitterExecutionPlanError::SourceFilter {
-                        emitter: emitter.name.clone(),
-                        relay: relay.clone(),
-                    },
-                )?),
-                None => None,
-            };
-            inputs.push(EmitterInputPlan {
-                relay: relay.clone(),
-                from_where,
-                retention: planned.retention,
-                partitions: planned.branching.partitions(),
-            });
-        }
-        let input_schema = input_schema.ok_or_else(|| {
-            Report::new(EmitterExecutionPlanError::MissingInput {
-                emitter: emitter.name.clone(),
-            })
-        })?;
+        let DecidedInputs {
+            inputs,
+            schema: input_schema,
+        } = Self::decide_inputs(emitter, activation)?;
         let scheduled = nodes
             .get(&NodeRef::new(ModelKind::Emitter, &emitter.name))
             .ok_or_else(|| {

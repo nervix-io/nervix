@@ -855,4 +855,6 @@ pub fn suggest_alter_emitter(input: &str, cursor: usize) -> Vec<String> {
 mod conformance_tests;
 
 #[cfg(test)]
+mod instances_tests;
+#[cfg(test)]
 mod tests;

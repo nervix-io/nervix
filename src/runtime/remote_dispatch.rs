@@ -33,7 +33,7 @@ use super::{
     remote_ack_watch_charge::{RemoteAckWatchCharge, RemoteAckWatchHold},
     *,
 };
-use crate::{emitter_execution_plan::EmitterInputUnits, runtime_schema::batch_payload_bytes};
+use crate::runtime_schema::batch_payload_bytes;
 
 pub(super) const REMOTE_RELAY_INSTANTIATION_WAIT: Duration = Duration::from_secs(5);
 
@@ -959,7 +959,7 @@ pub(super) fn push_remote_runtime_consumer(
     push_remote_scoped_runtime_consumer(consumers, node_id, relay, mode, None);
 }
 
-fn push_remote_scoped_runtime_consumer(
+pub(super) fn push_remote_scoped_runtime_consumer(
     consumers: &mut Vec<RemoteRuntimeConsumer>,
     node_id: &ClusterNodeName,
     relay: &RelayName,
@@ -1745,55 +1745,7 @@ impl Runtime {
                 }
             }
         }
-        // A single-unit emitter reads every unit of its inputs; an instance reads only the relay
-        // units it serves, on the node that runs it.
-        for emitter in revision.emitters.emitters() {
-            let node = revision
-                .nodes
-                .get(&NodeRef::new(
-                    ModelKind::Emitter,
-                    ModelName::from(&emitter.name),
-                ))
-                .assured("the emitter plans were decided from this same schedule");
-            for unit in node.units.keys().copied() {
-                let Some(target_node) = node.unit_execution_node(unit) else {
-                    continue;
-                };
-                if target_node == local_node_id {
-                    continue;
-                }
-                for input in &emitter.inputs {
-                    if !owned_relays.contains(&input.relay) {
-                        continue;
-                    }
-                    match emitter.input_units(unit, input) {
-                        EmitterInputUnits::WholeRelay => push_remote_runtime_consumer(
-                            consumers.entry(input.relay.clone()).or_default(),
-                            target_node,
-                            &input.relay,
-                            emitter.mode,
-                        ),
-                        EmitterInputUnits::Units(relay_units) => {
-                            for relay_unit in relay_units {
-                                // An unpartitioned relay's one unit is the whole relay.
-                                let scope = if relay_unit == Unit::SINGLE {
-                                    None
-                                } else {
-                                    Some(relay_unit)
-                                };
-                                push_remote_scoped_runtime_consumer(
-                                    consumers.entry(input.relay.clone()).or_default(),
-                                    target_node,
-                                    &input.relay,
-                                    emitter.mode,
-                                    scope,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        Self::push_emitter_remote_consumers(revision, local_node_id, &owned_relays, &mut consumers);
         for plan in revision.entrypoints.reingestors() {
             let identity = NodeRef::new(ModelKind::Reingestor, ModelName::from(&plan.name));
             let node = revision
