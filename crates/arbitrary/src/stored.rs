@@ -570,7 +570,33 @@ impl Arbitrary<'_> {
     pub fn domain_schedule_of(&mut self, domain: DomainName) -> DomainSchedule {
         let nodes = self.records(Self::scheduled_node);
         let placement_groups = self.records(Self::placement_group);
-        DomainSchedule::new(domain, nodes, placement_groups)
+        let mut partition_epochs = std::collections::BTreeMap::new();
+        for epoch in self.records(Self::branch_partition_epoch) {
+            partition_epochs.insert(self.name::<nervix_models::BranchName>(), epoch);
+        }
+        DomainSchedule::new(domain, nodes, placement_groups).with_partition_epochs(partition_epochs)
+    }
+
+    /// The partition epoch of one branch whose count changed since it was created: a later epoch,
+    /// settled or in a transition from the count before it.
+    pub fn branch_partition_epoch(&mut self) -> nervix_models::BranchPartitionEpoch {
+        let number = self.entropy.boundary_biased(2..=u64::MAX);
+        let number = nervix_models::PartitionEpochNumber::new(
+            std::num::NonZeroU64::new(number).verified("the range above starts at two"),
+        );
+        let partitions = self.branch_partitions();
+        let transition = if self.entropy.flag() {
+            Some(nervix_models::PartitionTransition {
+                previous: self.branch_partitions(),
+            })
+        } else {
+            None
+        };
+        nervix_models::BranchPartitionEpoch {
+            number,
+            partitions,
+            transition,
+        }
     }
 
     /// The authority a leader grants one restore to install a domain's state under: its tenure, the

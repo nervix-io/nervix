@@ -758,10 +758,12 @@ fn relay_state_task_applying_as_it_stops(
             .await
             .expect("the relay's assignment stays authoritative");
     });
+    let (commands, _command_rx) = mpsc::channel(1);
     RelayStateTask {
         shutdown,
         task,
         unit,
+        commands,
     }
 }
 

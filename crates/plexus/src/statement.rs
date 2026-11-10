@@ -35,6 +35,7 @@ pub fn statement_parser<'src>()
             .map(|create| Statement::Create(create.map_body(Model::Placement).map_body(Box::new))),
         crate::describe_deduplicator::describe_deduplicator_parser()
             .map(Statement::DescribeDeduplicator),
+        crate::describe_branch::describe_branch_parser().map(Statement::DescribeBranch),
         crate::describe_domain::describe_domain_parser().map(Statement::DescribeDomain),
         crate::describe_endpoint::describe_endpoint_parser().map(Statement::DescribeEndpoint),
         crate::describe_client::describe_client_parser().map(Statement::DescribeClient),

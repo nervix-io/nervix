@@ -397,11 +397,16 @@ fn branch_channels() -> (ProcessorBranchTask, mpsc::Receiver<ProcessorBranchComm
 }
 
 /// A reorderer unit task that answers an inspection's branch selection as the production one does,
-/// through the production answer from its own registry, which holds `branch` as its unbranched
-/// state, while its restore is pending or once it has installed that branch.
+/// through the production answer from its own registry, which holds `branch` live as its
+/// unbranched state, while its restore is pending or once it has installed that branch.
 fn selecting_unit(branch: ProcessorBranchTask, restore_pending: bool) -> ScheduledNodeTask {
-    let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
-    instances.insert_restored(None, Timestamp::from_unix_nanos(1_000), 7, branch);
+    let mut instances = ProcessorBranches::new();
+    instances.insert_restored(
+        None,
+        Timestamp::from_unix_nanos(1_000),
+        7,
+        ProcessorBranchSlot::Live(branch),
+    );
     let (commands, mut requests) = mpsc::channel(1);
     let task = nervix_primitives::task::spawn(async move {
         while let Some(command) = requests.recv().await {

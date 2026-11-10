@@ -150,11 +150,16 @@ docker_event_verify_window() {
 
 # Closes a window at this instant with a marker and writes the recorded events from FROM_NS through
 # the close that the selector matches to OUTPUT, with the recording's bounds beside it in
-# OUTPUT's .recording.json. Returns 1 when the recording does not cover the window.
+# OUTPUT's .recording.json. Returns 1 when the recording does not cover the window, and 2, writing
+# nothing, when the recording never started.
 docker_event_window() {
     local from_ns="$1"
     local output="$2"
     shift 2
+    if [[ -z "${docker_event_recording_started_ns}" ]]; then
+        printf 'no live Docker event recording started, so none covers %s\n' "${output##*/}" >&2
+        return 2
+    fi
     local to_ns
     to_ns="$(date +%s%N)"
     local name="${output##*/}"
