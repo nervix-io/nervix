@@ -734,3 +734,24 @@ fn stateful_inferencer_serialization_preserves_both_initial_forms() {
         assert_eq!(decoded, processor);
     }
 }
+
+#[test]
+fn an_inferencer_keeps_state_per_key_exactly_when_it_declares_state() {
+    let one = InferencerTensorDimension::Fixed(nonzero!(1u32));
+    let stateless = inferencer(vec![one], vec![one]);
+    assert!(
+        !crate::Model::Inferencer(stateless.clone()).keeps_state_per_key(),
+        "an inferencer without STATE keeps nothing a partition count change moves"
+    );
+    let mut stateful = stateless;
+    stateful.state = vec![InferencerStateBinding {
+        input: "state_in".to_string(),
+        output: "state_out".to_string(),
+        schema: tensor(vec![one]),
+        initial: InferencerStateInitial::Zeros,
+    }];
+    assert!(
+        crate::Model::Inferencer(stateful).keeps_state_per_key(),
+        "an inferencer's declared state is kept per branch key and moves with its key"
+    );
+}
