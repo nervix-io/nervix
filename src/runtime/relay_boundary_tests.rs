@@ -34,34 +34,8 @@ use crate::{
     runtime_schema::{RuntimeValue, test_runtime_row},
 };
 
-/// The branch presence of a relay that is not divided into partitions: its single unit's.
-fn single_presence(services: &RelayBoundaryServices) -> RelayBranchPresence {
-    services
-        .branch_presences
-        .of(Unit::SINGLE)
-        .cloned()
-        .expect("a whole relay has its single unit's presence")
-}
-
-/// Whether the ingress channel a producer of `branch` binds now, on a relay that is not divided
-/// into partitions, is cancelled from the start.
-fn single_ingress_cancelled(services: &RelayBoundaryServices, branch: &Option<BranchKey>) -> bool {
-    services
-        .ingress_slot(branch, Unit::SINGLE)
-        .cancellation()
-        .is_cancelled()
-}
-
-fn relay_metrics(runtime: &Runtime, domain: &DomainName, relay: &RelayName) -> RelayMetricsHandle {
-    runtime.inner.metrics.resolve_relay_metrics(
-        domain,
-        relay,
-        Unit::SINGLE,
-        None,
-        RELAY_BUFFER_DIRECTION_CONCRETE,
-        None,
-    )
-}
+mod fixtures;
+use fixtures::{relay_metrics, single_ingress_cancelled, single_presence};
 
 #[nervix_primitives::test(start_paused = true)]
 async fn runtime_report_chain_detached_relay_delivery_log() {

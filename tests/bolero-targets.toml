@@ -1677,7 +1677,7 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "src/registry/__fuzz__/registry__storage__tests__bolero_registry_archived_models_round_trip/corpus"
+corpus = "src/registry/storage/__fuzz__/registry__storage__tests__bolero_registry_archived_models_round_trip/corpus"
 domain_version = 58
 features = []
 id = "registry-archived-models"
@@ -1686,7 +1686,7 @@ manifest = "Cargo.toml"
 max_input_bytes = 4096
 package = "nervix-server"
 random_iterations = 256
-source = "src/registry/storage.rs"
+source = "src/registry/storage/tests.rs"
 test = "registry::storage::tests::bolero_registry_archived_models_round_trip"
 test_target = "lib"
 
