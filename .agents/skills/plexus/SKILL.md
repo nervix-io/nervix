@@ -96,6 +96,8 @@ For deduplicator keys and retained window state, read [Runtime Nodes → Inspect
 and [Inspect Retained Window State](../../../docs/src/processors.md#inspect-retained-window-state).
 Follow those sections for sensitive argument projection, branch selectors, paging and the distinction
 between retained rows and window metadata; use each processor's `DESCRIBE` for a count summary.
+For inspections while partitions change, also read [Relay → Changing the partition count](../../../docs/src/relay.md#changing-the-partition-count)
+before interpreting a key's partition or retrying a raced inspection.
 
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion

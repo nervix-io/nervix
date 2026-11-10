@@ -359,6 +359,11 @@ impl PersistentCommandRequest {
                             },
                         ));
                     }
+                    let Some(position) = command.expected_transaction_position else {
+                        return Err(Report::new(
+                            PersistentCommandRequestError::MissingTransactionPosition,
+                        ));
+                    };
                     if !is_queueable_transaction_statement(statement) {
                         durable_operations.push(
                             CommandExecutionTransactionOperation::RefuseUnqueueable {
@@ -367,11 +372,6 @@ impl PersistentCommandRequest {
                         );
                         continue;
                     }
-                    let Some(position) = command.expected_transaction_position else {
-                        return Err(Report::new(
-                            PersistentCommandRequestError::MissingTransactionPosition,
-                        ));
-                    };
                     durable_operations.push(CommandExecutionTransactionOperation::Queue(Box::new(
                         nervix_consensus::TransactionStatementRequest {
                             request_reference: command.request_reference.clone(),

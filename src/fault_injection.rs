@@ -1862,6 +1862,64 @@ impl FaultInjection {
         self.arm_command_pause(CommandPausePoint::OwnershipHandoffFlush(domain));
     }
 
+    /// Holds a processor claim after release, before installing its checkpoint.
+    pub fn pause_processor_partition_install(&self, processor: DomainNodeRef) {
+        self.arm_command_pause(CommandPausePoint::ProcessorPartitionInstall(processor));
+    }
+
+    pub async fn wait_for_processor_partition_install(&self, processor: &DomainNodeRef) {
+        self.wait_for_command_pause(&CommandPausePoint::ProcessorPartitionInstall(
+            processor.clone(),
+        ))
+        .await;
+    }
+
+    pub fn release_processor_partition_install(&self, processor: &DomainNodeRef) {
+        self.release_command_pause(&CommandPausePoint::ProcessorPartitionInstall(
+            processor.clone(),
+        ));
+    }
+
+    pub(crate) async fn pause_processor_partition_install_if_armed(
+        &self,
+        domain: &DomainName,
+        processor: &NodeRef,
+    ) {
+        self.pause_command_if_armed(CommandPausePoint::ProcessorPartitionInstall(
+            processor.in_domain(domain),
+        ))
+        .await;
+    }
+
+    /// Holds a processor claim after installation, before asking its holder to forget.
+    pub fn pause_processor_partition_forget(&self, processor: DomainNodeRef) {
+        self.arm_command_pause(CommandPausePoint::ProcessorPartitionForget(processor));
+    }
+
+    pub async fn wait_for_processor_partition_forget(&self, processor: &DomainNodeRef) {
+        self.wait_for_command_pause(&CommandPausePoint::ProcessorPartitionForget(
+            processor.clone(),
+        ))
+        .await;
+    }
+
+    pub fn release_processor_partition_forget(&self, processor: &DomainNodeRef) {
+        self.release_command_pause(&CommandPausePoint::ProcessorPartitionForget(
+            processor.clone(),
+        ));
+    }
+
+    pub(crate) async fn pause_processor_partition_forget_if_armed(
+        &self,
+        domain: &DomainName,
+        processor: &NodeRef,
+    ) {
+        self.pause_command_if_armed(CommandPausePoint::ProcessorPartitionForget(
+            processor.in_domain(domain),
+        ))
+        .await;
+    }
+
     pub async fn wait_for_ownership_handoff_flush_pause(&self, domain: &DomainName) {
         self.wait_for_command_pause(&CommandPausePoint::OwnershipHandoffFlush(domain.clone()))
             .await;
@@ -2798,6 +2856,16 @@ impl FaultInjection {
         pause.wait_until_reached().await;
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "one scenario-owned command pause selects at most one waiting attempt",
+            key = "one armed CommandPausePoint",
+            bound = "one keyed read and conditional removal; one claimed waiter; guards end \
+                     before the test-controlled wait and scenario teardown releases the pause"
+        )
+    )]
     async fn pause_command_if_armed(&self, point: CommandPausePoint) {
         let Some(pause) = self
             .inner

@@ -18,7 +18,7 @@ use std::{net::SocketAddr, time::Duration};
 #[cfg(not(feature = "testing"))]
 use nervix_models::{
     ClusterNodeIncarnation, ClusterNodeName, DomainName, DomainNodeRef, EmitterName, IngestorName,
-    ModelKind, ModelName, RelayName, Unit,
+    ModelKind, ModelName, NodeRef, RelayName, Unit,
 };
 
 #[cfg(not(feature = "testing"))]
@@ -26,6 +26,20 @@ use crate::ConfiguredFaultInjection;
 
 #[cfg(not(feature = "testing"))]
 impl ConfiguredFaultInjection {
+    pub(in crate::runtime) async fn pause_processor_partition_install_if_armed(
+        &self,
+        _domain: &DomainName,
+        _processor: &NodeRef,
+    ) {
+    }
+
+    pub(in crate::runtime) async fn pause_processor_partition_forget_if_armed(
+        &self,
+        _domain: &DomainName,
+        _processor: &NodeRef,
+    ) {
+    }
+
     pub(in crate::runtime) fn wasm_reset_publication_failure_is_enabled(
         &self,
         _domain: &DomainName,
