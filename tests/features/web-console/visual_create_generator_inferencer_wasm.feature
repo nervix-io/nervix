@@ -431,6 +431,79 @@ Feature: Web console visual generator, inferencer and WASM processor creation
       SET total = relay_state.visual_check_state.amount
       """
 
+  @visual_generator_transaction
+  Scenario: A generator offers the materialized relays staged in its transaction on exactly its branch and is queued with them
+    Given a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA visual_tx_event (tenant STRING, amount I64);
+      CREATE SCHEMA visual_tx_total (total I64);
+      CREATE SCHEMA visual_tx_key (tenant STRING);
+      CREATE BRANCH visual_tx_tenant SCHEMA visual_tx_key TTL 5m;
+      CREATE RELAY visual_tx_plain SCHEMA visual_tx_event UNBRANCHED;
+      CREATE RELAY visual_tx_branched_state SCHEMA visual_tx_event BRANCHED BY visual_tx_tenant
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE RELAY visual_tx_totals SCHEMA visual_tx_total UNBRANCHED;
+      """
+    And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
+    When selector ".prompt-row input" is filled with "BEGIN;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".prompt-row" contains "{{domain}} tx"
+    When selector ".prompt-row input" is filled with "CREATE RELAY visual_tx_staged_state SCHEMA visual_tx_event UNBRANCHED WITH MATERIALIZED STATE LAST BY TIMESTAMP;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    And selector ".transaction-indicator" is clicked
+    Then selector ".transaction-inspector .inspector-summary" contains "1 accepted"
+    When selector ".transaction-inspector button[aria-label='Close transaction inspector']" is clicked
+    And selector ".create-menu-button" is clicked
+    And selector ".create-menu [data-create-kind='generator']" is clicked
+    And selector ".create-name" is filled with "visual_tx_generator"
+    And selector ".create-processor-branching [data-branch='unbranched']" is clicked
+    # Only relays with materialized state on exactly the generator's branch are offered, the staged one included.
+    And selector ".create-generator-relay .create-choice-search" is filled with "visual_tx_plain"
+    Then selector ".create-generator-relay [data-value='visual_tx_plain']" does not exist
+    When selector ".create-generator-relay .create-choice-search" is filled with "visual_tx_branched_state"
+    Then selector ".create-generator-relay [data-value='visual_tx_branched_state']" does not exist
+    When selector ".create-generator-relay .create-choice-search" is filled with "visual_tx_staged_state"
+    Then selector ".create-generator-relay [data-value='visual_tx_staged_state']" exists
+    When selector ".create-generator-relay [data-value='visual_tx_staged_state']" is clicked
+    And selector ".create-generator-each" is filled with "250ms"
+    And selector ".create-processor-route-relay .create-choice-search" is filled with "visual_tx_totals"
+    Then selector ".create-processor-route-relay [data-value='visual_tx_totals']" exists
+    When selector ".create-processor-route-relay [data-value='visual_tx_totals']" is clicked
+    And selector ".create-processor-output-fields .create-choice-search" is filled with "total"
+    Then selector ".create-processor-output-fields [data-value='total']" exists
+    When selector ".create-processor-output-fields [data-value='total']" is clicked
+    And selector ".create-generator-state-fields .create-choice-search" is filled with "amount"
+    Then selector ".create-generator-state-fields [data-value='amount']" exists
+    When selector ".create-generator-state-fields [data-value='amount']" is clicked
+    And selector ".create-processor-flush [data-flush='immediate']" is clicked
+    And selector ".create-processor-message-error [data-error='log']" is clicked
+    Then selector ".create-preview" contains "CREATE GENERATOR visual_tx_generator USING MATERIALIZED STATE visual_tx_staged_state EACH 250ms UNBRANCHED"
+    When selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Queued in transaction"
+    When selector ".create-close" is clicked
+    And selector ".transaction-indicator" is clicked
+    Then selector ".transaction-inspector .inspector-summary" contains "2 accepted"
+    When selector ".transaction-inspector button[aria-label='Close transaction inspector']" is clicked
+    And selector ".prompt-row input" is filled with "COMMIT;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".transaction-indicator" eventually disappears
+    When these Plexus commands are executed through the client on the leader node
+      """
+      SHOW CREATE GENERATOR visual_tx_generator;
+      """
+    Then the last command output contains
+      """
+      USING MATERIALIZED STATE visual_tx_staged_state
+      """
+    And the last command output contains
+      """
+      SET total = relay_state.visual_tx_staged_state.amount
+      """
+
   @visual_inferencer_state_validation
   Scenario: An inferencer draft checks tensor typing, keeps itself through an unreadable model file, and creates a stateful model
     Given a 1 node nervix cluster is started
