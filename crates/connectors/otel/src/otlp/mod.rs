@@ -2592,7 +2592,11 @@ mod tests {
     #[nervix_primitives::test]
     async fn grpc_transport_initialization_does_not_require_a_reachable_endpoint()
     -> Result<(), Report<nervix_dns::DnsConfigurationError>> {
-        let dns = nervix_dns::DnsResolver::load(nervix_dns::DnsConfiguration::system()).await?;
+        let dns = nervix_dns::DnsResolver::load(
+            nervix_dns::DnsConfiguration::system(),
+            nervix_dns::DnsSettings::default(),
+        )
+        .await?;
         let transport = OtlpEncoder::transport_from_config(
             &config(&[
                 ("endpoint", "http://127.0.0.1:0"),
@@ -2638,11 +2642,14 @@ mod tests {
         )
         .assured("the fixture resolver configuration can be written");
         std::fs::write(&hosts_file, "").assured("the fixture hosts file can be written");
-        let dns = nervix_dns::DnsResolver::load(DnsConfiguration {
-            resolver_configuration,
-            hosts_file,
-            name_servers: NameServers::Explicit(vec![authority.address()]),
-        })
+        let dns = nervix_dns::DnsResolver::load(
+            DnsConfiguration {
+                resolver_configuration,
+                hosts_file,
+                name_servers: NameServers::Explicit(vec![authority.address()]),
+            },
+            nervix_dns::DnsSettings::default(),
+        )
         .await
         .assured("the fixture DNS configuration is valid");
         let transport = OtlpEncoder::transport_from_config(

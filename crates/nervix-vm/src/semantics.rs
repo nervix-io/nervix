@@ -1028,7 +1028,9 @@ pub fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescriptor> 
         FunctionName::Join => BuiltinLowering::Join,
         FunctionName::Like => BuiltinLowering::Like,
         FunctionName::ILike => BuiltinLowering::ILike,
-        FunctionName::ContainsAny => BuiltinLowering::ContainsAny(ContainsAnyCall::Dynamic),
+        FunctionName::ContainsAny => BuiltinLowering::ContainsAny(ContainsAnyCall::Dynamic {
+            capacity: crate::VmSettings::default().pattern_sets_per_batch(),
+        }),
         FunctionName::NormalizeNfc => BuiltinLowering::NormalizeNfc,
         FunctionName::Array => BuiltinLowering::ArrayConstruct,
         FunctionName::Vec => BuiltinLowering::VecConstruct,

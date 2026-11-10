@@ -925,6 +925,15 @@ impl IngestorRouteTask {
             let key = batch.key.clone();
             let estimated_bytes = batch.estimated_bytes();
             if !self.pending.contains_key(&key) {
+                #[cfg(feature = "testing")]
+                self.runtime_handle
+                    .fault_injection()
+                    .pause_ingestor_branch_buffer_if_armed(
+                        &self.domain,
+                        &self.template.branch.owner.node,
+                        key.as_ref().map(BranchKey::fingerprint),
+                    )
+                    .await;
                 let snapshot = match domain_clock.snapshot() {
                     Ok(snapshot) => snapshot,
                     Err(error) => {

@@ -37,8 +37,8 @@ impl nervix_interconnect::InterconnectRequest for CapabilityAnnouncement {
                       read deadline; it defines no independent numeric policy"
         )
     )]
-    const TIMEOUT: Duration =
-        <wire::RuntimeAdmissionRead as nervix_interconnect::InterconnectRequest>::TIMEOUT;
+    const DEADLINE: nervix_interconnect::RequestDeadline =
+        <wire::RuntimeAdmissionRead as nervix_interconnect::InterconnectRequest>::DEADLINE;
 }
 
 impl Consensus {
@@ -52,7 +52,7 @@ impl Consensus {
                 if request.record.identity.node_id() != context.peer_node_id() {
                     return CapabilityAnnouncementReply::SenderMismatch;
                 }
-                match proposer.inner.client_write(ConsensusCommand::AnnounceNodeCapabilities { record: request.record }).await {
+                match proposer.inner.client_write(ConsensusCommand::AnnounceNodeCapabilities { record: Box::new(request.record) }).await {
                     Ok(response) => match response.data {
                         ConsensusResponse::Applied => CapabilityAnnouncementReply::Committed,
                         ConsensusResponse::Conflict(conflict) => CapabilityAnnouncementReply::Refused(conflict),
@@ -147,7 +147,9 @@ impl Proposer {
         }
         let response = self
             .inner
-            .client_write(ConsensusCommand::AnnounceNodeCapabilities { record })
+            .client_write(ConsensusCommand::AnnounceNodeCapabilities {
+                record: Box::new(record),
+            })
             .await?;
         Self::applied_response(response.data)
     }
@@ -164,6 +166,42 @@ mod tests {
         NodeCapabilityRecord {
             identity: ClusterNodeIdentity::new(node, ClusterNodeIncarnation::new(incarnation)),
             capabilities: nervix_models::NodeCapabilities {
+                interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
+                dns: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
+                    .node_capability_record()
+                    .capabilities
+                    .dns,
+                node_database: nervix_arbitrary::Arbitrary::new(
+                    &[],
+                    nervix_arbitrary::Domain::Vocabulary,
+                )
+                .node_capability_record()
+                .capabilities
+                .node_database,
+                consensus_database: nervix_arbitrary::Arbitrary::new(
+                    &[],
+                    nervix_arbitrary::Domain::Vocabulary,
+                )
+                .node_capability_record()
+                .capabilities
+                .consensus_database,
+                consensus: nervix_arbitrary::Arbitrary::new(
+                    &[],
+                    nervix_arbitrary::Domain::Vocabulary,
+                )
+                .node_capability_record()
+                .capabilities
+                .consensus,
+                engines: nervix_arbitrary::Arbitrary::new(
+                    &[],
+                    nervix_arbitrary::Domain::Vocabulary,
+                )
+                .node_engine_capabilities(),
+                connector_host: nervix_arbitrary::Arbitrary::new(
+                    &[],
+                    nervix_arbitrary::Domain::Vocabulary,
+                )
+                .node_connector_host_capabilities(),
                 cpu_count: NonZeroU64::new(4),
                 memory_bytes: NonZeroU64::new(8 << 30),
                 receive: nervix_interconnect::PeerReceiveSettings::default().bounds(),
@@ -230,6 +268,25 @@ mod tests {
     }
 
     #[test]
+    fn engine_and_connector_claims_change_only_with_the_incarnation() {
+        let first = record(7);
+        let mut state = admitted_state(&first);
+        announce(&mut state, &first);
+        let unchanged = state.clone();
+        let mut changed = first.clone();
+        changed.capabilities.engines.vm_inline_row_limit = 42;
+        changed.capabilities.connector_host.retry_jitter_percent = 20;
+        announce(&mut state, &changed);
+        assert_eq!(state, unchanged);
+        changed.identity = record(8).identity;
+        announce(&mut state, &changed);
+        assert_eq!(
+            state.node_capabilities.get(changed.identity.node_id()),
+            Some(&changed)
+        );
+    }
+
+    #[test]
     fn an_unadmitted_run_cannot_publish_capacity() {
         let mut state = StateMachineData::default();
         announce(&mut state, &record(1));
@@ -243,7 +300,7 @@ mod tests {
         use crate::durable_batch::DurableBatch;
         bolero::check!()
             .with_iterations(128)
-            .with_max_len(256)
+            .with_max_len(1024)
             .for_each(|bytes: &[u8]| {
                 let record = Arbitrary::new(bytes, Domain::Vocabulary).node_capability_record();
                 let encoded = DurableBatch::encode(&record, 4096)

@@ -296,11 +296,13 @@ where
         shutdown: watch::Receiver<bool>,
     ) -> BoxFuture<'static, ()> {
         let Self { connector, policy } = *self;
+        let retry_settings = host.runtime.inner.connector_host.retry;
         Box::pin(run_ingestor_instance_with_retry(
             connector,
             IngestorHost::new(host),
             policy,
             shutdown,
+            retry_settings,
         ))
     }
 }
@@ -1803,6 +1805,7 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
     mut host: IngestorHost,
     policy: BrokerIngestorPolicy,
     mut shutdown: watch::Receiver<bool>,
+    retry_settings: nervix_connector::RetryBackoffSettings,
 ) where
     C: BrokerIngestorConnector,
 {
@@ -1903,7 +1906,7 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
                     if !wait_for_retry(&mut host, &mut shutdown, delay).await {
                         break;
                     }
-                    retry_delay = next_retry_delay(retry_delay, retry_policy);
+                    retry_delay = next_retry_delay(retry_delay, retry_policy, retry_settings);
                     continue;
                 }
             }
@@ -1936,7 +1939,7 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
                 if !wait_for_retry(&mut host, &mut shutdown, delay).await {
                     break;
                 }
-                retry_delay = next_retry_delay(retry_delay, retry_policy);
+                retry_delay = next_retry_delay(retry_delay, retry_policy, retry_settings);
                 continue;
             }
             host.mark_ready();
@@ -1957,7 +1960,7 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
                 if !end.wait_for_retry(&mut host, &mut shutdown, delay).await {
                     break;
                 }
-                retry_delay = next_retry_delay(retry_delay, retry_policy);
+                retry_delay = next_retry_delay(retry_delay, retry_policy, retry_settings);
                 continue;
             }
             ReadOutcome::Closed => break,
@@ -1969,7 +1972,7 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
                 if !end.wait_for_retry(&mut host, &mut shutdown, delay).await {
                     break;
                 }
-                retry_delay = next_retry_delay(retry_delay, retry_policy);
+                retry_delay = next_retry_delay(retry_delay, retry_policy, retry_settings);
                 continue;
             }
         };
@@ -1987,7 +1990,7 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
                     if !end.wait_for_retry(&mut host, &mut shutdown, delay).await {
                         break;
                     }
-                    retry_delay = next_retry_delay(retry_delay, retry_policy);
+                    retry_delay = next_retry_delay(retry_delay, retry_policy, retry_settings);
                 }
                 BatchDisposition::RetryRejection(positions) => {
                     pending_rejection = Some(positions);
@@ -2001,7 +2004,7 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
                     if !end.wait_for_retry(&mut host, &mut shutdown, delay).await {
                         break;
                     }
-                    retry_delay = next_retry_delay(retry_delay, retry_policy);
+                    retry_delay = next_retry_delay(retry_delay, retry_policy, retry_settings);
                 }
                 BatchDisposition::Shutdown => break,
             }

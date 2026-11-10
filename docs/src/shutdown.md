@@ -748,6 +748,21 @@ it was a replica, so the recovery does not wait for the module to compile. A pre
 including a guest that cannot restore a staged checkpoint, publishes the recovery with recreated
 state; see [Forced Recovery](./wasm-state.md#forced-recovery).
 
+A forced recovery of a stateful inferencer stages, for every branch of the lifecycle it recovers,
+the newest tensor snapshot that survives on the destination or on another node the unit is
+assigned to, within the recovery's preparation deadline. A replica receives the generations its
+owner publishes, so a promoted replica continues each branch from at least the generation it last
+received. Inputs admitted after that generation were acknowledged once their output was dispatched
+and are not replayed, so the recovered state skips their updates. A branch the recovered lifecycle
+names, but whose tensors no surviving node holds, starts from its declared `INITIAL` tensors, and
+`SHOW CLUSTER STATUS` reports `state_recovery=reset` with `inferencer:missing_checkpoint`. When no
+surviving node holds the branch lifecycle either, as after losing an owner that had no replica,
+every branch starts from `INITIAL` and the resets name `branch_lifecycle:missing_checkpoint` and
+`inferencer:expired_branch_metadata`. A former owner that returns is fenced by the committed
+schedule and runs none of the recovered branches. A later planned handoff onto it replaces every
+checkpoint it stored for that unit with the ones the handoff carries, so it never resumes from the
+tensors it held before.
+
 ## Topology Cases
 
 | Case | Behavior |

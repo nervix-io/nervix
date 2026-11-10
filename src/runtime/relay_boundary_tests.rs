@@ -772,7 +772,10 @@ async fn inbound_subscription_wait_does_not_hold_domain_execution() {
         .expect("subscription batch should build");
     let batch_ipc = batch
         .batch
-        .encode_arrow_ipc(runtime.executor())
+        .encode_arrow_ipc(
+            runtime.executor(),
+            nervix_execution::QueueAdmission::RefuseWhenFull,
+        )
         .await
         .expect("subscription batch should encode");
     subscription_fanout
@@ -984,7 +987,10 @@ async fn owner_ingress_publishes_branch_presence_to_the_relay_state_placement() 
     let batch_ipc = schema
         .batch_from_test_rows([[("user_id".to_string(), RuntimeValue::U32(42))]])
         .expect("batch should build")
-        .encode_arrow_ipc(runtime.executor())
+        .encode_arrow_ipc(
+            runtime.executor(),
+            nervix_execution::QueueAdmission::RefuseWhenFull,
+        )
         .await
         .expect("batch ipc should serialize");
 
@@ -1103,7 +1109,10 @@ impl JoinedRelayOwner {
             .schema
             .batch_from_test_rows([[("user_id".to_string(), RuntimeValue::U32(42))]])
             .expect("batch should build")
-            .encode_arrow_ipc(self.runtime.executor())
+            .encode_arrow_ipc(
+                self.runtime.executor(),
+                nervix_execution::QueueAdmission::RefuseWhenFull,
+            )
             .await
             .expect("batch ipc should serialize");
         RelayPayload {
@@ -1291,7 +1300,10 @@ async fn a_routed_attached_delivery_fails_on_a_node_that_no_longer_runs_its_cons
     );
     let batch_ipc = routed_test_batch(schema, AckSet::empty())
         .batch
-        .encode_arrow_ipc(runtime.executor())
+        .encode_arrow_ipc(
+            runtime.executor(),
+            nervix_execution::QueueAdmission::RefuseWhenFull,
+        )
         .await
         .expect("the routed test batch encodes");
 
@@ -1358,7 +1370,10 @@ async fn a_remote_payload_that_does_not_decode_names_its_defect() {
     );
     let batch_ipc = routed_test_batch(schema, AckSet::empty())
         .batch
-        .encode_arrow_ipc(runtime.executor())
+        .encode_arrow_ipc(
+            runtime.executor(),
+            nervix_execution::QueueAdmission::RefuseWhenFull,
+        )
         .await
         .expect("the routed test batch encodes");
     let one_row = || vec![test_runtime_row([]).metadata().to_remote()];
@@ -1454,7 +1469,10 @@ async fn a_subscription_fanout_that_does_not_decode_is_refused() {
     );
     let batch_ipc = routed_test_batch(schema, AckSet::empty())
         .batch
-        .encode_arrow_ipc(runtime.executor())
+        .encode_arrow_ipc(
+            runtime.executor(),
+            nervix_execution::QueueAdmission::RefuseWhenFull,
+        )
         .await
         .expect("the fan-out test batch encodes");
     let registration = RemoteAckRegistration {
@@ -2459,7 +2477,7 @@ async fn a_decoded_body_is_bounded_by_the_payload_it_carries() {
     let generous = Executor::default();
     let body = batch
         .batch
-        .encode_arrow_ipc(&generous)
+        .encode_arrow_ipc(&generous, nervix_execution::QueueAdmission::RefuseWhenFull)
         .await
         .expect("the body should encode");
     let decoded = schema
@@ -2554,7 +2572,7 @@ async fn a_three_destination_fanout_shares_one_encoded_body() {
     let admitted_before = executor.snapshot().data_cpu.admitted;
     let body = batch
         .batch
-        .encode_arrow_ipc(&executor)
+        .encode_arrow_ipc(&executor, nervix_execution::QueueAdmission::RefuseWhenFull)
         .await
         .expect("the fanout body should encode");
     assert_eq!(
@@ -2900,7 +2918,10 @@ async fn a_payload_for_a_relay_this_node_has_not_instantiated_names_its_domain_a
     let batch_ipc = test_schema(&[("value", ParseAsType::I64)])
         .batch_from_test_rows([[("value".to_string(), RuntimeValue::I64(1))]])
         .expect("batch should build")
-        .encode_arrow_ipc(runtime.executor())
+        .encode_arrow_ipc(
+            runtime.executor(),
+            nervix_execution::QueueAdmission::RefuseWhenFull,
+        )
         .await
         .expect("batch ipc should serialize");
     let payload = |kind, target: &DomainName| RelayPayload {

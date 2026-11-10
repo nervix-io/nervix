@@ -433,7 +433,7 @@ impl Runtime {
         revision.nodes.get(entity)
     }
 
-    fn processor_units_to_swap(
+    pub(super) fn processor_units_to_swap(
         &self,
         domain: &DomainName,
         entity: &NodeRef,
@@ -916,7 +916,6 @@ impl Runtime {
         let activation_plan = &revision.activation;
         let resource_plans = &revision.resources;
         let entrypoints = &revision.entrypoints;
-        let emitter_plans = &revision.emitters;
         let dispatcher = self.inner.remote_dispatcher.load_full();
         let local_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
         // A reassignment only replaces this cluster node's runtime when the node stopped or
@@ -1220,137 +1219,15 @@ impl Runtime {
                 continue;
             }
             if entity.kind == ModelKind::Emitter {
-                let emitter_name = EmitterName::from(&entity.identifier);
-                let Some(desired_emitter) = emitter_plans.emitter(&emitter_name).cloned() else {
-                    return Err(Report::new(ExecutionBuildError::MissingDesiredNode {
-                        node: entity.clone(),
-                    })
-                    .change_context(build()));
-                };
-                let desired_node = revision
-                    .nodes
-                    .get(entity)
-                    .assured("the emitter plan was decided from this same schedule");
-                let emitter_swap_unavailable = || {
-                    Report::new(ExecutionBuildError::ExecutionUnavailable {
-                        step: ExecutionStep::EmitterSwap,
-                    })
-                    .change_context(build())
-                };
-                let (old_emitter, old_task) = {
-                    let Some(mut execution) = self.inner.executions.get_mut(domain) else {
-                        return Err(emitter_swap_unavailable());
-                    };
-                    let Some(old_emitter) =
-                        execution.revision.emitters.emitter(&emitter_name).cloned()
-                    else {
-                        return Err(Report::new(ExecutionBuildError::MissingInstalledNode {
-                            node: entity.clone(),
-                        })
-                        .change_context(build()));
-                    };
-                    let old_task = execution.emitter_tasks.remove(entity);
-                    (old_emitter, old_task)
-                };
-                let had_old_task = old_task.is_some();
-                if let Some(old_task) = old_task
-                    && let Err(failure) = old_task.stop(self.domain_drain_timeout()).await
-                {
-                    let drain = failure.drain_description();
-                    let (error, old_task) = failure.into_parts();
-                    if let Some(mut execution) = self.inner.executions.get_mut(domain) {
-                        execution.emitter_tasks.insert(entity.clone(), old_task);
-                    }
-                    return Err(error
-                        .change_context(ExecutionBuildError::StopEmitter {
-                            emitter: emitter_name,
-                            drain,
-                        })
-                        .change_context(build()));
-                }
-
-                let executes_locally =
-                    local_node_id.is_some_and(|node_id| desired_node.executes_on(node_id));
-                /// What spawning the swapped emitter's task needs from the domain execution,
-                /// taken while it is borrowed so the spawn itself runs without holding that
-                /// borrow.
-                struct EmitterSpawnInputs {
-                    shutdown: watch::Sender<bool>,
-                    codecs: HashMap<CodecName, Arc<CompiledCodec>>,
-                    deps: EmitterTaskDeps,
-                    inputs: Vec<(RelayName, RelayRuntimeFanIn)>,
-                }
-
-                let spawn = {
-                    let Some(execution) = self.inner.executions.get_mut(domain) else {
-                        return Err(emitter_swap_unavailable());
-                    };
-                    if had_old_task {
-                        for input in &old_emitter.inputs {
-                            if let Some(services) = execution.relay_services.get(&input.relay)
-                                && registrations.counts(&input.relay, entity, None)
-                            {
-                                services.remove_local_runtime_consumer(old_emitter.mode);
-                            }
-                        }
-                    }
-                    if !executes_locally {
-                        None
-                    } else {
-                        let mut inputs = Vec::with_capacity(desired_emitter.inputs.len());
-                        for input in &desired_emitter.inputs {
-                            let Some(services) = execution.relay_services.get(&input.relay) else {
-                                return Err(Report::new(
-                                    ExecutionBuildError::MissingRelayBoundary {
-                                        relay: input.relay.clone(),
-                                    },
-                                )
-                                .change_context(build()));
-                            };
-                            inputs.push((
-                                input.relay.clone(),
-                                services.add_local_runtime_consumer(desired_emitter.mode),
-                            ));
-                        }
-                        let deps = self
-                            .emitter_task_deps(
-                                ExecutionBuildDeps::from_routing(domain, &execution),
-                                &desired_emitter,
-                            )
-                            .change_context_lazy(build)?;
-                        Some(EmitterSpawnInputs {
-                            shutdown: execution.shutdown.clone(),
-                            codecs: execution.codecs.clone(),
-                            deps,
-                            inputs,
-                        })
-                    }
-                };
-                if let Some(spawn) = spawn {
-                    let task = self
-                        .spawn_emitter_task(
-                            EmitterTaskBuildDeps {
-                                domain,
-                                shutdown_tx: &spawn.shutdown,
-                                codecs: &spawn.codecs,
-                                deps: spawn.deps,
-                            },
-                            desired_emitter.as_ref().clone(),
-                            spawn.inputs,
-                        )
-                        .change_context_lazy(build)?;
-                    let Some(mut execution) = self.inner.executions.get_mut(domain) else {
-                        return Err(emitter_swap_unavailable());
-                    };
-                    execution.emitter_tasks.insert(entity.clone(), task);
-                }
-                #[cfg(feature = "testing")]
-                if had_old_task && !executes_locally {
-                    self.inner
-                        .fault_injection
-                        .pause_emitter_swap_after_detach_if_armed(domain, &emitter_name)
-                        .await;
-                }
+                self.swap_emitter_entity(
+                    domain,
+                    entity,
+                    &revision,
+                    &registrations,
+                    explicitly_replaced.contains(entity),
+                    local_node_id,
+                )
+                .await?;
                 continue;
             }
             if entity.kind == ModelKind::Reingestor {
@@ -1451,7 +1328,11 @@ impl Runtime {
                     }
                     let runtimes = self
                         .start_reingestor_runtimes(
-                            ExecutionBuildDeps::from_routing(domain, &routing),
+                            ExecutionBuildDeps::from_routing(
+                                domain,
+                                &routing,
+                                self.inner.vm_settings,
+                            ),
                             &shutdown,
                             RelayRuntimeHandles {
                                 services: &routing.relay_services,
@@ -1520,6 +1401,7 @@ impl Runtime {
                                         unit,
                                         &execution.relay_services,
                                         &execution.udfs,
+                                        self.inner.vm_settings,
                                     )
                                     .change_context_lazy(build)?,
                                 );
@@ -1721,6 +1603,7 @@ impl Runtime {
                 BoundMessageErrorRoutes::bind(
                     revision.message_errors.clone(),
                     MessageErrorRouteBindingContext {
+                        vm_settings: self.inner.vm_settings,
                         relay_services: &execution.relay_services,
                         materialized_stream_specs: &execution.materialized_stream_specs,
                         lookups: &execution.lookups,
@@ -1826,6 +1709,7 @@ impl Runtime {
                 BoundMessageErrorRoutes::bind(
                     revision.message_errors.clone(),
                     MessageErrorRouteBindingContext {
+                        vm_settings: self.inner.vm_settings,
                         relay_services: &execution.relay_services,
                         materialized_stream_specs: &execution.materialized_stream_specs,
                         lookups: &execution.lookups,
@@ -1921,16 +1805,21 @@ impl Runtime {
                     Box::pin(self.retire_partition_transition(domain, node, desired)).await;
                 }
                 DynamicExecutionUpdate::EmitterFlush { emitter, policy } => {
-                    let commands = if let Some(execution) = self.inner.executions.get(domain)
-                        && let Some(task) = execution.emitter_tasks.get(&NodeRef {
-                            kind: ModelKind::Emitter,
-                            identifier: ModelName::from(emitter),
-                        }) {
-                        Some(task.commands.clone())
-                    } else {
-                        None
+                    // Every local instance of the emitter runs its own cadence.
+                    let entity = NodeRef {
+                        kind: ModelKind::Emitter,
+                        identifier: ModelName::from(emitter),
                     };
-                    if let Some(commands) = commands {
+                    let mut instance_commands = Vec::new();
+                    if let Some(execution) = self.inner.executions.get(domain) {
+                        for (owner, task) in &execution.emitter_tasks {
+                            if owner.node == entity {
+                                instance_commands.push(task.commands.clone());
+                            }
+                        }
+                    }
+                    for commands in instance_commands {
+                        nervix_primitives::task::consume_budget().await;
                         ScheduledEmitterTask::reconfigure_via(&commands, policy.clone())
                             .await
                             .change_context_lazy(|| ExecutionBuildError::ReconfigureEmitterFlush {

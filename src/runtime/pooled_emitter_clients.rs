@@ -57,11 +57,7 @@ impl PooledEmitterClient {
             lease,
             client: client.name.clone(),
             wait: context.runtime.register_pool_wait(
-                DomainNodeRef::node_in(
-                    context.domain.clone(),
-                    ModelKind::Emitter,
-                    context.emitter.clone(),
-                ),
+                context.registry_key(),
                 client.name.clone(),
                 context.interactions.clone(),
             ),
@@ -149,11 +145,7 @@ impl EmitterConnectorContext {
             _lease: lease,
             pool,
             wait: self.runtime.register_pool_wait(
-                DomainNodeRef::node_in(
-                    self.domain.clone(),
-                    ModelKind::Emitter,
-                    self.emitter.clone(),
-                ),
+                self.registry_key(),
                 plan.client.name.clone(),
                 self.interactions.clone(),
             ),

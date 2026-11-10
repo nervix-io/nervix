@@ -71,6 +71,7 @@ pub(super) fn plan(
         })
         .collect();
     KafkaTopicIngestorPlan {
+        settings: crate::KafkaTopicIngestorSettings::default(),
         executor: nervix_execution::Executor::default(),
         config,
         topic: KafkaTopicName::parse(TOPIC).assured("the test topic is a valid Kafka topic"),

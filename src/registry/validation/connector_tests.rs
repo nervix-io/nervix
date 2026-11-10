@@ -936,6 +936,7 @@ fn emitter_header_invocations_are_rejected_for_unsupported_emitters() {
         }],
     };
     let mut emitter = CreateEmitter {
+        instances: nervix_models::EmitterInstances::ONE,
         name: named("emit"),
         from: ProcessorInputs::single(named("events")),
         body: nervix_models::EmitterBody::Codec {
@@ -1037,6 +1038,7 @@ fn a_repeated_literal_header_write_is_refused_where_the_emitter_keeps_one_value_
         }],
     };
     let mut emitter = CreateEmitter {
+        instances: nervix_models::EmitterInstances::ONE,
         name: named("emit"),
         from: ProcessorInputs::single(named("events")),
         body: nervix_models::EmitterBody::Codec {

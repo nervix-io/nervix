@@ -14,8 +14,6 @@
     )
 )]
 
-use std::time::Duration;
-
 use nervix_models::{CoordinationIdentity, DomainName, RestoreStateAuthority};
 use rkyv::{Archive, Deserialize, Serialize};
 
@@ -94,7 +92,7 @@ impl InterconnectRequest for BackupDrainStatusRequest {
     const NAME: &'static str = "backup_domain_drain_status";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
-    const TIMEOUT: Duration = Duration::from_secs(2);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -105,7 +103,7 @@ impl InterconnectRequest for CaptureDomainStateRequest {
     type Response = Result<(), RemoteOperationFailure>;
     const NAME: &'static str = "backup_capture_domain_state";
     const CLASS: PoolClass = PoolClass::Management;
-    const TIMEOUT: Duration = Duration::from_secs(30);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Snapshot;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -148,7 +146,7 @@ impl InterconnectRequest for CaptureInventoryRequest {
     type Response = Result<Vec<CapturedSectionInventory>, RemoteOperationFailure>;
     const NAME: &'static str = "backup_capture_inventory";
     const CLASS: PoolClass = PoolClass::Management;
-    const TIMEOUT: Duration = Duration::from_secs(5);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -170,10 +168,7 @@ impl InterconnectStreamRequest for FetchCapturedSection {
     /// holds the peer connection's one Snapshot stream for as long as its transfer takes, which
     /// would otherwise keep the coordinator from opening a completed cut's sections.
     const SUBQUOTA: RequestSubquota = RequestSubquota::Shared;
-    #[inline]
-    fn default_timeout() -> Duration {
-        Duration::from_secs(30)
-    }
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Snapshot;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -212,7 +207,7 @@ impl InterconnectRequest for InstallRestoredStateRequest {
     const NAME: &'static str = "backup_install_restored_state";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const TIMEOUT: Duration = Duration::from_secs(30);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Snapshot;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)

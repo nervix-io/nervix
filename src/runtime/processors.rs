@@ -465,8 +465,9 @@ impl CompiledInferencerInputProgram {
         mappings: &[InferencerTensorMapping],
         input_schema: &CompiledSchema,
         udfs: Option<&UdfExecutor>,
+        vm_settings: nervix_vm::VmSettings,
     ) -> error_stack::Result<Self, ProcessorCompileError> {
-        Self::compile_inner(processor, mappings, input_schema, udfs, false)
+        Self::compile_inner(processor, mappings, input_schema, udfs, false, vm_settings)
             .map(|(program, _)| program)
     }
 
@@ -475,9 +476,10 @@ impl CompiledInferencerInputProgram {
         mappings: &[InferencerTensorMapping],
         input_schema: &CompiledSchema,
         udfs: Option<&UdfExecutor>,
+        vm_settings: nervix_vm::VmSettings,
     ) -> error_stack::Result<CompiledProgramWithMaterializedInterest, ProcessorCompileError> {
         let (program, error_sites) =
-            Self::compile_inner(processor, mappings, input_schema, udfs, true)?;
+            Self::compile_inner(processor, mappings, input_schema, udfs, true, vm_settings)?;
         Ok(CompiledProgramWithMaterializedInterest {
             compiled: program.program,
             materialized_interest: super::MaterializedProgramInterest::default(),
@@ -493,6 +495,7 @@ impl CompiledInferencerInputProgram {
         input_schema: &CompiledSchema,
         udfs: Option<&UdfExecutor>,
         capture_errors: bool,
+        vm_settings: nervix_vm::VmSettings,
     ) -> error_stack::Result<
         (Self, super::vm_compile::CompiledMessageErrorSites),
         ProcessorCompileError,
@@ -557,6 +560,7 @@ impl CompiledInferencerInputProgram {
             super::runtime_udf_compile_options(
                 udfs,
                 VmCompileOptions {
+                    settings: vm_settings,
                     output_mode: VmOutputMode::ExplicitOnly,
                     ..VmCompileOptions::default()
                 },
@@ -653,6 +657,7 @@ impl CompiledWindowAggregateProgram {
         output_relay: &RelayName,
         relay_schemas: &HashMap<RelayName, Arc<CompiledSchema>>,
         udfs: Option<&UdfExecutor>,
+        vm_settings: nervix_vm::VmSettings,
     ) -> error_stack::Result<Self, ProcessorCompileError> {
         let output_schema = relay_schemas.get(output_relay).ok_or_else(|| {
             Report::new(ProcessorCompileError::WindowOutputSchema {
@@ -680,7 +685,13 @@ impl CompiledWindowAggregateProgram {
                 output: &output_arrow_schema,
                 output_sensitivity: &output_sensitivity,
             },
-            &super::runtime_udf_compile_options(udfs, VmCompileOptions::default()),
+            &super::runtime_udf_compile_options(
+                udfs,
+                VmCompileOptions {
+                    settings: vm_settings,
+                    ..VmCompileOptions::default()
+                },
+            ),
         )
         .change_context_lazy(|| ProcessorCompileError::WindowRoute {
             relay: output_relay.clone(),

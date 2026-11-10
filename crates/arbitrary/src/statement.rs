@@ -271,6 +271,7 @@ enum EmitterOperationForm {
     SetFlush,
     SetGeneralError,
     Envelope,
+    SetInstances,
 }
 
 /// One targeted change an emitter's envelope takes.
@@ -1239,6 +1240,9 @@ impl Arbitrary<'_> {
         if !plexus || !capabilities.envelope.is_empty() || !capabilities.properties.is_empty() {
             forms.push(EmitterOperationForm::Envelope);
         }
+        if !plexus || capabilities.instancing.refusal(kind).is_none() {
+            forms.push(EmitterOperationForm::SetInstances);
+        }
         forms
     }
 
@@ -1307,6 +1311,9 @@ impl Arbitrary<'_> {
             },
             EmitterOperationForm::Envelope => AlterEmitterOperation::AlterEnvelope {
                 alteration: Box::new(self.envelope_alteration(kind)),
+            },
+            EmitterOperationForm::SetInstances => AlterEmitterOperation::SetInstances {
+                instances: self.emitter_instances_of(kind),
             },
         }
     }

@@ -75,6 +75,7 @@ impl Runtime {
         settings: RuntimeSettings,
     ) -> error_stack::Result<Self, RuntimePersistenceError> {
         let RuntimeEnvironment {
+            interconnect_request_timeout,
             executor,
             client_endpoints,
             outward_tls,
@@ -140,6 +141,9 @@ impl Runtime {
             );
         Ok(Self {
             inner: Arc::new(RuntimeInner {
+                interconnect_request_timeout,
+                connector_host: settings.connector_host,
+                vm_settings: settings.vm,
                 inspection_instances: AtomicU64::new(0),
                 inspection_settings: settings.inspection,
                 dns,
@@ -217,8 +221,11 @@ impl Runtime {
                 wasm_state_recovery_requests: ArcSwapOption::empty(),
                 raised_wasm_state_recoveries: RaisedWasmStateRecoveries::default(),
                 replicated_branch_aggregated_states: DashMap::default(),
-                wasm_runtime: WasmRuntime::new(WasmRuntimeConfig::default())
-                    .assured("wasmtime accepts its own default configuration"),
+                wasm_runtime: WasmRuntime::new(WasmRuntimeConfig {
+                    engine: settings.wasm_engine,
+                    ..WasmRuntimeConfig::default()
+                })
+                .change_context(RuntimePersistenceError::ConfigureWasmEngine)?,
                 guest_wasm_state_resets: PendingGuestWasmStateResets::default(),
                 branch_instance_expiration_scan_interval,
                 state_store,
@@ -872,7 +879,7 @@ impl Runtime {
             Self::await_shutdown_task_with_grace(
                 emitter_task.task,
                 domain,
-                Some(&IngestorName::from(&entity.identifier)),
+                Some(&IngestorName::from(&entity.node.identifier)),
                 "scheduled emitter",
                 self.branch_task_stop_timeout(),
             )

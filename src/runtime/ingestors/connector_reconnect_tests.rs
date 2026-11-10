@@ -387,6 +387,7 @@ async fn lose_the_connection_of_the_first_message(
         IngestorHost::new(RedeliveryHost::new(broker.clone(), true)),
         sequential_policy(position_class),
         shutdown_rx,
+        nervix_connector::RetryBackoffSettings::default(),
     )
     .await;
     drop(shutdown);
@@ -521,6 +522,7 @@ async fn successful_upgrades_keep_read_failure_backoff_until_a_batch_is_delivere
             IngestorHost::new(RedeliveryHost::new(broker.clone(), false)),
             policy,
             shutdown_rx,
+            nervix_connector::RetryBackoffSettings::default(),
         )
         .await;
         drop(shutdown);

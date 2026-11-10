@@ -54,6 +54,7 @@ struct StreamSlotQuotasInner {
     /// drain holds every permit.
     draining: AtomicBool,
     partition: StreamSlotPartition,
+    capacity: usize,
 }
 
 #[cfg_attr(
@@ -69,12 +70,13 @@ enum StreamSlotPartition {
     Replication(ReplicationStreamSlotQuotas),
     Bulk(BulkStreamSlotQuotas),
     Shared {
-        class: PoolClass,
+        capacity: usize,
         slots: StdArc<Semaphore>,
     },
 }
 
 struct ManagementStreamSlotQuotas {
+    shared_capacity: usize,
     shared: StdArc<Semaphore>,
     discovery: StdArc<Semaphore>,
     liveness: StdArc<Semaphore>,
@@ -85,6 +87,7 @@ struct ManagementStreamSlotQuotas {
 }
 
 struct BulkStreamSlotQuotas {
+    shared_capacity: usize,
     shared: StdArc<Semaphore>,
     resource: StdArc<Semaphore>,
     snapshot: StdArc<Semaphore>,
@@ -93,6 +96,7 @@ struct BulkStreamSlotQuotas {
 /// The one ordered append stream a leader keeps open to a follower reserves its own slot, so the
 /// ownership handoff requests that share this pool are never held behind it.
 struct ReplicationStreamSlotQuotas {
+    shared_capacity: usize,
     shared: StdArc<Semaphore>,
     append: StdArc<Semaphore>,
 }
@@ -132,6 +136,14 @@ const _: () = assert!(
 const REPLICATION_TOTAL_STREAMS: usize = PoolClass::Replication.stream_slots_per_connection();
 /// One live append stream per follower, and room for its replacement while the live one is still
 /// being torn down.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "one active ordered append stream and one replacement are independently retained \
+                  per follower"
+    )
+)]
 const REPLICATION_APPEND_STREAMS: usize = 2;
 const _: () = assert!(
     REPLICATION_APPEND_STREAMS > 0 && REPLICATION_APPEND_STREAMS < REPLICATION_TOTAL_STREAMS,
@@ -162,8 +174,60 @@ impl StreamSlotQuotas {
             inner: Arc::new(StreamSlotQuotasInner {
                 draining: AtomicBool::new(false),
                 partition: StreamSlotPartition::new(class),
+                capacity: class.stream_slots_per_connection(),
             }),
         }
+    }
+
+    /// Apply the peer's initial SETTINGS after the binding reply and before publication.
+    /// Only shared capacity shrinks; every reserved traffic class keeps its guaranteed slots.
+    pub(super) fn negotiate(
+        &mut self,
+        class: PoolClass,
+        peer_limit: usize,
+    ) -> Result<(), Report<TransportError>> {
+        let inner = Arc::get_mut(&mut self.inner)
+            .verified("binding owns the unpublished stream partition exclusively");
+        let (shared, shared_capacity, reserved) = match &mut inner.partition {
+            StreamSlotPartition::Management(quotas) => (
+                &quotas.shared,
+                &mut quotas.shared_capacity,
+                MANAGEMENT_RESERVED_STREAMS,
+            ),
+            StreamSlotPartition::Replication(quotas) => (
+                &quotas.shared,
+                &mut quotas.shared_capacity,
+                REPLICATION_APPEND_STREAMS,
+            ),
+            StreamSlotPartition::Bulk(quotas) => (
+                &quotas.shared,
+                &mut quotas.shared_capacity,
+                BULK_RESERVED_STREAMS,
+            ),
+            StreamSlotPartition::Shared { slots, capacity } => (&*slots, capacity, 0),
+        };
+        let minimum = reserved + 1;
+        if peer_limit < minimum {
+            return Err(Report::new(TransportError::Http2StreamCapacity {
+                class,
+                advertised: peer_limit,
+                minimum,
+            }));
+        }
+        let capacity = peer_limit.min(inner.capacity);
+        let remaining = capacity - reserved;
+        let removed = *shared_capacity - remaining;
+        let removed = u32::try_from(removed)
+            .assured("the local stream partition fits HTTP/2's setting width");
+        if removed > 0 {
+            shared
+                .try_acquire_many(removed)
+                .verified("no stream leases exist before the binding is published")
+                .forget();
+        }
+        *shared_capacity = remaining;
+        inner.capacity = capacity;
+        Ok(())
     }
 
     /// Lease one stream slot from `subquota`, unless every slot it reserves is already leased or
@@ -184,9 +248,9 @@ impl StreamSlotQuotas {
 
     /// Stream slots currently leased on this connection: its class capacity, less what its
     /// subquotas still hold free.
-    pub(super) fn leased(&self, class: PoolClass) -> usize {
-        class
-            .stream_slots_per_connection()
+    pub(super) fn leased(&self) -> usize {
+        self.inner
+            .capacity
             .checked_sub(self.inner.partition.available())
             .verified("stream permits are only taken and returned by this connection's leases")
     }
@@ -206,6 +270,7 @@ impl StreamSlotPartition {
     fn new(class: PoolClass) -> Self {
         if class == PoolClass::Management {
             return Self::Management(ManagementStreamSlotQuotas {
+                shared_capacity: MANAGEMENT_SHARED_STREAMS,
                 shared: StdArc::new(Semaphore::new(MANAGEMENT_SHARED_STREAMS)),
                 discovery: StdArc::new(Semaphore::new(MANAGEMENT_DISCOVERY_STREAMS)),
                 liveness: StdArc::new(Semaphore::new(MANAGEMENT_LIVENESS_STREAMS)),
@@ -217,19 +282,21 @@ impl StreamSlotPartition {
         }
         if class == PoolClass::Replication {
             return Self::Replication(ReplicationStreamSlotQuotas {
+                shared_capacity: REPLICATION_SHARED_STREAMS,
                 shared: StdArc::new(Semaphore::new(REPLICATION_SHARED_STREAMS)),
                 append: StdArc::new(Semaphore::new(REPLICATION_APPEND_STREAMS)),
             });
         }
         if class == PoolClass::Bulk {
             return Self::Bulk(BulkStreamSlotQuotas {
+                shared_capacity: BULK_SHARED_STREAMS,
                 shared: StdArc::new(Semaphore::new(BULK_SHARED_STREAMS)),
                 resource: StdArc::new(Semaphore::new(BULK_RESOURCE_STREAMS)),
                 snapshot: StdArc::new(Semaphore::new(BULK_SNAPSHOT_STREAMS)),
             });
         }
         Self::Shared {
-            class,
+            capacity: class.stream_slots_per_connection(),
             slots: StdArc::new(Semaphore::new(class.stream_slots_per_connection())),
         }
     }
@@ -264,9 +331,8 @@ impl StreamSlotPartition {
             Self::Management(quotas) => quotas.drain().await,
             Self::Replication(quotas) => quotas.drain().await,
             Self::Bulk(quotas) => quotas.drain().await,
-            Self::Shared { class, slots } => {
-                let permits: u32 = class
-                    .stream_slots_per_connection()
+            Self::Shared { capacity, slots } => {
+                let permits: u32 = (*capacity)
                     .try_into()
                     .assured("stream slot counts are much smaller than u32::MAX");
                 let permit = StdArc::clone(slots)
@@ -307,7 +373,7 @@ impl ManagementStreamSlotQuotas {
 
     async fn drain(&self) {
         let quotas = [
-            (RequestSubquota::Shared, MANAGEMENT_SHARED_STREAMS),
+            (RequestSubquota::Shared, self.shared_capacity),
             (RequestSubquota::Discovery, MANAGEMENT_DISCOVERY_STREAMS),
             (RequestSubquota::Liveness, MANAGEMENT_LIVENESS_STREAMS),
             (RequestSubquota::Progress, MANAGEMENT_PROGRESS_STREAMS),
@@ -358,7 +424,7 @@ impl ReplicationStreamSlotQuotas {
 
     async fn drain(&self) {
         let quotas = [
-            (RequestSubquota::Shared, REPLICATION_SHARED_STREAMS),
+            (RequestSubquota::Shared, self.shared_capacity),
             (RequestSubquota::Append, REPLICATION_APPEND_STREAMS),
         ];
         let mut drained = Vec::with_capacity(quotas.len());
@@ -401,7 +467,7 @@ impl BulkStreamSlotQuotas {
 
     async fn drain(&self) {
         let quotas = [
-            (RequestSubquota::Shared, BULK_SHARED_STREAMS),
+            (RequestSubquota::Shared, self.shared_capacity),
             (RequestSubquota::Resource, BULK_RESOURCE_STREAMS),
             (RequestSubquota::Snapshot, BULK_SNAPSHOT_STREAMS),
         ];
@@ -448,6 +514,9 @@ pub(super) fn configure_client_builder(
     builder
         .initial_window_size(windows.stream)
         .initial_connection_window_size(windows.connection)
+        .max_frame_size(
+            u32::try_from(BODY_CHUNK_BYTES).assured("the default HTTP/2 frame fits u32"),
+        )
         .max_header_list_size(state.options.max_header_bytes)
         .max_concurrent_streams(streams)
         .initial_max_send_streams(stream_slots)
@@ -470,10 +539,72 @@ pub(super) fn configure_server_builder(
     builder
         .initial_window_size(options.initial_stream_window_bytes)
         .initial_connection_window_size(options.initial_connection_window_bytes)
+        .max_frame_size(
+            u32::try_from(BODY_CHUNK_BYTES).assured("the default HTTP/2 frame fits u32"),
+        )
         .max_header_list_size(options.max_header_bytes)
         .max_concurrent_streams(streams)
         .max_local_error_reset_streams(Some(RESET_LIMIT))
         .max_pending_accept_reset_streams(RESET_LIMIT)
         .max_send_buffer_size(BODY_CHUNK_BYTES);
     Ok(())
+}
+
+#[cfg(all(
+    test,
+    not(any(feature = "shuttle", feature = "loom", feature = "turmoil"))
+))]
+mod negotiation_tests {
+    use super::*;
+
+    #[nervix_primitives::test]
+    async fn a_negotiated_partition_retains_reserves_and_drains_its_actual_capacity() {
+        let mut quotas = StreamSlotQuotas::new(PoolClass::Management);
+        quotas
+            .negotiate(PoolClass::Management, MANAGEMENT_RESERVED_STREAMS + 2)
+            .assured("the advertised streams hold every reserve and two shared requests");
+        let first = quotas
+            .try_lease(RequestSubquota::Shared)
+            .assured("first shared slot");
+        let second = quotas
+            .try_lease(RequestSubquota::Shared)
+            .assured("second shared slot");
+        assert!(quotas.try_lease(RequestSubquota::Shared).is_none());
+        let liveness = quotas
+            .try_lease(RequestSubquota::Liveness)
+            .assured("full shared capacity preserves liveness");
+        let cancellation = quotas
+            .try_lease(RequestSubquota::Cancellation)
+            .assured("full shared capacity preserves cancellation");
+        assert_eq!(quotas.leased(), 4);
+        let drain = quotas.drain();
+        tokio::pin!(drain);
+        assert!(futures_util::poll!(&mut drain).is_pending());
+        assert!(quotas.try_lease(RequestSubquota::Terminal).is_none());
+        drop((first, second, liveness, cancellation));
+        assert!(futures_util::poll!(&mut drain).is_ready());
+        assert!(quotas.try_lease(RequestSubquota::Shared).is_none());
+    }
+
+    #[test]
+    fn a_peer_cannot_consume_the_minimum_reserved_partition() {
+        for (class, minimum) in [
+            (PoolClass::Management, MANAGEMENT_RESERVED_STREAMS + 1),
+            (PoolClass::Replication, REPLICATION_APPEND_STREAMS + 1),
+            (PoolClass::Bulk, BULK_RESERVED_STREAMS + 1),
+        ] {
+            let mut quotas = StreamSlotQuotas::new(class);
+            let refusal = quotas
+                .negotiate(class, minimum - 1)
+                .err()
+                .assured("the peer's capacity cannot preserve every traffic class");
+            assert!(
+                matches!(refusal.current_context(), TransportError::Http2StreamCapacity { minimum: actual, .. } if *actual == minimum)
+            );
+            quotas
+                .negotiate(class, minimum)
+                .assured("the declared minimum leaves shared capacity");
+            assert!(quotas.try_lease(RequestSubquota::Shared).is_some());
+        }
+    }
 }

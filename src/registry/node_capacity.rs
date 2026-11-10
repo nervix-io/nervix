@@ -101,6 +101,46 @@ mod tests {
                 (
                     node.clone(),
                     NodeCapabilities {
+                        interconnect: nervix_interconnect::TransportSettings::default()
+                            .capabilities(),
+                        dns: nervix_arbitrary::Arbitrary::new(
+                            &[],
+                            nervix_arbitrary::Domain::Vocabulary,
+                        )
+                        .node_capability_record()
+                        .capabilities
+                        .dns,
+                        node_database: nervix_arbitrary::Arbitrary::new(
+                            &[],
+                            nervix_arbitrary::Domain::Vocabulary,
+                        )
+                        .node_capability_record()
+                        .capabilities
+                        .node_database,
+                        consensus_database: nervix_arbitrary::Arbitrary::new(
+                            &[],
+                            nervix_arbitrary::Domain::Vocabulary,
+                        )
+                        .node_capability_record()
+                        .capabilities
+                        .consensus_database,
+                        consensus: nervix_arbitrary::Arbitrary::new(
+                            &[],
+                            nervix_arbitrary::Domain::Vocabulary,
+                        )
+                        .node_capability_record()
+                        .capabilities
+                        .consensus,
+                        engines: nervix_arbitrary::Arbitrary::new(
+                            &[],
+                            nervix_arbitrary::Domain::Vocabulary,
+                        )
+                        .node_engine_capabilities(),
+                        connector_host: nervix_arbitrary::Arbitrary::new(
+                            &[],
+                            nervix_arbitrary::Domain::Vocabulary,
+                        )
+                        .node_connector_host_capabilities(),
                         cpu_count: NonZeroU64::new(cpu),
                         memory_bytes: NonZeroU64::new(memory),
                         receive,
@@ -121,6 +161,45 @@ mod tests {
             (
                 nodes[0].clone(),
                 NodeCapabilities {
+                    interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
+                    dns: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_capability_record()
+                    .capabilities
+                    .dns,
+                    node_database: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_capability_record()
+                    .capabilities
+                    .node_database,
+                    consensus_database: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_capability_record()
+                    .capabilities
+                    .consensus_database,
+                    consensus: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_capability_record()
+                    .capabilities
+                    .consensus,
+                    engines: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_engine_capabilities(),
+                    connector_host: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_connector_host_capabilities(),
                     cpu_count: NonZeroU64::new(1),
                     memory_bytes: NonZeroU64::new(1),
                     receive,
@@ -129,6 +208,45 @@ mod tests {
             (
                 nodes[1].clone(),
                 NodeCapabilities {
+                    interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
+                    dns: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_capability_record()
+                    .capabilities
+                    .dns,
+                    node_database: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_capability_record()
+                    .capabilities
+                    .node_database,
+                    consensus_database: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_capability_record()
+                    .capabilities
+                    .consensus_database,
+                    consensus: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_capability_record()
+                    .capabilities
+                    .consensus,
+                    engines: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_engine_capabilities(),
+                    connector_host: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_connector_host_capabilities(),
                     cpu_count: NonZeroU64::new(u64::MAX),
                     memory_bytes: NonZeroU64::new(u64::MAX - 1),
                     receive,
@@ -148,6 +266,45 @@ mod tests {
             (
                 nodes[0].clone(),
                 NodeCapabilities {
+                    interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
+                    dns: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_capability_record()
+                    .capabilities
+                    .dns,
+                    node_database: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_capability_record()
+                    .capabilities
+                    .node_database,
+                    consensus_database: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_capability_record()
+                    .capabilities
+                    .consensus_database,
+                    consensus: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_capability_record()
+                    .capabilities
+                    .consensus,
+                    engines: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_engine_capabilities(),
+                    connector_host: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_connector_host_capabilities(),
                     cpu_count: NonZeroU64::new(2),
                     memory_bytes: None,
                     receive,
@@ -156,6 +313,45 @@ mod tests {
             (
                 nodes[1].clone(),
                 NodeCapabilities {
+                    interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
+                    dns: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_capability_record()
+                    .capabilities
+                    .dns,
+                    node_database: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_capability_record()
+                    .capabilities
+                    .node_database,
+                    consensus_database: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_capability_record()
+                    .capabilities
+                    .consensus_database,
+                    consensus: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_capability_record()
+                    .capabilities
+                    .consensus,
+                    engines: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_engine_capabilities(),
+                    connector_host: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_connector_host_capabilities(),
                     cpu_count: NonZeroU64::new(4),
                     memory_bytes: NonZeroU64::new(16),
                     receive,

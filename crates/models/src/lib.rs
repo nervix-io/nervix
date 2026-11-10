@@ -33,11 +33,13 @@ mod command;
 mod completion;
 mod connector;
 mod construction_alteration;
+mod database_settings;
 mod domain_clock;
 mod duration_text;
 mod emitter;
 mod emitter_batch;
 mod emitter_envelope;
+mod emitter_instances;
 mod execution_unit;
 mod expression;
 mod http_request;
@@ -49,6 +51,7 @@ mod model_index;
 mod name_spelling;
 mod names;
 mod node_capabilities;
+pub use database_settings::*;
 mod node_endpoint;
 mod node_ref;
 mod partition_epoch;
@@ -263,6 +266,9 @@ pub use emitter_envelope::{
     EmitterEnvelope, EmitterEnvelopeAlteration, EnvelopeClause, EnvelopeClauseValue,
     EnvelopeDeclarationError, EnvelopeProperty,
 };
+pub use emitter_instances::{
+    EmitterInstances, EmitterInstancingCapability, SingleEmitterReason, SingleInstanceRefusal,
+};
 pub use execution_unit::{Unit, UnitIndexError, UnitKind};
 pub use expression::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, CaseBranch, Expression,
@@ -290,7 +296,11 @@ pub use names::{
     SubscriptionName, UdfName, UserName, VhostName, WasmProcessorName, WindowProcessorName,
     WireSchemaName,
 };
-pub use node_capabilities::{NodeCapabilities, NodeCapabilityRecord, PeerReceiveBounds};
+pub use node_capabilities::{
+    ConnectorHostCapabilities, ConsensusCapabilities, DnsAddressFamilies, DnsCapabilities,
+    EngineCapabilities, InterconnectCapabilities, InvalidPeerCapacity, MaxPeers, NodeCapabilities,
+    NodeCapabilityRecord, PeerReceiveBounds,
+};
 pub use node_endpoint::{
     NodeEndpoint, NodeEndpointParseError, NodeServiceUrl, NodeServiceUrlParseError,
 };
@@ -427,3 +437,10 @@ pub use wasm_state_inspection::{
     WasmUnitStateInspection,
 };
 pub use window_model_digest::WindowModelDigest;
+
+/// The existing host's single relay admission budget. The runtime settings owner adopts this
+/// policy input; transport retention consumes it rather than choosing another timeout.
+pub const HOST_RELAY_ADMISSION_BOUND: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The host's existing keep-alive cadence for unresolved relay acknowledgement admission.
+pub const HOST_RELAY_ALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);

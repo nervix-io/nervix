@@ -267,6 +267,9 @@ domain-clock reading, including when no new input has caused the branch task to 
 The ordered `FOR`, `LIMIT ... AFTER` and `FORMAT` clauses, owner routing and typed refusals are
 shared with materialized-state inspection. A continuation is refused as `stale_continuation` when
 its publication or visible expiry prefix changes. Reading state does not refresh a key's expiry.
+During a [partition transition](relay.md#changing-the-partition-count), each concrete branch is read from its holder
+until installation and from its claimant afterwards. Retained transfer copies add no duplicate
+rows or counts; a branch-catalog change racing the read produces `not_ready`.
 `DESCRIBE DEDUPLICATOR` reports `branches:`, `keys:` and `state bytes:` for each execution unit;
 bytes include key values and their `seen_at` timestamps. Partitioned units prefix these lines with
 the partition. An unavailable owner reports its typed refusal in place of the count.
@@ -426,6 +429,12 @@ types, null handling, numerical behavior, errors, and sensitivity, and
 [Approximate Sketches](filter-map-functions.md#approximate-sketches) owns the accuracy, memory, and
 expiry of the sketch aggregates.
 
+`COLLECT_VEC(input.value)` emits the retained argument values as one required vector, with the
+same ordering as `FIRST` and `LAST`. Its argument must be required; use `coalesce` for an optional
+field. A collecting route needs a message `WIDTH` or `MAX STATE SIZE`. Collection shares the
+retained argument column with `FIRST` and `LAST`, including through snapshot restore, and its
+values and structure remain visible through the existing state inspection commands.
+
 `MAX STATE SIZE <bytes>` caps the live state of each concrete branch. It charges retained Arrow
 input and argument allocations, row handles, branch keys, and the reserved capacity of every
 sketch in every active pane. A row that would exceed the cap, or a row whose aggregate arguments
@@ -485,6 +494,9 @@ accumulator facts do not advance the row position; they do consume the reply's b
 repeated on each page. Metadata that cannot fit is refused as `reply_too_large`. Every section uses
 the same captured publication, and a changed publication or branch lifetime invalidates its
 continuation. Branch selectors, formats and owner routing use the shared inspection contract.
+During a [partition transition](relay.md#changing-the-partition-count), the selected partition contributes the branch's
+rows, header, accumulator facts and byte charge once, including while its holder retains the
+transfer checkpoint. A branch-catalog change racing the read produces `not_ready`.
 `DESCRIBE WINDOW PROCESSOR` reports each unit's `branches:`, `rows:` and `state bytes:` without
 returning retained rows; the byte count is the sum of the same per-branch charges in the headers.
 
@@ -589,6 +601,11 @@ receive the same generation. A restart continues from the newest surviving snaps
 model binding and branch incarnation. Inputs admitted after that snapshot have already been
 acknowledged and are not replayed, so recovery can skip those state updates. A graceful stop
 persists the final generation before the branch ends. `STOP` followed by `START` retains it.
+A planned ownership handoff, by `RELOCATE`, a node drain or a placement change, carries the
+generation each branch published at the handoff's freeze, so the new owner continues every branch
+from every input the former owner admitted. An owner loss continues from the newest surviving
+snapshot, or reports the branches it reset; see
+[When The Former Owner Is Gone](shutdown.md#when-the-former-owner-is-gone).
 A [backup](backup-and-restore.md) also carries each active branch's published tensors with their
 shapes, pinned model identity and branch incarnation. Quiesced capture forces publication;
 `WITHOUT PAUSE` captures the latest published generation without a common quiesced boundary.

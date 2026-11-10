@@ -157,6 +157,7 @@ fn input_arrow(source_ip: &str) -> Vec<u8> {
 #[ignore = "needs `just wasm-datalake-geo-guest`"]
 async fn the_geo_guest_enriches_every_declared_route() {
     let runtime = WasmRuntime::new(WasmRuntimeConfig {
+        engine: nervix_wasm::WasmEngineSettings::default(),
         optimize: false,
         epoch_tick_interval: Duration::from_millis(5),
         epoch_deadline_ticks: 2_000,
@@ -295,6 +296,7 @@ async fn the_geo_guest_enriches_every_declared_route() {
 #[ignore = "needs `just wasm-datalake-geo-guest`"]
 async fn the_geo_guest_rejects_a_destination_schema_it_cannot_fill() {
     let runtime = WasmRuntime::new(WasmRuntimeConfig {
+        engine: nervix_wasm::WasmEngineSettings::default(),
         optimize: false,
         epoch_tick_interval: Duration::from_millis(5),
         epoch_deadline_ticks: 2_000,

@@ -313,8 +313,6 @@ pub struct Client {
 
 impl Client {
     pub(crate) const MAX_LEADER_ROUTING_ATTEMPTS: usize = 1200;
-    const LEADER_ELECTION_RETRY_DELAY: Duration = Duration::from_millis(100);
-    const MAX_RETRY_DELAY: Duration = Duration::from_secs(1);
 
     pub async fn connect(
         server: impl AsRef<str>,
@@ -330,29 +328,17 @@ impl Client {
     ) -> error_stack::Result<Self, ClientError> {
         let server = Url::parse(server.as_ref())
             .map_err(|error| Report::new(ClientError::InvalidServerUrl(error)))?;
-        const MAX_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
         if options.seed_servers.len() > ConnectOptions::MAX_SEED_SERVERS {
             return Err(Report::new(ClientError::TooManySeedServers {
                 count: options.seed_servers.len(),
             }));
-        }
-        for (field, value) in [
-            ("connect_timeout", options.connect_timeout),
-            ("request_timeout", options.request_timeout),
-            ("retry_timeout", options.retry_timeout),
-            ("backup_wait_timeout", options.backup_wait_timeout),
-        ] {
-            if value < Duration::from_millis(1) || value > MAX_DEADLINE {
-                return Err(Report::new(ClientError::InvalidDeadline { field }));
-            }
         }
         if server.scheme() == "https" {
             // A client that began over TLS cannot silently reconnect over plaintext, even when
             // the caller did not explicitly request TLS for every seed and redirect.
             options.tls_requirement = Some(TlsRequirement::Required);
         }
-        let mut connector = GrpcConnector::new(options)
-            .map_err(|error| Report::new(ClientError::BuildAuthenticationMetadata(error)))?;
+        let mut connector = GrpcConnector::new(options)?;
         connector
             .validate_server(&server)
             .map_err(EndpointValidationError::into_client)?;
@@ -363,7 +349,7 @@ impl Client {
         }
         connector.load_dns().await?;
         let mut servers = ServerDirectory::with_seeds(server, connector.seed_servers());
-        let events = SessionEvents::new();
+        let events = SessionEvents::new(connector.capabilities());
         let mut last_error = None;
         let deadline = Instant::now() + connector.retry_timeout();
         for candidate in servers.reconnect_candidates() {
@@ -394,10 +380,9 @@ impl Client {
         channel: Channel,
         domain: Option<DomainName>,
     ) -> error_stack::Result<Self, ClientError> {
-        let mut connector = GrpcConnector::new(ConnectOptions::default())
-            .map_err(|error| Report::new(ClientError::BuildAuthenticationMetadata(error)))?;
+        let mut connector = GrpcConnector::new(ConnectOptions::default())?;
         connector.load_dns().await?;
-        let events = SessionEvents::new();
+        let events = SessionEvents::new(connector.capabilities());
         let exchange = Exchange::open(channel, &connector, events.emitters.clone()).await?;
         Ok(Self::assemble(
             exchange,
@@ -843,7 +828,7 @@ impl Client {
                             self.follow_leader(leader, RecoveryDeadline::RetryBudget)
                                 .await?;
                         }
-                        Routing::AwaitElection if Self::await_retry(attempt).await => {}
+                        Routing::AwaitElection if self.await_retry(attempt).await => {}
                         _ => {
                             if let InspectionOutcome::Inspected(inspection) = &outcome {
                                 let preview = TransactionPreviewIdentity {
@@ -917,7 +902,7 @@ impl Client {
                     cancellation.unless_requested(following).await??;
                 }
                 Routing::AwaitElection | Routing::AwaitOutcome => {
-                    let retrying = std::pin::pin!(Self::await_retry(attempt));
+                    let retrying = std::pin::pin!(self.await_retry(attempt));
                     let waited = cancellation.unless_requested(retrying).await?;
                     if !waited {
                         return Ok(outcome);
@@ -1288,7 +1273,7 @@ impl Client {
                     self.inner.servers.lock().await.remember(leader);
                     self.reconnect(leader).await?;
                 }
-                Routing::AwaitElection if Self::await_retry(attempt).await => {}
+                Routing::AwaitElection if self.await_retry(attempt).await => {}
                 _ => return Ok(outcome),
             }
         }
@@ -1430,7 +1415,7 @@ impl Client {
                         return Err(report);
                     }
                     let allowed =
-                        nervix_primitives::time::timeout_at(deadline, Self::await_retry(attempt))
+                        nervix_primitives::time::timeout_at(deadline, self.await_retry(attempt))
                             .await
                             .map_err(|_| Report::new(ClientError::RetryDeadline))?;
                     if !allowed {
@@ -1817,15 +1802,11 @@ impl Client {
     }
 
     /// Waits before the request is sent again, and says whether it may be.
-    pub(crate) async fn await_retry(attempt: usize) -> bool {
+    pub(crate) async fn await_retry(&self, attempt: usize) -> bool {
         if !Self::retries_remain(attempt) {
             return false;
         }
-        let multiplier = 1_u32 << attempt.min(4);
-        let delay = Self::LEADER_ELECTION_RETRY_DELAY
-            .checked_mul(multiplier)
-            .assured("a retry multiplier of at most sixteen keeps 100 ms below two seconds");
-        sleep(delay.min(Self::MAX_RETRY_DELAY)).await;
+        sleep(self.inner.connector.capabilities().retry_delay(attempt)).await;
         true
     }
 
@@ -1926,7 +1907,7 @@ impl Client {
                 self.inner.servers.lock().await.remember(&endpoint);
             }
             let deadline = deadline.gives_up_at(&self.inner.connector);
-            let mut delay = Self::LEADER_ELECTION_RETRY_DELAY;
+            let mut delay = self.inner.connector.capabilities().retry_backoff();
             let mut last_error = None;
             loop {
                 nervix_primitives::task::consume_budget().await;
@@ -1959,8 +1940,8 @@ impl Client {
                 sleep(delay.min(remaining)).await;
                 delay = delay
                     .checked_mul(2)
-                    .assured("a delay capped at one second doubles within Duration's range")
-                    .min(Self::MAX_RETRY_DELAY);
+                    .assured("a validated delay capped at one day doubles within Duration's range")
+                    .min(self.inner.connector.capabilities().retry_max_backoff());
             }
         };
         let SessionRecovery::Ready = recovered else {

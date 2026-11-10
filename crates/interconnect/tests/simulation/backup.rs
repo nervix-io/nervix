@@ -371,11 +371,11 @@ async fn assert_inventory_deadline(
     assert!(
         matches!(
             error.current_context(),
-            RequestError::Timeout { timeout, .. } if *timeout == CaptureInventoryRequest::TIMEOUT
+            RequestError::Timeout { timeout, .. } if *timeout == CaptureInventoryRequest::DEADLINE.declared_default()
         ),
         "{error:?}"
     );
-    assert!(turmoil::elapsed() >= started + CaptureInventoryRequest::TIMEOUT);
+    assert!(turmoil::elapsed() >= started + CaptureInventoryRequest::DEADLINE.declared_default());
 }
 
 /// Requires the capture owner to list exactly the complete stage its capture produced.
@@ -785,7 +785,8 @@ fn exercise_backup_section(run: ScenarioRun, sections: SectionSet) -> Result<(),
                         "a stalled fetch must fail at its deadline"
                     );
                     assert!(
-                        turmoil::elapsed() >= started + FetchCapturedSection::default_timeout()
+                        turmoil::elapsed()
+                            >= started + FetchCapturedSection::DEADLINE.declared_default()
                     );
                     trace.record("client", "stalled fetch reached its deadline");
                     turmoil::partition("client", "server");

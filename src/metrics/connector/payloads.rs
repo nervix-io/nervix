@@ -154,7 +154,7 @@ impl PayloadFamilies {
             reason = "resolves all payload children for one starting emitter"
         )
     )]
-    pub(super) fn emitter(&self, values: &[&str; 5]) -> PayloadMetrics {
+    pub(super) fn emitter(&self, values: &[&str; 6]) -> PayloadMetrics {
         PayloadMetrics {
             payloads: self.payloads.with_label_values(values),
             source_messages: self.source_messages.with_label_values(values),
@@ -176,7 +176,7 @@ impl PayloadFamilies {
         nervix_lint,
         nervix::context(lifecycle, reason = "resolves one of four fixed source-work states")
     )]
-    fn work_child(&self, values: &[&str; 5], state: &str) -> WorkGauge {
+    fn work_child(&self, values: &[&str; 6], state: &str) -> WorkGauge {
         let mut labels = values.to_vec();
         labels.push(state);
         self.work.with_label_values(&labels)

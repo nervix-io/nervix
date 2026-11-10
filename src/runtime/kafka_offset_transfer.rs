@@ -25,8 +25,8 @@ use futures_util::{StreamExt as _, stream};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{CpuClass, MemoryClass};
 use nervix_interconnect::{
-    DescribeKafkaOffsets, InterconnectRequest, KafkaOffsetRevision, RemoteOperationFailure,
-    RemoteOperationSubject, StreamHandlerError, StreamingResponse, SyncKafkaOffsets,
+    DescribeKafkaOffsets, KafkaOffsetRevision, RemoteOperationFailure, RemoteOperationSubject,
+    StreamHandlerError, StreamingResponse, SyncKafkaOffsets,
 };
 use nervix_models::ClusterNodeName;
 use nervix_primitives::sync::Arc;
@@ -272,7 +272,7 @@ impl Runtime {
                     placement: placement.to_remote(),
                     after_lsm,
                 },
-                DescribeKafkaOffsets::TIMEOUT,
+                dispatcher.request_deadline::<DescribeKafkaOffsets>(),
             )
             .await
             .change_context_lazy(failure)?

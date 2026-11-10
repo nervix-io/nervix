@@ -320,6 +320,7 @@ pub struct InvocationBinding {
 
 #[derive(Debug, Clone)]
 pub struct CompiledProgram {
+    pub settings: crate::VmSettings,
     pub input_schema: StdArc<Schema>,
     pub output_schema: StdArc<Schema>,
     pub inputs: Vec<InputBinding>,
