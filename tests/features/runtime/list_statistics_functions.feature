@@ -229,59 +229,52 @@ Feature: Statistics over one list
 
   Scenario Outline: List statistics refuse elements and percentiles they cannot read when the statement is applied
     Given a <cluster_size> node nervix cluster is started
-    When these Plexus commands fail with "function 'list_var_pop' requires ARRAY or VEC elements of a scalar type"
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
-      CREATE SCHEMA nested_series (id STRING, windows <nested_type>);
-      CREATE SCHEMA nested_summary (id STRING, spread F64 OPTIONAL);
-      CREATE RELAY nested_series_in SCHEMA nested_series UNBRANCHED;
-      CREATE RELAY nested_summaries SCHEMA nested_summary UNBRANCHED;
-      CREATE JUNCTION describe_nested FROM nested_series_in UNBRANCHED TO nested_summaries
-        SET id = input.id, spread = list_var_pop(input.windows)
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA series (
+        id STRING,
+        readings <readings_type>,
+        windows <nested_type>,
+        labels <labels_type>,
+        digests <digests_type>,
+        percentile F64
+      );
+      CREATE SCHEMA summary (id STRING, value F64 OPTIONAL, position I64 OPTIONAL);
+      CREATE RELAY series_in SCHEMA series UNBRANCHED;
+      CREATE RELAY summaries SCHEMA summary UNBRANCHED;
+      """
+    When these Plexus commands fail with "function 'list_var_pop' requires ARRAY or VEC elements of a scalar type"
+      """
+      CREATE JUNCTION describe_nested FROM series_in UNBRANCHED TO summaries
+        SET id = input.id, value = list_var_pop(input.windows)
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       """
     And these Plexus commands fail with "function 'list_median' requires numeric input, found Utf8"
       """
-      CREATE UNPACED DOMAIN {{domain}};
-      CREATE SCHEMA label_series (id STRING, labels <labels_type>);
-      CREATE SCHEMA label_summary (id STRING, middle F64 OPTIONAL);
-      CREATE RELAY label_series_in SCHEMA label_series UNBRANCHED;
-      CREATE RELAY label_summaries SCHEMA label_summary UNBRANCHED;
-      CREATE JUNCTION describe_labels FROM label_series_in UNBRANCHED TO label_summaries
-        SET id = input.id, middle = list_median(input.labels)
+      CREATE JUNCTION describe_labels FROM series_in UNBRANCHED TO summaries
+        SET id = input.id, value = list_median(input.labels)
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       """
     And these Plexus commands fail with "function 'list_quantile' requires a percentile from 0 to 100, found 101"
       """
-      CREATE UNPACED DOMAIN {{domain}};
-      CREATE SCHEMA reading_series (id STRING, readings <readings_type>);
-      CREATE SCHEMA reading_summary (id STRING, tail F64 OPTIONAL);
-      CREATE RELAY reading_series_in SCHEMA reading_series UNBRANCHED;
-      CREATE RELAY reading_summaries SCHEMA reading_summary UNBRANCHED;
-      CREATE JUNCTION describe_tail FROM reading_series_in UNBRANCHED TO reading_summaries
-        SET id = input.id, tail = list_quantile(input.readings, 101)
+      CREATE JUNCTION describe_tail FROM series_in UNBRANCHED TO summaries
+        SET id = input.id, value = list_quantile(input.readings, 101)
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       """
     And these Plexus commands fail with "function 'list_quantile' requires its percentile to be a numeric literal"
       """
-      CREATE UNPACED DOMAIN {{domain}};
-      CREATE SCHEMA chosen_series (id STRING, readings <readings_type>, percentile F64);
-      CREATE SCHEMA chosen_summary (id STRING, chosen F64 OPTIONAL);
-      CREATE RELAY chosen_series_in SCHEMA chosen_series UNBRANCHED;
-      CREATE RELAY chosen_summaries SCHEMA chosen_summary UNBRANCHED;
-      CREATE JUNCTION describe_chosen FROM chosen_series_in UNBRANCHED TO chosen_summaries
-        SET id = input.id, chosen = list_quantile(input.readings, input.percentile)
+      CREATE JUNCTION describe_chosen FROM series_in UNBRANCHED TO summaries
+        SET id = input.id, value = list_quantile(input.readings, input.percentile)
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       """
     And these Plexus commands fail with "function 'list_argmax' requires ordered scalar elements, found Binary"
       """
-      CREATE UNPACED DOMAIN {{domain}};
-      CREATE SCHEMA digest_series (id STRING, digests <digests_type>);
-      CREATE SCHEMA digest_summary (id STRING, largest_at I64 OPTIONAL);
-      CREATE RELAY digest_series_in SCHEMA digest_series UNBRANCHED;
-      CREATE RELAY digest_summaries SCHEMA digest_summary UNBRANCHED;
-      CREATE JUNCTION locate_digest FROM digest_series_in UNBRANCHED TO digest_summaries
-        SET id = input.id, largest_at = list_argmax(input.digests)
+      CREATE JUNCTION locate_digest FROM series_in UNBRANCHED TO summaries
+        SET id = input.id, position = list_argmax(input.digests)
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       """
 
