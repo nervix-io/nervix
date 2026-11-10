@@ -1048,17 +1048,7 @@ impl SessionServiceImpl {
         {
             Ok(page) => page,
             Err(error) => {
-                let reason = match error.current_context() {
-                    ProcessorStatePageError::Position => {
-                        StateInspectionRejection::StaleContinuation
-                    }
-                    ProcessorStatePageError::Unavailable | ProcessorStatePageError::Branch => {
-                        StateInspectionRejection::OwnerUnavailable
-                    }
-                    ProcessorStatePageError::Unrestored
-                    | ProcessorStatePageError::Admission
-                    | ProcessorStatePageError::Columns => StateInspectionRejection::NotReady,
-                };
+                let reason = StateInspectionRejection::from(error.current_context());
                 return Err(inspection_refusal(error, reason));
             }
         };
@@ -1264,6 +1254,24 @@ impl SessionServiceImpl {
         .await
         .map_err(|error| inspection_refusal(error, StateInspectionRejection::OwnerUnavailable))??;
         Ok(received.descriptor.counts)
+    }
+}
+
+/// The typed refusal an inspection reports when a unit's owner could not read its page. A
+/// continuation position the unit's state no longer holds is stale. A unit task this node no
+/// longer runs, or a branch task that could not answer, leaves the owner unavailable. A processor
+/// still restoring its branches, or a page the node could not admit or gather, is not ready yet.
+impl From<&ProcessorStatePageError> for StateInspectionRejection {
+    fn from(error: &ProcessorStatePageError) -> Self {
+        match error {
+            ProcessorStatePageError::Position => Self::StaleContinuation,
+            ProcessorStatePageError::Unavailable | ProcessorStatePageError::Branch => {
+                Self::OwnerUnavailable
+            }
+            ProcessorStatePageError::Unrestored
+            | ProcessorStatePageError::Admission
+            | ProcessorStatePageError::Columns => Self::NotReady,
+        }
     }
 }
 
@@ -1474,3 +1482,7 @@ fn encode_page(
         last_branch,
     })
 }
+
+#[cfg(test)]
+#[path = "processor_state_tests.rs"]
+mod tests;
