@@ -656,27 +656,6 @@ pub struct DomainTick {
     pub period: crate::DomainClockPeriod,
 }
 
-/// Why a domain stopped, as the stop that committed it records it.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-)]
-pub enum DomainStopCause {
-    /// An operator's `STOP`, a transaction's `STOP` step, or the rollback of a `START` whose
-    /// application failed.
-    Operator,
-    /// The licensing stop gate closed while the domain ran (specification §10.7).
-    Licensing(crate::LicensingStopReason),
-}
-
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -687,10 +666,8 @@ pub struct DomainState {
     pub start_version: u64,
     pub last_start: DomainStartPoint,
     pub clock: Option<DomainClockState>,
-    /// The cause the committed stop recorded. Consensus writes it with each stop and clears it
-    /// with each start, so it is present only while the domain stays stopped by that stop; a
-    /// domain created or restored stopped has none.
-    pub stop_cause: Option<DomainStopCause>,
+    /// Why its committed stop ended the domain, kept while it stays stopped; a start clears it.
+    pub stop_cause: Option<crate::DomainStopCause>,
 }
 
 #[derive(

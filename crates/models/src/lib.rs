@@ -35,6 +35,7 @@ mod connector;
 mod construction_alteration;
 mod database_settings;
 mod domain_clock;
+mod domain_stop;
 mod duration_text;
 mod emitter;
 mod emitter_batch;
@@ -253,6 +254,7 @@ pub use domain_clock::{
     DomainClockObservedState, DomainClockPeriod, DomainClockProgress, DomainClockSkew,
     DomainClockState, DomainClockTickObservation, DomainTimeRate, PacedDomainClock,
 };
+pub use domain_stop::DomainStopCause;
 pub use duration_text::{DurationTextError, parse_duration_text};
 pub use emitter::{
     AckMode, AlterEmitter, AlterEmitterError, AlterEmitterOperation, CreateEmitter,
@@ -412,18 +414,18 @@ pub use statement::{
     DescribeJunction, DescribeLicense, DescribeLookup, DescribePlacement, DescribeReingestor,
     DescribeRelay, DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf,
     DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig, DomainPace, DomainStartPoint,
-    DomainState, DomainStatus, DomainStopCause, DomainTick, DrainNode, DropModel, DropNode,
-    EndpointKind, EndpointType, ErrorPolicies, GeneralErrorPolicy, IngestTimestampSource,
-    InspectionFormat, LookupQuery, MaterializedRelayState, MessageErrorPolicy, Model, ModelKind,
-    PartitionSeed, RefreshLicense, RelayBranching, Relocation, RelocationMember,
-    RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
-    RelocationUnitSelection, ResolvedBranching, ResolvedCodecWireFormat, RetryPolicy,
-    ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowPlacements, ShowProcessorState,
-    ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SignalingProtobufConfig,
-    SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat, StartDomain,
-    StateInspectedProcessor, StateInspectionPageRequest, Statement, StopDomain,
-    SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, UncordonNode,
-    UniquelyKindedModel, UploadResource, VhostTlsResource, WireSchemaLookup, default_relay_buffer,
+    DomainState, DomainStatus, DomainTick, DrainNode, DropModel, DropNode, EndpointKind,
+    EndpointType, ErrorPolicies, GeneralErrorPolicy, IngestTimestampSource, InspectionFormat,
+    LookupQuery, MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, PartitionSeed,
+    RefreshLicense, RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
+    RelocationPreferenceStrategy, RelocationSelection, RelocationUnitSelection, ResolvedBranching,
+    ResolvedCodecWireFormat, RetryPolicy, ShowClusterStatus, ShowCreate, ShowEmitters,
+    ShowIngestors, ShowPlacements, ShowProcessorState, ShowRelayMaterializedState,
+    ShowTransactions, ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
+    SignalingWaitStep, SignalingWireFormat, StartDomain, StateInspectedProcessor,
+    StateInspectionPageRequest, Statement, StopDomain, SubscriptionBinding,
+    SubscriptionDeliveryBehavior, SubscriptionLiteral, UncordonNode, UniquelyKindedModel,
+    UploadResource, VhostTlsResource, WireSchemaLookup, default_relay_buffer,
 };
 pub use timestamp::{AtomicTimestamp, Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};

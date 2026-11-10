@@ -321,6 +321,36 @@ impl LicensingRecord {
         })
     }
 
+    /// The committed activation a decision for `binding` is ordered against. A first activation
+    /// has none, and neither has a new activation superseding an ephemeral one whose stop gate
+    /// closed, which activates again or never runs (specification §7.6) and is never committed
+    /// again. A refresh, which names the committed revision it expects, is ordered against the
+    /// committed activation, whose binding it must carry.
+    fn ordering_base(
+        &self,
+        binding: &ActivationBinding,
+        expected_revision: Option<u64>,
+    ) -> error_stack::Result<Option<&ActivationState>, LicenseDecisionError> {
+        match (&self.mode, expected_revision) {
+            (LicensingMode::Free, None) => Ok(None),
+            (LicensingMode::Free, Some(_)) => Err(Report::new(LicenseDecisionError::NotActivated)),
+            (LicensingMode::Activated(activation), None) => {
+                if self.processing_stop().is_none()
+                    || activation.binding.activation_id == binding.activation_id
+                {
+                    return Err(Report::new(LicenseDecisionError::AlreadyActivated));
+                }
+                Ok(None)
+            }
+            (LicensingMode::Activated(activation), Some(_)) => {
+                if &activation.binding != binding {
+                    return Err(Report::new(LicenseDecisionError::Binding));
+                }
+                Ok(Some(activation.as_ref()))
+            }
+        }
+    }
+
     pub fn accept(
         &self,
         identity: &ClusterIdentity,
@@ -329,28 +359,7 @@ impl LicensingRecord {
         expected_revision: Option<u64>,
         environment: &LicensingEnvironment,
     ) -> error_stack::Result<Self, LicenseDecisionError> {
-        let previous = match (&self.mode, expected_revision) {
-            (LicensingMode::Free, None) => None,
-            (LicensingMode::Free, Some(_)) => {
-                return Err(Report::new(LicenseDecisionError::NotActivated));
-            }
-            // A new activation supersedes only an ephemeral one whose stop gate closed, which
-            // activates again or never runs (specification §7.6); it never re-commits that one.
-            (LicensingMode::Activated(activation), None) => {
-                if self.processing_stop().is_none()
-                    || activation.binding.activation_id == binding.activation_id
-                {
-                    return Err(Report::new(LicenseDecisionError::AlreadyActivated));
-                }
-                None
-            }
-            (LicensingMode::Activated(activation), Some(_)) => {
-                if &activation.binding != binding {
-                    return Err(Report::new(LicenseDecisionError::Binding));
-                }
-                Some(activation)
-            }
-        };
+        let previous = self.ordering_base(binding, expected_revision)?;
         let documents = merge_documents(&self.trust, &received.trust)?;
         let protocol = StoredTrustDocument::protocol_documents(&documents, environment)?;
         let trust = environment.trust(&protocol)?;
