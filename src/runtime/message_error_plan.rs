@@ -31,6 +31,7 @@ pub(super) struct BoundMessageErrorRoute {
 }
 
 pub(super) struct MessageErrorRouteBindingContext<'a> {
+    pub(super) vm_settings: nervix_vm::VmSettings,
     pub(super) relay_services: &'a HashMap<RelayName, Arc<RelayBoundaryServices>>,
     pub(super) materialized_stream_specs: &'a HashMap<RelayName, RuntimeMaterializedRelaySpec>,
     pub(super) lookups: &'a HashMap<LookupName, Arc<LookupRuntime>>,
@@ -66,6 +67,7 @@ impl BoundMessageErrorRoutes {
                 spec.output_schema.clone(),
                 spec.compile_schemas,
                 RuntimeVmCompileContext {
+                    settings: context.vm_settings,
                     available_materialized_streams: context.materialized_stream_specs,
                     available_lookups: context.lookups,
                     current_branching: &spec.target_branching,
@@ -191,6 +193,7 @@ mod tests {
             BoundMessageErrorRoutes::bind(
                 MessageErrorRouteSpecs { routes: vec![spec] },
                 MessageErrorRouteBindingContext {
+                    vm_settings: nervix_vm::VmSettings::default(),
                     relay_services,
                     materialized_stream_specs: &materialized,
                     lookups: &lookups,
@@ -250,6 +253,7 @@ mod tests {
                 routes: vec![spec(None), spec(None)],
             },
             MessageErrorRouteBindingContext {
+                vm_settings: nervix_vm::VmSettings::default(),
                 relay_services: &relay_services,
                 materialized_stream_specs: &materialized,
                 lookups: &lookups,

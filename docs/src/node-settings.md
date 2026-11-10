@@ -79,8 +79,8 @@ The bulk window must fit HTTP/2's connection limit for every stream and have its
 budget behind it before listening. These options govern inter-node delivery independently of
 public client admission. Change a claim by restarting the node with new overrides.
 
-`DESCRIBE CLUSTER` shows each live incarnation's committed CPU count, memory bytes and four receive
-bounds, pending claims, and retained departed records. Its `cluster-effective receive bounds` are
+`DESCRIBE CLUSTER` shows each live incarnation's committed CPU count, memory bytes, four receive
+bounds and its engine/connector host capabilities, pending claims, and retained departed records. Its `cluster-effective receive bounds` are
 the componentwise minimum of matching live committed claims. Individual sends use their receiver's
 claim, so one smaller peer does not shrink traffic between larger peers. The interconnect chapter
 owns refusal, re-slicing, bootstrap transfer and flow-control behavior; the placement chapter owns
@@ -484,6 +484,48 @@ no explicit pair, the node runs no memory-pressure supervisor. `--memory-limit` 
 memory limit and derives its restore-staging quota from its database volume, as
 [The Startup Preflight](#the-startup-preflight) describes.
 
+### Engine And Connector Host Capabilities
+
+These values are local `NodeCapabilities`. Changing them requires restarting that node; they do
+not alter a graph's stored execution contract. Each flag has an environment twin formed as
+`NERVIX_` plus its uppercase name with underscores.
+
+| Server option | Default | Owner and bound |
+| --- | --- | --- |
+| `--vm-inline-row-limit` | 1024 rows | VM admission; zero sends every nonempty batch through the executor |
+| `--vm-regex-search-cache-bytes` | 2 MiB | positive, addressable lazy-DFA cache per compiled regex |
+| `--vm-dynamic-pattern-cache-capacity` | 64 patterns | positive, per call site and compiled program |
+| `--vm-pattern-sets-per-batch` | 64 sets | positive, per dynamic `contains_any` call and batch |
+| `--wasm-stack-bytes` | 512 KiB | positive, addressable stack per WASM invocation |
+| `--wasm-memory-reservation-bytes` | 4 GiB on 64-bit hosts; 10 MiB on 32-bit hosts | virtual address reservation per guest memory; zero permits relocatable growth |
+| `--connector-retry-multiplier` | 2 | positive multiplier applied between reconnect attempts |
+| `--connector-retry-jitter-percent` | 0 | 0 through 100 percent added to the next multiplied delay, within the declared cap |
+| `--kafka-domain-assignment-retry` | 100 ms | positive retry cadence while a domain-offset assignment is unavailable |
+| `--kafka-partition-watch-interval` | 1 s | positive topology inspection cadence |
+| `--syslog-intake-queue-capacity` | 64 frames | positive, within the native channel permit bound; stream intake backpressures when full |
+| `--syslog-read-chunk-bytes` | 8 KiB | positive, addressable bytes per stream read, further limited by the frame bound |
+
+The two Kafka durations accept at most `u32::MAX` whole seconds. VM programs carry the compiling
+node's resolved settings into prepared regex calls and execution. Extension calls still use
+Extension workers regardless of the inline threshold. Deterministic row-defect limits, including
+compiled regex size and `contains_any` input limits, remain fixed across nodes.
+
+Engine and connector host values are part of the incarnation-bound Raft capability claim and
+appear in the resolved startup log and `DESCRIBE CLUSTER`. The current record uses one consensus
+storage identity and wire fingerprint. A database in another stored shape fails to open and must
+be recreated for this alpha build. Nodes speak the same current shape; their local capability
+values may differ during a rolling restart.
+
+WASM parallel compilation is explicitly disabled: independent module compilations already run
+on bounded Bulk workers, so nested compilation fan-out cannot escape that admission boundary.
+Stack and address reservation do not replace a processor's declared linear-memory or fuel limits.
+
+The connector retry law preserves the initial delay and ceiling of `RETRY POLICY`; it changes
+only later delays. Kafka, MQTT and the shared ingestor/emitter host receive the same law.
+External broker timeouts, connection pools, keep-alive and request behavior remain declared client
+`CONFIG` keys or entity clauses. Read the owning connector section in
+[Ingestors](ingestors.md) or [Emitters](emitters.md) before choosing those values.
+
 ### Validation Before Any I/O
 
 The edge validates every value, and every relationship between values, before the node opens a
@@ -745,6 +787,13 @@ one millisecond and observe the refusal naming the settings, and restart a node 
 three-node cluster with such a setting, through the harness step that names a setting for one
 node, before restarting it with a valid one. Converting and validating the options takes no lock
 and adds no lifecycle path, so the deadlock detector has nothing of it to observe.
+
+The relay-capability scenarios preserve both concrete branches, exactly-once output and confirmed
+acknowledgements across raised and lowered receive bounds. The oversized-row case observes both
+branch refusals before submitting its fitting batch. A producer's first negative acknowledgement
+does not establish that every branch buffer has flushed. Controlled examples stagger the branch
+buffers' deadlines to exercise that distinction, while keeping the same subsequent delivery and
+producer-completion assertions.
 
 The prerequisite record, its compatibility rule, its gossip text and the order `DESCRIBE CLUSTER`
 lists it in have unit tests beside the record, and the record's gossip text has a registered Bolero

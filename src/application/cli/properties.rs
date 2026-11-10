@@ -498,9 +498,50 @@ impl<'bytes> GeneratedSettings<'bytes> {
         } else {
             None
         };
-        let runtime =
+        let mut runtime =
             RuntimeSettings::resolve(Some(self.cluster_duration()), restore_staging_max_bytes)
                 .assured("the runtime settings declare no validation");
+        runtime.vm = nervix_vm::VmSettings::resolve(nervix_vm::VmSettingOverrides {
+            inline_row_limit: Some(
+                usize::try_from(self.entropy.boundary_biased(0..=4096))
+                    .assured("bounded rows fit usize"),
+            ),
+            regex_search_cache_bytes: Some(self.entropy.boundary_biased(1..=8_388_608)),
+            dynamic_pattern_cache_capacity: Some(
+                usize::try_from(self.entropy.boundary_biased(1..=128))
+                    .assured("bounded caches fit usize"),
+            ),
+            pattern_sets_per_batch: Some(
+                usize::try_from(self.entropy.boundary_biased(1..=128))
+                    .assured("bounded sets fit usize"),
+            ),
+        })
+        .assured("generated positive cache sizes validate");
+        runtime.wasm_engine = nervix_wasm::WasmEngineSettings::resolve(
+            Some(self.entropy.boundary_biased(1..=8_388_608)),
+            Some(self.entropy.boundary_biased(0..=8_589_934_592)),
+        )
+        .assured("bounded engine sizes fit this native host");
+        runtime.connector_host = crate::runtime::ConnectorHostSettings::resolve(
+            crate::runtime::ConnectorHostSettingOverrides {
+                retry_multiplier: std::num::NonZeroU32::new(
+                    u32::try_from(self.entropy.boundary_biased(1..=8))
+                        .assured("bounded multiplier fits u32"),
+                ),
+                retry_jitter_percent: Some(
+                    u8::try_from(self.entropy.boundary_biased(0..=100))
+                        .assured("percentages fit u8"),
+                ),
+                kafka_assignment_retry: Some(self.cluster_duration()),
+                kafka_partition_watch_interval: Some(self.cluster_duration()),
+                syslog_queue_capacity: std::num::NonZeroUsize::new(
+                    usize::try_from(self.entropy.boundary_biased(1..=128))
+                        .assured("bounded queue fits usize"),
+                ),
+                syslog_read_chunk_bytes: Some(self.entropy.boundary_biased(1..=65_536)),
+            },
+        )
+        .assured("generated connector host bounds validate");
         let transactions = TransactionLimits::resolve(TransactionBounds {
             idle_timeout: Some(self.cluster_duration()),
             tombstone_retention: Some(self.cluster_duration()),
