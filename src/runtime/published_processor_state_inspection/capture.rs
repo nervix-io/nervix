@@ -97,7 +97,59 @@ impl ReadPlan {
 
 struct CaptureSelection {
     expected: crate::runtime::RuntimeStatePlacement,
-    selection: StateInspectionBranchSelection,
+    selection: ProcessorStateSelection,
+}
+
+struct CapturedPage {
+    branches: Vec<CapturedBranch>,
+    plan: ReadPlan,
+    memory: Reservation,
+    partition_catalog: Option<BTreeSet<nervix_models::BranchKeyFingerprint>>,
+}
+
+impl CapturedPage {
+    fn new(
+        mut branches: Vec<CapturedBranch>,
+        plan: ReadPlan,
+        mut memory: Reservation,
+        excluded: Option<&BTreeSet<nervix_models::BranchKeyFingerprint>>,
+        cancellation: &Cancellation,
+    ) -> ReadResult<Self> {
+        branches.sort_by(|left, right| BranchKey::canonical_order(&left.key, &right.key));
+        let partition_catalog = match excluded {
+            Some(excluded) => {
+                let mut catalog = BTreeSet::new();
+                for branch in &branches {
+                    cancellation
+                        .check()
+                        .change_context(ProcessorStatePageError::Admission)?;
+                    if let Some(key) = &branch.key {
+                        // A sparse tree may allocate an entire node for this one fingerprint.
+                        let bytes = u64::try_from(std::mem::size_of::<
+                            nervix_models::BranchKeyFingerprint,
+                        >())
+                        .assured("a fingerprint's size fits u64")
+                        .checked_mul(16)
+                        .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?;
+                        reserve_bytes(&mut memory, bytes)?;
+                        catalog.insert(key.fingerprint());
+                    }
+                }
+                branches.retain(|branch| match &branch.key {
+                    Some(key) => !excluded.contains(&key.fingerprint()),
+                    None => true,
+                });
+                Some(catalog)
+            }
+            None => None,
+        };
+        Ok(Self {
+            branches,
+            plan,
+            memory,
+            partition_catalog,
+        })
+    }
 }
 
 impl CaptureSelection {
@@ -107,7 +159,7 @@ impl CaptureSelection {
             && placement.identifier == self.expected.identifier
             && placement.unit == self.expected.unit
             && placement.state == self.expected.state
-            && selected(self.selection, &placement.branch_key)
+            && selected(self.selection.branch, &placement.branch_key)
     }
 }
 
@@ -117,7 +169,7 @@ impl Runtime {
         domain: &DomainName,
         processor: &NodeRef,
         unit: Unit,
-        selection: StateInspectionBranchSelection,
+        selection: ProcessorStateSelection,
         after: Option<(Option<nervix_models::BranchKeyFingerprint>, u64)>,
         bounds: ProcessorStatePageBounds,
     ) -> ReadResult<ProcessorStatePage> {
@@ -214,12 +266,22 @@ impl Runtime {
                     }
                     _ => return Err(Report::new(ProcessorStatePageError::Columns)),
                 }
-                captured.sort_by(|left, right| BranchKey::canonical_order(&left.key, &right.key));
-                Ok::<_, Report<ProcessorStatePageError>>((captured, plan, memory))
+                CapturedPage::new(
+                    captured,
+                    plan,
+                    memory,
+                    selection.selection.partition_exclusions.as_ref(),
+                    cancellation,
+                )
             })
             .await
             .change_context(ProcessorStatePageError::Admission)??;
-        let (captured, plan, mut memory) = captured;
+        let CapturedPage {
+            branches: captured,
+            plan,
+            mut memory,
+            partition_catalog,
+        } = captured;
         for _ in &captured {
             reserve_item::<OpenBranch>(&mut memory)?;
         }
@@ -271,7 +333,10 @@ impl Runtime {
         }
         executor
             .run_cpu(CpuClass::Bulk, memory, move |memory, cancellation| {
-                PublishedPage::build(opened, plan, now, after, bounds, memory, cancellation)
+                let mut page =
+                    PublishedPage::build(opened, plan, now, after, bounds, memory, cancellation)?;
+                page.partition_catalog = partition_catalog;
+                Ok::<_, Report<ProcessorStatePageError>>(page)
             })
             .await
             .change_context(ProcessorStatePageError::Admission)?
@@ -284,5 +349,85 @@ fn sealed_publication(
     match &generation.value {
         Some(WindowPublishedSnapshot::Sealed(payload)) => Some(payload),
         Some(WindowPublishedSnapshot::Live(_)) | None => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use arrow_schema::DataType;
+
+    use super::*;
+    use crate::{
+        runtime::{DeduplicatorKey, named},
+        runtime_schema::RuntimeValue,
+    };
+
+    fn key(tenant: &str) -> BranchKey {
+        BranchKey::from_fields([(named("tenant"), RuntimeValue::String(tenant.to_string()))])
+            .assured("one typed fixture field forms a concrete key")
+    }
+
+    #[nervix_primitives::test]
+    async fn excluding_a_claimed_copy_keeps_the_complete_catalog_and_its_checkpoint_unchanged() {
+        let executor = nervix_execution::Executor::default();
+        let first = key("beta");
+        let second = key("eta");
+        let generation = StdArc::new(Generation {
+            revision: 7,
+            value: vec![PublishedDeduplicatorKey {
+                key: Arc::new(DeduplicatorKey::new(vec![ReorderKeyPart::UInt64(42)])),
+                seen_at: Timestamp::from_unix_nanos(11),
+            }],
+        });
+        let retained = generation.clone();
+        let excluded = BTreeSet::from([first.fingerprint()]);
+        let expected_catalog = BTreeSet::from([first.fingerprint(), second.fingerprint()]);
+        let memory = executor
+            .try_reserve(MemoryClass::Bulk, 1)
+            .assured("bounded fixture admission");
+        let captured = executor
+            .run_cpu(CpuClass::Bulk, memory, move |memory, cancellation| {
+                let branches = vec![
+                    CapturedBranch {
+                        key: Some(first),
+                        registration: [1; 16],
+                        revision: 7,
+                        state: CapturedState::Keys(generation.clone()),
+                    },
+                    CapturedBranch {
+                        key: Some(second),
+                        registration: [2; 16],
+                        revision: 7,
+                        state: CapturedState::Keys(generation),
+                    },
+                ];
+                CapturedPage::new(
+                    branches,
+                    ReadPlan::Keys {
+                        fields: vec![StdArc::new(arrow_schema::Field::new(
+                            "key",
+                            DataType::UInt64,
+                            true,
+                        ))],
+                        max_time: std::time::Duration::from_secs(3600),
+                    },
+                    memory,
+                    Some(&excluded),
+                    cancellation,
+                )
+            })
+            .await
+            .assured("the bounded capture completes")
+            .assured("one copy can be excluded");
+        assert_eq!(captured.partition_catalog.as_ref(), Some(&expected_catalog));
+        assert_eq!(captured.branches.len(), 1);
+        assert_eq!(captured.branches[0].key.as_ref(), Some(&key("eta")));
+        let CapturedState::Keys(selected) = &captured.branches[0].state else {
+            panic!("the fixture captures deduplicator state");
+        };
+        assert!(StdArc::ptr_eq(selected, &retained));
+        assert_eq!(retained.revision, 7);
+        assert_eq!(retained.value.len(), 1);
+        assert_eq!(retained.value[0].seen_at, Timestamp::from_unix_nanos(11));
     }
 }

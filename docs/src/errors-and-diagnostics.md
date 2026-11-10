@@ -2,6 +2,12 @@
 
 *Plexus, the Nervix graph definition language.*
 
+Processor state inspection reports `not_ready` when installation or forget changes a branch catalog
+between its partition census and owner page, or when two holders identify no installed claimant.
+It returns no partial page or inflated counts. A census that exceeds the session byte budget is
+`reply_too_large`; failed Bulk admission remains `not_ready`, and unavailable owners and expired
+read deadlines retain their existing typed outcomes. These refusals contain no branch field values.
+
 Secure random values come from `nervix-crypto`. Its pinned AWS-LC generator returns complete
 random bytes or aborts if sufficient entropy cannot be obtained; it has no recoverable entropy
 failure to classify as a record, authentication or transport rejection. No default value replaces

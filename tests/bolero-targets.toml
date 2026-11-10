@@ -4695,10 +4695,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/state_inspection__tests__bolero_processor_inspection_page_messages_round_trip/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "interconnect-processor-state-inspection"
-invariant = "Every field of the bounded processor owner-page request and typed descriptor or refusal survives the production admitted rkyv codec bit for bit, including the inspected kind and name, selectors, positions, source identity, complete counts, row runs with typed branch keys, section fields and body identities."
+invariant = "Every field of the bounded processor owner-page request and typed descriptor or refusal survives the production admitted rkyv codec bit for bit, including the inspected kind and name, selectors, partition exclusions and complete catalogs, positions, source identity, complete counts, row runs with typed branch keys, section fields and body identities."
 manifest = "Cargo.toml"
 max_input_bytes = 1024
 package = "nervix-interconnect"

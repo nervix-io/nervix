@@ -19,6 +19,8 @@
     )
 )]
 
+use std::collections::BTreeSet;
+
 use arrow_array::{StringArray, TimestampNanosecondArray, UInt32Array};
 use arrow_schema::{FieldRef, Schema as ArrowSchema};
 use error_stack::{Report, ResultExt as _};
@@ -34,8 +36,8 @@ use super::{
     deduplicator::PublishedDeduplicatorKey,
     processor_state_inspection::{
         ProcessorStatePage, ProcessorStatePageBounds, ProcessorStatePageError,
-        ProcessorStatePageMemory, ProcessorStateRun, ProcessorStateSectionColumns, extend_runs,
-        held_row_bytes, payload_columns, timestamp_column,
+        ProcessorStatePageMemory, ProcessorStateRun, ProcessorStateSectionColumns,
+        ProcessorStateSelection, extend_runs, held_row_bytes, payload_columns, timestamp_column,
     },
     published_generation::Generation,
     window_state::{
