@@ -1,11 +1,12 @@
-//! Shared visual editor for junction, deduplicator, reorderer, window processor, correlator and
-//! reingestor creation.
+//! Shared visual editor for junction, deduplicator, reorderer, window processor, correlator,
+//! reingestor, generator, inferencer and WASM processor creation.
 //!
 //! Layer: edges.
 //!
 //! - **Owns.** Browser controls for node-wide processor options and composition of the ordered
-//!   input lists, the family's key, window or correlation section, and the state and route
-//!   editors for every processor family.
+//!   input lists, the family's key, window, correlation, generator source, model binding and
+//!   tensor, or guest limit and policy sections, and the state and route editors for every
+//!   processor family.
 //! - **Depends on.** Processor drafts, typed choice controls, and Leptos signals.
 //! - **Must not know.** Registry validation, runtime placement, or session transport internals.
 
@@ -19,10 +20,18 @@ use nervix_models::AckMode;
 
 use super::{
     CreateSignals, RequestSender, event_target_textarea_value, event_target_value,
-    processor_correlation_editor::ProcessorCorrelationEditor, processor_draft::ProcessorFamily,
-    processor_input_draft::InputList, processor_input_editor::ProcessorInputEditor,
-    processor_key_editor::ProcessorKeyEditor, processor_route_editor::ProcessorRouteEditor,
-    processor_state_editor::ProcessorStateEditor, processor_window_editor::ProcessorWindowEditor,
+    processor_binding_editor::ProcessorBindingEditor,
+    processor_correlation_editor::ProcessorCorrelationEditor,
+    processor_draft::ProcessorFamily,
+    processor_generator_editor::ProcessorGeneratorEditor,
+    processor_input_draft::InputList,
+    processor_input_editor::ProcessorInputEditor,
+    processor_key_editor::ProcessorKeyEditor,
+    processor_route_editor::ProcessorRouteEditor,
+    processor_state_editor::ProcessorStateEditor,
+    processor_tensor_editor::ProcessorTensorEditor,
+    processor_wasm_editor::{ProcessorWasmLimitsEditor, ProcessorWasmPoliciesEditor},
+    processor_window_editor::ProcessorWindowEditor,
 };
 
 pub(super) fn indices(len: usize) -> Vec<usize> {
@@ -58,17 +67,58 @@ pub(super) fn ProcessorEditor(
             </label>
         }
     });
+    let mode = family.reads_inputs().then(|| {
+        view! {
+            <fieldset class="create-field create-processor-mode">
+                <legend>"Acknowledgement mode"</legend>
+                <button type="button" data-mode="attached"
+                    class:active=move || draft.get().mode == AckMode::Attached
+                    disabled=pending
+                    on:click=move |_| { draft.update(|state| state.mode = AckMode::Attached); signals.edit(); }>"ATTACHED"</button>
+                <button type="button" data-mode="detached"
+                    class:active=move || draft.get().mode == AckMode::Detached
+                    disabled=pending
+                    on:click=move |_| { draft.update(|state| state.mode = AckMode::Detached); signals.edit(); }>"DETACHED"</button>
+            </fieldset>
+        }
+    });
+    let inputs = family.reads_inputs().then(|| {
+        view! { <ProcessorInputEditor family=family list=family.primary_input_list() signals=signals request_tx=request_tx session_generation=session_generation /> }
+    });
     let stage = match family {
         ProcessorFamily::Window => Some(view! { <ProcessorWindowEditor signals=signals /> }.into_any()),
         ProcessorFamily::Correlator => Some(
             view! { <ProcessorCorrelationEditor signals=signals request_tx=request_tx session_generation=session_generation /> }
                 .into_any(),
         ),
+        ProcessorFamily::Generator => Some(
+            view! { <ProcessorGeneratorEditor signals=signals request_tx=request_tx session_generation=session_generation /> }
+                .into_any(),
+        ),
+        ProcessorFamily::Inferencer => Some(
+            view! {
+                <ProcessorBindingEditor family=family signals=signals request_tx=request_tx session_generation=session_generation />
+                <ProcessorTensorEditor signals=signals request_tx=request_tx session_generation=session_generation />
+            }
+            .into_any(),
+        ),
+        ProcessorFamily::Wasm => Some(
+            view! {
+                <ProcessorBindingEditor family=family signals=signals request_tx=request_tx session_generation=session_generation />
+                <ProcessorWasmLimitsEditor signals=signals />
+            }
+            .into_any(),
+        ),
         ProcessorFamily::Junction
         | ProcessorFamily::Deduplicator
         | ProcessorFamily::Reorderer
         | ProcessorFamily::Reingestor => None,
     };
+    let state = family.declares_state_dependencies().then(|| {
+        view! { <ProcessorStateEditor family=family signals=signals request_tx=request_tx session_generation=session_generation /> }
+    });
+    let policies = (family == ProcessorFamily::Wasm)
+        .then(|| view! { <ProcessorWasmPoliciesEditor signals=signals /> });
     view! {
         <label class="create-field"><span>{family.name_label()}</span>
             <input node_ref=name_input class="create-name" type="text" autocomplete="off"
@@ -79,24 +129,15 @@ pub(super) fn ProcessorEditor(
                     signals.edit();
                 } />
         </label>
-        <fieldset class="create-field create-processor-mode">
-            <legend>"Acknowledgement mode"</legend>
-            <button type="button" data-mode="attached"
-                class:active=move || draft.get().mode == AckMode::Attached
-                disabled=pending
-                on:click=move |_| { draft.update(|state| state.mode = AckMode::Attached); signals.edit(); }>"ATTACHED"</button>
-            <button type="button" data-mode="detached"
-                class:active=move || draft.get().mode == AckMode::Detached
-                disabled=pending
-                on:click=move |_| { draft.update(|state| state.mode = AckMode::Detached); signals.edit(); }>"DETACHED"</button>
-        </fieldset>
-        <ProcessorInputEditor family=family list=family.primary_input_list() signals=signals request_tx=request_tx session_generation=session_generation />
+        {mode}
+        {inputs}
         {right_inputs}
         {filter}
         {keys}
         {stage}
-        <ProcessorStateEditor family=family signals=signals request_tx=request_tx session_generation=session_generation />
+        {state}
         <ProcessorRouteEditor family=family signals=signals request_tx=request_tx session_generation=session_generation />
+        {policies}
     }
     .into_any()
 }

@@ -139,10 +139,10 @@ it after a leader change. Its `PACED` state and advancing ticks establish restor
 The top bar's **Create** menu opens keyboard-accessible forms for domains, users, resource
 catalogs, schemas, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps, Roto UDFs,
 relays, branches, ingestors, junctions, deduplicators, reorderers, window processors, correlators,
-reingestors, emitters, and subscriptions. The resource group in the sidebar also provides a
-contextual create action. A form keeps its unfinished draft when it closes, restores focus to the
-action that opened it, reports validation and server failures inline, and shows the canonical
-Plexus statement before submission.
+reingestors, generators, inferencers, WASM processors, emitters, and subscriptions. The resource
+group in the sidebar also provides a contextual create action. A form keeps its unfinished draft
+when it closes, restores focus to the action that opened it, reports validation and server
+failures inline, and shows the canonical Plexus statement before submission.
 An expression typed into a form, such as a filter, a `WHERE` predicate, an assigned value or an
 invocation argument, reads exactly as it does in a typed statement: its [string literals](filter-map-functions.md#literals) are verbatim, so a
 backslash is an ordinary character.
@@ -373,6 +373,49 @@ assignment, require at least one assignment, and require an explicit flush polic
 reports a scope a correlator does not expose, such as `input`, inline while the draft stays
 editable. [Window processor](processors.md#window-processor) and [Correlator](processors.md#correlator)
 describe the aggregate, cadence, matching, and timeout semantics.
+
+A generator form reads no input relays, so it has no input list, acknowledgement mode, node filter,
+or materialized dependencies. It chooses its exact unbranched or named branch, then its
+materialized relay: the session offers only relays with materialized state on exactly that branch,
+through the generator-materialized-relay choice, and a changed branch or domain requires the relay
+again. `EACH` is a domain-clock period such as `100ms`, read as the language reads it; the first
+occurrence is immediate and later ones keep that schedule. Its set-only routes are offered relays
+with the materialized relay's branch, require at least one output assignment and an explicit
+flush policy, and insert the materialized relay's fields as `relay_state.<relay>.<field>` and, for
+a named branch, the key's fields as `branch.<field>` into the last assignment. No picker offers a
+live input, which a generator does not have; the registry reports such a scope inline while the
+draft stays editable.
+
+An inferencer form follows the junction form's branch, input, filter, acknowledgement, state and
+relay rules. It selects a resource and one of its completed versions or `LATEST`, which stays the
+requested version until the statement is applied, and the model `FILE` inside that version. Its
+tensor section edits the ordered `INPUTS`, the optional `STATE` and the ordered `OUTPUT SCHEMA`.
+Each tensor names its model port and declares its dense `F32` shape axis by axis: a positive
+fixed size, `DYNAMIC`, or `BATCH`. An `INPUTS` mapping holds an expression over the live input,
+into which a picker inserts `input.<field>`; a `STATE` binding names its input and the output it
+comes `FROM` and requires `INITIAL ZEROS` or an `INITIAL` constant. The form shows the execution
+mode the shapes imply, per message or batched, and the refusal of shapes that mix the two or
+give state a `BATCH` axis, by the inferencer Model's own rule; the registry applies it when the
+statement is created. Routes are set-only with an explicit flush policy: they insert each output
+tensor whose name is a field name as that generated field and, for a named branch, the key's
+fields, and never offer the live input. The model file is read when the inferencer is created, so
+a missing or unreadable file, like a mapping the model rejects, is reported inline while the
+draft, its tensors included, stays editable.
+
+A WASM processor form follows the same branch, input, filter, acknowledgement, state and relay
+rules, and the same resource, version and `FILE` choices for its guest module. `MAX FUEL` is a
+whole number of fuel units and `MAX MEMORY` a byte size such as `64MiB`; both are required and
+positive. `ON REJECTED STATE` starts at `PRESERVE`, and the form states the consequence of each
+choice: `PRESERVE` keeps a snapshot the recreated guest refused and reports the refusal until an
+operator acts, while `RESET` replaces that branch's state lifetime once through the coordinated
+reset, starting it from the guest's initial state. `ON GLOBAL ERROR` requires `LOG` or `IGNORE`.
+The guest owns when its routes emit, so a route declares no flush policy; its set-only
+construction inserts the guest's output fields, one aligned to each field of the route's relay,
+and, for a named branch, the key's fields. The guest module is compiled when the processor is
+created, so a missing or invalid module, or a route that reads the live input, is reported inline
+while the draft stays editable. [Generator](processors.md#generator),
+[Inferencer](processors.md#inferencer) and [WASM processor](processors.md#wasm-processor) describe
+the cadence, tensor, state and guest semantics.
 
 An emitter form starts with its connector and entity, then selects the configured client or the
 schema a client consumer publishes. Its searchable input list preserves written order and offers

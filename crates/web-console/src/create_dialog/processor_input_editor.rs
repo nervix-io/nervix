@@ -20,9 +20,10 @@ use super::{
     ChoiceControl, CreateSignals, RequestSender,
     choice_group::ChoiceGroup,
     event_target_checked, event_target_textarea_value, event_target_value,
-    processor_draft::{NodeBranchDraft, ProcessorDraft, ProcessorFamily},
+    processor_draft::{ProcessorDraft, ProcessorFamily},
     processor_editor::indices,
     processor_input_draft::{InputList, InputListDraft},
+    processor_node_branch_editor::ProcessorNodeBranch,
 };
 
 /// The static presentation of one input list's controls.
@@ -131,30 +132,8 @@ pub(super) fn ProcessorInputEditor(
     let pending = move || signals.progress.get().is_pending();
     let controls = input_list_controls(list);
     // The node-wide branch is chosen once, beside the draft's primary list.
-    let node_branch_label = if list == family.primary_input_list() {
-        family.node_branch_label()
-    } else {
-        None
-    };
-    let node_branch = node_branch_label.map(|label| {
-        view! {
-            <fieldset class="create-field create-processor-branching">
-                <legend>{label}</legend>
-                <button type="button" data-branch="unbranched"
-                    class:active=move || draft.get().branching == NodeBranchDraft::Unbranched
-                    disabled=pending
-                    on:click=move |_| { draft.update(|state| state.choose_unbranched()); signals.edit(); }>"UNBRANCHED"</button>
-                <button type="button" data-branch="named"
-                    class:active=move || matches!(draft.get().branching, NodeBranchDraft::Branched(_))
-                    disabled=pending
-                    on:click=move |_| { draft.update(|state| state.choose_branched()); signals.edit(); }>"Named branch"</button>
-            </fieldset>
-            <Show when=move || matches!(draft.get().branching, NodeBranchDraft::Branched(_)) fallback=|| ()>
-                <ChoiceGroup class_name="create-processor-branch" label=label
-                    control=ChoiceControl::ProcessorBranch signals=signals request_tx=request_tx
-                    session_generation=session_generation show_detail=true />
-            </Show>
-        }
+    let node_branch = (list == family.primary_input_list()).then(|| {
+        view! { <ProcessorNodeBranch family=family signals=signals request_tx=request_tx session_generation=session_generation /> }
     });
     let collects = move || read_list(draft, list, |inputs| inputs.collect.is_some());
     let section = view! {

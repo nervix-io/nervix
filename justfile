@@ -1083,6 +1083,16 @@ test-visual-window-correlator *args: build-web-console wasm-processor-guests dow
     cargo test --package nervix-scenarios --test scenarios -- \
         --input tests/features/web-console/visual_create_window_correlator.feature "$@"
 
+# Create generators, inferencers and WASM processors through the web console's visual forms on
+# in-process one- and three-node clusters, with only the in-process server's prerequisites.
+[positional-arguments]
+test-visual-generator-inferencer-wasm *args: build-web-console wasm-processor-guests download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/web-console/visual_create_generator_inferencer_wasm.feature "$@"
+
 # Exercise coordinated WASM guest-state resets through in-process nodes: the RESET statement on the
 # session's active domain, its retries and refusals, and the operator and guest-requested resets.
 [positional-arguments]

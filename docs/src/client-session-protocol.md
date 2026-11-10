@@ -527,7 +527,10 @@ takes a domain and branch reference. Ingestor decoded and output fields use the 
 codec-field and relay-field targets. A junction, deduplicator, reorderer, or reingestor asks for
 another input relay with a domain and the first relay reference; candidates have that relay's exact named schema and branch.
 The same dependencies with the output-relay target select the input branch, and with the
-materialized-relay target select only relays with materialized state in that branch. Route
+materialized-relay target select only relays with materialized state in that branch. A generator
+reads no input, so its materialized relay uses the generator-materialized-relay target: with a
+domain alone it offers unbranched relays with materialized state, and with a domain and a branch
+reference the relays with materialized state branched by exactly that branch. Route
 construction of an unbranched or named branch uses the ingestor relay targets, while branch keys
 and record fields use the branch-field and relay-field targets. These processor targets resolve
 against the attached transaction prefix, and their page digests include the selected input

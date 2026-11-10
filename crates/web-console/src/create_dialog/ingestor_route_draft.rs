@@ -3,8 +3,8 @@
 //! Layer: edges.
 //!
 //! - **Owns.** Browser-local route construction, branch keys, flush and message error selections,
-//!   shared by processor and emitter forms, the set-only shape of window and correlator routes,
-//!   and conversion to current semantic Models.
+//!   shared by processor and emitter forms, the set-only shape of window, correlator, generator,
+//!   inferencer and WASM processor routes, and conversion to current semantic Models.
 //! - **Depends on.** Typed route Models, expression parsing, and selected browser references.
 //! - **Must not know.** Relay execution, registry state, or connector acknowledgements.
 
@@ -492,12 +492,14 @@ impl MessageErrorDraft {
     }
 }
 
-/// When a set-only route emits: on the flush policy it declares, as a correlator route does, or
-/// on its window's `WIDTH` and `STEP`, as a window route does instead of declaring a flush.
+/// When a set-only route emits: on the flush policy it declares, as a correlator, generator or
+/// inferencer route does; on its window's `WIDTH` and `STEP`, as a window route does instead of
+/// declaring a flush; or when its WASM guest returns output, which owns the cadence instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SetOnlyEmission {
     Flushed,
     WindowCadence,
+    GuestOutput,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -569,9 +571,10 @@ impl IngestRouteDraft {
         self.build_with_branch(branch)
     }
 
-    /// A set-only route of a window or correlator, which node-wide branching keeps on its input's
-    /// branch. Such a route constructs every output field with `SET` and may filter with `WHERE`,
-    /// so it reads neither an inheritance nor invocations.
+    /// A set-only route of a window, correlator, generator, inferencer or WASM processor, which
+    /// node-wide branching keeps on its source's branch. Such a route constructs every output
+    /// field with `SET` and may filter with `WHERE`, so it reads neither an inheritance nor
+    /// invocations.
     pub(super) fn build_set_only(
         &self,
         emission: SetOnlyEmission,
@@ -587,7 +590,7 @@ impl IngestRouteDraft {
         let where_clause = self.build_where_clause()?;
         let flush_policy = match emission {
             SetOnlyEmission::Flushed => Some(self.flush.build()?),
-            SetOnlyEmission::WindowCadence => None,
+            SetOnlyEmission::WindowCadence | SetOnlyEmission::GuestOutput => None,
         };
         Ok(ProcessorOutput {
             relay: relay.clone(),
