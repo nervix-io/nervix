@@ -2609,7 +2609,7 @@ Finding that Core is already uniform is an ordinary completion outcome carrying 
 effective and committed records; it proposes no additional membership entry, even when a preceding
 joint observation became stale before Core handled the request.
 
-Trace-level vote and pre-vote transport completion events record the existing nested result before
+Debug-level vote and pre-vote transport completion events record the existing nested result before
 its foreign-error conversion, beside the local listener, peer and elapsed time. A transport error
 and a peer's typed refusal therefore remain distinguishable in the diagnostic. Cancellation by
 OpenRaft can end the exchange before that event; its own timeout then records the outcome. These
@@ -3388,6 +3388,15 @@ every other event stays with the filter. The rule takes no decision away from th
 subscriber's maximum level stays the filter's, and an event the filter refuses costs what it would
 without the rule. The scenario run's subscriber, which writes
 `tests/logs/scenarios.log`, applies the same rule to its own default.
+
+The subscriber's maximum level is also the level up to which the `log` crate hands it every record a
+dependency writes, to be judged one record at a time. Cranelift writes `trace` records throughout
+every WASM module and every Roto UDF it compiles, so a filter that selects `trace` for any target
+makes each such compile several times as long: about six times for the 1.77 MB guest of the scenario
+suite. A node compiles the module of a WASM processor it installs before it reports the revision
+prepared, so under such a filter a large module can outlast the budget a revision has to become
+prepared and ready. The scenario run's default therefore selects nothing above `debug`, and the
+consensus vote boundaries and receiver contexts it collects are recorded at `debug`.
 
 The node drops Lapin's report of a message its broker returned. Lapin logs every
 returned message at `warn` under the target `lapin::returned_messages`, with the whole message, its
