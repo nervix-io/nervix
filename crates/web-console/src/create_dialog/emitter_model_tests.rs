@@ -595,3 +595,49 @@ fn wide_window_limits_and_invalid_policy_fields_keep_exact_values() {
         &EmitterDraftError::Missing("retry backoff")
     );
 }
+
+#[test]
+fn instances_are_offered_and_built_only_where_the_entity_runs_several() {
+    assert!(
+        !EmitterDraft::default().offers_instances(),
+        "no entity is chosen yet"
+    );
+    let mut arbitrary =
+        nervix_arbitrary::Arbitrary::new(&[42; 4096], nervix_arbitrary::Domain::Plexus);
+
+    let several = arbitrary.create_emitter_to(EmitterEntityKind::Kafka(KafkaEmitterEntity::Topic));
+    let mut draft = filled(&several);
+    assert!(draft.offers_instances());
+    draft.instances = "per partition".to_string();
+    let built = draft
+        .build()
+        .assured("a Kafka topic emitter runs one instance per partition");
+    assert_eq!(built.instances, EmitterInstances::PerPartition);
+
+    draft.choose_kind(EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic));
+    assert!(!draft.offers_instances());
+    assert!(
+        draft.instances.is_empty(),
+        "choosing an entity that runs one instance clears the count"
+    );
+
+    let single = arbitrary.create_emitter_to(EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic));
+    let mut draft = filled(&single);
+    assert!(!draft.offers_instances());
+    draft.instances = "2".to_string();
+    let refusal = draft
+        .build()
+        .err()
+        .assured("an MQTT topic emitter runs one instance");
+    assert_eq!(
+        refusal.current_context(),
+        &EmitterDraftError::Invalid("instances")
+    );
+    assert_eq!(
+        refusal.downcast_ref::<SingleInstanceRefusal>(),
+        Some(&SingleInstanceRefusal {
+            entity: EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic),
+            reason: SingleEmitterReason::OneClientIdentifier,
+        })
+    );
+}

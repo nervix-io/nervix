@@ -172,3 +172,56 @@ impl SessionServiceImpl {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use nervix_recovery::Discarded as _;
+
+    use super::*;
+    use crate::application::test_fixtures::{TestService, build_test_service, named};
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn an_instance_is_stopped_where_no_task_runs_and_unknown_where_its_owner_cannot_answer() {
+        let TestService { service, path, .. } = build_test_service(false).await;
+        let domain: DomainName = named("instances");
+        let emitter: EmitterName = named("events_out");
+        let unit = Unit::FIRST_INSTANCE;
+
+        assert_eq!(
+            service
+                .emitter_instance_status(&domain, &emitter, unit, None)
+                .await,
+            EmitterInstanceStatus::Stopped,
+            "an instance no node is scheduled to run runs nowhere"
+        );
+        let local = service.inner.consensus.local_node_id().clone();
+        assert_eq!(
+            service
+                .emitter_instance_status(&domain, &emitter, unit, Some(&local))
+                .await,
+            EmitterInstanceStatus::Stopped,
+            "this node runs no task for the instance"
+        );
+        let unreachable: ClusterNodeName = named("unreachable_peer");
+        assert_eq!(
+            service
+                .emitter_instance_status(&domain, &emitter, unit, Some(&unreachable))
+                .await,
+            EmitterInstanceStatus::Unknown,
+            "an owner the interconnect cannot reach does not report the instance"
+        );
+
+        let idle = service
+            .emitter_instance_summary(
+                &domain,
+                &emitter,
+                EmitterInstanceUnit { unit, index: 0 },
+                Some(unreachable),
+                Vec::new(),
+            )
+            .await;
+        assert_eq!(idle.status, EmitterInstanceStatus::Idle);
+
+        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
+    }
+}
