@@ -53,11 +53,25 @@ async fn then_consumer_receives_interleaved_rows(
     let mut seen = std::collections::BTreeSet::new();
     let mut branches = BTreeMap::new();
     while seen.len() < expected {
-        let delivery = nervix_primitives::time::timeout_at(deadline, client.next_batch())
-            .await
-            .expect("all output arrives before its deadline")
-            .expect("consumer read succeeds")
-            .expect("consumer remains open");
+        let received = nervix_primitives::time::timeout_at(deadline, client.next_batch()).await;
+        let delivery = match received {
+            Ok(delivery) => delivery,
+            Err(error) => {
+                let admissions = world
+                    .fault_injection
+                    .capability_relay_admissions(&world.domain);
+                let refusals = world
+                    .fault_injection
+                    .capability_relay_refusals(&world.domain);
+                panic!(
+                    "all {expected} output rows arrive before their deadline; received row \
+                     identities {seen:?} across branches {branches:?}; relay admissions \
+                     {admissions:?}; refusals {refusals:?}: {error}"
+                );
+            }
+        }
+        .expect("consumer read succeeds")
+        .expect("consumer remains open");
         let batch = delivery.record_batch().expect("valid Arrow output");
         let ids = batch
             .column(0)
