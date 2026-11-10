@@ -1799,9 +1799,12 @@ including for binary functions when either container is null.
 | --- | --- | --- | --- |
 | `count(list)` | any | `I64` | Number of elements |
 | `sum(list)` | numeric | optional element type | Sum of the elements. An empty list returns null |
-| `first(list)` | numeric, `BOOL`, `STRING`, `DATETIME` | optional element type | The first element, or null for an empty list |
-| `last(list)` | numeric, `BOOL`, `STRING`, `DATETIME` | optional element type | The last element, or null for an empty list |
-| `nth(list, index)` | numeric, `BOOL`, `STRING`, `DATETIME` | optional element type | The element at `index`, counting from `0`, or null when `index` is negative or past the end. `index` may be any integer type |
+| `first(list)` | numeric, `BOOL`, `STRING`, `DATETIME`, `ARRAY`, `VEC` | optional element type | The first element, or null for an empty list |
+| `last(list)` | numeric, `BOOL`, `STRING`, `DATETIME`, `ARRAY`, `VEC` | optional element type | The last element, or null for an empty list |
+| `nth(list, index)` | numeric, `BOOL`, `STRING`, `DATETIME`, `ARRAY`, `VEC` | optional element type | The element at `index`, counting from `0`, or null when `index` is negative or past the end. `index` may be any integer type |
+| `list_reshape(list, d1, ..., dk)` | any innermost type, fixed arrays only | `ARRAY<element, d1, ..., dk>` | Changes the fixed dimensions without changing innermost element order |
+| `list_flatten(list)` | `ARRAY`, `VEC` | `ARRAY` or `VEC` | Removes exactly one level of nesting; two fixed levels multiply their widths, and either variable level gives a vector |
+| `list_transpose(list)` | any innermost type, fixed arrays of rank two or more | `ARRAY` | Exchanges the two outermost dimensions and preserves every deeper dimension |
 | `contains(list, element)` | any scalar | `BOOL` | Whether `element`, of exactly the element type, occurs in the list. Empty lists return `false`; a null `element` returns null |
 | `overlap(left, right)` | any scalar | `BOOL` | Whether two lists of the same exact element type share an element. An empty list returns `false` |
 | `slice(list, start, length)` | any | `VEC<element>` | Selects up to `length` elements from the zero-based `start`; negative bounds act as zero and bounds past the end are clipped. Null bounds return null |
@@ -1815,10 +1818,22 @@ including for binary functions when either container is null.
 | `list_abs(list)` | numeric, including fixed nested `ARRAY`s | same list type | Apply scalar absolute value to every numeric leaf |
 
 `nth` counts from `0`, unlike string positions: `nth(input.values, 0)` is the same element as
-`first(input.values)`. A function whose elements the table narrows rejects any other element type
-when the statement is validated, such as a list whose elements are themselves `ARRAY` or `VEC`
-values, with `function 'first' requires ARRAY or VEC elements of a scalar type`. `first`, `last`,
-`nth`, `min`, and `max` do not take `BYTES` elements.
+`first(input.values)`. Selecting from `ARRAY<F32, 64, 8>` with `first`, `last`, or `nth` returns an
+optional `ARRAY<F32, 8>`; selecting from `VEC<VEC<I64>>` returns an optional `VEC<I64>`.
+`first`, `last`, `nth`, `min`, and `max` do not take `BYTES` elements. A function whose elements the
+table narrows rejects other element types when the statement is validated.
+
+Reshape dimensions are positive integer literals, each at most 2,147,483,647. Their product must
+equal the input's innermost element count. Nervix checks the complete shape when the statement is
+applied. For example, `list_reshape(input.series, 1, 64, 1)` changes `ARRAY<F32, 64>` into
+`ARRAY<F32, 1, 64, 1>`. Reshape and transpose require every input dimension to be fixed; a `VEC` at
+any depth is refused. These functions preserve the element type and sensitivity and report no
+per-message error. A null input produces a null result.
+
+Flattening `ARRAY<F32, 64, 8>` gives `ARRAY<F32, 512>`, while flattening `VEC<ARRAY<F32, 8>>` or
+`ARRAY<VEC<F32>, 64>` gives `VEC<F32>`. A third list level remains a list level. Transposing
+`ARRAY<F32, 64, 8>` gives `ARRAY<F32, 8, 64>`: output element `[feature][time]` is input element
+`[time][feature]`. Shape operations never construct a separate record per element.
 
 `min` and `max` order floating-point elements by the IEEE 754 total order, in which `-0.0` is below
 `0.0`, a NaN with the sign bit set is below every other value, and any other NaN is above every
@@ -2193,6 +2208,8 @@ errors. `T` is the argument's type, and a list is an `ARRAY` or a `VEC`.
 | `[...]`, `array` | `ARRAY` | [Array And Vector Functions](#array-and-vector-functions) |
 | `vec`, `slice` | `VEC` | [Array And Vector Functions](#array-and-vector-functions) |
 | `concat` over lists | `ARRAY` or `VEC` | [Array And Vector Functions](#array-and-vector-functions) |
+| `list_reshape`, `list_transpose` | `ARRAY` | [Array And Vector Functions](#array-and-vector-functions) |
+| `list_flatten` | `ARRAY` or `VEC` | [Array And Vector Functions](#array-and-vector-functions) |
 | `count` over a list | `I64` | [Array And Vector Functions](#array-and-vector-functions) |
 | `sum`, `first`, `last`, `nth`, `min`, `max` over a list | optional element type | [Array And Vector Functions](#array-and-vector-functions) |
 | `contains` over a list, `overlap` | `BOOL` | [Array And Vector Functions](#array-and-vector-functions) |

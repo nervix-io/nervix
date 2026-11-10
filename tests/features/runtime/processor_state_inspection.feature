@@ -61,7 +61,7 @@ Feature: Bounded typed reorderer and correlator state inspection
     When inspection client "reader" connects away from the last relay owner when possible
     And client "reader" executes these Plexus commands
       """
-      SHOW REORDERER held_notifications STATE FOR BRANCH VALUES { region = 'west' } LIMIT 10 FORMAT JSON;
+      SHOW REORDERER held_notifications STATE FOR BRANCH KEY { region = 'west' } LIMIT 10 FORMAT JSON;
       """
     Then the last processor state counts 2 rows in 1 branches
     And the typed inspection used its unit owner and a remote page when the cluster permits it
@@ -97,7 +97,7 @@ Feature: Bounded typed reorderer and correlator state inspection
     Then the typed inspection refuses the read with "unknown_entity"
     When client "reader" submits this Plexus command request
       """
-      SHOW REORDERER held_notifications STATE FOR BRANCH VALUES { absent = 'value' } FORMAT JSON;
+      SHOW REORDERER held_notifications STATE FOR BRANCH KEY { absent = 'value' } FORMAT JSON;
       """
     Then the typed inspection refuses the read with "invalid_selection"
     # Shortening MAX TIME is dynamic: each branch releases what it holds, in key order, on its next tick.
@@ -204,7 +204,7 @@ Feature: Bounded typed reorderer and correlator state inspection
     When inspection client "reader" connects away from the last relay owner when possible
     And client "reader" executes these Plexus commands
       """
-      SHOW CORRELATOR settle_orders STATE FOR BRANCH VALUES { tenant = 'globex' } FORMAT TEXT;
+      SHOW CORRELATOR settle_orders STATE FOR BRANCH KEY { tenant = 'globex' } FORMAT TEXT;
       """
     Then the last processor state counts 1 rows in 1 branches
     And the typed inspection used its unit owner and a remote page when the cluster permits it

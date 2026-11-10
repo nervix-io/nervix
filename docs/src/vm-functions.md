@@ -1036,6 +1036,16 @@ The reference owns each family's contract. These notes describe its implementati
   - Construction and `concat` use Arrow `interleave`. `slice` builds indices for one `take`.
   - `ListElements` in the catalog decides, when the call is compiled, which functions reject
     nested elements, so no batch reaches a kernel with an element type it cannot read.
+  - `list_reshape` resolves positive literal dimensions at lowering and validates their product
+    against the fixed input shape at compilation. Execution rebuilds the list levels around the
+    same innermost child buffer; fixed `list_flatten` also reuses its child buffer. Rebuilt levels
+    expand the input container's null mask, including for sliced inputs.
+  - `list_flatten` removes one level. With a variable level it composes offsets and shares the
+    child values where their validity permits; hidden null children of a null fixed container are
+    omitted when constructing a vector with required elements.
+  - `list_transpose` gathers the second-level child once, then exchanges the two outer fixed
+    levels. Deeper levels remain whole. `first`, `last`, and `nth` select nested list values through
+    the same Arrow `take` as scalar elements.
   - Explicit list arithmetic validates exact numeric leaf types and fixed inner shapes in
     `semantics/list_arithmetic.rs`. Its runtime owner applies the existing checked numeric kernels
     to a whole fixed child run; ragged pairs and per-row scalar operands use a segmented pass.

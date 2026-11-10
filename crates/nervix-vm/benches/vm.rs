@@ -28,6 +28,8 @@ mod workloads;
 
 #[path = "vm/list_arithmetic.rs"]
 mod list_arithmetic;
+#[path = "vm/list_shapes.rs"]
+mod list_shapes;
 
 #[cfg(feature = "benchmark-allocations")]
 #[path = "vm/allocation_probe.rs"]
@@ -2866,6 +2868,7 @@ criterion_group!(
     json_extraction_benches,
     string_search_benches,
     workloads::workload_shape_benches,
+    list_shapes::list_shape_benches,
     list_arithmetic::benches
 );
 criterion_main!(benches);
