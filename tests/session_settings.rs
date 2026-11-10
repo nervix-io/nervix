@@ -182,7 +182,7 @@ fn padded_command(bytes: usize) -> String {
         bytes <= 16 * 1024 * 1024,
         "the fixture bounds its source allocation"
     );
-    format!("DESCRIBE /*{}*/ CLUSTER;", "x".repeat(bytes))
+    format!("DESCRIBE {}CLUSTER;", " ".repeat(bytes))
 }
 
 async fn native_client(world: &ScenarioWorld, node: &str) -> nervix_client_core::Client {
