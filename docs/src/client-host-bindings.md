@@ -296,7 +296,7 @@ and C++'s through the `native_suites` test of `nervix-client-ffi`, which runs ea
 both ordinarily and under AddressSanitizer and UndefinedBehaviorSanitizer.
 
 The cluster tier runs as one outline per host in `client_suites.feature`, on one- and three-node
-clusters whose session listener serves HTTPS, and for the JVM, Ruby, C and C++ also HTTP. Its
+clusters whose session listener serves HTTPS or HTTP. Its
 graph is the conformance graph's shape, and a suite creates what a test changes itself. The
 scenario starts the host's runner on a follower when the cluster has one, with the probe's
 environment and what a suite needs beside it: the leader's listener to relay a session through,
@@ -396,17 +396,20 @@ Installation stays in the recipes: no test runs Cargo, a compiler or a package m
 
 | Instrument | Proves | Leaves to the others |
 | --- | --- | --- |
-| Host suite | One library behaves as its guide documents, in its host's idiom: values and typed failures, context managers, try-with-resources and blocks, `__repr__`, `toString` and `inspect`, equality and hashing, optional values, threads and cancellation from another thread, lifetimes under collection, packaging, and a reference to every public member | How another runtime reads the protocol, conversions of generated values, and whether a referenced member's whole behaviour is asserted |
+| Host suite | One library behaves as its guide documents, in its host's idiom: values and typed failures, refused subscription and clock restorations with cause/message/wait and subsequent recovery, context managers, try-with-resources and blocks, `__repr__`, `toString` and `inspect`, equality and hashing, optional values, threads and cancellation from another thread, lifetimes under collection, packaging, and a reference to every public member | How another runtime reads the protocol, conversions of generated values, and whether a referenced member's whole behaviour is asserted |
 | Conformance probe | Every runtime prints one expected report on one and three nodes: typed rows and operation outcomes for every runtime, the independent Go and TypeScript clients included, and attached clocks, generations and producer and consumer exchange for every binding host | The library surface and host idioms beyond that report |
 | Bolero property | A conversion its owner performs keeps every bounded generated value: the shared host's Arrow interface, the C, JNI and Ruby column and field boundaries, and the typed inspection views | Behaviour against a cluster |
-| Binding owner test | What a live cluster cannot provoke on demand, such as a refused clock restoration, a domain-removed clock end or a settlement whose answer was lost | That an application reaches it through the published API in a separate process |
+| Binding owner test | What a live cluster cannot provoke on demand, such as a domain-removed clock end or a settlement whose answer was lost | That an application reaches it through the published API in a separate process |
 
 ### Limits Of The Suites
 
 A suite observes only what its graph, its own statements and the declared testing-build actions
-provoke. The one declared fault refuses the next subscription opening on every node, so every
-suite reads a refused subscription restoration live; a refused clock restoration and a
-domain-removed clock end are binding owner-test evidence. A passing suite qualifies its host on the revision it ran; C and C++
+provoke. The declared faults refuse the next subscription opening as unavailable or the next clock
+attachment as in-transaction on every node, so every host suite reads both refused restorations
+live, checks their typed cause, message and positive retry wait, and observes recovery. Unused
+refusals are cleared in teardown. A domain-removed clock end stays binding owner-test evidence:
+there is no public domain-removal statement to provoke it. A passing suite qualifies its host on
+the revision it ran; C and C++
 sanitizers judge the host programs' use of the ABI while the Rust library stays uninstrumented,
 and Deloxide does not observe the host processes. The suites run the libraries the repository
 builds; no package registry or asynchronous adapter is involved.

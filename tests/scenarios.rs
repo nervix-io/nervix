@@ -5257,6 +5257,20 @@ async fn then_client_suite_passes_every_registered_cluster_test(
                         );
                     }
                 }
+                SuiteAction::RefuseNextClockAttachment => {
+                    for node_id in world.cluster().node_ids() {
+                        world.fault_injection.refuse_next_clock_attachment_on(
+                            crate::common::cluster::node_name(&node_id),
+                        );
+                    }
+                }
+                SuiteAction::ClearClockAttachmentRefusals => {
+                    for node_id in world.cluster().node_ids() {
+                        world.fault_injection.clear_clock_attachment_refusal_on(
+                            &crate::common::cluster::node_name(&node_id),
+                        );
+                    }
+                }
             }
             Ok(())
         })

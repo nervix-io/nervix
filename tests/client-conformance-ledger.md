@@ -241,10 +241,20 @@ specifies. Python's registered
 ask the scenario to arm every node's next subscription-opening refusal, restore the relay, read
 `INTERRUPTED` and `RESTORATION_FAILED` with `UNAVAILABLE`, a message and a positive retry wait,
 then read rows from the same subscription after restoration succeeds. All clear unused refusal
-tokens during teardown, including when an assertion fails. There is no corresponding declared
-clock-attachment refusal action or public domain-removal statement; clock restoration-failure and
-domain-removed end values remain covered by the binding owner tests rather than a claimed live
-host-suite observation.
+tokens during teardown, including when an assertion fails.
+
+The corresponding clock examples are Python's
+`test_a_refused_clock_restoration_reports_its_cause_and_recovers`, the JVM's
+`aRefusedClockRestorationReportsItsCauseAndRecovers`, Ruby's
+`test_refused_clock_restoration_reports_its_cause_and_recovers`, and the C/C++ case
+`test_b9_refused_clock_restoration_reports_its_cause_and_recovers`. Each reads the initial unpaced
+clock from the cached attach snapshot, cuts its relay, asks for `refuse-next-clock-attachment`,
+then restores the relay. It checks `INTERRUPTED`, `RESTORATION_FAILED` with `IN_TRANSACTION`,
+a nonempty message and a positive retry
+wait, then the restored `STATE` of the same domain and generation. Each teardown clears unused
+clock refusals, including on failure. This moves clock restoration failures into live host-suite
+evidence. No public domain-removal statement exists, so domain-removed clock ends remain binding
+owner-test evidence.
 
 Python's `test_an_upload_completes_again_under_its_identity_and_refuses_another_archive`, the JVM
 suite's `anUploadCompletesAgainUnderItsIdentityAndRefusesAnotherArchive`, Ruby's

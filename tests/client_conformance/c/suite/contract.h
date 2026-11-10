@@ -532,6 +532,7 @@ static nx_session *suite_through(struct suite_peer **peer_out, const char *domai
  * Cleanup uses the boolean result instead of throwing from a C++ deleter. */
 static uint64_t suite_action_sequence;
 static bool suite_refusal_armed;
+static bool suite_clock_refusal_armed;
 
 static bool suite_action_confirmed(const char *action) {
     if (suite_action_sequence == UINT64_MAX) return false;
@@ -565,9 +566,17 @@ static bool suite_action_confirmed(const char *action) {
 }
 
 static bool suite_clear_refusals(void) {
-    if (!suite_refusal_armed) return true;
-    suite_refusal_armed = false;
-    return suite_action_confirmed("clear-subscription-opening-refusals");
+    bool cleared = true;
+    if (suite_refusal_armed) {
+        suite_refusal_armed = false;
+        cleared = suite_action_confirmed("clear-subscription-opening-refusals");
+    }
+    if (suite_clock_refusal_armed) {
+        suite_clock_refusal_armed = false;
+        bool clock_cleared = suite_action_confirmed("clear-clock-attachment-refusals");
+        cleared = cleared && clock_cleared;
+    }
+    return cleared;
 }
 
 struct suite_wait {
@@ -1328,6 +1337,68 @@ static void test_b8_backup_recovers_under_its_execution_reference(void) {
     // ANCHOR_END: backup
 }
 
+static void test_b9_refused_clock_restoration_reports_its_cause_and_recovers(void) {
+    struct suite_peer *peer = NULL;
+    nx_session *following = suite_through(&peer, NULL);
+    nx_cancel *cancel = suite_deadline(120000);
+    suite_completed(following, "ATTACH DOMAIN CLOCK;");
+    const char *clock_domain = suite_env("NERVIX_PROBE_DOMAIN");
+    nx_domain_clock *initial = NULL;
+    suite_check(nx_session_domain_clock(following, suite_bytes(clock_domain), strlen(clock_domain), &initial));
+    HOLD(nx_domain_clock, initial);
+    nx_clock_state state = nx_domain_clock_state(initial);
+    REQUIRE(state == NX_CLOCK_UNPACED);
+    uint64_t generation = nx_domain_clock_generation(initial);
+    suite_drop(initial);
+    nx_clock_event *event = NULL;
+    suite_peer_cut(peer, true);
+    suite_clock_refusal_armed = true; /* Main clears unused refusals after any assertion. */
+    REQUIRE(suite_action_confirmed("refuse-next-clock-attachment"));
+    suite_peer_cut(peer, false);
+    // ANCHOR: clock_restoration_failed
+    suite_check(nx_session_next_clock_event(following, cancel, &event));
+    HOLD(nx_clock_event, event);
+    REQUIRE(nx_clock_event_kind_of(event) == NX_CLOCK_EVENT_INTERRUPTED);
+    suite_drop(event);
+    suite_check(nx_session_next_clock_event(following, cancel, &event));
+    HOLD(nx_clock_event, event);
+    REQUIRE(nx_clock_event_kind_of(event) == NX_CLOCK_EVENT_RESTORATION_FAILED);
+    nx_restoration_cause cause = NX_RESTORATION_FAILED;
+    const uint8_t *message = NULL, *domain = NULL;
+    size_t message_len = 0, domain_len = 0;
+    uint64_t retry_after = 0;
+    suite_check(nx_clock_event_restoration_cause(event, &cause));
+    suite_check(nx_clock_event_restoration_message(event, &message, &message_len));
+    suite_check(nx_clock_event_restoration_retry_after(event, &retry_after));
+    nx_clock_event_domain(event, &domain, &domain_len);
+    REQUIRE(suite_equal(domain, domain_len, suite_env("NERVIX_PROBE_DOMAIN")));
+    REQUIRE(cause == NX_RESTORATION_IN_TRANSACTION);
+    REQUIRE(message != NULL && message_len > 0 && retry_after > 0);
+    suite_drop(event);
+    /* The library keeps the attachment desired and retries it. */
+    bool restored = false;
+    while (!restored) {
+        suite_check(nx_session_next_clock_event(following, cancel, &event));
+        HOLD(nx_clock_event, event);
+        nx_clock_event_domain(event, &domain, &domain_len);
+        REQUIRE(suite_equal(domain, domain_len, suite_env("NERVIX_PROBE_DOMAIN")));
+        if (nx_clock_event_kind_of(event) == NX_CLOCK_EVENT_STATE) {
+            uint64_t actual = 0;
+            suite_check(nx_clock_event_state(event, &state));
+            suite_check(nx_clock_event_generation(event, &actual));
+            REQUIRE(state == NX_CLOCK_UNPACED && actual == generation);
+            restored = true;
+        } else {
+            REQUIRE(nx_clock_event_kind_of(event) == NX_CLOCK_EVENT_RESTORATION_FAILED);
+            suite_check(nx_clock_event_restoration_cause(event, &cause));
+            REQUIRE(cause == NX_RESTORATION_IN_TRANSACTION);
+        }
+        suite_drop(event);
+    }
+    // ANCHOR_END: clock_restoration_failed
+    suite_completed(following, "DETACH DOMAIN CLOCK;");
+}
+
 static void test_b10_restore_streams_the_archive_and_reports_its_steps(void) {
     nx_session *session = suite_connect(NULL, NULL);
     char query[2048], path[1024];
@@ -2015,6 +2086,7 @@ static void test_b1_an_upload_completes_again_under_its_identity_and_refuses_ano
     {"cluster", "test_b7_refused_subscription_restoration_reports_its_cause_and_recovers", test_b7_refused_subscription_restoration_reports_its_cause_and_recovers}, \
     {"cluster", "test_b8_backup_recovers_under_its_execution_reference", test_b8_backup_recovers_under_its_execution_reference}, \
     {"cluster", "test_b9_clock_events_retain_release_and_restore_after_a_gap", test_b9_clock_events_retain_release_and_restore_after_a_gap}, \
+    {"cluster", "test_b9_refused_clock_restoration_reports_its_cause_and_recovers", test_b9_refused_clock_restoration_reports_its_cause_and_recovers}, \
     {"cluster", "test_b10_restore_streams_the_archive_and_reports_its_steps", test_b10_restore_streams_the_archive_and_reports_its_steps}, \
     {"cluster", "test_b1_an_upload_completes_again_under_its_identity_and_refuses_another_archive", test_b1_an_upload_completes_again_under_its_identity_and_refuses_another_archive}, \
     {"cluster", "test_b11_read_the_attached_clock_before_ticks_and_project_it", test_b11_read_the_attached_clock_before_ticks_and_project_it}, \

@@ -281,8 +281,15 @@ attaches again on its next session, and reports the clock again with a `STATE` e
 
 When the new session refuses for now to attach the clock again, a `RESTORATION_FAILED` event carries
 the same `RestorationFailure` a subscription's does, with `IN_TRANSACTION`, `REJECTED` or `FAILED` as
-its cause, and the session tries again after the wait it names. A clock whose domain was removed
-ends with `ENDED`, and its `end_reason` is `DOMAIN_REMOVED`.
+its cause, the refusal message and a positive retry wait in nanoseconds. Keep following the clock:
+the library retries and reports `STATE` when the attachment is restored. The suite provokes an
+`IN_TRANSACTION` refusal before these checks:
+
+```python
+{{#include ../../tests/client_conformance/python/suite/cluster/test_clocks.py:clock_restoration_failed}}
+```
+
+A clock whose domain was removed ends with `ENDED`, and its `end_reason` is `DOMAIN_REMOVED`.
 
 `DETACH DOMAIN CLOCK;` stops following it.
 
