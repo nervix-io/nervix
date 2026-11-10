@@ -17,7 +17,7 @@
 
 use std::time::Duration;
 
-use ahash::{HashMap, HashSet};
+use ahash::HashSet;
 use arch_into::ArchInto;
 use nervix_dataflow_graph::{DataflowNodeHealth, DataflowNodeStatus};
 use nervix_interconnect::{
@@ -41,6 +41,7 @@ use sorted_vec::SortedSet;
 use crate::{
     registry::{
         PlacementEndpointPairPlan, PlacementPlan, PlacementRequireGroupPlan, PlacementRulePlan,
+        placement_members,
     },
     runtime::{DecodeRejection, IngestorDescribe as RuntimeIngestorDescribe, TransportPosition},
 };
@@ -1611,48 +1612,20 @@ pub(in crate::application) fn placement_rule_coverage_status(
     }
 }
 
+/// The placement members whose names start with `prefix`, as the placement owner offers them to
+/// the console's member choices: eligible runtime nodes with unambiguous names.
 pub(in crate::application) fn placement_runtime_node_ref_suggestions(
     models: &[Model<RequestedResourceVersion>],
     prefix: &str,
 ) -> Vec<String> {
     let prefix = prefix.to_ascii_lowercase();
-    let eligible = models
-        .iter()
-        .filter(|model| {
-            placement_member_model_is_eligible(model) && model.name().as_str().starts_with(&prefix)
-        })
-        .map(|model| model.name())
-        .collect::<Vec<_>>();
-
-    let mut counts = HashMap::<ModelName, usize>::default();
-    for identifier in &eligible {
-        *counts.entry(identifier.clone()).or_default() += 1;
+    let mut suggestions = Vec::new();
+    for member in placement_members(models) {
+        if member.identifier.as_str().starts_with(&prefix) {
+            suggestions.push(member.identifier.to_string());
+        }
     }
-    eligible
-        .into_iter()
-        .filter(|identifier| counts.get(identifier) == Some(&1))
-        .map(|identifier| identifier.to_string())
-        .collect()
-}
-
-fn placement_member_model_is_eligible<Version>(model: &Model<Version>) -> bool {
-    match model {
-        Model::Generator(_)
-        | Model::Inferencer(_)
-        | Model::WasmProcessor(_)
-        | Model::Reingestor(_)
-        | Model::Lookup(_)
-        | Model::Junction(_)
-        | Model::Deduplicator(_)
-        | Model::Correlator(_)
-        | Model::Reorderer(_)
-        | Model::WindowProcessor(_)
-        | Model::Emitter(_) => true,
-        // Ingestors that execute on every node are outside placement rules.
-        Model::Ingestor(ingestor) => !ingestor.input.executes_on_every_cluster_node(),
-        Model::Relay(_) => true,
-        _ => false,
-    }
+    suggestions
 }
 
 pub(in crate::application) fn ordered_placement_corridor(
@@ -1960,9 +1933,10 @@ mod tests {
         use super::super::test_fixtures::{named, scheduled_node};
 
         let scheduled = scheduled_node("intake", ModelKind::Ingestor);
-        assert!(placement_member_model_is_eligible(
-            scheduled.config.as_ref()
-        ));
+        assert_eq!(
+            placement_members(std::slice::from_ref(scheduled.config.as_ref())),
+            vec![placement_member("intake", ModelKind::Ingestor)]
+        );
 
         let sources: [IngestorEntity; 3] = [
             HttpEndpointIngestor {
@@ -1998,7 +1972,7 @@ mod tests {
             };
             input.source = source;
             assert!(model.executes_on_every_cluster_node());
-            assert!(!placement_member_model_is_eligible(model.as_ref()));
+            assert!(placement_members(std::slice::from_ref(model.as_ref())).is_empty());
         }
     }
 }

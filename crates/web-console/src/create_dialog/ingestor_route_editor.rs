@@ -529,7 +529,7 @@ fn IngestorRouteMessageErrorEditor(
 mod tests {
     use leptos::prelude::*;
     use meticulous::{OptionExt as _, ResultExt as _};
-    use nervix_models::{DomainName, FieldName};
+    use nervix_models::{DomainName, FieldName, ModelKind};
 
     use super::{
         AssignmentArea, AssignmentDraft, CreateSignals, FlushDraft, InheritDraft, InvocationDraft,
@@ -548,7 +548,7 @@ mod tests {
         Owner::new().with(|| {
             let signals = CreateSignals::new();
             signals.open(
-                CreateKind::Ingestor,
+                CreateKind::Model(ModelKind::Ingestor),
                 Some(DomainName::parse("orders").assured("test domain is valid")),
                 "global-create-button",
             );
@@ -613,7 +613,7 @@ mod tests {
         Owner::new().with(|| {
             let signals = CreateSignals::new();
             signals.open(
-                CreateKind::Ingestor,
+                CreateKind::Model(ModelKind::Ingestor),
                 Some(DomainName::parse("orders").assured("test domain is valid")),
                 "global-create-button",
             );
