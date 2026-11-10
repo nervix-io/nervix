@@ -214,6 +214,8 @@ enum ChoiceTarget : ubyte {
   EmitterErrorRelay,
   SchemaField,
   GeneratorMaterializedRelay,
+  /// Runtime nodes a placement rule may name as a FROM or TO member. Requires a domain.
+  PlacementMember,
 }
 
 enum DomainPaceChoice : ubyte {

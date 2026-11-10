@@ -17,7 +17,7 @@
 
 use std::collections::BTreeSet;
 
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     Choice, ChoiceLookupRequest, ChoicePresentation, ChoiceSelection, ChoiceStatus, ChoiceTarget,
     ChoiceValue,
@@ -29,6 +29,7 @@ use nervix_models::{
 };
 
 use super::session_service::hash_choice_text;
+use crate::registry::placement_members;
 
 mod emitter;
 
@@ -67,6 +68,8 @@ pub(in crate::application) enum ConfiguredQuestion {
     EmitterMaterializedRelays(Vec<NodeRef>),
     EmitterErrorRelays(Vec<NodeRef>),
     SchemaFields(NodeRef),
+    /// The runtime nodes a placement rule may name as a `FROM` or `TO` member.
+    PlacementMembers,
 }
 
 /// The domain a lookup reads, and what it asks of that domain's configuration.
@@ -165,6 +168,7 @@ impl<'a> ConfiguredQuery<'a> {
             | ChoiceTarget::EmitterMaterializedRelay
             | ChoiceTarget::EmitterErrorRelay
             | ChoiceTarget::SchemaField => return Self::emitter(request),
+            ChoiceTarget::PlacementMember => ConfiguredQuestion::PlacementMembers,
             ChoiceTarget::DomainPace | ChoiceTarget::PlacementPolicy => return None,
             ChoiceTarget::IngestHttpRequestSource
             | ChoiceTarget::IngestHttpEndpointSource
@@ -427,6 +431,7 @@ impl ConfiguredChoices {
             ConfiguredQuestion::CodecFields(codec) => self.codec_fields(codec, &search),
             ConfiguredQuestion::BranchFields(branch) => self.branch_fields(branch, &search),
             ConfiguredQuestion::Resources => self.resources(&search),
+            ConfiguredQuestion::PlacementMembers => self.placement_members(&search),
             ConfiguredQuestion::CompletedResourceVersions(resource) => {
                 self.completed_versions(resource, &search)
             }
@@ -622,6 +627,34 @@ impl ConfiguredChoices {
         }
         let mut choices = Vec::with_capacity(candidates.len());
         for candidate in candidates {
+            hash_choice_text(&mut digest, &candidate.definition);
+            choices.push(candidate.choice);
+        }
+        Ok(ResolvedChoices {
+            choices,
+            content_digest: digest.finalize().to_hex().to_string(),
+        })
+    }
+
+    /// The runtime nodes a placement rule may name, exactly as the placement owner decides them,
+    /// so a member the form offers is one the rule's validation accepts.
+    ///
+    /// Non-security BLAKE3: checks member-page freshness; it does not authorize candidates.
+    fn placement_members(&self, search: &str) -> Result<ResolvedChoices, ChoiceStatus> {
+        let mut digest = blake3::Hasher::new();
+        let mut choices = Vec::new();
+        // The owner lists each member once, ordered by name, which is the order of the labels.
+        for member in placement_members(self.models.models()) {
+            let model = self
+                .models
+                .get(&member)
+                .verified("the placement owner listed this member from the same model index");
+            let detail = member.kind.keyword_phrase().to_string();
+            let candidate =
+                ModelCandidate::new(member, detail, "Runtime node", model.to_canonical_plexus())?;
+            if !candidate.matches(search) {
+                continue;
+            }
             hash_choice_text(&mut digest, &candidate.definition);
             choices.push(candidate.choice);
         }
@@ -1495,6 +1528,10 @@ mod tests {
             (ChoiceTarget::Schema, ConfiguredQuestion::Schemas),
             (ChoiceTarget::Branch, ConfiguredQuestion::Branches),
             (ChoiceTarget::Relay, ConfiguredQuestion::Relays),
+            (
+                ChoiceTarget::PlacementMember,
+                ConfiguredQuestion::PlacementMembers,
+            ),
         ] {
             let request = ChoiceLookupRequest::new(target, in_domain.clone(), String::new());
             let query = ConfiguredQuery::of(&request).assured("a domain is the only dependency");
@@ -1535,6 +1572,33 @@ mod tests {
         assert_eq!(ConfiguredQuery::of(&domain_only), None);
         let enumerated = ChoiceLookupRequest::new(ChoiceTarget::DomainPace, in_domain, "".into());
         assert_eq!(ConfiguredQuery::of(&enumerated), None);
+    }
+
+    #[test]
+    fn placement_members_offer_the_eligible_runtime_nodes_with_their_kind() {
+        assert_eq!(
+            labels(&ConfiguredQuestion::PlacementMembers, ""),
+            ["audit", "dangling", "orders"],
+            "relays are runtime nodes, while schemas and branches are not"
+        );
+        assert_eq!(
+            labels(&ConfiguredQuestion::PlacementMembers, "ORD"),
+            ["orders"]
+        );
+        let members = configuration()
+            .resolve(&ConfiguredQuestion::PlacementMembers, "")
+            .assured("placement members resolve");
+        let orders = &members.choices[2];
+        assert_eq!(orders.value, ChoiceValue::Model(relay_node("orders")));
+        assert_eq!(orders.presentation.detail.as_deref(), Some("RELAY"));
+        assert_eq!(orders.presentation.group.as_deref(), Some("Runtime node"));
+        let searched = configuration()
+            .resolve(&ConfiguredQuestion::PlacementMembers, "ord")
+            .assured("placement members resolve");
+        assert_ne!(
+            members.content_digest, searched.content_digest,
+            "a page binds the definitions of exactly the members it offers"
+        );
     }
 
     #[test]

@@ -1185,6 +1185,27 @@ test-visual-generator-inferencer-wasm *args: build-web-console wasm-processor-gu
     cargo test --package nervix-scenarios --test scenarios -- \
         --input tests/features/web-console/visual_create_generator_inferencer_wasm.feature "$@"
 
+# Run the server's owner tests of the placement-member rule: registry validation, REPL completion
+# and the typed choices that share it, with the rest of the placement and choice-query tests.
+[positional-arguments]
+test-placement-members *args: build-web-console download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-server --features testing --lib -- placement configured_choices "$@"
+
+# Create placement rules, use the contextual create actions and build a complete graph in one
+# transaction through the web console's visual forms on in-process one- and three-node clusters,
+# with only the in-process server's prerequisites. The input is an absolute glob, so Cucumber
+# reads the two feature files instead of walking the checkout.
+[positional-arguments]
+test-visual-placement-graph *args: build-web-console wasm-processor-guests download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input "$PWD/tests/features/web-console/visual_create_{placement,graph}.feature" "$@"
+
 # Exercise coordinated WASM guest-state resets through in-process nodes: the RESET statement on the
 # session's active domain, its retries and refusals, and the operator and guest-requested resets.
 [positional-arguments]

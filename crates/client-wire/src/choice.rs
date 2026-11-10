@@ -103,6 +103,10 @@ pub enum ChoiceTarget {
     /// Relays with materialized state on exactly a generator's branch, asked with the domain
     /// alone for an unbranched generator, or with the domain and then its named branch.
     GeneratorMaterializedRelay,
+    /// The runtime nodes of a domain a placement rule may name as a `FROM` or `TO` member: the
+    /// placement-eligible kinds, except ingestors that execute on every cluster node and names
+    /// that more than one eligible kind shares. Asked with the domain alone.
+    PlacementMember,
 }
 
 wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
@@ -171,6 +175,7 @@ wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
     EmitterErrorRelay,
     SchemaField,
     GeneratorMaterializedRelay,
+    PlacementMember,
 });
 
 impl ChoiceTarget {
@@ -455,7 +460,8 @@ impl ChoiceTarget {
             | Self::EmitterMaterializedRelay
             | Self::EmitterErrorRelay
             | Self::SchemaField
-            | Self::GeneratorMaterializedRelay => None,
+            | Self::GeneratorMaterializedRelay
+            | Self::PlacementMember => None,
         }
     }
 }
