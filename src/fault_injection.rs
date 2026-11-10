@@ -1829,16 +1829,6 @@ impl FaultInjection {
         ));
     }
 
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            bounded,
-            reason = "one scenario-owned processor installation pause is claimed once",
-            key = "one test domain, processor and claim phase",
-            bound = "one keyed read and conditional removal; guards end before the \
-                     test-controlled wait"
-        )
-    )]
     pub(crate) async fn pause_processor_partition_install_if_armed(
         &self,
         domain: &DomainName,
@@ -1868,16 +1858,6 @@ impl FaultInjection {
         ));
     }
 
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            bounded,
-            reason = "one scenario-owned processor forget pause is claimed once",
-            key = "one test domain, processor and claim phase",
-            bound = "one keyed read and conditional removal; guards end before the \
-                     test-controlled wait"
-        )
-    )]
     pub(crate) async fn pause_processor_partition_forget_if_armed(
         &self,
         domain: &DomainName,
@@ -2825,6 +2805,16 @@ impl FaultInjection {
         pause.wait_until_reached().await;
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "one scenario-owned command pause selects at most one waiting attempt",
+            key = "one armed CommandPausePoint",
+            bound = "one keyed read and conditional removal; one claimed waiter; guards end \
+                     before the test-controlled wait and scenario teardown releases the pause"
+        )
+    )]
     async fn pause_command_if_armed(&self, point: CommandPausePoint) {
         let Some(pause) = self
             .inner
