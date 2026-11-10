@@ -14,7 +14,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | CLIENT PRODUCER | Compare `CLIENT CONSUMER`: modes, ingest payload facts. Native Arrow batches cross an application session; producers submit batches and consumers explicitly acknowledge delivery attempts, with no broker envelope. |
+| Entity | CLIENT PRODUCER | Compare `CLIENT CONSUMER`: modes, ingest metadata, ingest payload facts. Native Arrow batches cross an application session; producers submit batches and consumers explicitly acknowledge delivery attempts, with no broker envelope. |
 | Reference | SCHEMA &lt;schema&gt; |  |
 | Locator and validation rule | Not offered: The body references the native schema; there is no external topic, queue or table to locate. |  |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
@@ -23,7 +23,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Connector events | None declared. |  |
 | Instancing | single |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
-| Metadata | Not offered: Application batches have no broker envelope, peer address or external message attributes; the native schema describes each row. |  |
+| Metadata | metadata.user: STRING OPTIONAL |  |
 | Payload facts | payload.bytes: U64<br>payload.rows: U64 |  |
 | Every live node | no; scheduled owner |  |
 | Position class | none |  |

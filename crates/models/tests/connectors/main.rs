@@ -271,7 +271,7 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
     match kind {
         IngestorEntityKind::Client(ClientIngestorEntity::Producer) => IngestorDeclaration {
             headers: None,
-            metadata: &[],
+            metadata: &[("user", IngestorMetadataType::String)],
             every_node: false,
             reference: IngestorReferenceKind::Schema,
         },
