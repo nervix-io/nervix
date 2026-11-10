@@ -1011,6 +1011,12 @@ impl TestSession {
 
     fn file_event(&mut self, event: ServerEvent) -> io::Result<()> {
         match event {
+            ServerEvent::SessionOpened(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "a gRPC session announced its bounds inside an event frame",
+                ));
+            }
             ServerEvent::Notice(notice) => {
                 if let NoticeLevel::Error = notice.level {
                     self.pending_server_errors.push_back(TestServerEvent {
