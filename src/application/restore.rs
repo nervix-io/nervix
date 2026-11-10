@@ -37,7 +37,7 @@ mod runner;
 mod shuttle_tests;
 mod steps;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use arch_into::ArchInto as _;
 use error_stack::Report;
@@ -46,10 +46,11 @@ use meticulous::OptionExt as _;
 use nervix_backup::DescribedRuntimeState;
 use nervix_consensus::{CommandExecution, RestoreExecution};
 use nervix_models::{
-    ClusterSchedule, CommandExecutionReference, DomainName, ModelKind, NodeRef, Restore,
-    RestoreArchive, RestoreLifecycle, RestoreMode, RestoreReport, RestoreScope, RestoreState,
-    RestoreStep, RestoreStepOutcome, RestoreStepReport, RestoredDomain, RestoredUsers,
-    ScheduledNode, SchemaFingerprint, Timestamp, Unit, UserName,
+    ClusterSchedule, CommandExecutionReference, DomainName, DomainStatus, DomainStopCause,
+    LicensingStopReason, ModelKind, NodeRef, Restore, RestoreArchive, RestoreLifecycle,
+    RestoreMode, RestoreReport, RestoreScope, RestoreState, RestoreStep, RestoreStepOutcome,
+    RestoreStepReport, RestoredDomain, RestoredUsers, ScheduledNode, SchemaFingerprint, Timestamp,
+    Unit, UserName,
 };
 use tracing::info;
 
@@ -539,15 +540,19 @@ impl SessionServiceImpl {
             RestoreRunEnd::LeadershipLost(redirect) => return *redirect,
             RestoreRunEnd::Failed { step, reason } => {
                 let restored = self.restored_users(&execution.reference).await;
-                let report = restore_report(&restore, &plan, &archive, restored, outcomes);
+                let mut report = restore_report(&restore, &plan, &archive, restored, outcomes);
+                let stopped = self.restored_domains_stopped_by_licensing(&report).await;
+                settle_licensing_stops(&mut report, &stopped);
                 return restore_failed_at(&step, &reason, report);
             }
         }
         let restored = self.restored_users(&execution.reference).await;
-        let report = restore_report(&restore, &plan, &archive, restored, outcomes);
+        let mut report = restore_report(&restore, &plan, &archive, restored, outcomes);
+        let stopped = self.restored_domains_stopped_by_licensing(&report).await;
+        settle_licensing_stops(&mut report, &stopped);
         let schedule = self.inner.consensus.current_schedule().await;
         let warnings = restore_state_warnings(&plan, &archive, &schedule, restore.restore.state);
-        let message = restore_message(&restore.restore, &report);
+        let message = restore_message(&restore.restore, &report, &stopped);
         info!(
             execution_reference = %execution.reference,
             domains = report.domains.len(),
@@ -558,6 +563,29 @@ impl SessionServiceImpl {
             diagnostics: warnings,
             ..command_ok(message)
         }
+    }
+
+    /// The restored domains a licensing stop left stopped, with its reason, read from their
+    /// committed records. A `RESUME` whose licensing stop gate closed while it applied leaves its
+    /// domains stopped with the licensing cause instead of running (specification §10.7).
+    async fn restored_domains_stopped_by_licensing(
+        &self,
+        report: &RestoreReport,
+    ) -> BTreeMap<DomainName, LicensingStopReason> {
+        let mut stopped = BTreeMap::new();
+        for restored in &report.domains {
+            nervix_primitives::task::consume_budget().await;
+            let Some(committed) = self.inner.consensus.current_domain(&restored.domain).await
+            else {
+                continue;
+            };
+            if committed.status == DomainStatus::Stopped
+                && let Some(DomainStopCause::Licensing(reason)) = committed.stop_cause
+            {
+                stopped.insert(restored.domain.clone(), reason);
+            }
+        }
+        stopped
     }
 
     /// What the users step of the restore `reference` names did, as consensus recorded it.
@@ -817,16 +845,52 @@ fn report_counts(report: &RestoreReport) -> String {
     )
 }
 
-fn restore_message(restore: &Restore, report: &RestoreReport) -> String {
+/// Reports each restored domain a licensing stop left stopped as stopped: that is the lifecycle it
+/// reached after complete publication, not the running one the restore planned.
+fn settle_licensing_stops(
+    report: &mut RestoreReport,
+    stopped: &BTreeMap<DomainName, LicensingStopReason>,
+) {
+    for restored in &mut report.domains {
+        if stopped.contains_key(&restored.domain) {
+            restored.status = DomainStatus::Stopped;
+        }
+    }
+}
+
+fn restore_message(
+    restore: &Restore,
+    report: &RestoreReport,
+    stopped: &BTreeMap<DomainName, LicensingStopReason>,
+) -> String {
     let lifecycle = match restore.lifecycle {
-        RestoreLifecycle::Stopped => "stopped",
-        RestoreLifecycle::Resume => "running at their archived lifecycle",
+        RestoreLifecycle::Stopped => "stopped".to_owned(),
+        RestoreLifecycle::Resume => resumed_lifecycle(report, stopped),
     };
     format!(
         "restored {} from '{}': {}; restored domains are {lifecycle}",
         scope_label(restore),
         restore.source,
         report_counts(report)
+    )
+}
+
+/// What a `RESUME` left its restored domains as: running at their archived lifecycle, except those
+/// a licensing stop gate that closed while it applied left stopped (specification §10.7).
+fn resumed_lifecycle(
+    report: &RestoreReport,
+    stopped: &BTreeMap<DomainName, LicensingStopReason>,
+) -> String {
+    let Some(reason) = stopped.values().next() else {
+        return "running at their archived lifecycle".to_owned();
+    };
+    if stopped.len() == report.domains.len() {
+        return format!("stopped by licensing: {reason}");
+    }
+    let names: Vec<String> = stopped.keys().map(|domain| format!("'{domain}'")).collect();
+    format!(
+        "running at their archived lifecycle, except {}, stopped by licensing: {reason}",
+        names.join(", ")
     )
 }
 
@@ -911,5 +975,121 @@ mod backup_state_warning_tests {
             None
         );
         assert_eq!(restored_state_schema(None, Unit::SINGLE), None);
+    }
+}
+
+#[cfg(test)]
+mod licensing_stop_report_tests {
+    //! The report and message of a `RESUME` the licensing stop gate closed under.
+
+    use std::num::NonZeroU64;
+
+    use meticulous::ResultExt as _;
+    use nervix_models::ArchiveDigest;
+
+    use super::*;
+
+    fn domain(name: &str) -> DomainName {
+        DomainName::parse(name).assured("the test domain is an identifier-shaped literal")
+    }
+
+    fn restored(name: &str, status: DomainStatus) -> RestoredDomain {
+        RestoredDomain {
+            source: domain(name),
+            domain: domain(name),
+            resource_versions: 0,
+            models: 0,
+            status,
+            start_version: 4,
+            planned_models: None,
+        }
+    }
+
+    fn resume() -> Restore {
+        Restore {
+            scope: RestoreScope::Cluster {
+                existing_users: nervix_models::ExistingUserPolicy::Fail,
+            },
+            source: "cluster.nvxb".to_owned(),
+            mode: RestoreMode::Apply,
+            state: RestoreState::All,
+            lifecycle: RestoreLifecycle::Resume,
+        }
+    }
+
+    /// The report of a completed `RESUME` of two domains, as planned: both running.
+    fn resumed_report() -> RestoreReport {
+        RestoreReport {
+            mode: RestoreMode::Apply,
+            archive: RestoreArchive {
+                total_bytes: NonZeroU64::MIN,
+                digest: ArchiveDigest::from_bytes([7; 32]),
+            },
+            captured_at: Timestamp::from_unix_nanos(1),
+            users: None,
+            domains: vec![
+                restored("first", DomainStatus::Running),
+                restored("second", DomainStatus::Running),
+            ],
+            steps: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_resume_reports_the_domains_a_licensing_stop_left_stopped() {
+        let reason = LicensingStopReason::EphemeralExpired {
+            expired_at: Timestamp::from_unix_nanos(1_000),
+        };
+
+        let mut report = resumed_report();
+        let none = BTreeMap::new();
+        settle_licensing_stops(&mut report, &none);
+        assert_eq!(
+            report,
+            resumed_report(),
+            "without a licensing stop the plan stands"
+        );
+        assert!(
+            restore_message(&resume(), &report, &none)
+                .ends_with("; restored domains are running at their archived lifecycle")
+        );
+
+        let all = BTreeMap::from([(domain("first"), reason), (domain("second"), reason)]);
+        settle_licensing_stops(&mut report, &all);
+        assert_eq!(
+            report.domains,
+            vec![
+                restored("first", DomainStatus::Stopped),
+                restored("second", DomainStatus::Stopped),
+            ]
+        );
+        let message = restore_message(&resume(), &report, &all);
+        assert!(
+            message.ends_with(&format!(
+                "; restored domains are stopped by licensing: {reason}"
+            )),
+            "{message}"
+        );
+
+        // A domain whose installation committed before the gate closed runs until the leader's
+        // licensing stop reaches it.
+        let mut report = resumed_report();
+        let second = BTreeMap::from([(domain("second"), reason)]);
+        settle_licensing_stops(&mut report, &second);
+        assert_eq!(
+            report.domains,
+            vec![
+                restored("first", DomainStatus::Running),
+                restored("second", DomainStatus::Stopped),
+            ]
+        );
+        let message = restore_message(&resume(), &report, &second);
+        assert!(
+            message.ends_with(&format!(
+                "; restored domains are running at their archived lifecycle, except 'second', \
+                 stopped by licensing: {reason}"
+            )),
+            "{message}"
+        );
     }
 }

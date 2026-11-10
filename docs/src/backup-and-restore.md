@@ -350,6 +350,10 @@ RESTORE DOMAIN payments FROM './payments.nvxb' WITHOUT SOURCE OFFSETS;
 - `RESUME` makes each restored domain running after its complete state set is published on every
   assigned owner and replica. Its start generation and latest start point stay exactly as archived.
   Omit it to leave the restored domain stopped. It precedes `ON EXISTING USER` and `DRY RUN`.
+  While the [licensing stop gate](node-settings.md#cluster-licensing) is closed, `RESUME` is
+  refused. A `RESUME` the gate closes under still completes: each domain it leaves stopped by
+  licensing is reported stopped, and the message reports `restored domains are stopped by
+  licensing: <reason>`, or names those domains when others already run.
 - `WITHOUT STATE` restores the configuration and purges state for the target domain.
 - `WITHOUT SOURCE OFFSETS` restores WASM, branch lifecycle, materialized, deduplicator and window
   state but starts ingestors without the archived Kafka positions.
@@ -1048,6 +1052,8 @@ reason, and changed nothing. The reasons are:
 - `RESTORE CLUSTER` was given a domain archive, or `RESTORE DOMAIN` names a domain the archive does
   not hold
 - a restored domain name exists
+- `RESUME` was given while the licensing stop gate is closed: `RESUME cannot run the restored
+  domains: licensing stopped processing: <reason>`
 - an archived user exists and the user policy is `FAIL`
 - the archive was taken `WITHOUT RESOURCES` and holds completed resource versions, holds no bytes of
   a completed version, holds a version's bytes that do not match its root checksum, records a

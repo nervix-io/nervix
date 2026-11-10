@@ -239,3 +239,47 @@ Feature: Ephemeral activation expiry and the licensing stop gate
       | cluster_size | observer |
       | 1            | node-1   |
       | 3            | node-3   |
+
+  Scenario Outline: A RESUME restore the expiry interrupts completes with its domain stopped by licensing, and a later RESUME is refused, on <cluster_size> nodes
+    Given an HTTPS licensing test service is available
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      ACTIVATE LICENSE EPHEMERAL WITH KEY 'NVXK-TESTABCD-fixture-secret';
+      """
+    Then the committed license decision is saved as placeholder "ephemeral"
+    And the ephemeral expiry of license placeholder "ephemeral" is saved as placeholder "expired_at"
+    And the current leader node is saved as placeholder "leader"
+    When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "resumable.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    Given restore step "apply models" of domain "{{domain}}_copy" on node "{{leader}}" pauses before it applies
+    When restore "DOMAIN {{domain}} AS {{domain}}_copy RESUME" of backup archive "resumable.nvxb" is streamed to node "{{leader}}" under execution reference "interrupted-resume" in the background
+    Then the restore pauses at step "apply models" of domain "{{domain}}_copy" on node "{{leader}}"
+    When the cluster licensing clock passes the "ephemeral" deadline
+    Then node "<observer>" eventually describes this license without a selected domain
+      """
+      policy: stopped
+      """
+    When the restore step pause on node "{{leader}}" is released
+    Then the background restore stream's outcome is "completed" as "executed"
+    And the restore stream's report shows every step applied
+    And the restore stream's outcome message contains "restored domains are stopped by licensing: ephemeral activation expired at"
+    Given the active domain is "{{domain}}_copy"
+    When these Plexus commands are executed on node "<observer>"
+      """
+      DESCRIBE DOMAIN;
+      """
+    Then the last command output contains
+      """
+      status: stopped
+      stopped by licensing: ephemeral activation expired at {{expired_at}}
+      """
+    When the CLI restores "domain {{domain}} --as {{domain}}_again --resume" from "resumable.nvxb" on node "{{leader}}" reporting JSON
+    Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "RESUME cannot run the restored domains: licensing stopped processing: ephemeral activation expired at {{expired_at}}"
+
+    Examples:
+      | cluster_size | observer |
+      | 1            | node-1   |
+      | 3            | node-3   |
