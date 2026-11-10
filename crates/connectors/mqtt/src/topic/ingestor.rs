@@ -685,6 +685,15 @@ impl MqttTopicIngestorPlan {
         subscription
     }
 
+    async fn subscribed_connection(
+        &self,
+        instance_index: u64,
+    ) -> MqttTopicIngestorResult<UnstartedConnection> {
+        let mut connection = self.client(instance_index)?;
+        self.establish_subscription(&mut connection).await?;
+        Ok(connection)
+    }
+
     /// Drives the event loop until the broker confirms the subscription.
     ///
     /// A broker that resumes a persistent session already holds the subscription and cannot
@@ -975,20 +984,19 @@ impl IngestorConnector for MqttTopicIngestor {
             self.connection = MqttIngestorConnection::Disconnected;
         }
         if let MqttIngestorConnection::Disconnected = self.connection {
-            let mut connection = self
-                .plan
-                .client(self.instance_index)
-                .change_context(IngestorError::Resume { connector: MQTT })?;
-            if let Err(error) = self.plan.establish_subscription(&mut connection).await {
-                if let Some(
-                    MqttTopicIngestorError::SubscriptionRefused
-                    | MqttTopicIngestorError::SubscriptionDowngraded { .. },
-                ) = error.downcast_ref::<MqttTopicIngestorError>()
-                {
-                    self.connection = MqttIngestorConnection::RetiringSubscription;
+            let connection = match self.plan.subscribed_connection(self.instance_index).await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    if let Some(
+                        MqttTopicIngestorError::SubscriptionRefused
+                        | MqttTopicIngestorError::SubscriptionDowngraded { .. },
+                    ) = error.downcast_ref::<MqttTopicIngestorError>()
+                    {
+                        self.connection = MqttIngestorConnection::RetiringSubscription;
+                    }
+                    return Err(error.change_context(IngestorError::Resume { connector: MQTT }));
                 }
-                return Err(error.change_context(IngestorError::Resume { connector: MQTT }));
-            }
+            };
             let UnstartedConnection {
                 client,
                 eventloop,
