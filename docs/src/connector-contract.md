@@ -135,9 +135,12 @@ outward policy to shared-provider construction. Every new handshake captures its
 while established connections retain their negotiation and the connector retains its driver.
 SDKs that construct their own provider remain inventoried gaps. SQS projects the boundary's typed
 outward choice into Smithy's AWS-LC mode, retaining the SDK's cipher filtering. The interconnect
-has an independent fixed provider. [Cryptography](cryptography.md#algorithm-policy) owns membership
-and the governed-path inventory; connectors still own trust roots, identities and protocol
-negotiation.
+has an independent fixed provider. [Cryptography](cryptography.md#outward-tls-policy) owns
+membership and the governed-path inventory; connectors still own trust roots, identities and
+protocol negotiation. A new connector TLS path takes the committed policy, or joins that
+inventory's driver-owned gaps in the same change. Driver cryptography outside AWS-LC is listed in
+the [inventory](cryptography.md#inventory-outside-aws-lc) with what the later FIPS mode refuses,
+and a connector change adds none.
 An integration crate may depend on the contract, vocabulary, Arrow, and its own driver stack. It
 must not depend on the server, another integration crate, or runtime collectors. Driver libraries
 belong in that integration's manifest, with test-harness dependencies kept separately. A
@@ -3871,5 +3874,5 @@ change. The rustls configuration captures the current complete pair for each new
 including a driver-created reconnect; an established connection keeps its snapshot. Policy changes
 do not re-open the connector or alter its retry, quiesce, finish or acknowledgement contract.
 Trust roots, identity and ALPN remain properties of the concrete client configuration.
-[Cryptography](cryptography.md#algorithm-policy) owns the exact governed-path and driver-owned-gap
+[Cryptography](cryptography.md#outward-tls-policy) owns the exact governed-path and driver-owned-gap
 inventory.

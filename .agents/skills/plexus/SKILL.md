@@ -113,7 +113,7 @@ commits, read [Signing In](../../../docs/src/client-tools-web-console.md#signing
 [Inspecting a transaction](../../../docs/src/client-tools-web-console.md#inspecting-a-transaction).
 Read [Layout](../../../docs/src/client-tools-web-console.md#layout) before interpreting footer totals.
 Listener certificates are node provisioning, configured outside Plexus statements.
-For TLS algorithm choices, read [Cryptography](../../../docs/src/cryptography.md#algorithm-policy):
+For TLS algorithm choices, read [Cryptography](../../../docs/src/cryptography.md#outward-tls-policy):
 use ordered string lists with `ALTER CLUSTER SET TLS_CIPHER_SUITES = ('fips'),
 TLS_KEY_EXCHANGE_GROUPS = ('fips');`. Read that chapter before choosing exact names or aliases,
 changing both lists, or promising which connector handshakes are governed. The interconnect keeps
@@ -148,9 +148,10 @@ current failure gauge in `/metrics` and `DESCRIBE EMITTER`.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
 Roto UDFs, ingestors and emitters for every connector and entity pair, junctions, deduplicators,
-reorderers, window processors, correlators, reingestors, and session subscriptions; use the same
-web-console chapter for their typed fields, resource versions, program editors, reference lookup,
-and transaction behavior.
+reorderers, window processors, correlators, reingestors, generators, inferencers, WASM processors,
+and session subscriptions; use the same web-console chapter for their typed fields, resource
+versions, tensor shapes, guest limits, program editors, reference lookup, and transaction
+behavior.
 
 For materialized relay inspection, read [Relay → Inspect Materialized State](../../../docs/src/relay.md#inspect-materialized-state)
 for selector, LIMIT/AFTER and FORMAT clause order, typed rows, sensitivity and stale continuations.

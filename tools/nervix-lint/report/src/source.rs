@@ -17,6 +17,10 @@ use syn::{
 
 pub mod provenance;
 
+/// The rule of authored cryptography outside AWS-LC. `nervix-ratchet gate` refuses every site of
+/// it instead of counting it.
+pub const AUTHORED_NON_AWS_LC_CRYPTO: &str = crypto::RULE;
+
 #[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SourceInput {
     pub path: String,
