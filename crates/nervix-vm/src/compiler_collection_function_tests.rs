@@ -26,7 +26,95 @@ fn source_schema() -> StdArc<Schema> {
         Field::new("other", DataType::List(float_item), true),
         Field::new("index", DataType::Int64, true),
         Field::new("name", DataType::Utf8, true),
+        Field::new(
+            "matrix",
+            DataType::FixedSizeList(
+                StdArc::new(Field::new(
+                    "item",
+                    DataType::FixedSizeList(
+                        StdArc::new(Field::new("item", DataType::Int64, false)),
+                        3,
+                    ),
+                    false,
+                )),
+                2,
+            ),
+            true,
+        ),
     ]))
+}
+
+#[test]
+fn list_shape_calls_resolve_dimensions_and_nested_access_when_compiled() {
+    let item = StdArc::new(Field::new("item", DataType::Int64, false));
+    let row = DataType::FixedSizeList(item.clone(), 3);
+    let transposed = DataType::FixedSizeList(
+        StdArc::new(Field::new(
+            "item",
+            DataType::FixedSizeList(item.clone(), 2),
+            false,
+        )),
+        3,
+    );
+    for (expression, result_type) in [
+        (
+            "list_reshape(input.matrix, 6)",
+            DataType::FixedSizeList(item.clone(), 6),
+        ),
+        (
+            "list_flatten(input.matrix)",
+            DataType::FixedSizeList(item, 6),
+        ),
+        ("list_transpose(input.matrix)", transposed),
+        ("first(input.matrix)", row.clone()),
+        ("last(input.matrix)", row.clone()),
+        ("nth(input.matrix, 1)", row),
+    ] {
+        let result = compile_assignment(expression, result_type);
+        assert!(result.is_ok(), "{expression}: {result:?}");
+    }
+}
+
+#[test]
+fn list_shape_calls_refuse_invalid_input_shapes_when_compiled() {
+    for expression in [
+        "list_reshape(input.matrix, 5)",
+        "list_reshape(input.left, 2)",
+        "list_transpose(input.left)",
+        "list_transpose(input.right)",
+        "list_flatten(input.right)",
+        "list_flatten(input.index)",
+        "list_flatten()",
+        "list_flatten(input.matrix, input.matrix)",
+        "list_transpose(input.matrix, input.matrix)",
+    ] {
+        let error = compile_assignment(expression, DataType::Int64)
+            .expect_err("invalid list shapes cannot become an executable program");
+        assert_eq!(
+            error.current_context().code(),
+            "unsupported_function",
+            "{expression}: {error:#}"
+        );
+    }
+}
+
+#[test]
+fn list_shape_dimensions_must_be_positive_integer_literals() {
+    for expression in [
+        "list_reshape()",
+        "list_reshape(input.matrix)",
+        "list_reshape(input.matrix, 0)",
+        "list_reshape(input.matrix, -1)",
+        "list_reshape(input.matrix, 2147483648)",
+        "list_reshape(input.matrix, 2.0)",
+        "list_reshape(input.matrix, input.index)",
+        "list_reshape(input.matrix, 2 + 1)",
+        "list_reshape(input.matrix, 2147483647, 2147483647, 2147483647)",
+    ] {
+        let error = parse_program(&format!("SET result = {expression}"))
+            .expect_err("dimensions are resolved before an expression reaches type inference");
+        assert!(error.contains("list_reshape"), "{expression}: {error}");
+    }
 }
 
 fn compile_assignment(
