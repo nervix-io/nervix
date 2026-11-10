@@ -92,14 +92,14 @@ pub use canonical::{
     ingestor_input_body_to_plexus, string_literal,
 };
 pub use client_consumer::{
-    CLIENT_CONSUMER_NODE_BYTES, ClientConsumerLimits, DEFAULT_CLIENT_CONSUMER_SESSION_BYTES,
-    MAX_CLIENT_CONSUMER_BATCHES, MAX_CLIENT_CONSUMERS_PER_SESSION,
+    ClientConsumerLimits, DEFAULT_CLIENT_CONSUMER_SESSION_BYTES, MAX_CLIENT_CONSUMER_BATCHES,
+    MAX_CLIENT_CONSUMERS_PER_SESSION,
 };
 pub use client_producer::{
-    CLIENT_PRODUCER_NODE_BYTES, ClientAttachmentId, ClientBatchDefect, ClientEndpointContract,
-    ClientOutcomeUncertainty, ClientProcessingFailure, ClientProducerAdmission,
-    ClientProducerDescription, ClientProducerEndReason, ClientProducerGrant, ClientProducerLimits,
-    ClientProducerPolicy, ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
+    ClientAttachmentId, ClientBatchDefect, ClientEndpointContract, ClientOutcomeUncertainty,
+    ClientProcessingFailure, ClientProducerAdmission, ClientProducerDescription,
+    ClientProducerEndReason, ClientProducerGrant, ClientProducerLimits, ClientProducerPolicy,
+    ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
     DEFAULT_CLIENT_BATCH_ROWS, DEFAULT_CLIENT_PRODUCER_SESSION_BYTES, MAX_CLIENT_PRODUCER_BATCHES,
     MAX_CLIENT_PRODUCERS_PER_SESSION,
 };
@@ -380,7 +380,8 @@ pub use state_branch_selection::{
 };
 pub use state_inspection::{
     ProcessorStateSection, StateInspectionBranchSelection, StateInspectionCounts,
-    StateInspectionOrigin, StateInspectionPosition, StateInspectionRejection, StateInspectionStage,
+    StateInspectionEntity, StateInspectionOrigin, StateInspectionPosition,
+    StateInspectionRejection, StateInspectionStage,
 };
 pub use state_inspection_settings::{
     StateInspectionMaxRows, StateInspectionMaxSections, StateInspectionReadTimeout,
@@ -397,21 +398,21 @@ pub use statement::{
     CreateSignalingProtocol, CreateStatement, CreateSubscription, CreateUser, CreateVhost,
     DeleteSubscription, DescribeBranch, DescribeClient, DescribeCluster, DescribeCorrelator,
     DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor,
-    DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay,
-    DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
-    DescribeWindowProcessor, DomainConfig, DomainPace, DomainStartPoint, DomainState, DomainStatus,
-    DomainTick, DrainNode, DropModel, DropNode, EndpointKind, EndpointType, ErrorPolicies,
-    GeneralErrorPolicy, IngestTimestampSource, InspectionFormat, LookupQuery,
-    MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, PartitionSeed, RelayBranching,
-    Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
-    RelocationSelection, RelocationUnitSelection, ResolvedBranching, ResolvedCodecWireFormat,
-    RetryPolicy, ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowPlacements,
-    ShowProcessorState, ShowRelayMaterializedState, ShowTransactions, ShowUdfs,
-    SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
-    SignalingWireFormat, StartDomain, StateInspectedProcessor, StateInspectionPageRequest,
-    Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral,
-    UncordonNode, UniquelyKindedModel, UploadResource, VhostTlsResource, WireSchemaLookup,
-    default_relay_buffer,
+    DescribeJunction, DescribeLicense, DescribeLookup, DescribePlacement, DescribeReingestor,
+    DescribeRelay, DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf,
+    DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig, DomainPace, DomainStartPoint,
+    DomainState, DomainStatus, DomainTick, DrainNode, DropModel, DropNode, EndpointKind,
+    EndpointType, ErrorPolicies, GeneralErrorPolicy, IngestTimestampSource, InspectionFormat,
+    LookupQuery, MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, PartitionSeed,
+    RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
+    RelocationPreferenceStrategy, RelocationSelection, RelocationUnitSelection, ResolvedBranching,
+    ResolvedCodecWireFormat, RetryPolicy, ShowClusterStatus, ShowCreate, ShowEmitters,
+    ShowIngestors, ShowPlacements, ShowProcessorState, ShowRelayMaterializedState,
+    ShowTransactions, ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
+    SignalingWaitStep, SignalingWireFormat, StartDomain, StateInspectedProcessor,
+    StateInspectionPageRequest, Statement, StopDomain, SubscriptionBinding,
+    SubscriptionDeliveryBehavior, SubscriptionLiteral, UncordonNode, UniquelyKindedModel,
+    UploadResource, VhostTlsResource, WireSchemaLookup, default_relay_buffer,
 };
 pub use timestamp::{AtomicTimestamp, Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};

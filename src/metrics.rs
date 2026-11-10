@@ -4404,6 +4404,14 @@ impl RuntimeMetrics {
         self.series.prometheus.text()
     }
 
+    /// Composition installs an independent observation collector on the node's shared registry.
+    pub(crate) fn register_collector(
+        &self,
+        collector: Box<dyn Collector>,
+    ) -> prometheus::Result<()> {
+        self.series.prometheus.registry.register(collector)
+    }
+
     pub(crate) fn record_restore_staging(&self, observation: RestoreStagingObservation) {
         self.series.prometheus.restore_staging.record(observation);
     }

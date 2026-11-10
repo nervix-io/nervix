@@ -179,6 +179,15 @@ fn no_client_deadline_key_bounds_a_kafka_wait() {
         .find(|wait| wait.wait == "delivery under ACK")
         .assured("the emitter declares its confirmed delivery wait");
     assert_eq!(confirmed_delivery.bound, WaitBound::Clause("ACK TIMEOUT"));
+    let given_up_wait =
+        "a failed publish under ACK, for the reports of the records its purge gave up";
+    let given_up = emit
+        .bounds
+        .waits
+        .iter()
+        .find(|wait| wait.wait == given_up_wait)
+        .assured("the emitter declares the wait of a failed confirmed publish for its purge");
+    assert_eq!(given_up.bound, WaitBound::Clause("ACK TIMEOUT"));
 }
 
 fn config_entry(key: &str, value: &str) -> ClientConfigEntry {

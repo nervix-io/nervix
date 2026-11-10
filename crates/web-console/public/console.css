@@ -3393,7 +3393,11 @@ button {
 .create-processor-state-policy,
 .create-processor-inherit,
 .create-processor-flush,
-.create-processor-message-error {
+.create-processor-message-error,
+.create-window-bound,
+.create-correlator-match,
+.create-correlator-left-timeout,
+.create-correlator-right-timeout {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
@@ -3410,7 +3414,13 @@ button {
 .create-processor-state-policy legend,
 .create-processor-inherit legend,
 .create-processor-flush legend,
-.create-processor-message-error legend {
+.create-processor-message-error legend,
+.create-window-bound legend,
+.create-correlator-match legend,
+.create-correlator-left-timeout legend,
+.create-correlator-right-timeout legend,
+.create-window-aggregate-references legend,
+.create-correlator-route-references legend {
   color: var(--text-d);
   font-size: 10px;
   font-weight: 700;
@@ -3418,6 +3428,8 @@ button {
 
 .create-processor-inputs,
 .create-processor-keys,
+.create-processor-window,
+.create-processor-correlation,
 .create-processor-state,
 .create-processor-routes,
 .create-processor-route,
@@ -3433,6 +3445,8 @@ button {
 
 .create-processor-inputs,
 .create-processor-keys,
+.create-processor-window,
+.create-processor-correlation,
 .create-processor-state,
 .create-processor-routes,
 .create-processor-route {
@@ -3443,6 +3457,8 @@ button {
 
 .create-processor-inputs h3,
 .create-processor-keys h3,
+.create-processor-window h3,
+.create-processor-correlation h3,
 .create-processor-state h3,
 .create-processor-routes h3,
 .create-processor-invocations h4 {
@@ -3471,6 +3487,7 @@ button {
 
 .create-processor-inputs button,
 .create-processor-keys button,
+.create-processor-correlation button,
 .create-processor-state button,
 .create-processor-routes button,
 .create-processor-mode button {
@@ -3486,12 +3503,33 @@ button {
 
 .create-processor-inputs button.active,
 .create-processor-keys button.active,
+.create-processor-correlation button.active,
 .create-processor-state button.active,
 .create-processor-routes button.active,
 .create-processor-mode button.active {
   border-color: var(--cyan);
   color: var(--cyan);
   background: color-mix(in srgb, var(--cyan) 13%, var(--surface));
+}
+
+.create-window-aggregate-references,
+.create-correlator-route-references {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.create-window-aggregate-references p,
+.create-correlator-route-references p,
+.create-processor-window p,
+.create-processor-correlation p {
+  margin: 0;
+  color: var(--text-d);
+  font-size: 10px;
 }
 
 .create-processor-assignment-row input,

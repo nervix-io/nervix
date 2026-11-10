@@ -106,6 +106,7 @@ impl Default for RuntimeSettings {
 pub(crate) struct RuntimeEnvironment {
     /// The node's bounded execution and transient-memory admission.
     pub(crate) executor: Executor,
+    pub(crate) client_endpoints: super::ClientEndpointSettings,
     pub(crate) outward_tls: nervix_tls::OutwardTlsPolicy,
     /// The node's resolver, which connectors resolve host names through.
     pub(crate) dns: Option<DnsResolver>,
@@ -126,6 +127,7 @@ impl RuntimeEnvironment {
     pub(crate) fn transient(executor: Executor) -> Self {
         Self {
             executor,
+            client_endpoints: super::ClientEndpointSettings::default(),
             outward_tls: nervix_tls::OutwardTlsPolicy::default(),
             dns: None,
             db: None,

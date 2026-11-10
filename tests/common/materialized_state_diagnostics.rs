@@ -61,11 +61,11 @@ where
 
 /// Keep placement, exact branch identity and fixture measurements without copying payload values.
 pub(crate) fn summarize(state: &StateInspection) -> String {
-    let mut lines = vec![format!(
-        "entity: {}/{}",
-        state.entity.domain,
-        state.entity.identifier()
-    )];
+    let entity = match state.entity.domain_node() {
+        Some(entity) => format!("{}/{}", entity.domain, entity.identifier()),
+        None => "cluster license".to_string(),
+    };
+    let mut lines = vec![format!("entity: {entity}")];
     let StateInspectionResult::Page(page) = &state.result else {
         if let StateInspectionResult::Rejected(reason) = &state.result {
             lines.push(format!("rejection: {}", reason.as_ref()));

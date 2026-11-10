@@ -656,7 +656,7 @@ mod tests {
         service
             .inner
             .consensus
-            .put_domain(changed_domain, None)
+            .put_domain(changed_domain, None, service.domain_quota())
             .await
             .assured("the single-node test consensus accepts the domain update");
         let error = service

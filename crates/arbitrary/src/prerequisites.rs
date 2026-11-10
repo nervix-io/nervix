@@ -93,13 +93,20 @@ impl Arbitrary<'_> {
         let mut verdicts = BTreeMap::new();
         for _ in 0..runs {
             let run = self.node_identity();
-            let verdict = if self.entropy.flag() {
-                AdmissionVerdict::Accepted
-            } else {
-                AdmissionVerdict::Refused {
+            let verdict = match self.entropy.byte() % 3 {
+                0 => AdmissionVerdict::Accepted,
+                1 => AdmissionVerdict::Refused {
                     voter: self.rule_name(),
                     mismatch: self.prerequisite_mismatch(),
-                }
+                },
+                _ => AdmissionVerdict::QuotaRefused {
+                    refusal: nervix_licensing_vocabulary::LicensingRefusal {
+                        condition: nervix_licensing_vocabulary::QuotaName::ClusterNodes,
+                        limit: self.entropy.any_u64(),
+                        current_usage: self.entropy.any_u64(),
+                        requested: self.entropy.any_u64(),
+                    },
+                },
             };
             verdicts.insert(run, verdict);
         }

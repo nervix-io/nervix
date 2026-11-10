@@ -1,5 +1,14 @@
 # Storage Representation Coverage
 
+The `licensing-record-rkyv` property preserves licensing time, Free mode and every retained trust
+document's original bytes, typed document kind, serial and optional working-key identity. The
+consensus state-record properties include the singleton paired with the cluster identity; durable
+recovery refuses an incomplete pair. Raft record generators carry captured bounded or unlimited
+quotas in domain creation and restore effects. Admission-verdict generation includes complete
+licensing refusals, and statement/archive/canonical domains include `DESCRIBE LICENSE`.
+`client-state-inspection` and the shared host inspection property preserve cluster-license scope
+without manufacturing a domain or graph-node identity.
+
 Names drawn from `nervix-arbitrary` include current Plexus keyword spellings where their name
 kind and domain admit them. The [property register](../docs/src/property-testing-and-fuzzing.md)
 records each generated domain's revision and input bounds.
@@ -52,7 +61,7 @@ datetimes or bytes. JSON, CBOR and AVRO retain their own wire type enums; CBOR c
 native representation types, and an AVRO array nests its item type, arrays included, to a
 bounded depth. The Model/archive, registry and consensus properties preserve those complete
 values, including inferencer state bindings and their initial expressions.
-The `NERVIX PAY HOPS ` registry signature and `raft_payload_identity_capability_tls_inference_reset_epoch_` consensus namespace
+The `NERVIX PAY HOPS ` registry signature and `raft_payload_identity_licensing_capability_tls_inference_reset_epoch_` consensus namespace
 identify the current Model layout before decoding.
 
 `ALTER INGESTOR` and `ALTER EMITTER` statement generators draw, for every entity, each change its
@@ -61,7 +70,7 @@ Kafka's and Pulsar's `SET START AT`, a declared quiesce mode and `SET CLIENT` wh
 or writes through a client. They mix them with the shared operations, the in-place construction
 changes of a route or an emitter, and an emitter's envelope clauses and properties. The
 Model/archive, consensus and canonical Plexus properties preserve the complete operations in order,
-and the `raft_payload_identity_capability_tls_inference_reset_epoch_` consensus namespace identifies the statement layout the
+and the `raft_payload_identity_licensing_capability_tls_inference_reset_epoch_` consensus namespace identifies the statement layout the
 transactions it keeps are stored in before decoding.
 
 `RESET WASM PROCESSOR ... STATE` statement generators draw a processor and an unbranched,

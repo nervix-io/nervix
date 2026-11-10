@@ -240,6 +240,7 @@ pub enum CommandExecutionEffect {
         applied: Option<Box<nervix_models::ClusterParameterRecord>>,
     },
     CreateDomain {
+        domain_quota: nervix_licensing_vocabulary::Quota,
         if_not_exists: bool,
         existed_at_admission: bool,
         state: Box<DomainState>,

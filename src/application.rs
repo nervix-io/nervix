@@ -51,11 +51,10 @@ use clap_complete::Shell;
 #[cfg(feature = "deloxide")]
 pub use cli::DiagnosticArgs;
 pub use cli::{
-    Args, CapacityArgs, Command, ConsensusArgs, MembershipArgs, MemoryPressureArgs, NodeArgs,
-    ResourceArgs, RuntimeArgs, SchedulingArgs, SettingOverride, SettingsArgs, ShutdownArgs,
-    TracingArgs, TransactionArgs,
+    Args, CapacityArgs, Command, ConsensusArgs, ExecutionArgs, MembershipArgs, MemoryPressureArgs,
+    NodeArgs, ResourceArgs, RuntimeArgs, SchedulingArgs, SettingOverride, SettingsArgs,
+    ShutdownArgs, TracingArgs, TransactionArgs,
 };
-use cli_completions::print_completions;
 pub use cli_values::{HumanBytes, HumanDuration, InternalTransportMode, RefusedCliValue};
 #[cfg(test)]
 use cli_values::{parse_human_bytes, parse_human_duration, parse_trace_sample_ratio};
@@ -174,6 +173,9 @@ mod http_endpoint;
 mod interconnect_relay;
 mod join_supervision;
 mod leader_redirect;
+mod license_description;
+mod licensing_admission;
+mod membership_reconciliation;
 mod model_mutation;
 mod model_validation;
 mod node_capabilities;
@@ -186,6 +188,14 @@ mod ownership_handoff;
 mod partition_transition;
 mod placement_groups;
 mod preflight;
+pub use nervix_execution::{
+    RuntimeMaxBlockingThreads, RuntimeThreadOverrides, RuntimeThreadSettings,
+    RuntimeThreadStackSize, RuntimeWorkerThreads,
+};
+mod process;
+pub use process::run_cli;
+#[cfg(not(feature = "shuttle"))]
+pub use process::run_server_process;
 mod public_listener;
 mod relocation;
 mod resource;
@@ -272,6 +282,8 @@ pub struct Application {
     #[builder(default)]
     pub settings: NodeSettings,
     #[builder(default)]
+    pub cpu_detection: crate::capacity::CpuDetection,
+    #[builder(default)]
     #[doc(hidden)]
     pub fault_injection: ConfiguredFaultInjection,
     /// Bound by the shutdown timeout the settings hold, so the two can never disagree.
@@ -282,60 +294,6 @@ pub struct Application {
     pub shutdown: ShutdownCoordinator,
     #[builder(default = true)]
     pub graceful_shutdown_drain: bool,
-}
-
-/// Runs this process as the server, from its own command line to its exit. The `nervix-server`
-/// executable is this call, and a test process that re-executes itself under the server's name
-/// makes the same call, so a real process in a test starts the way a deployed one does. No Shuttle
-/// model runs a whole process and Shuttle's runtime has no stack size to set, so a Shuttle build has
-/// no such entry point.
-#[cfg(not(feature = "shuttle"))]
-pub fn run_server_process() -> Result<(), Report<AppError>> {
-    let args = Args::parse();
-    // Registered before any other thread exists, so neither SIGINT nor SIGTERM can end the process
-    // by its default action at any later point in its life.
-    let termination_signals = TerminationSignals::register()?;
-    // A diagnostic node installs its deadlock detector before any tracked lock or runtime worker
-    // exists, and after the signals, so the detector's threads never see one by its default action.
-    #[cfg(feature = "deloxide")]
-    nervix_deadlock::DiagnosticRun::start_selected(
-        args.diagnostics
-            .deadlock_evidence
-            .clone()
-            .map(nervix_deadlock::EvidenceDirectory::new),
-        nervix_primitives::deadlock::DiagnosticSelection::for_build(
-            args.diagnostics.deadlock_active_only,
-        ),
-    )
-    .change_context(AppError::StartDeadlockDiagnostics)?;
-    let runtime = nervix_primitives::runtime::Builder::new_multi_thread()
-        .thread_stack_size(8 * 1024 * 1024) // Set custom stack size here
-        .enable_all()
-        .build()
-        .change_context(AppError::BuildRuntime)?;
-
-    let tracing_guard = {
-        let _entered = runtime.enter();
-        init_tracing(&args.tracing)?
-    };
-    runtime.block_on(run_cli(args, termination_signals, &tracing_guard))
-}
-
-/// Runs the server command line with termination signals the caller has already registered, so
-/// neither signal can end the process by its default action while the application starts.
-pub async fn run_cli(
-    args: Args,
-    termination_signals: TerminationSignals,
-    tracing: &TracingGuard,
-) -> Result<(), Report<AppError>> {
-    if let Some(Command::Completions { shell }) = args.subcommand.clone() {
-        print_completions(shell);
-        return Ok(());
-    }
-
-    let application = Application::try_from(args)?;
-    termination_signals.supervise(application.shutdown.clone())?;
-    application.run_with_tracing(Some(tracing)).await
 }
 
 impl Application {
@@ -404,23 +362,6 @@ impl Application {
         let replica_count = settings.scheduling.replica_count();
         let runtime_settings = settings.runtime;
         let state_snapshot_interval = runtime_settings.state_snapshot_interval();
-        let memory_pressure_controller = {
-            let mapping_input = settings
-                .memory_pressure
-                .config()
-                .map(MemoryPressureController::new)
-                .transpose();
-            match mapping_input {
-                Ok(mapped_value) => Ok(mapped_value),
-                Err(error) => Err({
-                    error!(
-                        error = format!("{error:#}"),
-                        "failed to initialize memory pressure monitor"
-                    );
-                    error.change_context(AppError::InitMemoryPressureMonitor)
-                }),
-            }
-        }?;
         let db_path = self.identity.db_path.clone();
         let temp_dir = self.identity.temp_dir.clone();
         let resource_store_limits = settings.resources.limits();
@@ -487,6 +428,7 @@ impl Application {
             db_path: &db_path,
             temp_dir: &temp_dir,
             dns: &dns_configuration,
+            cpu_detection: self.cpu_detection,
         }
         .run()
         .instrument(tracing::info_span!("startup_preflight", node_id = %node_id))
@@ -496,6 +438,9 @@ impl Application {
             dns,
             memory,
             capabilities,
+            peer_receive,
+            client_endpoints,
+            memory_pressure,
             restore_staging_max_bytes,
             database_volume,
         } = match preflight {
@@ -508,6 +453,22 @@ impl Application {
                 return Err(error.change_context(AppError::Preflight));
             }
         };
+        let memory_pressure_controller = {
+            let mapping_input = memory_pressure
+                .config()
+                .map(MemoryPressureController::new)
+                .transpose();
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    error!(
+                        error = format!("{error:#}"),
+                        "failed to initialize memory pressure monitor"
+                    );
+                    error.change_context(AppError::InitMemoryPressureMonitor)
+                }),
+            }
+        }?;
         let grpc_listener = TcpListener::bind(grpc_listen_addr)
             .await
             .change_context(AppError::BindGrpcListenAddress)?;
@@ -597,6 +558,7 @@ impl Application {
             let mapping_input = Runtime::with_environment(
                 RuntimeEnvironment {
                     executor,
+                    client_endpoints,
                     outward_tls: outward_tls.clone(),
                     dns: Some(dns.clone()),
                     db: Some(db.clone()),
@@ -669,7 +631,7 @@ impl Application {
             },
             interconnect_tls,
             nervix_interconnect::TransportOptions {
-                peer_receive: Some(settings.peer_receive),
+                peer_receive: Some(peer_receive),
                 ..Default::default()
             },
             startup.runtime.executor().clone(),
@@ -859,6 +821,16 @@ impl Application {
             consensus.verified("startup assigns this handle before it reaches this point");
         let interconnect =
             interconnect.verified("startup assigns this handle before it reaches this point");
+        let licensing = crate::licensing::PolicyHandle::new(
+            &consensus.observer(),
+            &runtime.metrics(),
+            fault_injection.clone(),
+        );
+        crate::licensing::metrics::register(
+            &runtime.metrics(),
+            licensing.clone(),
+            consensus.observer(),
+        );
         let mut interconnect_rx = interconnect_rx;
         let runtime_admission = Arc::new(runtime_admission::RuntimeAdmission::new(
             cluster.local_node_identity().await,
@@ -874,6 +846,11 @@ impl Application {
             .metrics()
             .install_node_observations(node_observations.clone());
         let mut background_tasks = Vec::new();
+        background_tasks.push(nervix_primitives::task::spawn(
+            licensing
+                .clone()
+                .follow(consensus.observer(), shutdown.clone()),
+        ));
         background_tasks.push(node_capabilities::spawn(
             consensus.proposer(),
             cluster.clone(),
@@ -904,8 +881,6 @@ impl Application {
         let cluster_for_membership_reconcile = cluster.clone();
         let administrator_for_membership_reconcile = consensus.administrator();
         let proposer_for_parameter_seeding = consensus.proposer();
-        #[cfg(feature = "testing")]
-        let fault_for_identity_seeding = fault_injection.clone();
         let membership_reconcile_shutdown = shutdown.clone();
         let interconnect_tls_transport = interconnect.clone();
         let interconnect_tls_shutdown = shutdown.clone();
@@ -921,6 +896,8 @@ impl Application {
             .await;
         }));
         let (join_refusal_sender, join_refusal) = watch::channel(None);
+        let bootstrap_refusal_sender = join_refusal_sender.clone();
+        let bootstrap_refusal_coordinator = shutdown_coordinator.clone();
         if has_bootstrap_candidates {
             let supervision = JoinSupervision {
                 transport: interconnect.clone(),
@@ -955,76 +932,20 @@ impl Application {
                 controller.run(memory_runtime, memory_shutdown).await;
             }));
         }
-        background_tasks.push(nervix_primitives::task::spawn(async move {
-            sleep(Duration::from_millis(500)).await;
-            let mut initialized = false;
-            loop {
-                nervix_primitives::task::consume_budget().await;
-                if membership_reconcile_shutdown.is_cancelled() {
-                    break;
-                }
-                if allow_bootstrap && !initialized {
-                    match administrator_for_membership_reconcile
-                        .maybe_initialize()
-                        .await
-                    {
-                        Ok(did_initialize) => {
-                            initialized = did_initialize;
-                        }
-                        Err(error) => {
-                            warn!(error = %format_args!("{error:#}"), "raft bootstrap attempt failed");
-                        }
-                    }
-                }
-                if let Err(error) = cluster_identity::seed(
-                    &proposer_for_parameter_seeding,
-                    #[cfg(feature = "testing")]
-                    &fault_for_identity_seeding,
-                ).await {
-                    warn!(error = %format_args!("{error:#}"), "failed to seed cluster identity");
-                }
-                if allow_bootstrap
-                    && proposer_for_parameter_seeding.cluster_identity().is_some()
-                    && proposer_for_parameter_seeding
-                        .cluster_parameters()
-                        .is_none()
-                    && proposer_for_parameter_seeding
-                        .current_leader()
-                        .await
-                        .as_ref()
-                        == Some(proposer_for_parameter_seeding.local_node_id())
-                    && let Err(error) = proposer_for_parameter_seeding
-                        .seed_cluster_parameters(parameter_seeds)
-                        .await
-                {
-                    warn!(
-                        error = format!("{error:#}"),
-                        "failed to seed cluster parameters"
-                    );
-                }
-                if let Some(record) = proposer_for_parameter_seeding.cluster_parameters() {
-                    cluster_for_membership_reconcile
-                        .publish_cluster_parameters(record, false)
-                        .await;
-                }
-                if let Err(error) = administrator_for_membership_reconcile
-                    .reconcile_nodes(cluster_for_membership_reconcile.gossip_state())
-                    .await
-                {
-                    warn!(error = %format_args!("{error:#}"), "raft membership reconciliation failed");
-                }
-                // Published whether or not a membership change failed: the verdicts were judged
-                // before any change was attempted, and a node that stopped leading withdraws them.
-                let verdicts = administrator_for_membership_reconcile.admission_verdicts();
-                cluster_for_membership_reconcile
-                    .publish_admission_verdicts(verdicts.as_ref())
-                    .await;
-                nervix_primitives::select! {
-                    _ = membership_reconcile_shutdown.cancelled() => break,
-                    _ = sleep(Duration::from_secs(1)) => {}
-                }
-            }
-        }));
+        background_tasks.push(membership_reconciliation::spawn(
+            membership_reconciliation::MembershipReconciliation {
+                cluster: cluster_for_membership_reconcile,
+                administrator: administrator_for_membership_reconcile,
+                proposer: proposer_for_parameter_seeding,
+                shutdown: membership_reconcile_shutdown,
+                allow_bootstrap,
+                parameter_seeds,
+                licensing: licensing.clone(),
+                refusals: bootstrap_refusal_sender,
+                coordinator: bootstrap_refusal_coordinator,
+                fault: fault_injection.clone(),
+            },
+        ));
         let certificates = HttpsListenerCertificates::new(
             &resource_store,
             &fault_injection,
@@ -1044,6 +965,7 @@ impl Application {
                 resource_store,
                 https_certificates: certificates,
                 runtime: runtime.clone(),
+                licensing,
                 runtime_admission: runtime_admission.clone(),
                 initialization: Arc::new(node_initialization::NodeInitialization::default()),
                 admission_shutdown: shutdown_coordinator.admission_token(),

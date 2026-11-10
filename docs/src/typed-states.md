@@ -367,8 +367,8 @@ expression scope.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
-Consensus's `raft_payload_identity_capability_tls_inference_reset_epoch_` keyspaces and current
-`ClusterState` metadata encoding, 23, identify its stored shapes, including the partition count of every resolved
+Consensus's `raft_payload_identity_licensing_capability_tls_inference_reset_epoch_` keyspaces and current
+`ClusterState` metadata encoding, 24, identify its stored shapes, including the partition count of every resolved
 branch declaration in the committed schedule, the partition epoch the schedule records for each
 branch whose count changed, and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations and a `RESET WASM PROCESSOR ... STATE` that takes
@@ -1428,3 +1428,25 @@ as bootstrap and administrative transitions. The complete candidate includes TLS
 retains a TLS 1.2 suite, a usable TLS 1.2 group. Neither decoding nor installation supplies an omitted
 policy field. Current storage headers and the interconnect contract fingerprint identify this
 complete shape. See [Algorithm Policy](cryptography.md#algorithm-policy).
+
+## Licensing Publication And Admission
+
+The consensus state pairs its cluster identity with one `LicensingRecord`. Both are absent before
+bootstrap and both are present after the first identity installation. The record carries committed
+licensing time, original trust documents with their typed identities, and its current `Free` mode.
+Recovery refuses an incomplete pair; it never substitutes an embedded record for missing storage.
+
+`LicensingPolicy` is one immutable publication containing the effective conditions, usage and
+applied revision. Usage is captured from committed membership and domain records in one consensus
+observation. The policy's free state has no stop reason or licensing deadline. An unlimited quota
+and a bounded quota whose limit is `u64::MAX` stay distinct.
+
+Domain creation carries a typed admission constraint to its authoritative mutation. Rechecking the
+actual committed count prevents separate creations from each accepting the same remaining slot.
+Updates to an existing domain are explicit and do not acquire new quota. The quota's checked
+arithmetic preserves overflow under a bounded quota as a typed refusal. Membership admission includes learners and keeps
+already admitted members outside the new-usage path.
+
+An inspection entity is `DomainNode` or `ClusterLicense`. Only the former contains a domain and
+node reference. Both use the shared page and Row-section representation; a cluster observation
+never invents a graph identity to satisfy the envelope.

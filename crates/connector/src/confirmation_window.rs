@@ -4,8 +4,9 @@
 //!
 //! - **Owns.** The records a confirmed publish handed its broker and still awaits answers for,
 //!   oldest first and at most the declared `MAX` at once; each record's deadline, `ACK TIMEOUT`
-//!   after its own hand-over; the wait for the oldest answer until that deadline; and the publish
-//!   outcome the answers settle, including every answer a failure finds already given.
+//!   after its own hand-over; the wait for the oldest answer until that deadline; the wait, until
+//!   `ACK TIMEOUT` after a give-up, for the answers a driver gives the records it gave up; and the
+//!   publish outcome the answers settle, including every answer a failure finds already given.
 //! - **Depends on.** The emitter contract's outcome, record identity and failure types, the
 //!   boundary's monotonic clock and deadline-bounded wait, and the futures through which a
 //!   connector's driver answers.
@@ -94,22 +95,30 @@ pub enum ConfirmationWindowError {
 /// records await their answers at once. `ACK SEQUENTIAL` is a window of one. A driver whose queue
 /// fills below `MAX` can request the oldest answer through [`ConfirmationWindow::settle_next`].
 ///
-/// A publish ends in one of two ways. Both consume the window, which holds the publish's outcome,
-/// so the outcome cannot be reported without them:
+/// A publish ends in one of three ways. Each consumes the window, which holds the publish's
+/// outcome, so the outcome cannot be reported without them:
 ///
 /// - [`ConfirmationWindow::finish`], once every record was handed over, waits for each answer
 ///   still awaited, oldest first and each until its own deadline.
 /// - [`ConfirmationWindow::fail`] ends the publish with a failure: the driver could not take a
 ///   record for a reason that is not the record's own, the oldest answer failed or missed its
 ///   deadline, or a deadline is past the clock's range.
+/// - [`ConfirmationWindow::fail_once_given_up`] ends the publish with such a failure after the
+///   driver gave up every record it still holds, once the window has waited for the answers the
+///   driver gives for them. A driver that keeps trying to deliver a record after the window stopped
+///   waiting for it, and so could deliver its own copy beside the one the host's retry sends, ends
+///   a failed publish this way. It settles the answers still awaited through
+///   [`ConfirmationWindow::settle_awaited`], which returns a failure to it instead of ending the
+///   publish as `finish` does.
 ///
-/// A failure ends the publish at once but never discards an answer the broker already gave. Every
-/// given answer still in the window is settled first, the oldest's included, however many there
-/// are: a confirmed record is delivered and a refused one rejected, so the host's retry never
-/// sends either again. A record whose answer has not arrived, or whose answer itself failed, stays
-/// unresolved: its outcome is unknown, and the host's retry sends it again, which is the
-/// at-least-once delivery `MODE ACK` promises.
-#[must_use = "a confirmed publish reports its outcome only through `finish` or `fail`"]
+/// `fail` ends the publish at once and `fail_once_given_up` once its wait ends, but neither
+/// discards an answer the broker already gave. Every given answer still in the window is settled
+/// first, the oldest's included, however many there are: a confirmed record is delivered and a
+/// refused one rejected, so the host's retry never sends either again. A record whose answer has
+/// not arrived, or whose answer itself failed, stays unresolved: its outcome is unknown, and the
+/// host's retry sends it again, which is the at-least-once delivery `MODE ACK` promises.
+#[must_use = "a confirmed publish reports its outcome only through `finish`, `fail` or \
+              `fail_once_given_up`"]
 pub struct ConfirmationWindow<A> {
     /// The emitter a failure of the window is reported for.
     connector: &'static str,
@@ -244,13 +253,26 @@ where
     /// When an answer fails or misses its deadline, the publish ends with that failure as
     /// [`ConfirmationWindow::fail`] ends it.
     pub async fn finish(mut self) -> PerRecordOutcome<EmitterRecordId> {
-        while !self.in_flight.is_empty() {
-            nervix_primitives::task::consume_budget().await;
-            if let Err(failure) = self.settle_oldest().await {
-                return self.fail(failure);
-            }
+        if let Err(failure) = self.settle_awaited().await {
+            return self.fail(failure);
         }
         self.outcome
+    }
+
+    /// Waits for each answer still awaited, oldest first and each until its own deadline, and
+    /// settles it.
+    ///
+    /// When an answer fails or misses its deadline this returns that failure without ending the
+    /// publish, and the caller ends it with the failure: through [`ConfirmationWindow::fail`], or
+    /// through [`ConfirmationWindow::fail_once_given_up`] once its driver gave up the records still
+    /// in the window. Otherwise the window awaits no answer any more, and
+    /// [`ConfirmationWindow::finish`] reports the publish's outcome at once.
+    pub async fn settle_awaited(&mut self) -> EmitterWriteResult<()> {
+        while !self.in_flight.is_empty() {
+            nervix_primitives::task::consume_budget().await;
+            self.settle_oldest().await?;
+        }
+        Ok(())
     }
 
     /// Ends the publish with `failure`, settling every answer the broker already gave.
@@ -276,6 +298,47 @@ where
         }
         outcome.fail(failure);
         outcome
+    }
+
+    /// Ends the publish with `failure` once the driver gave up every record still in the window,
+    /// settling the answers the driver gives for them.
+    ///
+    /// A driver that gives a record up can no longer deliver it, and answers for it at once: with
+    /// the broker's verdict, where the broker answered before the record was given up, and
+    /// otherwise with the failure of giving it up. The window waits for those answers, oldest first,
+    /// until `ACK TIMEOUT` after this call, and then ends the publish as
+    /// [`ConfirmationWindow::fail`] does with every answer given by then. A record the broker
+    /// confirmed before its driver gave it up is delivered and a refused one rejected, so the host's
+    /// retry never sends either again, and every other record stays unresolved for that retry,
+    /// which no copy the driver held can race. An answer that does not arrive within that bound
+    /// leaves its record unresolved, as any missing answer does.
+    pub async fn fail_once_given_up(
+        mut self,
+        failure: Report<EmitterWriteError>,
+    ) -> PerRecordOutcome<EmitterRecordId> {
+        let Some(deadline) = Instant::now().checked_add(self.settings.timeout) else {
+            // No deadline exists to wait until, so the window settles what is given now.
+            return self.fail(failure);
+        };
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let Some(given_up) = self.in_flight.front_mut() else {
+                break;
+            };
+            let Ok(answer) = timeout_at(deadline, &mut given_up.answer).await else {
+                // The answers are overdue: `fail` reads those given by now without waiting.
+                break;
+            };
+            let given_up = self
+                .in_flight
+                .pop_front()
+                .verified("the given-up record was read from the front of this window above");
+            match answer {
+                Ok(verdict) => given_up.settle(verdict, &mut self.outcome),
+                failed @ Err(_) => failed.discarded(UNKNOWN_OUTCOME),
+            }
+        }
+        self.fail(failure)
     }
 
     /// Waits for the oldest answer until the oldest's deadline, and settles it.

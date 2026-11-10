@@ -22,6 +22,13 @@ struct StoppingTask {
 }
 
 impl Runtime {
+    pub(crate) fn client_endpoint_capacities(&self) -> (u64, u64) {
+        (
+            self.inner.client_producer_budget.capacity(),
+            self.inner.client_emitter_budget.capacity(),
+        )
+    }
+
     pub(crate) fn new() -> Self {
         Self::with_persistence(None, nervix_models::StateSnapshotInterval::DEFAULT)
             .verified("the None persistence path has no fallible step")
@@ -69,6 +76,7 @@ impl Runtime {
     ) -> error_stack::Result<Self, RuntimePersistenceError> {
         let RuntimeEnvironment {
             executor,
+            client_endpoints,
             outward_tls,
             dns,
             db,
@@ -171,9 +179,13 @@ impl Runtime {
                 state_identities: DashMap::default(),
                 state_replication_routing: Default::default(),
                 client_ingestors: DashMap::default(),
-                client_producer_budget: client_ingestor::ClientProducerBudget::default(),
+                client_producer_budget: client_ingestor::ClientProducerBudget::new(
+                    client_endpoints.producer_node_bytes,
+                ),
                 client_emitters: DashMap::default(),
-                client_emitter_budget: client_emitter::ClientEmitterBudget::default(),
+                client_emitter_budget: client_emitter::ClientEmitterBudget::new(
+                    client_endpoints.consumer_node_bytes,
+                ),
                 endpoint_intake_routes: EndpointIntakeRoutes::default(),
                 relay_boundary_fanouts: DashMap::default(),
                 events,

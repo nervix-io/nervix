@@ -1,9 +1,10 @@
-//! Typed semantic questions asked by junction, deduplicator, reorderer and reingestor controls.
-//!
-//! Layer: edges.
+//! Typed semantic questions asked by junction, deduplicator, reorderer, window processor,
+//! correlator and reingestor controls.
 //!
 //! - **Owns.** The dependency context sent for compatible input, output, branch, and state
-//!   choices in one browser processor draft.
+//!   choices, for a correlator's right side and timeout relays, and for the scoped fields window
+//!   and correlator pickers insert, in one browser processor draft; the controls an open processor
+//!   form asks about; and applying the selections of the right side, timeout and field pickers.
 //! - **Depends on.** Typed choice wire values and the current processor draft.
 //! - **Must not know.** Registry implementation or how a server pages candidates.
 
@@ -12,14 +13,16 @@
     nervix::layer(edge, reason = "owns the edges boundary declared above")
 )]
 
-use leptos::prelude::GetUntracked;
+use leptos::prelude::{Get as _, GetUntracked, Update as _};
 use nervix_client_wire::{ChoiceSelection, ChoiceTarget, ChoiceValue};
 use nervix_models::{ModelKind, NodeRef, RelayName};
 
 use super::{
     ChoiceControl, ChoiceQuery, CreateSignals,
-    ingestor_route_draft::RouteBranchDraft,
-    processor_draft::{NodeBranchDraft, ProcessorDraft, ProcessorFamily},
+    ingestor_route_draft::{InheritDraft, MessageErrorDraft, RouteBranchDraft},
+    processor_correlator_draft::{CorrelationSide, TimeoutDraft},
+    processor_draft::{NodeBranchDraft, ProcessorDraft, ProcessorFamily, StatePolicyDraft},
+    processor_window_draft::WindowDraft,
 };
 
 /// What a node-wide branch family asks for before its first input relay can be offered.
@@ -69,7 +72,8 @@ impl CreateSignals {
     }
 
     /// The question for the first input relay: any relay for a reingestor, and relays with exactly
-    /// the node-wide branch for the families that declare one.
+    /// the node-wide branch for the families that declare one. A correlator asks it for the first
+    /// relay of each side.
     fn processor_first_input_question(
         self,
         draft: &ProcessorDraft,
@@ -93,6 +97,14 @@ impl CreateSignals {
                 unselected: "Choose the reorderer branch before its input relays",
                 unnamed: "Choose the named reorderer branch before its input relays",
             },
+            ProcessorFamily::Window => NodeBranchPrerequisites {
+                unselected: "Choose the window processor branch before its input relays",
+                unnamed: "Choose the named window processor branch before its input relays",
+            },
+            ProcessorFamily::Correlator => NodeBranchPrerequisites {
+                unselected: "Choose the correlator branch before its left and right relays",
+                unnamed: "Choose the named correlator branch before its left and right relays",
+            },
         };
         match &draft.branching {
             NodeBranchDraft::Unselected => Err(prerequisites.unselected),
@@ -114,17 +126,132 @@ impl CreateSignals {
         }
     }
 
+    /// The question a correlator's right side, timeout relay or a scoped field picker asks.
+    fn processor_scope_choice_query(
+        self,
+        draft: &ProcessorDraft,
+        control: ChoiceControl,
+    ) -> Result<ChoiceQuery, &'static str> {
+        let first_right = match draft.correlator() {
+            Some(correlator) => correlator.right.current_first(),
+            None => None,
+        };
+        match control {
+            ChoiceControl::ProcessorRightInputRelay => {
+                let later = match draft.correlator() {
+                    Some(correlator) => correlator.right.active > 0,
+                    None => false,
+                };
+                if !later {
+                    return self.processor_first_input_question(draft);
+                }
+                let Some(first) = first_right else {
+                    return Err("Choose the first RIGHT FROM relay before another right relay");
+                };
+                self.processor_relay_question(
+                    ChoiceTarget::ProcessorCompatibleInputRelay,
+                    first,
+                    "Select a domain before choosing a right relay",
+                    20,
+                )
+            }
+            ChoiceControl::ProcessorLeftTimeoutRelay => {
+                let Some(first) = draft.current_first_input() else {
+                    return Err("Choose the first LEFT FROM relay before the left timeout relay");
+                };
+                self.processor_relay_question(
+                    ChoiceTarget::ProcessorCompatibleInputRelay,
+                    first,
+                    "Select a domain before choosing a timeout relay",
+                    20,
+                )
+            }
+            ChoiceControl::ProcessorRightTimeoutRelay => {
+                let Some(first) = first_right else {
+                    return Err("Choose the first RIGHT FROM relay before the right timeout relay");
+                };
+                self.processor_relay_question(
+                    ChoiceTarget::ProcessorCompatibleInputRelay,
+                    first,
+                    "Select a domain before choosing a timeout relay",
+                    20,
+                )
+            }
+            ChoiceControl::ProcessorAggregateField => {
+                let Some(input) = draft.current_first_input() else {
+                    return Err("Choose an input relay before its fields");
+                };
+                if !draft.has_output_assignment() {
+                    return Err("Add an output assignment before an aggregate argument");
+                }
+                if draft
+                    .window()
+                    .and_then(WindowDraft::aggregate_function)
+                    .is_none()
+                {
+                    return Err(
+                        "Enter the aggregate function, such as COUNT, before choosing its input \
+                         field",
+                    );
+                }
+                self.processor_relay_question(
+                    ChoiceTarget::RelayField,
+                    input,
+                    "Select a domain before choosing an input field",
+                    100,
+                )
+            }
+            ChoiceControl::ProcessorCorrelateLeftField | ChoiceControl::ProcessorRouteLeftField => {
+                let Some(first) = draft.current_first_input() else {
+                    return Err("Choose the first LEFT FROM relay before its fields");
+                };
+                self.processor_side_field_question(draft, control, first)
+            }
+            ChoiceControl::ProcessorCorrelateRightField
+            | ChoiceControl::ProcessorRouteRightField => {
+                let Some(first) = first_right else {
+                    return Err("Choose the first RIGHT FROM relay before its fields");
+                };
+                self.processor_side_field_question(draft, control, first)
+            }
+            _ => Err("This control is not a correlator or window choice"),
+        }
+    }
+
+    /// The fields of one correlator side's first relay. A route's picker inserts into an output
+    /// assignment, so it needs one first.
+    fn processor_side_field_question(
+        self,
+        draft: &ProcessorDraft,
+        control: ChoiceControl,
+        relay: &RelayName,
+    ) -> Result<ChoiceQuery, &'static str> {
+        let assigns = matches!(
+            control,
+            ChoiceControl::ProcessorRouteLeftField | ChoiceControl::ProcessorRouteRightField
+        );
+        if assigns && !draft.has_output_assignment() {
+            return Err("Add an output assignment before a field to assign");
+        }
+        self.processor_relay_question(
+            ChoiceTarget::RelayField,
+            relay,
+            "Select a domain before choosing a field",
+            100,
+        )
+    }
+
     pub(super) fn processor_choice_query(
         self,
         control: ChoiceControl,
     ) -> Result<ChoiceQuery, &'static str> {
         let Some(signal) = self.active_processor() else {
-            return Err("Open a junction, deduplicator, reorderer or reingestor form first");
+            return Err("Open a processor form first");
         };
         let draft = signal.get_untracked();
         match control {
             ChoiceControl::ProcessorInputRelay => {
-                if draft.active_input > 0 {
+                if draft.from.active > 0 {
                     let Some(input) = draft.current_first_input() else {
                         return Err("Choose the first input relay before another input");
                     };
@@ -261,7 +388,144 @@ impl CreateSignals {
                     20,
                 )
             }
+            ChoiceControl::ProcessorRightInputRelay
+            | ChoiceControl::ProcessorLeftTimeoutRelay
+            | ChoiceControl::ProcessorRightTimeoutRelay
+            | ChoiceControl::ProcessorAggregateField
+            | ChoiceControl::ProcessorCorrelateLeftField
+            | ChoiceControl::ProcessorCorrelateRightField
+            | ChoiceControl::ProcessorRouteLeftField
+            | ChoiceControl::ProcessorRouteRightField => {
+                self.processor_scope_choice_query(&draft, control)
+            }
             _ => Err("This control is not a processor choice"),
+        }
+    }
+
+    /// The controls the open processor form asks the session about.
+    pub(super) fn processor_open_controls(self) -> Vec<ChoiceControl> {
+        let Some(processor) = self.active_processor() else {
+            return Vec::new();
+        };
+        let draft = processor.get_untracked();
+        let mut controls = vec![
+            ChoiceControl::ProcessorInputRelay,
+            ChoiceControl::ProcessorRouteRelay,
+        ];
+        if draft.family().declares_node_branch()
+            && matches!(draft.branching, NodeBranchDraft::Branched(_))
+        {
+            controls.push(ChoiceControl::ProcessorBranch);
+        }
+        if let Some(state) = draft.active_state() {
+            controls.push(ChoiceControl::ProcessorStateRelay);
+            if matches!(state.policy, StatePolicyDraft::Default(_)) {
+                controls.push(ChoiceControl::ProcessorStateField);
+            }
+        }
+        if let Some(correlator) = draft.correlator() {
+            controls.push(ChoiceControl::ProcessorRightInputRelay);
+            controls.push(ChoiceControl::ProcessorCorrelateLeftField);
+            controls.push(ChoiceControl::ProcessorCorrelateRightField);
+            controls.push(ChoiceControl::ProcessorRouteLeftField);
+            controls.push(ChoiceControl::ProcessorRouteRightField);
+            if matches!(correlator.left_timeout, TimeoutDraft::SendTo(_)) {
+                controls.push(ChoiceControl::ProcessorLeftTimeoutRelay);
+            }
+            if matches!(correlator.right_timeout, TimeoutDraft::SendTo(_)) {
+                controls.push(ChoiceControl::ProcessorRightTimeoutRelay);
+            }
+        }
+        if draft.window().is_some() {
+            controls.push(ChoiceControl::ProcessorAggregateField);
+        }
+        if let Some(route) = draft.active_route() {
+            if matches!(
+                route.inherit,
+                InheritDraft::AllExcept(_) | InheritDraft::Fields(_)
+            ) {
+                controls.push(ChoiceControl::ProcessorInputField);
+            }
+            if matches!(route.branch, RouteBranchDraft::Branched { .. }) {
+                controls.push(ChoiceControl::ProcessorRouteBranch);
+                controls.push(ChoiceControl::ProcessorBranchField);
+            }
+            controls.push(ChoiceControl::ProcessorOutputField);
+            if matches!(route.message_error, MessageErrorDraft::SendTo { .. }) {
+                controls.push(ChoiceControl::ProcessorErrorRelay);
+                controls.push(ChoiceControl::ProcessorErrorField);
+            }
+        }
+        controls
+    }
+
+    /// Applies `value` chosen in a correlator's right side, timeout or a scoped field picker to
+    /// the open processor draft. A field is inserted where the picker writes, not held as a
+    /// selection.
+    pub(super) fn select_processor_scope_choice(self, control: ChoiceControl, value: ChoiceValue) {
+        let Some(signal) = self.active_processor() else {
+            return;
+        };
+        signal.update(|draft| match (control, value) {
+            (ChoiceControl::ProcessorRightInputRelay, ChoiceValue::Model(node)) => {
+                draft.select_right_input(&node);
+            }
+            (ChoiceControl::ProcessorLeftTimeoutRelay, ChoiceValue::Model(node)) => {
+                draft.select_timeout_relay(CorrelationSide::Left, &node);
+            }
+            (ChoiceControl::ProcessorRightTimeoutRelay, ChoiceValue::Model(node)) => {
+                draft.select_timeout_relay(CorrelationSide::Right, &node);
+            }
+            (ChoiceControl::ProcessorAggregateField, ChoiceValue::Field(field)) => {
+                draft.insert_aggregate_argument(field);
+            }
+            (ChoiceControl::ProcessorCorrelateLeftField, ChoiceValue::Field(field)) => {
+                draft.insert_correlation_reference(CorrelationSide::Left, field);
+            }
+            (ChoiceControl::ProcessorCorrelateRightField, ChoiceValue::Field(field)) => {
+                draft.insert_correlation_reference(CorrelationSide::Right, field);
+            }
+            (ChoiceControl::ProcessorRouteLeftField, ChoiceValue::Field(field)) => {
+                draft.insert_route_reference(CorrelationSide::Left, field);
+            }
+            (ChoiceControl::ProcessorRouteRightField, ChoiceValue::Field(field)) => {
+                draft.insert_route_reference(CorrelationSide::Right, field);
+            }
+            _ => {}
+        });
+    }
+
+    /// Whether `value` is what a correlator's right side or timeout control holds. A field picker
+    /// holds no selection.
+    pub(super) fn processor_scope_selected(
+        self,
+        control: ChoiceControl,
+        value: &ChoiceValue,
+    ) -> bool {
+        let ChoiceValue::Model(node) = value else {
+            return false;
+        };
+        let Some(signal) = self.active_processor() else {
+            return false;
+        };
+        let draft = signal.get();
+        let Some(correlator) = draft.correlator() else {
+            return false;
+        };
+        let relay = match control {
+            ChoiceControl::ProcessorRightInputRelay => correlator
+                .right
+                .active()
+                .and_then(|input| input.current_relay()),
+            ChoiceControl::ProcessorLeftTimeoutRelay => correlator.left_timeout.current_relay(),
+            ChoiceControl::ProcessorRightTimeoutRelay => correlator.right_timeout.current_relay(),
+            _ => None,
+        };
+        match relay {
+            Some(relay) => {
+                node.kind == ModelKind::Relay && relay.as_str() == node.identifier.as_str()
+            }
+            None => false,
         }
     }
 }

@@ -310,6 +310,36 @@ no refusal event to these four reasons. No execution identity, domain or user ap
 See [Bounded History And Expired Identities](./client-session-protocol.md#bounded-history-and-expired-identities)
 for retention and admission semantics.
 
+## Licensing Metrics
+
+The `nervix_licensing_` families expose the published policy and process-local admission events.
+Label values come from fixed declarations, with every applicable labelled child initialized to
+zero. Replicated gauges describe the exporting node's applied state; use the leader's values for
+a cluster total. Sum refusal-counter rates across nodes as leadership moves. A process restart
+resets its counters.
+
+| Suffix | Kind and labels | Free policy |
+| --- | --- | --- |
+| `state` | Gauge, `state`: `free`, `licensed_fresh`, `licensed_due`, `licensed_overdue`, `lapsed`, `stopped`, `releasing`, `degraded` | `free` is 1; the other states are 0. |
+| `decision_revision` | Gauge | Absent until a committed decision exists. |
+| `deadline_timestamp_seconds` | Gauge, `deadline`: `refresh_after`, `overdue_at`, `valid_until`, `term_ends_at`, `ephemeral_expires_at`, `next_grant` | A sample is absent when its deadline does not exist. |
+| `licensing_time_seconds` | Gauge | The committed licensing timestamp as Unix seconds, present after first installation. |
+| `requests_total` | Counter, `operation` and `outcome` | On the leader, every operation/outcome pair starts at 0. |
+| `stream_connected` | Gauge | On the leader, 0. |
+| `transitions_active` | Gauge | 0. |
+| `over_limit` | Gauge, catalog `condition` | Every cluster quota starts at 0. |
+| `admissions_refused_total` | Counter, catalog `condition` and refusal `state` | Every cluster quota/refusal-state pair starts at 0. |
+
+Request operations are `activation.create`, `activation.refresh`, `activation.release`,
+`activation.rotate_key` and `events.subscribe`. Outcomes are `committed`, `rejected_by_cluster`,
+`refused_by_service`, `unreachable` and `timeout`. Refusal states are `within_grace`, `over_limit`,
+`lapsed` and `stopped`. Connectivity and request families are leader-local. Free mode supplies no
+decision or deadline and makes no licensing request. The shipped unlimited quotas produce no
+admission refusals.
+
+See [Cluster Licensing](node-settings.md#cluster-licensing) for `DESCRIBE LICENSE` and the
+committed node/domain usage definitions.
+
 ## Client Ingestors
 
 The six client-ingestor families describe the node that executes the ingestor and use `domain` and
@@ -392,7 +422,9 @@ identifier.
 `class` is the traffic class on transport series — `management`, `commands`, `replication`, `relay`,
 or `bulk` — and the execution class on admission series — `management`, `commands`, `relay`, `bulk`,
 `state_read`, `state_read_cache`, `bulk_window`, `restore_metadata`, `credentials` for memory, and `control_cpu`, `credentials_cpu`, `data_cpu`, `extension_cpu`,
-`bulk_cpu`, `consensus_storage`, `filesystem_storage` for workers. `operation` is the reserved request subquota: `shared`, `append`, `resource`, `snapshot`,
+`bulk_cpu`, `consensus_storage`, `filesystem_storage`, `connector_storage` for workers. Execution byte-limit
+series use `operation` values `relay_encoded`, `relay_decoded`, `relay_scratch` and `bulk_chunk`.
+On transport series, `operation` is the reserved request subquota: `shared`, `append`, `resource`, `snapshot`,
 `discovery`, `liveness`, `progress`, `admission`, `cancellation`, or `terminal`.
 
 Transport pools:
@@ -464,6 +496,9 @@ a second of flushing; see [Kafka client retirement](./connector-contract.md#kafk
   transient memory reserved for one class, and what it is currently holding
 - `nervix_execution_memory_reservations_total` and `nervix_execution_memory_rejections_total`:
   charges granted and charges refused outright
+- `nervix_execution_operation_limit_bytes` and `nervix_execution_resident_replication_batches`: resolved relay/bulk byte ceilings and replication window.
+- `nervix_execution_queue_capacity`: configured waiting places for each worker class. Workers,
+  queues and memory capacities report the actual [resolved execution settings](node-settings.md#execution-capabilities).
 - `nervix_execution_workers`, `nervix_execution_jobs_running`, `nervix_execution_jobs_pending`: how
   many jobs one class may have on the blocking pool at once, how many it holds, and how many wait
 - `nervix_execution_jobs_total`, `nervix_execution_jobs_completed_total`,
@@ -473,7 +508,7 @@ a second of flushing; see [Kafka client retirement](./connector-contract.md#kafk
 For `state_read_cache`, a rejected charge means the optional retained view had no room. The
 generator can still return a complete uncached read using `state_read` admission. Active decoded
 snapshots hold that class through installation or source evaluation and dispatch. Both read
-classes derive their capacities from the relay budget and count separately in the startup total.
+classes default to the relay budget, accept independent overrides and count separately in the startup total.
 - `nervix_execution_job_queue_seconds_total` and `nervix_execution_job_work_seconds_total`: time
   admitted jobs spent waiting for a worker, and time completed jobs spent holding one
 

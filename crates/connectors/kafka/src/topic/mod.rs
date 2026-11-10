@@ -7,7 +7,8 @@
 //!   create time each record carries from its envelope's `TIMESTAMP`, native queue capacity and
 //!   admission backpressure, delivery-report classification, the records the producer holds until
 //!   their delivery reports are served, the delivery bound a confirmed publish gives the producer,
-//!   and producer queue shutdown.
+//!   the purge through which a failed confirmed publish gives up the records the producer still
+//!   holds, and producer queue shutdown.
 //! - **Depends on.** The connector contract and its confirmation window, vocabulary values, the
 //!   bounded executor, `error-stack`, Tokio, and `rust-rdkafka`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -72,7 +73,7 @@ use rdkafka::{
     config::ClientConfig,
     error::{KafkaError, RDKafkaErrorCode},
     message::{Header as KafkaHeader, OwnedHeaders},
-    producer::{BaseRecord, Producer, ThreadedProducer},
+    producer::{BaseRecord, Producer, PurgeConfig, ThreadedProducer},
 };
 use retirement::{NativeClient, RetirementCharge, Retiring};
 use thiserror::Error;
@@ -296,9 +297,11 @@ enum KafkaQueueWaitError {
 /// whole milliseconds `delivery.timeout.ms` counts.
 ///
 /// A confirmed publish stops waiting for a record's answer `ACK TIMEOUT` after it handed the
-/// record over, and the host's retry then sends the record again. A producer that went on trying
-/// past that point could still deliver the copy it was handed first beside the retry's copy, so it
-/// gives up after the same `ACK TIMEOUT`, rounded up to the millisecond it counts in.
+/// record over, so librdkafka stops trying to deliver it after the same `ACK TIMEOUT`, rounded up
+/// to the millisecond it counts in, instead of retrying for its five-minute default. librdkafka
+/// checks that bound only about once a second, though, so a publish that stops waiting also gives
+/// up what the producer still holds before the host's retry sends the record again; see
+/// [`KafkaTopicEmitter::give_up`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct KafkaMessageTimeout {
     millis: u32,
@@ -633,9 +636,11 @@ impl KafkaTopicEmitter {
     /// Publishes `records` and awaits librdkafka's delivery report for each through the
     /// confirmation window `settings` declare.
     ///
-    /// Every way the publish can fail ends it through the window, which first settles each answer
-    /// the broker already gave, so the host's retry never resends a record the broker confirmed.
-    /// A full producer queue waits for an outstanding answer before trying the same record again.
+    /// Every way the publish can fail ends it through [`KafkaTopicEmitter::give_up`]: the producer
+    /// gives up every record it still holds, and the window settles each answer the broker gave
+    /// before that, so the host's retry never resends a record the broker confirmed and never races
+    /// a copy the producer could still deliver. A full producer queue waits for an outstanding
+    /// answer before trying the same record again.
     async fn publish_confirmed(
         &self,
         producer: &Retiring<KafkaProducer>,
@@ -677,14 +682,41 @@ impl KafkaTopicEmitter {
                         window.reject(record.rejected(format!("{KAFKA} rejected record: {error}")));
                         continue;
                     }
-                    return window.fail(failure);
+                    return Self::give_up(producer, window, failure).await;
                 }
             };
             if let Err(failure) = window.admit(record.id, record.occurred_at, answer).await {
-                return window.fail(failure);
+                return Self::give_up(producer, window, failure).await;
             }
         }
+        if let Err(failure) = window.settle_awaited().await {
+            return Self::give_up(producer, window, failure).await;
+        }
         window.finish().await
+    }
+
+    /// Ends a confirmed publish with `failure` once the producer gave up every record it still
+    /// holds.
+    ///
+    /// librdkafka keeps trying to deliver a record until its `delivery.timeout.ms` passes, checks
+    /// that bound only about once a second, and still sends a record whose bound has passed until
+    /// that check fails it. The host's retry sends every record this publish leaves unresolved
+    /// again, so a copy the producer still held could reach the broker beside the retry's. The
+    /// producer therefore purges every record it queues or has in flight, which ends each record's
+    /// delivery with a report, and the window settles the reports that arrive within `ACK TIMEOUT`:
+    /// a record the broker took before the purge is confirmed by its report instead of being sent
+    /// again. A record already on its way to the broker when the purge ran stays ambiguous, as any
+    /// unanswered record is, because the broker may still store it.
+    ///
+    /// The purge does not wait for librdkafka's broker threads, so it parks no asynchronous worker;
+    /// the window waits for the reports instead.
+    async fn give_up(
+        producer: &Retiring<KafkaProducer>,
+        window: ConfirmationWindow<KafkaAnswer>,
+        failure: Report<EmitterWriteError>,
+    ) -> PerRecordOutcome<EmitterRecordId> {
+        producer.purge(PurgeConfig::default().queue().inflight().non_blocking());
+        window.fail_once_given_up(failure).await
     }
 
     /// Retries a refused enqueue after settling the oldest outstanding answer. A native callback
@@ -944,8 +976,8 @@ impl EmitterLifecycle for KafkaTopicEmitter {
     }
 
     /// Flushes the producer's queue, which holds the records a `NO ACK` publish delivered and
-    /// librdkafka has not sent yet, and any record a publish handed over and then gave up on. A
-    /// flush sends them at once, whatever `linger.ms` says.
+    /// librdkafka has not sent yet, and the records of a confirmed publish its caller stopped
+    /// awaiting before it ended. A flush sends them at once, whatever `linger.ms` says.
     ///
     /// The outcome counts records alone, each until librdkafka serves its delivery report, and never
     /// the events waiting in the producer's queue beside them.

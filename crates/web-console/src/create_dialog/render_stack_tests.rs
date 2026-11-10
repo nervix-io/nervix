@@ -20,8 +20,9 @@ use meticulous::ResultExt as _;
 const THREE_QUARTERS_OF_THE_DEFAULT_TEST_STACK_BYTES: usize = 1536 * 1024;
 
 /// The test modules that render the create dialog, as test name filters.
-const RENDER_TEST_MODULES: [&str; 3] = [
+const RENDER_TEST_MODULES: [&str; 4] = [
     "create_dialog::emitter_form_tests::",
+    "create_dialog::processor_family_form_tests::",
     "create_dialog::tests::",
     "create_dialog::visual_forms_tests::",
 ];

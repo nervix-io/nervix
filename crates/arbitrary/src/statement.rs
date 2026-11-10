@@ -14,8 +14,8 @@ use nervix_models::{
     ClientIngestorEntity, CordonNode, CreateDomain, CreateResource, CreateStatement, CreateUser,
     DescribeBranch, DescribeClient, DescribeCluster, DescribeCorrelator, DescribeDeduplicator,
     DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction,
-    DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer,
-    DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
+    DescribeLicense, DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay,
+    DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
     DescribeWindowProcessor, DomainConfig, DomainPace, DomainTimeRate, DrainNode, DropModel,
     DropNode, EmitterBatchLegality, EmitterBodyForm, EmitterEntityKind, EmitterEnvelopeAlteration,
     EmitterReferenceKind, ExistingUserPolicy, FieldName, HttpIngestorEntity, IngestorAlteration,
@@ -167,6 +167,7 @@ pub enum StatementVariant {
     ShowTransactions,
     DescribeTransaction,
     DescribeCluster,
+    DescribeLicense,
     AlterBranch,
     DescribeBranch,
     AlterCluster,
@@ -240,6 +241,7 @@ impl StatementVariant {
             Statement::ShowTransactions(_) => Self::ShowTransactions,
             Statement::DescribeTransaction(_) => Self::DescribeTransaction,
             Statement::DescribeCluster(_) => Self::DescribeCluster,
+            Statement::DescribeLicense(_) => Self::DescribeLicense,
         }
     }
 }
@@ -782,6 +784,7 @@ impl Arbitrary<'_> {
                 })
             }
             StatementVariant::DescribeCluster => Statement::DescribeCluster(DescribeCluster),
+            StatementVariant::DescribeLicense => Statement::DescribeLicense(DescribeLicense),
         }
     }
 
