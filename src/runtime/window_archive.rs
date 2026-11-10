@@ -1382,8 +1382,21 @@ mod tests {
             let latencies: ArrayRef = StdArc::new(Int64Array::from(vec![Some(1), Some(2)]));
             let labels: ArrayRef = StdArc::new(StringArray::from(vec![Some("a"), None]));
             let healthy: ArrayRef = StdArc::new(BooleanArray::from(vec![Some(true), Some(false)]));
+            let element = Field::new("item", DataType::Int64, false);
+            let pair_type = DataType::FixedSizeList(StdArc::new(element.clone()), 2);
+            let pairs = FixedSizeListBuilder::new(Int64Builder::new(), 2).with_field(element);
+            let mut nested =
+                ListBuilder::new(pairs).with_field(Field::new("item", pair_type, false));
+            for pair in [[1, 10], [2, 20]] {
+                for value in pair {
+                    nested.values().values().append_value(value);
+                }
+                nested.values().append(true);
+                nested.append(true);
+            }
+            let values: ArrayRef = StdArc::new(nested.finish());
             let refused = window
-                .admit(vec![latencies, labels, healthy], &[1, 2])
+                .admit(vec![latencies, labels, healthy, values], &[1, 2])
                 .await;
             assert!(refused.is_empty(), "both rows fit the window: {refused:?}");
             let published = window.state.to_snapshot().assured("the window publishes");
