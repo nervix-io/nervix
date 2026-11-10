@@ -282,14 +282,14 @@ that does not begin with an octet count is malformed and closes its connection. 
 
 An octet count must be a positive decimal number with at most ten digits. Each connection holds at
 most `max_message_size` bytes, plus one octet count and its space, of what it has read but not yet
-queued, and hands every frame it completes to an intake queue of 64 frames that all of the
-listener's connections share. When the queue is full, a connection keeps its completed frame and
-reads nothing more until the queue has room, so TCP flow control holds its sender back and no
+queued, and hands every frame it completes to the listener's shared intake queue. The node capability
+`syslog-intake-queue-capacity` sets its frame bound. When the queue is full, a connection keeps its
+completed frame and reads nothing more until the queue has room, so TCP flow control holds its sender back and no
 frame is dropped.
 
 These are per-connection limits. The listener has no connection-count limit, so the total of its
 frame-assembly buffers and completed frames waiting for the queue is unbounded. The shared
-64-frame queue does not bound that total; the generated [capability declaration](connector-capabilities.md#syslog-listener-ingest)
+intake queue does not bound that total; the generated [capability declaration](connector-capabilities.md#syslog-listener-ingest)
 reports these buffers separately.
 
 A frame may arrive split across any number of reads, including inside its octet count or between
@@ -460,7 +460,7 @@ payload values.
 | Octet-counted emission | At most 9,999,999,999 payload bytes; the prefix adds at most 10 decimal digits and one space |
 | Non-transparent TCP emission | A payload contains no LF; framing appends one LF |
 | Concurrent TCP/TLS connections | Unbounded count; each holds at most `max_message_size` bytes, plus one octet count and its space, of what it has read but not yet queued |
-| TCP/TLS intake queue | 64 frames shared by a listener's connections; a full queue holds the connections back |
+| TCP/TLS intake queue | The node's `syslog-intake-queue-capacity` frames, shared by a listener's connections; a full queue holds the connections back |
 | TLS handshake of an accepted connection | `connect_timeout_ms`, default 30 seconds |
 | Accepted connection sending nothing | `idle_timeout_ms`; unbounded when omitted |
 | Listener rebind after a socket failure | 250 ms after the first failure, doubling up to 30 seconds |

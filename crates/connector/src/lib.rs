@@ -108,3 +108,8 @@ pub use row_requests::{
 };
 pub use service_url::{ServiceUrl, ServiceUrlError};
 pub use tls::{RustlsClientConfigProvider, ServerCertificateTrust, TlsClientConfigError};
+
+mod retry_settings;
+pub use retry_settings::{
+    ConnectorRetryJitterPercent, ConnectorRetryMultiplier, RetryBackoffSettings, RetrySettingsError,
+};

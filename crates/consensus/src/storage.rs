@@ -96,13 +96,13 @@ const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
 const KEYSPACE_LOGS: &str =
-    "raft_payload_identity_licensing_capability_tls_inference_reset_epoch_logs";
+    "raft_payload_identity_licensing_capability_tls_inference_reset_epoch_engine_host_logs";
 const KEYSPACE_META: &str =
-    "raft_payload_identity_licensing_capability_tls_inference_reset_epoch_meta";
+    "raft_payload_identity_licensing_capability_tls_inference_reset_epoch_engine_host_meta";
 const KEYSPACE_STATE_MACHINE: &str =
-    "raft_payload_identity_licensing_capability_tls_inference_reset_epoch_state";
+    "raft_payload_identity_licensing_capability_tls_inference_reset_epoch_engine_host_state";
 const KEYSPACE_SNAPSHOT: &str =
-    "raft_payload_identity_licensing_capability_tls_inference_reset_epoch_snapshots";
+    "raft_payload_identity_licensing_capability_tls_inference_reset_epoch_engine_host_snapshots";
 const KEY_CLUSTER_IDENTITY: &[u8] = b"K";
 const KEY_LICENSING: &[u8] = b"L";
 /// Working memory reserved for ordinary metadata and log storage relative to its operation unit.

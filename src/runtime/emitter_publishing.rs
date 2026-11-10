@@ -1424,10 +1424,13 @@ mod tests {
         let retry_started = Arc::new(Notify::new());
         let task_retry_started = retry_started.clone();
         let task = nervix_primitives::task::spawn(async move {
-            let mut backoff = RuntimeReconnectBackoff::from_policy(ParsedRetryPolicy {
-                backoff: Duration::from_secs(30),
-                max_backoff: Duration::from_secs(30),
-            });
+            let mut backoff = RuntimeReconnectBackoff::from_policy(
+                ParsedRetryPolicy {
+                    backoff: Duration::from_secs(30),
+                    max_backoff: Duration::from_secs(30),
+                },
+                nervix_connector::RetryBackoffSettings::default(),
+            );
             let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
             let (acks, _completion) = AckSet::root();
             task_retry_started.notify_one();
@@ -1509,6 +1512,7 @@ mod tests {
         .assured("the fixture maps its integer input unchanged");
         let projection = super::super::emitter_values::MappedValuesProjection::compile(
             super::super::emitter_values::MappedValuesProjectionInit {
+                vm_settings: nervix_vm::VmSettings::default(),
                 label: "ClickHouse",
                 namespace: "clickhouse",
                 emitter: &emitter,

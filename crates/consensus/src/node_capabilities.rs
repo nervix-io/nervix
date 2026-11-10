@@ -164,6 +164,16 @@ mod tests {
         NodeCapabilityRecord {
             identity: ClusterNodeIdentity::new(node, ClusterNodeIncarnation::new(incarnation)),
             capabilities: nervix_models::NodeCapabilities {
+                engines: nervix_arbitrary::Arbitrary::new(
+                    &[],
+                    nervix_arbitrary::Domain::Vocabulary,
+                )
+                .node_engine_capabilities(),
+                connector_host: nervix_arbitrary::Arbitrary::new(
+                    &[],
+                    nervix_arbitrary::Domain::Vocabulary,
+                )
+                .node_connector_host_capabilities(),
                 cpu_count: NonZeroU64::new(4),
                 memory_bytes: NonZeroU64::new(8 << 30),
                 receive: nervix_interconnect::PeerReceiveSettings::default().bounds(),
@@ -226,6 +236,25 @@ mod tests {
                 .node_capabilities
                 .get(next.identity.node_id())
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn engine_and_connector_claims_change_only_with_the_incarnation() {
+        let first = record(7);
+        let mut state = admitted_state(&first);
+        announce(&mut state, &first);
+        let unchanged = state.clone();
+        let mut changed = first.clone();
+        changed.capabilities.engines.vm_inline_row_limit = 42;
+        changed.capabilities.connector_host.retry_jitter_percent = 20;
+        announce(&mut state, &changed);
+        assert_eq!(state, unchanged);
+        changed.identity = record(8).identity;
+        announce(&mut state, &changed);
+        assert_eq!(
+            state.node_capabilities.get(changed.identity.node_id()),
+            Some(&changed)
         );
     }
 

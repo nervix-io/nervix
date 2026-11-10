@@ -13,12 +13,12 @@ use jni::{
     refs::Auto,
     sys::{jdouble, jint, jlong},
 };
-use nervix_client_core::{ConnectOptions, DomainName, TlsRequirement};
+use nervix_client_core::{DomainName, TlsRequirement};
 use nervix_client_host as host;
 use nervix_primitives::sync::Arc;
 use url::Url;
 
-use crate::{error::Error, handles::Value, marshal};
+use crate::{connection_options::ConnectionOptions, error::Error, handles::Value, marshal};
 
 fn seconds(value: f64, name: &'static str) -> Result<Duration, Error> {
     Duration::try_from_secs_f64(value).map_err(|error| {
@@ -35,7 +35,7 @@ fn options_new<'local>(
     _env: &mut jni::Env<'local>,
     _class: jni::objects::JClass<'local>,
 ) -> Result<jlong, crate::error::Error> {
-    Ok(Value::Options(ConnectOptions::default()).into_handle())
+    Ok(Value::Options(ConnectionOptions::default()).into_handle())
 }
 
 native!(options_auth(handle: long, username: JString, password: JString) -> ());
@@ -180,7 +180,7 @@ fn connect<'local>(
 ) -> Result<jlong, crate::error::Error> {
     let server = server.try_to_string(env)?;
     let domain = marshal::optional_string(env, &domain)?;
-    let options = value!(options).options()?.clone();
+    let options = value!(options).options()?.clone().into_native();
     let session = host::Session::connect(&server, domain.as_deref(), options, cancel!(token))?;
     Ok(Value::Session(session).into_handle())
 }
