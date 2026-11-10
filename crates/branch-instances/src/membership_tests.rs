@@ -163,6 +163,44 @@ fn expiry_publishes_the_release_of_idle_branches_only() {
     assert_eq!(branches(&presence.load()), BTreeSet::from([2]));
 }
 
+/// Observations do not run an expiry scan or refresh activity. A scan just before the TTL can
+/// legitimately leave both branches visible until the next scan, even beyond twice the TTL when
+/// that scan runs late. Lifecycle scenarios must leave margin for the scan as well as the TTL.
+#[test]
+fn observing_idle_branches_between_scans_neither_expires_nor_refreshes_them() {
+    let presence = Arc::new(BranchPresence::<u8>::new());
+    let mut owner = OwnedBranches::<u8, u64>::claim(presence.clone());
+    let ttl = Duration::from_millis(30);
+    admit(&mut owner, Some(1), at(1), None, 10);
+    admit(&mut owner, Some(2), at(2), None, 20);
+    admit(&mut owner, Some(1), at(3), None, 11);
+    admit(&mut owner, Some(2), at(4), None, 21);
+    let before = presence.load();
+
+    // Neither key is idle for its TTL at this first scan.
+    assert!(owner.expire(at(32), ttl).is_empty());
+    for _ in 0..100 {
+        assert!(presence.contains(Some(&1)));
+        assert!(presence.contains(Some(&2)));
+        assert!(StdArc::ptr_eq(&before, &presence.load()));
+    }
+
+    // The owner alone expires them. Its next scan can run after the observation's budget;
+    // reading the published presence before that scan still correctly reports both keys.
+    let expired = owner.expire(at(65), ttl);
+    let expired = expired
+        .into_iter()
+        .map(|(key, state)| (key, *state))
+        .collect::<Vec<_>>();
+    assert_eq!(expired, vec![(1, 10), (2, 20)]);
+    assert!(branches(&presence.load()).is_empty());
+    assert_eq!(branches(&before), BTreeSet::from([1, 2]));
+
+    let returning = admit(&mut owner, Some(1), at(66), None, 0);
+    assert_eq!(returning.branch.as_deref(), Some(&0));
+    assert_eq!(branches(&presence.load()), BTreeSet::from([1]));
+}
+
 #[test]
 fn dropping_the_owner_releases_its_membership() {
     let presence = Arc::new(BranchPresence::<u8>::new());
