@@ -460,7 +460,7 @@ Each refusal names the setting or directory it judged, with the values involved:
 
 | Check | Refusal |
 | --- | --- |
-| Memory budgets | `the execution memory budgets of 101.25MiB exceed node memory 32MiB` |
+| Memory budgets | `the execution memory budgets of 229.25MiB exceed node memory 32MiB` |
 | Memory watermark | `memory-high-watermark (4GiB) exceeds memory-limit (3GiB)` |
 | Directories | `the database directory <path> cannot be created`, `the temporary directory <path> is not writable` |
 | Volumes | `the capacity of the volume holding the database directory <path> cannot be read` |

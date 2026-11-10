@@ -138,9 +138,11 @@ impl InputAccounting {
             // consumed incrementally, and trailers have their own bounded decoder buffer.
             // The initial scratch covers the backing shared with the request head; each new
             // body backing needs its exposed capacity, without another request-head allowance.
-            let target = u64::try_from(capacity)
-                .ok()
-                .and_then(|n| active.required.checked_add(n))
+            let capacity =
+                u64::try_from(capacity).map_err(|_| Report::new(InputRefusal::MemoryCapacity))?;
+            let target = active
+                .required
+                .checked_add(capacity)
                 .ok_or_else(|| Report::new(InputRefusal::MemoryCapacity))?;
             active
                 .reservation
@@ -178,13 +180,17 @@ impl InputAccounting {
         io::Error::other(InputReadReport(error))
     }
     fn read_error(&self, error: hyper::Error) -> Report<InputRefusal> {
-        let refusal = self
-            .ledger
-            .lock()
-            .active
-            .as_mut()
-            .and_then(|active| active.refusal.take())
-            .unwrap_or(InputRefusal::InvalidBody);
+        let refusal = {
+            let mut ledger = self.ledger.lock();
+            let pending = match ledger.active.as_mut() {
+                Some(active) => active.refusal.take(),
+                None => None,
+            };
+            match pending {
+                Some(refusal) => refusal,
+                None => InputRefusal::InvalidBody,
+            }
+        };
         Report::new(error).change_context(refusal)
     }
 }
@@ -266,12 +272,15 @@ async fn receive_input(
         if bytes.is_empty() {
             continue;
         }
-        total = total
-            .checked_add(
-                u64::try_from(bytes.len()).assured("a native slice length is at most u64::MAX"),
-            )
-            .filter(|total| *total <= cap)
+        let length =
+            u64::try_from(bytes.len()).assured("a native slice length is at most u64::MAX");
+        let next_total = total
+            .checked_add(length)
             .ok_or_else(|| Report::new(InputRefusal::BodyCapacity))?;
+        if next_total > cap {
+            return Err(Report::new(InputRefusal::BodyCapacity));
+        }
+        total = next_total;
         accounting.charge_frame()?;
         frames.push_back(bytes);
     }
