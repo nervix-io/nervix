@@ -508,7 +508,10 @@ as text edits; [CLI Completion](./client-tools-cli.md#completion) describes thei
 
 Semantic completion of placement members offers only placement-eligible runtime nodes. HTTP
 endpoint, WebSocket endpoint and Syslog listener ingestors execute on every cluster node, so their
-declared execution policy excludes them from these suggestions.
+declared execution policy excludes them from these suggestions. A name that more than one eligible
+entity shares is ambiguous in a rule and is not suggested either. The placement-member choice target
+answers from the same rule, so the REPL, a visual form and the rule's validation agree on every
+member.
 
 Choice lookups on the concurrent lane return typed values for structured client controls. A domain
 dependency selects internal schemas, branches, relays, codecs, VHOSTs, signaling protocols,
@@ -530,7 +533,10 @@ The same dependencies with the output-relay target select the input branch, and 
 materialized-relay target select only relays with materialized state in that branch. A generator
 reads no input, so its materialized relay uses the generator-materialized-relay target: with a
 domain alone it offers unbranched relays with materialized state, and with a domain and a branch
-reference the relays with materialized state branched by exactly that branch. Route
+reference the relays with materialized state branched by exactly that branch. A placement form
+asks the placement-member target with a domain for each `FROM` and `TO` member; it offers the
+placement-eligible runtime nodes, with the attached transaction prefix applied, and its page digest
+includes each candidate's definition. Route
 construction of an unbranched or named branch uses the ingestor relay targets, while branch keys
 and record fields use the branch-field and relay-field targets. These processor targets resolve
 against the attached transaction prefix, and their page digests include the selected input
