@@ -2082,6 +2082,7 @@ mod tests {
                 &domain,
                 &[ClusterNodeName::parse("node-1").expect("valid name")],
                 0,
+                None,
                 &crate::registry::uniform_capabilities(&[
                     ClusterNodeName::parse("node-1").expect("valid name")
                 ]),

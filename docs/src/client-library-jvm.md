@@ -201,8 +201,17 @@ combine its ticks with the preceding generation.
 {{#include ../../tests/client_conformance/java/suite/cluster/ClockTests.java:clock_generations}}
 ```
 
-A session gap preserves the last snapshot while the session restores its attachment. Detach
-explicitly when the application no longer follows it.
+A session gap reports `INTERRUPTED` and preserves the last snapshot while the session restores its
+attachment. A temporary refusal reports `RESTORATION_FAILED` with a `RestorationFailure`: its
+typed cause, message and positive retry wait in nanoseconds. The library keeps trying; read the
+restored `STATE` without attaching again. The suite provokes an `IN_TRANSACTION` refusal before
+these checks:
+
+```java
+{{#include ../../tests/client_conformance/java/suite/cluster/ClockTests.java:clock_restoration_failed}}
+```
+
+Detach explicitly when the application no longer follows it.
 
 ```java
 {{#include ../../tests/client_conformance/java/suite/cluster/ClockTests.java:detach_clock}}

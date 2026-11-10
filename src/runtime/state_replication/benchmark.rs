@@ -107,11 +107,12 @@ impl StateReplicationBenchmark {
             },
         );
         let branch_lru = runtime
-            .state_placement(
+            .state_placement_for_unit(
                 &domain,
                 RuntimeStateKind::BranchLru,
                 ModelKind::Deduplicator,
                 deduplicator.clone(),
+                nervix_models::Unit::SINGLE,
                 None,
             )
             .assured("the published identity places the branch lifecycle");
@@ -126,11 +127,12 @@ impl StateReplicationBenchmark {
             .assured("a benchmark branch key names one field");
             branch_checkpoints.push(
                 runtime
-                    .state_placement(
+                    .state_placement_for_unit(
                         &domain,
                         RuntimeStateKind::Deduplicator,
                         ModelKind::Deduplicator,
                         deduplicator.clone(),
+                        nervix_models::Unit::SINGLE,
                         Some(key.clone()),
                     )
                     .assured("the published identity places the branch state"),
@@ -292,11 +294,12 @@ impl ReplicaCatchUpBenchmark {
             );
         }
         let branch_lru = owner
-            .state_placement(
+            .state_placement_for_unit(
                 &domain,
                 RuntimeStateKind::BranchLru,
                 ModelKind::Deduplicator,
                 deduplicator.clone(),
+                nervix_models::Unit::SINGLE,
                 None,
             )
             .assured("the published identity places the branch lifecycle");
@@ -310,11 +313,12 @@ impl ReplicaCatchUpBenchmark {
             )])
             .assured("a benchmark branch key names one field");
             let placement = owner
-                .state_placement(
+                .state_placement_for_unit(
                     &domain,
                     RuntimeStateKind::Deduplicator,
                     ModelKind::Deduplicator,
                     deduplicator.clone(),
+                    nervix_models::Unit::SINGLE,
                     Some(key.clone()),
                 )
                 .assured("the published identity places the branch state");

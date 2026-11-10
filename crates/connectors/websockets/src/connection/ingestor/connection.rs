@@ -2,9 +2,9 @@
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** The active transport, immutable response headers, optional ping cadence, the
-//!   inbound activity deadline retained across read cancellation, and the Close a connection this
-//!   client ends offers its peer: going away when that deadline ends it, or the status of a frame
-//!   the peer sent that failed the read.
+//!   inbound activity deadline and bounded missed-ping response window retained across
+//!   cancellation, and the Close a connection this client ends offers its peer: going away when
+//!   that deadline ends it, or the status of a frame the peer sent that failed the read.
 //! - **Depends on.** Connector outcomes, execution primitives, recovery classes and WebSocket
 //!   transport.
 //! - **Must not know.** Configuration Models, Plexus, domains, relays, registry or host admission.
@@ -32,7 +32,7 @@ use nervix_primitives::{
     net::TcpStream,
     sync::Arc,
     task::unconstrained,
-    time::{Instant, Interval, MissedTickBehavior, error::Elapsed, interval, timeout_at},
+    time::{Instant, error::Elapsed, timeout_at},
 };
 use nervix_recovery::Reported as _;
 use tokio_tungstenite::{
@@ -44,7 +44,7 @@ use tokio_tungstenite::{
     },
 };
 
-use super::{WEBSOCKETS, WebsocketsConnectionIngestorFailure};
+use super::{WEBSOCKETS, WebsocketsConnectionIngestorFailure, pings::WebsocketPings};
 
 /// An explicit client deadline retains its key; a derived keep-alive/default keeps its bound.
 #[derive(Debug, Clone, Copy)]
@@ -96,7 +96,7 @@ pub(super) struct WebsocketConnection {
     pub(super) relay: WebSocketStream<MaybeTlsStream<TcpStream>>,
     // Pending and delivered messages retain this snapshot after the connection ends.
     pub(super) headers: Arc<RetainedIngestHeaders>,
-    pings: Option<Interval>,
+    pings: Option<WebsocketPings>,
     idle_deadline: WebsocketIdleDeadline,
     last_received: Instant,
 }
@@ -207,15 +207,7 @@ impl WebsocketConnection {
         ping_interval: Option<Duration>,
         idle_deadline: WebsocketIdleDeadline,
     ) -> Self {
-        let pings = match ping_interval {
-            Some(period) => {
-                let mut timer = interval(period);
-                timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
-                timer.reset();
-                Some(timer)
-            }
-            None => None,
-        };
+        let pings = ping_interval.map(WebsocketPings::new);
         Self {
             relay,
             headers,
@@ -233,15 +225,27 @@ impl WebsocketConnection {
         )))
     }
 
-    pub(super) async fn next(&mut self) -> IngestorResult<WebsocketRead> {
-        // This absolute deadline survives cancelled reads and outgoing pings. Only an inbound
-        // frame resets it, including peer ping/pong control frames.
-        let deadline = self
-            .last_received
+    fn read_deadline(&self) -> Instant {
+        if let Some(pings) = &self.pings
+            && let Some(deadline) = pings.response_deadline()
+        {
+            return deadline;
+        }
+        self.last_received
             .checked_add(self.idle_deadline.bound())
-            .verified("client deadlines are held to the schedulable duration bound");
-        let read = timeout_at(deadline, self.relay.next());
-        let read = match self.pings.as_mut() {
+            .verified("client deadlines are held to the schedulable duration bound")
+    }
+
+    pub(super) fn ping_written(&mut self) {
+        self.pings
+            .as_mut()
+            .verified("only a configured ping cadence requests a ping write")
+            .written(Instant::now(), self.idle_deadline.bound());
+    }
+
+    pub(super) async fn next(&mut self) -> IngestorResult<WebsocketRead> {
+        let read = timeout_at(self.read_deadline(), self.relay.next());
+        let frame = match self.pings.as_mut() {
             Some(pings) => nervix_primitives::select! {
                 biased;
                 frame = read => frame,
@@ -249,13 +253,23 @@ impl WebsocketConnection {
             },
             None => read.await,
         };
-        let frame = match read {
+        let frame = match frame {
             Ok(frame) => frame,
-            Err(elapsed) => return Err(self.end_silent(elapsed)),
+            Err(error) => {
+                if let Some(pings) = self.pings.as_mut()
+                    && pings.offer_after_idle(self.last_received, Instant::now())
+                {
+                    return Ok(WebsocketRead::Ping);
+                }
+                return Err(self.end_silent(error));
+            }
         };
         match frame {
             Some(Ok(frame)) => {
                 self.last_received = Instant::now();
+                if let Some(pings) = self.pings.as_mut() {
+                    pings.received();
+                }
                 Ok(WebsocketRead::Frame(Some(frame)))
             }
             Some(Err(failure)) => Err(self.end_failed(failure)),

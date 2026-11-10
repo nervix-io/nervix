@@ -182,6 +182,209 @@ async fn a_silent_peer_expires_with_the_explicit_or_ping_derived_idle_bound() {
 }
 
 #[nervix_primitives::test]
+async fn a_responsive_peer_survives_a_handoff_past_the_idle_deadline() {
+    use nervix_primitives::time::{advance, pause, resume};
+
+    for explicit in [false, true] {
+        let mut config = vec![ClientConfigEntry {
+            key: "ping_interval_ms".to_string(),
+            value: "10000".to_string(),
+        }];
+        if explicit {
+            config.push(ClientConfigEntry {
+                key: "idle_timeout_ms".to_string(),
+                value: "30000".to_string(),
+            });
+        }
+        let (mut ingestor, mut peer) =
+            tests::connected_pair_with(config, WebsocketsUpgradeHeaders::default()).await;
+        peer.send(Message::Text("before handoff".to_string()))
+            .await
+            .assured("the peer supplies the payload the host hands off");
+        let request = IngestorBatchRequest {
+            max_messages: std::num::NonZeroUsize::MIN,
+            batch_timeout: None,
+        };
+        let cancellation = IngestorReadCancellation::new();
+        let first = ingestor
+            .next_batch(request, &cancellation)
+            .await
+            .assured("the first payload reaches the host");
+        let IngestorBatch::Messages(first) = first else {
+            panic!("the peer supplied the first payload");
+        };
+        assert_eq!(first[0].payload(), b"before handoff");
+
+        // This is the elapsed-time behavior under test: the host owns its payload and does not
+        // poll another read, so no client ping can be written during the handoff.
+        pause();
+        advance(Duration::from_secs(120)).await;
+        resume();
+        let connection = ingestor
+            .connection
+            .as_mut()
+            .assured("the connection is retained");
+        let resumed = connection
+            .next()
+            .await
+            .assured("a missed client ping is offered before blaming the responsive peer");
+        assert!(matches!(resumed, WebsocketRead::Ping));
+        // Cancellation before a selected ping finishes writing must not consume its response
+        // window. Another handoff can elapse before the caller gets back to that same probe.
+        pause();
+        advance(Duration::from_secs(120)).await;
+        resume();
+        let offered_again = ingestor
+            .connection
+            .as_mut()
+            .assured("the unwritten probe retains the connection")
+            .next()
+            .await
+            .assured("an unwritten probe keeps its response opportunity");
+        assert!(matches!(offered_again, WebsocketRead::Ping));
+        assert!(matches!(
+            ingestor
+                .send_ping(&cancellation)
+                .await
+                .assured("the probe is written"),
+            WebsocketPingOutcome::Sent
+        ));
+
+        let answer = async {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let frame = peer
+                    .next()
+                    .await
+                    .assured("the same connection stays open")
+                    .assured("the client writes a valid frame");
+                if let Message::Ping(_) = frame {
+                    peer.flush().await.assured("the peer answers the ping");
+                    peer.send(Message::Text("after handoff".to_string()))
+                        .await
+                        .assured("the responsive peer supplies the next payload");
+                    return;
+                }
+            }
+        };
+        let (next, ()) = timeout(Duration::from_secs(60), async {
+            tokio::join!(ingestor.next_batch(request, &cancellation), answer)
+        })
+        .await
+        .assured("the probe and its payload complete within the fixture budget");
+        let IngestorBatch::Messages(next) = next.assured("the resumed read succeeds") else {
+            panic!("the peer supplied the second payload");
+        };
+        assert_eq!(next[0].payload(), b"after handoff");
+        assert!(!ingestor.needs_resume());
+    }
+}
+
+#[nervix_primitives::test]
+async fn a_cancelled_read_keeps_the_response_deadline_of_its_written_catch_up_ping() {
+    use nervix_primitives::time::{advance, pause, resume};
+
+    let config = vec![ClientConfigEntry {
+        key: "ping_interval_ms".to_string(),
+        value: "10000".to_string(),
+    }];
+    let (mut ingestor, _silent_peer) =
+        tests::connected_pair_with(config, WebsocketsUpgradeHeaders::default()).await;
+    pause();
+    advance(Duration::from_secs(120)).await;
+    resume();
+    let read = ingestor
+        .connection
+        .as_mut()
+        .assured("the pair is connected")
+        .next()
+        .await
+        .assured("the missed ping is offered before the idle verdict");
+    assert!(matches!(read, WebsocketRead::Ping));
+    assert!(matches!(
+        ingestor
+            .send_ping(&IngestorReadCancellation::new())
+            .await
+            .assured("the catch-up ping is written"),
+        WebsocketPingOutcome::Sent
+    ));
+
+    pause();
+    advance(Duration::from_secs(10)).await;
+    resume();
+    let next_ping = ingestor
+        .connection
+        .as_mut()
+        .assured("the response window retains the connection")
+        .next()
+        .await
+        .assured("normal ping cadence continues inside the response window");
+    assert!(matches!(next_ping, WebsocketRead::Ping));
+    assert!(matches!(
+        ingestor
+            .send_ping(&IngestorReadCancellation::new())
+            .await
+            .assured("the later ping is written"),
+        WebsocketPingOutcome::Sent
+    ));
+
+    let cancellation = IngestorReadCancellation::new();
+    cancellation.cancel();
+    let request = IngestorBatchRequest {
+        max_messages: std::num::NonZeroUsize::MIN,
+        batch_timeout: None,
+    };
+    let interrupted = ingestor
+        .next_batch(request, &cancellation)
+        .await
+        .assured("read cancellation is an ordinary outcome");
+    assert!(matches!(interrupted, IngestorBatch::Interrupted { .. }));
+    pause();
+    advance(Duration::from_secs(25)).await;
+    resume();
+    // Thirty-five seconds have passed since the probe, but only twenty-five since the next
+    // ping. A renewed window would still wait; the retained deadline must expire immediately.
+    let result = futures_util::FutureExt::now_or_never(
+        ingestor.next_batch(request, &IngestorReadCancellation::new()),
+    )
+    .assured("the original response deadline ends a silent peer without another wait");
+    let Err(report) = result else {
+        panic!("cancellation and further overdue pings cannot renew an unanswered probe");
+    };
+    assert!(report.contains::<WebsocketsConnectionIngestorFailure>());
+    assert!(ingestor.needs_resume());
+}
+
+#[nervix_primitives::test]
+async fn a_connection_without_client_pings_keeps_its_physical_idle_deadline_after_handoff() {
+    use nervix_primitives::time::{advance, pause, resume};
+
+    let config = vec![ClientConfigEntry {
+        key: "idle_timeout_ms".to_string(),
+        value: "30000".to_string(),
+    }];
+    let (mut ingestor, _silent_peer) =
+        tests::connected_pair_with(config, WebsocketsUpgradeHeaders::default()).await;
+    pause();
+    advance(Duration::from_secs(120)).await;
+    resume();
+    let result = ingestor
+        .next_batch(
+            IngestorBatchRequest {
+                max_messages: std::num::NonZeroUsize::MIN,
+                batch_timeout: None,
+            },
+            &IngestorReadCancellation::new(),
+        )
+        .await;
+    let Err(report) = result else {
+        panic!("without a client ping cadence only inbound activity can extend the deadline");
+    };
+    assert!(report.contains::<nervix_connector::DeadlineElapsed>());
+    assert!(ingestor.needs_resume());
+}
+
+#[nervix_primitives::test]
 async fn inbound_message_and_frame_limits_end_the_exact_connection_with_the_driver_cause() {
     for key in ["max_message_size", "max_frame_size"] {
         let config = vec![ClientConfigEntry {
