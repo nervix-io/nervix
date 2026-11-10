@@ -907,6 +907,7 @@ mod tests {
 
     fn vhost(name: &str, hostname: &str, tls_version: Option<u64>) -> Model {
         Model::Vhost(CreateVhost {
+            labels: Default::default(),
             name: named(name),
             hostnames: vec![hostname.to_string()],
             tls: tls_version.map(|version| VhostTlsResource {

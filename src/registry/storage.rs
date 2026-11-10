@@ -24,7 +24,7 @@ use std::{path::Path, str::FromStr};
 use ahash::{HashMap, HashSet};
 use error_stack::{Report, ResultExt};
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, Readable as _, Snapshot};
-use meticulous::OptionExt;
+use meticulous::{OptionExt, ResultExt as _};
 #[cfg(test)]
 use nervix_models::{AlterRelay, DropModel};
 use nervix_models::{
@@ -290,7 +290,12 @@ impl Registry {
             .cloned()
             .collect::<HashSet<_>>();
         self.storage
-            .commit_batch(domain, &models_to_persist, &drops)
+            .commit_batch(
+                domain,
+                &models_to_persist,
+                &drops,
+                &nervix_models::EntityLabelLimits::from(self.parameters.load().as_ref()),
+            )
             .change_context(RegistryError::PersistBatch)?;
 
         let current = self.state.read();
@@ -468,6 +473,16 @@ impl Registry {
                     }
 
                     candidate.insert(model.as_ref().clone());
+                }
+                RegistryMutation::Labels(edit) => {
+                    let Some(mut model) = candidate.remove(&edit.entity) else {
+                        return Err(Report::new(RegistryError::NotFound {
+                            domain: domain.as_str().to_owned(),
+                            identifier: edit.entity.identifier.as_str().to_owned(),
+                        }));
+                    };
+                    model.labels_mut().apply(&edit.mutation);
+                    candidate.insert(model);
                 }
                 RegistryMutation::AlterSchema(alter) => {
                     info!(
@@ -993,6 +1008,7 @@ impl Registry {
                 &planned.domain,
                 &planned.models_to_persist,
                 &planned.drops_in_batch,
+                &nervix_models::EntityLabelLimits::from(self.parameters.load().as_ref()),
             )
             .change_context(RegistryError::PersistBatch)?;
 
@@ -1070,7 +1086,12 @@ impl Registry {
             .cloned()
             .collect::<HashSet<_>>();
         self.storage
-            .commit_batch(&planned.domain, &models_to_persist, &drops)
+            .commit_batch(
+                &planned.domain,
+                &models_to_persist,
+                &drops,
+                &nervix_models::EntityLabelLimits::from(self.parameters.load().as_ref()),
+            )
             .change_context(RegistryError::PersistBatch)?;
 
         let base_state = self.build_domain_state(&planned.domain, &planned.base_models)?;
@@ -1170,7 +1191,7 @@ impl Registry {
     pub(crate) fn resulting_models(
         &self,
         domain: &DomainName,
-        queued: &[RegistryMutation<RequestedResourceVersion>],
+        queued: &[nervix_models::Statement],
     ) -> Result<Vec<Model<RequestedResourceVersion>>, Report<RegistryError>> {
         let mut models = self
             .storage
@@ -1179,8 +1200,8 @@ impl Registry {
             .into_iter()
             .map(|record| Model::<RequestedResourceVersion>::from(record.model))
             .collect::<ModelIndex<RequestedResourceVersion>>();
-        for mutation in queued {
-            mutation.fold_into_models(&mut models);
+        for statement in queued {
+            RegistryMutation::fold_statement(statement, &mut models);
         }
         Ok(models.into_iter().map(|(_, model)| model).collect())
     }
@@ -1366,7 +1387,12 @@ impl ModelStorage {
             }));
         }
 
-        let value = serialize_value(model)?;
+        let value = serialize_value(
+            model,
+            &nervix_models::EntityLabelLimits::from(
+                &nervix_models::ClusterParameterValues::default(),
+            ),
+        )?;
 
         self.index
             .insert(key, value)
@@ -1378,6 +1404,7 @@ impl ModelStorage {
         domain: &DomainName,
         models_to_persist: &HashMap<NodeRef, RegistryPersistMutation>,
         drops_in_batch: &HashSet<NodeRef>,
+        label_limits: &nervix_models::EntityLabelLimits,
     ) -> Result<(), Report<RegistryError>> {
         let encoded_models = models_to_persist
             .iter()
@@ -1388,7 +1415,7 @@ impl ModelStorage {
                 };
                 Ok((
                     encode_key(domain, key.kind, &key.identifier)?,
-                    serialize_value(model)?,
+                    serialize_value(model, label_limits)?,
                 ))
             })
             .collect::<Result<Vec<_>, Report<RegistryError>>>()?;
@@ -1574,15 +1601,29 @@ fn decode_key(raw: &[u8]) -> Result<StoredModelKey, Report<RegistryError>> {
     })
 }
 
-fn serialize_value(model: &Model) -> Result<Vec<u8>, Report<RegistryError>> {
+fn serialize_value(
+    model: &Model,
+    limits: &nervix_models::EntityLabelLimits,
+) -> Result<Vec<u8>, Report<RegistryError>> {
+    model
+        .labels()
+        .validate(limits)
+        .change_context(RegistryError::SerializeValue)?;
     let archive = rkyv::to_bytes::<rkyv::rancor::Error>(model)
         .change_context(RegistryError::SerializeValue)?;
-    let capacity = MODEL_ARCHIVE_HEADER
-        .len()
+    let capacity = MODEL_ARCHIVE_PREFIX_BYTES
         .checked_add(archive.len())
         .assured("a Vec archive is bounded by isize::MAX, and its 16-byte header fits in usize");
     let mut payload = Vec::with_capacity(capacity);
     payload.extend_from_slice(MODEL_ARCHIVE_HEADER);
+    for value in [
+        limits.count,
+        limits.key_bytes,
+        limits.value_bytes,
+        limits.bytes,
+    ] {
+        payload.extend_from_slice(&value.to_le_bytes());
+    }
     payload.extend_from_slice(&archive);
     Ok(payload)
 }
@@ -1591,16 +1632,42 @@ fn deserialize_value(bytes: &[u8]) -> Result<Model, Report<RegistryError>> {
     let archive = bytes
         .strip_prefix(MODEL_ARCHIVE_HEADER)
         .ok_or_else(|| Report::new(RegistryError::InvalidModelArchive))?;
+    let (encoded_limits, archive) = archive
+        .split_at_checked(MODEL_LABEL_LIMIT_BYTES)
+        .ok_or_else(|| Report::new(RegistryError::InvalidModelArchive))?;
+    let mut values = encoded_limits.chunks_exact(size_of::<u64>());
+    let mut next = || {
+        u64::from_le_bytes(
+            values
+                .next()
+                .assured("the fixed policy prefix holds one word per declared limit")
+                .try_into()
+                .assured("each policy word contains exactly eight bytes"),
+        )
+    };
+    let limits = nervix_models::EntityLabelLimits {
+        count: next(),
+        key_bytes: next(),
+        value_bytes: next(),
+        bytes: next(),
+    };
     // A value read back from an on-disk table is a slice of its block at whatever offset the block
     // placed it, so the archive is copied to the alignment its root requires before validation.
     let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(archive.len());
     aligned.extend_from_slice(archive);
-    rkyv::from_bytes::<Model, rkyv::rancor::Error>(&aligned)
-        .change_context(RegistryError::DeserializeValue)
+    let model = rkyv::from_bytes::<Model, rkyv::rancor::Error>(&aligned)
+        .change_context(RegistryError::DeserializeValue)?;
+    model
+        .labels()
+        .validate(&limits)
+        .change_context(RegistryError::DeserializeValue)?;
+    Ok(model)
 }
 
 // The header identifies the current persisted Model shape before archive decoding.
-const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX PAY HOPS ";
+const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX LABELS   ";
+const MODEL_LABEL_LIMIT_BYTES: usize = 4 * size_of::<u64>();
+const MODEL_ARCHIVE_PREFIX_BYTES: usize = MODEL_ARCHIVE_HEADER.len() + MODEL_LABEL_LIMIT_BYTES;
 
 #[cfg(test)]
 #[cfg_attr(
@@ -1723,8 +1790,13 @@ mod tests {
             Some(RegistryError::InvalidModelArchive)
         )));
 
-        let misplaced =
-            serialize_value(&schema("event_schema")).assured("the current schema Model archives");
+        let misplaced = serialize_value(
+            &schema("event_schema"),
+            &nervix_models::EntityLabelLimits::from(
+                &nervix_models::ClusterParameterValues::default(),
+            ),
+        )
+        .assured("the current schema Model archives");
         registry
             .storage
             .index
@@ -1870,8 +1942,13 @@ mod tests {
     #[test]
     fn current_model_archive_validates_its_header() {
         let model = sample_transport_model("transport");
-        let mut encoded = super::serialize_value(&model)
-            .assured("a bounded current Model archives into its current stored shape");
+        let mut encoded = super::serialize_value(
+            &model,
+            &nervix_models::EntityLabelLimits::from(
+                &nervix_models::ClusterParameterValues::default(),
+            ),
+        )
+        .assured("a bounded current Model archives into its current stored shape");
         assert!(encoded.starts_with(super::MODEL_ARCHIVE_HEADER));
         assert_eq!(
             super::deserialize_value(&encoded).assured("a current Model reads its own encoding"),
@@ -1885,6 +1962,59 @@ mod tests {
             error.current_context(),
             RegistryError::InvalidModelArchive
         ));
+    }
+
+    #[test]
+    fn registry_models_decode_under_their_captured_complete_label_limits() {
+        let mut model = schema("labelled");
+        let value = "Δ".repeat(768);
+        *model.labels_mut() = serde_json::from_value(serde_json::json!({"owner": value}))
+            .assured("the fixture key is valid and its value is exact UTF-8");
+        let limits = nervix_models::EntityLabelLimits {
+            count: 3,
+            key_bytes: 5,
+            value_bytes: 2048,
+            bytes: 4096,
+        };
+        let encoded = super::serialize_value(&model, &limits)
+            .assured("the current map fits its committed raised policy");
+        assert_eq!(
+            super::deserialize_value(&encoded)
+                .assured("the record carries the policy it was written under"),
+            model
+        );
+        for (index, maximum, parameter) in [
+            (
+                0_usize,
+                0_u64,
+                nervix_models::ClusterParameterKey::EntityLabelsMaxCount,
+            ),
+            (
+                1,
+                4,
+                nervix_models::ClusterParameterKey::EntityLabelsMaxKeyBytes,
+            ),
+            (
+                2,
+                1535,
+                nervix_models::ClusterParameterKey::EntityLabelsMaxValueBytes,
+            ),
+            (
+                3,
+                1540,
+                nervix_models::ClusterParameterKey::EntityLabelsMaxBytes,
+            ),
+        ] {
+            let mut damaged = encoded.clone();
+            let start = super::MODEL_ARCHIVE_HEADER.len() + index * size_of::<u64>();
+            damaged[start..start + size_of::<u64>()].copy_from_slice(&maximum.to_le_bytes());
+            let Err(error) = super::deserialize_value(&damaged) else {
+                panic!("a complete map outside the record's policy is invalid");
+            };
+            assert!(
+                matches!(error.downcast_ref::<nervix_models::EntityLabelError>(), Some(nervix_models::EntityLabelError::Limit { parameter: actual, .. }) if *actual == parameter)
+            );
+        }
     }
 
     #[test]
@@ -1906,8 +2036,13 @@ mod tests {
                     Ok(model) => model,
                     Err(never) => match never {},
                 };
-                let encoded = super::serialize_value(&model)
-                    .assured("bounded current Models encode through the registry owner");
+                let encoded = super::serialize_value(
+                    &model,
+                    &nervix_models::EntityLabelLimits::from(
+                        &nervix_models::ClusterParameterValues::default(),
+                    ),
+                )
+                .assured("bounded current Models encode through the registry owner");
                 let decoded = super::deserialize_value(&encoded)
                     .assured("a current registry archive restores its complete Model");
                 assert_eq!(decoded, model);
@@ -1941,6 +2076,7 @@ mod tests {
         let path = temp_db_path();
         let domain = named::<DomainName>("binary_domain");
         let schema = CreateSchema {
+            labels: Default::default(),
             name: named::<SchemaName>("binary_payload"),
             fields: vec![SchemaField {
                 name: named("payload"),
@@ -2203,6 +2339,7 @@ mod tests {
                     relay("incoming", "event_schema"),
                     relay("outgoing", "event_schema"),
                     Model::Junction(CreateJunction {
+                        labels: Default::default(),
                         name: named("route_events"),
                         from: ProcessorInputs::single(named("incoming")),
                         output_routes: with_inherit_all(ProcessorOutputs::single(named(
@@ -2361,6 +2498,7 @@ mod tests {
         let domain = DomainName::parse("default").expect("valid domain");
         let mut models = full_graph_batch();
         models.push(Model::WireJsonSchema(CreateWireSchema {
+            labels: Default::default(),
             name: named("event_wire_v2"),
             strictness: Default::default(),
             fields: vec![WireSchemaField {

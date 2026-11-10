@@ -238,6 +238,7 @@ mod tests {
 
     fn kafka_ingestor(name: &str, offset_mode: KafkaOffsetMode) -> Model {
         Model::Ingestor(CreateIngestor {
+            labels: Default::default(),
             name: named(name),
             output_routes: with_inherit_all(ProcessorOutputs::single(named("events")))
                 .with_flush_policy(FlushPolicy::Immediate)
@@ -269,6 +270,7 @@ mod tests {
         };
         let kafka_client = || {
             Model::ClientKafka(CreateClientKafka {
+                labels: Default::default(),
                 name: named("kafka"),
                 mount: None,
                 config: Vec::new(),

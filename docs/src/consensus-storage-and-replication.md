@@ -518,8 +518,8 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_payload_identity_capability_tls_inference_reset_logs`, `raft_payload_identity_capability_tls_inference_reset_meta`, `raft_payload_identity_capability_tls_inference_reset_state`, and
-`raft_payload_identity_capability_tls_inference_reset_snapshots`. Opening it validates the complete keyspace namespace before reading
+`raft_entity_labels_logs`, `raft_entity_labels_meta`, `raft_entity_labels_state`, and
+`raft_entity_labels_snapshots`. Opening it validates the complete keyspace namespace before reading
 any records. The committed cluster-parameter record stores ordered typed TLS cipher suites and
 key-exchange groups; recovery validates their complete pair before returning that record.
 This namespace identifies the current Model shape, including the separate JSON
@@ -541,7 +541,7 @@ construction where it stands, including the typed `payload` expression scope and
 `RESET WASM PROCESSOR ... STATE` that names its processor and scope and takes its domain from
 the transaction, as the step effect and commit plan step keep it too. The database also stores
 incarnation-bound node capability claims under record-family tag `C`. Its state metadata
-requires the current `ClusterState` encoding, 22, including the cluster identity reference,
+requires the current `ClusterState` encoding, 24, including the cluster identity reference,
 committed cluster parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,
@@ -784,3 +784,10 @@ keyed lookup and no user scan. Recovery validates that the count covers both the
 creation policy and every recovered user before publishing the state. Snapshot metadata and
 user records preserve the complete values. The namespace and state-encoding checks above fence
 this shape before rkyv reads any user record or log entry.
+
+
+Domain Model archives use a current fixed header followed by the four committed label acceptance
+limits as `u64` words and the Model archive. Readers validate the complete decoded map against
+those recorded limits; a permissive node-local default cannot reinterpret the stored policy.
+The consensus state and a backup domain cut carry their own committed policy publication, so
+snapshot/replay and restore validate metadata under the policy captured with that configuration.

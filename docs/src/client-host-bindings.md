@@ -189,6 +189,15 @@ introduces row-map payloads, implicit numeric conversions or per-cell callbacks 
 
 ## Typed Inspection
 
+`Outcome::entity_labels()` supplies an independently retained `EntityLabelsInspection` for a
+domain metadata read. Every native binding preserves the exact map, existing domain/node identity,
+captured policy revision and limits, and explicit committed/staged view. A committed view has its
+applied revision; a staged view has transaction id, accepted position and planning-basis bytes.
+Absent variant fields remain absent, and zero-valued revisions or positions remain present.
+Pointer/length accessors preserve empty values and embedded NUL bytes. No binding derives this
+typed result from the display message. The registered host suites exercise exact values, staged
+inspection and revert, and views retained after their outcome is released.
+
 `Outcome::state_inspection()` supplies the existing owned `Inspection`. Its state is the
 verified `StateInspection`, and its cached JSON is that envelope's lossless serialization.
 Bindings retain this owner for page/refusal, entity, complete counts, unit identity, ordered

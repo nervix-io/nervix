@@ -69,6 +69,10 @@ use crate::{
 /// Why a restore was refused before it changed anything. No variant carries archive contents.
 #[derive(Debug, Error)]
 pub(in crate::application) enum RestoreRefusal {
+    #[error("the archive has no captured label policy for domain {domain}")]
+    MissingLabelPolicy { domain: DomainName },
+    #[error("labels in domain {domain} exceed the archive's captured committed policy")]
+    InvalidLabels { domain: DomainName },
     #[error("the archive could not be read on this node")]
     Unreadable,
     #[error("the archive metadata exceeds the node's available restore preparation budget")]
@@ -388,11 +392,31 @@ impl SessionServiceImpl {
         let data = executor
             .run_cpu(CpuClass::Bulk, reservation, move |charge, cancellation| {
                 let mut models = BTreeMap::new();
+                let policies = contents
+                    .description
+                    .manifest
+                    .domains
+                    .iter()
+                    .map(|capture| (&capture.domain, &capture.entity_label_policy))
+                    .collect::<BTreeMap<_, _>>();
                 for (domain, text) in &contents.models {
                     cancellation
                         .check()
                         .change_context(RestoreRefusal::Unreadable)?;
-                    models.insert(domain.clone(), parse_models(domain, text)?);
+                    let parsed = parse_models(domain, text)?;
+                    let policy = policies.get(domain).ok_or_else(|| {
+                        Report::new(RestoreRefusal::MissingLabelPolicy {
+                            domain: domain.clone(),
+                        })
+                    })?;
+                    for model in &parsed {
+                        model.labels().validate(&policy.limits).change_context(
+                            RestoreRefusal::InvalidLabels {
+                                domain: domain.clone(),
+                            },
+                        )?;
+                    }
+                    models.insert(domain.clone(), parsed);
                 }
                 Ok::<_, Report<RestoreRefusal>>(VerifiedArchiveData {
                     contents,

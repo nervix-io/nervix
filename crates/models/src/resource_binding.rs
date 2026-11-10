@@ -65,6 +65,7 @@ macro_rules! impl_client_resource_versions {
                         None => None,
                     };
                     Ok($Client {
+            labels: self.labels,
                         name: self.name,
                         $($extra: self.$extra,)*
                         mount,
@@ -111,6 +112,7 @@ impl<Version> CreateLookup<Version> {
     {
         let resource_version = map(&self.resource, self.resource_version)?;
         Ok(CreateLookup {
+            labels: self.labels,
             name: self.name,
             key_field: self.key_field,
             resource: self.resource,
@@ -150,6 +152,7 @@ impl<Version> CreateVhost<Version> {
             None => None,
         };
         Ok(CreateVhost {
+            labels: self.labels,
             name: self.name,
             hostnames: self.hostnames,
             tls,
@@ -213,6 +216,7 @@ impl<Version> CreateCodec<Version> {
     {
         let wire_format = self.wire_format.try_map_version(map)?;
         Ok(CreateCodec {
+            labels: self.labels,
             name: self.name,
             wire_format,
             schema: self.schema,
@@ -271,6 +275,7 @@ impl<Version> CreateSignalingProtocol<Version> {
     {
         let format = self.format.try_map_version(map)?;
         Ok(CreateSignalingProtocol {
+            labels: self.labels,
             name: self.name,
             format,
             on_connect: self.on_connect,
@@ -288,6 +293,7 @@ impl<Version> CreateInferencer<Version> {
     {
         let resource_version = map(&self.resource, self.resource_version)?;
         Ok(CreateInferencer {
+            labels: self.labels,
             name: self.name,
             from: self.from,
             output_routes: self.output_routes,
@@ -315,6 +321,7 @@ impl<Version> CreateWasmProcessor<Version> {
     {
         let resource_version = map(&self.resource, self.resource_version)?;
         Ok(CreateWasmProcessor {
+            labels: self.labels,
             name: self.name,
             from: self.from,
             output_routes: self.output_routes,

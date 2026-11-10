@@ -98,6 +98,19 @@ impl SettingsArgs {
                 .cluster_parameters
                 .udf_code_bytes
                 .map(|bytes| bytes.0.as_u64()),
+            entity_labels_max_count: self.cluster_parameters.entity_labels_max_count,
+            entity_labels_max_key_bytes: self
+                .cluster_parameters
+                .entity_labels_max_key_bytes
+                .map(|bytes| bytes.0.as_u64()),
+            entity_labels_max_value_bytes: self
+                .cluster_parameters
+                .entity_labels_max_value_bytes
+                .map(|bytes| bytes.0.as_u64()),
+            entity_labels_max_bytes: self
+                .cluster_parameters
+                .entity_labels_max_bytes
+                .map(|bytes| bytes.0.as_u64()),
             http_header_bytes: self
                 .cluster_parameters
                 .http_header_bytes

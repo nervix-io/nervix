@@ -335,6 +335,7 @@ struct CodecFixture {
 impl CodecFixture {
     fn new() -> Self {
         let schema = CreateSchema {
+            labels: Default::default(),
             name: "syslog_event"
                 .parse()
                 .assured("the literal is a schema name"),

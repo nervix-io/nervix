@@ -771,6 +771,7 @@ impl ProcessorDraft {
         let input = self.build_input()?;
         let output = self.build_output()?;
         Ok(CreateJunction {
+            labels: Default::default(),
             name,
             from: input.inputs,
             output_routes: output.routes,
@@ -792,6 +793,7 @@ impl ProcessorDraft {
         let keys = keyed.build(KeyClause::DeduplicateOn)?;
         let output = self.build_output()?;
         Ok(CreateDeduplicator {
+            labels: Default::default(),
             name,
             from: input.inputs,
             output_routes: output.routes,
@@ -815,6 +817,7 @@ impl ProcessorDraft {
         let keys = keyed.build(KeyClause::By)?;
         let output = self.build_output()?;
         Ok(CreateReorderer {
+            labels: Default::default(),
             name,
             from: input.inputs,
             output_routes: output.routes,
@@ -838,6 +841,7 @@ impl ProcessorDraft {
         let cadence = window.build()?;
         let output = self.build_output()?;
         Ok(CreateWindowProcessor {
+            labels: Default::default(),
             name,
             from: input.inputs,
             output_routes: output.routes,
@@ -864,6 +868,7 @@ impl ProcessorDraft {
         let correlation = correlator.build()?;
         let output = self.build_output()?;
         Ok(CreateCorrelator {
+            labels: Default::default(),
             name,
             left,
             right: correlation.right,
@@ -885,6 +890,7 @@ impl ProcessorDraft {
         let input = self.build_input()?;
         let output = self.build_output()?;
         Ok(CreateReingestor {
+            labels: Default::default(),
             name,
             from: input.inputs,
             output_routes: output.routes,

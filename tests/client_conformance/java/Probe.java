@@ -1169,6 +1169,12 @@ public final class Probe {
                 printed.add(lines); retained.add(event);
             }
         }
+        session.execute("SET LABELS ON RELAY " + relay + " { 'probe' = ' retained Δ ' };", null, outcomes);
+        Outcome labelled = session.execute("SHOW LABELS ON RELAY " + relay + " FORMAT TEXT;", null, outcomes);
+        try (var labels = labelled.handle().entityLabels()) {
+            require(labels != null && " retained Δ ".equals(labels.labels().get("probe")), "typed entity labels lost exact metadata");
+            require(relay.equals(labels.entityName()) && labels.revision() != null, "typed entity labels lost identity or revision");
+        }
         checkCancellation(session);
         Outcome closed = session.execute("DELETE SUBSCRIPTION " + subscription + ";", null, outcomes);
         session.close();

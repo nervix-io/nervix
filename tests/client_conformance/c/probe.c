@@ -2270,7 +2270,7 @@ int main(int argc, char **argv) {
         const uint8_t *frame = NULL;
         size_t frame_len = 0;
         check(nx_event_frame(retained[index], &frame, &frame_len), "frame");
-        if (frame_len < 8 || memcmp(frame + 4, "NXSM", 4) != 0) {
+        if (frame_len < 8 || memcmp(frame + 4, "NXEL", 4) != 0) {
             fail("a retained frame is not a ServerMessage frame");
         }
         char *again = row_lines(retained[index], &row_fields, &key_fields);
@@ -2283,6 +2283,29 @@ int main(int argc, char **argv) {
     }
     free(retained);
     free(reported);
+    snprintf(query, sizeof query, "SET LABELS ON RELAY %s { 'probe' = ' retained Δ ' };", relay);
+    nx_outcome *metadata_set = execute(session, query);
+    if (nx_outcome_disposition(metadata_set) != NX_DISPOSITION_COMPLETED) fail("entity label edit failed");
+    nx_outcome_free(metadata_set);
+    snprintf(query, sizeof query, "SHOW LABELS ON RELAY %s FORMAT TEXT;", relay);
+    nx_outcome *metadata_read = execute(session, query);
+    nx_entity_labels *metadata = NULL;
+    check(nx_outcome_entity_labels(metadata_read, &metadata), "read typed labels");
+    nx_outcome_free(metadata_read);
+    if (!metadata || nx_entity_labels_count(metadata) == 0) fail("typed labels are absent");
+    uint64_t metadata_revision = 0;
+    if (!nx_entity_labels_revision(metadata, &metadata_revision)) fail("typed labels lack committed revision");
+    bool metadata_found = false;
+    for (size_t index = 0; index < nx_entity_labels_count(metadata); index++) {
+        const uint8_t *key, *value; size_t key_len, value_len;
+        check(nx_entity_labels_entry(metadata, index, &key, &key_len, &value, &value_len), "read typed label entry");
+        if (key_len == 5 && memcmp(key, "probe", 5) == 0) {
+            const char exact[] = " retained Δ ";
+            metadata_found = value_len == sizeof exact - 1 && memcmp(value, exact, value_len) == 0;
+        }
+    }
+    if (!metadata_found) fail("typed labels lost exact metadata");
+    nx_entity_labels_free(metadata);
     check_cancellation(session);
     printf("CHECKS ok\n");
 

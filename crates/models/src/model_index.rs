@@ -162,6 +162,7 @@ mod tests {
 
     fn relay(name: &str) -> Model {
         Model::Relay(CreateRelay {
+            labels: Default::default(),
             name: RelayName::parse(name).expect("valid relay name"),
             schema: SchemaName::parse("events").expect("valid schema name"),
             buffer: nonzero_ext::nonzero!(4usize),
@@ -196,6 +197,7 @@ mod tests {
         let index = ModelIndex::from_iter([
             relay("shared"),
             Model::Schema(CreateSchema {
+                labels: Default::default(),
                 name: SchemaName::parse("shared").expect("valid schema name"),
                 fields: Vec::new(),
             }),

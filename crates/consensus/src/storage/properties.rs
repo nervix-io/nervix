@@ -511,6 +511,7 @@ fn recovery_refuses_a_schedule_entry_keyed_by_another_node() {
     let mut state = StateMachineData::default();
     let domain: DomainName = fixture_name("stored");
     let schema = nervix_models::Model::Schema(nervix_models::CreateSchema {
+        labels: Default::default(),
         name: fixture_name("readings"),
         fields: Vec::new(),
     });

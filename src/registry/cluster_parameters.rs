@@ -165,7 +165,12 @@ pub(crate) fn validate_model_parameters<'a>(
             _ => None,
         })
         .collect();
+    let label_limits = nervix_models::EntityLabelLimits::from(parameters);
     for model in &models {
+        model
+            .labels()
+            .validate(&label_limits)
+            .map_err(|error| RegistryError::invalid_model(domain, model.name().as_str(), error))?;
         let check = |parameter: ClusterParameterKey, actual: u64, maximum: u64| {
             if actual > maximum {
                 Err(Report::new(RegistryError::ClusterParameterLimit {
@@ -305,6 +310,7 @@ mod tests {
 
     fn emitter(invocations: Vec<Invocation>) -> Model {
         Model::Emitter(CreateEmitter {
+            labels: Default::default(),
             name: EmitterName::parse("headers").assured("the fixture emitter name is valid"),
             from: ProcessorInputs::single(
                 RelayName::parse("events").assured("the fixture relay name is valid"),
@@ -355,6 +361,7 @@ mod tests {
         };
 
         Model::Ingestor(CreateIngestor {
+            labels: Default::default(),
             name: IngestorName::parse("polling").assured("the fixture name is valid"),
             output_routes: crate::registry::test_fixtures::unbranched_transforming_outputs(
                 "events",
@@ -514,6 +521,7 @@ mod tests {
         }]);
         for (value, minimum_bytes) in [("bb", 7), ("{{ token }}", 5)] {
             let client = Model::ClientHttp(CreateClientHttp {
+                labels: Default::default(),
                 name: ClientName::parse("api").assured("the fixture client is valid"),
                 mount: None,
                 config: vec![
@@ -559,6 +567,7 @@ mod tests {
             value: HttpRequestHeaderValue::ClientSecret("secret.future".to_string()),
         }]);
         let client = Model::ClientHttp(CreateClientHttp {
+            labels: Default::default(),
             name: ClientName::parse("api").assured("the fixture client is valid"),
             mount: None,
             config: vec![

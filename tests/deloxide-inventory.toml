@@ -6683,3 +6683,99 @@ selections = ["deloxide-stress-restore"]
 gap = "The new per-template client/server cache mutex serializes one bounded config clone and provider replacement. Public outward TLS policy scenarios and the production-owner Shuttle check cover policy/capture behavior in ordinary and modeled modes. Diagnostic campaigns are deliberately unrun under the live Task Execution Template's temporary Deloxide CI/local cost policy; no tracked-lock execution evidence is claimed."
 path = "crates/tls/src/lib.rs"
 workloads = []
+
+
+[[invocation]]
+bound_seconds = 900
+concurrency = 1
+evidence = true
+id = "entity-label-publication"
+inputs = ["tests/features/runtime/entity_labels.feature"]
+kind = "cucumber"
+package = "nervix-scenarios"
+selections = ["deloxide", "deloxide-order"]
+tags = ["@entity_labels_publication", "@entity_labels_restore"]
+target = "test:scenarios"
+
+[[workload]]
+coverage = "The production metadata reader acquires the applied-state publication lock during a committed or staged view. Transaction planning, snapshot/restart and archive restore reach existing tracked registry and consensus owners; async ACK waits are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/entity_labels.feature"
+id = "scenario.entity-label-publication-1"
+invariant = "Exact labels, typed revision/policy coherence and retained execution/state survive the selected transaction or lifecycle operation without a tracked-lock cycle."
+invocation = "entity-label-publication"
+scenario = "Label commits preserve two branch states and in-flight acknowledgement trees"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "The production metadata reader acquires the applied-state publication lock during a committed or staged view. Transaction planning, snapshot/restart and archive restore reach existing tracked registry and consensus owners; async ACK waits are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/entity_labels.feature"
+id = "scenario.entity-label-publication-2"
+invariant = "Exact labels, typed revision/policy coherence and retained execution/state survive the selected transaction or lifecycle operation without a tracked-lock cycle."
+invocation = "entity-label-publication"
+scenario = "Label candidates are visible only to their transaction and revert atomically"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "The production metadata reader acquires the applied-state publication lock during a committed or staged view. Transaction planning, snapshot/restart and archive restore reach existing tracked registry and consensus owners; async ACK waits are outside detector evidence."
+examples = 4
+feature = "tests/features/runtime/entity_labels.feature"
+id = "scenario.entity-label-publication-3"
+invariant = "Exact labels, typed revision/policy coherence and retained execution/state survive the selected transaction or lifecycle operation without a tracked-lock cycle."
+invocation = "entity-label-publication"
+scenario = "Restart and archive restore retain the captured label revision"
+selections = ["deloxide", "deloxide-order"]
+
+[[owner]]
+path = "crates/consensus/src/entity_labels.rs"
+workloads = [
+  "scenario.entity-label-publication-1",
+  "scenario.entity-label-publication-2",
+  "scenario.entity-label-publication-3",
+  "stress.entity-label-publication-1",
+  "stress.entity-label-publication-2",
+  "stress.entity-label-publication-3",
+]
+
+[[workload]]
+coverage = "Under scheduling stress: The production metadata reader acquires the applied-state publication lock during a committed or staged view. Transaction planning, snapshot/restart and archive restore reach existing tracked registry and consensus owners; async ACK waits are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/entity_labels.feature"
+id = "stress.entity-label-publication-1"
+invariant = "Exact labels, typed revision/policy coherence and retained execution/state survive the selected transaction or lifecycle operation without a tracked-lock cycle."
+invocation = "stress-entity-label-publication"
+scenario = "Label commits preserve two branch states and in-flight acknowledgement trees"
+selections = ["deloxide-stress", "deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: The production metadata reader acquires the applied-state publication lock during a committed or staged view. Transaction planning, snapshot/restart and archive restore reach existing tracked registry and consensus owners; async ACK waits are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/entity_labels.feature"
+id = "stress.entity-label-publication-2"
+invariant = "Exact labels, typed revision/policy coherence and retained execution/state survive the selected transaction or lifecycle operation without a tracked-lock cycle."
+invocation = "stress-entity-label-publication"
+scenario = "Label candidates are visible only to their transaction and revert atomically"
+selections = ["deloxide-stress", "deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: The production metadata reader acquires the applied-state publication lock during a committed or staged view. Transaction planning, snapshot/restart and archive restore reach existing tracked registry and consensus owners; async ACK waits are outside detector evidence."
+examples = 4
+feature = "tests/features/runtime/entity_labels.feature"
+id = "stress.entity-label-publication-3"
+invariant = "Exact labels, typed revision/policy coherence and retained execution/state survive the selected transaction or lifecycle operation without a tracked-lock cycle."
+invocation = "stress-entity-label-publication"
+scenario = "Restart and archive restore retain the captured label revision"
+selections = ["deloxide-stress", "deloxide-stress-restore"]
+
+[[invocation]]
+bound_seconds = 900
+concurrency = 1
+evidence = true
+id = "stress-entity-label-publication"
+inputs = ["tests/features/runtime/entity_labels.feature"]
+kind = "cucumber"
+package = "nervix-scenarios"
+selections = ["deloxide-stress", "deloxide-stress-restore"]
+tags = ["@entity_labels_publication", "@entity_labels_restore"]
+target = "test:scenarios"

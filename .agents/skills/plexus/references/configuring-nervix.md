@@ -60,6 +60,7 @@ Keep detailed grammar in those chapters when reviewing a configuration.
 | Session subscriptions and domain clock attachment | `Sessions` |
 | Configuration backups, their archives, bounded waits and exact-reference recovery, `DESCRIBE BACKUP`, and `RESTORE` | `Backup And Restore`; cut timeout phases and their elapsed measurements: `Backup And Restore Architecture` → `Observability` |
 | Metrics and runtime inspection | `Metrics And Observability` |
+| Domain entity labels, bounded metadata, staged inspection and execution continuity | `Entity Labels` |
 | Emitter record outcomes, retries, acquisition, pool waits, finish outcomes and current failure | `Metrics And Observability` → `Emitter outcomes and lifecycle` |
 | Persistent-command history size, retry-fence age and admission refusal metrics | `Metrics And Observability` → `Command Execution History` |
 | Full graph examples | `Examples` |

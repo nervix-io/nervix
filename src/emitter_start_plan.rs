@@ -1679,6 +1679,7 @@ mod tests {
 
     fn emitter(connector: EmitterEntity) -> CreateEmitter {
         CreateEmitter {
+            labels: Default::default(),
             name: named("orders_out"),
             from: ProcessorInputs::single(named("orders")),
             body: nervix_models::EmitterBody::Values,
@@ -1716,6 +1717,7 @@ mod tests {
 
     fn iceberg_catalog() -> Model {
         Model::ClientIcebergRest(CreateClientIcebergRest {
+            labels: Default::default(),
             name: named("catalog"),
             mount: client_mount(),
             config: client_config(),
@@ -1815,6 +1817,7 @@ mod tests {
                         path: expression("concat('/orders/', input.id)"),
                     })),
                     client: Model::ClientHttp(CreateClientHttp {
+                        labels: Default::default(),
                         name: client(),
                         mount: client_mount(),
                         config: http_client_config("https://orders.example.com:8443"),
@@ -1833,6 +1836,7 @@ mod tests {
                         topic: named("orders"),
                     })),
                     client: Model::ClientKafka(CreateClientKafka {
+                        labels: Default::default(),
                         name: client(),
                         mount: client_mount(),
                         config: client_config(),
@@ -1851,6 +1855,7 @@ mod tests {
                         topic: named("orders"),
                     })),
                     client: Model::ClientPulsar(CreateClientPulsar {
+                        labels: Default::default(),
                         name: client(),
                         mount: client_mount(),
                         config: client_config(),
@@ -1871,6 +1876,7 @@ mod tests {
                         },
                     )),
                     client: Model::ClientRabbitMq(CreateClientRabbitMq {
+                        labels: Default::default(),
                         name: client(),
                         mount: client_mount(),
                         config: client_config(),
@@ -1889,6 +1895,7 @@ mod tests {
                         channel: named("orders"),
                     })),
                     client: Model::ClientRedis(CreateClientRedis {
+                        labels: Default::default(),
                         name: client(),
                         pool: pool_bounds(),
                         mount: client_mount(),
@@ -1909,6 +1916,7 @@ mod tests {
                         qos: MqttQos::Qos0,
                     })),
                     client: Model::ClientMqtt(CreateClientMqtt {
+                        labels: Default::default(),
                         name: client(),
                         mount: client_mount(),
                         config: client_config(),
@@ -1927,6 +1935,7 @@ mod tests {
                         subject: named("orders"),
                     })),
                     client: Model::ClientNats(CreateClientNats {
+                        labels: Default::default(),
                         name: client(),
                         mount: client_mount(),
                         config: client_config(),
@@ -1944,6 +1953,7 @@ mod tests {
                         client: client(),
                     })),
                     client: Model::ClientZeroMq(CreateClientZeroMq {
+                        labels: Default::default(),
                         name: client(),
                         mount: client_mount(),
                         config: client_config(),
@@ -1963,6 +1973,7 @@ mod tests {
                         },
                     )),
                     client: Model::ClientSyslog(CreateClientSyslog {
+                        labels: Default::default(),
                         name: client(),
                         mount: client_mount(),
                         config: client_config(),
@@ -1983,6 +1994,7 @@ mod tests {
                         send: nervix_models::SqsSend::Batch,
                     })),
                     client: Model::ClientSqs(CreateClientSqs {
+                        labels: Default::default(),
                         name: client(),
                         mount: client_mount(),
                         config: client_config(),
@@ -2001,6 +2013,7 @@ mod tests {
                         platform: Some("python".to_owned()),
                     })),
                     client: Model::ClientSentry(CreateClientSentry {
+                        labels: Default::default(),
                         name: client(),
                         mount: client_mount(),
                         config: client_config(),
@@ -2024,6 +2037,7 @@ mod tests {
                         },
                     }),
                     client: Model::ClientOtel(CreateClientOtel {
+                        labels: Default::default(),
                         name: client(),
                         mount: client_mount(),
                         config: client_config(),
@@ -2045,6 +2059,7 @@ mod tests {
                         },
                     )),
                     client: Model::ClientClickHouse(CreateClientClickHouse {
+                        labels: Default::default(),
                         name: client(),
                         mount: client_mount(),
                         config: client_config(),
@@ -2067,6 +2082,7 @@ mod tests {
                         },
                     )),
                     client: Model::ClientPostgres(CreateClientPostgres {
+                        labels: Default::default(),
                         name: client(),
                         pool: pool_bounds(),
                         mount: client_mount(),
@@ -2088,6 +2104,7 @@ mod tests {
                         conflict_action: nervix_models::MySqlConflictAction::None,
                     })),
                     client: Model::ClientMySql(CreateClientMySql {
+                        labels: Default::default(),
                         name: client(),
                         pool: pool_bounds(),
                         mount: client_mount(),
@@ -2111,6 +2128,7 @@ mod tests {
                         },
                     )),
                     client: Model::ClientMongoDb(CreateClientMongoDb {
+                        labels: Default::default(),
                         name: client(),
                         pool: pool_bounds(),
                         mount: client_mount(),
@@ -2121,6 +2139,7 @@ mod tests {
                 Self::IcebergS3 => EmitterCase {
                     connector: iceberg_emitter(),
                     client: Model::ClientS3(CreateClientS3 {
+                        labels: Default::default(),
                         name: client(),
                         mount: client_mount(),
                         config: client_config(),
@@ -2130,6 +2149,7 @@ mod tests {
                 Self::IcebergGcs => EmitterCase {
                     connector: iceberg_emitter(),
                     client: Model::ClientGcs(CreateClientGcs {
+                        labels: Default::default(),
                         name: client(),
                         mount: client_mount(),
                         config: client_config(),
@@ -2139,6 +2159,7 @@ mod tests {
                 Self::IcebergAzureBlob => EmitterCase {
                     connector: iceberg_emitter(),
                     client: Model::ClientAzureBlob(CreateClientAzureBlob {
+                        labels: Default::default(),
                         name: client(),
                         mount: client_mount(),
                         config: client_config(),
@@ -2445,6 +2466,7 @@ mod tests {
         ] {
             let mut case = EmitterKind::Http.case();
             case.client = Model::ClientHttp(CreateClientHttp {
+                labels: Default::default(),
                 name: named("upstream"),
                 mount: None,
                 config,
@@ -2907,6 +2929,7 @@ mod tests {
     fn reports_a_client_model_registered_under_another_name() {
         let mut case = EmitterKind::Sentry.case();
         case.client = Model::ClientSentry(CreateClientSentry {
+            labels: Default::default(),
             name: named("different"),
             mount: None,
             config: Vec::new(),

@@ -466,6 +466,7 @@ mod tests {
 
     fn key_schema(name: &str, fields: &[(&str, ParseAsType)]) -> CreateSchema {
         CreateSchema {
+            labels: Default::default(),
             name: nervix_models::SchemaName::parse(name)
                 .assured("the test schema is a valid literal name"),
             fields: fields

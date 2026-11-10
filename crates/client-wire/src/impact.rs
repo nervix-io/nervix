@@ -160,6 +160,7 @@ wire_enum!(ALL_MODEL_CHANGE_ASPECTS: ModelChangeAspect => wire::ModelChangeAspec
     EntityCreated,
     EntityDropped,
     BranchPartitions,
+    EntityLabels,
 });
 
 /// Encodes a complete transaction impact report.

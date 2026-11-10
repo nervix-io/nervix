@@ -106,7 +106,7 @@ archive; see [Restore Streams](#restore-streams).
   `ClientMessage` and `NXUM` for an `UploadMessage`, and without a size prefix. It MUST NOT split a
   frame across messages, join frames in one message, or send a WebSocket text message.
 - **F-3.** Before it reads any field of a received frame, it MUST check that the frame is at most
-  the frame limit of 4 MiB, at least 8 bytes long, and carries the expected identifier, `NXSM` on a
+  the frame limit of 4 MiB, at least 8 bytes long, and carries the expected identifier, `NXEL` on a
   session and `NXUR` for an upload reply. Where its FlatBuffers runtime has a verifier, it MUST
   verify the frame with a nesting limit of 64, a table limit of the frame length divided by 4, and
   an apparent-size limit of 8 times the frame length. Where its runtime has none, as for Go and
@@ -1390,6 +1390,21 @@ worker. A successful Exchange or WebSocket establishes the user once for that se
 and events reuse that identity. HTTP authentication probes deliberately verify the credentials
 they present. An unjudged attempt remains retryable through UNAVAILABLE or HTTP 503; a wrong
 password remains refused. Clients never receive a stored credential, salt or digest.
+
+## Reading Entity Labels
+
+Clients MUST preserve `CommandOutcome.entity_labels` independently of the rendered command
+message. The result's existing domain/node identity, complete exact string map and captured policy
+revision/limits form one read. The required view distinguishes a committed applied revision from
+a staged `TransactionPreviewIdentity`. Clients MUST preserve that distinction, including a
+present-zero committed revision or accepted-operation position, and MUST NOT parse display text
+or substitute defaults for missing fields.
+
+Current key validation, duplicate-key refusal and complete-map limits apply at decoding, together
+with transport bounds. Keys render canonically in lexicographic order; values retain exact UTF-8
+and an empty value differs from absence. Large results use the existing reply-transfer protocol
+and its typed oversize rejection. Native `EntityLabelsInspection` views outlive the outcome;
+host guides demonstrate their ownership and committed/staged accessors.
 
 ## Reading Typed Materialized State
 

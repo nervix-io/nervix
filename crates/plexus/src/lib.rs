@@ -53,6 +53,7 @@ pub mod generator;
 pub mod inferencer;
 pub mod ingestor;
 pub mod junction;
+mod labels;
 pub mod lexer;
 pub mod lookup;
 pub mod lookup_query;

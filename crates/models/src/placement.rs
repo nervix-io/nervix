@@ -52,6 +52,7 @@ pub enum PlacementPolicy {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct CreatePlacement {
+    pub labels: crate::EntityLabels,
     pub name: PlacementName,
     pub scope: PlacementScope,
     pub policy: PlacementPolicy,
@@ -121,6 +122,7 @@ impl CreatePlacement {
         rank: Option<NonZeroU64>,
     ) -> error_stack::Result<Self, AlterPlacementError> {
         let mut placement = Self {
+            labels: crate::EntityLabels::default(),
             name,
             scope: PlacementScope::Corridor { from, to },
             policy,
@@ -137,6 +139,7 @@ impl CreatePlacement {
         rank: Option<NonZeroU64>,
     ) -> Self {
         Self {
+            labels: crate::EntityLabels::default(),
             name,
             scope: PlacementScope::DomainWide,
             policy,

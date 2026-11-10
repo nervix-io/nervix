@@ -269,16 +269,17 @@ impl ActiveGraph {
             encoded: Vec<u8>,
         }
 
-        let window_definition =
-            self.graph.node_weight(index).and_then(|node| {
-                if let Model::WindowProcessor(_) = node.config.as_ref() {
-                    Some(serde_json::to_vec(node.config.as_ref()).assured(
+        let window_definition = self.graph.node_weight(index).and_then(|node| {
+            if let Model::WindowProcessor(_) = node.config.as_ref() {
+                Some(
+                    serde_json::to_vec(node.config.execution_configuration().as_ref()).assured(
                         "registry window models are plain serde structures with string keys",
-                    ))
-                } else {
-                    None
-                }
-            });
+                    ),
+                )
+            } else {
+                None
+            }
+        });
         let mut pending = vec![index];
         let mut visited = HashSet::default();
         let mut schemas = Vec::<FingerprintedSchema>::new();
@@ -299,10 +300,11 @@ impl ActiveGraph {
                 schemas.push(FingerprintedSchema {
                     kind: node.kind,
                     identifier: node.identifier.clone(),
-                    encoded: serde_json::to_vec(node.config.as_ref()).assured(
-                        "registry models are plain serde structures with string keys, which \
-                         serde_json always encodes",
-                    ),
+                    encoded: serde_json::to_vec(node.config.execution_configuration().as_ref())
+                        .assured(
+                            "registry models are plain serde structures with string keys, which \
+                             serde_json always encodes",
+                        ),
                 });
             }
             pending.extend(

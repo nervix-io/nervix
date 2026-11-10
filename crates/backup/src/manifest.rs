@@ -18,10 +18,10 @@ use crate::{
 
 /// The archive format major version this crate writes and reads. A reader refuses any other: a
 /// new major is a format this reader cannot interpret.
-pub const ARCHIVE_FORMAT_MAJOR: u16 = 8;
+pub const ARCHIVE_FORMAT_MAJOR: u16 = 9;
 
 /// The manifest record's format version.
-const MANIFEST_VERSION: u16 = 4;
+const MANIFEST_VERSION: u16 = 5;
 
 /// What an archive is and every section it holds, in the order the archive holds them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +57,7 @@ pub enum ArchiveScope {
 /// The configuration of one domain as a backup read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DomainCapture {
+    pub entity_label_policy: nervix_models::EntityLabelPolicy,
     pub domain: DomainName,
     /// The applied consensus revision the domain was read at.
     pub revision: u64,
@@ -199,6 +200,7 @@ impl From<&BackupManifest> for ManifestWire {
             .map(|capture| DomainCaptureWire {
                 domain: capture.domain.as_str().to_string(),
                 revision: capture.revision,
+                entity_label_policy: capture.entity_label_policy,
                 raft_term: capture.raft_log.term,
                 raft_index: capture.raft_log.index,
                 cut: match capture.cut {
@@ -269,6 +271,7 @@ impl BackupManifest {
             domains.push(DomainCapture {
                 domain: manifest_domain(&capture.domain)?,
                 revision: capture.revision,
+                entity_label_policy: capture.entity_label_policy,
                 raft_log: RaftLogPosition {
                     term: capture.raft_term,
                     index: capture.raft_index,

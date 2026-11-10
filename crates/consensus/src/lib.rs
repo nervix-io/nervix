@@ -178,6 +178,8 @@ use domain_mutation::DomainMutationAdmission;
 #[cfg(any(test, feature = "testing"))]
 pub use storage_fault::{StorageBoundary, StorageFault, StoragePause};
 use transaction_report::TransactionReportRecords;
+mod entity_labels;
+pub use entity_labels::{EntityLabelReadError, EntityLabelTransactionSnapshot};
 mod wire;
 
 pub use transaction::{
@@ -724,6 +726,7 @@ impl AuthenticationInput {
 pub struct ConfigurationCapture {
     /// The log entry the capture reflects.
     pub applied: AppliedLogPosition,
+    pub parameters: Option<ClusterParameterRecord>,
     pub domains: BTreeMap<DomainName, DomainState>,
     /// Every domain's Models, as its schedule places them.
     pub schedule: ClusterSchedule,
@@ -3330,6 +3333,7 @@ impl Observer {
                 term: applied.leader_id.term,
                 index: applied.index,
             },
+            parameters: state.parameters,
             domains: (&state.domains).into(),
             schedule: (&state.schedule).into(),
             users: (&state.users).into(),
@@ -10115,6 +10119,7 @@ mod tests {
 
     fn vhost_schedule(raw: &str, tls_version: u64) -> DomainSchedule {
         let vhost = nervix_models::Model::Vhost(nervix_models::CreateVhost {
+            labels: Default::default(),
             name: nervix_models::VhostName::try_from("edge").expect("valid vhost name"),
             hostnames: vec!["edge.example.com".to_string()],
             tls: Some(nervix_models::VhostTlsResource {

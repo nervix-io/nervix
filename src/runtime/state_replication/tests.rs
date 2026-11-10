@@ -67,6 +67,7 @@ impl EmptyRelayHandoffFixture {
         let schema = SchemaName::from(&identifier);
         let schema_node = ScheduledNode::new(
             nervix_models::Model::Schema(CreateSchema {
+                labels: Default::default(),
                 name: schema.clone(),
                 fields: Vec::new(),
             }),
@@ -74,6 +75,7 @@ impl EmptyRelayHandoffFixture {
         );
         let relay = ScheduledNode::new(
             nervix_models::Model::Relay(CreateRelay {
+                labels: Default::default(),
                 name: RelayName::from(&identifier),
                 schema,
                 buffer: nonzero!(4usize),
@@ -507,6 +509,7 @@ async fn stopped_wasm_ownership_recovery_preserves_the_complete_checkpoint_inven
     runtime.sync_domains(&BTreeMap::from([(domain.clone(), state)]));
     let mut nodes = vec![ScheduledNode::new(
         nervix_models::Model::Schema(CreateSchema {
+            labels: Default::default(),
             name: named("counted_event"),
             fields: Vec::new(),
         }),
@@ -516,6 +519,7 @@ async fn stopped_wasm_ownership_recovery_preserves_the_complete_checkpoint_inven
         nodes.push(
             ScheduledNode::new(
                 nervix_models::Model::Relay(CreateRelay {
+                    labels: Default::default(),
                     name: named(name),
                     schema: named("counted_event"),
                     buffer: nonzero!(4usize),
@@ -665,6 +669,7 @@ async fn forced_recovery_completion_survives_runtime_restart_and_schedule_rebuil
     let schema = SchemaName::from(&identifier);
     let schema_node = ScheduledNode::new(
         nervix_models::Model::Schema(CreateSchema {
+            labels: Default::default(),
             name: schema.clone(),
             fields: vec![SchemaField {
                 name: named("order_id"),
@@ -677,6 +682,7 @@ async fn forced_recovery_completion_survives_runtime_restart_and_schedule_rebuil
     );
     let mut scheduled = ScheduledNode::new(
         nervix_models::Model::Relay(CreateRelay {
+            labels: Default::default(),
             name: RelayName::from(&identifier),
             schema,
             buffer: nonzero!(4usize),
@@ -756,6 +762,7 @@ async fn forced_recovery_completion_survives_runtime_restart_and_schedule_rebuil
         runtime.sync_domains(&BTreeMap::from([(domain.clone(), domain_state)]));
         let unrelated_schema = ScheduledNode::new(
             nervix_models::Model::Schema(CreateSchema {
+                labels: Default::default(),
                 name: named("unrelated_event"),
                 fields: vec![SchemaField {
                     name: named("event_id"),
@@ -834,6 +841,7 @@ async fn forced_recovery_recreates_state_only_for_a_complete_reset_decision() {
         .expect("current checkpoint should persist");
     let mut scheduled = ScheduledNode::new(
         nervix_models::Model::Relay(CreateRelay {
+            labels: Default::default(),
             name: RelayName::from(&identifier),
             schema: SchemaName::from(&identifier),
             buffer: nonzero!(4usize),
@@ -2453,6 +2461,7 @@ fn reinstalling_schema_fingerprints_never_exposes_a_node_without_one() {
         vec![
             ScheduledNode::new(
                 nervix_models::Model::Relay(nervix_models::CreateRelay {
+                    labels: Default::default(),
                     name: nervix_models::RelayName::from(&identifier.clone()),
                     schema: nervix_models::SchemaName::from(&identifier.clone()),
                     buffer: nonzero!(4usize),
@@ -2590,6 +2599,7 @@ fn graph_and_schedule_key_materialized_relay_state_alike() {
     let schema = named::<SchemaName>("event");
     let models = vec![
         nervix_models::Model::Schema(CreateSchema {
+            labels: Default::default(),
             name: schema.clone(),
             fields: vec![SchemaField {
                 name: named("seq"),
@@ -2599,6 +2609,7 @@ fn graph_and_schedule_key_materialized_relay_state_alike() {
             }],
         }),
         nervix_models::Model::Relay(CreateRelay {
+            labels: Default::default(),
             name: relay.clone(),
             schema,
             buffer: nonzero!(4usize),
@@ -2752,6 +2763,7 @@ fn a_schema_change_leaves_only_schema_bound_checkpoints_stale() {
 fn deduplicator_node(identifier: &ModelName, fingerprint: SchemaFingerprint) -> ScheduledNode {
     ScheduledNode::new(
         nervix_models::Model::Deduplicator(nervix_models::CreateDeduplicator {
+            labels: Default::default(),
             name: nervix_models::DeduplicatorName::from(identifier),
             from: nervix_models::ProcessorInputs::new(Vec::new(), Vec::new()),
             output_routes: nervix_models::ProcessorOutputs::new(Vec::new()),
@@ -2778,6 +2790,7 @@ fn unchanged_schema_fingerprint() -> SchemaFingerprint {
 fn wasm_processor_node() -> ScheduledNode {
     ScheduledNode::new(
         nervix_models::Model::WasmProcessor(nervix_models::CreateWasmProcessor {
+            labels: Default::default(),
             name: named("counting_guest"),
             from: nervix_models::ProcessorInputs::single(named("counted_input")),
             output_routes: nervix_models::ProcessorOutputs::single(named("counted_output")),

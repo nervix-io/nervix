@@ -64,6 +64,7 @@ pub(super) fn create<'src>()
         .then(target_schema())
         .then(encoding_rules())
         .map(|((declared, schema), encoding_rules)| CreateCodec {
+            labels: Default::default(),
             name: declared.name,
             wire_format: declared.wire_format,
             schema,

@@ -46,6 +46,11 @@ macro_rules! host_enum {
     };
 }
 
+host_enum! { EntityLabelViewKind from EntityLabelViewKind {
+    Committed = 1 as "COMMITTED",
+    Staged = 2 as "STAGED",
+} }
+
 host_enum! { InspectionRejection from InspectionRejection {
     UnknownEntity = 1 as "UNKNOWN_ENTITY",
     NotMaterialized = 2 as "NOT_MATERIALIZED",
@@ -381,6 +386,7 @@ impl From<Tls> for TlsRequirement {
 
 /// Adds every enumeration to the module.
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<EntityLabelViewKind>()?;
     module.add_class::<InspectionRejection>()?;
     module.add_class::<InspectionStage>()?;
     module.add_class::<InspectionUnitKind>()?;

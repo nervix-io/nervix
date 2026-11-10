@@ -352,7 +352,7 @@ transport offset conversion. The SDK's indexed authoring and typed-inspection vi
 empty JSON value arrays. These driver representations never enter semantic Models or plans.
 
 A NATS ingestor or emitter Model distinguishes `NATS SUBJECT` and `NATS STREAM` entities in its archived union.
-The registry's `NERVIX PAY HOPS ` archive signature identifies the current Model layout, including
+The registry's `NERVIX LABELS   ` archive signature identifies the current Model layout, including
 that union, the endpoint kind, the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
 encoding, a Pulsar subscription's required type and an owned subscription's required start position,
 a Kafka consumer group's required start position, the required 16-bit branch partition count,
@@ -367,8 +367,8 @@ expression scope.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
-Consensus's `raft_payload_identity_capability_tls_inference_reset_` keyspaces and current `ClusterState`
-metadata encoding, 22, identify its stored shapes, including the partition count of every resolved branch
+Consensus's `raft_entity_labels_` keyspaces and current `ClusterState`
+metadata encoding, 24, identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations and a `RESET WASM PROCESSOR ... STATE` that takes
 its domain from the transaction. The runtime state store's
@@ -805,6 +805,21 @@ and must be recreated. Complete equality properties exercise the production repr
 their range boundaries; see [Property Testing And Fuzzing](./property-testing-and-fuzzing.md).
 
 ## Parameter Authority and Installation
+
+Entity metadata uses one `EntityLabels` map. `LabelKey` validates its exact ASCII spelling at
+construction and JSON/archive decoding; map and removal-list construction reject duplicate
+authored keys before any overwrite. Values are exact UTF-8 strings, including empty values.
+Complete-set acceptance uses `EntityLabelLimits` projected from one captured committed parameter
+record. Registry publication, recovered committed configuration and wire inspection validate
+against that captured policy and their outer representation bounds. Compiled defaults never
+replace a missing policy or normalize invalid stored metadata.
+
+An `EntityLabelsInspection` carries the existing `DomainNodeRef`, complete map and captured
+policy. Its view is explicitly committed, with its applied revision, or staged, with a
+`TransactionPreviewIdentity`. The discriminant determines which identity is present; an absent
+committed revision is never inferred to be zero or to describe a staged candidate. Labels remain
+control-plane state and are excluded from execution identities. [Entity Labels](entity-labels.md)
+owns their product semantics.
 
 `ClusterParameterValues` holds validated class-typed settings with a single definition for each
 default and bound. `ClusterParameterRecord` pairs them with a positive revision. The state machine

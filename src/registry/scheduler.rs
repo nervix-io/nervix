@@ -1002,6 +1002,7 @@ mod tests {
                     ingestor("ing_b", "source_b", "event_codec", "broker_b"),
                     ingestor("ing_c", "source_c", "event_codec", "broker_c"),
                     Model::Junction(CreateJunction {
+                        labels: Default::default(),
                         name: named("join"),
                         from: ProcessorInputs::new(
                             vec![named("source_a"), named("source_b"), named("source_c")],
@@ -1661,6 +1662,7 @@ mod tests {
                     ),
                     relay("notifications", "event_schema"),
                     Model::Ingestor(CreateIngestor {
+                        labels: Default::default(),
                         name: IngestorName::parse("http_ing").expect("valid identifier"),
                         output_routes: unbranched_transforming_outputs("notifications"),
                         input: nervix_models::IngestorInput::Transport(
@@ -1768,6 +1770,7 @@ mod tests {
                     ),
                     relay("notifications", "event_schema"),
                     Model::Ingestor(CreateIngestor {
+                        labels: Default::default(),
                         name: IngestorName::parse("ws_ing").expect("valid identifier"),
                         output_routes: unbranched_transforming_outputs("notifications"),
                         input: nervix_models::IngestorInput::Transport(

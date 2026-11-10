@@ -2227,7 +2227,8 @@ impl SessionServiceImpl {
                 };
                 self.stop_domain(domain, stop).await
             }
-            Statement::Create(_)
+            Statement::MutateEntityLabels(_)
+            | Statement::Create(_)
             | Statement::AlterSchema(_)
             | Statement::AlterWireJsonSchema(_)
             | Statement::AlterWireCborSchema(_)
@@ -2375,6 +2376,12 @@ impl SessionServiceImpl {
                     .as_ref()
                     .verified("this statement requires a request domain, which was resolved above");
                 self.lookup_query(domain, query).await
+            }
+            Statement::ShowLabels(show) => {
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
+                self.show_entity_labels(domain, show, session).await
             }
             Statement::ShowCreate(show) => {
                 let domain = domain

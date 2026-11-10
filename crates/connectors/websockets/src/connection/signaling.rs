@@ -909,6 +909,7 @@ mod tests {
         on_connect: SignalingProtocolOnConnect,
     ) -> CreateSignalingProtocol {
         CreateSignalingProtocol {
+            labels: Default::default(),
             name: SignalingProtocolName::from(
                 &ModelName::parse("handshake").expect("valid identifier"),
             ),

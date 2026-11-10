@@ -2200,6 +2200,7 @@ mod tests {
             vec![
                 ScheduledNode::new(
                     nervix_models::Model::Schema(CreateSchema {
+                        labels: Default::default(),
                         name: schema.clone(),
                         fields: vec![SchemaField {
                             name: named("value"),
@@ -2211,6 +2212,7 @@ mod tests {
                     SchemaFingerprint::from_digest([1; 32]),
                 ),
                 scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                    labels: Default::default(),
                     name: relay.clone(),
                     schema,
                     buffer: nonzero!(2usize),
@@ -2260,6 +2262,7 @@ mod tests {
             domain.clone(),
             vec![
                 scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                    labels: Default::default(),
                     name: schema.clone(),
                     fields: vec![SchemaField {
                         name: named("user_id"),
@@ -2269,6 +2272,7 @@ mod tests {
                     }],
                 })),
                 scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                    labels: Default::default(),
                     name: relay.clone(),
                     schema,
                     buffer: nonzero!(2usize),
@@ -2334,6 +2338,7 @@ mod tests {
             },
         )]);
         let schema_node = scheduled_model(nervix_models::Model::Schema(CreateSchema {
+            labels: Default::default(),
             name: schema.clone(),
             fields: vec![SchemaField {
                 name: named("user_id"),
@@ -2352,6 +2357,7 @@ mod tests {
             vec![
                 schema_node,
                 scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                    labels: Default::default(),
                     name: relay.clone(),
                     schema,
                     buffer: nonzero!(2usize),
@@ -2444,6 +2450,7 @@ mod tests {
         let relay = named::<RelayName>("notifications");
         let domains = BTreeMap::from([(domain.clone(), unpaced_domain_state(domain.as_str()))]);
         let schema_node = scheduled_model(nervix_models::Model::Schema(CreateSchema {
+            labels: Default::default(),
             name: schema.clone(),
             fields: vec![SchemaField {
                 name: named("user_id"),
@@ -2462,6 +2469,7 @@ mod tests {
             vec![
                 schema_node,
                 scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                    labels: Default::default(),
                     name: relay.clone(),
                     schema,
                     buffer: nonzero!(2usize),
@@ -2519,6 +2527,7 @@ mod tests {
         let relay = named::<RelayName>("notifications");
         let domains = BTreeMap::from([(domain.clone(), unpaced_domain_state(domain.as_str()))]);
         let relay_node = scheduled_model(nervix_models::Model::Relay(CreateRelay {
+            labels: Default::default(),
             name: relay.clone(),
             schema: schema.clone(),
             buffer: nonzero!(2usize),
@@ -2534,6 +2543,7 @@ mod tests {
             domain.clone(),
             vec![
                 scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                    labels: Default::default(),
                     name: schema,
                     fields: vec![SchemaField {
                         name: named("user_id"),
@@ -2594,6 +2604,7 @@ mod tests {
         let order_schema = named::<SchemaName>("order_event");
         let order_relay = |name: &str| {
             scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                labels: Default::default(),
                 name: named(name),
                 schema: order_schema.clone(),
                 buffer: nonzero!(2usize),
@@ -2613,6 +2624,7 @@ mod tests {
             domain.clone(),
             vec![
                 scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                    labels: Default::default(),
                     name: order_schema.clone(),
                     fields: vec![SchemaField {
                         name: named("order_id"),
@@ -2627,6 +2639,7 @@ mod tests {
                 order_relay("right_orders"),
                 order_relay("joined_orders"),
                 scheduled_model(nervix_models::Model::Deduplicator(CreateDeduplicator {
+                    labels: Default::default(),
                     name: named("dedup_orders"),
                     from: ProcessorInputs::single(named("orders")),
                     output_routes: processor_routes("projected_orders"),
@@ -2638,6 +2651,7 @@ mod tests {
                     materialized_state: Vec::new(),
                 })),
                 scheduled_model(nervix_models::Model::Junction(CreateJunction {
+                    labels: Default::default(),
                     name: named("join_orders"),
                     from: ProcessorInputs::new(
                         vec![named("left_orders"), named("right_orders")],
@@ -2692,6 +2706,7 @@ mod tests {
             domain.clone(),
             vec![
                 scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                    labels: Default::default(),
                     name: event_schema.clone(),
                     fields: vec![SchemaField {
                         name: named("event_id"),
@@ -2701,6 +2716,7 @@ mod tests {
                     }],
                 })),
                 scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                    labels: Default::default(),
                     name: named("events"),
                     schema: event_schema.clone(),
                     buffer: nonzero!(2usize),
@@ -2708,6 +2724,7 @@ mod tests {
                     materialized_state: None,
                 })),
                 scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                    labels: Default::default(),
                     name: named("unique_events"),
                     schema: event_schema,
                     buffer: nonzero!(2usize),
@@ -2715,6 +2732,7 @@ mod tests {
                     materialized_state: None,
                 })),
                 scheduled_model(nervix_models::Model::Deduplicator(CreateDeduplicator {
+                    labels: Default::default(),
                     name: processor.clone(),
                     from: ProcessorInputs::single(named("events")),
                     output_routes: with_inherit_all(ProcessorOutputs::single(named(
@@ -2881,6 +2899,7 @@ mod tests {
             domain.clone(),
             vec![
                 scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                    labels: Default::default(),
                     name: event_schema.clone(),
                     fields: vec![SchemaField {
                         name: named("event_id"),
@@ -2890,6 +2909,7 @@ mod tests {
                     }],
                 })),
                 scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                    labels: Default::default(),
                     name: named("events"),
                     schema: event_schema.clone(),
                     buffer: nonzero!(2usize),
@@ -2897,6 +2917,7 @@ mod tests {
                     materialized_state: None,
                 })),
                 scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                    labels: Default::default(),
                     name: named("unique_events"),
                     schema: event_schema,
                     buffer: nonzero!(2usize),
@@ -2904,6 +2925,7 @@ mod tests {
                     materialized_state: None,
                 })),
                 scheduled_model(nervix_models::Model::Deduplicator(CreateDeduplicator {
+                    labels: Default::default(),
                     name: processor.clone(),
                     from: ProcessorInputs::single(named("events")),
                     output_routes: with_inherit_all(ProcessorOutputs::single(named(

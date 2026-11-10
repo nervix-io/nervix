@@ -507,6 +507,7 @@ mod tests {
 
     fn event_schema() -> CreateSchema {
         CreateSchema {
+            labels: Default::default(),
             name: named("event"),
             fields: vec![
                 SchemaField {
@@ -544,6 +545,7 @@ mod tests {
 
     fn event_wire<T>(seq: T, note: T) -> CreateWireSchema<T> {
         CreateWireSchema {
+            labels: Default::default(),
             name: named("event_wire"),
             strictness: Default::default(),
             fields: vec![
@@ -563,6 +565,7 @@ mod tests {
 
     fn avro_wire() -> CreateWireSchema<AvroType> {
         CreateWireSchema {
+            labels: Default::default(),
             name: named("event_avro"),
             strictness: Default::default(),
             fields: vec![
@@ -582,6 +585,7 @@ mod tests {
 
     fn codec_named(name: &str, wire_format: CodecWireFormat) -> CreateCodec {
         CreateCodec {
+            labels: Default::default(),
             name: named(name),
             wire_format,
             schema: named("event"),
@@ -680,7 +684,7 @@ mod tests {
             },
         );
         let wire = event_wire(JsonType::Integer, JsonType::String);
-        let codec = compile(&codec, ResolvedCodecWireFormat::Json(&wire), None);
+        let codec = compile(&codec, ResolvedCodecWireFormat::Json((&wire).into()), None);
 
         let payload = container(&codec).expect("the container should encode");
 
@@ -699,7 +703,7 @@ mod tests {
             },
         );
         let wire = event_wire(CborType::Integer, CborType::Text);
-        let codec = compile(&codec, ResolvedCodecWireFormat::Cbor(&wire), None);
+        let codec = compile(&codec, ResolvedCodecWireFormat::Cbor((&wire).into()), None);
 
         let payload = container(&codec).expect("the container should encode");
 
@@ -718,7 +722,7 @@ mod tests {
             },
         );
         let wire = avro_wire();
-        let codec = compile(&codec, ResolvedCodecWireFormat::Avro(&wire), None);
+        let codec = compile(&codec, ResolvedCodecWireFormat::Avro((&wire).into()), None);
 
         let payload = container(&codec).expect("the container should encode");
 
@@ -894,7 +898,7 @@ mod tests {
             },
         );
         let wire = event_wire(JsonType::Integer, JsonType::String);
-        let codec = compile(&codec, ResolvedCodecWireFormat::Json(&wire), None);
+        let codec = compile(&codec, ResolvedCodecWireFormat::Json((&wire).into()), None);
         let batch = events();
         let encoder = codec
             .batch_encoder(&batch)
@@ -1004,6 +1008,7 @@ mod tests {
     #[test]
     fn a_syslog_batch_is_one_frame_whose_message_is_the_members_messages() {
         let schema = CreateSchema {
+            labels: Default::default(),
             name: named("syslog_event"),
             fields: [
                 ("facility", ParseAsType::U8),
@@ -1022,6 +1027,7 @@ mod tests {
             .collect(),
         };
         let codec: CreateCodec = CreateCodec {
+            labels: Default::default(),
             name: named("syslog_codec"),
             wire_format: CodecWireFormat::Syslog,
             schema: named("syslog_event"),
@@ -1095,7 +1101,7 @@ mod tests {
             },
         );
         let wire = event_wire(JsonType::Integer, JsonType::String);
-        compile(&codec, ResolvedCodecWireFormat::Json(&wire), None)
+        compile(&codec, ResolvedCodecWireFormat::Json((&wire).into()), None)
     }
 
     fn cbor_event_codec() -> Arc<CompiledCodec> {
@@ -1106,7 +1112,7 @@ mod tests {
             },
         );
         let wire = event_wire(CborType::Integer, CborType::Text);
-        compile(&codec, ResolvedCodecWireFormat::Cbor(&wire), None)
+        compile(&codec, ResolvedCodecWireFormat::Cbor((&wire).into()), None)
     }
 
     fn avro_event_codec() -> Arc<CompiledCodec> {
@@ -1117,7 +1123,7 @@ mod tests {
             },
         );
         let wire = avro_wire();
-        compile(&codec, ResolvedCodecWireFormat::Avro(&wire), None)
+        compile(&codec, ResolvedCodecWireFormat::Avro((&wire).into()), None)
     }
 
     /// A container of the three events' members repeated to a count, beside the members' own

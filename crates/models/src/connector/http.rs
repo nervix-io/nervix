@@ -769,6 +769,7 @@ mod tests {
             });
         }
         CreateClientHttp {
+            labels: Default::default(),
             name: ClientName::parse("source").assured("a valid client name"),
             mount: None,
             config,

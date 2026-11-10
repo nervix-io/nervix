@@ -703,6 +703,7 @@ mod tests {
 
     fn json_codec() -> Arc<CompiledCodec> {
         let wire = CreateWireSchema {
+            labels: Default::default(),
             name: named("input_wire"),
             strictness: Default::default(),
             fields: vec![WireSchemaField {
@@ -712,6 +713,7 @@ mod tests {
             }],
         };
         let model = CreateCodec {
+            labels: Default::default(),
             name: named("input_codec"),
             wire_format: CodecWireFormat::Json {
                 wire_schema: wire.name.clone(),
@@ -719,8 +721,12 @@ mod tests {
             schema: named("emitter_input"),
             encoding_rules: Vec::new(),
         };
-        compile_codec(&model, input_schema(), ResolvedCodecWireFormat::Json(&wire))
-            .expect("the test codec and Arrow schema both define one required integer field")
+        compile_codec(
+            &model,
+            input_schema(),
+            ResolvedCodecWireFormat::Json((&wire).into()),
+        )
+        .expect("the test codec and Arrow schema both define one required integer field")
     }
 
     #[test]
@@ -1118,6 +1124,7 @@ mod tests {
             on_emitting_batch: None,
         };
         let model = CreateCodec {
+            labels: Default::default(),
             name: named("jaq_codec"),
             wire_format: CodecWireFormat::JaqNative {
                 format: CodecJaqFormat::Json,

@@ -404,7 +404,9 @@ licensed installation requires an administrative transfer to the rebuilt cluster
   the resource receives the number the source would have assigned next. See
   [Resource Versions](resource-versions.md#restored-versions).
 - **Models.** Every model of the domain, bound to exactly the resource versions it was bound to in
-  the source cluster. `SHOW CREATE` prints each restored model as it printed it in the source.
+  the source cluster, with its complete exact entity labels from the captured schedule revision.
+  `SHOW CREATE` prints each restored model as it printed it in the source. `WITHOUT STATE` retains
+  these labels; the target cluster's committed acceptance limits still apply to restore.
 
 A restore stages the archive's compatible branch lifecycle, WASM guest checkpoints, Kafka
 positions, materialized relay checkpoints, deduplicator keyspaces and windows on every newly
@@ -874,7 +876,7 @@ its format version, each a little-endian 16-bit integer. The rest is an
 
 | Kind | Tag | Format version | Holds |
 | --- | --- | --- | --- |
-| Manifest | 1 | 4 | Archive format major version, producer and Plexus releases, cluster id and source cluster UID, capture time, scope, whether resource bytes are included, each domain's revision, Raft log entry and cut kind, with a quiesced cut's engagement and release times and quiesce counters, and each section's path, content kind, length and BLAKE3 digest |
+| Manifest | 1 | 5 | Archive format major version, producer and Plexus releases, cluster id and source cluster UID, capture time, scope, whether resource bytes are included, each domain's revision, captured label policy, Raft log entry and cut kind, with a quiesced cut's engagement and release times and quiesce counters, and each section's path, content kind, length and BLAKE3 digest |
 | Users | 2 | 2 | Every user's name and typed PBKDF2-HMAC-SHA-512 credential: validated iterations, 128-bit salt and 64-byte digest |
 | Domain | 3 | 2 | Pace, lifecycle status, start count, the point the latest start began from, the committed clock mapping, the logical instant the clock had reached, and each declared resource with its next version number |
 | Resource version | 4 | 1 | The version's domain, resource and number, its upload state, and for a published version its checksums, file count, sizes, creation time and creating node |
@@ -887,7 +889,7 @@ its format version, each a little-endian 16-bit integer. The rest is an
 | Window state descriptor | 11 | 4 | Domain and window processor names, scheduled unit, schema fingerprint, window model digest, branch fingerprint and typed branch fields, revision, branch incarnation, first and next admission sequence, each retained row's low/high ingestion watermarks, group count, and each aggregate's structure: rebuilt from the retained rows, or a linear histogram with its delayed removals as expiry time and bucket |
 | Inferencer state descriptor | 12 | 1 | Domain and inferencer names, scheduled unit, schema and pinned model fingerprints, typed branch key and fingerprint, nonzero branch incarnation, revision, ordered shapes and the exact raw section byte length and BLAKE3 digest |
 
-The archive format major version is `8`. An archive with another major version fails before any
+The archive format major version is `9`. An archive with another major version fails before any
 state section can be skipped or installed; capture a new archive in the current instance-unit format. A reader refuses invalid record magic, an unsupported
 manifest or required configuration record, an unknown record kind in the manifest, a first entry
 other than the manifest, and any section whose place, length or digest differs from what the

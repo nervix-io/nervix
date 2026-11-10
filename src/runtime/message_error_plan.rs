@@ -157,6 +157,7 @@ mod tests {
             },
             program: lowered_set(Vec::new()),
             output_schema: Arc::new(compile_schema(&CreateSchema {
+                labels: Default::default(),
                 name: named::<SchemaName>("error_record"),
                 fields: Vec::new(),
             })),

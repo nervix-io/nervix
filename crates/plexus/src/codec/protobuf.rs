@@ -54,6 +54,7 @@ pub(super) fn create<'src>()
                 ),
                 encoding_rules,
             )| CreateCodec {
+                labels: Default::default(),
                 name,
                 wire_format: CodecWireFormat::Protobuf(CodecProtobufConfig {
                     resource,

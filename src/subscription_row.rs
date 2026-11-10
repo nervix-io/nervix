@@ -851,6 +851,7 @@ mod tests {
 
     fn payload_schema() -> CreateSchema {
         CreateSchema {
+            labels: Default::default(),
             name: named("events"),
             fields: vec![
                 field("sequence", ParseAsType::I64, false, false),
@@ -872,6 +873,7 @@ mod tests {
 
     fn branch_schema() -> CreateSchema {
         CreateSchema {
+            labels: Default::default(),
             name: named("tenant_key"),
             fields: vec![
                 field("tenant", ParseAsType::String, false, false),
@@ -1208,6 +1210,7 @@ mod tests {
     fn every_arrow_value_kind_keeps_its_exact_wire_type() {
         let fixed_length = NonZeroU32::new(2).assured("the fixed-list length is nonzero");
         let schema = CreateSchema {
+            labels: Default::default(),
             name: named("all_types"),
             fields: vec![
                 field("u8_value", ParseAsType::U8, false, false),
@@ -1338,6 +1341,7 @@ mod tests {
     #[test]
     fn selected_rows_batch_to_the_explicit_row_limit() {
         let schema = CreateSchema {
+            labels: Default::default(),
             name: named("events"),
             fields: vec![field("sequence", ParseAsType::I64, false, false)],
         };
@@ -1379,6 +1383,7 @@ mod tests {
     #[test]
     fn encoded_rows_split_before_the_session_byte_limit() {
         let schema = CreateSchema {
+            labels: Default::default(),
             name: named("events"),
             fields: vec![field("detail", ParseAsType::String, false, false)],
         };
@@ -1420,10 +1425,12 @@ mod tests {
     #[test]
     fn interleaved_branches_keep_their_typed_identity_and_order() {
         let payload = CreateSchema {
+            labels: Default::default(),
             name: named("events"),
             fields: vec![field("sequence", ParseAsType::I64, false, false)],
         };
         let branch = CreateSchema {
+            labels: Default::default(),
             name: named("tenant_key"),
             fields: vec![field("tenant", ParseAsType::String, false, false)],
         };

@@ -367,6 +367,13 @@ test-scenarios *args: tests-deps test-client-python-api-run
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
 
+# Exercise domain entity metadata through the public command path.
+test-entity-labels *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input "{{ justfile_directory() }}/tests/features/runtime/entity_labels.feature" {{ quote(args) }}
+
 # Exercise transport payload facts without unrelated paced client-driver preparation.
 test-ingestor-payload *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash

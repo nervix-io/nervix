@@ -1,3 +1,15 @@
+//! Semantic domain entity configuration and alterations.
+//!
+//! Layer: vocabulary.
+//! - **Owns.** Typed entity declarations and their network-free local invariants.
+//! - **Depends on.** Vocabulary names, metadata and serialization.
+//! - **Must not know.** Parsing, registry state or runtime execution.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns entity configuration vocabulary")
+)]
+
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, EnumString, IntoStaticStr};
@@ -48,6 +60,7 @@ pub struct UdfReturn {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct CreateUdf {
+    pub labels: crate::EntityLabels,
     pub name: UdfName,
     pub language: UdfLanguage,
     pub arguments: Vec<UdfArgument>,
@@ -70,6 +83,7 @@ impl CreateUdf {
     ) -> Self {
         let code_hash = blake3::hash(code.as_bytes()).to_hex().to_string();
         Self {
+            labels: crate::EntityLabels::default(),
             name,
             language,
             arguments,

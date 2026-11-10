@@ -340,6 +340,7 @@ pub struct CommandOutcome {
     pub inspection: Option<Box<TransactionInspection>>,
     /// The typed state read by a WASM processor description.
     pub wasm_state: Option<Box<nervix_models::WasmStateInspection>>,
+    pub entity_labels: Option<Box<nervix_models::EntityLabelsInspection>>,
     /// A bounded typed read of runtime state.
     pub state: Option<Box<crate::StateInspection>>,
     /// The versions, entries and bindings read by a description of every version of a resource,
@@ -410,6 +411,11 @@ impl CommandOutcome {
             }
             None => None,
         };
+        let entity_labels = self
+            .entity_labels
+            .as_deref()
+            .map(|labels| crate::entity_labels::encode_entity_labels(labels, encoder))
+            .transpose()?;
         let state = self
             .state
             .as_ref()
@@ -441,6 +447,7 @@ impl CommandOutcome {
                 transaction_admission,
                 inspection,
                 wasm_state,
+                entity_labels,
                 state,
                 resource,
                 backup,
@@ -510,6 +517,10 @@ impl CommandOutcome {
             }
             None => None,
         };
+        let entity_labels = outcome
+            .entity_labels()
+            .map(|labels| crate::entity_labels::decode_entity_labels(decoder, labels).map(Box::new))
+            .transpose()?;
         let state = outcome
             .state()
             .map(|state| {
@@ -539,6 +550,7 @@ impl CommandOutcome {
             transaction_admission,
             inspection,
             wasm_state,
+            entity_labels,
             state,
             resource,
             backup,

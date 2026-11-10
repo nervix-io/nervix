@@ -81,35 +81,38 @@ fn placement_rank<'src>()
 pub fn create_placement_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreatePlacement>, extra::Err<ParseError<'src>>>
 + Clone {
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then_ignore(kw(Identifier::Placement))
-        .then(placement_name())
-        .then(choice((
-            kw_phrase2(Identifier::Domain, Identifier::Wide).to(PlacementScope::DomainWide),
-            kw(Identifier::From)
-                .ignore_then(placement_members())
-                .then_ignore(kw(Identifier::To))
-                .then(placement_members())
-                .map(|(from, to)| PlacementScope::Corridor { from, to }),
-        )))
-        .then(placement_policy_parser())
-        .then(placement_rank().or_not())
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .try_map(|((((if_not_exists, name), scope), policy), rank), span| {
-            let mapping_input = match scope {
-                PlacementScope::Corridor { from, to } => {
-                    CreatePlacement::new(name, from, to, policy, rank)
+    crate::labels::finish_creation({
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then_ignore(kw(Identifier::Placement))
+            .then(placement_name())
+            .then(choice((
+                kw_phrase2(Identifier::Domain, Identifier::Wide).to(PlacementScope::DomainWide),
+                kw(Identifier::From)
+                    .ignore_then(placement_members())
+                    .then_ignore(kw(Identifier::To))
+                    .then(placement_members())
+                    .map(|(from, to)| PlacementScope::Corridor { from, to }),
+            )))
+            .then(placement_policy_parser())
+            .then(placement_rank().or_not())
+            .try_map(|((((if_not_exists, name), scope), policy), rank), span| {
+                let mapping_input = match scope {
+                    PlacementScope::Corridor { from, to } => {
+                        CreatePlacement::new(name, from, to, policy, rank)
+                    }
+                    PlacementScope::DomainWide => {
+                        Ok(CreatePlacement::domain_wide(name, policy, rank))
+                    }
                 }
-                PlacementScope::DomainWide => Ok(CreatePlacement::domain_wide(name, policy, rank)),
-            }
-            .map(|placement| CreateStatement::new(placement, if_not_exists));
-            match mapping_input {
-                Ok(mapped_value) => Ok(mapped_value),
-                Err(error) => Err(Rich::custom(span, error.to_string())),
-            }
-        })
-        .boxed()
+                .map(|placement| CreateStatement::new(placement, if_not_exists));
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(error) => Err(Rich::custom(span, error.to_string())),
+                }
+            })
+            .boxed()
+    })
 }
 
 pub fn alter_placement_parser<'src>()
@@ -332,10 +335,13 @@ mod tests {
             "CREATE PLACEMENT rule DOMAIN WIDE NEUTRAL ",
             "CREATE PLACEMENT rule FROM a TO b NEUTRAL ",
         ] {
-            assert_eq!(suggest_statement(input, input.len()), [";", "RANK"]);
+            assert_eq!(
+                suggest_statement(input, input.len()),
+                [";", "LABELS", "RANK"]
+            );
             assert_eq!(
                 crate::client_statement::suggest_client_statement(input, input.len()),
-                [";", "RANK"]
+                [";", "LABELS", "RANK"]
             );
         }
     }

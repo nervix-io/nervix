@@ -148,7 +148,7 @@ fn observed_frame(
             body: Some(observed.as_union_value()),
         },
     );
-    finish_raw(builder, root, "NXSM")
+    finish_raw(builder, root, "NXEL")
 }
 
 fn paced_frame(period_nanos: u64, time_rate: Option<f64>) -> bytes::Bytes {
@@ -256,7 +256,7 @@ fn an_attachment_end_needs_a_declared_reason() {
                 body: Some(ended.as_union_value()),
             },
         );
-        let frame = raw_server(finish_raw(builder, root, "NXSM"));
+        let frame = raw_server(finish_raw(builder, root, "NXEL"));
         assert_eq!(decode_error(ServerMessage::decode(&frame)), expected);
     }
 }

@@ -440,6 +440,12 @@ impl<'a> Values<'a> {
                 next_version: NonZeroU64::new(4).assured("four is positive"),
             }];
             let capture = DomainCapture {
+                entity_label_policy: nervix_models::EntityLabelPolicy {
+                    revision: std::num::NonZeroU64::MIN,
+                    limits: nervix_models::EntityLabelLimits::from(
+                        &nervix_models::ClusterParameterValues::default(),
+                    ),
+                },
                 domain: domain.clone(),
                 revision: self.0.entropy().any_u64(),
                 raft_log: RaftLogPosition {

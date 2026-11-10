@@ -55,7 +55,7 @@ struct CompiledCborWireField {
 }
 
 impl CompiledCborWireSchema {
-    pub(super) fn compile(schema: &CreateWireSchema<CborType>) -> Self {
+    pub(super) fn compile(schema: nervix_models::WireSchemaRef<'_, CborType>) -> Self {
         Self {
             strictness: schema.strictness,
             fields: schema

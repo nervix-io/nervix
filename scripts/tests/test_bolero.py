@@ -143,6 +143,10 @@ class InventoryTests(unittest.TestCase):
     def test_inventory_has_current_targets_and_exact_corpus_paths(self) -> None:
         inventory = bolero.load_inventory()
         self.assertEqual({target.id for target in inventory.targets}, {
+            "client-wire-entity-labels",
+            "entity-label-decoding",
+            "entity-label-maps",
+            "entity-label-mutations",
             "cluster-identity-record-rkyv",
             "licensing-protocol-json-roundtrip",
             "licensing-conditions-resolution",
@@ -543,32 +547,36 @@ class InventoryTests(unittest.TestCase):
             target.id: target.domain_version for target in bolero.load_inventory().targets
         }
         for target, version in {
+            "client-wire-entity-labels": 1,
+            "entity-label-decoding": 1,
+            "entity-label-maps": 1,
+            "entity-label-mutations": 1,
             "benchmark-metrics-report": 1,
             "node-settings-command-line": 8,
             "ingestor-describe-envelope": 11,
-            "plexus-model": 60,
-            "plexus-archive-model": 63,
-            "plexus-statement": 64,
-            "plexus-statement-text": 63,
-            "plexus-format-document": 63,
-            "plexus-format-text": 62,
-            "models-archived-models": 63,
-            "registry-archived-models": 55,
-            "consensus-state-records": 58,
-            "consensus-state-corruption": 58,
-            "consensus-raft-records": 57,
-            "registry-stored-models": 48,
-            "registry-stored-models-corruption": 48,
+            "plexus-model": 61,
+            "plexus-archive-model": 64,
+            "plexus-statement": 65,
+            "plexus-statement-text": 64,
+            "plexus-format-document": 64,
+            "plexus-format-text": 63,
+            "models-archived-models": 64,
+            "registry-archived-models": 56,
+            "consensus-state-records": 59,
+            "consensus-state-corruption": 59,
+            "consensus-raft-records": 58,
+            "registry-stored-models": 49,
+            "registry-stored-models-corruption": 49,
             "cluster-identity-record-rkyv": 1,
             "node-capability-records": 2,
             "inferencer-tensor-columns": 1,
             "inferencer-state-snapshots": 1,
             "backup-inferencer-values": 2,
             "backup-inferencer-malformed": 2,
-            "backup-record-manifest": 17,
-            "backup-complete-archives": 17,
-            "backup-malformed-records": 17,
-            "backup-corrupt-archives": 18,
+            "backup-record-manifest": 18,
+            "backup-complete-archives": 18,
+            "backup-malformed-records": 18,
+            "backup-corrupt-archives": 19,
             "backup-capture-wire": 3,
             "backup-capture-wire-malformed": 3,
             "backup-section-mapping": 4,
@@ -584,7 +592,7 @@ class InventoryTests(unittest.TestCase):
 
     def test_state_inspection_representations_are_bounded_pairs(self) -> None:
         targets = {target.id: target for target in bolero.load_inventory().targets}
-        for name, version in (("client-state-inspection", 5), ("state-inspection-cursor", 7)):
+        for name, version in (("client-state-inspection", 6), ("state-inspection-cursor", 7)):
             with self.subTest(target=name):
                 self.assertEqual(targets[name].domain_version, version)
                 self.assertEqual(targets[name].max_input_bytes, 512)

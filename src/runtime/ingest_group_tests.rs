@@ -43,6 +43,7 @@ use crate::{
 /// The one-field schema the ingest-group decode tests below decode into.
 fn grouped_event_schema() -> Arc<CompiledSchema> {
     Arc::new(compile_schema(&CreateSchema {
+        labels: Default::default(),
         name: named("grouped_event"),
         fields: vec![SchemaField {
             name: named("user_id"),
@@ -58,6 +59,7 @@ fn grouped_event_codec() -> Arc<CompiledCodec> {
     let schema = grouped_event_schema();
     compile_codec(
         &CreateCodec {
+            labels: Default::default(),
             name: named("grouped_event_codec"),
             wire_format: CodecWireFormat::Json {
                 wire_schema: named("grouped_event_wire"),
@@ -66,15 +68,19 @@ fn grouped_event_codec() -> Arc<CompiledCodec> {
             encoding_rules: Vec::new(),
         },
         schema,
-        ResolvedCodecWireFormat::Json(&CreateWireSchema {
-            name: named("grouped_event_wire"),
-            strictness: Default::default(),
-            fields: vec![WireSchemaField {
-                name: named("user_id"),
-                ty: JsonType::Integer,
-                optional: false,
-            }],
-        }),
+        ResolvedCodecWireFormat::Json(
+            (&CreateWireSchema {
+                labels: Default::default(),
+                name: named("grouped_event_wire"),
+                strictness: Default::default(),
+                fields: vec![WireSchemaField {
+                    name: named("user_id"),
+                    ty: JsonType::Integer,
+                    optional: false,
+                }],
+            })
+                .into(),
+        ),
     )
     .expect("the grouped event codec should compile")
 }
@@ -88,6 +94,7 @@ fn unfolding_event_codec(program: &str) -> Arc<CompiledCodec> {
     };
     compile_codec(
         &CreateCodec {
+            labels: Default::default(),
             name: named("unfolding_event_codec"),
             wire_format: CodecWireFormat::JaqNative {
                 format: CodecJaqFormat::Json,

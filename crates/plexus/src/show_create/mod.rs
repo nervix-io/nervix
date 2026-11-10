@@ -225,7 +225,9 @@ mod tests {
         let suggestions = suggest_show_create(input, input.len());
         assert!(suggestions.contains(&"SCHEMA".to_string()));
         assert!(suggestions.contains(&"BRANCH".to_string()));
-        assert!(suggestions.contains(&"WIRE".to_string()));
+        for phrase in ["WIRE JSON SCHEMA", "WIRE CBOR SCHEMA", "WIRE AVRO SCHEMA"] {
+            assert!(suggestions.contains(&phrase.to_string()), "{suggestions:?}");
+        }
         assert!(suggestions.contains(&"CODEC".to_string()));
         assert!(suggestions.contains(&"CLIENT".to_string()));
         assert!(suggestions.contains(&"VHOST".to_string()));

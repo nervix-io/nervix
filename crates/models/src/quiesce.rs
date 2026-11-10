@@ -201,6 +201,7 @@ macro_rules! declare_model_change_aspects {
 }
 
 declare_model_change_aspects! {
+    EntityLabels => Dynamic, None, true;
     RelayCapacity => Dynamic, None, false;
     RelaySchema => DomainPause, None, false;
     RelayBranching => DomainPause, None, false;
@@ -356,6 +357,17 @@ impl ModelChangeAspects {
 
 impl Model {
     pub fn change_aspects_against(&self, candidate: &Self) -> ModelChangeAspects {
+        let base_configuration = self.execution_configuration();
+        let candidate_configuration = candidate.execution_configuration();
+        let mut changes =
+            base_configuration.configuration_change_aspects_against(&candidate_configuration);
+        if self.labels() != candidate.labels() {
+            changes.aspects.push(ModelChangeAspect::EntityLabels);
+        }
+        changes
+    }
+
+    fn configuration_change_aspects_against(&self, candidate: &Self) -> ModelChangeAspects {
         if self == candidate {
             return ModelChangeAspects::default();
         }
@@ -395,10 +407,12 @@ impl Model {
             }
             (Self::Schema(base), Self::Schema(candidate)) => {
                 let CreateSchema {
+                    labels: _,
                     name: base_name,
                     fields: base_fields,
                 } = base;
                 let CreateSchema {
+                    labels: _,
                     name: candidate_name,
                     fields: candidate_fields,
                 } = candidate;
@@ -486,6 +500,7 @@ fn reingestor_change_aspects(
     candidate: &CreateReingestor,
 ) -> ModelChangeAspects {
     let CreateReingestor {
+        labels: _,
         name: base_name,
         from: base_from,
         output_routes: base_outputs,
@@ -494,6 +509,7 @@ fn reingestor_change_aspects(
         filter_where: base_filter,
     } = base;
     let CreateReingestor {
+        labels: _,
         name: candidate_name,
         from: candidate_from,
         output_routes: candidate_outputs,
@@ -530,6 +546,7 @@ fn generator_change_aspects(
     candidate: &CreateGenerator,
 ) -> ModelChangeAspects {
     let CreateGenerator {
+        labels: _,
         name: base_name,
         materialized_relay: base_materialized_relay,
         branched_by: base_branching,
@@ -537,6 +554,7 @@ fn generator_change_aspects(
         output_routes: base_outputs,
     } = base;
     let CreateGenerator {
+        labels: _,
         name: candidate_name,
         materialized_relay: candidate_materialized_relay,
         branched_by: candidate_branching,
@@ -569,6 +587,7 @@ fn ingestor_change_aspects(
     candidate: &CreateIngestor,
 ) -> ModelChangeAspects {
     let CreateIngestor {
+        labels: _,
         name: base_name,
         output_routes: base_output_routes,
         input: base_input,
@@ -577,6 +596,7 @@ fn ingestor_change_aspects(
         filter_where: base_filter,
     } = base;
     let CreateIngestor {
+        labels: _,
         name: candidate_name,
         output_routes: candidate_output_routes,
         input: candidate_input,
@@ -622,6 +642,7 @@ fn ingestor_change_aspects(
 
 fn relay_change_aspects(base: &CreateRelay, candidate: &CreateRelay) -> ModelChangeAspects {
     let CreateRelay {
+        labels: _,
         name: base_name,
         schema: base_schema,
         buffer: base_buffer,
@@ -629,6 +650,7 @@ fn relay_change_aspects(base: &CreateRelay, candidate: &CreateRelay) -> ModelCha
         materialized_state: base_materialized_state,
     } = base;
     let CreateRelay {
+        labels: _,
         name: candidate_name,
         schema: candidate_schema,
         buffer: candidate_buffer,
@@ -667,6 +689,7 @@ fn junction_change_aspects(
     candidate: &CreateJunction,
 ) -> ModelChangeAspects {
     let CreateJunction {
+        labels: _,
         name: base_name,
         from: base_from,
         output_routes: base_outputs,
@@ -676,6 +699,7 @@ fn junction_change_aspects(
         materialized_state: base_materialized_state,
     } = base;
     let CreateJunction {
+        labels: _,
         name: candidate_name,
         from: candidate_from,
         output_routes: candidate_outputs,
@@ -725,6 +749,7 @@ fn deduplicator_change_aspects(
     candidate: &CreateDeduplicator,
 ) -> ModelChangeAspects {
     let CreateDeduplicator {
+        labels: _,
         name: base_name,
         from: base_from,
         output_routes: base_outputs,
@@ -736,6 +761,7 @@ fn deduplicator_change_aspects(
         materialized_state: base_materialized_state,
     } = base;
     let CreateDeduplicator {
+        labels: _,
         name: candidate_name,
         from: candidate_from,
         output_routes: candidate_outputs,
@@ -794,6 +820,7 @@ fn reorderer_change_aspects(
     candidate: &CreateReorderer,
 ) -> ModelChangeAspects {
     let CreateReorderer {
+        labels: _,
         name: base_name,
         from: base_from,
         output_routes: base_outputs,
@@ -805,6 +832,7 @@ fn reorderer_change_aspects(
         materialized_state: base_materialized_state,
     } = base;
     let CreateReorderer {
+        labels: _,
         name: candidate_name,
         from: candidate_from,
         output_routes: candidate_outputs,
@@ -1302,6 +1330,7 @@ fn message_error_targets(routes: &[ProcessorOutput]) -> Vec<&RelayName> {
 
 fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> ModelChangeAspects {
     let CreateEmitter {
+        labels: _,
         name: base_name,
         from: base_from,
         body: base_body,
@@ -1315,6 +1344,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
         materialized_state: base_materialized_state,
     } = base;
     let CreateEmitter {
+        labels: _,
         name: candidate_name,
         from: candidate_from,
         body: candidate_body,
@@ -1424,6 +1454,7 @@ mod tests {
 
     fn relay() -> CreateRelay {
         CreateRelay {
+            labels: Default::default(),
             name: named("events"),
             schema: named("event"),
             buffer: nonzero!(1usize),
@@ -1434,6 +1465,7 @@ mod tests {
 
     fn junction() -> CreateJunction {
         CreateJunction {
+            labels: Default::default(),
             name: named("merge"),
             from: ProcessorInputs::single(named("input")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
@@ -1452,6 +1484,7 @@ mod tests {
 
     fn deduplicator() -> CreateDeduplicator {
         CreateDeduplicator {
+            labels: Default::default(),
             name: named("dedup"),
             from: ProcessorInputs::single(named("input")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
@@ -1472,6 +1505,7 @@ mod tests {
 
     fn reorderer() -> CreateReorderer {
         CreateReorderer {
+            labels: Default::default(),
             name: named("order"),
             from: ProcessorInputs::single(named("input")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
@@ -1492,6 +1526,7 @@ mod tests {
 
     fn emitter() -> CreateEmitter {
         CreateEmitter {
+            labels: Default::default(),
             name: named("emit"),
             from: ProcessorInputs::single(named("events")),
             body: EmitterBody::Codec {
@@ -1523,6 +1558,7 @@ mod tests {
 
     fn reingestor() -> CreateReingestor {
         CreateReingestor {
+            labels: Default::default(),
             name: named("repartition"),
             from: ProcessorInputs::single(named("input")),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
@@ -1540,6 +1576,7 @@ mod tests {
 
     fn generator() -> CreateGenerator {
         CreateGenerator {
+            labels: Default::default(),
             name: named("synth"),
             materialized_relay: named("state"),
             branched_by: BranchSelection::unbranched(),
@@ -1558,6 +1595,7 @@ mod tests {
 
     fn ingestor() -> CreateIngestor {
         CreateIngestor {
+            labels: Default::default(),
             name: named("ingest"),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
                 named("events"),
@@ -2274,6 +2312,7 @@ mod catch_all_kind_tests {
 
     fn correlator() -> CreateCorrelator {
         CreateCorrelator {
+            labels: Default::default(),
             name: named("correlate"),
             left: ProcessorInputs::single(named("left_input")),
             right: ProcessorInputs::single(named("right_input")),
@@ -2294,6 +2333,7 @@ mod catch_all_kind_tests {
 
     fn codec() -> CreateCodec {
         CreateCodec {
+            labels: Default::default(),
             name: named("event_codec"),
             wire_format: CodecWireFormat::Json {
                 wire_schema: named("event_wire"),
@@ -2338,6 +2378,7 @@ mod catch_all_kind_tests {
     #[test]
     fn window_bound_changes_pause_only_the_entity() {
         let base = CreateWindowProcessor {
+            labels: Default::default(),
             name: named("window"),
             from: ProcessorInputs::single(named("input")),
             output_routes: outputs(),
@@ -2371,6 +2412,7 @@ mod catch_all_kind_tests {
     #[test]
     fn wasm_binding_changes_pause_only_the_entity() {
         let base = CreateWasmProcessor {
+            labels: Default::default(),
             name: named("guest"),
             from: ProcessorInputs::single(named("input")),
             output_routes: outputs(),
@@ -2401,6 +2443,7 @@ mod catch_all_kind_tests {
     #[test]
     fn wasm_limit_changes_pause_only_the_entity_without_purging_guest_state() {
         let base = CreateWasmProcessor {
+            labels: Default::default(),
             name: named("guest"),
             from: ProcessorInputs::single(named("input")),
             output_routes: outputs(),
@@ -2432,6 +2475,7 @@ mod catch_all_kind_tests {
     #[test]
     fn inferencer_binding_changes_pause_only_the_entity() {
         let base = CreateInferencer {
+            labels: Default::default(),
             name: named("score"),
             from: ProcessorInputs::single(named("input")),
             output_routes: outputs(),
@@ -2469,6 +2513,7 @@ mod catch_all_kind_tests {
         );
 
         let base_vhost = CreateVhost {
+            labels: Default::default(),
             name: named("edge"),
             hostnames: vec!["edge.example.com".to_string()],
             tls: None,
@@ -2495,6 +2540,7 @@ mod catch_all_kind_tests {
         );
 
         let base_branch = CreateBranch {
+            labels: Default::default(),
             name: named("by_tenant"),
             schema: named("tenant_branch"),
             ttl: "5m".to_string(),
@@ -2523,6 +2569,7 @@ mod catch_all_kind_tests {
     #[test]
     fn a_tls_version_change_refreshes_the_https_listener_without_a_pause() {
         let base = CreateVhost {
+            labels: Default::default(),
             name: named("edge"),
             hostnames: vec!["edge.example.com".to_string()],
             tls: Some(VhostTlsResource {

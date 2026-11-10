@@ -401,7 +401,7 @@ impl SessionServiceImpl {
         planned: &crate::registry::PlannedMutations,
         client_admission: QueueAdmission,
     ) -> error_stack::Result<(), ModelBindingValidationError> {
-        for model in planned.changed_models() {
+        for model in planned.execution_changed_models() {
             nervix_primitives::task::consume_budget().await;
             if let Some(client) = model.configured_client() {
                 self.validate_client_configuration(domain, client, client_admission)
@@ -477,7 +477,7 @@ impl SessionServiceImpl {
     ) -> error_stack::Result<Option<crate::runtime::CompiledDomainUdfs>, ModelBindingValidationError>
     {
         let changed_udfs = planned
-            .changed_models()
+            .execution_changed_models()
             .into_iter()
             .filter_map(|model| match model {
                 Model::Udf(udf) => Some(udf.name.clone()),
@@ -1528,6 +1528,7 @@ mod tests {
 
     fn inferencer() -> CreateInferencer {
         CreateInferencer {
+            labels: Default::default(),
             name: named("scoring"),
             from: ProcessorInputs::new(Vec::new(), Vec::new()),
             output_routes: ProcessorOutputs::new(Vec::new()),

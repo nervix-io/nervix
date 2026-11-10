@@ -17,10 +17,10 @@
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,
-    DomainClockAuthority, DomainConfig, DomainName, DomainNodeRef, DomainPace, DomainStartPoint,
-    DomainState, DomainStatus, EmitterName, ErrorPolicies, FieldName, ModelKind, ParseAsType,
-    ResolvedCodecWireFormat, SchemaName, Timestamp,
+    CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec, DomainClockAuthority,
+    DomainConfig, DomainName, DomainNodeRef, DomainPace, DomainStartPoint, DomainState,
+    DomainStatus, EmitterName, ErrorPolicies, FieldName, ModelKind, ParseAsType,
+    ResolvedCodecWireFormat, SchemaDefinition, SchemaName, Timestamp,
 };
 
 use super::{
@@ -63,13 +63,16 @@ fn benchmark_schema() -> nervix_primitives::sync::Arc<CompiledSchema> {
         optional: false,
         sensitive: false,
     };
-    nervix_primitives::sync::Arc::new(compile_schema(&CreateSchema {
-        name: identifier::<SchemaName>("admitted_work_benchmark"),
-        fields: vec![
-            field("tenant", ParseAsType::String),
-            field("value", ParseAsType::I64),
-        ],
-    }))
+    nervix_primitives::sync::Arc::new(compile_schema(
+        SchemaDefinition {
+            name: identifier::<SchemaName>("admitted_work_benchmark"),
+            fields: vec![
+                field("tenant", ParseAsType::String),
+                field("value", ParseAsType::I64),
+            ],
+        }
+        .as_ref(),
+    ))
 }
 
 /// `rows` rows spread evenly over `branches` tenants, one relay batch per tenant, in tenant order.
@@ -185,6 +188,7 @@ impl TransformedEncodingBenchmark {
         };
         let codec = compile_codec(
             &CreateCodec {
+                labels: Default::default(),
                 name: identifier("admitted_work_codec"),
                 wire_format: CodecWireFormat::JaqNative {
                     format: CodecJaqFormat::Json,

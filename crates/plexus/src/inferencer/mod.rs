@@ -161,65 +161,67 @@ pub fn create_inferencer_parser<'src>() -> impl Parser<
     CreateStatement<CreateInferencer<RequestedResourceVersion>>,
     extra::Err<ParseError<'src>>,
 > + Clone {
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then_ignore(kw(Identifier::Inferencer))
-        .then(inferencer_name())
-        .then_ignore(kw(Identifier::From))
-        .then(from_relay_clauses())
-        .then(ack_mode().or_not())
-        .then(filter_where_clause().or_not())
-        .boxed()
-        .then_ignore(kw(Identifier::Using))
-        .then_ignore(kw(Identifier::Resource))
-        .then(resource_ref())
-        .then(resource_version_clause())
-        .then_ignore(kw(Identifier::File))
-        .then(string_lit())
-        .boxed()
-        .then(input_mappings())
-        .then(state_bindings().or_not())
-        .then(output_schema())
-        .then(branch_selection())
-        .then(materialized_state_dependencies())
-        .boxed()
-        .then(flushed_processor_outputs())
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .map(|value| {
-            let (
-                (
+    crate::labels::finish_creation({
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then_ignore(kw(Identifier::Inferencer))
+            .then(inferencer_name())
+            .then_ignore(kw(Identifier::From))
+            .then(from_relay_clauses())
+            .then(ack_mode().or_not())
+            .then(filter_where_clause().or_not())
+            .boxed()
+            .then_ignore(kw(Identifier::Using))
+            .then_ignore(kw(Identifier::Resource))
+            .then(resource_ref())
+            .then(resource_version_clause())
+            .then_ignore(kw(Identifier::File))
+            .then(string_lit())
+            .boxed()
+            .then(input_mappings())
+            .then(state_bindings().or_not())
+            .then(output_schema())
+            .then(branch_selection())
+            .then(materialized_state_dependencies())
+            .boxed()
+            .then(flushed_processor_outputs())
+            .map(|value| {
+                let (
                     (
                         (
-                            (((((base, resource), resource_version), file), inputs), state),
-                            output_schema,
+                            (
+                                (((((base, resource), resource_version), file), inputs), state),
+                                output_schema,
+                            ),
+                            branched_by,
                         ),
-                        branched_by,
+                        materialized_state,
                     ),
-                    materialized_state,
-                ),
-                processor_outputs,
-            ) = value;
-            let ((((if_not_exists, name), from_input), mode), filter_where) = base;
-            CreateStatement::new(
-                CreateInferencer {
-                    name,
-                    from: from_input,
-                    output_routes: processor_outputs,
-                    branched_by,
-                    resource,
-                    resource_version,
-                    file,
-                    inputs,
-                    state: state.unwrap_or_default(),
-                    output_schema,
-                    mode: mode.unwrap_or_default(),
-                    filter_where,
-                    materialized_state,
-                },
-                if_not_exists,
-            )
-        })
-        .boxed()
+                    processor_outputs,
+                ) = value;
+                let ((((if_not_exists, name), from_input), mode), filter_where) = base;
+                CreateStatement::new(
+                    CreateInferencer {
+                        labels: Default::default(),
+                        name,
+                        from: from_input,
+                        output_routes: processor_outputs,
+                        branched_by,
+                        resource,
+                        resource_version,
+                        file,
+                        inputs,
+                        state: state.unwrap_or_default(),
+                        output_schema,
+                        mode: mode.unwrap_or_default(),
+                        filter_where,
+                        materialized_state,
+                    },
+                    if_not_exists,
+                )
+            })
+            .boxed()
+    })
 }
 
 pub fn parse_create_inferencer_tokens(

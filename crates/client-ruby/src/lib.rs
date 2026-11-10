@@ -23,6 +23,7 @@
 mod batches;
 mod clocks;
 mod endpoints;
+mod entity_labels;
 mod enums;
 mod errors;
 mod gvl;
@@ -45,6 +46,7 @@ pub fn register(ruby: &Ruby) -> Result<(), Error> {
     batches::register(ruby, client)?;
     sessions::register(ruby, client)?;
     inspection::register(ruby, client)?;
+    entity_labels::register(ruby, client)?;
     subscriptions::register(ruby, client)?;
     clocks::register(ruby, client)?;
     endpoints::register(ruby, client)?;

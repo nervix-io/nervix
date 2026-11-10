@@ -8,6 +8,31 @@
 
 [[test]]
 host = "python"
+identity = "cluster/test_entity_labels.py::test_entity_labels_keep_exact_values_revisions_and_staged_views"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::EntityLabelsTest#test_entity_labels_keep_exact_values_revisions_and_staged_views"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.EntityLabelsTests#entityLabelsKeepExactValuesRevisionsAndStagedViews"
+tier = "cluster"
+
+[[test]]
+host = "c"
+identity = "test_entity_labels_retain_exact_values_and_revision_views"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_entity_labels_retain_exact_values_and_revision_views"
+tier = "cluster"
+
+[[test]]
+host = "python"
 identity = "cluster/test_inspection.py::test_inspection_metadata_and_verified_frames_survive_their_parents"
 tier = "cluster"
 

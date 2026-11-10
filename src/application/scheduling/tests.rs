@@ -1076,6 +1076,7 @@ fn forced_recovery_preserves_the_complete_healthy_partition_inside_and_outside_a
     let branching = ResolvedBranching::branched(
         named("tenants"),
         CreateSchema {
+            labels: Default::default(),
             name: named("tenant_key"),
             fields: vec![SchemaField {
                 name: named("tenant"),

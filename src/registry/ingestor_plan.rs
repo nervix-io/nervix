@@ -1288,6 +1288,7 @@ mod tests {
 
     fn ingestor_model(source: IngestorEntity) -> Model {
         Model::Ingestor(CreateIngestor {
+            labels: Default::default(),
             name: named("source"),
             output_routes: with_inherit_all(ProcessorOutputs::single(named("events")))
                 .with_flush_policy(FlushPolicy::Immediate)
@@ -1386,6 +1387,7 @@ mod tests {
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientHttp(CreateClientHttp {
+                labels: Default::default(),
                 name: named("upstream"),
                 mount: None,
                 config: Vec::new(),
@@ -1417,6 +1419,7 @@ mod tests {
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientKafka(CreateClientKafka {
+                labels: Default::default(),
                 name: named("upstream"),
                 mount: None,
                 config: Vec::new(),
@@ -1448,6 +1451,7 @@ mod tests {
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientPulsar(CreateClientPulsar {
+                labels: Default::default(),
                 name: named("upstream"),
                 mount: None,
                 config: Vec::new(),
@@ -1478,6 +1482,7 @@ mod tests {
                 quiesce: IngestQuiesceMode::Drop,
             })),
             source_model: Model::ClientMqtt(CreateClientMqtt {
+                labels: Default::default(),
                 name: named("upstream"),
                 mount: None,
                 config: Vec::new(),
@@ -1508,6 +1513,7 @@ mod tests {
                 quiesce: IngestQuiesceMode::Drop,
             })),
             source_model: Model::ClientNats(CreateClientNats {
+                labels: Default::default(),
                 name: named("upstream"),
                 mount: None,
                 config: Vec::new(),
@@ -1542,6 +1548,7 @@ mod tests {
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientRabbitMq(CreateClientRabbitMq {
+                labels: Default::default(),
                 name: named("upstream"),
                 mount: None,
                 config: Vec::new(),
@@ -1567,6 +1574,7 @@ mod tests {
                 quiesce: IngestQuiesceMode::Drop,
             })),
             source_model: Model::ClientRedis(CreateClientRedis {
+                labels: Default::default(),
                 name: named("upstream"),
                 pool: pool_bounds(),
                 mount: None,
@@ -1596,6 +1604,7 @@ mod tests {
                 },
             )),
             source_model: Model::ClientPrometheus(CreateClientPrometheus {
+                labels: Default::default(),
                 name: named("upstream"),
                 mount: None,
                 config: Vec::new(),
@@ -1620,6 +1629,7 @@ mod tests {
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientZeroMq(CreateClientZeroMq {
+                labels: Default::default(),
                 name: named("upstream"),
                 mount: None,
                 config: Vec::new(),
@@ -1651,6 +1661,7 @@ mod tests {
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientSqs(CreateClientSqs {
+                labels: Default::default(),
                 name: named("upstream"),
                 mount: None,
                 config: Vec::new(),
@@ -1677,6 +1688,7 @@ mod tests {
                 },
             })),
             source_model: Model::Endpoint(CreateEndpoint {
+                labels: Default::default(),
                 name: named("upstream"),
                 on_vhost: named("public"),
                 path: "/events".to_string(),
@@ -1703,6 +1715,7 @@ mod tests {
                 },
             )),
             source_model: Model::ClientWebsockets(CreateClientWebsockets {
+                labels: Default::default(),
                 name: named("upstream"),
                 mount: None,
                 signaling_protocol: None,
@@ -1728,6 +1741,7 @@ mod tests {
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientSyslog(CreateClientSyslog {
+                labels: Default::default(),
                 name: named("upstream"),
                 mount: None,
                 config: Vec::new(),
@@ -1864,6 +1878,7 @@ mod tests {
                 },
             }));
         let endpoint = Model::Endpoint(CreateEndpoint {
+            labels: Default::default(),
             name: named("upstream"),
             on_vhost: named("public"),
             path: "/events".to_owned(),
@@ -2029,7 +2044,7 @@ mod tests {
     #[rstest::rstest]
     #[case::client(
         http_case(),
-        Model::ClientHttp(CreateClientHttp {
+        Model::ClientHttp(CreateClientHttp { labels: Default::default(),
             name: named("different"),
             mount: None,
             config: Vec::new(),
@@ -2037,7 +2052,7 @@ mod tests {
     )]
     #[case::endpoint(
         endpoint_case(),
-        Model::Endpoint(CreateEndpoint {
+        Model::Endpoint(CreateEndpoint { labels: Default::default(),
             name: named("different"),
             on_vhost: named("public"),
             path: "/events".to_string(),
@@ -2074,6 +2089,7 @@ mod tests {
     /// its statement declares.
     fn client_ingestor_model(ack_timeout: &str, backoff: &str, max_backoff: &str) -> Model {
         Model::Ingestor(CreateIngestor {
+            labels: Default::default(),
             name: named("source"),
             output_routes: with_inherit_all(ProcessorOutputs::single(named("events")))
                 .with_flush_policy(FlushPolicy::Immediate)

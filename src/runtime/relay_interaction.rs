@@ -1043,6 +1043,7 @@ mod tests {
         SCHEMA
             .get_or_init(|| {
                 nervix_primitives::sync::Arc::new(compile_schema(&CreateSchema {
+                    labels: Default::default(),
                     name: SchemaName::from(
                         &ModelName::parse("relay_interaction_test").expect("valid schema"),
                     ),
@@ -1074,6 +1075,7 @@ mod tests {
 
     fn alternate_batch(acks: AckSet) -> RelayRecordBatch {
         let alternate_schema = nervix_primitives::sync::Arc::new(compile_schema(&CreateSchema {
+            labels: Default::default(),
             name: SchemaName::from(
                 &ModelName::parse("relay_interaction_alternate").expect("valid alternate schema"),
             ),

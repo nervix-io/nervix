@@ -28,42 +28,44 @@ use crate::{
 pub fn create_junction_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateJunction>, extra::Err<ParseError<'src>>>
 + Clone {
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then_ignore(kw(Identifier::Junction))
-        .then(junction_name())
-        .then_ignore(kw(Identifier::From))
-        .then(from_relay_clauses())
-        .then(ack_mode().or_not())
-        .then(filter_where_clause().or_not())
-        .boxed()
-        .then(branch_selection())
-        .then(materialized_state_dependencies())
-        .then(flushed_processor_outputs())
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .map(
-            |(
-                (
-                    (((((if_not_exists, name), from_inputs), mode), filter_where), branched_by),
-                    materialized_state,
-                ),
-                outputs,
-            )| {
-                CreateStatement::new(
-                    CreateJunction {
-                        name,
-                        from: from_inputs,
-                        output_routes: outputs,
-                        branched_by,
-                        mode: mode.unwrap_or_default(),
-                        filter_where,
+    crate::labels::finish_creation({
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then_ignore(kw(Identifier::Junction))
+            .then(junction_name())
+            .then_ignore(kw(Identifier::From))
+            .then(from_relay_clauses())
+            .then(ack_mode().or_not())
+            .then(filter_where_clause().or_not())
+            .boxed()
+            .then(branch_selection())
+            .then(materialized_state_dependencies())
+            .then(flushed_processor_outputs())
+            .map(
+                |(
+                    (
+                        (((((if_not_exists, name), from_inputs), mode), filter_where), branched_by),
                         materialized_state,
-                    },
-                    if_not_exists,
-                )
-            },
-        )
-        .boxed()
+                    ),
+                    outputs,
+                )| {
+                    CreateStatement::new(
+                        CreateJunction {
+                            labels: Default::default(),
+                            name,
+                            from: from_inputs,
+                            output_routes: outputs,
+                            branched_by,
+                            mode: mode.unwrap_or_default(),
+                            filter_where,
+                            materialized_state,
+                        },
+                        if_not_exists,
+                    )
+                },
+            )
+            .boxed()
+    })
 }
 
 pub fn alter_junction_parser<'src>()

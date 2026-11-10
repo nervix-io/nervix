@@ -1649,6 +1649,7 @@ impl InferencerRegistrySchema for CreateInferencer {
             })
             .collect::<Result<Vec<_>, Report<RegistryError>>>()?;
         Ok(CreateSchema {
+            labels: Default::default(),
             name: SchemaName::parse(INNER_OUTPUT_NAMESPACE)
                 .assured("this is a constant literal that satisfies the identifier grammar"),
             fields,

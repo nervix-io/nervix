@@ -633,6 +633,7 @@ mod tests {
     fn scheduled_junction(schema_byte: u8, input: &str, branch_ttl: &str) -> ScheduledNodes {
         let branch_name = named::<BranchName>("by_tenant");
         let branch_schema = CreateSchema {
+            labels: Default::default(),
             name: named("tenant_key"),
             fields: vec![SchemaField {
                 name: named("tenant"),
@@ -643,6 +644,7 @@ mod tests {
         };
         let branch = ScheduledNode::new(
             Model::Branch(CreateBranch {
+                labels: Default::default(),
                 name: branch_name.clone(),
                 schema: branch_schema.name.clone(),
                 ttl: branch_ttl.to_string(),
@@ -656,6 +658,7 @@ mod tests {
         );
         let junction = ScheduledNode::new(
             Model::Junction(CreateJunction {
+                labels: Default::default(),
                 name: named("route_events"),
                 from: ProcessorInputs::single(named(input)),
                 output_routes: ProcessorOutputs::new(vec![

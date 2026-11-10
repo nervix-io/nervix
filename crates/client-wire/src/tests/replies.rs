@@ -755,7 +755,7 @@ fn replies_refuse_undeclared_bodies_and_missing_request_identity() {
             body: Some(reply.as_union_value()),
         },
     );
-    let frame = raw_server(finish_raw(builder, root, "NXSM"));
+    let frame = raw_server(finish_raw(builder, root, "NXEL"));
     assert_eq!(frame.request_id(), None);
     assert_eq!(
         decode_error(ServerMessage::decode(&frame)),

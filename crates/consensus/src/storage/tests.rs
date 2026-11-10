@@ -483,6 +483,7 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
     let domain = Harness::domain("tenant");
     let processor = ScheduledNode::new(
         Model::WasmProcessor(CreateWasmProcessor {
+            labels: Default::default(),
             name: WasmProcessorName::parse("guest")?,
             from: ProcessorInputs::single(RelayName::parse("input")?),
             output_routes: ProcessorOutputs::single(RelayName::parse("output")?),
@@ -2036,6 +2037,7 @@ async fn replica_update_writes_one_record_and_metadata_amid_unrelated_graphs() -
     for index in 0..10_000 {
         graph_nodes.push(nervix_models::ScheduledNode::new(
             nervix_models::Model::Schema(nervix_models::CreateSchema {
+                labels: Default::default(),
                 name: nervix_models::SchemaName::parse(&format!("schema_{index}"))?,
                 fields: vec![nervix_models::SchemaField {
                     name: nervix_models::FieldName::parse("value")?,

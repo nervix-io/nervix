@@ -759,6 +759,7 @@ async fn explicit_keys_keep_their_inferred_value_kind_and_exact_empty_or_binary_
 async fn partition_only_envelopes_select_each_source_count_without_a_value_program() {
     let input = test_schema(&[("id", ParseAsType::String)]);
     let schema = nervix_models::CreateSchema {
+        labels: Default::default(),
         name: named("tenant_fields"),
         fields: vec![nervix_models::SchemaField {
             name: named("tenant"),

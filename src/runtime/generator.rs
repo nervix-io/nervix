@@ -1391,6 +1391,7 @@ mod tests {
         let source_schema = test_schema(&[("value", ParseAsType::String)]);
         let output_schema = test_schema(&[("tenant", ParseAsType::String)]);
         let branch_schema = compile_schema(&CreateSchema {
+            labels: Default::default(),
             name: named("tenant_branch"),
             fields: vec![SchemaField {
                 name: named("tenant"),

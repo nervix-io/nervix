@@ -801,6 +801,7 @@ mod tests {
         assigned_nodes.extend(replicas.iter().map(|node| node_name(node)));
         ScheduledNode::new(
             Model::Junction(CreateJunction {
+                labels: Default::default(),
                 name: JunctionName::from(&identifier),
                 from: nervix_models::ProcessorInputs::new(Vec::new(), Vec::new()),
                 output_routes: nervix_models::ProcessorOutputs::new(Vec::new()),
@@ -997,6 +998,7 @@ mod tests {
         node = node.with_resolved_branching(Some(ResolvedBranching::branched(
             "tenants".try_into().assured("valid name"),
             CreateSchema {
+                labels: Default::default(),
                 name: "tenant_key".try_into().assured("valid name"),
                 fields: vec![SchemaField {
                     name: "tenant".try_into().assured("valid name"),

@@ -30,6 +30,7 @@ impl InstallationFixture {
         let schema = named::<SchemaName>("event");
         let schema_node = ScheduledNode::new(
             nervix_models::Model::Schema(CreateSchema {
+                labels: Default::default(),
                 name: schema.clone(),
                 fields: vec![SchemaField {
                     name: named("sequence"),
@@ -42,6 +43,7 @@ impl InstallationFixture {
         );
         let relay = ScheduledNode::new(
             nervix_models::Model::Relay(CreateRelay {
+                labels: Default::default(),
                 name: named("events"),
                 schema,
                 buffer: nonzero!(4usize),

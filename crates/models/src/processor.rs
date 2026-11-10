@@ -212,6 +212,7 @@ impl ProcessorOutputs {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct CreateReingestor {
+    pub labels: crate::EntityLabels,
     pub name: ReingestorName,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
@@ -277,6 +278,7 @@ impl CreateReingestor {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct CreateInferencer<Version = u64> {
+    pub labels: crate::EntityLabels,
     pub name: InferencerName,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
@@ -394,6 +396,7 @@ pub enum InferencerStateInitial {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct CreateWasmProcessor<Version = u64> {
+    pub labels: crate::EntityLabels,
     pub name: WasmProcessorName,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
@@ -619,6 +622,7 @@ impl InferencerTensorDimension {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct CreateJunction {
+    pub labels: crate::EntityLabels,
     pub name: JunctionName,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
@@ -686,6 +690,7 @@ impl CreateJunction {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct CreateDeduplicator {
+    pub labels: crate::EntityLabels,
     pub name: DeduplicatorName,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
@@ -776,6 +781,7 @@ impl CreateDeduplicator {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct CreateCorrelator {
+    pub labels: crate::EntityLabels,
     pub name: CorrelatorName,
     pub left: ProcessorInputs,
     pub right: ProcessorInputs,
@@ -833,6 +839,7 @@ pub enum CorrelationTimeoutAction {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct CreateReorderer {
+    pub labels: crate::EntityLabels,
     pub name: ReordererName,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
@@ -1196,6 +1203,7 @@ where
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct CreateWindowProcessor {
+    pub labels: crate::EntityLabels,
     pub name: WindowProcessorName,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,

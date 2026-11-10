@@ -377,6 +377,7 @@ pub(crate) async fn test_interconnect(cluster_id: &str, node_id: &ClusterNodeNam
 fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
     match kind {
         ModelKind::Ingestor => Model::Ingestor(CreateIngestor {
+            labels: Default::default(),
             name: named(identifier_raw),
             output_routes: ProcessorOutputs::new(Vec::new()),
             input: nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
@@ -401,6 +402,7 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
             filter_where: None,
         }),
         ModelKind::Emitter => Model::Emitter(CreateEmitter {
+            labels: Default::default(),
             name: named(identifier_raw),
             from: ProcessorInputs::new(Vec::new(), Vec::new()),
             body: nervix_models::EmitterBody::Values,
@@ -424,6 +426,7 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
             materialized_state: Vec::new(),
         }),
         ModelKind::Junction => Model::Junction(CreateJunction {
+            labels: Default::default(),
             name: named(identifier_raw),
             from: ProcessorInputs::new(Vec::new(), Vec::new()),
             output_routes: ProcessorOutputs::new(Vec::new()),
@@ -433,6 +436,7 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
             materialized_state: Vec::new(),
         }),
         ModelKind::Deduplicator => Model::Deduplicator(CreateDeduplicator {
+            labels: Default::default(),
             name: named(identifier_raw),
             from: ProcessorInputs::new(Vec::new(), Vec::new()),
             output_routes: ProcessorOutputs::new(Vec::new()),
@@ -444,6 +448,7 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
             materialized_state: Vec::new(),
         }),
         ModelKind::WasmProcessor => Model::WasmProcessor(CreateWasmProcessor {
+            labels: Default::default(),
             name: named(identifier_raw),
             from: ProcessorInputs::new(Vec::new(), Vec::new()),
             output_routes: ProcessorOutputs::new(Vec::new()),
@@ -462,11 +467,13 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
             materialized_state: Vec::new(),
         }),
         ModelKind::Client => Model::ClientSyslog(nervix_models::CreateClientSyslog {
+            labels: Default::default(),
             name: named(identifier_raw),
             mount: None,
             config: Vec::new(),
         }),
         ModelKind::Schema => Model::Schema(CreateSchema {
+            labels: Default::default(),
             name: named(identifier_raw),
             fields: Vec::new(),
         }),

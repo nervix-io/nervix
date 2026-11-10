@@ -25,6 +25,7 @@ use crate::runtime_schema::{CodecError, compile_codec, compile_schema};
 /// A strict JSON codec whose one field is a required integer.
 fn event_codec() -> Arc<CompiledCodec> {
     let schema = Arc::new(compile_schema(&CreateSchema {
+        labels: Default::default(),
         name: named("event"),
         fields: vec![SchemaField {
             name: named("user_id"),
@@ -35,6 +36,7 @@ fn event_codec() -> Arc<CompiledCodec> {
     }));
     compile_codec(
         &CreateCodec {
+            labels: Default::default(),
             name: named("event_codec"),
             wire_format: CodecWireFormat::Json {
                 wire_schema: named("event_wire"),
@@ -43,15 +45,19 @@ fn event_codec() -> Arc<CompiledCodec> {
             encoding_rules: Vec::new(),
         },
         schema,
-        ResolvedCodecWireFormat::Json(&CreateWireSchema {
-            name: named("event_wire"),
-            strictness: Default::default(),
-            fields: vec![WireSchemaField {
-                name: named("user_id"),
-                ty: JsonType::Integer,
-                optional: false,
-            }],
-        }),
+        ResolvedCodecWireFormat::Json(
+            (&CreateWireSchema {
+                labels: Default::default(),
+                name: named("event_wire"),
+                strictness: Default::default(),
+                fields: vec![WireSchemaField {
+                    name: named("user_id"),
+                    ty: JsonType::Integer,
+                    optional: false,
+                }],
+            })
+                .into(),
+        ),
     )
     .assured("the event codec compiles")
 }

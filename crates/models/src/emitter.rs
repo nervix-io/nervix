@@ -29,6 +29,7 @@ use crate::{
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct CreateEmitter {
+    pub labels: crate::EntityLabels,
     pub name: EmitterName,
     pub from: ProcessorInputs,
     pub body: EmitterBody,

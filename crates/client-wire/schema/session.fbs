@@ -13,7 +13,7 @@
 //
 // * gRPC. Each gRPC message holds exactly one frame. `/nervix.session.Session/Exchange` is a
 //   bidirectional stream of ClientMessage frames ("NXCM") answered by ServerMessage frames
-//   ("NXSM"). `/nervix.session.Session/UploadResource` is a client stream of UploadMessage frames
+//   ("NXEL"). `/nervix.session.Session/UploadResource` is a client stream of UploadMessage frames
 //   ("NXUM") answered by exactly one UploadReply frame ("NXUR").
 //   `/nervix.session.Session/DownloadBackup` is one BackupDownloadRequest frame ("NXBQ") answered
 //   by a server stream of BackupDownloadMessage frames ("NXBD").
@@ -625,7 +625,8 @@ enum ModelChangeAspect : ubyte {
   EntityReplaced,
   EntityCreated,
   EntityDropped,
-  BranchPartitions
+  BranchPartitions,
+  EntityLabels
 }
 
 table ConfigurationReason {
@@ -1738,6 +1739,15 @@ table StateInspectionRefused { reason: StateInspectionRejection = null; }
 union StateInspectionResult { StateInspectionPage, StateInspectionRefused }
 table StateInspection { domain: string (required); entity: NodeRef (required); result: StateInspectionResult (required); }
 
+// An exact metadata read under its captured committed acceptance policy.
+table LabelEntry { key: string (required); value: string (required); }
+table EntityLabelLimits { count: ulong; key_bytes: ulong; value_bytes: ulong; bytes: ulong; }
+table EntityLabelPolicy { revision: ulong; limits: EntityLabelLimits (required); }
+table CommittedEntityLabels { revision: ulong; }
+table StagedEntityLabels { preview: TransactionPreviewIdentity (required); }
+union EntityLabelView { CommittedEntityLabels, StagedEntityLabels }
+table EntityLabelsInspection { domain: string (required); entity: NodeRef (required); labels: [LabelEntry] (required); policy: EntityLabelPolicy (required); view: EntityLabelView (required); }
+
 table CommandOutcome {
   /// The execution_reference of the request.
   execution_reference: string (required);
@@ -1770,6 +1780,7 @@ table CommandOutcome {
   restore: RestoreReport;
   /// Typed bounded state inspection, independent of the requested presentation format.
   state: StateInspection;
+  entity_labels: EntityLabelsInspection;
 }
 
 table TransactionAttached {
@@ -2843,7 +2854,7 @@ table ClientMessage {
   request: ClientRequest (required);
 }
 
-/// Root of a server frame ("NXSM").
+/// Root of a server frame ("NXEL").
 table ServerMessage {
   body: ServerBody (required);
 }

@@ -225,6 +225,7 @@ mod tests {
                     .assured("the fixture domain name is valid"),
                 vec![ScheduledNode::new(
                     Model::Relay(CreateRelay {
+                        labels: Default::default(),
                         name: nervix_models::RelayName::parse("events")
                             .assured("the fixture relay name is valid"),
                         schema: nervix_models::SchemaName::parse("missing_schema")

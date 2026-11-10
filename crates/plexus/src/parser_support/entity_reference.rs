@@ -18,9 +18,10 @@ use crate::{
     parser_support::{
         ParseError, boxed_choice, branch_ref, client_ref, codec_ref, correlator_ref,
         deduplicator_ref, emitter_ref, endpoint_ref, generator_ref, inferencer_ref, ingestor_ref,
-        junction_ref, kw, kw_phrase2, lookup_ref, placement_ref, reingestor_ref, relay_ref,
-        reorderer_ref, schema_ref, signaling_protocol_ref, udf_ref, vhost_ref, wasm_processor_ref,
-        window_processor_ref, wire_avro_schema_ref, wire_cbor_schema_ref, wire_json_schema_ref,
+        junction_ref, kw, kw_phrase2, kw_phrase3, lookup_ref, placement_ref, reingestor_ref,
+        relay_ref, reorderer_ref, schema_ref, signaling_protocol_ref, udf_ref, vhost_ref,
+        wasm_processor_ref, window_processor_ref, wire_avro_schema_ref, wire_cbor_schema_ref,
+        wire_json_schema_ref,
     },
 };
 
@@ -39,25 +40,19 @@ pub(crate) fn model_ref<'src>()
                 kind: ModelKind::Branch,
                 identifier: name.into(),
             }),
-        kw(Identifier::Wire)
-            .ignore_then(kw(Identifier::Json))
-            .ignore_then(kw(Identifier::Schema))
+        kw_phrase3(Identifier::Wire, Identifier::Json, Identifier::Schema)
             .ignore_then(wire_json_schema_ref())
             .map(|name| NodeRef {
                 kind: ModelKind::WireJsonSchema,
                 identifier: name.into(),
             }),
-        kw(Identifier::Wire)
-            .ignore_then(kw(Identifier::Cbor))
-            .ignore_then(kw(Identifier::Schema))
+        kw_phrase3(Identifier::Wire, Identifier::Cbor, Identifier::Schema)
             .ignore_then(wire_cbor_schema_ref())
             .map(|name| NodeRef {
                 kind: ModelKind::WireCborSchema,
                 identifier: name.into(),
             }),
-        kw(Identifier::Wire)
-            .ignore_then(kw(Identifier::Avro))
-            .ignore_then(kw(Identifier::Schema))
+        kw_phrase3(Identifier::Wire, Identifier::Avro, Identifier::Schema)
             .ignore_then(wire_avro_schema_ref())
             .map(|name| NodeRef {
                 kind: ModelKind::WireAvroSchema,

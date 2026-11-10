@@ -130,6 +130,7 @@ impl RemoteGenerationFixture {
             )
             .assured("the reader has the relay's published identity");
         let schema = compile_schema(&CreateSchema {
+            labels: Default::default(),
             name: named::<SchemaName>("profile"),
             fields: vec![
                 SchemaField {
@@ -324,6 +325,7 @@ async fn a_partition_handoff_hides_only_its_materialized_dependency_until_the_fe
     let relay = named::<RelayName>("profiles");
     install_unpaced_test_domain(&runtime, &domain);
     let schema = compile_schema(&CreateSchema {
+        labels: Default::default(),
         name: named("profile"),
         fields: vec![SchemaField {
             name: named("value"),

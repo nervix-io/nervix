@@ -447,7 +447,7 @@ pub(in crate::application) enum TransactionAttachment {
 pub(in crate::application) struct QueuedConfiguration {
     /// Queued model mutations as their statements wrote them. Completion only reads names and
     /// kinds, so the resource versions stay unresolved until `COMMIT` plans them.
-    pub(in crate::application) models: Vec<RegistryMutation<RequestedResourceVersion>>,
+    pub(in crate::application) models: Vec<Statement>,
     resources: BTreeSet<ResourceName>,
 }
 
@@ -669,7 +669,8 @@ pub(in crate::application) fn transaction_statement_label(statement: &Statement)
         Statement::DrainNode(_) => "DRAIN",
         Statement::Relocate(_) => "RELOCATE",
         Statement::LookupQuery(_) => "LOOKUP",
-        Statement::ShowCreate(_)
+        Statement::ShowLabels(_)
+        | Statement::ShowCreate(_)
         | Statement::ShowUdfs(_)
         | Statement::ShowIngestors(_)
         | Statement::ShowEmitters(_)
@@ -748,9 +749,7 @@ impl SessionServiceImpl {
         {
             if statement.is_model_mutation() {
                 if !matches!(statement, Statement::RebindResource(_)) {
-                    queued
-                        .models
-                        .push(Self::transaction_registry_mutation(statement));
+                    queued.models.push(statement.clone());
                 }
             } else if let Statement::CreateResource(create) = statement {
                 queued.resources.insert(create.identifier.clone());
@@ -1073,6 +1072,60 @@ impl SessionServiceImpl {
             .consensus
             .transaction_control_snapshot(domain)
             .await;
+        let (captured, ()) = self
+            .plan_transaction_statements_against(
+                domain,
+                statements,
+                operation_references,
+                first_operation_index,
+                allow_incomplete_final_model_run,
+                control,
+                |_| (),
+            )
+            .await?;
+        let domain_state = captured
+            .inputs
+            .state()
+            .assured("the planner verified that the captured domain exists");
+        let plan = &captured.plan;
+        for step in plan.steps() {
+            nervix_primitives::task::consume_budget().await;
+            let PlannedTransactionStepKind::Models { plan: model_plan } = &step.kind else {
+                continue;
+            };
+            let Some(planned) = &model_plan.planned else {
+                continue;
+            };
+            self.validate_changed_model_bindings(
+                domain,
+                domain_state.config.pace,
+                planned,
+                QueueAdmission::RefuseWhenFull,
+            )
+            .await
+            .change_context(TransactionPlanningError::ExternalModelValidation {
+                operation: step.impact.operations().first(),
+            })?;
+            self.prepare_planned_domain_udfs(planned)
+                .await
+                .change_context(TransactionPlanningError::UdfPreparation {
+                    operation: step.impact.operations().first(),
+                })?;
+        }
+        Ok(captured)
+    }
+
+    /// Inspect the same pure candidate and planning basis without preparing external bindings.
+    pub(in crate::application) async fn plan_transaction_statements_against<T>(
+        &self,
+        domain: &DomainName,
+        statements: &[Statement],
+        operation_references: &[CommandExecutionReference],
+        first_operation_index: usize,
+        allow_incomplete_final_model_run: bool,
+        control: nervix_consensus::TransactionControlSnapshot,
+        inspect: impl FnOnce(&ModelIndex) -> T,
+    ) -> Result<(CapturedTransactionPlan, T), Report<TransactionPlanningError>> {
         let models = match control.planning_inputs.schedule() {
             Some(schedule) => schedule
                 .nodes
@@ -1131,7 +1184,7 @@ impl SessionServiceImpl {
             operation_references: operation_references.to_vec(),
         };
         let planning_domain = domain.clone();
-        let plan = Registry::plan_transaction(
+        let (plan, inspected) = Registry::plan_transaction_captured(
             snapshot,
             statements,
             first_operation_index,
@@ -1157,36 +1210,16 @@ impl SessionServiceImpl {
                     ownership_moves: CanonicalImpactSet::new(ownership_moves),
                 }
             },
+            inspect,
         )?;
-        for step in plan.steps() {
-            nervix_primitives::task::consume_budget().await;
-            let PlannedTransactionStepKind::Models { plan: model_plan } = &step.kind else {
-                continue;
-            };
-            let Some(planned) = &model_plan.planned else {
-                continue;
-            };
-            self.validate_changed_model_bindings(
-                domain,
-                domain_state.config.pace,
-                planned,
-                QueueAdmission::RefuseWhenFull,
-            )
-            .await
-            .change_context(TransactionPlanningError::ExternalModelValidation {
-                operation: step.impact.operations().first(),
-            })?;
-            self.prepare_planned_domain_udfs(planned)
-                .await
-                .change_context(TransactionPlanningError::UdfPreparation {
-                    operation: step.impact.operations().first(),
-                })?;
-        }
-        Ok(CapturedTransactionPlan {
-            plan,
-            inputs: control.planning_inputs,
-            schedule_inputs,
-        })
+        Ok((
+            CapturedTransactionPlan {
+                plan,
+                inputs: control.planning_inputs,
+                schedule_inputs,
+            },
+            inspected,
+        ))
     }
 
     fn transaction_admission_result(
@@ -1533,13 +1566,6 @@ impl SessionServiceImpl {
             })
             .await?;
         Ok(Some(failed))
-    }
-
-    fn transaction_registry_mutation(
-        statement: &Statement,
-    ) -> RegistryMutation<RequestedResourceVersion> {
-        RegistryMutation::try_from(statement)
-            .assured("transaction registry mutation requires a model mutation")
     }
 
     pub(in crate::application) async fn revert_bound_transaction(

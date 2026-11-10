@@ -375,6 +375,18 @@ connection that ends in a refusal is counted in `nervix_interconnect_connection_
 with reason `prerequisite`. [Cluster Interconnect](interconnect.md#the-join-contract) owns the
 handshake and its wire forms.
 
+## Entity Label Limits
+
+Domain Models share four committed metadata limits: `ENTITY_LABELS_MAX_COUNT` (64),
+`ENTITY_LABELS_MAX_KEY_BYTES` (128 B), `ENTITY_LABELS_MAX_VALUE_BYTES` (1024 B), and
+`ENTITY_LABELS_MAX_BYTES` (16384 B). Their declarations also supply the first-bootstrap options
+`--entity-labels-max-count`, `--entity-labels-max-key-bytes`, `--entity-labels-max-value-bytes`, and
+`--entity-labels-max-bytes`, with matching `NERVIX_ENTITY_LABELS_MAX_*` environment variables.
+Each accepts a nonnegative `u64` value; the byte options accept the normal byte units.
+`ALTER CLUSTER SET` validates each complete committed label map against the complete proposed
+policy. A reduction that would invalidate a map has no effects. Existing outer command and
+archive limits continue to bound allocation. See [Entity Labels](entity-labels.md).
+
 ## Typed Definitions And Defaults
 
 An area group's fields use `Setting<D>`. Its `SettingDefinition` must choose exactly one sealed
@@ -765,3 +777,10 @@ bounds the complete operator read and governs remote admission/setup as well as 
 The byte-stream request obtains its fallback read deadline through the same definition's
 `default_value`; no independent transport timeout duplicates that policy.
 These capabilities do not change materialized row delivery, replication or stored snapshot bounds.
+
+The committed parameter carrier stores duration settings as exact `u32` seconds and `u32`
+nanoseconds. Their declarations retain the positive bound of `u32::MAX` whole seconds, and their
+public values, assignments and bootstrap seeds remain `Duration`. This lossless private layout
+keeps the inline consensus record bounded as the policy grows; it adds no per-record allocation.
+JSON retains the standard duration projection, and the current archived value validates the
+nanosecond coordinate before constructing a setting.

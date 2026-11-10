@@ -968,6 +968,7 @@ async fn preceding_lease_expiry_does_not_release_a_reengaged_hold() {
 #[test]
 fn emitter_entity_pause_gates_every_input_relay() {
     let emitter = CreateEmitter {
+        labels: Default::default(),
         name: named("combined_emitter"),
         from: ProcessorInputs::new(
             vec![named("source_b"), named("source_a")],
@@ -1001,6 +1002,7 @@ fn emitter_entity_pause_gates_every_input_relay() {
     };
     let input_relay = |name: &str| {
         scheduled_model(nervix_models::Model::Relay(CreateRelay {
+            labels: Default::default(),
             name: named(name),
             schema: named("event"),
             buffer: nonzero!(2usize),
@@ -1012,6 +1014,7 @@ fn emitter_entity_pause_gates_every_input_relay() {
         domain("testing"),
         vec![
             scheduled_model(nervix_models::Model::Schema(nervix_models::CreateSchema {
+                labels: Default::default(),
                 name: named("event"),
                 fields: vec![nervix_models::SchemaField {
                     name: named("seq"),
@@ -1021,6 +1024,7 @@ fn emitter_entity_pause_gates_every_input_relay() {
                 }],
             })),
             scheduled_model(nervix_models::Model::Codec(nervix_models::CreateCodec {
+                labels: Default::default(),
                 name: named("event_codec"),
                 wire_format: nervix_models::CodecWireFormat::Syslog,
                 schema: named("event"),
@@ -1028,6 +1032,7 @@ fn emitter_entity_pause_gates_every_input_relay() {
             })),
             scheduled_model(nervix_models::Model::ClientZeroMq(
                 nervix_models::CreateClientZeroMq {
+                    labels: Default::default(),
                     name: named("emitter"),
                     mount: None,
                     config: Vec::new(),
@@ -1099,6 +1104,7 @@ fn emitter_entity_pause_gates_every_input_relay() {
 fn ownership_handoff_keeps_internal_moved_group_relays_open() {
     let junction = |name: &str, input: &str, output: &str| {
         scheduled_model(nervix_models::Model::Junction(CreateJunction {
+            labels: Default::default(),
             name: named(name),
             from: ProcessorInputs::single(named(input)),
             output_routes: (ProcessorOutputs::single(named(output)))

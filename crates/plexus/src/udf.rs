@@ -17,84 +17,92 @@ use crate::{
 pub fn create_udf_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateUdf>, extra::Err<ParseError<'src>>> + Clone
 {
-    let argument = field_ref()
-        .then(nervix_type())
-        .then(kw(Identifier::Optional).or_not())
-        .map(|((name, ty), optional)| UdfArgument {
-            name,
-            ty,
-            optional: optional.is_some(),
-        })
-        .boxed();
-    let arguments = argument
-        .separated_by(tok(Token::Comma))
-        .at_least(1)
-        .at_most(8)
-        .collect::<Vec<_>>()
-        .delimited_by(tok(Token::LParen), tok(Token::RParen))
-        .boxed();
-    let returns = nervix_type()
-        .then(kw(Identifier::Optional).or_not())
-        .map(|(ty, optional)| UdfReturn {
-            ty,
-            optional: optional.is_some(),
-        })
-        .boxed();
-    let language = kw(Identifier::Roto0_13).to(UdfLanguage::Roto0_13);
+    crate::labels::finish_creation({
+        let argument = field_ref()
+            .then(nervix_type())
+            .then(kw(Identifier::Optional).or_not())
+            .map(|((name, ty), optional)| UdfArgument {
+                name,
+                ty,
+                optional: optional.is_some(),
+            })
+            .boxed();
+        let arguments = argument
+            .separated_by(tok(Token::Comma))
+            .at_least(1)
+            .at_most(8)
+            .collect::<Vec<_>>()
+            .delimited_by(tok(Token::LParen), tok(Token::RParen))
+            .boxed();
+        let returns = nervix_type()
+            .then(kw(Identifier::Optional).or_not())
+            .map(|(ty, optional)| UdfReturn {
+                ty,
+                optional: optional.is_some(),
+            })
+            .boxed();
+        let language = kw(Identifier::Roto0_13).to(UdfLanguage::Roto0_13);
 
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then_ignore(kw(Identifier::Udf))
-        .then(udf_name())
-        .then_ignore(kw(Identifier::With))
-        .then(language)
-        .then_ignore(kw(Identifier::Args))
-        .then(arguments)
-        .boxed()
-        .then_ignore(kw(Identifier::Returns))
-        .then(returns)
-        .then(kw(Identifier::Volatile).or_not())
-        .then_ignore(kw(Identifier::Code))
-        .then(string_lit())
-        .boxed()
-        .try_map(
-            |((((((if_not_exists, name), language), arguments), returns), volatile), code),
-             span| {
-                if name.as_str().starts_with("__nervix_") {
-                    return Err(Rich::custom(
-                        span,
-                        "UDF names beginning with '__nervix_' are reserved",
-                    ));
-                }
-                for (index, argument) in arguments.iter().enumerate() {
-                    if argument.name.as_str().starts_with("__nervix_") {
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then_ignore(kw(Identifier::Udf))
+            .then(udf_name())
+            .then_ignore(kw(Identifier::With))
+            .then(language)
+            .then_ignore(kw(Identifier::Args))
+            .then(arguments)
+            .boxed()
+            .then_ignore(kw(Identifier::Returns))
+            .then(returns)
+            .then(kw(Identifier::Volatile).or_not())
+            .then_ignore(kw(Identifier::Code))
+            .then(string_lit())
+            .boxed()
+            .try_map(
+                |((((((if_not_exists, name), language), arguments), returns), volatile), code),
+                 span| {
+                    if name.as_str().starts_with("__nervix_") {
                         return Err(Rich::custom(
                             span,
-                            "UDF argument names beginning with '__nervix_' are reserved",
+                            "UDF names beginning with '__nervix_' are reserved",
                         ));
                     }
-                    if arguments[..index]
-                        .iter()
-                        .any(|earlier| earlier.name == argument.name)
-                    {
-                        return Err(Rich::custom(
-                            span,
-                            format!("duplicate UDF argument '{}'", argument.name.as_str()),
-                        ));
+                    for (index, argument) in arguments.iter().enumerate() {
+                        if argument.name.as_str().starts_with("__nervix_") {
+                            return Err(Rich::custom(
+                                span,
+                                "UDF argument names beginning with '__nervix_' are reserved",
+                            ));
+                        }
+                        if arguments[..index]
+                            .iter()
+                            .any(|earlier| earlier.name == argument.name)
+                        {
+                            return Err(Rich::custom(
+                                span,
+                                format!("duplicate UDF argument '{}'", argument.name.as_str()),
+                            ));
+                        }
                     }
-                }
-                if code.len() > 64 * 1024 {
-                    return Err(Rich::custom(span, "UDF code exceeds the 64 KiB limit"));
-                }
+                    if code.len() > 64 * 1024 {
+                        return Err(Rich::custom(span, "UDF code exceeds the 64 KiB limit"));
+                    }
 
-                Ok(CreateStatement::new(
-                    CreateUdf::new(name, language, arguments, returns, volatile.is_some(), code),
-                    if_not_exists,
-                ))
-            },
-        )
-        .then_ignore(tok(Token::Semicolon).or_not())
-        .boxed()
+                    Ok(CreateStatement::new(
+                        CreateUdf::new(
+                            name,
+                            language,
+                            arguments,
+                            returns,
+                            volatile.is_some(),
+                            code,
+                        ),
+                        if_not_exists,
+                    ))
+                },
+            )
+            .boxed()
+    })
 }
 
 pub fn describe_udf_parser<'src>()

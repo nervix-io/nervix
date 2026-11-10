@@ -263,7 +263,7 @@ fn notice_frame(
             body: Some(notice.as_union_value()),
         },
     );
-    finish_raw(builder, root, "NXSM")
+    finish_raw(builder, root, "NXEL")
 }
 
 #[test]
@@ -370,7 +370,7 @@ fn a_domain_entity_must_be_declared() {
             body: Some(snapshot.as_union_value()),
         },
     );
-    let frame = raw_server(finish_raw(builder, root, "NXSM"));
+    let frame = raw_server(finish_raw(builder, root, "NXEL"));
     assert_eq!(
         decode_error(ServerMessage::decode(&frame)),
         WireDecodeError::ZeroValue {

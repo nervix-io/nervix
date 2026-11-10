@@ -1986,6 +1986,7 @@ mod tests {
                 let mut arbitrary = Arbitrary::new(input, Domain::Vocabulary);
                 let scalar = generated_schema_type(&mut arbitrary, 3);
                 let schema_model = CreateSchema {
+                    labels: Default::default(),
                     name: SchemaName::parse("event").assured("schema name is valid"),
                     fields: vec![
                         SchemaField {

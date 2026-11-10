@@ -29,6 +29,7 @@ use crate::registry::{
 
 fn syslog_client(name: &str, config: &[(&str, &str)]) -> Model {
     Model::ClientSyslog(nervix_models::CreateClientSyslog {
+        labels: Default::default(),
         name: named(name),
         mount: None,
         config: config
@@ -43,6 +44,7 @@ fn syslog_client(name: &str, config: &[(&str, &str)]) -> Model {
 
 fn syslog_listener(name: &str, client: &str) -> Model {
     Model::Ingestor(CreateIngestor {
+        labels: Default::default(),
         name: named(name),
         output_routes: unbranched_transforming_outputs("notifications"),
         input: nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {

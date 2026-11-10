@@ -184,7 +184,11 @@ impl SchemaDraft {
                 sensitive: draft.sensitive,
             });
         }
-        Ok(CreateSchema { name, fields })
+        Ok(CreateSchema {
+            labels: Default::default(),
+            name,
+            fields,
+        })
     }
 }
 
@@ -386,16 +390,19 @@ impl WireSchemaDraft {
         }
         match format {
             WireFormat::Json => Ok(Model::WireJsonSchema(CreateWireSchema {
+                labels: Default::default(),
                 name,
                 strictness,
                 fields: self.build_fields(WireFieldType::json)?,
             })),
             WireFormat::Cbor => Ok(Model::WireCborSchema(CreateWireSchema {
+                labels: Default::default(),
                 name,
                 strictness,
                 fields: self.build_fields(WireFieldType::cbor)?,
             })),
             WireFormat::Avro => Ok(Model::WireAvroSchema(CreateWireSchema {
+                labels: Default::default(),
                 name,
                 strictness,
                 fields: self.build_fields(WireFieldType::avro)?,
@@ -535,6 +542,7 @@ impl BranchDraft {
             None
         };
         Ok(CreateBranch {
+            labels: Default::default(),
             name,
             schema: schema.clone(),
             ttl: ttl.to_string(),

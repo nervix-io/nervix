@@ -6,6 +6,7 @@ import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.function.LongConsumer;
 import java.util.function.LongFunction;
@@ -88,6 +89,13 @@ public final class Nervix {
         UNKNOWN_ENTITY(1), NOT_MATERIALIZED(2), INVALID_SELECTION(3), INVALID_LIMIT(4), STALE_CONTINUATION(5), OWNER_UNAVAILABLE(6), NOT_READY(7), DEADLINE(8), REPLY_TOO_LARGE(9);
         private final int code;
         InspectionRejection(int code) { this.code = code; }
+        public int code() { return code; }
+    }
+    /** Whether metadata was read from applied configuration or this transaction's candidate. */
+    public enum EntityLabelViewKind implements Coded {
+        COMMITTED(1), STAGED(2);
+        private final int code;
+        EntityLabelViewKind(int code) { this.code = code; }
         public int code() { return code; }
     }
     public enum InspectionStage implements Coded {
@@ -643,8 +651,36 @@ public final class Nervix {
         public Schema schema() { return read(p -> { long handle = Native.outcomeSchema(p); return handle == 0 ? null : new Schema(handle); }); }
         public Backup backup() { return read(p -> (Backup) Native.outcomeBackup(p)); }
         public Restore restore() { return read(p -> (Restore) Native.outcomeRestore(p)); }
+        public EntityLabelsInspection entityLabels() {
+            return read(p -> { long handle = Native.outcomeEntityLabels(p); return handle == 0 ? null : new EntityLabelsInspection(handle); });
+        }
         public Inspection stateInspection() {
             return read(p -> { long handle = Native.outcomeInspection(p); return handle == 0 ? null : new Inspection(handle); });
+        }
+    }
+    /** Exact metadata and its captured policy, retained independently of the originating outcome. */
+    public static final class EntityLabelsInspection extends Handle {
+        private EntityLabelsInspection(long pointer) { super(pointer); }
+        public String domain() { return read(Native::entityLabelsDomain); }
+        public String entityKind() { return read(Native::entityLabelsEntityKind); }
+        public String entityName() { return read(Native::entityLabelsEntityName); }
+        public EntityLabelViewKind view() { return read(p -> decode(EntityLabelViewKind.values(), Native.entityLabelsView(p))); }
+        public Long revision() { return read(p -> (Long) Native.entityLabelsRevision(p)); }
+        public String transactionId() { return read(Native::entityLabelsTransactionId); }
+        public Long position() { return read(p -> (Long) Native.entityLabelsPosition(p)); }
+        public byte[] planningBasis() { return read(Native::entityLabelsPlanningBasis); }
+        public long policyRevision() { return read(Native::entityLabelsPolicyRevision); }
+        public long maxCount() { return read(Native::entityLabelsMaxCount); }
+        public long maxKeyBytes() { return read(Native::entityLabelsMaxKeyBytes); }
+        public long maxValueBytes() { return read(Native::entityLabelsMaxValueBytes); }
+        public long maxBytes() { return read(Native::entityLabelsMaxBytes); }
+        public Map<String, String> labels() {
+            return read(p -> {
+                Object[] entries = Native.entityLabelsEntries(p);
+                var labels = new java.util.LinkedHashMap<String, String>(entries.length / 2);
+                for (int index = 0; index < entries.length; index += 2) labels.put((String) entries[index], (String) entries[index + 1]);
+                return java.util.Collections.unmodifiableMap(labels);
+            });
         }
     }
     /** An independently owned typed state page or refusal, with the complete lossless JSON view. */

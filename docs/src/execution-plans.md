@@ -38,7 +38,8 @@ new cluster schedule with the last schedule successfully applied on this node. F
 in the desired schedule, it builds a complete `ExecutionRevision` before asking the runtime to
 apply anything. The revision holds:
 
-- the domain and one source digest derived from the complete scheduled domain;
+- the domain and one source digest derived from the scheduled domain's execution configuration,
+  placement and state contracts;
 - typed nodes with identity, schema fingerprint, resolved branch contract, gate relays, and
   unit-keyed placement, ownership transitions, and applicable state generations;
 - activation, resource, entrypoint, emitter, processor, and message-error plans from that same
@@ -87,6 +88,13 @@ currently installed revision is the predecessor it was planned against. The hand
 has a separate purpose: ownership preparation and activation must agree on the exact committed
 schedule, including its assignments and state generations. Planning preserves its established
 encoding and does not substitute the source digest for it.
+
+Entity labels remain in the authoritative Model index and committed schedule. Execution planning
+projects configuration without labels before constructing typed plans or computing source,
+ownership and schema/state fingerprints. The window model digest uses the same distinction.
+Changing only metadata therefore preserves every execution and state identity. No record path
+reads labels or reconstructs them from a Model. [Entity Labels](entity-labels.md) owns their
+validation, transaction and inspection contract.
 
 Registry validation rejects invalid candidate Models before they become an active graph.
 Execution-revision construction resolves references and lowers the remaining schedule-specific
@@ -328,6 +336,7 @@ contains only typed runtime instructions:
 | Change | Runtime application |
 | --- | --- |
 | Unchanged | Keep the installed tasks and state when the predecessor, lifecycle, and start version still match. |
+| Entity labels only | Publish the committed metadata while retaining execution, state, allowances, bindings, connections, buffers and ACK obligations. No pause, force flush, rebuild or relocation is required. |
 | Dynamic | Apply the typed capacity, processor, WASM reset, emitter flush, or VHOST TLS update; bind and publish the desired processor and error plans. |
 | Entity swap | Fence affected input relays, force-flush as required, rebind reassigned placement and selected node tasks, then publish the desired revision and release the gates. Unaffected nodes and their branch state stay in place. |
 | Rebuild | Stop the preceding domain execution and install the complete desired running or passive revision. Domain-wide changes, a missing predecessor, and lifecycle changes can require this path. |

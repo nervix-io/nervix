@@ -137,6 +137,7 @@ pub(crate) enum ResourcesWire {
 
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
 pub(crate) struct DomainCaptureWire {
+    pub(crate) entity_label_policy: nervix_models::EntityLabelPolicy,
     pub(crate) domain: String,
     pub(crate) revision: u64,
     pub(crate) raft_term: u64,

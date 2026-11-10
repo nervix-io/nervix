@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use ahash::{HashMap, HashSet};
 use arch_into::ArchInto;
+use meticulous::ResultExt as _;
 use nervix_dataflow_graph::{DataflowNodeHealth, DataflowNodeStatus};
 use nervix_interconnect::{
     DataflowNodeStatusEnvelope, DecodeRejectionEnvelope, IngestorDescribeEnvelope,
@@ -250,17 +251,31 @@ pub(in crate::application) fn format_millis_duration(millis: u64) -> String {
     humantime::format_duration(Duration::from_millis(millis)).to_string()
 }
 
+pub(in crate::application) fn entity_label_line(labels: &nervix_models::EntityLabels) -> String {
+    let labels =
+        serde_json::to_string(labels).assured("exact metadata maps have string keys and values");
+    format!("labels: {labels}")
+}
+
+pub(in crate::application) fn append_entity_label_lines(
+    lines: &mut Vec<String>,
+    labels: &nervix_models::EntityLabels,
+) {
+    lines.push(entity_label_line(labels));
+}
+
 pub(in crate::application) fn format_endpoint_describe_output(
     name: &ModelName,
     endpoint: &CreateEndpoint,
 ) -> String {
-    [
+    let mut lines = vec![
         format!("endpoint: {}", name.as_str()),
         format!("kind: {}", endpoint.kind),
         format!("vhost: {}", endpoint.on_vhost.as_str()),
         format!("path: {}", endpoint.path),
-    ]
-    .join("\n")
+    ];
+    append_entity_label_lines(&mut lines, &endpoint.labels);
+    lines.join("\n")
 }
 
 pub(in crate::application) fn format_ingestor_describe_output(
@@ -480,6 +495,7 @@ pub(in crate::application) fn format_ingestor_describe_output(
         format_header_model(ingestor.input.entity_kind().capabilities().headers)
     ));
 
+    append_entity_label_lines(&mut lines, &ingestor.labels);
     Ok(lines.join("\n"))
 }
 
@@ -640,6 +656,7 @@ pub(in crate::application) fn format_relay_describe_output(
     if !branching.is_unbranched() {
         lines.push("branch-local describe: use WHERE bindings".to_string());
     }
+    append_entity_label_lines(&mut lines, &relay.labels);
     lines.join("\n")
 }
 
@@ -761,6 +778,7 @@ pub(in crate::application) fn format_lookup_describe_output(
         format!("codec: {}", summary.decode_using_codec.as_str()),
         format!("entries: {}", summary.entry_count),
     ]);
+    append_entity_label_lines(&mut lines, scheduled_node.config.labels());
     lines.join("\n")
 }
 
@@ -815,6 +833,7 @@ pub(in crate::application) fn format_deduplicator_describe_output(
         format!("  max time: {}", deduplicator.max_time),
     ]);
     lines.extend(format_processor_output_lines(&deduplicator.output_routes));
+    append_entity_label_lines(&mut lines, &deduplicator.labels);
     lines.join("\n")
 }
 
@@ -844,6 +863,7 @@ pub(in crate::application) fn format_junction_describe_output(
         "branch-local: true".to_string(),
     ]);
     lines.extend(format_processor_output_lines(&junction.output_routes));
+    append_entity_label_lines(&mut lines, &junction.labels);
     lines.join("\n")
 }
 
@@ -871,6 +891,7 @@ pub(in crate::application) fn format_reingestor_describe_output(
         ),
     ]);
     lines.extend(format_processor_output_lines(&reingestor.output_routes));
+    append_entity_label_lines(&mut lines, &reingestor.labels);
     lines.join("\n")
 }
 
@@ -921,6 +942,7 @@ pub(in crate::application) fn format_correlator_describe_output(
         "replicated state: true".to_string(),
     ]);
     lines.extend(format_processor_output_lines(&correlator.output_routes));
+    append_entity_label_lines(&mut lines, &correlator.labels);
     lines.join("\n")
 }
 
@@ -962,6 +984,7 @@ pub(in crate::application) fn format_reorderer_describe_output(
         "replicated state: true".to_string(),
     ]);
     lines.extend(format_processor_output_lines(&reorderer.output_routes));
+    append_entity_label_lines(&mut lines, &reorderer.labels);
     lines.join("\n")
 }
 
@@ -1071,6 +1094,7 @@ pub(in crate::application) fn format_emitter_describe_output(
             ),
         ]);
     }
+    append_entity_label_lines(&mut lines, &emitter.labels);
     Ok(lines.join("\n"))
 }
 
@@ -1107,6 +1131,7 @@ pub(in crate::application) fn format_window_processor_describe_output(
     for demand in aggregate.demands() {
         lines.extend(format_window_aggregate_demand(demand, &references));
     }
+    append_entity_label_lines(&mut lines, &processor.labels);
     lines.join("\n")
 }
 
@@ -1159,6 +1184,7 @@ pub(in crate::application) fn format_wasm_processor_describe_output(
             lines.extend(format_wasm_checkpoint_lines(Some(unit)));
         }
     }
+    append_entity_label_lines(&mut lines, &processor.labels);
     lines.join("\n")
 }
 

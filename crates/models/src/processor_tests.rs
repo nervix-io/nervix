@@ -53,6 +53,7 @@ fn inferencer_tensor_schema_requires_exact_array_axis_structure() {
 #[test]
 fn junction_alter_preserves_order_and_rejects_ambiguous_routes_atomically() {
     let mut junction = CreateJunction {
+        labels: Default::default(),
         name: named("route_events"),
         from: ProcessorInputs::new(vec![named("incoming")], Vec::new()),
         output_routes: ProcessorOutputs::new(vec![
@@ -102,6 +103,7 @@ fn junction_alter_preserves_order_and_rejects_ambiguous_routes_atomically() {
 #[test]
 fn junction_alter_applies_ordered_collection_filter_dependency_and_route_updates() {
     let mut junction = CreateJunction {
+        labels: Default::default(),
         name: named("route_events"),
         from: ProcessorInputs::single(named("incoming_a")),
         output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
@@ -215,6 +217,7 @@ fn junction_alter_applies_ordered_collection_filter_dependency_and_route_updates
 #[test]
 fn junction_alter_reports_each_typed_lookup_and_last_element_error() {
     let base = CreateJunction {
+        labels: Default::default(),
         name: named("route_events"),
         from: ProcessorInputs::single(named("incoming")),
         output_routes: ProcessorOutputs::single(named("accepted")),
@@ -357,6 +360,7 @@ fn junction_alter_reports_each_typed_lookup_and_last_element_error() {
 
 fn deduplicator() -> CreateDeduplicator {
     CreateDeduplicator {
+        labels: Default::default(),
         name: named("dedup_events"),
         from: ProcessorInputs::single(named("incoming")),
         output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(named("outgoing"))]),
@@ -371,6 +375,7 @@ fn deduplicator() -> CreateDeduplicator {
 
 fn reorderer() -> CreateReorderer {
     CreateReorderer {
+        labels: Default::default(),
         name: named("order_events"),
         from: ProcessorInputs::single(named("incoming")),
         output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(named("outgoing"))]),
@@ -525,6 +530,7 @@ fn processor_alters_are_atomic_and_report_typed_target_errors() {
 #[test]
 fn reingestor_alter_is_ordered_atomic_and_rejects_node_branching() {
     let mut reingestor = CreateReingestor {
+        labels: Default::default(),
         name: named("repartition"),
         from: ProcessorInputs::single(named("incoming")),
         output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(named("outgoing"))]),
@@ -600,6 +606,7 @@ fn inferencer(
     output: Vec<InferencerTensorDimension>,
 ) -> CreateInferencer {
     CreateInferencer {
+        labels: Default::default(),
         name: named("scorer"),
         from: ProcessorInputs::single(named("features")),
         output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(named("scores"))]),

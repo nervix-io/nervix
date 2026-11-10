@@ -389,6 +389,7 @@ impl EmitterDraft {
         };
         let envelope = self.envelope.build(connector.kind())?;
         let emitter = CreateEmitter {
+            labels: Default::default(),
             name,
             from: self.build_inputs()?,
             body,

@@ -53,6 +53,7 @@ pub(in crate::registry) fn temp_db_path() -> PathBuf {
 
 pub(in crate::registry) fn sample_transport_model(name: &str) -> Model {
     Model::ClientKafka(CreateClientKafka {
+        labels: Default::default(),
         name: ClientName::parse(name).expect("valid identifier"),
         mount: None,
         config: vec![KafkaConfigEntry {
@@ -221,6 +222,7 @@ pub(in crate::registry) fn unbranched_transforming_outputs(relay: &str) -> Proce
 
 pub(in crate::registry) fn branch_schema(name: &str, fields: &[&str]) -> Model {
     Model::Schema(CreateSchema {
+        labels: Default::default(),
         name: named(name),
         fields: fields
             .iter()
@@ -236,6 +238,7 @@ pub(in crate::registry) fn branch_schema(name: &str, fields: &[&str]) -> Model {
 
 pub(in crate::registry) fn branch(name: &str, schema: &str) -> Model {
     Model::Branch(CreateBranch {
+        labels: Default::default(),
         name: named(name),
         schema: named(schema),
         ttl: "5m".to_string(),
@@ -246,6 +249,7 @@ pub(in crate::registry) fn branch(name: &str, schema: &str) -> Model {
 
 pub(in crate::registry) fn branch_for_relay(relay: &str, schema: &str) -> Model {
     Model::Branch(CreateBranch {
+        labels: Default::default(),
         name: branch_name_for_relay(relay),
         schema: named(schema),
         ttl: "5m".to_string(),
@@ -259,6 +263,7 @@ pub(in crate::registry) fn branch_schema_with_types(
     fields: &[(&str, ParseAsType)],
 ) -> Model {
     Model::Schema(CreateSchema {
+        labels: Default::default(),
         name: named(name),
         fields: fields
             .iter()
@@ -274,6 +279,7 @@ pub(in crate::registry) fn branch_schema_with_types(
 
 pub(in crate::registry) fn schema(name: &str) -> Model {
     Model::Schema(CreateSchema {
+        labels: Default::default(),
         name: SchemaName::parse(name).expect("valid identifier"),
         fields: vec![SchemaField {
             name: FieldName::parse("value").expect("valid identifier"),
@@ -286,6 +292,7 @@ pub(in crate::registry) fn schema(name: &str) -> Model {
 
 pub(in crate::registry) fn wire_schema(name: &str) -> Model {
     Model::WireJsonSchema(CreateWireSchema {
+        labels: Default::default(),
         name: WireSchemaName::parse(name).expect("valid identifier"),
         strictness: Default::default(),
         fields: vec![WireSchemaField {
@@ -298,6 +305,7 @@ pub(in crate::registry) fn wire_schema(name: &str) -> Model {
 
 pub(in crate::registry) fn json_wire_schema_with_type(name: &str, field_type: JsonType) -> Model {
     Model::WireJsonSchema(CreateWireSchema {
+        labels: Default::default(),
         name: named(name),
         strictness: Default::default(),
         fields: vec![WireSchemaField {
@@ -313,6 +321,7 @@ pub(in crate::registry) fn avro_wire_schema_with_type(
     field_type: nervix_models::AvroType,
 ) -> Model {
     Model::WireAvroSchema(CreateWireSchema {
+        labels: Default::default(),
         name: named(name),
         strictness: Default::default(),
         fields: vec![WireSchemaField {
@@ -329,6 +338,7 @@ pub(in crate::registry) fn client_model(name: &str) -> Model {
 
 pub(in crate::registry) fn vhost(name: &str, hostnames: &[&str]) -> Model {
     Model::Vhost(CreateVhost {
+        labels: Default::default(),
         name: VhostName::parse(name).expect("valid identifier"),
         hostnames: hostnames
             .iter()
@@ -345,6 +355,7 @@ pub(in crate::registry) fn endpoint(
     endpoint_type: nervix_models::EndpointType,
 ) -> Model {
     Model::Endpoint(nervix_models::CreateEndpoint {
+        labels: Default::default(),
         name: EndpointName::parse(name).expect("valid identifier"),
         on_vhost: VhostName::parse(vhost_name).expect("valid identifier"),
         path: path.to_string(),
@@ -359,6 +370,7 @@ pub(in crate::registry) fn endpoint(
 
 pub(in crate::registry) fn codec(name: &str, schema: &str) -> Model {
     Model::Codec(CreateCodec {
+        labels: Default::default(),
         name: CodecName::parse(name).expect("valid identifier"),
         wire_format: CodecWireFormat::Json {
             wire_schema: WireSchemaName::parse("event_wire").expect("valid identifier"),
@@ -370,6 +382,7 @@ pub(in crate::registry) fn codec(name: &str, schema: &str) -> Model {
 
 pub(in crate::registry) fn syslog_codec(name: &str, schema: &str) -> Model {
     Model::Codec(CreateCodec {
+        labels: Default::default(),
         name: named(name),
         wire_format: CodecWireFormat::Syslog,
         schema: named(schema),
@@ -379,6 +392,7 @@ pub(in crate::registry) fn syslog_codec(name: &str, schema: &str) -> Model {
 
 pub(in crate::registry) fn syslog_client(name: &str) -> Model {
     Model::ClientSyslog(CreateClientSyslog {
+        labels: Default::default(),
         name: named(name),
         mount: None,
         config: vec![
@@ -396,6 +410,7 @@ pub(in crate::registry) fn syslog_client(name: &str) -> Model {
 
 pub(in crate::registry) fn avro_codec(name: &str, wire_schema: &str, schema: &str) -> Model {
     Model::Codec(CreateCodec {
+        labels: Default::default(),
         name: named(name),
         wire_format: CodecWireFormat::Avro {
             wire_schema: named(wire_schema),
@@ -412,6 +427,7 @@ pub(in crate::registry) fn jaq_native_codec(
     on_emitting: Option<&str>,
 ) -> Model {
     Model::Codec(CreateCodec {
+        labels: Default::default(),
         name: named(name),
         wire_format: CodecWireFormat::JaqNative {
             format: CodecJaqFormat::Json,
@@ -433,6 +449,7 @@ pub(in crate::registry) fn protobuf_codec(
     on_emitting: Option<&str>,
 ) -> Model {
     Model::Codec(CreateCodec {
+        labels: Default::default(),
         name: named(name),
         wire_format: CodecWireFormat::Protobuf(CodecProtobufConfig {
             resource: named("proto_bundle"),
@@ -461,6 +478,7 @@ pub(in crate::registry) fn rfc3339_json_codec_for_field(
     field: &str,
 ) -> Model {
     Model::Codec(CreateCodec {
+        labels: Default::default(),
         name: named(name),
         wire_format: CodecWireFormat::Json {
             wire_schema: named(wire_schema),
@@ -511,6 +529,7 @@ pub(in crate::registry) fn ingestor_statement(
         branched_by(into, branch_fields)
     };
     CreateIngestor {
+        labels: Default::default(),
         name: named(name),
         output_routes: with_output_branch(
             with_inherit_all(ProcessorOutputs::single(named(into))).with_flush_policy(
@@ -550,6 +569,7 @@ pub(in crate::registry) fn ingestor_statement(
 
 pub(in crate::registry) fn relay(name: &str, schema: &str) -> Model {
     Model::Relay(CreateRelay {
+        labels: Default::default(),
         name: RelayName::parse(name).expect("valid identifier"),
         schema: SchemaName::parse(schema).expect("valid identifier"),
         buffer: nonzero!(1usize),
@@ -588,6 +608,7 @@ pub(in crate::registry) fn relay_branched_like(
 
 pub(in crate::registry) fn materialized_relay(name: &str, schema: &str) -> Model {
     Model::Relay(CreateRelay {
+        labels: Default::default(),
         name: RelayName::parse(name).expect("valid identifier"),
         schema: SchemaName::parse(schema).expect("valid identifier"),
         buffer: nonzero!(1usize),
@@ -616,6 +637,7 @@ pub(in crate::registry) fn processor(name: &str, from_relay: &str, into_relay: &
 
 pub(in crate::registry) fn wasm_processor(name: &str, from_relay: &str, into_relay: &str) -> Model {
     Model::WasmProcessor(CreateWasmProcessor {
+        labels: Default::default(),
         name: named(name),
         from: ProcessorInputs::single(named(from_relay)),
         output_routes: {
@@ -669,6 +691,7 @@ pub(in crate::registry) fn unbranched_correlator(
         nervix_plexus::parse_route_construction("SET value = left.value")
             .expect("route construction must parse");
     Model::Correlator(CreateCorrelator {
+        labels: Default::default(),
         name: named(name),
         left: ProcessorInputs::single(named(left_relay)),
         right: ProcessorInputs::single(named(right_relay)),
@@ -699,6 +722,7 @@ pub(in crate::registry) fn window_processor(
     output_routes.routes[0].construction = nervix_plexus::parse_route_construction(construction)
         .expect("window route construction must parse");
     Model::WindowProcessor(CreateWindowProcessor {
+        labels: Default::default(),
         name: WindowProcessorName::parse(name).expect("valid identifier"),
         from: ProcessorInputs::single(RelayName::parse(from_relay).expect("valid identifier")),
         output_routes,
@@ -720,6 +744,7 @@ pub(in crate::registry) fn window_processor(
 
 pub(in crate::registry) fn junction(name: &str, from_relays: &[&str], into_relay: &str) -> Model {
     Model::Junction(CreateJunction {
+        labels: Default::default(),
         name: JunctionName::parse(name).expect("valid identifier"),
         from: ProcessorInputs::new(
             from_relays
@@ -754,6 +779,7 @@ pub(in crate::registry) fn deduplicator(
     max_time: &str,
 ) -> Model {
     Model::Deduplicator(CreateDeduplicator {
+        labels: Default::default(),
         name: DeduplicatorName::parse(name).expect("valid identifier"),
         from: ProcessorInputs::single(RelayName::parse(from_relay).expect("valid identifier")),
         output_routes: with_inherit_all(ProcessorOutputs::single(
@@ -798,6 +824,7 @@ pub(in crate::registry) fn reingestor_statement(
         branched_by(into_relay, params)
     };
     CreateReingestor {
+        labels: Default::default(),
         name: ReingestorName::parse(name).expect("valid identifier"),
         from: ProcessorInputs::single(RelayName::parse(from_relay).expect("valid identifier")),
         output_routes: with_output_branch(
@@ -823,6 +850,7 @@ pub(in crate::registry) fn emitter(
     client: &str,
 ) -> Model {
     Model::Emitter(CreateEmitter {
+        labels: Default::default(),
         name: EmitterName::parse(name).expect("valid identifier"),
         from: ProcessorInputs::single(RelayName::parse(from_relay).expect("valid identifier")),
         body: nervix_models::EmitterBody::Codec {
@@ -864,6 +892,7 @@ pub(in crate::registry) fn signaling_protocol(
     fail_matchers: &[&str],
 ) -> CreateSignalingProtocol {
     CreateSignalingProtocol {
+        labels: Default::default(),
         name: named("handshake"),
         format,
         on_connect: SignalingProtocolOnConnect {

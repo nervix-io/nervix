@@ -104,8 +104,8 @@ func (e *exchange) receive() (*session.ServerMessage, error) {
 	if err := e.stream.RecvMsg(&frame); err != nil {
 		return nil, err
 	}
-	if len(frame) < 8 || string(frame[4:8]) != "NXSM" {
-		return nil, errors.New("a server frame lacks the NXSM identifier")
+	if len(frame) < 8 || string(frame[4:8]) != "NXEL" {
+		return nil, errors.New("a server frame lacks the NXEL identifier")
 	}
 	return session.GetRootAsServerMessage(frame, 0), nil
 }

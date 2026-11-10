@@ -120,7 +120,7 @@ func frameRoot(frame []byte, identifier string) error {
 
 // reply reads the reply a server frame holds.
 func reply(frame []byte) (*session.Reply, error) {
-	if err := frameRoot(frame, "NXSM"); err != nil {
+	if err := frameRoot(frame, "NXEL"); err != nil {
 		return nil, err
 	}
 	message := session.GetRootAsServerMessage(frame, 0)
@@ -253,6 +253,14 @@ func commandLines(head string, outcome *session.CommandOutcome) ([]string, error
 	}
 	if state := outcome.State(nil); state != nil {
 		inspected, err := stateInspectionLines(state)
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, inspected...)
+	}
+
+	if labels := outcome.EntityLabels(nil); labels != nil {
+		inspected, err := entityLabelLines(labels)
 		if err != nil {
 			return nil, err
 		}
@@ -656,7 +664,7 @@ func downloadLines(frame []byte) ([]string, error) {
 }
 
 func serverLines(frame []byte, fields, keys []field) ([]string, error) {
-	if err := frameRoot(frame, "NXSM"); err != nil {
+	if err := frameRoot(frame, "NXEL"); err != nil {
 		return nil, err
 	}
 	message := session.GetRootAsServerMessage(frame, 0)
@@ -1438,6 +1446,50 @@ func stateInspectionLines(state *session.StateInspection) ([]string, error) {
 				}
 			}
 		}
+	}
+	return lines, nil
+}
+
+func entityLabelLines(value *session.EntityLabelsInspection) ([]string, error) {
+	entity := value.Entity(nil)
+	policy := value.Policy(nil)
+	if entity == nil || entity.Kind() == nil || policy == nil {
+		return nil, errors.New("labels lack identity or policy")
+	}
+	limits := policy.Limits(nil)
+	if limits == nil {
+		return nil, errors.New("labels lack captured limits")
+	}
+	lines := []string{fmt.Sprintf("ENTITY_LABELS domain=%s kind=%s name=%s policy=%d limits=%d/%d/%d/%d",
+		value.Domain(), strings.ToLower(session.EnumNamesModelKind[*entity.Kind()]), entity.Name(), policy.Revision(),
+		limits.Count(), limits.KeyBytes(), limits.ValueBytes(), limits.Bytes())}
+	switch value.ViewType() {
+	case session.EntityLabelViewCommittedEntityLabels:
+		view := new(session.CommittedEntityLabels)
+		if err := union(value.View, view); err != nil {
+			return nil, err
+		}
+		lines = append(lines, fmt.Sprintf("LABEL_VIEW committed revision=%d", view.Revision()))
+	case session.EntityLabelViewStagedEntityLabels:
+		view := new(session.StagedEntityLabels)
+		if err := union(value.View, view); err != nil {
+			return nil, err
+		}
+		preview := view.Preview(nil)
+		if preview == nil || preview.PlanningBasis(nil) == nil || preview.PlanningBasis(nil).BytesLength() != 32 {
+			return nil, errors.New("labels lack preview identity")
+		}
+		lines = append(lines, fmt.Sprintf("LABEL_VIEW staged transaction=%s position=%d basis=%s",
+			text(preview.TransactionId()), preview.Position(), hex.EncodeToString(preview.PlanningBasis(nil).BytesBytes())))
+	default:
+		return nil, errors.New("labels have an undeclared view")
+	}
+	for index := 0; index < value.LabelsLength(); index++ {
+		entry := new(session.LabelEntry)
+		if !value.Labels(entry, index) {
+			return nil, errors.New("labels lack an entry")
+		}
+		lines = append(lines, fmt.Sprintf("LABEL key=%s value=%s", text(entry.Key()), text(entry.Value())))
 	}
 	return lines, nil
 }

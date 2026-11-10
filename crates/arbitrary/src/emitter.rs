@@ -61,6 +61,7 @@ impl Arbitrary<'_> {
         };
         let envelope = self.emitter_envelope_of(kind);
         CreateEmitter {
+            labels: Default::default(),
             name: self.name(),
             from: self.processor_inputs(true),
             body,

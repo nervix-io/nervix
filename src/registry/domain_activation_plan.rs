@@ -87,9 +87,9 @@ pub(crate) struct PlannedRelay {
 
 #[derive(Debug, Clone)]
 pub(crate) enum PlannedCodecWireFormat {
-    Json(CreateJsonWireSchema),
-    Cbor(CreateCborWireSchema),
-    Avro(CreateAvroWireSchema),
+    Json(nervix_models::WireSchemaDefinition<nervix_models::JsonType>),
+    Cbor(nervix_models::WireSchemaDefinition<nervix_models::CborType>),
+    Avro(nervix_models::WireSchemaDefinition<nervix_models::AvroType>),
     Syslog,
     JaqNative {
         format: CodecJaqFormat,
@@ -101,9 +101,9 @@ pub(crate) enum PlannedCodecWireFormat {
 impl PlannedCodecWireFormat {
     pub(crate) fn resolved(&self) -> ResolvedCodecWireFormat<'_> {
         match self {
-            Self::Json(schema) => ResolvedCodecWireFormat::Json(schema),
-            Self::Cbor(schema) => ResolvedCodecWireFormat::Cbor(schema),
-            Self::Avro(schema) => ResolvedCodecWireFormat::Avro(schema),
+            Self::Json(schema) => ResolvedCodecWireFormat::Json(schema.as_ref()),
+            Self::Cbor(schema) => ResolvedCodecWireFormat::Cbor(schema.as_ref()),
+            Self::Avro(schema) => ResolvedCodecWireFormat::Avro(schema.as_ref()),
             Self::Syslog => ResolvedCodecWireFormat::Syslog,
             Self::JaqNative {
                 format,
@@ -120,9 +120,9 @@ impl PlannedCodecWireFormat {
 impl From<ResolvedCodecWireFormat<'_>> for PlannedCodecWireFormat {
     fn from(format: ResolvedCodecWireFormat<'_>) -> Self {
         match format {
-            ResolvedCodecWireFormat::Json(schema) => Self::Json(schema.clone()),
-            ResolvedCodecWireFormat::Cbor(schema) => Self::Cbor(schema.clone()),
-            ResolvedCodecWireFormat::Avro(schema) => Self::Avro(schema.clone()),
+            ResolvedCodecWireFormat::Json(schema) => Self::Json(schema.to_owned()),
+            ResolvedCodecWireFormat::Cbor(schema) => Self::Cbor(schema.to_owned()),
+            ResolvedCodecWireFormat::Avro(schema) => Self::Avro(schema.to_owned()),
             ResolvedCodecWireFormat::Syslog => Self::Syslog,
             ResolvedCodecWireFormat::JaqNative {
                 format,
@@ -193,9 +193,15 @@ impl DomainActivationPlan {
                     plan.schemas
                         .insert(schema.name.clone(), Arc::new(compile_schema(schema)));
                 }
-                Model::WireJsonSchema(schema) => wire_schemas.insert_json(schema.clone()),
-                Model::WireCborSchema(schema) => wire_schemas.insert_cbor(schema.clone()),
-                Model::WireAvroSchema(schema) => wire_schemas.insert_avro(schema.clone()),
+                Model::WireJsonSchema(schema) => {
+                    wire_schemas.insert_json(schema.definition().to_owned())
+                }
+                Model::WireCborSchema(schema) => {
+                    wire_schemas.insert_cbor(schema.definition().to_owned())
+                }
+                Model::WireAvroSchema(schema) => {
+                    wire_schemas.insert_avro(schema.definition().to_owned())
+                }
                 Model::Branch(branch) => {
                     branches.insert(branch.name.clone(), branch);
                 }
@@ -344,21 +350,30 @@ impl DomainActivationPlan {
 
 #[derive(Default)]
 struct WireSchemas {
-    json: BTreeMap<WireSchemaName, CreateJsonWireSchema>,
-    cbor: BTreeMap<WireSchemaName, CreateCborWireSchema>,
-    avro: BTreeMap<WireSchemaName, CreateAvroWireSchema>,
+    json: BTreeMap<WireSchemaName, nervix_models::WireSchemaDefinition<nervix_models::JsonType>>,
+    cbor: BTreeMap<WireSchemaName, nervix_models::WireSchemaDefinition<nervix_models::CborType>>,
+    avro: BTreeMap<WireSchemaName, nervix_models::WireSchemaDefinition<nervix_models::AvroType>>,
 }
 
 impl WireSchemas {
-    fn insert_json(&mut self, schema: CreateJsonWireSchema) {
+    fn insert_json(
+        &mut self,
+        schema: nervix_models::WireSchemaDefinition<nervix_models::JsonType>,
+    ) {
         self.json.insert(schema.name.clone(), schema);
     }
 
-    fn insert_cbor(&mut self, schema: CreateCborWireSchema) {
+    fn insert_cbor(
+        &mut self,
+        schema: nervix_models::WireSchemaDefinition<nervix_models::CborType>,
+    ) {
         self.cbor.insert(schema.name.clone(), schema);
     }
 
-    fn insert_avro(&mut self, schema: CreateAvroWireSchema) {
+    fn insert_avro(
+        &mut self,
+        schema: nervix_models::WireSchemaDefinition<nervix_models::AvroType>,
+    ) {
         self.avro.insert(schema.name.clone(), schema);
     }
 }
@@ -369,22 +384,31 @@ impl WireSchemaLookup for WireSchemas {
     fn json_wire_schema(
         &self,
         name: &WireSchemaName,
-    ) -> Result<&CreateJsonWireSchema, Self::Error> {
-        self.json.get(name).ok_or_else(|| name.clone())
+    ) -> Result<nervix_models::WireSchemaRef<'_, nervix_models::JsonType>, Self::Error> {
+        self.json
+            .get(name)
+            .map(nervix_models::WireSchemaDefinition::as_ref)
+            .ok_or_else(|| name.clone())
     }
 
     fn cbor_wire_schema(
         &self,
         name: &WireSchemaName,
-    ) -> Result<&CreateCborWireSchema, Self::Error> {
-        self.cbor.get(name).ok_or_else(|| name.clone())
+    ) -> Result<nervix_models::WireSchemaRef<'_, nervix_models::CborType>, Self::Error> {
+        self.cbor
+            .get(name)
+            .map(nervix_models::WireSchemaDefinition::as_ref)
+            .ok_or_else(|| name.clone())
     }
 
     fn avro_wire_schema(
         &self,
         name: &WireSchemaName,
-    ) -> Result<&CreateAvroWireSchema, Self::Error> {
-        self.avro.get(name).ok_or_else(|| name.clone())
+    ) -> Result<nervix_models::WireSchemaRef<'_, nervix_models::AvroType>, Self::Error> {
+        self.avro
+            .get(name)
+            .map(nervix_models::WireSchemaDefinition::as_ref)
+            .ok_or_else(|| name.clone())
     }
 }
 
@@ -422,6 +446,7 @@ mod tests {
 
     fn codec(name: &str, wire_format: CodecWireFormat) -> Model {
         Model::Codec(CreateCodec {
+            labels: Default::default(),
             name: named(name),
             wire_format,
             schema: named("payload"),
@@ -448,6 +473,7 @@ mod tests {
             schema("payload"),
             Model::Schema(branch_schema.clone()),
             Model::Branch(CreateBranch {
+                labels: Default::default(),
                 name: branch_name.clone(),
                 schema: branch_schema.name.clone(),
                 ttl: "7m".to_string(),
@@ -460,6 +486,7 @@ mod tests {
             Model::Relay(branched),
             wire_schema("json_wire"),
             Model::WireCborSchema(CreateWireSchema {
+                labels: Default::default(),
                 name: named("cbor_wire"),
                 strictness: Default::default(),
                 fields: vec![WireSchemaField {
@@ -469,6 +496,7 @@ mod tests {
                 }],
             }),
             Model::WireAvroSchema(CreateWireSchema {
+                labels: Default::default(),
                 name: named("avro_wire"),
                 strictness: Default::default(),
                 fields: vec![WireSchemaField {
@@ -521,6 +549,7 @@ mod tests {
                 }),
             ),
             Model::Vhost(CreateVhost {
+                labels: Default::default(),
                 name: named("edge"),
                 hostnames: vec!["API.EXAMPLE.COM".to_string()],
                 tls: Some(VhostTlsResource {
@@ -535,6 +564,7 @@ mod tests {
                 &[],
             )),
             Model::Endpoint(CreateEndpoint {
+                labels: Default::default(),
                 name: named("receive"),
                 on_vhost: named("edge"),
                 path: "/ingest".to_string(),
@@ -668,6 +698,7 @@ mod tests {
             ),
         ] {
             branched_relay.extend(nodes(vec![Model::Branch(CreateBranch {
+                labels: Default::default(),
                 name: branch_name.clone(),
                 schema: branch_schema.name.clone(),
                 ttl: ttl.to_string(),
@@ -713,6 +744,7 @@ mod tests {
         ));
 
         let endpoint_nodes = nodes(vec![Model::Endpoint(CreateEndpoint {
+            labels: Default::default(),
             name: named("receive"),
             on_vhost: named("missing"),
             path: "/ingest".to_string(),
@@ -727,11 +759,13 @@ mod tests {
 
         let endpoint_nodes = nodes(vec![
             Model::Vhost(CreateVhost {
+                labels: Default::default(),
                 name: named("edge"),
                 hostnames: vec!["example.com".to_string()],
                 tls: None,
             }),
             Model::Endpoint(CreateEndpoint {
+                labels: Default::default(),
                 name: named("receive"),
                 on_vhost: named("edge"),
                 path: "/ingest".to_string(),

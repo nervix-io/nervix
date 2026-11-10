@@ -32,6 +32,7 @@ SUITE_RELEASE(nx_outcome, nx_outcome_free)
 SUITE_RELEASE(nx_schema, nx_schema_free)
 SUITE_RELEASE(nx_suggestions, nx_suggestions_free)
 SUITE_RELEASE(nx_inspection, nx_inspection_free)
+SUITE_RELEASE(nx_entity_labels, nx_entity_labels_free)
 SUITE_RELEASE(nx_event, nx_event_release)
 SUITE_RELEASE(nx_clock_event, nx_clock_event_release)
 SUITE_RELEASE(nx_domain_clock, nx_domain_clock_release)
@@ -858,9 +859,9 @@ static void test_b3_event_references_keep_borrowed_frames_alive(void) {
     const uint8_t *frame = NULL;
     size_t length = 0;
     suite_check(nx_event_frame(held, &frame, &length));
-    REQUIRE(length > 8 && memcmp(frame + 4, "NXSM", 4) == 0);
+    REQUIRE(length > 8 && memcmp(frame + 4, "NXEL", 4) == 0);
     suite_drop(event);
-    REQUIRE(memcmp(frame + 4, "NXSM", 4) == 0);
+    REQUIRE(memcmp(frame + 4, "NXEL", 4) == 0);
     suite_cross_thread(held, suite_release_nx_event);
     // ANCHOR_END: retain_event
     suite_completed(session, "DELETE SUBSCRIPTION c_retained;");
@@ -1118,6 +1119,66 @@ static void suite_await_state_rows(nx_session *session, const char *show, uint64
         nanosleep(&pause, NULL);
     }
     suite_require(false, "the materialized state reached its owner within 30 seconds");
+}
+
+static void test_entity_labels_retain_exact_values_and_revision_views(void) {
+    nx_session *session = suite_connect(NULL, NULL);
+    nx_outcome *created = suite_completed(session,
+        "CREATE SCHEMA c_labels ( value U32 ) LABELS { 'empty' = '', 'owner' = ' Δ ' };");
+    // ANCHOR: entity_labels
+    nx_outcome *outcome = suite_completed(session, "SHOW LABELS ON SCHEMA c_labels FORMAT TEXT;");
+    nx_entity_labels *labels = NULL;
+    suite_check(nx_outcome_entity_labels(outcome, &labels));
+    HOLD(nx_entity_labels, labels);
+    suite_drop(outcome); /* Retained metadata is independent of its outcome. */
+    const uint8_t *text = NULL;
+    size_t length = 0;
+    nx_entity_labels_domain(labels, &text, &length);
+    REQUIRE(suite_equal(text, length, suite_env("NERVIX_PROBE_DOMAIN")));
+    nx_entity_labels_entity_kind(labels, &text, &length);
+    REQUIRE(suite_equal(text, length, "SCHEMA"));
+    nx_entity_labels_entity_name(labels, &text, &length);
+    REQUIRE(suite_equal(text, length, "c_labels"));
+    nx_entity_label_view_kind committed_view = nx_entity_labels_view(labels);
+    REQUIRE(committed_view == NX_ENTITY_LABEL_VIEW_COMMITTED);
+    uint64_t revision = 0, value = 0;
+    REQUIRE(nx_entity_labels_revision(labels, &revision));
+    REQUIRE(!nx_entity_labels_position(labels, &value));
+    REQUIRE(!nx_entity_labels_transaction_id(labels, &text, &length));
+    REQUIRE(!nx_entity_labels_planning_basis(labels, &text, &length));
+    REQUIRE(nx_entity_labels_policy_revision(labels) > 0);
+    uint64_t count = 0, key_bytes = 0, value_bytes = 0, bytes = 0;
+    nx_entity_labels_limits(labels, &count, &key_bytes, &value_bytes, &bytes);
+    REQUIRE(count == 64 && key_bytes == 128 && value_bytes == 1024 && bytes == 16384);
+    REQUIRE(nx_entity_labels_count(labels) == 2);
+    const uint8_t *key = NULL, *label_value = NULL;
+    size_t key_length = 0, value_length = 0;
+    suite_check(nx_entity_labels_entry(labels, 0, &key, &key_length, &label_value, &value_length));
+    REQUIRE(suite_equal(key, key_length, "empty") && value_length == 0);
+    suite_check(nx_entity_labels_entry(labels, 1, &key, &key_length, &label_value, &value_length));
+    REQUIRE(suite_equal(key, key_length, "owner") && suite_equal(label_value, value_length, " Δ "));
+    suite_completed(session, "BEGIN;");
+    suite_completed(session, "SET LABELS ON SCHEMA c_labels { 'owner' = 'Platform' };");
+    nx_outcome *staged_outcome = suite_completed(session, "SHOW LABELS ON SCHEMA c_labels;");
+    nx_entity_labels *staged = NULL;
+    suite_check(nx_outcome_entity_labels(staged_outcome, &staged));
+    HOLD(nx_entity_labels, staged);
+    suite_drop(staged_outcome);
+    REQUIRE(nx_entity_labels_view(staged) == NX_ENTITY_LABEL_VIEW_STAGED);
+    REQUIRE(!nx_entity_labels_revision(staged, &value));
+    REQUIRE(nx_entity_labels_transaction_id(staged, &text, &length) && length > 0);
+    REQUIRE(nx_entity_labels_position(staged, &value) && value == 1);
+    REQUIRE(nx_entity_labels_planning_basis(staged, &text, &length) && length == 32);
+    suite_completed(session, "REVERT;");
+    suite_check(nx_entity_labels_entry(staged, 1, &key, &key_length, &label_value, &value_length));
+    REQUIRE(suite_equal(label_value, value_length, "Platform"));
+    suite_check(nx_entity_labels_entry(labels, 1, &key, &key_length, &label_value, &value_length));
+    REQUIRE(suite_equal(label_value, value_length, " Δ "));
+    // ANCHOR_END: entity_labels
+    suite_kind(nx_entity_labels_entry(labels, 2, &key, &key_length, &label_value, &value_length), NX_ERROR_INVALID_ARGUMENT);
+    nx_entity_labels *absent = NULL;
+    suite_kind(nx_outcome_entity_labels(created, &absent), NX_ERROR_INVALID_ARGUMENT);
+    REQUIRE(absent == NULL);
 }
 
 static void test_inspection_retains_typed_state_after_its_outcome_is_released(void) {
@@ -2010,6 +2071,7 @@ static void test_b1_an_upload_completes_again_under_its_identity_and_refuses_ano
     {"cluster", "test_b5_calls_run_on_native_host_threads", test_b5_calls_run_on_native_host_threads}, \
     {"cluster", "test_b6_columns_use_size_queries_and_pointer_lengths", test_b6_columns_use_size_queries_and_pointer_lengths}, \
     {"cluster", "test_completion_pages_have_utf8_byte_ranges", test_completion_pages_have_utf8_byte_ranges}, \
+    {"cluster", "test_entity_labels_retain_exact_values_and_revision_views", test_entity_labels_retain_exact_values_and_revision_views}, \
     {"cluster", "test_inspection_retains_typed_state_after_its_outcome_is_released", test_inspection_retains_typed_state_after_its_outcome_is_released}, \
     {"cluster", "test_b7_subscription_gap_end_and_variant_accessors", test_b7_subscription_gap_end_and_variant_accessors}, \
     {"cluster", "test_b7_refused_subscription_restoration_reports_its_cause_and_recovers", test_b7_refused_subscription_restoration_reports_its_cause_and_recovers}, \

@@ -1859,6 +1859,7 @@ mod tests {
 
     fn user_id_schema() -> Arc<CompiledSchema> {
         Arc::new(runtime_schema::compile_schema(&CreateSchema {
+            labels: Default::default(),
             name: named("event"),
             fields: user_id_fields(),
         }))
@@ -2051,6 +2052,7 @@ mod tests {
         let branching = nervix_models::ResolvedBranching::branched(
             named("by_tenant"),
             nervix_models::CreateSchema {
+                labels: Default::default(),
                 name: named("tenant_key"),
                 fields: vec![SchemaField {
                     name: field.clone(),

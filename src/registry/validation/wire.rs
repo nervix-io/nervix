@@ -64,31 +64,34 @@ impl WireSchemaLookup for DomainModelWireSchemas<'_> {
     fn json_wire_schema(
         &self,
         name: &WireSchemaName,
-    ) -> Result<&CreateJsonWireSchema, Self::Error> {
+    ) -> Result<nervix_models::WireSchemaRef<'_, nervix_models::JsonType>, Self::Error> {
         self.require(ModelKind::WireJsonSchema, name, |model| match model {
             Model::WireJsonSchema(schema) => Some(schema),
             _ => None,
         })
+        .map(CreateWireSchema::definition)
     }
 
     fn cbor_wire_schema(
         &self,
         name: &WireSchemaName,
-    ) -> Result<&CreateCborWireSchema, Self::Error> {
+    ) -> Result<nervix_models::WireSchemaRef<'_, nervix_models::CborType>, Self::Error> {
         self.require(ModelKind::WireCborSchema, name, |model| match model {
             Model::WireCborSchema(schema) => Some(schema),
             _ => None,
         })
+        .map(CreateWireSchema::definition)
     }
 
     fn avro_wire_schema(
         &self,
         name: &WireSchemaName,
-    ) -> Result<&CreateAvroWireSchema, Self::Error> {
+    ) -> Result<nervix_models::WireSchemaRef<'_, nervix_models::AvroType>, Self::Error> {
         self.require(ModelKind::WireAvroSchema, name, |model| match model {
             Model::WireAvroSchema(schema) => Some(schema),
             _ => None,
         })
+        .map(CreateWireSchema::definition)
     }
 }
 
@@ -780,6 +783,7 @@ mod tests {
                 Self::Json { internal, .. } | Self::Avro { internal, .. } => internal.clone(),
             };
             let schema = Model::Schema(CreateSchema {
+                labels: Default::default(),
                 name: named("event_schema"),
                 fields: vec![SchemaField {
                     name: named("value"),
@@ -826,6 +830,7 @@ mod tests {
         let identifier =
             ModelName::parse("event_codec").assured("event_codec is a valid model name");
         let schema = CreateSchema {
+            labels: Default::default(),
             name: named("event_schema"),
             fields: Vec::new(),
         };
@@ -949,6 +954,7 @@ mod tests {
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
+                        labels: Default::default(),
                         name: SchemaName::parse("event_schema").expect("valid identifier"),
                         fields: vec![SchemaField {
                             name: FieldName::parse("value").expect("valid identifier"),
@@ -982,6 +988,7 @@ mod tests {
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
+                        labels: Default::default(),
                         name: named("syslog_event"),
                         fields: vec![
                             SchemaField {
@@ -1051,6 +1058,7 @@ mod tests {
                     &domain,
                     vec![
                         Model::Schema(CreateSchema {
+                            labels: Default::default(),
                             name: named("syslog_event"),
                             fields: vec![field],
                         }),
@@ -1092,6 +1100,7 @@ mod tests {
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
+                        labels: Default::default(),
                         name: named("syslog_event"),
                         fields: vec![SchemaField {
                             name: named("message"),
@@ -1150,6 +1159,7 @@ mod tests {
 
         fn validate(&self) -> Result<(), Report<RegistryError>> {
             let schema = CreateSchema {
+                labels: Default::default(),
                 name: named("binary_schema"),
                 fields: vec![SchemaField {
                     name: named("value"),
@@ -1165,15 +1175,19 @@ mod tests {
                     ensure_codec_schema_compatibility(
                         &domain,
                         &identifier,
-                        ResolvedCodecWireFormat::$format(&CreateWireSchema {
-                            name: named("binary_wire"),
-                            strictness: Default::default(),
-                            fields: vec![WireSchemaField {
-                                name: named("value"),
-                                ty: $ty,
-                                optional: false,
-                            }],
-                        }),
+                        ResolvedCodecWireFormat::$format(
+                            (&CreateWireSchema {
+                                labels: Default::default(),
+                                name: named("binary_wire"),
+                                strictness: Default::default(),
+                                fields: vec![WireSchemaField {
+                                    name: named("value"),
+                                    ty: $ty,
+                                    optional: false,
+                                }],
+                            })
+                                .into(),
+                        ),
                         &schema,
                         &self.rules,
                     )
@@ -1779,6 +1793,7 @@ mod tests {
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
+                        labels: Default::default(),
                         name: SchemaName::parse("event_schema").expect("valid identifier"),
                         fields: vec![SchemaField {
                             name: FieldName::parse("value").expect("valid identifier"),
@@ -1788,6 +1803,7 @@ mod tests {
                         }],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
+                        labels: Default::default(),
                         name: WireSchemaName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![WireSchemaField {

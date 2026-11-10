@@ -1378,6 +1378,7 @@ mod tests {
 
         let mut scheduled = ScheduledNode::new(
             nervix_models::Model::WasmProcessor(nervix_models::CreateWasmProcessor {
+                labels: Default::default(),
                 name: nervix_models::WasmProcessorName::parse("sessionizer")
                     .expect("valid identifier"),
                 from: nervix_models::ProcessorInputs::single(
@@ -1407,6 +1408,7 @@ mod tests {
         let schema = nervix_models::SchemaName::parse("session_event").expect("valid schema name");
         let schema_node =
             scheduled_model(nervix_models::Model::Schema(nervix_models::CreateSchema {
+                labels: Default::default(),
                 name: schema.clone(),
                 fields: vec![nervix_models::SchemaField {
                     name: FieldName::parse("value").expect("valid field name"),
@@ -1417,6 +1419,7 @@ mod tests {
             }));
         let relay_node = |name: &str| {
             scheduled_model(nervix_models::Model::Relay(nervix_models::CreateRelay {
+                labels: Default::default(),
                 name: RelayName::parse(name).expect("valid relay name"),
                 schema: schema.clone(),
                 buffer: nonzero!(2usize),

@@ -519,6 +519,7 @@ mod tests {
                 ResolvedBranching::branched(
                     named(source),
                     nervix_models::CreateSchema {
+                        labels: Default::default(),
                         name: named(source),
                         fields: fields
                             .into_iter()

@@ -2335,6 +2335,7 @@ mod tests {
             named::<ModelName>("dedup_users"),
         );
         let schema = Arc::new(compile_schema(&CreateSchema {
+            labels: Default::default(),
             name: named("notification"),
             fields: vec![SchemaField {
                 name: named("user_id"),

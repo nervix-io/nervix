@@ -1207,6 +1207,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn cancelled_message_error_delivery_keeps_the_record_pending() {
         let schema = Arc::new(compile_schema(&nervix_models::CreateSchema {
+            labels: Default::default(),
             name: named("events"),
             fields: vec![nervix_models::SchemaField {
                 name: named("value"),
@@ -1257,6 +1258,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn rejected_record_ack_remains_held_for_message_error_delivery() {
         let schema = Arc::new(compile_schema(&nervix_models::CreateSchema {
+            labels: Default::default(),
             name: named("events"),
             fields: vec![nervix_models::SchemaField {
                 name: named("value"),

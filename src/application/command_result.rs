@@ -184,6 +184,7 @@ pub(in crate::application) struct CommandResult {
     pub(in crate::application) inspection: Option<Box<TransactionInspection>>,
     /// The read-only state facts returned by a WASM processor description.
     pub(in crate::application) wasm_state: Option<Box<nervix_models::WasmStateInspection>>,
+    pub(in crate::application) entity_labels: Option<Box<nervix_models::EntityLabelsInspection>>,
     pub(in crate::application) state: Option<Box<RenderedStateInspection>>,
     /// The versions, entries and bindings a resource description read.
     pub(in crate::application) resource: Option<Box<ResourceDescription>>,
@@ -206,6 +207,7 @@ impl CommandResult {
             transaction_admission: None,
             inspection: None,
             wasm_state: None,
+            entity_labels: None,
             state: None,
             resource: None,
             backup: None,

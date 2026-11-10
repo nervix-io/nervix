@@ -17,6 +17,7 @@ use meticulous::ResultExt as _;
 use rkyv::{
     Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize,
     rancor::{Fallible, Source},
+    with::DeserializeWith as _,
 };
 use serde::{Deserialize, Serialize};
 use strum::EnumIter;
@@ -26,13 +27,16 @@ use crate::{Setting, SettingDefinition};
 
 pub(crate) mod archive;
 mod durations;
+mod entity_labels;
 mod limits;
+mod packed_duration;
 mod publication;
 #[cfg(test)]
 mod tests;
 mod tls;
 
 pub use durations::*;
+pub use entity_labels::*;
 pub use limits::*;
 pub use publication::*;
 pub use tls::*;
@@ -155,6 +159,27 @@ macro_rules! parameter_cli_text {
     };
 }
 
+macro_rules! parameter_setting {
+    ($definition:ident, Duration) => { Setting<packed_duration::DurationDefinition<$definition>> };
+    ($definition:ident, $kind:ident) => { Setting<$definition> };
+}
+macro_rules! parameter_resolve {
+    ($definition:ident, $value:expr, Duration) => {
+        packed_duration::resolve::<$definition>($value, ClusterParameterKey::$definition)
+    };
+    ($definition:ident, $value:expr, $kind:ident) => {
+        Setting::<$definition>::resolve($value, &())
+    };
+}
+macro_rules! parameter_value {
+    ($setting:expr, Duration) => {
+        $setting.value().get()
+    };
+    ($setting:expr, $kind:ident) => {
+        *$setting.value()
+    };
+}
+
 macro_rules! parameter_values {
     ($($field:ident: $definition:ident($value:ty) => $kind:ident,)+) => {
         /// The complete cluster policy. Each field has one class, default and validation owner.
@@ -164,7 +189,7 @@ macro_rules! parameter_values {
             $(
                 #[serde(with = "archive")]
                 #[rkyv(with = archive::ValidatedSetting)]
-                $field: Setting<$definition>,
+                $field: parameter_setting!($definition, $kind),
             )+
         }
 
@@ -173,7 +198,7 @@ macro_rules! parameter_values {
                 use serde::de::Error as _;
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
-                struct Fields { $(#[serde(with = "archive")] $field: Setting<$definition>,)+ }
+                struct Fields { $(#[serde(with = "archive")] $field: parameter_setting!($definition, $kind),)+ }
                 let fields = Fields::deserialize(deserializer)?;
                 let values = Self {
                     $($field: fields.$field,)+
@@ -188,8 +213,7 @@ macro_rules! parameter_values {
         {
             fn deserialize(&self, deserializer: &mut D) -> Result<ClusterParameterValues, D::Error> {
                 let values = ClusterParameterValues {
-                    $($field: Setting::new(self.$field.deserialize(deserializer)?, &())
-                        .map_err(|error| D::Error::new(error.into_error()))?,)+
+                    $($field: archive::ValidatedSetting::deserialize_with(&self.$field, deserializer)?,)+
                 };
                 values.validate_tls().map_err(|error| D::Error::new(error.into_error()))?;
                 Ok(values)
@@ -225,18 +249,18 @@ macro_rules! parameter_values {
 
         impl ClusterParameterValues {
             pub fn resolve(seed: ClusterParameterSeedValues) -> Result<Self, Report<ClusterParameterError>> {
-                let values = Self { $($field: Setting::resolve(seed.$field, &())?,)+ };
+                let values = Self { $($field: parameter_resolve!($definition, seed.$field, $kind)?,)+ };
                 values.validate_tls()?;
                 Ok(values)
             }
 
-            $(pub fn $field(&self) -> $value { *self.$field.value() })+
+            $(pub fn $field(&self) -> $value { parameter_value!(self.$field, $kind) })+
 
             /// Validate every proposed value before returning the complete candidate.
             pub fn changed(&self, updates: &ClusterParameterUpdates) -> Result<Self, Report<ClusterParameterError>> {
                 let mut next = *self;
                 for update in updates.iter() {
-                    match update { $(ClusterParameterChange::$definition(value) => { next.$field = Setting::new(*value, &())?; },)+ }
+                    match update { $(ClusterParameterChange::$definition(value) => { next.$field = parameter_resolve!($definition, Some(*value), $kind)?; },)+ }
                 }
                 next.validate_tls()?;
                 Ok(next)
@@ -250,7 +274,7 @@ macro_rules! parameter_values {
                 vec![$(
                     DescribedClusterParameter {
                         parameter: ClusterParameterKey::$definition,
-                        value: parameter_text!(self.$field.value(), $kind),
+                        value: parameter_text!(&self.$field(), $kind),
                     },
                 )+]
             }
@@ -314,6 +338,10 @@ parameter_values! {
     resource_max_archive_bytes: ResourceMaxArchiveBytes(u64) => Bytes,
     resource_max_extracted_bytes: ResourceMaxExtractedBytes(u64) => Bytes,
     resource_max_file_count: ResourceMaxFileCount(u64) => Count,
+    entity_labels_max_count: EntityLabelsMaxCount(u64) => Count,
+    entity_labels_max_key_bytes: EntityLabelsMaxKeyBytes(u64) => Bytes,
+    entity_labels_max_value_bytes: EntityLabelsMaxValueBytes(u64) => Bytes,
+    entity_labels_max_bytes: EntityLabelsMaxBytes(u64) => Bytes,
     max_batch_messages: MaxBatchMessages(u64) => Count,
     client_producer_session_bytes: ClientProducerSessionBytes(u64) => Bytes,
     client_consumer_session_bytes: ClientConsumerSessionBytes(u64) => Bytes,
@@ -326,6 +354,16 @@ parameter_values! {
     password_iterations: PasswordIterations(u64) => Count,
 }
 
+/// One bound shared by the duration declarations and their lossless representation.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the declared duration coordinate has exactly u32 seconds of range"
+    )
+)]
+const MAX_PARAMETER_DURATION: Duration = Duration::from_secs(4_294_967_295);
+
 impl ClusterParameterKey {
     pub fn keyword(self) -> String {
         self.setting_name().replace('-', "_").to_ascii_uppercase()
@@ -337,7 +375,7 @@ impl ClusterParameterKey {
                 parameter: self,
             }));
         }
-        let maximum = Duration::from_secs(u64::from(u32::MAX));
+        let maximum = MAX_PARAMETER_DURATION;
         if value > maximum {
             return Err(Report::new(ClusterParameterError::DurationTooLong {
                 parameter: self,

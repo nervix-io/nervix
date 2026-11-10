@@ -1172,6 +1172,7 @@ mod tests {
     fn branch_schema_rejects_nested_bytes_with_field_identity() {
         let domain = named::<DomainName>("binary_domain");
         let branch = CreateBranch {
+            labels: Default::default(),
             name: named("by_blob"),
             schema: named("binary_branch_schema"),
             ttl: "5m".to_string(),
@@ -1205,6 +1206,7 @@ mod tests {
         let relay_name: RelayName = named("events");
         let branch_name: BranchName = named("by_tenant");
         let branch_schema = CreateSchema {
+            labels: Default::default(),
             name: named("tenant_branch_schema"),
             fields: vec![SchemaField {
                 name: named("tenant"),
@@ -1262,6 +1264,7 @@ mod tests {
         assert!(!changed);
 
         let sensitive_schema = CreateSchema {
+            labels: Default::default(),
             name: branch_schema.name.clone(),
             fields: vec![SchemaField {
                 name: named("tenant"),
@@ -1346,6 +1349,7 @@ mod tests {
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
+                        labels: Default::default(),
                         name: named("event_schema"),
                         fields: vec![SchemaField {
                             name: named("value"),
@@ -1358,6 +1362,7 @@ mod tests {
                     codec("event_codec", "event_schema"),
                     relay_branched_by_relay_branch("events", "event_schema"),
                     Model::Schema(CreateSchema {
+                        labels: Default::default(),
                         name: named("value_branch"),
                         fields: vec![SchemaField {
                             name: named("value"),
@@ -1446,6 +1451,7 @@ mod tests {
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
+                        labels: Default::default(),
                         name: SchemaName::parse("event_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
@@ -1469,6 +1475,7 @@ mod tests {
                         ],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
+                        labels: Default::default(),
                         name: WireSchemaName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
@@ -1509,6 +1516,7 @@ mod tests {
                         &["tenant", "user_id"],
                     ),
                     Model::Ingestor(CreateIngestor {
+                        labels: Default::default(),
                         name: named("ing_b"),
                         output_routes: with_output_branch(
                             with_inherit_all(ProcessorOutputs::single(named("notifications")))
@@ -1688,6 +1696,7 @@ mod tests {
                     branch("branch_a", "value_branch"),
                     branch("branch_b", "value_branch"),
                     Model::Generator(CreateGenerator {
+                        labels: Default::default(),
                         name: named("generate"),
                         materialized_relay: named("input"),
                         branched_by: BranchSelection::branched_by(named("branch_b")),
@@ -1735,6 +1744,7 @@ mod tests {
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
+                        labels: Default::default(),
                         name: SchemaName::parse("event_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
@@ -1758,6 +1768,7 @@ mod tests {
                         ],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
+                        labels: Default::default(),
                         name: WireSchemaName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
@@ -1837,6 +1848,7 @@ mod tests {
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
+                        labels: Default::default(),
                         name: SchemaName::parse("event_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
@@ -1860,6 +1872,7 @@ mod tests {
                         ],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
+                        labels: Default::default(),
                         name: WireSchemaName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
@@ -1907,6 +1920,7 @@ mod tests {
                     ),
                     branch("by_route_logs", "tenant_user_id_branch"),
                     Model::Reingestor(CreateReingestor {
+                        labels: Default::default(),
                         name: named("route_logs"),
                         from: ProcessorInputs::single(named("notifications")),
                         output_routes: with_output_branch(
@@ -2019,6 +2033,7 @@ mod tests {
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
+                        labels: Default::default(),
                         name: SchemaName::parse("notification").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
@@ -2036,6 +2051,7 @@ mod tests {
                         ],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
+                        labels: Default::default(),
                         name: WireSchemaName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
@@ -2152,6 +2168,7 @@ mod tests {
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
+                        labels: Default::default(),
                         name: SchemaName::parse("event_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
@@ -2175,6 +2192,7 @@ mod tests {
                         ],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
+                        labels: Default::default(),
                         name: WireSchemaName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
@@ -2291,6 +2309,7 @@ mod tests {
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
+                        labels: Default::default(),
                         name: SchemaName::parse("event_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
@@ -2402,6 +2421,7 @@ mod tests {
                 &domain,
                 vec![
                     Model::Schema(CreateSchema {
+                        labels: Default::default(),
                         name: SchemaName::parse("event_schema").expect("valid identifier"),
                         fields: vec![
                             SchemaField {
@@ -2425,6 +2445,7 @@ mod tests {
                         ],
                     }),
                     Model::WireJsonSchema(CreateWireSchema {
+                        labels: Default::default(),
                         name: WireSchemaName::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![

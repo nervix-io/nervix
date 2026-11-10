@@ -1877,6 +1877,7 @@ mod tests {
             branch_fields: &[],
         };
         let reingestor = nervix_models::CreateReingestor {
+            labels: Default::default(),
             name: named("repartition"),
             from: nervix_models::ProcessorInputs::single(named("incoming")),
             output_routes: with_inherit_all(nervix_models::ProcessorOutputs::single(named(

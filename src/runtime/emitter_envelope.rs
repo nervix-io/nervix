@@ -360,6 +360,7 @@ impl CompiledEnvelope {
                     });
                 }
                 let schema = compile_schema(&nervix_models::CreateSchema {
+                    labels: Default::default(),
                     name: nervix_models::SchemaName::parse(ENVELOPE_NAMESPACE)
                         .assured("the envelope namespace is a schema name"),
                     fields,

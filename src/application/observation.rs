@@ -579,15 +579,22 @@ impl SessionServiceImpl {
         else {
             return command_error(format!("placement '{}' not found", describe.name.as_str()));
         };
+        let mut label_lines = Vec::new();
         let form = match self
             .inner
             .registry
             .get::<CreatePlacement>(domain, &describe.name)
         {
-            Ok(Some(placement)) => match placement.to_canonical_plexus() {
-                Ok(form) => Some(form),
-                Err(error) => return command_error(format!("{error:#}")),
-            },
+            Ok(Some(placement)) => {
+                super::describe_output::append_entity_label_lines(
+                    &mut label_lines,
+                    &placement.labels,
+                );
+                match placement.to_canonical_plexus() {
+                    Ok(form) => Some(form),
+                    Err(error) => return command_error(format!("{error:#}")),
+                }
+            }
             Ok(None) => None,
             Err(error) => return command_error(format!("{error:#}")),
         };
@@ -595,6 +602,7 @@ impl SessionServiceImpl {
         if let Some(form) = form {
             lines.push(format!("form: {form}"));
         }
+        lines.extend(label_lines);
         lines.push(format!("scope: {}", placement_rule_scope(rule)));
         lines.push(format!("policy: {}", rule.policy.as_ref()));
         let rank = match rule.rank {
@@ -1973,7 +1981,7 @@ impl SessionServiceImpl {
         } else {
             "(none)".to_string()
         };
-        command_ok(format!(
+        let message = format!(
             "name: {}\nlanguage: {}\nsignature: ({arguments}) -> {}{}\nvolatile: {}\ncode_hash: \
              {}\nreferencing_nodes: {references}",
             model.name.as_str(),
@@ -1986,6 +1994,10 @@ impl SessionServiceImpl {
             },
             model.volatile,
             model.code_hash
+        );
+        command_ok(format!(
+            "{message}\n{}",
+            super::describe_output::entity_label_line(&model.labels)
         ))
     }
 
@@ -2463,6 +2475,7 @@ mod tests {
         } = build_test_service(true).await;
         let domain: DomainName = named("default");
         let lookup = CreateLookup {
+            labels: Default::default(),
             name: named("balances"),
             key_field: named("account"),
             resource: named("data"),
@@ -2471,6 +2484,7 @@ mod tests {
             decode_using_codec: named("balance_codec"),
         };
         let codec = CreateCodec {
+            labels: Default::default(),
             name: lookup.decode_using_codec.clone(),
             wire_format: CodecWireFormat::Json {
                 wire_schema: named("balance_wire"),
@@ -2479,6 +2493,7 @@ mod tests {
             encoding_rules: Vec::new(),
         };
         let mut schema = CreateSchema {
+            labels: Default::default(),
             name: codec.schema.clone(),
             fields: Vec::new(),
         };

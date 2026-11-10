@@ -325,6 +325,7 @@ impl SignalingDraft {
             steps.push(step.build(index + 1)?);
         }
         Ok(CreateSignalingProtocol {
+            labels: Default::default(),
             name,
             format,
             on_connect: SignalingProtocolOnConnect {

@@ -407,6 +407,7 @@ impl CodecDraft {
             });
         }
         Ok(CreateCodec {
+            labels: Default::default(),
             name,
             wire_format,
             schema,
