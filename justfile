@@ -357,18 +357,6 @@ test-scenario-arguments:
 test-scenario-shards:
     python3 -m unittest scripts.tests.test_scenario_shards
 
-# Prepare the public scenario executable without spending a runtime check's execution budget.
-build-scenarios: tests-deps
-    cargo test --package nervix-scenarios --test scenarios --no-run
-
-# --input accepts a feature file, directory or quoted glob, relative to the workspace or absolute.
-# A selection that executes no scenarios fails, including an empty name, tag or shard filter.
-test-scenarios *args: tests-deps test-client-python-api-run
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
-
 # Exercise the compiled runner's expected-empty failures; no scenario workload is qualified.
 test-scenario-selection-guards binary="" evidence="":
     #!/usr/bin/env bash
@@ -381,6 +369,18 @@ test-scenario-selection-guards binary="" evidence="":
         evidence="$(mktemp -d {{ quote(cargo_target_dir + "/scenario-selection-guards.XXXXXXXX") }})"
     fi
     python3 -m scripts.scenario_selection_qualification "$binary" "$evidence"
+
+# Prepare the public scenario executable without spending a runtime check's execution budget.
+build-scenarios: tests-deps
+    cargo test --package nervix-scenarios --test scenarios --no-run
+
+# --input accepts a feature file, directory or quoted glob, relative to the workspace or absolute.
+# A selection that executes no scenarios fails, including an empty name, tag or shard filter.
+test-scenarios *args: tests-deps test-client-python-api-run
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
 
 # Exercise fixed window collection and its sampled-sequence tensor consumer.
 test-window-collection-arrays *args: build-deps build-plexus-format build-test-cli build-deadlock-report
