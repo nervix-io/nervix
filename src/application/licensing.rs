@@ -8,7 +8,9 @@
 mod client;
 mod clock;
 mod coordinator;
+mod notifications;
 mod request_turn;
+mod stream;
 pub(in crate::application) use coordinator::run;
 pub(in crate::application) use request_turn::LicensingRequests;
 pub mod test_support;

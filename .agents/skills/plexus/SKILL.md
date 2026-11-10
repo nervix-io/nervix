@@ -140,6 +140,8 @@ For cluster continuity and public identity inspection, read
 For activation, refresh, `DESCRIBE LICENSE`, effective policy, credential handling and quota usage, read
 [Node Settings → Cluster Licensing](../../../docs/src/node-settings.md#cluster-licensing) and
 [Licensing Metrics](../../../docs/src/metrics-and-observability.md#licensing-metrics).
+For notification freshness, reconnects and polling fallback, use that chapter’s event-stream contract.
+Treat notification hints as requests to obtain a verified decision, never as permissions.
 Keep licensing commands cluster-scoped and obtain credentials and trust provisioning externally;
 Plexus supplies no service-address or trust-anchor override.
 For source UUID inspection and restore behavior, read
