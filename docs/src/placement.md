@@ -270,7 +270,9 @@ Drain, colocation consolidation, and explicit relocation use a planned handoff a
 runtime nodes whose primary owner changed. A runtime node that keeps its assignment continues on every cluster node,
 including the former and new owners of a moved neighbor: it keeps buffered work, retained
 `REQUIRED WAIT` messages, branch-local state, and external ingestor sessions. Its neighbors re-point
-at the committed revision. Draining a host moves hard groups and independent execution units one at a time in
+at the committed revision. A moved processor carries its branch-local state to the destination as
+each branch published it at the handoff's freeze: deduplicator keys, window rows, WASM guest
+checkpoints and stateful inferencer tensors. Draining a host moves hard groups and independent execution units one at a time in
 canonical kind/name/unit order. Failover uses immediate termination because the former owner is already
 unavailable.
 

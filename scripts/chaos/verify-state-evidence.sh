@@ -16,7 +16,7 @@ set -euo pipefail
 usage() {
     cat >&2 <<'EOF'
 usage:
-  verify-state-evidence.sh dedup|window|enrich|counter --input FILE --output FILE
+  verify-state-evidence.sh dedup|window|enrich|counter|inferencer --input FILE --output FILE
       --boundaries FILE --result FILE
 
 dedup requires every first occurrence of a key in its branch to be emitted, a later occurrence to
@@ -34,6 +34,18 @@ counter requires each record's guest count to equal its branch index before the 
 fall below it, and to advance by one per record after recovery. Volatile inputs may be replayed
 repeatedly, including when the restored checkpoint already reflects them; the output ledger does
 not bound the resulting count excess.
+
+inferencer reads each branch's running count, the one-element score the stateful inferencer emits
+per admitted record, in output order. An output equal to its branch's previous output is a replay
+of that output. Without a fault every branch counts 1, 2, 3 and so on up to its accepted records,
+with no replay. With a fault, every output before it counts the same way, and covers at least the
+branch's records before the milestone. After the fault a branch may continue from a restored
+count C, its first count then C + 1: C must hold every record before the milestone and at most the
+records admitted before recovery. A periodic checkpoint skips the updates after it, and a
+redelivered input counts again, so nothing more bounds C. Every count after the fault that does not
+follow its branch's previous count by one, including an output a former owner delivered before its
+fence took effect, starts again from such a C. The counts that end the run advance by one per
+output through at least as many outputs as the branch has records after recovery.
 EOF
 }
 
@@ -424,11 +436,128 @@ counter() {
     finish_verdict
 }
 
+inferencer() {
+    jq -n --slurpfile input "${input}" --slurpfile output "${output}" \
+        --slurpfile bounds "${boundaries}" "${common}"'
+        | ($b.pre_fault_outputs.chaos_inferred_output // 0) as $pre
+        | ($input | map(.branch_name) | unique) as $branches
+        | [$output | to_entries[] | {offset: .key, record: .value}] as $rows
+        # An output names an accepted branch and carries one whole, positive count.
+        | def well_formed($record):
+            ($record | type) == "object"
+            and ($record | keys) == ["branch_name", "score"]
+            and ($record.branch_name | type) == "string"
+            and any($branches[]; . == $record.branch_name)
+            and ($record.score | type) == "array"
+            and ($record.score | length) == 1
+            and ($record.score[0] | type) == "number"
+            and $record.score[0] >= 1
+            and ($record.score[0] | floor) == $record.score[0];
+          [$rows[] | select(well_formed(.record) | not)] as $malformed
+        | [$branches[] as $branch
+           | [$rows[] | select(well_formed(.record) and .record.branch_name == $branch)
+              | {offset, count: .record.score[0], before_fault: ($strict or .offset < $pre)}] as $observed
+           # An output equal to the previous output of its branch is that output delivered again.
+           | [$observed | to_entries[] | select(.key > 0 and .value.count == $observed[.key - 1].count)
+              | .value] as $replays
+           | [$observed | to_entries[] | select(.key == 0 or .value.count != $observed[.key - 1].count)
+              | .value] as $counts
+           | [$counts | to_entries[] | select(.key > 0 and .value.count != $counts[.key - 1].count + 1)
+              | {index: .key, offset: .value.offset, from: $counts[.key - 1].count, to: .value.count,
+                 before_fault: .value.before_fault}] as $breaks
+           # The counts after the last break advance by one per output through the end of the run.
+           | ($counts[(if ($breaks | length) == 0 then 0 else $breaks[-1].index end):]) as $final_run
+           | ($input | map(select(.branch_name == $branch))) as $records
+           | {branch_name: $branch,
+              records: ($records | length),
+              milestone_records: ($records | map(select(class(.sequence) == "milestone")) | length),
+              admitted_before_recovery: ($records | map(select(class(.sequence) != "recovered")) | length),
+              recovered_records: ($records | map(select(class(.sequence) == "recovered")) | length),
+              outputs: ($observed | length),
+              counted_before_fault: ($counts | map(select(.before_fault)) | length),
+              first_count: ($counts[0].count // null),
+              first_count_before_fault: ($counts[0].before_fault // false),
+              final_count: ($counts[-1].count // null),
+              replays: $replays,
+              breaks: $breaks,
+              final_run_length: ($final_run | length),
+              counted_after_fault: ($counts | map(select(.before_fault | not)) | length)}] as $per_branch
+        | [$per_branch[] | select(.first_count_before_fault and .first_count != 1)] as $wrong_start
+        | [$per_branch[] | .branch_name as $branch | .breaks[] | select(.before_fault)
+           | . + {branch_name: $branch}] as $broken_before_fault
+        | [$per_branch[] | select($strict and .final_count != .records)] as $inexact_totals
+        | [$per_branch[] | .branch_name as $branch | .replays[] | select(.before_fault)
+           | . + {branch_name: $branch}] as $violating_replays
+        | [$per_branch[] | select(($strict | not) and .counted_before_fault < .milestone_records)] as $uncovered_milestone
+        # Each break after the fault continues from a restored count, one below the count it lands on.
+        | [$per_branch[] | . as $branch | .breaks[] | select(.before_fault | not)
+           | {branch_name: $branch.branch_name, offset, restored: (.to - 1),
+              milestone_records: $branch.milestone_records,
+              admitted_before_recovery: $branch.admitted_before_recovery}] as $restorations
+        | [$restorations[] | select(.restored < .milestone_records)] as $below_milestone
+        | [$restorations[] | select(.restored > .admitted_before_recovery)] as $above_admitted
+        | [$per_branch[] | select(($strict | not) and .final_run_length < .recovered_records)] as $unsteady
+        | [$per_branch[] | select(($strict | not) and (.recovered_records == 0 or .counted_after_fault == 0))] as $unexercised
+        | [
+            (if ($malformed | length) > 0
+             then "output records that are not one whole, positive count of an accepted branch" else empty end),
+            (if (($wrong_start | length) > 0 or ($broken_before_fault | length) > 0 or ($inexact_totals | length) > 0)
+             then "a branch count differed from its record count while no fault had occurred" else empty end),
+            (if ($violating_replays | length) > 0 then "outputs were emitted twice while no fault had occurred" else empty end),
+            (if ($uncovered_milestone | length) > 0
+             then "records acknowledged by the milestone had no count before the fault" else empty end),
+            (if ($below_milestone | length) > 0
+             then "a branch count after the fault fell below the records durable at the milestone: state durable at the milestone was lost" else empty end),
+            (if ($above_admitted | length) > 0
+             then "a branch count after the fault exceeded the records admitted before recovery" else empty end),
+            (if ($unsteady | length) > 0
+             then "branch counts after recovery did not advance by one per record" else empty end),
+            (if ($unexercised | length) > 0
+             then "no record produced after recovery was counted, so durability is unverified" else empty end)
+          ] as $failures
+        | {
+            processor: "inferencer",
+            verdict: (if ($failures | length) == 0 then "pass" else "fail" end),
+            fault: $b.fault,
+            input_records: ($input | length),
+            output_records: ($output | length),
+            checks: {malformed: ($malformed | length), wrong_first_count: ($wrong_start | length),
+                     broken_without_a_fault: ($broken_before_fault | length),
+                     inexact_totals_without_a_fault: ($inexact_totals | length),
+                     replays_without_a_fault: ($violating_replays | length),
+                     milestone_records_uncounted_before_the_fault: ($uncovered_milestone | length),
+                     restored_below_milestone: ($below_milestone | length),
+                     restored_above_admitted: ($above_admitted | length),
+                     unsteady_after_recovery: ($unsteady | length)},
+            restored_counts: ($per_branch | map({key: .branch_name,
+                                                 value: [.breaks[] | select(.before_fault | not) | .to - 1]})
+                              | from_entries),
+            final_counts: ($per_branch | map({key: .branch_name, value: .final_count}) | from_entries),
+            count_excess: ($per_branch | map({key: .branch_name,
+                                              value: (if .final_count == null then null else .final_count - .records end)})
+                           | from_entries),
+            replay_duplicates: {outputs: ([$per_branch[].replays | length] | add // 0),
+                                after_fault: ([$per_branch[].replays[] | select(.before_fault | not)] | length)},
+            durability: (if $strict then null else
+              {milestone: "source acknowledged and committed, outputs stable, held for the configured publication intervals",
+               milestone_records: ($per_branch | map({key: .branch_name, value: .milestone_records}) | from_entries),
+               counted_after_fault: ($per_branch | map({key: .branch_name, value: .counted_after_fault}) | from_entries),
+               advancing_through_the_end: ($per_branch | map({key: .branch_name, value: .final_run_length})
+                                           | from_entries)} end),
+            branches: $per_branch,
+            malformed: $malformed,
+            restorations: $restorations,
+            failures: $failures
+          }' >"${result}"
+    finish_verdict
+}
+
 case "${mode}" in
     dedup) dedup ;;
     window) window ;;
     enrich) enrich ;;
     counter) counter ;;
+    inferencer) inferencer ;;
     -h | --help) usage; exit 0 ;;
     *) fail_usage "unknown verifier mode: ${mode}" ;;
 esac
