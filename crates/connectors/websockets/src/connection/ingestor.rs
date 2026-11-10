@@ -253,6 +253,7 @@ pub struct WebsocketsConnectionIngestor {
 
 mod connection;
 mod handshake;
+mod pings;
 use connection::{WebsocketConnection, WebsocketRead};
 
 enum WebsocketPingOutcome {
@@ -277,7 +278,10 @@ impl WebsocketsConnectionIngestor {
             return Ok(WebsocketPingOutcome::Interrupted);
         };
         match outcome {
-            Ok(Ok(())) => Ok(WebsocketPingOutcome::Sent),
+            Ok(Ok(())) => {
+                connection.ping_written();
+                Ok(WebsocketPingOutcome::Sent)
+            }
             Ok(Err(error)) => {
                 self.connection = None;
                 Err(Report::new(error).change_context(IngestorError::Read {
@@ -1093,11 +1097,14 @@ mod tests {
             )
             .assured("the fixture resolver configuration can be written");
             std::fs::write(&hosts_file, "").assured("the fixture hosts file can be written");
-            let resolver = DnsResolver::load(DnsConfiguration {
-                resolver_configuration,
-                hosts_file,
-                name_servers: NameServers::Explicit(vec![authority.address()]),
-            })
+            let resolver = DnsResolver::load(
+                DnsConfiguration {
+                    resolver_configuration,
+                    hosts_file,
+                    name_servers: NameServers::Explicit(vec![authority.address()]),
+                },
+                nervix_dns::DnsSettings::default(),
+            )
             .await
             .assured("the fixture resolver configuration is valid");
             Self {

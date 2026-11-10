@@ -213,6 +213,7 @@ enum ChoiceTarget : ubyte {
   EmitterMaterializedRelay,
   EmitterErrorRelay,
   SchemaField,
+  GeneratorMaterializedRelay,
 }
 
 enum DomainPaceChoice : ubyte {
@@ -625,7 +626,8 @@ enum ModelChangeAspect : ubyte {
   EntityReplaced,
   EntityCreated,
   EntityDropped,
-  BranchPartitions
+  BranchPartitions,
+  EmitterInstances
 }
 
 table ConfigurationReason {

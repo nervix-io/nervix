@@ -44,6 +44,7 @@ use nervix_models::{
 use rstest::rstest;
 use strum::IntoEnumIterator as _;
 
+mod emitter_instancing;
 mod instancing;
 mod surface;
 
@@ -270,7 +271,7 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
     match kind {
         IngestorEntityKind::Client(ClientIngestorEntity::Producer) => IngestorDeclaration {
             headers: None,
-            metadata: &[],
+            metadata: &[("user", IngestorMetadataType::String)],
             every_node: false,
             reference: IngestorReferenceKind::Schema,
         },

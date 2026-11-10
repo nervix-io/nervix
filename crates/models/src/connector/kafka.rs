@@ -619,6 +619,7 @@ pub struct KafkaTopicEmitter {
 impl EmitterDeclaration for KafkaTopicEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         events: crate::DeclaredEvents::NONE,
+        instancing: crate::EmitterInstancingCapability::Instances,
         // A Kafka record carries its headers as a list, in the order written, repeats included.
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         reference: EmitterReferenceKind::Client(ConnectorKind::Kafka),

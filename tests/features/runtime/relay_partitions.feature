@@ -766,7 +766,7 @@ Feature: Relay partitions
       | 1            |
       | 3            |
 
-  Scenario Outline: ALTER BRANCH SET PARTITIONS is refused while the domain runs and changes the count on a stopped domain
+  Scenario Outline: ALTER BRANCH SET PARTITIONS changes the count of a stopped domain's branch
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -811,18 +811,6 @@ Feature: Relay partitions
         ON GENERAL ERROR LOG;
 
       START;
-      """
-    When these Plexus commands fail with "changes its partition count only while its domain is stopped"
-      """
-      ALTER BRANCH by_tenant SET PARTITIONS 2;
-      """
-    When these Plexus commands are executed on node "<reader>"
-      """
-      SHOW CREATE BRANCH by_tenant;
-      """
-    Then the last command output contains
-      """
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m PARTITIONS 4;
       """
     When these Plexus commands are executed on the leader node
       """

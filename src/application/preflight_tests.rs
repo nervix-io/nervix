@@ -212,7 +212,7 @@ async fn a_quota_beyond_the_database_volume_refuses_the_node_naming_the_setting(
 }
 
 #[nervix_primitives::test]
-async fn the_complete_startup_total_includes_both_client_node_windows() {
+async fn the_complete_startup_total_includes_client_node_windows_and_database_caches() {
     let scratch = scratch();
     let settings = NodeSettings {
         capacity: CapacitySettings::resolve(Some(ByteUnit::Gibibyte(1)), None, None)
@@ -221,12 +221,26 @@ async fn the_complete_startup_total_includes_both_client_node_windows() {
             producer_node_bytes: Some(ByteUnit::Mebibyte(800)),
             ..Default::default()
         },
+        node_database: nervix_models::DatabaseSettings::resolve(
+            nervix_models::DatabaseSettingValues {
+                cache_bytes: Some(ByteUnit::Mebibyte(1)),
+                ..Default::default()
+            },
+        )
+        .assured("one MiB is a valid node database cache"),
+        consensus_database: nervix_models::DatabaseSettings::resolve(
+            nervix_models::DatabaseSettingValues {
+                cache_bytes: Some(ByteUnit::Mebibyte(2)),
+                ..Default::default()
+            },
+        )
+        .assured("two MiB is a valid consensus database cache"),
         ..Default::default()
     };
     let refused = refusal(&settings, &scratch.path().join("db"), scratch.path()).await;
     let PreflightError::MemoryBelowBudgets { budgets, .. } = refused.current_context() else {
         panic!("all pools and client credit must fit together: {refused:?}");
     };
-    assert_eq!(*budgets, ByteUnit::Mebibyte(1259));
+    assert_eq!(*budgets, ByteUnit::Mebibyte(1262));
     assert!(!scratch.path().join("db").exists());
 }

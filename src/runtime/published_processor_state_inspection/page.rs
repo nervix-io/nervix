@@ -99,6 +99,7 @@ impl PublishedPage {
             }
         }
         Ok(ProcessorStatePage {
+            partition_catalog: None,
             fingerprint: page.digest.finish(),
             generation: page.generation,
             counts: page.counts,

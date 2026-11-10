@@ -556,6 +556,11 @@ impl ArgumentColumn {
         self.array.slice(row, 1)
     }
 
+    /// The immutable column a collection projects directly into its result.
+    pub(super) fn array(&self) -> &ArrayRef {
+        &self.array
+    }
+
     /// A stable, type-separated byte key for a present sketch input. Floating-point zero has
     /// one encoding regardless of sign. Non-finite values are refused before admission.
     pub(super) fn sketch_key(&self, row: usize) -> Option<Vec<u8>> {

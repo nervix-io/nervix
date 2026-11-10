@@ -516,6 +516,10 @@ impl SessionServiceImpl {
                 }
                 self.validate_branch_states(domain, archive, schedule)
                     .await?;
+                if let Some(schedule) = schedule {
+                    self.validate_regrouped_materialized(domain, archive, schedule)
+                        .await?;
+                }
                 for captured in archive.states_for(&domain.source) {
                     let nervix_backup::DescribedRuntimeState::Materialized {
                         descriptor,
@@ -535,8 +539,11 @@ impl SessionServiceImpl {
                     let Some(node) = schedule.nodes.get(&reference) else {
                         continue;
                     };
+                    // A relay a branch's partitions divide restores its rows regrouped by unit,
+                    // which validation of the regrouped conversion covers.
                     if node.schema_fingerprint != descriptor.schema
                         || !node.units.contains_key(&descriptor.unit)
+                        || node.partition_branch().is_some()
                     {
                         continue;
                     }
@@ -570,6 +577,55 @@ impl SessionServiceImpl {
 }
 
 impl SessionServiceImpl {
+    /// Validates the same bounded conversion installation runs for every unit of each materialized
+    /// relay a branch's partitions divide: the rows of every archived unit regrouped by the unit
+    /// the restored count places each key in. Their temporary files drop here; no checkpoint
+    /// namespace is published.
+    async fn validate_regrouped_materialized(
+        &self,
+        domain: &PlannedDomain,
+        archive: &VerifiedArchive,
+        schedule: &nervix_models::DomainSchedule,
+    ) -> Result<(), Report<RestoreRefusal>> {
+        let states = archive.states_for(&domain.source);
+        let partitions = super::partitions::RestoredPartitions::of(schedule, states);
+        let relays =
+            super::materialized::ArchivedMaterializedUnit::of_divided_relays(states, &partitions);
+        for (reference, mut archived) in relays {
+            nervix_primitives::task::consume_budget().await;
+            let refusal = || RestoreRefusal::MaterializedState {
+                domain: domain.source.clone(),
+                entity: reference.identifier.clone(),
+            };
+            let Some(node) = partitions.divided(&reference) else {
+                continue;
+            };
+            let Some(schema) = domain.materialized_schemas.get(&reference.identifier) else {
+                continue;
+            };
+            let declarations = Arc::new(
+                RestoredBranchDeclarations::of(schedule, &reference)
+                    .change_context_lazy(refusal)?,
+            );
+            for unit in node.units.keys() {
+                nervix_primitives::task::consume_budget().await;
+                archived.sort_by_key(|source| source.descriptor.unit != *unit);
+                super::materialized::prepare_regrouped_materialized_checkpoint(
+                    &self.inner.runtime,
+                    archive,
+                    &archived,
+                    *unit,
+                    node,
+                    schema.clone(),
+                    declarations.clone(),
+                )
+                .await
+                .change_context_lazy(refusal)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Validates the same bounded conversion installation runs for every archived deduplicator
     /// keyspace and window the restored schedule installs. Their temporary files drop here; no
     /// checkpoint namespace is published.
@@ -617,8 +673,11 @@ impl SessionServiceImpl {
                     else {
                         continue;
                     };
+                    // A branch's partitions place an archived key in the unit the restored count
+                    // gives it, whichever unit archived it.
                     if node.schema_fingerprint != descriptor.schema
-                        || !node.units.contains_key(&descriptor.unit)
+                        || (!node.units.contains_key(&descriptor.unit)
+                            && node.partition_branch().is_none())
                     {
                         continue;
                     }

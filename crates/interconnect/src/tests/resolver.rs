@@ -55,11 +55,14 @@ pub(super) async fn test_resolver() -> PeerResolver {
         .assured("the test resolver configuration can be written");
     std::fs::write(&hosts_file, "127.0.0.1 localhost\n")
         .assured("the test hosts file can be written");
-    let dns = nervix_dns::DnsResolver::load(nervix_dns::DnsConfiguration {
-        resolver_configuration,
-        hosts_file,
-        name_servers: nervix_dns::NameServers::ResolverConfiguration,
-    })
+    let dns = nervix_dns::DnsResolver::load(
+        nervix_dns::DnsConfiguration {
+            resolver_configuration,
+            hosts_file,
+            name_servers: nervix_dns::NameServers::ResolverConfiguration,
+        },
+        nervix_dns::DnsSettings::default(),
+    )
     .await
     .assured("the test resolver configuration is valid");
     PeerResolver::new(dns)

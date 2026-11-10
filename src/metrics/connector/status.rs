@@ -227,7 +227,7 @@ mod tests {
 
     use super::*;
 
-    const IDENTITY: [&str; 5] = ["domain", "emitter", "node-1", "REDIS", "PUBSUB"];
+    const IDENTITY: [&str; 6] = ["domain", "emitter", "node-1", "-", "REDIS", "PUBSUB"];
 
     #[test]
     fn ending_a_task_with_an_in_flight_collection_unpublishes_its_failure() {
@@ -253,7 +253,7 @@ mod tests {
     fn withdrawing_an_identity_removes_only_its_series_and_allows_registering_it_again() {
         let registry = Registry::new();
         let withdrawn = FailureProjection::register(&registry, &EMITTER_FAILURE, &IDENTITY);
-        let sibling_identity = ["domain", "sibling", "node-1", "REDIS", "PUBSUB"];
+        let sibling_identity = ["domain", "sibling", "node-1", "-", "REDIS", "PUBSUB"];
         let sibling = FailureProjection::register(&registry, &EMITTER_FAILURE, &sibling_identity);
         let _sibling_binding = FailureProjection::bind(&sibling, || true);
         FailureProjection::withdraw(&withdrawn, &registry);

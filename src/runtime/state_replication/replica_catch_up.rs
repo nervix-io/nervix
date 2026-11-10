@@ -91,11 +91,11 @@ impl StateOwner for RemoteStateOwner {
         after_lsm: Option<u64>,
     ) -> error_stack::Result<Option<PersistedRuntimeStateEntry>, StateReplicationError> {
         self.runtime
-            .request_state_sync_with_timeout(
+            .request_state_sync_with_deadline(
                 &self.node,
                 placement,
                 after_lsm,
-                StateSyncRequest::TIMEOUT,
+                StateSyncRequest::DEADLINE,
             )
             .await
     }
@@ -122,7 +122,7 @@ impl StateOwner for RemoteStateOwner {
                     lifecycle: lifecycle.to_remote(),
                     after,
                 },
-                BranchCheckpointListingRequest::TIMEOUT,
+                dispatcher.request_deadline::<BranchCheckpointListingRequest>(),
             )
             .await
             .change_context_lazy(request_failed)?;

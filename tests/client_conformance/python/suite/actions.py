@@ -38,6 +38,16 @@ class Harness:
 
         self._perform("clear-subscription-opening-refusals")
 
+    def refuse_next_clock_attachment(self) -> None:
+        """Arms every scenario node to refuse its next clock attachment as in-transaction."""
+
+        self._perform("refuse-next-clock-attachment")
+
+    def clear_clock_attachment_refusals(self) -> None:
+        """Clears unused clock refusals before another test attaches a clock."""
+
+        self._perform("clear-clock-attachment-refusals")
+
     def _perform(self, action: str) -> None:
         self.sequence += 1
         # A framework may have left progress characters on the current output line.

@@ -114,6 +114,8 @@ pub enum AppError {
     CloseStores,
     #[error("invalid memory pressure configuration")]
     InvalidMemoryPressureConfig,
+    #[error("invalid consensus capacities or deadlines")]
+    InvalidConsensusOperations,
     #[error("invalid Raft timings")]
     InvalidRaftTimings,
     #[error("invalid membership settings")]
@@ -122,6 +124,12 @@ pub enum AppError {
     InvalidCapacitySettings,
     #[error("invalid --node-tags")]
     InvalidNodeTags,
+    #[error("invalid database capacity settings")]
+    InvalidDatabaseSettings,
+    #[error("invalid DNS settings")]
+    InvalidDnsSettings,
+    #[error("invalid interconnect settings")]
+    InvalidTransportSettings,
     #[error("invalid client endpoint byte capacity")]
     InvalidClientEndpointCapacity,
     #[error("invalid execution capacity")]
@@ -132,6 +140,12 @@ pub enum AppError {
     InvalidPeerReceiveSettings,
     #[error("invalid state inspection capabilities")]
     InvalidStateInspectionSettings,
+    #[error("invalid expression engine capabilities")]
+    InvalidVmSettings,
+    #[error("invalid connector host settings")]
+    InvalidConnectorHostSettings,
+    #[error("invalid WASM engine capabilities")]
+    InvalidWasmEngineSettings,
     #[error("invalid shutdown timeouts")]
     InvalidShutdownTimeouts,
     #[error("failed to read the node settings")]

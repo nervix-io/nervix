@@ -129,6 +129,15 @@ pub enum ClientError {
     InvalidServerEndpoint,
     #[error("{field} must be between one millisecond and one day")]
     InvalidDeadline { field: &'static str },
+    #[error("{field} capacity {capacity} exceeds the native channel limit")]
+    InvalidFrameCapacity {
+        field: &'static str,
+        capacity: usize,
+    },
+    #[error("retry-backoff must not exceed retry-max-backoff")]
+    InvalidRetryBackoff,
+    #[error("derived subscription retention must fit addressable memory")]
+    InvalidSubscriptionRetention,
     #[error("{count} configured seed servers exceeds the limit of 32")]
     TooManySeedServers { count: usize },
     #[error("TLS is required but the server URI is not https")]

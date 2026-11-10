@@ -27,6 +27,7 @@ pub struct Runtime {
 /// a `Runtime` handle and therefore hold their values directly. The few that keep an `Arc` of
 /// their own have a second owner that outlives the handle's borrow, and each names that owner.
 pub(in crate::runtime) struct RuntimeInner {
+    pub(in crate::runtime) interconnect_request_timeout: Duration,
     /// Process-local lifetimes of materialized state, allocated once at construction.
     pub(in crate::runtime) inspection_instances: AtomicU64,
     pub(in crate::runtime) inspection_settings: StateInspectionSettings,
@@ -45,10 +46,11 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) ingestor_readiness:
         DashMap<DomainNodeUnitRef, IngestorInstanceReadiness, RandomState>,
     pub(in crate::runtime) emitter_statuses:
-        DashMap<DomainNodeRef, Arc<task_status::TaskStatus<EmitterRetryStatus>>, RandomState>,
-    pub(in crate::runtime) emitter_readiness: DashMap<DomainNodeRef, Arc<AtomicBool>, RandomState>,
+        DashMap<DomainNodeUnitRef, Arc<task_status::TaskStatus<EmitterRetryStatus>>, RandomState>,
+    pub(in crate::runtime) emitter_readiness:
+        DashMap<DomainNodeUnitRef, Arc<AtomicBool>, RandomState>,
     pub(in crate::runtime) emitter_confirmation_waits:
-        DashMap<DomainNodeRef, Arc<AtomicUsize>, RandomState>,
+        DashMap<DomainNodeUnitRef, Arc<AtomicUsize>, RandomState>,
     /// One connector instance per named client on this node, keyed by the client it belongs to and
     /// held open by the emitters and ingestors leasing it.
     pub(in crate::runtime) shared_clients:
@@ -56,7 +58,7 @@ pub(in crate::runtime) struct RuntimeInner {
     /// The graph nodes that have asked a shared client for a connection and not yet been given
     /// one, keyed by the waiting node rather than the client it waits on.
     pub(in crate::runtime) pool_waits:
-        DashMap<DomainNodeRef, Arc<shared_clients::PoolWaitSlot>, RandomState>,
+        DashMap<DomainNodeUnitRef, Arc<shared_clients::PoolWaitSlot>, RandomState>,
     pub(in crate::runtime) executions: DashMap<DomainName, DomainExecution, RandomState>,
     /// Stable per-domain publication handles retained across execution rebuilds. Data-plane tasks
     /// resolve one handle when they start and keep its cache instead of revisiting `executions`.
@@ -94,7 +96,8 @@ pub(in crate::runtime) struct RuntimeInner {
         DashMap<DomainNodeUnitRef, Arc<AckRootTracker>, RandomState>,
     pub(in crate::runtime) generator_activity_by_domain:
         DashMap<DomainName, Arc<AtomicUsize>, RandomState>,
-    pub(in crate::runtime) emitter_buffers: DashMap<DomainNodeRef, Arc<AtomicUsize>, RandomState>,
+    pub(in crate::runtime) emitter_buffers:
+        DashMap<DomainNodeUnitRef, Arc<AtomicUsize>, RandomState>,
     pub(in crate::runtime) force_flush_by_domain:
         DashMap<DomainName, Arc<DomainForceFlush>, RandomState>,
     pub(in crate::runtime) node_quiesce_counters:
@@ -181,6 +184,10 @@ pub(in crate::runtime) struct RuntimeInner {
         DashMap<RuntimeStatePlacement, PreparedRuntimeStateSnapshot, RandomState>,
     pub(in crate::runtime) relay_branch_presences:
         DashMap<RuntimeStatePlacement, RelayBranchPresence, RandomState>,
+    /// The holdings every unit of a branch-keyed entity this node owns publishes while its
+    /// branch's partition count changes. Each unit's owner registers its publication when it starts
+    /// and withdraws it when it ends; claimants and observers read it. No record path reaches it.
+    pub(in crate::runtime) partition_holdings: super::partition_holdings::PartitionHoldingsRegistry,
     pub(in crate::runtime) replicated_deduplicator_states:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedDeduplicatorState>, RandomState>,
     pub(in crate::runtime) replicated_kafka_offset_states:
@@ -207,6 +214,8 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) replicated_branch_aggregated_states:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedBranchAggregatedState>, RandomState>,
     pub(in crate::runtime) wasm_runtime: WasmRuntime,
+    pub(in crate::runtime) connector_host: super::ConnectorHostSettings,
+    pub(in crate::runtime) vm_settings: nervix_vm::VmSettings,
     /// The guest-requested branch state resets this node's branch tasks are waiting for. A branch
     /// fences itself and leaves its request here; the control-plane coordinator drains them.
     pub(in crate::runtime) guest_wasm_state_resets: PendingGuestWasmStateResets,

@@ -11,7 +11,7 @@
     nervix::layer(engine, reason = "owns the boundary declared above")
 )]
 
-use std::time::Duration;
+use std::collections::BTreeSet;
 
 use nervix_models::{
     BranchKeyFingerprint, ClusterNodeIdentity, DomainName, NodeRef, ProcessorStateSection,
@@ -40,10 +40,7 @@ impl InterconnectStreamRequest for ReadMaterializedStatePage {
     const NAME: &'static str = "read_materialized_state_page";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    #[inline]
-    fn default_timeout() -> Duration {
-        <nervix_models::StateInspectionReadTimeout as nervix_models::SettingDefinition>::default_value(&())
-    }
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Request;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
@@ -83,6 +80,10 @@ pub struct ReadProcessorStatePage {
     pub control_revision: u64,
     pub schema: SchemaFingerprint,
     pub selection: StateInspectionBranchSelection,
+    /// During a partition transition, request the complete selected branch catalog and omit
+    /// copies whose authoritative publication the coordinator selected in another unit.
+    /// Absent for ordinary reads, which require no catalog or additional selection work.
+    pub partition_exclusions: Option<BTreeSet<BranchKeyFingerprint>>,
     pub after: Option<(Option<BranchKeyFingerprint>, u64)>,
     pub max_rows: u64,
     pub max_bytes: u64,
@@ -93,10 +94,7 @@ impl InterconnectStreamRequest for ReadProcessorStatePage {
     const NAME: &'static str = "read_processor_state_page";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    #[inline]
-    fn default_timeout() -> Duration {
-        <nervix_models::StateInspectionReadTimeout as nervix_models::SettingDefinition>::default_value(&())
-    }
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Request;
 }
 
 /// What one unit's processor page holds: the read origin, the complete counts, where the page
@@ -104,6 +102,9 @@ impl InterconnectStreamRequest for ReadProcessorStatePage {
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
 pub struct ProcessorStatePageDescriptor {
     pub origin: StateInspectionOrigin,
+    /// The selected catalog before partition exclusions, present exactly when requested. Comparing
+    /// it with the coordinator's census detects a claim racing the read.
+    pub partition_catalog: Option<BTreeSet<BranchKeyFingerprint>>,
     pub counts: StateInspectionCounts,
     pub offset: u64,
     pub last_branch: Option<BranchKeyFingerprint>,
@@ -212,7 +213,31 @@ mod tests {
                 } else {
                     None
                 };
+                let partition_exclusions = if let ModelKind::Deduplicator
+                | ModelKind::WindowProcessor = kind
+                    && arbitrary.entropy().flag()
+                {
+                    let mut excluded = BTreeSet::new();
+                    for _ in 0..arbitrary.entropy().byte() % 4 {
+                        excluded.insert(BranchKeyFingerprint::new(std::array::from_fn(|_| {
+                            arbitrary.entropy().byte()
+                        })));
+                    }
+                    Some(excluded)
+                } else {
+                    None
+                };
+                let selection = if partition_exclusions.is_some() {
+                    StateInspectionBranchSelection::All
+                } else {
+                    match arbitrary.entropy().byte() % 3 {
+                        0 => StateInspectionBranchSelection::All,
+                        1 => StateInspectionBranchSelection::Unbranched,
+                        _ => StateInspectionBranchSelection::Branch(branch),
+                    }
+                };
                 let request = ReadProcessorStatePage {
+                    partition_exclusions,
                     domain: arbitrary.name(),
                     processor: NodeRef::new(kind, arbitrary.name::<ModelName>()),
                     unit: Unit::partition(u32::from(arbitrary.entropy().byte())),
@@ -220,11 +245,7 @@ mod tests {
                     schema: SchemaFingerprint::from_digest(std::array::from_fn(|_| {
                         arbitrary.entropy().byte()
                     })),
-                    selection: match arbitrary.entropy().byte() % 3 {
-                        0 => StateInspectionBranchSelection::All,
-                        1 => StateInspectionBranchSelection::Unbranched,
-                        _ => StateInspectionBranchSelection::Branch(branch),
-                    },
+                    selection,
                     after,
                     max_rows: u64::from(arbitrary.entropy().byte()),
                     max_bytes: arbitrary.positive_u64().get(),
@@ -270,7 +291,27 @@ mod tests {
                         });
                     }
                     let last_branch = arbitrary.entropy().flag().then_some(branch);
+                    let partition_catalog = match &request.partition_exclusions {
+                        Some(excluded) => {
+                            let mut catalog = excluded.clone();
+                            for _ in 0..arbitrary.entropy().byte() % 4 {
+                                catalog.insert(BranchKeyFingerprint::new(std::array::from_fn(
+                                    |_| arbitrary.entropy().byte(),
+                                )));
+                            }
+                            Some(catalog)
+                        }
+                        None => None,
+                    };
+                    let branches = match (&partition_catalog, &request.partition_exclusions) {
+                        (Some(catalog), Some(excluded)) => {
+                            u64::try_from(catalog.difference(excluded).count())
+                                .assured("the fixture catalog is bounded")
+                        }
+                        _ => arbitrary.positive_u64().get(),
+                    };
                     Ok(ProcessorStatePageDescriptor {
+                        partition_catalog,
                         origin: StateInspectionOrigin {
                             node: target,
                             fingerprint: std::array::from_fn(|_| arbitrary.entropy().byte()),
@@ -279,7 +320,7 @@ mod tests {
                             stage: StateInspectionStage::Live,
                         },
                         counts: StateInspectionCounts {
-                            branches: arbitrary.positive_u64().get(),
+                            branches,
                             rows: arbitrary.positive_u64().get(),
                             bytes: arbitrary.positive_u64().get(),
                         },

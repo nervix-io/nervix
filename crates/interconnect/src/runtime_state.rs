@@ -16,8 +16,6 @@
     )
 )]
 
-use std::time::Duration;
-
 use nervix_models::{
     DomainName, InferencerModelFingerprint, ModelKind, ModelName, RemoteRuntimeField,
     SchemaFingerprint, Unit, WasmStateGeneration,
@@ -238,17 +236,14 @@ impl InterconnectRequest for DescribeKafkaOffsets {
     type Response = Result<KafkaOffsetRevision, RemoteOperationFailure>;
     const NAME: &'static str = "describe_kafka_offsets";
     const CLASS: PoolClass = PoolClass::Commands;
-    const TIMEOUT: Duration = Duration::from_secs(5);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
 }
 
 impl InterconnectStreamRequest for SyncKafkaOffsets {
     const NAME: &'static str = "sync_kafka_offsets";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    #[inline]
-    fn default_timeout() -> Duration {
-        Duration::from_secs(30)
-    }
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Snapshot;
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
@@ -344,7 +339,7 @@ impl InterconnectRequest for BranchCheckpointListingRequest {
 
     const NAME: &'static str = "branch_checkpoint_listing";
     const CLASS: PoolClass = PoolClass::Replication;
-    const TIMEOUT: Duration = Duration::from_secs(5);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
 }
 
 impl InterconnectRequest for StateSyncRequest {
@@ -352,22 +347,14 @@ impl InterconnectRequest for StateSyncRequest {
 
     const NAME: &'static str = "state_sync";
     const CLASS: PoolClass = PoolClass::Replication;
-    const TIMEOUT: Duration = Duration::from_secs(5);
-}
-
-impl FetchStateCheckpoint {
-    /// Checkpoint fetching and its canonical Kafka-start coordinator share this one deadline.
-    pub(crate) const TRANSFER_TIMEOUT: Duration = Duration::from_secs(60);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
 }
 
 impl InterconnectStreamRequest for FetchStateCheckpoint {
     const NAME: &'static str = "fetch_state_checkpoint";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    #[inline]
-    fn default_timeout() -> Duration {
-        Self::TRANSFER_TIMEOUT
-    }
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
 }
 
 #[cfg(all(

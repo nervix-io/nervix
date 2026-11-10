@@ -862,3 +862,17 @@ lifetimes and removed entities are rejected before guest capture; losing local e
 also rejects the checkpoint. The captured replica count and checkpoint deadline keep their existing
 meaning. Removal publishes absence before dropping registry interest, so a retained reader cannot
 resurrect an assignment.
+
+## Local Engine Capabilities
+
+Each node explicitly configures Wasmtime from its validated local capabilities:
+`--wasm-stack-bytes` bounds the WASM stack (512 KiB by default), and
+`--wasm-memory-reservation-bytes` selects the virtual address reservation per guest memory
+(4 GiB on 64-bit hosts, 10 MiB on 32-bit hosts). A zero reservation permits relocatable memory
+growth. These values do not change the processor's declared linear-memory bound, fuel or recovery
+contract. A configuration Wasmtime cannot construct fails node initialization with its typed cause.
+
+Parallel compilation stays disabled because module compilation already occupies bounded Bulk
+workers. This explicit derivation prevents nested compiler fan-out from bypassing the executor.
+See [Node Settings](node-settings.md#engine-and-connector-host-capabilities) for environment
+variables and validation.

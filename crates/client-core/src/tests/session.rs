@@ -570,7 +570,7 @@ impl TestServer {
         let channel = within_deadline(connector.connect(&server))
             .await
             .assured("the client reaches the test server");
-        let events = SessionEvents::new();
+        let events = SessionEvents::new(crate::ClientCapabilities::default());
         let exchange =
             within_deadline(Exchange::open(channel, &connector, events.emitters.clone()))
                 .await
@@ -634,11 +634,14 @@ async fn native_session_uses_ordered_fixture_addresses_and_original_host() {
     )
     .assured("the fixture resolver configuration can be written");
     std::fs::write(&hosts_file, "").assured("the fixture hosts file can be written");
-    let dns = DnsResolver::load(DnsConfiguration {
-        resolver_configuration,
-        hosts_file,
-        name_servers: NameServers::Explicit(vec![authority.address()]),
-    })
+    let dns = DnsResolver::load(
+        DnsConfiguration {
+            resolver_configuration,
+            hosts_file,
+            name_servers: NameServers::Explicit(vec![authority.address()]),
+        },
+        nervix_dns::DnsSettings::default(),
+    )
     .await
     .assured("the fixture DNS configuration is valid");
     let options = ConnectOptions {
@@ -670,11 +673,14 @@ async fn native_session_connection_deadline_cancels_a_silent_dns_lookup() {
     )
     .assured("the fixture resolver configuration can be written");
     std::fs::write(&hosts_file, "").assured("the fixture hosts file can be written");
-    let dns = DnsResolver::load(DnsConfiguration {
-        resolver_configuration,
-        hosts_file,
-        name_servers: NameServers::Explicit(vec![authority.address()]),
-    })
+    let dns = DnsResolver::load(
+        DnsConfiguration {
+            resolver_configuration,
+            hosts_file,
+            name_servers: NameServers::Explicit(vec![authority.address()]),
+        },
+        nervix_dns::DnsSettings::default(),
+    )
     .await
     .assured("the fixture DNS configuration is valid");
     let options = ConnectOptions {
@@ -722,11 +728,14 @@ async fn native_session_connection_error_preserves_the_typed_dns_failure() {
     )
     .assured("the fixture resolver configuration can be written");
     std::fs::write(&hosts_file, "").assured("the fixture hosts file can be written");
-    let dns = DnsResolver::load(DnsConfiguration {
-        resolver_configuration,
-        hosts_file,
-        name_servers: NameServers::Explicit(vec![authority.address()]),
-    })
+    let dns = DnsResolver::load(
+        DnsConfiguration {
+            resolver_configuration,
+            hosts_file,
+            name_servers: NameServers::Explicit(vec![authority.address()]),
+        },
+        nervix_dns::DnsSettings::default(),
+    )
     .await
     .assured("the fixture DNS configuration is valid");
     let Err(error) = Client::connect_with_options(

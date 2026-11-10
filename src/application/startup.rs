@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 use error_stack::{Report, ResultExt};
 use fjall::Database;
+use meticulous::ResultExt as _;
 use nervix_consensus::{Consensus, ConsensusSettings};
 use nervix_execution::{Executor, MemoryClass, StorageClass};
 use nervix_interconnect::{HandlerRegistrationError, Transport};
@@ -64,6 +65,7 @@ impl ApplicationStartup {
     pub(in crate::application) async fn open_node_database(
         path: PathBuf,
         executor: &Executor,
+        capacity: nervix_models::DatabaseCapabilities,
     ) -> Result<Database, Report<AppError>> {
         let reservation = executor
             .reserve(MemoryClass::Management, STORAGE_JOB_RESERVATION_BYTES)
@@ -73,6 +75,12 @@ impl ApplicationStartup {
         let opened = executor
             .run_storage(StorageClass::Filesystem, reservation, move |_, _| {
                 let db = Database::builder(opened_path)
+                    .cache_size(capacity.cache_bytes)
+                    .max_journaling_size(capacity.journal_bytes)
+                    .worker_threads(
+                        usize::try_from(capacity.workers.get())
+                            .assured("resolved database workers fit this node"),
+                    )
                     .open()
                     .change_context(NodeDatabaseOpenError::Open)?;
                 if db
@@ -382,10 +390,15 @@ mod tests {
         use meticulous::{OptionExt as _, ResultExt as _};
         let file = tempfile::NamedTempFile::new().assured("the fixture can create a file");
         let executor = Executor::default();
-        let failure = ApplicationStartup::open_node_database(file.path().to_path_buf(), &executor)
-            .await
-            .err()
-            .assured("a file cannot be opened as a database directory");
+        let failure = ApplicationStartup::open_node_database(
+            file.path().to_path_buf(),
+            &executor,
+            nervix_models::DatabaseSettings::<nervix_models::NodeDatabase>::default()
+                .capabilities(None),
+        )
+        .await
+        .err()
+        .assured("a file cannot be opened as a database directory");
         assert!(matches!(
             failure.current_context(),
             crate::application::error::AppError::OpenRegistry

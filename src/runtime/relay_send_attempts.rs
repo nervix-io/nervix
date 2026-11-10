@@ -92,6 +92,7 @@ impl RelaySendAttempts {
                 initial: RemoteDispatcher::DISPATCH_RETRY_INTERVAL,
                 next: RemoteDispatcher::DISPATCH_RETRY_INTERVAL,
                 max: Self::capacity_wait_ceiling(),
+                settings: nervix_connector::RetryBackoffSettings::default(),
             },
         }
     }

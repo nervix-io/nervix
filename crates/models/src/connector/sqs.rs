@@ -543,6 +543,7 @@ pub enum SqsSend {
 impl EmitterDeclaration for SqsQueueEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         events: crate::DeclaredEvents::NONE,
+        instancing: crate::EmitterInstancingCapability::Instances,
         // An SQS message's attributes: one value per name, the last written, in no order, each a
         // string, a number or bytes.
         headers: Some(

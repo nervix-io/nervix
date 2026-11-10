@@ -2121,9 +2121,12 @@ impl Cluster {
             shutdown_drain_timeout: Duration::from_millis(250),
             ..TransportOptions::default()
         };
-        let dns = DnsResolver::load(DnsConfiguration::system())
-            .await
-            .map_err(|report| io::Error::other(format!("{report:?}")))?;
+        let dns = DnsResolver::load(
+            DnsConfiguration::system(),
+            nervix_dns::DnsSettings::default(),
+        )
+        .await
+        .map_err(|report| io::Error::other(format!("{report:?}")))?;
         let (transport, _incoming) = Transport::bind(
             "127.0.0.1:0".parse().expect("probe address is valid"),
             TransportIdentity {

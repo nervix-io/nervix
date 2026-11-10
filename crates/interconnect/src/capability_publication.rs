@@ -62,6 +62,45 @@ mod tests {
                         ClusterNodeIncarnation::new(1),
                     ),
                     capabilities: NodeCapabilities {
+                        interconnect: crate::TransportSettings::default().capabilities(),
+                        dns: nervix_arbitrary::Arbitrary::new(
+                            &[],
+                            nervix_arbitrary::Domain::Vocabulary,
+                        )
+                        .node_capability_record()
+                        .capabilities
+                        .dns,
+                        node_database: nervix_arbitrary::Arbitrary::new(
+                            &[],
+                            nervix_arbitrary::Domain::Vocabulary,
+                        )
+                        .node_capability_record()
+                        .capabilities
+                        .node_database,
+                        consensus_database: nervix_arbitrary::Arbitrary::new(
+                            &[],
+                            nervix_arbitrary::Domain::Vocabulary,
+                        )
+                        .node_capability_record()
+                        .capabilities
+                        .consensus_database,
+                        consensus: nervix_arbitrary::Arbitrary::new(
+                            &[],
+                            nervix_arbitrary::Domain::Vocabulary,
+                        )
+                        .node_capability_record()
+                        .capabilities
+                        .consensus,
+                        engines: nervix_arbitrary::Arbitrary::new(
+                            &[],
+                            nervix_arbitrary::Domain::Vocabulary,
+                        )
+                        .node_engine_capabilities(),
+                        connector_host: nervix_arbitrary::Arbitrary::new(
+                            &[],
+                            nervix_arbitrary::Domain::Vocabulary,
+                        )
+                        .node_connector_host_capabilities(),
                         cpu_count: NonZeroU64::new(2),
                         memory_bytes: NonZeroU64::new(8 << 30),
                         receive: crate::PeerReceiveSettings::default().bounds(),

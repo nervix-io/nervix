@@ -111,6 +111,7 @@ pub enum Statement {
     DescribeLicense(DescribeLicense),
     DescribeClient(DescribeClient),
     AlterBranch(AlterBranch),
+    DescribeBranch(DescribeBranch),
 }
 
 impl Statement {
@@ -190,6 +191,7 @@ impl Statement {
             | Self::ShowTransactions(_)
             | Self::DescribeTransaction(_)
             | Self::DescribeCluster(_)
+            | Self::DescribeBranch(_)
             | Self::DescribeLicense(_)
             | Self::ResetWasmState(_) => false,
         }
@@ -993,6 +995,15 @@ pub struct DescribeLookup {
     pub name: LookupName,
 }
 
+/// `DESCRIBE BRANCH <branch>`: a branch's declaration, its partition epoch and, while keys placed
+/// under its previous partition count may lie outside their partition, how many still do.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct DescribeBranch {
+    pub branch: BranchName,
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -1347,6 +1358,18 @@ impl Model {
             ingestor.input.executes_on_every_cluster_node()
         } else {
             false
+        }
+    }
+
+    /// Whether this model keeps durable state per branch key: a deduplicator, window or WASM
+    /// processor, an inferencer that declares state, or a materialized relay. A change of its
+    /// branch's partition count moves that state between the model's units.
+    pub fn keeps_state_per_key(&self) -> bool {
+        match self {
+            Self::Deduplicator(_) | Self::WindowProcessor(_) | Self::WasmProcessor(_) => true,
+            Self::Inferencer(inferencer) => !inferencer.state.is_empty(),
+            Self::Relay(relay) => relay.materialized_state.is_some(),
+            _ => false,
         }
     }
 
@@ -1934,6 +1957,32 @@ impl BranchPartitions {
             .collect()
     }
 
+    /// Whether a node this branch branches is scheduled as `unit` under this count: the `Single`
+    /// unit for one partition, and `Partition(0)` through `Partition(n - 1)` for n partitions.
+    pub fn schedules(self, unit: Unit) -> bool {
+        match unit.kind() {
+            crate::UnitKind::Single => !self.is_partitioned(),
+            crate::UnitKind::Partition(index) => {
+                self.is_partitioned() && index < u32::from(self.count().get())
+            }
+            crate::UnitKind::Instance(_) => false,
+        }
+    }
+
+    /// The units of a relay of this branch that instance `instance` of an emitter with `instances`
+    /// instances serves: every partition `p` with `p mod instances = instance`, and the `Single`
+    /// unit of a branch of one partition, which instance 0 serves. An unbranched relay serves as a
+    /// branch of one partition.
+    pub fn units_served_by(self, instance: u64, instances: std::num::NonZeroU64) -> Vec<Unit> {
+        let mut served = Vec::new();
+        for (ordinal, unit) in (0_u64..).zip(self.units()) {
+            if ordinal % instances.get() == instance {
+                served.push(unit);
+            }
+        }
+        served
+    }
+
     /// The unit that owns a key whose seed is `seed`: the `Single` unit of a branch of one
     /// partition, and `Partition(seed mod n)` of a branch of n partitions.
     pub fn unit_of(self, seed: PartitionSeed) -> Unit {
@@ -1981,17 +2030,30 @@ pub struct AlterBranch {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum AlterBranchOperation {
-    /// `SET PARTITIONS n`. The registry accepts it only while the branch's domain is stopped.
+    /// `SET PARTITIONS n`: begins the branch's next partition epoch, on a running domain as on a
+    /// stopped one. Keys the previous count placed elsewhere move to their new partition when
+    /// their next record reaches it.
     SetPartitions { partitions: BranchPartitions },
 }
 
 impl AlterBranch {
-    /// Whether this alteration changes the branch's partition count, which only a stopped domain
-    /// accepts.
+    /// Whether this alteration changes the branch's partition count, which begins a new partition
+    /// epoch.
     pub fn sets_partitions(&self) -> bool {
         self.operations
             .iter()
             .any(|operation| matches!(operation, AlterBranchOperation::SetPartitions { .. }))
+    }
+
+    /// The partition count this alteration leaves the branch with, when it sets one: the last
+    /// count it sets, since its operations apply in written order.
+    pub fn requested_partitions(&self) -> Option<BranchPartitions> {
+        let mut requested = None;
+        for operation in &self.operations {
+            let AlterBranchOperation::SetPartitions { partitions } = operation;
+            requested = Some(*partitions);
+        }
+        requested
     }
 }
 
@@ -2097,6 +2159,24 @@ impl ResolvedBranching {
         match self {
             Self::Unbranched => None,
             Self::Branched { branch, .. } => Some(branch),
+        }
+    }
+
+    /// Whether `other` names the same branch with the same key schema, whatever partition count
+    /// each places keys by: the keys and their values are the same under either count.
+    pub fn same_key_as(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Branched { branch, schema, .. },
+                Self::Branched {
+                    branch: other_branch,
+                    schema: other_schema,
+                    ..
+                },
+            ) => branch == other_branch && schema == other_schema,
+            (Self::Unbranched, Self::Unbranched) => true,
+            (Self::Unbranched, Self::Branched { .. })
+            | (Self::Branched { .. }, Self::Unbranched) => false,
         }
     }
 

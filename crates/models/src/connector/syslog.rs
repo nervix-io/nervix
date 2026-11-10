@@ -231,10 +231,7 @@ const SYSLOG_LISTENER_BOUNDS: DeclaredBounds = DeclaredBounds {
         DeclaredBuffer {
             holds: "frames read from TCP and TLS connections",
             bound: BufferBound::Bounded {
-                capacity: BufferCapacity::Items {
-                    count: 64,
-                    unit: "frames",
-                },
+                capacity: BufferCapacity::Setting("node capability syslog-intake-queue-capacity"),
                 overflow: BufferOverflow::Backpressure,
             },
         },
@@ -415,6 +412,7 @@ pub struct SyslogCollectorEmitter {
 impl EmitterDeclaration for SyslogCollectorEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         events: crate::DeclaredEvents::NONE,
+        instancing: crate::EmitterInstancingCapability::Instances,
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::Syslog),
         body: EmitterBodyForm::Codec,
@@ -614,10 +612,7 @@ mod tests {
         assert_eq!(
             buffers[3].bound,
             BufferBound::Bounded {
-                capacity: BufferCapacity::Items {
-                    count: 64,
-                    unit: "frames",
-                },
+                capacity: BufferCapacity::Setting("node capability syslog-intake-queue-capacity"),
                 overflow: BufferOverflow::Backpressure,
             }
         );

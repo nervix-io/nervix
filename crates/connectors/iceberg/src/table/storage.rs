@@ -960,11 +960,14 @@ mod tests {
         )
         .expect("the fixture resolver configuration can be written");
         std::fs::write(&hosts_file, "").expect("the fixture hosts file can be written");
-        let dns = DnsResolver::load(DnsConfiguration {
-            resolver_configuration,
-            hosts_file,
-            name_servers: NameServers::Explicit(vec![authority.address()]),
-        })
+        let dns = DnsResolver::load(
+            DnsConfiguration {
+                resolver_configuration,
+                hosts_file,
+                name_servers: NameServers::Explicit(vec![authority.address()]),
+            },
+            nervix_dns::DnsSettings::default(),
+        )
         .await
         .expect("the fixture DNS configuration is valid");
         let listener =

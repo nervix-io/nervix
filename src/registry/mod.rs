@@ -21,6 +21,7 @@ pub(crate) use cluster_parameters::{validate_model_parameters, validate_resource
 mod creation_order;
 mod domain_activation_plan;
 mod domain_state;
+mod emitter_units;
 mod entity_gate;
 mod entrypoint_plan;
 mod error;
@@ -33,6 +34,7 @@ mod ingestor_units;
 mod message_error_plan;
 mod mutation;
 mod node_capacity;
+mod partition_epochs;
 mod placement;
 mod processor_plan;
 mod reingestor_plan;

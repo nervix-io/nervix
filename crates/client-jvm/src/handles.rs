@@ -16,7 +16,7 @@ use meticulous::ResultExt as _;
 use nervix_client_host as host;
 use nervix_primitives::sync::Arc;
 
-use crate::error::Error;
+use crate::{connection_options::ConnectionOptions, error::Error};
 
 macro_rules! objects {
     ($($variant:ident => $accessor:ident: $ty:ty),* $(,)?) => {
@@ -26,7 +26,7 @@ macro_rules! objects {
             Schema(host::Schema),
             Fields(host::Fields),
             Builder(host::BatchBuilder),
-            Options(nervix_client_core::ConnectOptions),
+            Options(ConnectionOptions),
         }
 
         impl Value {
@@ -112,14 +112,14 @@ impl Value {
         }
     }
 
-    pub(crate) fn options(&self) -> Result<&nervix_client_core::ConnectOptions, Error> {
+    pub(crate) fn options(&self) -> Result<&ConnectionOptions, Error> {
         match self {
             Self::Options(value) => Ok(value),
             _ => Err(Self::wrong_kind()),
         }
     }
 
-    pub(crate) fn options_mut(&mut self) -> Result<&mut nervix_client_core::ConnectOptions, Error> {
+    pub(crate) fn options_mut(&mut self) -> Result<&mut ConnectionOptions, Error> {
         match self {
             Self::Options(value) => Ok(value),
             _ => Err(Self::wrong_kind()),

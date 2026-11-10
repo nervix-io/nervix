@@ -96,6 +96,17 @@ fn swap_of(entity: NodeRef) -> EntitySwapExecution {
 }
 
 /// The whole chain of a failed build of `domain`'s execution whose failed step reads `step`.
+/// The revision the test execution of `domain` has installed.
+fn installed_revision(runtime: &Runtime, domain: &DomainName) -> Arc<ExecutionRevision> {
+    runtime
+        .inner
+        .executions
+        .get(domain)
+        .assured("the test installed the domain's execution")
+        .revision
+        .clone()
+}
+
 fn failed_build(domain: &DomainName, step: &str) -> String {
     format!("failed to build domain execution for '{domain}': {step}")
 }
@@ -253,6 +264,7 @@ async fn a_reassignment_names_the_execution_or_the_node_it_cannot_find() {
             &revision,
             std::slice::from_ref(&absent),
             Some(&local),
+            &std::collections::BTreeSet::new(),
         )
         .await
         .expect_err("a reassignment needs the installed execution");
@@ -276,6 +288,7 @@ async fn a_reassignment_names_the_execution_or_the_node_it_cannot_find() {
             &revision,
             std::slice::from_ref(&absent),
             Some(&local),
+            &std::collections::BTreeSet::new(),
         )
         .await
         .expect_err("a reassigned node its revision does not plan cannot be placed");
@@ -415,7 +428,7 @@ async fn a_wasm_state_reset_keeps_the_report_of_the_task_that_did_not_apply_it()
     drop(closed);
     install_wasm_processor_task(&runtime, &domain, &processor, commands, spawn(async {}));
     let unsent = runtime
-        .apply_dynamic_model_updates(&domain, &reset)
+        .apply_dynamic_model_updates(&domain, &installed_revision(&runtime, &domain), &reset)
         .await
         .expect_err("a task that reads no more commands cannot reset its state");
     assert_eq!(
@@ -433,7 +446,7 @@ async fn a_wasm_state_reset_keeps_the_report_of_the_task_that_did_not_apply_it()
     });
     install_wasm_processor_task(&runtime, &domain, &processor, commands, unanswering);
     let unanswered = runtime
-        .apply_dynamic_model_updates(&domain, &reset)
+        .apply_dynamic_model_updates(&domain, &installed_revision(&runtime, &domain), &reset)
         .await
         .expect_err("a task that drops the reset unanswered fails it");
     assert_eq!(
@@ -460,7 +473,7 @@ async fn a_wasm_state_reset_keeps_the_report_of_the_task_that_did_not_apply_it()
     });
     install_wasm_processor_task(&runtime, &domain, &processor, commands, refusing);
     let refused = runtime
-        .apply_dynamic_model_updates(&domain, &reset)
+        .apply_dynamic_model_updates(&domain, &installed_revision(&runtime, &domain), &reset)
         .await
         .expect_err("a reset the task refuses fails the update");
     assert_eq!(
@@ -671,7 +684,10 @@ async fn a_flush_change_names_the_emitter_whose_task_did_not_take_it() {
         .assured("the test installed the domain's execution")
         .emitter_tasks
         .insert(
-            NodeRef::new(ModelKind::Emitter, named::<ModelName>("audit")),
+            NodeUnitRef::new(
+                NodeRef::new(ModelKind::Emitter, named::<ModelName>("audit")),
+                Unit::SINGLE,
+            ),
             ScheduledEmitterTask {
                 commands,
                 stop_signal,
@@ -684,7 +700,7 @@ async fn a_flush_change_names_the_emitter_whose_task_did_not_take_it() {
         policy: FlushPolicy::Immediate,
     }];
     let error = runtime
-        .apply_dynamic_model_updates(&domain, &flush)
+        .apply_dynamic_model_updates(&domain, &installed_revision(&runtime, &domain), &flush)
         .await
         .expect_err("a task that reads no more commands cannot change its flush policy");
     assert_eq!(
@@ -728,6 +744,7 @@ fn emitting_nodes() -> Vec<ScheduledNode> {
             materialized_state: None,
         })),
         scheduled_model(nervix_models::Model::Emitter(CreateEmitter {
+            instances: nervix_models::EmitterInstances::ONE,
             name: named("audit"),
             from: ProcessorInputs::single(named("events")),
             body: EmitterBody::Codec {
@@ -803,7 +820,10 @@ async fn an_emitter_swap_keeps_the_task_that_did_not_stop() {
         emitting_nodes(),
         DomainRoutingSnapshot::default(),
     );
-    let emitter = NodeRef::new(ModelKind::Emitter, named::<ModelName>("audit"));
+    let emitter = NodeUnitRef::new(
+        NodeRef::new(ModelKind::Emitter, named::<ModelName>("audit")),
+        Unit::SINGLE,
+    );
     let (commands, closed) = mpsc::channel(1);
     drop(closed);
     let (stop_signal, _) = watch::channel(None);
@@ -826,7 +846,7 @@ async fn an_emitter_swap_keeps_the_task_that_did_not_stop() {
         .swap_scheduled_nodes(
             &domain,
             test_execution_revision(&domain, emitting_nodes()),
-            &swap_of(emitter.clone()),
+            &swap_of(emitter.node.clone()),
         )
         .await
         .expect_err("an emitter whose task does not stop cannot be swapped");
@@ -844,7 +864,7 @@ async fn an_emitter_swap_keeps_the_task_that_did_not_stop() {
         .apply_schedule_delta(
             &node,
             &revision,
-            &ExecutionDelta::EntitySwap(swap_of(emitter.clone())),
+            &ExecutionDelta::EntitySwap(swap_of(emitter.node.clone())),
             true,
         )
         .await;

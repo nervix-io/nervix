@@ -27,6 +27,7 @@ impl EmitterConnectorStarter {
     ) -> EmitterRuntimeResult<Box<dyn EmitterConnector>> {
         let opened = {
             let projection = Self::projection(MappedValuesProjectionInit {
+                vm_settings: context.runtime.inner.vm_settings,
                 label: "Iceberg",
                 namespace: "iceberg",
                 emitter: &context.emitter,

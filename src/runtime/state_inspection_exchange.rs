@@ -461,6 +461,25 @@ fn processor_page_rows(
     payload: &[(ProcessorStateSection, Vec<SchemaField>)],
 ) -> Result<Vec<u64>, Report<StatePageExchangeError>> {
     let framing = || Report::new(StatePageExchangeError::Framing);
+    match (&request.partition_exclusions, &descriptor.partition_catalog) {
+        (None, None) => {}
+        (Some(excluded), Some(catalog)) => {
+            let selected = catalog.difference(excluded).count();
+            let selected = u64::try_from(selected).map_err(|_| framing())?;
+            if selected != descriptor.counts.branches {
+                return Err(framing());
+            }
+            for key in catalog {
+                match request.selection {
+                    nervix_models::StateInspectionBranchSelection::All => {}
+                    nervix_models::StateInspectionBranchSelection::Branch(wanted)
+                        if key == &wanted => {}
+                    _ => return Err(framing()),
+                }
+            }
+        }
+        _ => return Err(framing()),
+    }
     let start = match request.after {
         Some((_, offset)) => offset,
         None => 0,

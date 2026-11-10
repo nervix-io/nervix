@@ -328,8 +328,8 @@ contains only typed runtime instructions:
 | Change | Runtime application |
 | --- | --- |
 | Unchanged | Keep the installed tasks and state when the predecessor, lifecycle, and start version still match. |
-| Dynamic | Apply the typed capacity, processor, WASM reset, emitter flush, or VHOST TLS update; bind and publish the desired processor and error plans. |
-| Entity swap | Fence affected input relays, force-flush as required, rebind reassigned placement and selected node tasks, then publish the desired revision and release the gates. Unaffected nodes and their branch state stay in place. |
+| Dynamic | Apply the typed capacity, processor, WASM reset, emitter flush, VHOST TLS or retired partition transition update; bind and publish the desired processor and error plans. A retired transition gates nothing and force-flushes nothing: each local unit the schedule keeps ends its claims in its own task, and each holding unit ends with its placement tasks. |
+| Entity swap | Fence affected input relays, force-flush as required, rebind reassigned placement and selected node tasks, then publish the desired revision and release the gates. A new partition epoch first gives every relay of the branch new boundary services for the new count on the same fan-out. Unaffected nodes and their branch state stay in place. |
 | Rebuild | Stop the preceding domain execution and install the complete desired running or passive revision. Domain-wide changes, a missing predecessor, and lifecycle changes can require this path. |
 
 The schedule classifier retains Model-based change-aspect and quiescence decisions in the
@@ -427,9 +427,15 @@ program, and attachment boundary. Registry validation rejects an incompatible sc
 batch contract before the plan can run. A flush-only dynamic change keeps that delivery contract;
 a contract change replaces the endpoint and ends existing consumers. The host binds mounts and
 programs before opening an emitter; reconnects and retries reuse the typed configuration and retained
-prepared write. Swaps install consumer edges from the new plan. The connector receives ingestor or
-emitter settings and per-record outcomes, never graph placement authority, Models, ACK maps, or
-runtime state. [Connector Crates And The Connector Contract](./connector-contract.md) owns each
+prepared write. Swaps install consumer edges from the new plan. An emitter declared with
+[instances](./emitters.md#emitter-instances) plans its units together: the plan records, for each
+input relay, which relay units every instance serves (partition `p` for instance `p mod n`, an
+unpartitioned relay's single unit for instance 0), and refuses a scheduled unit set that does not
+match the declaration. Building, swapping and reassigning register exactly those units' consumer
+edges, local or remote, for each instance placed on the node; an instance that serves none runs
+no task. A reassignment swaps only the instances whose local placement changed. The connector
+receives ingestor or emitter settings and per-record outcomes, never graph placement authority,
+Models, ACK maps, or runtime state. [Connector Crates And The Connector Contract](./connector-contract.md) owns each
 external transport's header, retry, ACK, and commit behavior. [Client Session Protocol](./client-session-protocol.md)
 owns native consumer delivery and settlement.
 

@@ -30,7 +30,8 @@ use arrow_ipc::writer::StreamWriter;
 use arrow_schema::Schema as ArrowSchema;
 use error_stack::{Report, ResultExt as _};
 use nervix_execution::{
-    BudgetedBuffer, ChargedBytes, CpuClass, ExecutionError, Executor, MemoryClass, Reservation,
+    BudgetedBuffer, ChargedBytes, CpuClass, ExecutionError, Executor, MemoryClass, QueueAdmission,
+    Reservation,
 };
 use nervix_primitives::sync::StdArc;
 use thiserror::Error;
@@ -159,11 +160,15 @@ impl RuntimeRecordBatch {
     /// a buffer that fails at the configured relay body limit rather than growing past it. The
     /// returned handle carries the single charge that backs the allocation: cloning it for another
     /// destination costs one refcount and no second copy of the bytes.
+    /// `admission` distinguishes a retryable request from accepted work the caller retains while
+    /// it waits for a worker place; dropping this future cancels that wait and the submitted job.
     pub async fn encode_arrow_ipc(
         &self,
         executor: &Executor,
+        admission: QueueAdmission,
     ) -> Result<ChargedBytes, Report<ArrowBodyError>> {
-        self.encode_body(executor, ArrowBodyCarriage::Relay).await
+        self.encode_body(executor, ArrowBodyCarriage::Relay, admission)
+            .await
     }
 
     /// Encode this batch as one Arrow section of a sealed runtime snapshot, charged to the bulk
@@ -172,8 +177,12 @@ impl RuntimeRecordBatch {
         &self,
         executor: &Executor,
     ) -> Result<ChargedBytes, Report<ArrowBodyError>> {
-        self.encode_body(executor, ArrowBodyCarriage::SnapshotSection)
-            .await
+        self.encode_body(
+            executor,
+            ArrowBodyCarriage::SnapshotSection,
+            QueueAdmission::RefuseWhenFull,
+        )
+        .await
     }
 
     /// Admit projection and its encoded result together, so neither allocation waits for a
@@ -219,6 +228,7 @@ impl RuntimeRecordBatch {
         &self,
         executor: &Executor,
         carriage: ArrowBodyCarriage,
+        admission: QueueAdmission,
     ) -> Result<ChargedBytes, Report<ArrowBodyError>> {
         let limit = carriage.encoded_limit(executor);
         // Charge what the columns already occupy, bounded by the body limit, before the writer
@@ -230,8 +240,9 @@ impl RuntimeRecordBatch {
             .change_context(ArrowBodyError::Admission)?;
         let batch = self.batch.clone();
         executor
-            .run_cpu(
+            .run_cpu_with(
                 carriage.cpu_class(),
+                admission,
                 reservation,
                 move |charge, cancellation| {
                     cancellation

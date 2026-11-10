@@ -340,9 +340,15 @@ impl Runtime {
                     .nodes
                     .get(&NodeRef::new(model_kind, identifier.clone()))
                 {
+                    // Partition units, and the instances of an emitter, each describe only the
+                    // units this node executes.
                     Some(node)
-                        if node.units.keys().any(|unit| {
-                            matches!(unit.kind(), nervix_models::UnitKind::Partition(_))
+                        if node.units.keys().any(|unit| match unit.kind() {
+                            nervix_models::UnitKind::Partition(_) => true,
+                            nervix_models::UnitKind::Instance(_) => {
+                                model_kind == ModelKind::Emitter
+                            }
+                            nervix_models::UnitKind::Single => false,
                         }) =>
                     {
                         let dispatcher = self.inner.remote_dispatcher.load_full();
@@ -581,35 +587,83 @@ impl Runtime {
         let Ok(model_kind) = kind.to_ascii_lowercase().parse::<ModelKind>() else {
             return nervix_dataflow_graph::DataflowNodeHealth::default();
         };
-        if model_kind == ModelKind::Emitter
-            && self
-                .inner
-                .emitter_readiness
-                .get(&DomainNodeRef::node_in(
-                    domain.clone(),
-                    model_kind,
-                    identifier.clone(),
-                ))
-                .is_some_and(|ready| !ready.load(Ordering::Relaxed))
-        {
-            return nervix_dataflow_graph::DataflowNodeHealth {
-                status: nervix_dataflow_graph::DataflowNodeStatus::Waiting,
-                detail: Some("waiting for emitter transport readiness".to_string()),
-                reconnect_wait_millis,
-            };
+        let entity = DomainNodeRef::node_in(domain.clone(), model_kind, identifier);
+        let unit_keys = self.local_unit_keys(&entity);
+        if model_kind == ModelKind::Emitter {
+            for key in &unit_keys {
+                let Some(ready) = self.inner.emitter_readiness.get(key) else {
+                    continue;
+                };
+                if !ready.load(Ordering::Relaxed) {
+                    return nervix_dataflow_graph::DataflowNodeHealth {
+                        status: nervix_dataflow_graph::DataflowNodeStatus::Waiting,
+                        detail: Some("waiting for emitter transport readiness".to_string()),
+                        reconnect_wait_millis,
+                    };
+                }
+            }
         }
-        match self.pool_wait(&DomainNodeRef::node_in(
-            domain.clone(),
-            model_kind,
-            identifier,
-        )) {
-            Some(wait) => nervix_dataflow_graph::DataflowNodeHealth {
-                status: nervix_dataflow_graph::DataflowNodeStatus::Waiting,
-                detail: Some(wait.describe()),
-                reconnect_wait_millis,
-            },
-            None => nervix_dataflow_graph::DataflowNodeHealth::default(),
+        for key in &unit_keys {
+            if let Some(wait) = self.pool_wait(key) {
+                return nervix_dataflow_graph::DataflowNodeHealth {
+                    status: nervix_dataflow_graph::DataflowNodeStatus::Waiting,
+                    detail: Some(wait.describe()),
+                    reconnect_wait_millis,
+                };
+            }
         }
+        nervix_dataflow_graph::DataflowNodeHealth::default()
+    }
+
+    /// The registry keys of the units of `entity` this node executes. The published revision
+    /// names the local instances of an emitter it runs as several; every other entity runs here
+    /// as its single unit, the key its registrations use whether or not a revision is published.
+    fn local_unit_keys(&self, entity: &DomainNodeRef) -> Vec<DomainNodeUnitRef> {
+        let single = vec![DomainNodeUnitRef::single(entity.clone())];
+        if entity.node.kind != ModelKind::Emitter {
+            return single;
+        }
+        let Some(execution) = self.inner.executions.get(&entity.domain) else {
+            return single;
+        };
+        let Some(node) = execution.revision.nodes.get(&entity.node) else {
+            return single;
+        };
+        let mut instanced = false;
+        for unit in node.units.keys() {
+            if let nervix_models::UnitKind::Instance(_) = unit.kind() {
+                instanced = true;
+                break;
+            }
+        }
+        if !instanced {
+            return single;
+        }
+        let dispatcher = self.inner.remote_dispatcher.load_full();
+        let local = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
+        let mut keys = Vec::new();
+        for unit in node.units.keys() {
+            if Self::scheduled_unit_executes_locally(node, *unit, local) {
+                keys.push(DomainNodeUnitRef::new(entity.clone(), *unit));
+            }
+        }
+        keys
+    }
+
+    /// Whether the task of `unit` of `emitter` runs on this node: its registration lasts exactly
+    /// as long as the task.
+    pub(crate) fn emitter_unit_is_running(
+        &self,
+        domain: &DomainName,
+        emitter: &EmitterName,
+        unit: Unit,
+    ) -> bool {
+        self.inner
+            .emitter_statuses
+            .contains_key(&DomainNodeUnitRef::new(
+                DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone()),
+                unit,
+            ))
     }
 
     /// A connector's reconnect state: the transient error it last hit, the backoff it is waiting
@@ -632,12 +686,17 @@ impl Runtime {
                 .find_map(|entry| entry.connection.failures());
             DataflowNodeTransientState::from_failures(failures, |retry| retry)
         } else if kind.eq_ignore_ascii_case("EMITTER") {
-            let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, identifier);
-            let failures = self
-                .inner
-                .emitter_statuses
-                .get(&key)
-                .and_then(|status| status.failures());
+            let entity = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, identifier);
+            let mut failures = None;
+            for key in self.local_unit_keys(&entity) {
+                let Some(status) = self.inner.emitter_statuses.get(&key) else {
+                    continue;
+                };
+                failures = status.failures();
+                if failures.is_some() {
+                    break;
+                }
+            }
             DataflowNodeTransientState::from_failures(failures, |retry| &retry.reconnect)
         } else {
             DataflowNodeTransientState::default()

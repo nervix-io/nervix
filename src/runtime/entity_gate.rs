@@ -278,6 +278,8 @@ pub(crate) enum EmitterPublishingDrainState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EmitterPublishingDrainStatus {
     pub(crate) emitter: EmitterName,
+    /// The unit of the emitter that publishes: its single unit, or one of its instances.
+    pub(crate) unit: Unit,
     pub(crate) state: EmitterPublishingDrainState,
     pub(crate) pending_messages: usize,
     pub(crate) retry_backoff: Option<Duration>,
@@ -413,9 +415,10 @@ impl NodeQuiesceCounters {
     }
 
     pub(super) fn outstanding_work_for(&self, purpose: EntityGatePurpose) -> usize {
-        if purpose == EntityGatePurpose::OwnershipHandoff {
-            // A handoff carries parked messages to the destination. Read flush obligations
-            // first: acquiring a completed flush also observes work it resumed from parking.
+        if purpose.keeps_parked_work() {
+            // A handoff carries parked messages to the destination, and a partition change to the
+            // unit's next supervisor. Read flush obligations first: acquiring a completed flush
+            // also observes work it resumed from parking.
             return self
                 .force_flush_obligations()
                 .checked_add(self.admitted_work())
@@ -1143,7 +1146,7 @@ impl Runtime {
                 deadline,
                 &reason,
             ),
-            EntityGatePurpose::ModelAlteration => {
+            EntityGatePurpose::ModelAlteration | EntityGatePurpose::PartitionChange => {
                 self.engage_entity_gates(domain, &scope.relays, deadline, &reason)
             }
         };
@@ -1172,7 +1175,9 @@ impl Runtime {
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         let quiesce_cause = match purpose {
-            EntityGatePurpose::ModelAlteration => IngestorQuiesceCause::EntityHold,
+            EntityGatePurpose::ModelAlteration | EntityGatePurpose::PartitionChange => {
+                IngestorQuiesceCause::EntityHold
+            }
             EntityGatePurpose::OwnershipHandoff => IngestorQuiesceCause::OwnershipHandoff,
             EntityGatePurpose::WasmStateReset(_) => IngestorQuiesceCause::EntityHold,
         };
@@ -1398,8 +1403,9 @@ impl Runtime {
             }
         }
         for entry in self.inner.emitter_buffers.iter() {
-            if entry.key().domain == *domain && entities.contains(&entry.key().node) {
-                units.insert(NodeUnitRef::new(entry.key().node.clone(), Unit::SINGLE));
+            let key = entry.key();
+            if key.entity.domain == *domain && entities.contains(&key.entity.node) {
+                units.insert(NodeUnitRef::new(key.entity.node.clone(), key.unit));
             }
         }
         units.into_iter().collect()
@@ -1610,11 +1616,10 @@ impl Runtime {
                     None => 0,
                 };
                 let emitter_work = if member.node.kind == ModelKind::Emitter {
-                    match self
-                        .inner
-                        .emitter_buffers
-                        .get(&member.node.in_domain(domain))
-                    {
+                    match self.inner.emitter_buffers.get(&DomainNodeUnitRef::new(
+                        member.node.in_domain(domain),
+                        member.unit,
+                    )) {
                         Some(buffer) => buffer.load(Ordering::Acquire),
                         None => 0,
                     }
@@ -1637,20 +1642,28 @@ impl Runtime {
                     ))
             })
             .map(|tracker| {
-                if purpose == EntityGatePurpose::OwnershipHandoff {
+                if purpose.keeps_parked_work() {
                     tracker.outstanding_for_ownership_handoff()
                 } else {
                     tracker.outstanding()
                 }
             })
             .sum();
-        let mut emitter_publishing = targets
-            .entities()
-            .iter()
-            .filter(|entity| entity.kind == ModelKind::Emitter)
-            .filter_map(|entity| self.emitter_publishing_drain_status(&entity.in_domain(domain)))
-            .collect::<Vec<_>>();
-        emitter_publishing.sort_by(|left, right| left.emitter.cmp(&right.emitter));
+        let mut emitter_publishing = Vec::new();
+        for member in &units {
+            if member.node.kind != ModelKind::Emitter {
+                continue;
+            }
+            let key = DomainNodeUnitRef::new(member.node.in_domain(domain), member.unit);
+            if let Some(status) = self.emitter_publishing_drain_status(&key) {
+                emitter_publishing.push(status);
+            }
+        }
+        emitter_publishing.sort_by(|left, right| {
+            left.emitter
+                .cmp(&right.emitter)
+                .then(left.unit.cmp(&right.unit))
+        });
         EntityDrainStatus {
             buffered_relay_batches,
             node_work_items,
@@ -1661,7 +1674,7 @@ impl Runtime {
 
     pub(super) fn emitter_publishing_drain_status(
         &self,
-        key: &DomainNodeRef,
+        key: &DomainNodeUnitRef,
     ) -> Option<EmitterPublishingDrainStatus> {
         let pending_messages = match self.inner.emitter_buffers.get(key) {
             Some(buffered) => buffered.load(Ordering::Acquire),
@@ -1674,7 +1687,8 @@ impl Runtime {
             .is_some_and(|waits| waits.load(Ordering::Acquire) > 0);
         if awaiting_confirmation {
             return Some(EmitterPublishingDrainStatus {
-                emitter: EmitterName::from(key.identifier()),
+                emitter: EmitterName::from(key.entity.identifier()),
+                unit: key.unit,
                 state: EmitterPublishingDrainState::AwaitingConfirmation,
                 pending_messages,
                 retry_backoff: None,
@@ -1688,7 +1702,8 @@ impl Runtime {
             EmitterRetryKind::Commit => EmitterPublishingDrainState::RetryingCommit,
         };
         Some(EmitterPublishingDrainStatus {
-            emitter: EmitterName::from(key.identifier()),
+            emitter: EmitterName::from(key.entity.identifier()),
+            unit: key.unit,
             state,
             pending_messages,
             retry_backoff: Some(retry.reconnect.backoff),
@@ -1798,7 +1813,7 @@ impl Runtime {
             .inner
             .emitter_buffers
             .iter()
-            .filter(|entry| &entry.key().domain == domain)
+            .filter(|entry| &entry.key().entity.domain == domain)
             .map(|entry| entry.value().load(Ordering::Acquire))
             .sum();
         let mut publishing_keys = self
@@ -1806,12 +1821,12 @@ impl Runtime {
             .emitter_confirmation_waits
             .iter()
             .filter(|entry| {
-                &entry.key().domain == domain && entry.value().load(Ordering::Acquire) > 0
+                &entry.key().entity.domain == domain && entry.value().load(Ordering::Acquire) > 0
             })
             .map(|entry| entry.key().clone())
             .collect::<HashSet<_>>();
         for entry in self.inner.emitter_statuses.iter() {
-            if &entry.key().domain == domain
+            if &entry.key().entity.domain == domain
                 && let Some(failure) = entry.value().snapshot()
                 && failure.retry.is_some()
             {
@@ -1831,7 +1846,8 @@ impl Runtime {
                 .is_some_and(|waits| waits.load(Ordering::Acquire) > 0);
             if awaiting_confirmation {
                 emitter_publishing.push(EmitterPublishingDrainStatus {
-                    emitter: EmitterName::from(key.identifier()),
+                    emitter: EmitterName::from(key.entity.identifier()),
+                    unit: key.unit,
                     state: EmitterPublishingDrainState::AwaitingConfirmation,
                     pending_messages,
                     retry_backoff: None,
@@ -1855,7 +1871,8 @@ impl Runtime {
                 EmitterRetryKind::Commit => EmitterPublishingDrainState::RetryingCommit,
             };
             emitter_publishing.push(EmitterPublishingDrainStatus {
-                emitter: EmitterName::from(key.identifier()),
+                emitter: EmitterName::from(key.entity.identifier()),
+                unit: key.unit,
                 state,
                 pending_messages,
                 retry_backoff: Some(retry.reconnect.backoff),
@@ -1867,7 +1884,11 @@ impl Runtime {
                 ),
             });
         }
-        emitter_publishing.sort_by(|left, right| left.emitter.cmp(&right.emitter));
+        emitter_publishing.sort_by(|left, right| {
+            left.emitter
+                .cmp(&right.emitter)
+                .then(left.unit.cmp(&right.unit))
+        });
         DomainDrainStatus {
             active_ingestors,
             active_generators,

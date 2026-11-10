@@ -449,6 +449,7 @@ const RABBITMQ_EMITTER_ENVELOPE: &[EnvelopeClauseKind] = &[
 impl EmitterDeclaration for RabbitMqQueueEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         events: crate::DeclaredEvents::NONE,
+        instancing: crate::EmitterInstancingCapability::Instances,
         // An AMQP field table holds one value per name, in ascending order of name.
         headers: Some(HeaderModel::exact(HeaderLayout::SortedByName)),
         reference: EmitterReferenceKind::Client(ConnectorKind::RabbitMq),
@@ -497,6 +498,7 @@ pub struct RabbitMqExchangeEmitter {
 impl EmitterDeclaration for RabbitMqExchangeEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         events: crate::DeclaredEvents::NONE,
+        instancing: crate::EmitterInstancingCapability::Instances,
         // An AMQP field table holds one value per name, in ascending order of name.
         headers: Some(HeaderModel::exact(HeaderLayout::SortedByName)),
         reference: EmitterReferenceKind::Client(ConnectorKind::RabbitMq),

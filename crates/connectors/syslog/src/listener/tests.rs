@@ -97,7 +97,11 @@ fn frame_in_reads(
     max_message_size: NonZeroUsize,
     framing: Option<SyslogFraming>,
 ) -> Framing {
-    let mut decoder = StreamFrameDecoder::new(max_message_size, framing);
+    let mut decoder = StreamFrameDecoder::new(
+        max_message_size,
+        framing,
+        SyslogListenerSettings::default().read_chunk_bytes(),
+    );
     let mut frames = Vec::new();
     let mut position = 0;
     let mut reads = reads.iter().cycle();
@@ -370,7 +374,11 @@ fn every_split_of_every_stream_frames_like_one_read() {
 
 #[test]
 fn a_read_compacts_the_bytes_framed_before_it_once() {
-    let mut decoder = StreamFrameDecoder::new(nonzero!(128usize), None);
+    let mut decoder = StreamFrameDecoder::new(
+        nonzero!(128usize),
+        None,
+        SyslogListenerSettings::default().read_chunk_bytes(),
+    );
     assert_eq!(read_into(&mut decoder, b"5 hello5 world4 te"), Ok(18));
     assert_eq!(
         decoder.next_frame().expect("valid frame"),
@@ -397,7 +405,11 @@ fn a_read_compacts_the_bytes_framed_before_it_once() {
 
 #[test]
 fn a_line_split_across_reads_is_searched_once() {
-    let mut decoder = StreamFrameDecoder::new(nonzero!(128usize), None);
+    let mut decoder = StreamFrameDecoder::new(
+        nonzero!(128usize),
+        None,
+        SyslogListenerSettings::default().read_chunk_bytes(),
+    );
     assert_eq!(read_into(&mut decoder, b"<13>split"), Ok(9));
     assert_eq!(decoder.next_frame().expect("a line may continue"), None);
     assert_eq!(
@@ -420,7 +432,11 @@ fn a_line_split_across_reads_is_searched_once() {
 
 #[test]
 fn an_octet_counted_payload_split_across_reads_keeps_its_count() {
-    let mut decoder = StreamFrameDecoder::new(nonzero!(128usize), None);
+    let mut decoder = StreamFrameDecoder::new(
+        nonzero!(128usize),
+        None,
+        SyslogListenerSettings::default().read_chunk_bytes(),
+    );
     assert_eq!(read_into(&mut decoder, b"12 octet"), Ok(8));
     assert_eq!(decoder.next_frame().expect("valid prefix"), None);
     assert_eq!(
@@ -440,7 +456,11 @@ fn an_octet_counted_payload_split_across_reads_keeps_its_count() {
 #[test]
 fn a_read_never_takes_more_than_the_frame_bound_admits() {
     let max_message_size = nonzero!(16usize);
-    let mut decoder = StreamFrameDecoder::new(max_message_size, None);
+    let mut decoder = StreamFrameDecoder::new(
+        max_message_size,
+        None,
+        SyslogListenerSettings::default().read_chunk_bytes(),
+    );
     let bound = max_message_size.get() + SYSLOG_FRAME_LIMITS.octet_count_prefix();
     let stream = vec![b'7'; 64];
     assert_eq!(read_into(&mut decoder, &stream), Ok(bound));
@@ -539,13 +559,16 @@ async fn read_connection(
     chunks: &[&[u8]],
     framing: Option<SyslogFraming>,
 ) -> (error_stack::Result<(), SyslogConnectionError>, Vec<Vec<u8>>) {
-    let (tx, mut rx) = mpsc::channel(STREAM_INTAKE_QUEUE_CAPACITY);
+    let (tx, mut rx) = mpsc::channel(SyslogListenerSettings::default().queue_capacity());
     let (_paused, paused_rx) = watch::channel(false);
     let peer_addr = SocketAddr::from(([127, 0, 0, 1], 6514));
     let outcome = read_stream_connection(
         ScriptedStream::new(chunks),
         SyslogPeer::Tcp(peer_addr),
-        nonzero!(128usize),
+        StreamReadLimits {
+            max_message_size: nonzero!(128usize),
+            read_chunk_bytes: SyslogListenerSettings::default().read_chunk_bytes(),
+        },
         framing,
         None,
         tx,
@@ -608,7 +631,10 @@ async fn a_decoded_frame_waiting_for_intake_survives_suspension() {
     let mut connection = Box::pin(read_stream_connection(
         ScriptedStream::new(&[b"6 second"]),
         SyslogPeer::Tcp(peer_addr),
-        nonzero!(128usize),
+        StreamReadLimits {
+            max_message_size: nonzero!(128usize),
+            read_chunk_bytes: SyslogListenerSettings::default().read_chunk_bytes(),
+        },
         None,
         None,
         tx,
@@ -668,6 +694,7 @@ async fn a_failed_accept_keeps_an_established_connection_and_rebinds() {
         ],
         |_| bind_addr,
         Default::default(),
+        SyslogListenerSettings::default(),
     )
     .expect("the TCP plan is valid");
     let mut ingestor = SyslogListenerIngestor::open(&plan, 0)
@@ -684,7 +711,10 @@ async fn a_failed_accept_keeps_an_established_connection_and_rebinds() {
     listener.connections.spawn(read_stream_connection(
         server,
         SyslogPeer::Tcp(peer_addr),
-        nonzero!(128usize),
+        StreamReadLimits {
+            max_message_size: nonzero!(128usize),
+            read_chunk_bytes: SyslogListenerSettings::default().read_chunk_bytes(),
+        },
         None,
         None,
         tx,
@@ -807,7 +837,10 @@ fn shuttle_a_decoded_frame_racing_suspension_is_handed_off_once() {
             let mut connection = Box::pin(read_stream_connection(
                 ScriptedStream::new(&[b"6 second"]),
                 SyslogPeer::Tcp(peer_addr),
-                nonzero!(128usize),
+                StreamReadLimits {
+                    max_message_size: nonzero!(128usize),
+                    read_chunk_bytes: SyslogListenerSettings::default().read_chunk_bytes(),
+                },
                 None,
                 None,
                 tx,
@@ -900,12 +933,15 @@ struct IdleConnection {
 impl IdleConnection {
     fn open() -> Self {
         let (client, server) = tokio::io::duplex(1024);
-        let (tx, frames) = mpsc::channel(STREAM_INTAKE_QUEUE_CAPACITY);
+        let (tx, frames) = mpsc::channel(SyslogListenerSettings::default().queue_capacity());
         let (paused, paused_rx) = watch::channel(false);
         let reader = nervix_primitives::task::spawn(read_stream_connection(
             server,
             SyslogPeer::Tcp(SocketAddr::from(([127, 0, 0, 1], 6514))),
-            nonzero!(128usize),
+            StreamReadLimits {
+                max_message_size: nonzero!(128usize),
+                read_chunk_bytes: SyslogListenerSettings::default().read_chunk_bytes(),
+            },
             None,
             Some(idle_deadline()),
             tx,
@@ -990,12 +1026,15 @@ async fn a_suspended_connection_is_not_closed_for_idleness() {
 #[nervix_primitives::test(start_paused = true)]
 async fn a_connection_without_an_idle_deadline_waits_for_its_sender() {
     let (mut client, server) = tokio::io::duplex(1024);
-    let (tx, mut frames) = mpsc::channel(STREAM_INTAKE_QUEUE_CAPACITY);
+    let (tx, mut frames) = mpsc::channel(SyslogListenerSettings::default().queue_capacity());
     let (_paused, paused_rx) = watch::channel(false);
     let reader = nervix_primitives::task::spawn(read_stream_connection(
         server,
         SyslogPeer::Tcp(SocketAddr::from(([127, 0, 0, 1], 6514))),
-        nonzero!(128usize),
+        StreamReadLimits {
+            max_message_size: nonzero!(128usize),
+            read_chunk_bytes: SyslogListenerSettings::default().read_chunk_bytes(),
+        },
         None,
         None,
         tx,
@@ -1186,4 +1225,34 @@ fn a_message_hands_over_every_declared_field_and_names_its_peer_position() {
     let mut headers = 0;
     metadata.headers.headers().visit(&mut |_, _| headers += 1);
     assert_eq!(headers, 0);
+}
+
+#[test]
+fn a_configured_read_chunk_preserves_frames_across_small_reads() {
+    use meticulous::ResultExt as _;
+    let settings = SyslogListenerSettings::resolve(Some(nonzero!(2usize)), Some(3))
+        .assured("the selected local bounds validate");
+    let mut decoder =
+        StreamFrameDecoder::new(nonzero!(128usize), None, settings.read_chunk_bytes());
+    let mut remaining = b"5 hello5 world".as_slice();
+    let mut frames = Vec::new();
+    while !remaining.is_empty() {
+        let read = read_into(&mut decoder, remaining).assured("bounded input fits the frame limit");
+        assert!(read <= 3);
+        remaining = &remaining[read..];
+        while let Some(frame) = decoder.next_frame().assured("each split frame is valid") {
+            frames.push(frame);
+        }
+    }
+    assert_eq!(frames, [b"hello".to_vec(), b"world".to_vec()]);
+    assert!(decoder.is_empty());
+    let (tx, mut rx) = mpsc::channel::<u8>(settings.queue_capacity());
+    assert!(tx.try_send(1).is_ok());
+    assert!(tx.try_send(2).is_ok());
+    assert!(matches!(
+        tx.try_send(3),
+        Err(mpsc::error::TrySendError::Full(3))
+    ));
+    assert_eq!(rx.try_recv().ok(), Some(1));
+    assert!(tx.try_send(3).is_ok());
 }

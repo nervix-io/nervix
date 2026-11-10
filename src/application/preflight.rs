@@ -59,6 +59,8 @@ impl fmt::Display for StagingDirectory {
 /// judged, with the values involved.
 #[derive(Debug, Error)]
 pub enum PreflightError {
+    #[error("consensus capacity cannot hold the configured execution limits")]
+    ConsensusCapacity,
     #[error("the executor's memory budgets cannot hold the operations its limits admit")]
     ExecutionLimits,
     #[error("the peer receive bounds do not fit the resolved executor")]
@@ -214,16 +216,45 @@ impl Preflight<'_> {
         );
         drop(executor);
         let executor = Executor::new(config).change_context(PreflightError::ExecutionLimits)?;
+        self.settings
+            .consensus_operations
+            .validate_execution(executor.limits())
+            .change_context(PreflightError::ConsensusCapacity)?;
         let peer_receive = self
             .settings
             .peer_receive
             .resolve(executor.limits())
             .change_context(PreflightError::PeerReceiveLimits)?;
         let capabilities = nervix_models::NodeCapabilities {
+            interconnect: self.settings.interconnect.capabilities(),
+            dns: self.settings.dns.capabilities(),
+            node_database: self.settings.node_database.capabilities(cpu_count),
+            consensus_database: self.settings.consensus_database.capabilities(cpu_count),
+            consensus: self.settings.consensus_operations.capabilities(
+                *self
+                    .settings
+                    .raft_retention
+                    .snapshot_entry_threshold
+                    .value(),
+                executor.limits(),
+            ),
+            engines: self.settings.runtime.engine_capabilities(),
+            connector_host: self.settings.runtime.connector_host.capabilities(),
             cpu_count,
             memory_bytes,
             receive: peer_receive.bounds(),
         };
+        let mut budget_bytes = budgets.as_u64();
+        for cache_bytes in [
+            capabilities.node_database.cache_bytes,
+            capabilities.consensus_database.cache_bytes,
+        ] {
+            budget_bytes = match budget_bytes.checked_add(cache_bytes) {
+                Some(total) => total,
+                None => return Err(Report::new(PreflightError::UnaddressableBudgets)),
+            };
+        }
+        let budgets = ByteUnit::Byte(budget_bytes);
         let memory_pressure = self
             .settings
             .memory_pressure
@@ -267,7 +298,7 @@ impl Preflight<'_> {
             }
         }
 
-        let dns = DnsResolver::load(self.dns.clone())
+        let dns = DnsResolver::load(self.dns.clone(), self.settings.dns)
             .instrument(tracing::info_span!("load_dns_configuration"))
             .await
             .change_context(PreflightError::Resolver)?;

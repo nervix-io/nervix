@@ -12,13 +12,64 @@
     nervix::layer(decisions, reason = "owns the decisions boundary declared above")
 )]
 
+use std::collections::BTreeSet;
+
 use nervix_models::{
-    DomainSchedule, DynamicModelUpdate, ModelKind, NodeRef, NodeUnitRef, QuiesceLevel,
-    ScheduledNode, WasmStateResetPhase,
+    BranchName, DomainSchedule, DynamicModelUpdate, ModelKind, NodeRef, NodeUnitRef, QuiesceLevel,
+    RelayName, ResolvedBranching, ScheduledNode, WasmStateResetPhase,
 };
 use sorted_vec::SortedSet;
 
-use super::graph::is_schedulable_model;
+use super::{entity_gate::entity_input_relays, graph::is_schedulable_model};
+
+/// How the partition epochs of two schedules differ, branch by branch.
+struct EpochChanges {
+    /// Branches whose count changed: a committed change began the next epoch.
+    recounted: BTreeSet<BranchName>,
+    /// Branches whose epoch and count are the same and whose transition ended.
+    retired: BTreeSet<BranchName>,
+}
+
+impl EpochChanges {
+    fn between(existing: &DomainSchedule, desired: &DomainSchedule) -> Self {
+        let mut recounted = BTreeSet::new();
+        let mut retired = BTreeSet::new();
+        for (branch, epoch) in &desired.partition_epochs {
+            let Some(current) = existing.partition_epochs.get(branch) else {
+                recounted.insert(branch.clone());
+                continue;
+            };
+            if current == epoch {
+                continue;
+            }
+            if current.number == epoch.number && current.partitions == epoch.partitions {
+                retired.insert(branch.clone());
+            } else {
+                recounted.insert(branch.clone());
+            }
+        }
+        for branch in existing.partition_epochs.keys() {
+            if !desired.partition_epochs.contains_key(branch) {
+                recounted.insert(branch.clone());
+            }
+        }
+        Self { recounted, retired }
+    }
+}
+
+/// The schedule residue a node may change without a rebuild, decided by how its model changed and
+/// whether its branch's partition epoch changed.
+#[derive(Debug, Clone, Copy)]
+struct ScheduleResidueChanges {
+    /// An emitter's schema fingerprint, which an entity-level model change may move.
+    schema_fingerprint: bool,
+    /// A reingestor's or generator's model-derived residue.
+    model_derived: bool,
+    /// An ingestor's unit schedule.
+    ingestor_schedule: bool,
+    /// The partition count the node's branch places keys by.
+    partitions: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ScheduleDelta {
@@ -57,6 +108,17 @@ impl ScheduleDelta {
         }
     }
 
+    /// Whether `desired` changes the partition count of a branch `existing` places keys by,
+    /// beginning the branch's next partition epoch.
+    pub(crate) fn changes_a_partition_count(
+        existing: &DomainSchedule,
+        desired: &DomainSchedule,
+    ) -> bool {
+        !EpochChanges::between(existing, desired)
+            .recounted
+            .is_empty()
+    }
+
     fn has_executable_nodes(schedule: &DomainSchedule) -> bool {
         schedule
             .nodes
@@ -75,6 +137,16 @@ impl ScheduleDelta {
         let mut updates = Vec::new();
         let mut entities = Vec::new();
         let mut reassignments = Vec::new();
+        // A branch whose partition count changes moves its keys between units of the same
+        // entities, so every entity it reaches is replaced in place rather than the domain rebuilt.
+        // A retired transition changes only the entities that keep state per key, and in place:
+        // their units stop claiming keys and their holding units end, while every task that keeps
+        // its unit keeps running with its input.
+        let epochs = EpochChanges::between(existing, desired);
+        let mut moving = Self::repartitioned_entities(existing, &epochs.recounted);
+        moving.extend(Self::repartitioned_entities(desired, &epochs.recounted));
+        let mut retiring = Self::keyed_entities(existing, &epochs.retired);
+        retiring.extend(Self::keyed_entities(desired, &epochs.retired));
         for (identity, desired_node) in &desired.nodes {
             let Some(existing_node) = existing.nodes.get(identity) else {
                 if is_schedulable_model(desired_node.config.as_ref()) {
@@ -82,6 +154,8 @@ impl ScheduleDelta {
                 }
                 continue;
             };
+            let repartitions = moving.contains(identity);
+            let retires = retiring.contains(identity);
             for (unit, placement) in &desired_node.units {
                 if existing_node.units.get(unit).is_none_or(|existing| {
                     existing.primary_node != placement.primary_node
@@ -90,12 +164,24 @@ impl ScheduleDelta {
                     reassignments.push(NodeUnitRef::new(desired_node.identity(), *unit));
                 }
             }
-            if existing_node
-                .units
-                .keys()
-                .any(|unit| !desired_node.units.contains_key(unit))
+            if !repartitions
+                && !retires
+                && existing_node
+                    .units
+                    .keys()
+                    .any(|unit| !desired_node.units.contains_key(unit))
             {
                 return Self::Rebuild;
+            }
+            if repartitions {
+                entities.push(desired_node.identity());
+            }
+            // A swap of the same entity for another change starts its units outside the
+            // transition, which leaves the retirement nothing to do there.
+            if retires {
+                updates.push(DynamicModelUpdate::PartitionTransitionRetired {
+                    node: desired_node.identity(),
+                });
             }
             let aspects = existing_node
                 .config
@@ -136,14 +222,17 @@ impl ScheduleDelta {
                 desired_node.kind(),
                 ModelKind::Reingestor | ModelKind::Generator
             ) && level == QuiesceLevel::EntityPause;
-            let ingestor_schedule_residue_may_change =
-                desired_node.kind() == ModelKind::Ingestor && level == QuiesceLevel::EntityPause;
+            let ingestor_schedule_residue_may_change = desired_node.kind() == ModelKind::Ingestor
+                && (level == QuiesceLevel::EntityPause || repartitions);
             if !Self::same_schedule_residue(
                 existing_node,
                 desired_node,
-                emitter_schema_fingerprint_may_change,
-                model_derived_residue_may_change,
-                ingestor_schedule_residue_may_change,
+                ScheduleResidueChanges {
+                    schema_fingerprint: emitter_schema_fingerprint_may_change,
+                    model_derived: model_derived_residue_may_change,
+                    ingestor_schedule: ingestor_schedule_residue_may_change,
+                    partitions: repartitions,
+                },
             ) {
                 return Self::Rebuild;
             }
@@ -159,7 +248,11 @@ impl ScheduleDelta {
                     updates.extend(aspects.dynamic_updates().iter().cloned());
                 }
                 QuiesceLevel::EntityPause => {
-                    entities.push(desired_node.identity());
+                    // A declaration without a runtime of its own, such as a branch, reaches the
+                    // runtime through the entities that resolve it.
+                    if is_schedulable_model(desired_node.config.as_ref()) {
+                        entities.push(desired_node.identity());
+                    }
                     updates.extend(aspects.dynamic_updates().iter().cloned());
                 }
                 QuiesceLevel::DomainPause => return Self::Rebuild,
@@ -237,13 +330,109 @@ impl ScheduleDelta {
         .into_vec()
     }
 
+    /// Every node of `schedule` that keeps state per key in a unit of one of `branches`: each
+    /// deduplicator, window and WASM processor the branches divide, and each materialized relay
+    /// they branch.
+    fn keyed_entities(
+        schedule: &DomainSchedule,
+        branches: &BTreeSet<BranchName>,
+    ) -> BTreeSet<NodeRef> {
+        let mut entities = BTreeSet::new();
+        if branches.is_empty() {
+            return entities;
+        }
+        for node in schedule.nodes.values() {
+            let Some(branch) = node.partition_branch() else {
+                continue;
+            };
+            if branches.contains(branch) && node.keeps_state_per_key() {
+                entities.insert(node.identity());
+            }
+        }
+        entities
+    }
+
+    /// Every entity of `schedule` a change of the partition epochs of `branches` replaces: each
+    /// relay they branch, each node they divide into units, and each node producing into, reading
+    /// from or resolving materialized state in one of those relays.
+    fn repartitioned_entities(
+        schedule: &DomainSchedule,
+        branches: &BTreeSet<BranchName>,
+    ) -> BTreeSet<NodeRef> {
+        let mut entities = BTreeSet::new();
+        if branches.is_empty() {
+            return entities;
+        }
+        let mut relays = BTreeSet::<RelayName>::new();
+        for node in schedule.nodes.values() {
+            let branch = match node.resolved_branching.as_ref() {
+                Some(branching) => branching.branch(),
+                None => None,
+            };
+            let Some(branch) = branch else {
+                continue;
+            };
+            if !branches.contains(branch) {
+                continue;
+            }
+            if node.kind() == ModelKind::Relay {
+                relays.insert(RelayName::from(&node.identifier));
+                entities.insert(node.identity());
+            } else if node.partition_branch().is_some() {
+                entities.insert(node.identity());
+            }
+        }
+        for node in schedule.nodes.values() {
+            let config = node.config.as_ref();
+            let mut reaches = false;
+            for relay in entity_input_relays(config) {
+                if relays.contains(&relay) {
+                    reaches = true;
+                }
+            }
+            for relay in config.materialized_state_relays() {
+                if relays.contains(relay) {
+                    reaches = true;
+                }
+            }
+            if let Some(outputs) = config.output_routes() {
+                for relay in outputs.relays() {
+                    if relays.contains(relay) {
+                        reaches = true;
+                    }
+                }
+            }
+            if reaches {
+                entities.insert(node.identity());
+            }
+        }
+        entities
+    }
+
+    /// Whether two resolutions name the same branch with the same key schema, whatever partition
+    /// count each places keys by.
+    fn same_branching_apart_from_partitions(
+        existing: Option<&ResolvedBranching>,
+        desired: Option<&ResolvedBranching>,
+    ) -> bool {
+        match (existing, desired) {
+            (Some(existing), Some(desired)) => existing.same_key_as(desired),
+            (None, None) => true,
+            (Some(_), None) | (None, Some(_)) => false,
+        }
+    }
+
     fn same_schedule_residue(
         existing: &ScheduledNode,
         desired: &ScheduledNode,
-        allow_schema_fingerprint_change: bool,
-        allow_model_derived_residue_change: bool,
-        allow_ingestor_schedule_residue_change: bool,
+        allowed: ScheduleResidueChanges,
     ) -> bool {
+        let ScheduleResidueChanges {
+            schema_fingerprint: allow_schema_fingerprint_change,
+            model_derived: allow_model_derived_residue_change,
+            ingestor_schedule: allow_ingestor_schedule_residue_change,
+            partitions: allow_partition_change,
+        } = allowed;
         let ScheduledNode {
             identifier: existing_identifier,
             resolved_branching: existing_resolved_branching,
@@ -267,8 +456,14 @@ impl ScheduleDelta {
         }
 
         if !allow_model_derived_residue_change {
-            let resolved_branching_matches =
-                existing_resolved_branching == desired_resolved_branching;
+            let resolved_branching_matches = if allow_partition_change {
+                Self::same_branching_apart_from_partitions(
+                    existing_resolved_branching.as_ref(),
+                    desired_resolved_branching.as_ref(),
+                )
+            } else {
+                existing_resolved_branching == desired_resolved_branching
+            };
             if !resolved_branching_matches {
                 return false;
             }
@@ -665,6 +860,7 @@ mod tests {
     #[test]
     fn emitter_flush_is_dynamic_and_client_changes_swap_despite_fingerprint_changes() {
         let emitter = CreateEmitter {
+            instances: nervix_models::EmitterInstances::ONE,
             name: named("event_emitter"),
             from: nervix_models::ProcessorInputs::single(named("events")),
             body: nervix_models::EmitterBody::Codec {
@@ -1000,6 +1196,156 @@ mod tests {
                 )],
                 dynamic_updates: Vec::new(),
             }
+        );
+    }
+
+    /// One branch of eight partitions with a materialized relay, which keeps state per key, and a
+    /// plain relay beside it, both placed on one node, in partition epoch two.
+    fn repartitioned_schedule(transition: bool) -> DomainSchedule {
+        let branch = || named::<nervix_models::BranchName>("by_tenant");
+        let partitions = |count: u16| {
+            nervix_models::BranchPartitions::Direct(
+                std::num::NonZeroU16::new(count).expect("test counts are positive"),
+            )
+        };
+        let key_schema = nervix_models::CreateSchema {
+            name: named("tenant_key"),
+            fields: Vec::new(),
+        };
+        let node = || ClusterNodeName::parse("node-1").expect("valid name");
+        let relay = |name: &str, materialized: bool| {
+            ScheduledNode::new(
+                Model::Relay(CreateRelay {
+                    name: named(name),
+                    schema: named("event"),
+                    buffer: nonzero!(8usize),
+                    branching: RelayBranching::branched_by(branch()),
+                    materialized_state: materialized
+                        .then_some(nervix_models::MaterializedRelayState::LastByTimestamp),
+                }),
+                SchemaFingerprint::from_digest([1; 32]),
+            )
+            .with_resolved_branching(Some(ResolvedBranching::branched(
+                branch(),
+                key_schema.clone(),
+                partitions(8),
+            )))
+            .placed_on(Some(node()), vec![node()])
+        };
+        let epoch = nervix_models::BranchPartitionEpoch {
+            number: nervix_models::PartitionEpochNumber::FIRST.next(),
+            partitions: partitions(8),
+            transition: transition.then_some(nervix_models::PartitionTransition {
+                previous: partitions(4),
+            }),
+        };
+        DomainSchedule::new(
+            DomainName::parse("testing").expect("valid domain"),
+            vec![relay("profiles", true), relay("events", false)],
+            Vec::new(),
+        )
+        .with_partition_epochs(std::collections::BTreeMap::from([(branch(), epoch)]))
+    }
+
+    #[test]
+    fn a_retired_transition_retires_the_entities_that_keep_state_per_key_in_place() {
+        let moving = repartitioned_schedule(true);
+        let retired = repartitioned_schedule(false);
+        assert_eq!(
+            ScheduleDelta::classify(&moving, &retired),
+            ScheduleDelta::Dynamic(vec![DynamicModelUpdate::PartitionTransitionRetired {
+                node: NodeRef::new(
+                    ModelKind::Relay,
+                    named::<nervix_models::ModelName>("profiles")
+                ),
+            }])
+        );
+        assert!(!ScheduleDelta::changes_a_partition_count(&moving, &retired));
+    }
+
+    #[test]
+    fn a_retired_shrinking_transition_ends_its_holding_units_without_a_rebuild() {
+        let units = |count: u16| {
+            (0..u32::from(count))
+                .map(nervix_models::Unit::partition)
+                .collect::<Vec<_>>()
+        };
+        let with_profile_units = |schedule: DomainSchedule, count: u16| {
+            let mut schedule = schedule;
+            let node = schedule
+                .nodes
+                .get_mut(&NodeRef::new(
+                    ModelKind::Relay,
+                    named::<nervix_models::ModelName>("profiles"),
+                ))
+                .expect("the fixture schedules the materialized relay");
+            let local = ClusterNodeName::parse("node-1").expect("valid name");
+            *node = node
+                .clone()
+                .with_units(&units(count))
+                .placed_on(Some(local.clone()), vec![local]);
+            schedule
+        };
+        // Under the previous count of eight, units 4 to 7 hold the keys the count of four places
+        // elsewhere until the transition retires.
+        let shrinking = |transition: bool| {
+            let mut schedule = repartitioned_schedule(transition);
+            let mut epochs = schedule.partition_epochs.clone();
+            for epoch in epochs.values_mut() {
+                epoch.partitions = nervix_models::BranchPartitions::Direct(nonzero!(4u16));
+                epoch.transition = transition.then_some(nervix_models::PartitionTransition {
+                    previous: nervix_models::BranchPartitions::Direct(nonzero!(8u16)),
+                });
+            }
+            schedule = schedule.with_partition_epochs(epochs);
+            schedule
+        };
+        let moving = with_profile_units(shrinking(true), 8);
+        let retired = with_profile_units(shrinking(false), 4);
+        assert_eq!(
+            ScheduleDelta::classify(&moving, &retired),
+            ScheduleDelta::Dynamic(vec![DynamicModelUpdate::PartitionTransitionRetired {
+                node: NodeRef::new(
+                    ModelKind::Relay,
+                    named::<nervix_models::ModelName>("profiles")
+                ),
+            }])
+        );
+    }
+
+    #[test]
+    fn a_new_epoch_swaps_every_entity_its_branch_reaches() {
+        let settled = repartitioned_schedule(false);
+        let mut changed = repartitioned_schedule(true);
+        let next = nervix_models::BranchPartitionEpoch {
+            number: nervix_models::PartitionEpochNumber::FIRST.next().next(),
+            partitions: nervix_models::BranchPartitions::Direct(nonzero!(8u16)),
+            transition: Some(nervix_models::PartitionTransition {
+                previous: nervix_models::BranchPartitions::Direct(nonzero!(8u16)),
+            }),
+        };
+        changed = changed.with_partition_epochs(std::collections::BTreeMap::from([(
+            named::<nervix_models::BranchName>("by_tenant"),
+            next,
+        )]));
+        assert!(ScheduleDelta::changes_a_partition_count(&settled, &changed));
+        let ScheduleDelta::EntitySwap { entities, .. } =
+            ScheduleDelta::classify(&settled, &changed)
+        else {
+            panic!("a new partition epoch swaps the branch's entities");
+        };
+        assert_eq!(
+            entities,
+            vec![
+                NodeRef::new(
+                    ModelKind::Relay,
+                    named::<nervix_models::ModelName>("events")
+                ),
+                NodeRef::new(
+                    ModelKind::Relay,
+                    named::<nervix_models::ModelName>("profiles")
+                ),
+            ]
         );
     }
 }

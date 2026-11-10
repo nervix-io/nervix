@@ -1616,6 +1616,7 @@ mod tests {
                 std::slice::from_ref(&mapping),
                 &input_schema,
                 None,
+                nervix_vm::VmSettings::default(),
             )),
             "inferencer 'score_events' tensor name 'not a field' is not a valid field"
         );
