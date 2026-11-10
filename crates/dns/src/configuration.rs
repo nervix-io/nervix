@@ -62,7 +62,6 @@ pub struct DnsConfiguration {
     pub hosts_file: PathBuf,
     /// Which name servers the resolver asks.
     pub name_servers: NameServers,
-    pub settings: crate::DnsSettings,
 }
 
 /// Which name servers a resolver asks.
@@ -108,26 +107,26 @@ impl DnsConfiguration {
             resolver_configuration: PathBuf::from(SYSTEM_RESOLVER_CONFIGURATION),
             hosts_file: PathBuf::from(SYSTEM_HOSTS_FILE),
             name_servers: NameServers::ResolverConfiguration,
-            settings: crate::DnsSettings::default(),
         }
     }
 
     /// Read both files. Blocking file I/O: callers run it on the blocking pool.
-    pub(crate) fn read(self) -> Result<LoadedConfiguration, Report<DnsConfigurationError>> {
+    pub(crate) fn read(
+        self,
+        settings: crate::DnsSettings,
+    ) -> Result<LoadedConfiguration, Report<DnsConfigurationError>> {
         let file = ResolverConfigurationFile::read(&self.resolver_configuration)?;
-        let name_servers = file.name_servers(
-            &self.name_servers,
-            *self.settings.trust_negative_answers.value(),
-        )?;
+        let name_servers =
+            file.name_servers(&self.name_servers, *settings.trust_negative_answers.value())?;
         let search = file.search_list()?;
         let resolver = ResolverConfig::from_parts(None, search, name_servers);
-        let options = file.options(&self.settings);
+        let options = file.options(&settings);
         let hosts = HostsTable::read(&self.hosts_file)?;
         Ok(LoadedConfiguration {
             resolver,
             options,
             hosts,
-            settings: self.settings,
+            settings,
         })
     }
 }
@@ -284,7 +283,6 @@ mod tests {
         name_servers: NameServers,
     ) -> DnsConfiguration {
         DnsConfiguration {
-            settings: crate::DnsSettings::default(),
             resolver_configuration: resolver.path().to_path_buf(),
             hosts_file: hosts.path().to_path_buf(),
             name_servers,
@@ -292,7 +290,7 @@ mod tests {
     }
 
     fn read_error(configuration: DnsConfiguration) -> Report<DnsConfigurationError> {
-        match configuration.read() {
+        match configuration.read(crate::DnsSettings::default()) {
             Ok(_) => panic!("the configuration must be rejected"),
             Err(report) => report,
         }
@@ -303,7 +301,7 @@ mod tests {
         let resolver = file("nameserver 192.0.2.1\nnameserver 2001:db8::1\n");
         let hosts = file("");
         let loaded = configuration(&resolver, &hosts, NameServers::ResolverConfiguration)
-            .read()
+            .read(crate::DnsSettings::default())
             .assured("the configuration names two servers");
         let servers = loaded.resolver.name_servers();
         assert_eq!(servers.len(), 2);
@@ -317,7 +315,7 @@ mod tests {
         let hosts = file("");
         let explicit = SocketAddr::from(([127, 0, 0, 1], 5353));
         let loaded = configuration(&resolver, &hosts, NameServers::Explicit(vec![explicit]))
-            .read()
+            .read(crate::DnsSettings::default())
             .assured("the explicit server replaces the file's");
         let servers = loaded.resolver.name_servers();
         assert_eq!(servers.len(), 1);
@@ -363,7 +361,6 @@ mod tests {
         let hosts = file("");
         let directory = tempfile::tempdir().assured("a temporary directory can be created");
         let report = read_error(DnsConfiguration {
-            settings: crate::DnsSettings::default(),
             resolver_configuration: directory.path().join("missing.conf"),
             hosts_file: hosts.path().to_path_buf(),
             name_servers: NameServers::ResolverConfiguration,
@@ -379,7 +376,6 @@ mod tests {
         let resolver = file("nameserver 192.0.2.1\n");
         let directory = tempfile::tempdir().assured("a temporary directory can be created");
         let report = read_error(DnsConfiguration {
-            settings: crate::DnsSettings::default(),
             resolver_configuration: resolver.path().to_path_buf(),
             hosts_file: directory.path().join("missing-hosts"),
             name_servers: NameServers::ResolverConfiguration,
@@ -409,9 +405,8 @@ mod tests {
     fn declared_local_policy_reaches_the_resolver_builder() {
         let resolver = file("nameserver 192.0.2.1\n");
         let hosts = file("");
-        let mut configuration =
-            configuration(&resolver, &hosts, NameServers::ResolverConfiguration);
-        configuration.settings = crate::DnsSettings::resolve(
+        let configuration = configuration(&resolver, &hosts, NameServers::ResolverConfiguration);
+        let settings = crate::DnsSettings::resolve(
             crate::DnsSettingValues {
                 cache_entries: Some(12),
                 positive_max_ttl: Some(Duration::from_secs(6)),
@@ -423,7 +418,9 @@ mod tests {
             3,
         )
         .assured("a bounded local resolver policy");
-        let loaded = configuration.read().assured("the configuration is valid");
+        let loaded = configuration
+            .read(settings)
+            .assured("the configuration is valid");
         assert_eq!(loaded.options.cache_size, 12);
         assert_eq!(
             loaded.options.positive_max_ttl,
@@ -447,7 +444,7 @@ mod tests {
         let resolver = file("nameserver 192.0.2.1\noptions ndots:3 timeout:2 attempts:4 edns0\n");
         let hosts = file("");
         let loaded = configuration(&resolver, &hosts, NameServers::ResolverConfiguration)
-            .read()
+            .read(crate::DnsSettings::default())
             .assured("the configuration is valid");
         let options = loaded.options;
         assert_eq!(options.ndots, 3);
@@ -473,7 +470,7 @@ mod tests {
         let resolver = file("nameserver 192.0.2.1\nsearch one.test two.test\ndomain three.test\n");
         let hosts = file("");
         let loaded = configuration(&resolver, &hosts, NameServers::ResolverConfiguration)
-            .read()
+            .read(crate::DnsSettings::default())
             .assured("the configuration is valid");
         let search = loaded.resolver.search();
         assert_eq!(search.len(), 1);

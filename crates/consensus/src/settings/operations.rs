@@ -522,10 +522,12 @@ impl RaftOperationSettings {
     }
     /// A follower beyond two snapshot intervals receives the snapshot, never one before it exists.
     pub fn replication_lag_threshold(snapshot_entries: u64) -> u64 {
-        match snapshot_entries.checked_mul(2) {
-            Some(twice) => twice,
-            None => u64::MAX,
-        }
+        nervix_primitives::expect_lint!(
+            nervix::clamped_arithmetic,
+            "OpenRaft's u64 lag limit caps the doubled threshold; validation rejects a snapshot \
+             threshold of MAX so this limit remains strictly greater",
+            snapshot_entries.saturating_mul(2)
+        )
     }
     pub fn backoff(&self) -> String {
         format!(

@@ -25,8 +25,6 @@ use tracing::{debug, info};
 
 use crate::{NervixRaft, storage::FjallStore};
 
-/// How often retention is reconsidered when nothing else wakes it.
-
 /// What a node keeps of its Raft log, and when it snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RaftRetentionPolicy {

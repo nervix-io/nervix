@@ -293,9 +293,7 @@ impl Preflight<'_> {
             }
         }
 
-        let mut dns_configuration = self.dns.clone();
-        dns_configuration.settings = self.settings.dns;
-        let dns = DnsResolver::load(dns_configuration)
+        let dns = DnsResolver::load(self.dns.clone(), self.settings.dns)
             .instrument(tracing::info_span!("load_dns_configuration"))
             .await
             .change_context(PreflightError::Resolver)?;

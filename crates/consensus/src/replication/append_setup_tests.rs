@@ -63,14 +63,16 @@ async fn client_with_departed_target() -> NetworkClient<()> {
     std::fs::write(&resolver_configuration, "nameserver 127.0.0.1\n")
         .expect("test resolver configuration");
     std::fs::write(&hosts_file, "127.0.0.1 localhost\n").expect("test hosts file");
-    let dns = DnsResolver::load(DnsConfiguration {
-        settings: nervix_dns::DnsSettings::default(),
-        resolver_configuration,
-        hosts_file,
-        name_servers: NameServers::Explicit(vec![
-            "127.0.0.1:5353".parse().expect("test nameserver"),
-        ]),
-    })
+    let dns = DnsResolver::load(
+        DnsConfiguration {
+            resolver_configuration,
+            hosts_file,
+            name_servers: NameServers::Explicit(vec![
+                "127.0.0.1:5353".parse().expect("test nameserver"),
+            ]),
+        },
+        nervix_dns::DnsSettings::default(),
+    )
     .await
     .expect("test resolver loads its explicit fixtures");
     let executor = nervix_execution::Executor::default();

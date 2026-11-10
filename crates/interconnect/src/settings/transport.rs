@@ -574,10 +574,12 @@ mod tests {
 
     #[test]
     fn jitter_stays_inside_its_declared_fraction_and_disabled_jitter_reads_no_entropy() {
-        let mut options = TransportOptions::default();
-        options.entropy = TransportEntropy::from_source(|| {
-            panic!("disabled jitter must preserve the entropy sequence")
-        });
+        let mut options = TransportOptions {
+            entropy: TransportEntropy::from_source(|| {
+                panic!("disabled jitter must preserve the entropy sequence")
+            }),
+            ..Default::default()
+        };
         assert_eq!(
             options.retry_delay(Duration::from_secs(1)),
             Duration::from_secs(1)

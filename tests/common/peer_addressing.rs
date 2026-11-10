@@ -173,7 +173,6 @@ impl ClusterDns {
             }
         };
         let configuration = DnsConfiguration {
-            settings: nervix_dns::DnsSettings::default(),
             resolver_configuration: directory.join("resolv.conf"),
             hosts_file: directory.join("hosts"),
             name_servers: NameServers::Explicit(vec![authority.address()]),

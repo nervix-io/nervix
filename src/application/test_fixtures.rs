@@ -349,9 +349,12 @@ pub(crate) async fn test_interconnect(cluster_id: &str, node_id: &ClusterNodeNam
     let addr = "127.0.0.1:0"
         .parse()
         .expect("ephemeral interconnect address must parse");
-    let dns = nervix_dns::DnsResolver::load(nervix_dns::DnsConfiguration::system())
-        .await
-        .expect("the host's resolver configuration should load");
+    let dns = nervix_dns::DnsResolver::load(
+        nervix_dns::DnsConfiguration::system(),
+        nervix_dns::DnsSettings::default(),
+    )
+    .await
+    .expect("the host's resolver configuration should load");
     let (transport, _rx) = Transport::bind(
         addr,
         nervix_interconnect::TransportIdentity {

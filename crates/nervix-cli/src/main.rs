@@ -1250,7 +1250,6 @@ fn connect_options_from_args(args: &Args) -> Result<ConnectOptions, StackReport<
     };
     Ok(ConnectOptions {
         dns: ConnectDns::Configuration(DnsConfiguration {
-            settings: nervix_dns::DnsSettings::default(),
             resolver_configuration: args.dns_resolver_config.clone(),
             hosts_file: args.dns_hosts_file.clone(),
             name_servers: if args.dns_name_servers.is_empty() {

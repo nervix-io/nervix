@@ -12,7 +12,7 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use std::{collections::BTreeSet, marker::PhantomData, time::Duration};
+use std::{collections::BTreeSet, marker::PhantomData};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_model_harness::shuttle::check_random_and_pct;

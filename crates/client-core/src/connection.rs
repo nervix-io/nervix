@@ -141,9 +141,11 @@ impl GrpcConnector {
     /// Load DNS at the client's safe setup boundary, or reuse its owner's resolver.
     pub(crate) async fn load_dns(&mut self) -> error_stack::Result<(), ClientError> {
         let dns = match &self.options.dns {
-            ConnectDns::Configuration(configuration) => DnsResolver::load(configuration.clone())
-                .await
-                .change_context(ClientError::LoadDnsConfiguration)?,
+            ConnectDns::Configuration(configuration) => {
+                DnsResolver::load(configuration.clone(), nervix_dns::DnsSettings::default())
+                    .await
+                    .change_context(ClientError::LoadDnsConfiguration)?
+            }
             ConnectDns::Resolver(dns) => dns.clone(),
         };
         self.dns = Some(dns);

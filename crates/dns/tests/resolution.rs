@@ -58,7 +58,7 @@ impl Fixture {
             .await
             .assured("a loopback UDP port is available");
         let (files, configuration) = Self::files(resolver_options, hosts, authority.address());
-        let resolver = DnsResolver::load(configuration)
+        let resolver = DnsResolver::load(configuration, nervix_dns::DnsSettings::default())
             .await
             .assured("the fixture configuration is valid");
         Self {
@@ -80,7 +80,6 @@ impl Fixture {
             .assured("the resolver configuration can be written");
         std::fs::write(&hosts_file, hosts).assured("the hosts file can be written");
         let configuration = DnsConfiguration {
-            settings: nervix_dns::DnsSettings::default(),
             resolver_configuration,
             hosts_file,
             name_servers: NameServers::Explicit(vec![name_server]),
@@ -428,7 +427,7 @@ fn resolvers_are_rebuilt_and_torn_down_with_their_runtime() {
             .assured("a node runtime can be built");
         let (_files, configuration) = Fixture::files(QUICK_OPTIONS, "", authority.address());
         runtime.block_on(async {
-            let resolver = DnsResolver::load(configuration)
+            let resolver = DnsResolver::load(configuration, nervix_dns::DnsSettings::default())
                 .await
                 .assured("the fixture configuration is valid");
             let resolved = resolver

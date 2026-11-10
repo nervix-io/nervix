@@ -105,15 +105,17 @@ impl DnsResolver {
         self.inner.hook_budget
     }
 
-    /// Read `configuration` and construct the resolver it describes.
+    /// Read `configuration` and construct the resolver under the caller's resolved `settings`.
     ///
     /// The configuration and hosts files are read once, on the blocking pool, so a slow filesystem
     /// never stalls the caller's reactor. Neither file is read again: a changed file takes effect
     /// when the node next starts.
     pub async fn load(
         configuration: DnsConfiguration,
+        settings: DnsSettings,
     ) -> Result<Self, Report<DnsConfigurationError>> {
-        let reading = nervix_primitives::task::spawn_blocking(move || configuration.read()).await;
+        let reading =
+            nervix_primitives::task::spawn_blocking(move || configuration.read(settings)).await;
         let loaded = match reading {
             Ok(loaded) => loaded?,
             Err(error) => {

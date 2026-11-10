@@ -66,6 +66,11 @@ seam where the Turmoil build substitutes simulated names, as
 
 ## Resolver Lifetime
 
+Resolver construction takes the file-source configuration and the resolved DNS policy as separate
+inputs. The server supplies its node settings; native clients and test fixtures explicitly
+select the declaration defaults. File-source configuration remains a small value in client
+connection options, with no added handle allocation or enlarged shared handle slot.
+
 A node loads its resolver once, at startup, as the last check of its
 [startup preflight](./node-settings.md#the-startup-preflight): after the TLS material of its client
 listeners, and before it binds any listener, reads its interconnect credentials or opens a store.

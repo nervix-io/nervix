@@ -1093,12 +1093,14 @@ mod tests {
             )
             .assured("the fixture resolver configuration can be written");
             std::fs::write(&hosts_file, "").assured("the fixture hosts file can be written");
-            let resolver = DnsResolver::load(DnsConfiguration {
-                settings: nervix_dns::DnsSettings::default(),
-                resolver_configuration,
-                hosts_file,
-                name_servers: NameServers::Explicit(vec![authority.address()]),
-            })
+            let resolver = DnsResolver::load(
+                DnsConfiguration {
+                    resolver_configuration,
+                    hosts_file,
+                    name_servers: NameServers::Explicit(vec![authority.address()]),
+                },
+                nervix_dns::DnsSettings::default(),
+            )
             .await
             .assured("the fixture resolver configuration is valid");
             Self {

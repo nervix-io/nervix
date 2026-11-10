@@ -6,14 +6,14 @@ Feature: Declared infrastructure settings
     Given a 10 node nervix cluster is started
     When 16 domains named "infrastructure_append" are created on the leader node
     Then within "120s" every node has applied 16 domains named "infrastructure_append"
-    And node "node-1" eventually describes node "node-10" with "interconnect: max-peers=64 request-quota=128 health-probes=64"
+    And node "node-1" eventually describes node "node-10" with "interconnect: max-peers=64 request-quota=128 health-probes=64 max-connections=768 handshakes=32 queue=1024 completion=4 watermarks=8192 stream-window=65536 connection-window=262144 setup=5s request=10s progress=5s backoff=200ms max-backoff=5s jitter-permille=0"
 
   Scenario Outline: A configured request quota is visible on a cluster of <cluster_size>
     Given node-1 starts with interconnect-max-peers = 16
     And node-1 starts with interconnect-request-quota = 4
     And node-1 starts with interconnect-request-timeout = 20s
     And a <cluster_size> node nervix cluster is started
-    Then node "node-<cluster_size>" eventually describes node "node-1" with "interconnect: max-peers=16 request-quota=4 health-probes=16"
+    Then node "node-<cluster_size>" eventually describes node "node-1" with "interconnect: max-peers=16 request-quota=4 health-probes=16 max-connections=192 handshakes=32 queue=1024 completion=1 watermarks=8192 stream-window=65536 connection-window=262144 setup=5s request=20s progress=5s backoff=200ms max-backoff=5s jitter-permille=0"
     When 4 domains named "configured_infrastructure" are created on the leader node
     Then within "60s" every node has applied 4 domains named "configured_infrastructure"
 
@@ -61,7 +61,11 @@ Feature: Declared infrastructure settings
       """
     Then the last cluster status schedules nodes on at least 3 distinct owners
     And node "node-1" eventually describes node "node-3" with "interconnect liveness: ping-interval=2s ping-timeout=1s probe-timeout=400ms"
-    And the last cluster status work on healthy nodes "node-1,node-3" is saved
+    When these Plexus commands are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status work on healthy nodes "node-1,node-3" is saved
     When application health responses from node "node-2" fail
     And consensus connectivity for node "node-2" is blocked
     And gossip exchanges involving node "node-2" are blocked with a "5s" send delay
@@ -81,7 +85,7 @@ Feature: Declared infrastructure settings
     And a <cluster_size> node nervix cluster is started
     Then node "node-<cluster_size>" eventually describes node "node-1" with "database: cache-bytes=1048576 journal-bytes=67108864 workers=1"
     And node "node-<cluster_size>" eventually describes node "node-1" with "raft database: cache-bytes=2097152 journal-bytes=67108864 workers=1"
-    And node "node-<cluster_size>" eventually describes node "node-1" with "dns: cache-entries=16 positive-max-ttl=2s negative-max-ttl=1s"
+    And node "node-<cluster_size>" eventually describes node "node-1" with "dns: cache-entries=16 positive-max-ttl=2s negative-max-ttl=1s hook-budget=30s families=dual-stack trust-negative=true concurrent-lookups=64"
     When 2 domains named "configured_stores" are created on the leader node
     Then within "60s" every node has applied 2 domains named "configured_stores"
 

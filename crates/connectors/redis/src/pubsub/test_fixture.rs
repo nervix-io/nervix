@@ -42,12 +42,14 @@ impl Fixture {
             "the hosts file can be written",
         );
         let dns = required(
-            DnsResolver::load(DnsConfiguration {
-                settings: nervix_dns::DnsSettings::default(),
-                resolver_configuration,
-                hosts_file,
-                name_servers: NameServers::Explicit(vec![authority.address()]),
-            })
+            DnsResolver::load(
+                DnsConfiguration {
+                    resolver_configuration,
+                    hosts_file,
+                    name_servers: NameServers::Explicit(vec![authority.address()]),
+                },
+                nervix_dns::DnsSettings::default(),
+            )
             .await,
             "the DNS fixture configuration loads",
         );
