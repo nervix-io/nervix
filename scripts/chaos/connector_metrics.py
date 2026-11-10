@@ -52,9 +52,8 @@ class Observation:
         required = cls.requirements(kind)
         names = {name for name, _ in required}
         target = f"chaos_{kind}"
-        identity = {"domain", kind, "physical_node_id", "connector", "entity"}
-        if kind == "ingestor":
-            identity.add("instance")
+        identity = {"domain", kind, "physical_node_id", "connector", "entity", "instance"}
+        expected_instance = "0" if kind == "ingestor" else "-"
         values = {}
         try:
             for family in text_string_to_metric_families(text):
@@ -67,8 +66,8 @@ class Observation:
                         raise EvidenceError("sample names another physical node")
                     if sample.labels.get("connector") != "KAFKA" or sample.labels.get("entity") != "TOPIC":
                         raise EvidenceError("sample names another connector entity")
-                    if kind == "ingestor" and sample.labels.get("instance") != "0":
-                        raise EvidenceError("sample names another ingestor instance")
+                    if sample.labels.get("instance") != expected_instance:
+                        raise EvidenceError(f"sample names another {kind} instance")
                     extras = tuple(sorted((key, value) for key, value in sample.labels.items() if key not in identity))
                     key = (sample.name, extras)
                     if key not in required:

@@ -14,7 +14,7 @@ from scripts.chaos import connector_metrics
 def emitter_scrape(node="node-2", total=0):
     labels = (
         'connector="KAFKA",domain="chaos_baseline",emitter="chaos_emitter",'
-        f'entity="TOPIC",physical_node_id="{node}"'
+        f'entity="TOPIC",instance="-",physical_node_id="{node}"'
     )
     lines = []
     for operation in ("publish", "commit"):
@@ -85,6 +85,13 @@ class ConnectorMetricEvidenceTests(unittest.TestCase):
         text = ingestor_scrape().replace('instance="0"', 'instance="1"')
         with self.assertRaisesRegex(connector_metrics.EvidenceError, "instance"):
             self.observation("ingestor", text)
+
+    def test_numbered_instance_cannot_supply_single_emitter_samples(self):
+        for instance in ("0", "1"):
+            with self.subTest(instance=instance):
+                text = emitter_scrape().replace('instance="-"', f'instance="{instance}"')
+                with self.assertRaisesRegex(connector_metrics.EvidenceError, "instance"):
+                    self.observation("emitter", text)
 
     def test_wrong_entity_or_domain_cannot_supply_missing_samples(self):
         for name, value in (("emitter", "another"), ("domain", "another"), ("entity", "STREAM")):

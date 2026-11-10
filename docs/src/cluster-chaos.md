@@ -1470,7 +1470,9 @@ process-local counters must exist at zero before the gate opens. The same physic
 counters must then advance: payloads, bytes and acknowledged trees for an ingestor; successful
 publish attempts and duration observations for an emitter. The emitter check also requires every
 bounded publish/commit outcome child to be registered. The Kafka fixture's one indexed ingestor
-unit is attributed to `instance="0"`. The ordinary owner-crash cases retain their
+unit is attributed to `instance="0"`, and its default single emitter unit to `instance="-"`.
+Samples of a numbered emitter instance cannot supply that single unit's counters.
+The ordinary owner-crash cases retain their
 continuous load throughout the fault.
 
 The ingestor metric suite entry uses three records: one settled before the fault, one held until
@@ -1483,7 +1485,7 @@ prefix.
 Each observation retains the raw `/metrics` scrape, the owner-routed `DESCRIBE` section and a
 machine-readable verdict under `crash/connector-metrics/`. Missing children, duplicate samples,
 another owner, expanded identity labels, invalid counter values, a nonzero fresh-owner counter,
-another ingestor instance, counter resets and absent progress fail qualification. Totals from the
+another instance, counter resets and absent progress fail qualification. Totals from the
 crashed process never supply the survivor's progress. The run manifest records
 `connector_metrics: true`. Parser
 preparation happens before execution; a run builds and installs nothing.
