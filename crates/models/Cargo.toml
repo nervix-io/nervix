@@ -35,9 +35,9 @@ serde_json = { workspace = true }
 sorted-vec = { workspace = true, features = ["serde"] }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
+ubyte = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["serde"] }
-ubyte = { workspace = true }
 
 [target.'cfg(target_pointer_width = "64")'.dependencies]
 arrow-array = { workspace = true }
