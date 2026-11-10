@@ -862,4 +862,9 @@ entries. The current operational-policy keyspaces and interconnect fingerprint c
 parameter record and required immutable node operational claim; other stored shapes require
 recreation and have no second decoder.
 
+The eight count parameters whose definitions already cap them within `u32::MAX` use four-byte
+stored projections. Their public u64 values, defaults and admitted ranges remain unchanged;
+full-width count and byte parameters retain eight bytes. Storage and JSON both validate through
+the owning definition before publishing the complete policy.
+
 A durable transaction request records an unqueueable statement as a typed refusal carrying only its statement label. It retains preceding operations and batch shape without retaining the refused Model or its source, so a preceding `BEGIN` remains open after refusal and credentials never enter that queued effect.

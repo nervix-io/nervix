@@ -21,7 +21,7 @@ use rkyv::{
 use serde::{Deserialize, Serialize};
 use strum::EnumIter;
 use thiserror::Error;
-use value::ParameterSetting;
+use value::{ParameterSetting, ParameterValue};
 
 use crate::SettingDefinition;
 #[doc(hidden)]
@@ -158,8 +158,17 @@ macro_rules! parameter_cli_text {
     };
 }
 
+macro_rules! parameter_storage {
+    ($value:ty) => {
+        <$value as ParameterValue>::Stored
+    };
+    ($value:ty, $stored:ty) => {
+        $stored
+    };
+}
+
 macro_rules! parameter_values {
-    ($($field:ident: $definition:ident($value:ty) => $kind:ident,)+) => {
+    ($($field:ident: $definition:ident($value:ty) => $kind:ident $(<$stored:ty>)?,)+) => {
         /// The complete cluster policy. Each field has one class, default and validation owner.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Archive, RkyvSerialize)]
         #[serde(deny_unknown_fields)]
@@ -167,7 +176,7 @@ macro_rules! parameter_values {
             $(
                 #[serde(with = "value_archive")]
                 #[rkyv(with = value_archive::ValidatedSetting)]
-                $field: ParameterSetting<$definition>,
+                $field: ParameterSetting<$definition, parameter_storage!($value $(, $stored)?)>,
             )+
         }
 
@@ -176,7 +185,7 @@ macro_rules! parameter_values {
                 use serde::de::Error as _;
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
-                struct Fields { $(#[serde(with = "value_archive")] $field: ParameterSetting<$definition>,)+ }
+                struct Fields { $(#[serde(with = "value_archive")] $field: ParameterSetting<$definition, parameter_storage!($value $(, $stored)?)>,)+ }
                 let fields = Fields::deserialize(deserializer)?;
                 let values = Self {
                     $($field: fields.$field,)+
@@ -317,24 +326,24 @@ parameter_values! {
     transaction_tombstone_retention: TransactionTombstoneRetention(Duration) => Duration,
     command_retry_validity: CommandRetryValidity(Duration) => Duration,
     state_snapshot_interval: StateSnapshotInterval(Duration) => Duration,
-    transaction_max_statements: TransactionMaxStatements(u64) => Count,
+    transaction_max_statements: TransactionMaxStatements(u64) => Count<u32>,
     transaction_max_source_bytes: TransactionMaxSourceBytes(u64) => Bytes,
-    transaction_max_open: TransactionMaxOpen(u64) => Count,
-    command_execution_capacity: CommandExecutionCapacity(u64) => Count,
-    replica_count: ReplicaCount(u64) => Count,
+    transaction_max_open: TransactionMaxOpen(u64) => Count<u32>,
+    command_execution_capacity: CommandExecutionCapacity(u64) => Count<u32>,
+    replica_count: ReplicaCount(u64) => Count<u32>,
     resource_max_archive_bytes: ResourceMaxArchiveBytes(u64) => Bytes,
     resource_max_extracted_bytes: ResourceMaxExtractedBytes(u64) => Bytes,
     resource_max_file_count: ResourceMaxFileCount(u64) => Count,
-    max_batch_messages: MaxBatchMessages(u64) => Count,
+    max_batch_messages: MaxBatchMessages(u64) => Count<u32>,
     client_producer_session_bytes: ClientProducerSessionBytes(u64) => Bytes,
     client_consumer_session_bytes: ClientConsumerSessionBytes(u64) => Bytes,
     udf_code_bytes: UdfCodeBytes(u64) => Bytes,
     http_header_bytes: HttpHeaderBytes(u64) => Bytes,
-    http_header_fields: HttpHeaderFields(u64) => Count,
-    client_batch_rows: ClientBatchRows(u64) => Count,
+    http_header_fields: HttpHeaderFields(u64) => Count<u32>,
+    client_batch_rows: ClientBatchRows(u64) => Count<u32>,
     tls_cipher_suites: TlsCipherSuites(nervix_crypto_policy::TlsCipherSuites) => AlgorithmNames,
     tls_key_exchange_groups: TlsKeyExchangeGroups(nervix_crypto_policy::TlsKeyExchangeGroups) => AlgorithmNames,
-    password_iterations: PasswordIterations(u64) => Count,
+    password_iterations: PasswordIterations(u64) => Count<u32>,
 }
 
 impl ClusterParameterKey {

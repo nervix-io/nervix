@@ -311,3 +311,87 @@ fn a_compact_duration_refusal_keeps_its_integer_conversion_cause() {
     assert!(refusal.contains::<crate::ClusterParameterDurationError>());
     assert!(refusal.contains::<std::num::TryFromIntError>());
 }
+
+#[test]
+fn bounded_counts_preserve_their_complete_public_and_stored_value_domains() {
+    type CountDefinition = (fn(u64) -> ClusterParameterChange, u64, u64);
+    let definitions: [CountDefinition; 8] = [
+        (
+            ClusterParameterChange::TransactionMaxStatements,
+            0,
+            u64::from(u32::MAX),
+        ),
+        (
+            ClusterParameterChange::TransactionMaxOpen,
+            0,
+            u64::from(u32::MAX),
+        ),
+        (
+            ClusterParameterChange::CommandExecutionCapacity,
+            1,
+            u64::from(u32::MAX),
+        ),
+        (ClusterParameterChange::ReplicaCount, 0, u64::from(u32::MAX)),
+        (
+            ClusterParameterChange::MaxBatchMessages,
+            1,
+            u64::from(u32::MAX),
+        ),
+        (
+            ClusterParameterChange::HttpHeaderFields,
+            1,
+            HttpHeaderFields::MAXIMUM,
+        ),
+        (
+            ClusterParameterChange::ClientBatchRows,
+            1,
+            u64::from(u32::MAX),
+        ),
+        (
+            ClusterParameterChange::PasswordIterations,
+            1,
+            PasswordIterations::MAXIMUM,
+        ),
+    ];
+    for (definition, minimum, maximum) in definitions {
+        for value in [minimum, minimum + (maximum - minimum) / 2, maximum] {
+            let change = definition(value);
+            let parameter = change.parameter();
+            let updates = ClusterParameterUpdates::try_from(vec![change.clone()])
+                .assured("one current parameter assignment is unique");
+            let original = ClusterParameterValues::default()
+                .changed(&updates)
+                .assured("the complete admitted count domain remains representable");
+            let json = serde_json::to_value(original).assured("current policy has a JSON form");
+            assert_eq!(json[parameter.setting_name().replace('-', "_")], value);
+            assert_eq!(
+                serde_json::from_value::<ClusterParameterValues>(json)
+                    .assured("the public boundary accepts every admitted count"),
+                original
+            );
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original)
+                .assured("the complete policy stores without allocation inside its values");
+            assert_eq!(
+                rkyv::from_bytes::<ClusterParameterValues, rkyv::rancor::Error>(&bytes)
+                    .assured("the stored boundary retains every admitted count"),
+                original
+            );
+            let restored = original
+                .assignments()
+                .iter()
+                .find(|value| value.parameter() == parameter)
+                .cloned()
+                .assured("every current parameter has an assignment");
+            assert_eq!(restored, change);
+        }
+        let updates = ClusterParameterUpdates::try_from(vec![definition(maximum + 1)])
+            .assured("one out-of-range assignment is unique");
+        let refusal = ClusterParameterValues::default()
+            .changed(&updates)
+            .expect_err("the definition refuses counts beyond its existing range");
+        assert!(matches!(
+            refusal.current_context(),
+            ClusterParameterError::OutOfRange { .. }
+        ));
+    }
+}

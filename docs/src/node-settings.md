@@ -270,6 +270,11 @@ whole seconds and subsecond nanoseconds in eight bytes; every permitted duration
 The public duration values and their JSON seconds/nanoseconds encoding retain full precision.
 This keeps the inline Raft command footprint bounded while carrying the complete policy.
 
+The eight count parameters whose definitions already cap them within `u32::MAX` use four-byte
+stored projections. Their public u64 values, defaults and admitted ranges remain unchanged;
+full-width count and byte parameters retain eight bytes. Storage and JSON both validate through
+the owning definition before publishing the complete policy.
+
 ## Permanent Cluster Identity
 
 The first leader commits a permanent UUID and signing key for the cluster. `DESCRIBE CLUSTER;`

@@ -1470,3 +1470,8 @@ uses its validated eight-byte seconds/nanoseconds projection without allocating.
 recovery request carries exact u64 nanoseconds and validates its duration range at the destination.
 Their public JSON remains seconds and nanoseconds. Both stored and public decoders cross the
 definition's validation boundary; an invalid stored scalar cannot become a valid policy by defaulting.
+
+The eight count parameters whose definitions already cap them within `u32::MAX` use four-byte
+stored projections. Their public u64 values, defaults and admitted ranges remain unchanged;
+full-width count and byte parameters retain eight bytes. Storage and JSON both validate through
+the owning definition before publishing the complete policy.
