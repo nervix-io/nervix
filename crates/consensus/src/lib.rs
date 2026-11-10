@@ -157,10 +157,16 @@ pub use restore::{
 };
 pub use retention::RaftRetentionPolicy;
 pub use settings::{
-    ELECTION_TIMEOUT_MAX_HEARTBEATS, ELECTION_TIMEOUT_MIN_HEARTBEATS, RAFT_LOG_DURABILITY,
+    ApiBatchCapacity, ApiChannelCapacity, AppendBatchEntries, AppendIdleBound,
+    ConsensusEventCapacity, ELECTION_TIMEOUT_MAX_HEARTBEATS, ELECTION_TIMEOUT_MIN_HEARTBEATS,
+    MembershipMutationTimeout, MembershipStepDownDelay, NotificationChannelCapacity,
+    OutstandingAppendBatches, OutstandingAppendBytes, PurgeBatchEntries, RAFT_LOG_DURABILITY,
     RaftCoveredLogBytesRetained, RaftCoveredLogEntriesRetained, RaftHeartbeatInterval,
-    RaftRetainedLogCap, RaftRetentionBounds, RaftRetentionSettings, RaftSnapshotByteThreshold,
-    RaftSnapshotEntryThreshold, RaftTimingError, RaftTimings,
+    RaftOperationError, RaftOperationSettings, RaftOperationValues, RaftRetainedLogCap,
+    RaftRetentionBounds, RaftRetentionSettings, RaftSnapshotByteThreshold,
+    RaftSnapshotEntryThreshold, RaftTimingError, RaftTimings, ReplicationBackoff,
+    ReplicationBackoffMaximum, RetentionAdmissionPoll, RetentionAdmissionTimeout,
+    RetentionInterval, SnapshotTransferTimeout, StateMachineChannelCapacity,
 };
 pub use snapshot::{SealedSnapshot, SnapshotRetention};
 mod storage;
@@ -420,7 +426,7 @@ pub struct TransactionControlSnapshot {
 )]
 pub enum ConsensusCommand {
     AnnounceNodeCapabilities {
-        record: NodeCapabilityRecord,
+        record: Box<NodeCapabilityRecord>,
     },
     InstallClusterIdentity {
         identity: Box<ClusterIdentityRecord>,
@@ -972,13 +978,9 @@ pub type StoredMembershipOf =
 pub type SnapshotOf =
     Snapshot<CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, Node, SealedSnapshot>;
 
-const MEMBERSHIP_MUTATION_TIMEOUT: Duration = Duration::from_secs(10);
 /// How many consensus transitions a session can fall behind before the bus drops the oldest.
-const CONSENSUS_EVENT_CAPACITY: usize = 256;
 /// How often a mutation held back by log retention rechecks for reclaimed space.
-const RETENTION_ADMISSION_POLL: Duration = Duration::from_millis(50);
 /// How long one complete snapshot transfer may take.
-const SNAPSHOT_TRANSFER_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct ConsensusSettings {
@@ -989,6 +991,8 @@ pub struct ConsensusSettings {
     pub executor: nervix_execution::Executor,
     pub raft_timings: RaftTimings,
     pub raft_retention: RaftRetentionSettings,
+    pub operations: RaftOperationSettings,
+    pub database: nervix_models::DatabaseCapabilities,
 }
 
 /// One node as cluster discovery currently describes it.
@@ -2265,6 +2269,7 @@ struct ConsensusState {
     lease_refusal: LeaseRefusal,
     membership_interruption: MembershipInterruption,
     raft_retention: RaftRetentionPolicy,
+    operations: RaftOperationSettings,
     /// Serializes membership changes, and holds the admission refusals the leader has reported.
     membership_mutation: AsyncMutex<ReportedAdmissionRefusals>,
     /// The verdicts on live runs this node holds while it leads, replaced by every membership
@@ -2480,8 +2485,8 @@ struct ConsensusEvents {
 }
 
 impl ConsensusEvents {
-    fn new() -> Self {
-        let (sender, _) = broadcast::channel(CONSENSUS_EVENT_CAPACITY);
+    fn new(capacity: usize) -> Self {
+        let (sender, _) = broadcast::channel(capacity);
         Self { sender }
     }
 
@@ -2535,10 +2540,14 @@ impl Consensus {
         path: impl AsRef<Path>,
         settings: ConsensusSettings,
     ) -> error_stack::Result<Self, ConsensusError> {
-        let db = Self::open_database(path.as_ref().to_path_buf(), &settings.executor)
-            .await
-            .map_err(|error| Report::new(error).change_context(ConsensusError::Storage))?;
-        let store = FjallStore::from_database(db, settings.executor.clone())
+        let db = Self::open_database(
+            path.as_ref().to_path_buf(),
+            &settings.executor,
+            settings.database,
+        )
+        .await
+        .map_err(|error| Report::new(error).change_context(ConsensusError::Storage))?;
+        let store = FjallStore::from_database(db, settings.executor.clone(), settings.operations)
             .await
             .map_err(|error| Report::new(error).change_context(ConsensusError::Storage))?;
         Self::from_store(store, settings, ()).await
@@ -2550,13 +2559,18 @@ impl Consensus {
         settings: ConsensusSettings,
         test_probe: ConsensusTestProbe,
     ) -> Result<Self, Report<ConsensusError>> {
-        let db = Self::open_database(path.as_ref().to_path_buf(), &settings.executor)
-            .await
-            .map_err(|error| Report::new(error).change_context(ConsensusError::Storage))?;
+        let db = Self::open_database(
+            path.as_ref().to_path_buf(),
+            &settings.executor,
+            settings.database,
+        )
+        .await
+        .map_err(|error| Report::new(error).change_context(ConsensusError::Storage))?;
         let store = FjallStore::from_database_with_storage_fault(
             db,
             settings.executor.clone(),
             test_probe.storage_fault(),
+            settings.operations,
         )
         .await
         .map_err(|error| Report::new(error).change_context(ConsensusError::Storage))?;
@@ -2566,6 +2580,7 @@ impl Consensus {
     async fn open_database(
         path: PathBuf,
         executor: &nervix_execution::Executor,
+        capacity: nervix_models::DatabaseCapabilities,
     ) -> io::Result<Database> {
         let reservation = executor
             .reserve(nervix_execution::MemoryClass::Management, 4096)
@@ -2575,7 +2590,17 @@ impl Consensus {
             .run_storage(
                 nervix_execution::StorageClass::Consensus,
                 reservation,
-                move |_, _| Database::builder(path).open().map_err(io::Error::other),
+                move |_, _| {
+                    Database::builder(path)
+                        .cache_size(capacity.cache_bytes)
+                        .max_journaling_size(capacity.journal_bytes)
+                        .worker_threads(
+                            usize::try_from(capacity.workers.get())
+                                .assured("validated database workers fit the node"),
+                        )
+                        .open()
+                        .map_err(io::Error::other)
+                },
             )
             .await
             .map_err(io::Error::other)?
@@ -2599,7 +2624,11 @@ impl Consensus {
     where
         Recorder: AppendStreamOpenRecorder,
     {
-        let retention = settings.raft_retention.policy();
+        settings
+            .operations
+            .validate_execution(settings.executor.limits())
+            .change_context(ConsensusError::Startup)?;
+        let retention = settings.raft_retention.policy(&settings.operations);
         let heartbeat_interval =
             u64::try_from(settings.raft_timings.heartbeat_interval().as_millis())
                 .unwrap_or(u64::MAX);
@@ -2631,16 +2660,58 @@ impl Consensus {
                 // The log reader fills a batch to the append target and never splits a command,
                 // so the byte bound comes from storage. This only caps how many entries one
                 // batch may gather before that bound is reached.
-                max_payload_entries: replication::MAX_APPEND_BATCH_ENTRIES,
+                max_payload_entries: *settings.operations.append_batch_entries.value(),
                 snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(
                     retention.snapshot_entry_threshold,
                 ),
                 max_in_snapshot_log_to_keep: retention.covered_entries_retained,
                 // One snapshot moves section by section under one deadline, so this covers the
                 // whole transfer rather than one chunk of it.
-                install_snapshot_timeout: u64::try_from(SNAPSHOT_TRANSFER_TIMEOUT.as_millis())
-                    .unwrap_or(u64::MAX),
-                ..Default::default()
+                install_snapshot_timeout: u64::try_from(
+                    settings
+                        .operations
+                        .snapshot_transfer_timeout
+                        .value()
+                        .as_millis(),
+                )
+                .unwrap_or(u64::MAX),
+                max_append_entries: Some(*settings.operations.api_batch_capacity.value()),
+                replication_lag_threshold: RaftOperationSettings::replication_lag_threshold(
+                    retention.snapshot_entry_threshold,
+                ),
+                snapshot_max_chunk_size: settings.executor.limits().bulk_chunk_bytes.as_u64(),
+                purge_batch_size: *settings.operations.purge_batch_entries.value(),
+                api_channel_size: Some(*settings.operations.api_channel_capacity.value()),
+                notification_channel_size: Some(
+                    *settings.operations.notification_channel_capacity.value(),
+                ),
+                state_machine_channel_size: Some(
+                    *settings.operations.state_machine_channel_capacity.value(),
+                ),
+                log_stage_capacity: Some(
+                    *settings.operations.state_machine_channel_capacity.value(),
+                ),
+                api_batch_capacity: *settings.operations.api_batch_capacity.value(),
+                api_batch_linger_ms: 0,
+                backoff: settings.operations.backoff(),
+                enable_tick: true,
+                enable_heartbeat: true,
+                enable_elect: true,
+                removed_leader_step_down: openraft::StepDownPolicy::After(
+                    u64::try_from(
+                        settings
+                            .operations
+                            .membership_step_down_delay
+                            .value()
+                            .as_millis(),
+                    )
+                    .verified("validated consensus milliseconds"),
+                ),
+                allow_log_reversion: Some(false),
+                enable_leader_restore: Some(true),
+                // The library retains a deprecated chunk-sender field that Nervix never reads;
+                // every active configuration field is explicit above.
+                ..Config::default()
             }
             .validate()
             .map_err(|error| Report::new(error).change_context(ConsensusError::Startup))?,
@@ -2653,6 +2724,7 @@ impl Consensus {
             local_node_id: settings.node_id.clone(),
             interconnect: settings.interconnect.clone(),
             executor: settings.executor.clone(),
+            operations: settings.operations,
             connectivity: connectivity.clone(),
             append_stream_open_recorder,
             snapshot_transfer_ids: Arc::new(SnapshotTransferIds::new()),
@@ -2666,7 +2738,7 @@ impl Consensus {
         )
         .await
         .map_err(|error| Report::new(error).change_context(ConsensusError::Startup))?;
-        let events = ConsensusEvents::new();
+        let events = ConsensusEvents::new(*settings.operations.event_capacity.value());
         let metrics_raft = raft.clone();
         let metrics_events = events.clone();
         let metrics_task = nervix_primitives::task::spawn(async move {
@@ -2719,6 +2791,7 @@ impl Consensus {
                 lease_refusal,
                 membership_interruption,
                 raft_retention: retention,
+                operations: settings.operations,
                 membership_mutation: AsyncMutex::new(ReportedAdmissionRefusals::default()),
                 admission_verdicts: watch::channel(None).0,
                 incoming_snapshots: Mutex::new(BTreeMap::new()),
@@ -4502,7 +4575,7 @@ impl Administrator {
                         self.inner.events.report(format!("raft {operation}"));
                         let proposed_under = self.inner.leader_tenure();
                         let update = timeout(
-                            MEMBERSHIP_MUTATION_TIMEOUT,
+                            *self.inner.operations.membership_mutation_timeout.value(),
                             self.inner.raft.change_membership(
                                 ChangeMembers::SetNodes(BTreeMap::from([(
                                     node_id,
@@ -4565,7 +4638,7 @@ impl Administrator {
                         self.inner.events.report(format!("raft {operation}"));
                         let proposed_under = self.inner.leader_tenure();
                         let admission = timeout(
-                            MEMBERSHIP_MUTATION_TIMEOUT,
+                            *self.inner.operations.membership_mutation_timeout.value(),
                             self.inner.raft.add_learner(
                                 node_id,
                                 BasicNode::new(endpoint.to_string()),
@@ -4597,7 +4670,7 @@ impl Administrator {
                         let operation = format!("promote voters {voters:?}");
                         let proposed_under = self.inner.leader_tenure();
                         let membership = timeout(
-                            MEMBERSHIP_MUTATION_TIMEOUT,
+                            *self.inner.operations.membership_mutation_timeout.value(),
                             self.inner
                                 .membership_interruption
                                 .change(&self.inner.raft, voters.clone()),
@@ -4664,7 +4737,12 @@ impl Administrator {
                 }
             }
         };
-        match timeout(MEMBERSHIP_MUTATION_TIMEOUT, completion).await {
+        match timeout(
+            *self.inner.operations.membership_mutation_timeout.value(),
+            completion,
+        )
+        .await
+        {
             Ok(result) => result,
             Err(_) => {
                 let observed = self.membership_snapshot();
@@ -4814,7 +4892,7 @@ impl Administrator {
         let operation = format!("remove node '{node_id}'");
         let proposed_under = self.inner.leader_tenure();
         let membership = timeout(
-            MEMBERSHIP_MUTATION_TIMEOUT,
+            *self.inner.operations.membership_mutation_timeout.value(),
             self.inner
                 .raft
                 .change_membership(desired_voters.clone(), false),
@@ -4863,15 +4941,16 @@ impl Administrator {
             .nodes()
             .map(|(node_id, node)| (node_id, &node.addr))
             .collect::<BTreeMap<_, _>>();
+        let timeout = *self.inner.operations.membership_mutation_timeout.value();
         self.inner.events.report(format!(
-            "raft membership wait timed out after {MEMBERSHIP_MUTATION_TIMEOUT:?}: {operation}; \
-             observed effective voters {:?} and nodes {:?}",
+            "raft membership wait timed out after {timeout:?}: {operation}; observed effective \
+             voters {:?} and nodes {:?}",
             observed.voter_ids(),
             nodes
         ));
         ConsensusError::MembershipChangeTimeout {
             operation,
-            timeout: MEMBERSHIP_MUTATION_TIMEOUT,
+            timeout: *self.inner.operations.membership_mutation_timeout.value(),
         }
     }
 
@@ -4903,7 +4982,8 @@ impl ConsensusState {
             let reclaimed = timeout(deadline, async {
                 loop {
                     nervix_primitives::task::consume_budget().await;
-                    nervix_primitives::time::sleep(RETENTION_ADMISSION_POLL).await;
+                    nervix_primitives::time::sleep(self.raft_retention.retention_admission_poll)
+                        .await;
                     if self.store.retained_log_bytes() <= cap {
                         return;
                     }
@@ -5162,6 +5242,7 @@ struct NetworkFactory<Recorder> {
     local_node_id: ClusterNodeName,
     interconnect: Transport,
     executor: nervix_execution::Executor,
+    operations: RaftOperationSettings,
     connectivity: ConnectivityFault,
     append_stream_open_recorder: Recorder,
     /// Shared with every client the factory creates, so no two transfers the node sends carry
@@ -5176,6 +5257,7 @@ struct NetworkClient<Recorder> {
     interconnect: Transport,
     executor: nervix_execution::Executor,
     append_path: AppendPath,
+    operations: RaftOperationSettings,
     connectivity: ConnectivityFault,
     append_stream_open_recorder: Recorder,
     /// The node's allocator, which the factory and every other client of the node share.
@@ -5193,6 +5275,7 @@ where
             interconnect: self.interconnect.clone(),
             executor: self.executor.clone(),
             append_path,
+            operations: self.operations,
             connectivity: self.connectivity.clone(),
             append_stream_open_recorder: self.append_stream_open_recorder.clone(),
             snapshot_transfer_ids: self.snapshot_transfer_ids.clone(),
@@ -5283,7 +5366,11 @@ where
                     .request_with_timeout(
                         &self.target,
                         wire::HeartbeatRequest(record),
-                        replication::append_request_deadline(&option, self.append_path),
+                        replication::append_request_deadline(
+                            &option,
+                            self.append_path,
+                            *self.operations.append_idle_bound.value(),
+                        ),
                     )
                     .await
                     .map_err(io_error);
@@ -8518,9 +8605,12 @@ mod tests {
     async fn membership_completion_leaves_an_already_uniform_core_log_unchanged()
     -> Result<(), Box<dyn std::error::Error>> {
         let node = ClusterNodeName::parse("node-1")?;
-        let store =
-            FjallStore::from_database(temp_database(), nervix_execution::Executor::default())
-                .await?;
+        let store = FjallStore::from_database(
+            temp_database(),
+            nervix_execution::Executor::default(),
+            crate::RaftOperationSettings::default(),
+        )
+        .await?;
         let config = nervix_primitives::sync::StdArc::new(super::Config::default().validate()?);
         let raft = super::NervixRaft::new(
             node.clone(),
@@ -8535,24 +8625,28 @@ mod tests {
             super::Node::new("127.0.0.1:1"),
         )]))
         .await?;
-        raft.wait(Some(super::MEMBERSHIP_MUTATION_TIMEOUT))
-            .metrics(
-                |metrics| {
-                    metrics.current_leader.as_ref() == Some(&node)
-                        && metrics.last_applied.as_ref().map(|entry| entry.index)
-                            == metrics.last_log_index
-                        && metrics
-                            .membership_config
-                            .membership()
-                            .get_joint_config()
-                            .len()
-                            == 1
-                        && metrics.membership_config.log_id()
-                            == metrics.committed_membership_config.log_id()
-                },
-                "the single-node leader has applied its committed uniform membership",
-            )
-            .await?;
+        raft.wait(Some(
+            <super::MembershipMutationTimeout as nervix_models::SettingDefinition>::default_value(
+                &(),
+            ),
+        ))
+        .metrics(
+            |metrics| {
+                metrics.current_leader.as_ref() == Some(&node)
+                    && metrics.last_applied.as_ref().map(|entry| entry.index)
+                        == metrics.last_log_index
+                    && metrics
+                        .membership_config
+                        .membership()
+                        .get_joint_config()
+                        .len()
+                        == 1
+                    && metrics.membership_config.log_id()
+                        == metrics.committed_membership_config.log_id()
+            },
+            "the single-node leader has applied its committed uniform membership",
+        )
+        .await?;
         let (before, current) = raft
             .with_raft_state(|state| {
                 (
@@ -8565,10 +8659,12 @@ mod tests {
             })
             .await?;
         let completion = super::timeout(
-            super::MEMBERSHIP_MUTATION_TIMEOUT,
+            <super::MembershipMutationTimeout as nervix_models::SettingDefinition>::default_value(
+                &(),
+            ),
             super::Administrator::propose_voter_change_completion(
                 &raft,
-                &super::ConsensusEvents::new(),
+                &super::ConsensusEvents::new(<super::ConsensusEventCapacity as nervix_models::SettingDefinition>::default_value(&())),
                 current,
             ),
         )
@@ -8608,9 +8704,12 @@ mod tests {
     async fn membership_completion_uses_the_core_after_a_joint_observation()
     -> Result<(), Box<dyn std::error::Error>> {
         let node = ClusterNodeName::parse("node-1")?;
-        let mut store =
-            FjallStore::from_database(temp_database(), nervix_execution::Executor::default())
-                .await?;
+        let mut store = FjallStore::from_database(
+            temp_database(),
+            nervix_execution::Executor::default(),
+            crate::RaftOperationSettings::default(),
+        )
+        .await?;
         let voters = BTreeSet::from([node.clone()]);
         // Both recorded quorum sets use the fixture voter, so the real Core can apply the
         // joint-to-uniform transition without a remote peer.
@@ -8632,24 +8731,28 @@ mod tests {
             store,
         )
         .await?;
-        raft.wait(Some(super::MEMBERSHIP_MUTATION_TIMEOUT))
-            .metrics(
-                |metrics| {
-                    metrics.current_leader.as_ref() == Some(&node)
-                        && metrics.last_applied.as_ref().map(|entry| entry.index)
-                            == metrics.last_log_index
-                        && metrics
-                            .membership_config
-                            .membership()
-                            .get_joint_config()
-                            .len()
-                            == 2
-                        && metrics.membership_config.log_id()
-                            == metrics.committed_membership_config.log_id()
-                },
-                "the single-node leader has applied its committed joint membership",
-            )
-            .await?;
+        raft.wait(Some(
+            <super::MembershipMutationTimeout as nervix_models::SettingDefinition>::default_value(
+                &(),
+            ),
+        ))
+        .metrics(
+            |metrics| {
+                metrics.current_leader.as_ref() == Some(&node)
+                    && metrics.last_applied.as_ref().map(|entry| entry.index)
+                        == metrics.last_log_index
+                    && metrics
+                        .membership_config
+                        .membership()
+                        .get_joint_config()
+                        .len()
+                        == 2
+                    && metrics.membership_config.log_id()
+                        == metrics.committed_membership_config.log_id()
+            },
+            "the single-node leader has applied its committed joint membership",
+        )
+        .await?;
         let (observed, joint_log) = raft
             .with_raft_state(|state| {
                 (
@@ -8662,10 +8765,12 @@ mod tests {
             })
             .await?;
         let initial = super::timeout(
-            super::MEMBERSHIP_MUTATION_TIMEOUT,
+            <super::MembershipMutationTimeout as nervix_models::SettingDefinition>::default_value(
+                &(),
+            ),
             super::Administrator::propose_voter_change_completion(
                 &raft,
-                &super::ConsensusEvents::new(),
+                &super::ConsensusEvents::new(<super::ConsensusEventCapacity as nervix_models::SettingDefinition>::default_value(&())),
                 observed.clone(),
             ),
         )
@@ -8675,10 +8780,12 @@ mod tests {
             .with_raft_state(|state| state.log_ids.last().cloned())
             .await?;
         let completion = super::timeout(
-            super::MEMBERSHIP_MUTATION_TIMEOUT,
+            <super::MembershipMutationTimeout as nervix_models::SettingDefinition>::default_value(
+                &(),
+            ),
             super::Administrator::propose_voter_change_completion(
                 &raft,
-                &super::ConsensusEvents::new(),
+                &super::ConsensusEvents::new(<super::ConsensusEventCapacity as nervix_models::SettingDefinition>::default_value(&())),
                 observed,
             ),
         )
@@ -11578,10 +11685,13 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn log_reader_returns_the_requested_range_in_index_order() {
-        let mut store =
-            FjallStore::from_database(temp_database(), nervix_execution::Executor::default())
-                .await
-                .expect("store should open");
+        let mut store = FjallStore::from_database(
+            temp_database(),
+            nervix_execution::Executor::default(),
+            crate::RaftOperationSettings::default(),
+        )
+        .await
+        .expect("store should open");
         let vote = VoteOf::new(4, ClusterNodeName::parse("node-1").expect("valid name"));
         RaftLogStorage::<TypeConfig>::save_vote(&mut store, &vote)
             .await
@@ -11628,10 +11738,13 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn log_reader_observes_writes_the_storage_owner_makes() {
-        let mut store =
-            FjallStore::from_database(temp_database(), nervix_execution::Executor::default())
-                .await
-                .expect("store should open");
+        let mut store = FjallStore::from_database(
+            temp_database(),
+            nervix_execution::Executor::default(),
+            crate::RaftOperationSettings::default(),
+        )
+        .await
+        .expect("store should open");
         let mut reader = RaftLogStorage::<TypeConfig>::get_log_reader(&mut store).await;
         assert!(
             reader
@@ -11688,8 +11801,12 @@ mod durability_tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let database = Database::builder(directory.path()).open()?;
-        let mut store =
-            FjallStore::from_database(database, nervix_execution::Executor::default()).await?;
+        let mut store = FjallStore::from_database(
+            database,
+            nervix_execution::Executor::default(),
+            crate::RaftOperationSettings::default(),
+        )
+        .await?;
         let mut notifications = store.inner.resource_tx.subscribe();
         let domain = DomainName::try_from("durability")?;
         let identifier = ResourceName::parse("artifact")?;

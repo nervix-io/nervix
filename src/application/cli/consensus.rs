@@ -14,7 +14,6 @@
 )]
 
 use error_stack::Report;
-use meticulous::ResultExt as _;
 use nervix_consensus::{
     RaftCoveredLogBytesRetained, RaftCoveredLogEntriesRetained, RaftHeartbeatInterval,
     RaftRetainedLogCap, RaftRetentionBounds, RaftRetentionSettings, RaftSnapshotByteThreshold,
@@ -79,7 +78,9 @@ impl ConsensusArgs {
         RaftTimings::resolve(Some(self.raft_heartbeat_interval.0))
     }
 
-    pub(super) fn retention(&self) -> RaftRetentionSettings {
+    pub(super) fn retention(
+        &self,
+    ) -> Result<RaftRetentionSettings, Report<nervix_consensus::RaftOperationError>> {
         RaftRetentionSettings::resolve(RaftRetentionBounds {
             snapshot_entry_threshold: Some(self.raft_snapshot_entry_threshold),
             snapshot_byte_threshold: Some(self.raft_snapshot_byte_threshold.0),
@@ -87,7 +88,6 @@ impl ConsensusArgs {
             covered_bytes_retained: Some(self.raft_covered_log_bytes_retained.0),
             retained_log_cap: Some(self.raft_retained_log_cap.0),
         })
-        .assured("the Raft retention bounds declare no validation")
     }
 
     pub(super) fn from_settings(timings: &RaftTimings, retention: &RaftRetentionSettings) -> Self {

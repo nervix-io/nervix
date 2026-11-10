@@ -40,6 +40,7 @@ impl PeerFixture {
             .checked_mul(2)
             .assured("fixture capacities are a handful of positions");
         Self::with_capacity(RelayPeerCapacity {
+            retention: crate::RelayRetentionSettings::default().retention(),
             attempts: capacity,
             watermarks,
         })
@@ -134,7 +135,7 @@ impl PeerFixture {
         });
         let grant = RelayGrant {
             expires_at: Instant::now()
-                .checked_add(RELAY_GRANT_LIFETIME)
+                .checked_add(crate::TransportOptions::default().relay_grant_lifetime())
                 .assured("the fixture grant fits the clock"),
             reservation: self
                 .executor
@@ -474,6 +475,7 @@ fn a_cancellation_fences_the_next_position_before_the_outcome_of_the_one_before_
 #[test]
 fn retiring_a_resolved_attempt_for_the_next_position_counts_a_forgotten_watermark() {
     let fixture = PeerFixture::with_capacity(RelayPeerCapacity {
+        retention: crate::RelayRetentionSettings::default().retention(),
         attempts: 2,
         watermarks: 3,
     });
@@ -552,7 +554,7 @@ fn grant_expiry_and_idle_reconciliation_reclaim_every_protocol_collection() {
     fixture.owner.expire_grant(1, Instant::now());
     assert_eq!(record.status(), RelayAdmissionStatus::Reserved);
     let expiry = Instant::now()
-        .checked_add(RELAY_GRANT_LIFETIME)
+        .checked_add(crate::TransportOptions::default().relay_grant_lifetime())
         .assured("the fixture expiry fits");
     fixture.owner.expire_grant(1, expiry);
     assert_eq!(record.status(), RelayAdmissionStatus::Cancelled);
@@ -568,7 +570,7 @@ fn grant_expiry_and_idle_reconciliation_reclaim_every_protocol_collection() {
         .assured("the fixture has outbound room");
     assert_eq!(fixture.owner.outbound_epoch(&key), Some(101));
     let expiry = Instant::now()
-        .checked_add(RELAY_CHANNEL_RETENTION)
+        .checked_add(crate::RelayRetentionSettings::default().retention())
         .assured("the fixture retention fits");
     fixture.owner.sweep(expiry);
     assert_eq!(fixture.owner.snapshot().attempts, 0);
@@ -579,6 +581,7 @@ fn grant_expiry_and_idle_reconciliation_reclaim_every_protocol_collection() {
 #[test]
 fn discovery_can_bind_before_membership_but_relay_work_waits_for_the_live_run() {
     let capacity = RelayPeerCapacity {
+        retention: crate::RelayRetentionSettings::default().retention(),
         attempts: 1,
         watermarks: 2,
     };
@@ -596,7 +599,7 @@ fn discovery_can_bind_before_membership_but_relay_work_waits_for_the_live_run() 
     assert!(unobserved.bind_epoch(102, 2, false));
     let expiry = unobserved
         .created_at
-        .checked_add(RELAY_CHANNEL_RETENTION)
+        .checked_add(crate::RelayRetentionSettings::default().retention())
         .assured("the fixture membership grace fits");
     unobserved.sweep(expiry);
     assert!(unobserved.closed.is_cancelled());
@@ -1000,6 +1003,7 @@ fn shuttle_the_next_grant_racing_the_outcome_return_before_it_takes_the_next_pos
 #[test]
 fn a_peer_keeps_admitting_new_channels_after_more_than_its_watermark_budget_turned_over() {
     let fixture = PeerFixture::with_capacity(RelayPeerCapacity {
+        retention: crate::RelayRetentionSettings::default().retention(),
         attempts: 1,
         watermarks: 2,
     });
@@ -1018,6 +1022,7 @@ fn a_peer_keeps_admitting_new_channels_after_more_than_its_watermark_budget_turn
 #[test]
 fn a_forgotten_channel_is_answered_retired_and_never_admitted_again() {
     let fixture = PeerFixture::with_capacity(RelayPeerCapacity {
+        retention: crate::RelayRetentionSettings::default().retention(),
         attempts: 1,
         watermarks: 2,
     });
@@ -1057,6 +1062,7 @@ fn a_forgotten_channel_is_answered_retired_and_never_admitted_again() {
 #[test]
 fn the_least_recently_consulted_watermark_is_forgotten_first() {
     let fixture = PeerFixture::with_capacity(RelayPeerCapacity {
+        retention: crate::RelayRetentionSettings::default().retention(),
         attempts: 1,
         watermarks: 2,
     });
@@ -1082,6 +1088,7 @@ fn the_least_recently_consulted_watermark_is_forgotten_first() {
 #[test]
 fn the_retired_channel_floor_refuses_an_older_unseen_channel_and_admits_a_newer_one() {
     let fixture = PeerFixture::with_capacity(RelayPeerCapacity {
+        retention: crate::RelayRetentionSettings::default().retention(),
         attempts: 1,
         watermarks: 2,
     });
@@ -1100,6 +1107,7 @@ fn the_retired_channel_floor_refuses_an_older_unseen_channel_and_admits_a_newer_
 #[test]
 fn an_outstanding_attempt_keeps_its_channel_known_below_the_floor() {
     let fixture = PeerFixture::with_capacity(RelayPeerCapacity {
+        retention: crate::RelayRetentionSettings::default().retention(),
         attempts: 2,
         watermarks: 3,
     });
@@ -1137,12 +1145,13 @@ fn an_outstanding_attempt_keeps_its_channel_known_below_the_floor() {
 #[test]
 fn the_sweep_forgets_idle_watermarks_under_the_retired_channel_floor() {
     let fixture = PeerFixture::with_capacity(RelayPeerCapacity {
+        retention: crate::RelayRetentionSettings::default().retention(),
         attempts: 1,
         watermarks: 4,
     });
     fixture.deliver(1, 0, 1);
     let expiry = Instant::now()
-        .checked_add(RELAY_CHANNEL_RETENTION)
+        .checked_add(crate::RelayRetentionSettings::default().retention())
         .assured("the fixture retention fits the monotonic clock");
     fixture.owner.sweep(expiry);
     assert_eq!(fixture.owner.snapshot().watermarks, 0);
@@ -1158,6 +1167,7 @@ fn the_sweep_forgets_idle_watermarks_under_the_retired_channel_floor() {
 #[test]
 fn a_new_process_epoch_clears_the_retired_channel_floor() {
     let fixture = PeerFixture::with_capacity(RelayPeerCapacity {
+        retention: crate::RelayRetentionSettings::default().retention(),
         attempts: 1,
         watermarks: 2,
     });
@@ -1178,6 +1188,7 @@ fn a_new_process_epoch_clears_the_retired_channel_floor() {
 #[test]
 fn a_cancellation_fence_takes_a_position_from_a_full_watermark_budget() {
     let fixture = PeerFixture::with_capacity(RelayPeerCapacity {
+        retention: crate::RelayRetentionSettings::default().retention(),
         attempts: 1,
         watermarks: 2,
     });
@@ -1231,14 +1242,17 @@ struct TurnoverModel {
 }
 
 impl TurnoverModel {
-    const CAPACITY: RelayPeerCapacity = RelayPeerCapacity {
-        attempts: 2,
-        watermarks: 3,
-    };
+    fn capacity() -> RelayPeerCapacity {
+        RelayPeerCapacity {
+            attempts: 2,
+            watermarks: 3,
+            retention: crate::RelayRetentionSettings::default().retention(),
+        }
+    }
 
     fn new() -> Self {
         Self {
-            fixture: PeerFixture::with_capacity(Self::CAPACITY),
+            fixture: PeerFixture::with_capacity(Self::capacity()),
             registered: BTreeSet::new(),
             channels: Vec::new(),
             undecided: Vec::new(),
@@ -1261,7 +1275,7 @@ impl TurnoverModel {
             4 => self.sweep(),
             _ => self.return_outcome(choice),
         }
-        assert!(self.fixture.owner.snapshot().watermarks <= Self::CAPACITY.watermarks);
+        assert!(self.fixture.owner.snapshot().watermarks <= Self::capacity().watermarks);
     }
 
     fn room(&self) -> bool {
@@ -1415,7 +1429,7 @@ impl TurnoverModel {
             return;
         }
         let expiry = Instant::now()
-            .checked_add(RELAY_CHANNEL_RETENTION)
+            .checked_add(crate::RelayRetentionSettings::default().retention())
             .assured("the fixture retention fits the monotonic clock");
         self.fixture.owner.sweep(expiry);
     }
@@ -1444,11 +1458,11 @@ impl TurnoverModel {
         self.fixture.owner.end();
         assert_eq!(
             self.fixture.items.available_permits(),
-            Self::CAPACITY.attempts
+            Self::capacity().attempts
         );
         assert_eq!(
             self.fixture.terminals.available_permits(),
-            Self::CAPACITY.attempts
+            Self::capacity().attempts
         );
     }
 }

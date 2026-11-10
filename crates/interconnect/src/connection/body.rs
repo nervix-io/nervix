@@ -334,8 +334,18 @@ async fn drain_body(
 
 /// The charge a body reader starts with: room for a small body, never more than the body's limit.
 /// A larger body grows the charge as it arrives.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "body accounting starts with one 4 KiB granule and then charges bytes as they \
+                  arrive"
+    )
+)]
+const INITIAL_BODY_CHARGE: u64 = 4 * 1024;
+
 fn initial_body_charge(limit: u64) -> u64 {
-    limit.min(4 * 1024)
+    limit.min(INITIAL_BODY_CHARGE)
 }
 
 /// The next chunk of `body`, or `None` at its end, failing when no chunk arrives for

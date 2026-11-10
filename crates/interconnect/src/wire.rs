@@ -40,6 +40,14 @@ use super::{
     RelayPayloadKind, TransportError,
 };
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "typed message encoding starts with one 4 KiB accounting granule before charging \
+                  its exact encoded size"
+    )
+)]
 const INITIAL_MESSAGE_CHARGE: u64 = 4 * 1024;
 
 /// Changes whenever the one supported interconnect contract changes.

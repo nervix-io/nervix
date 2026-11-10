@@ -75,6 +75,7 @@ impl Runtime {
         settings: RuntimeSettings,
     ) -> error_stack::Result<Self, RuntimePersistenceError> {
         let RuntimeEnvironment {
+            interconnect_request_timeout,
             executor,
             client_endpoints,
             outward_tls,
@@ -140,6 +141,7 @@ impl Runtime {
             );
         Ok(Self {
             inner: Arc::new(RuntimeInner {
+                interconnect_request_timeout,
                 connector_host: settings.connector_host,
                 vm_settings: settings.vm,
                 inspection_instances: AtomicU64::new(0),
