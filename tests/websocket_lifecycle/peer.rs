@@ -184,6 +184,8 @@ pub(crate) enum FirstHandshake {
     Refused,
     /// Never answers, so the protocol's `TIMEOUT` ends the handshake.
     Stalled,
+    /// Starts the closing handshake with a policy refusal and retains the exact reply.
+    Closed,
 }
 
 /// What a subprotocol peer answers to the `sec-websocket-protocol` offer of every opening upgrade.
@@ -608,6 +610,13 @@ impl WebsocketPeer {
                     .await
                     .map_err(io::Error::other)?,
                 FirstHandshake::Stalled => {}
+                FirstHandshake::Closed => failed
+                    .send(Message::Close(Some(CloseFrame {
+                        code: CloseCode::Policy,
+                        reason: "subscription refused".into(),
+                    })))
+                    .await
+                    .map_err(io::Error::other)?,
             }
             let failed_ending = async {
                 let ending = UnreadEnding::read(failed).await?;

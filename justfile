@@ -1162,6 +1162,16 @@ test-wire-schema-lists *args: build-web-console wasm-processor-guests download-o
     cargo test --package nervix-scenarios --test scenarios -- \
         --input tests/features/runtime/wire_schema_lists.feature "$@"
 
+# Convert lists with AS and TRY_CAST through the in-process cluster: element and container
+# conversions, failed rows, conditional arms, an inferencer input and the refused conversions.
+[positional-arguments]
+test-list-conversions *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/runtime/list_conversions.feature "$@"
+
 # Create window processors and correlators through the web console's visual forms on in-process
 # one- and three-node clusters, with only the in-process server's prerequisites.
 [positional-arguments]

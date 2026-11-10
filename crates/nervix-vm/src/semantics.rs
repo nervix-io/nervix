@@ -28,9 +28,11 @@ use nervix_primitives::sync::StdArc;
 
 use crate::{
     CompileError, CompileErrorCode, RegisterType,
+    cast::CastTarget,
     extremum::Extremum,
     ip_address::NetworkSource,
     json::JsonOutput,
+    list_statistics::ListStatistic,
     membership::MembershipSet,
     program::{BinaryOp, CastFailure, DatetimeFunction, Expr, FunctionName, SpannedExpr, UnaryOp},
     regexp::{RegexpCall, RegexpFunction},
@@ -310,6 +312,7 @@ impl CaseMapping {
 
 mod catalog;
 mod list_arithmetic;
+mod list_statistics;
 pub use catalog::builtin_descriptor;
 pub use list_arithmetic::ListArithmetic;
 
@@ -441,6 +444,7 @@ pub enum BuiltinLowering {
     /// An `IN` test, with the set of constants it was compiled with.
     Membership(MembershipSet),
     Datetime(DatetimeFunction),
+    ListStatistic(ListStatistic),
 }
 
 impl RegisterType {
@@ -635,34 +639,21 @@ pub struct CastDescriptor {
 }
 
 impl CastDescriptor {
+    /// Accepts a cast of a value of `input_type` to `target_type` when some value of that type
+    /// can convert, and refuses with the reason [`CastTarget::between`] gives when none ever can.
     pub fn validate(
         self,
         input_type: &DataType,
         target_type: &DataType,
         span: impl Into<std::ops::Range<usize>>,
     ) -> error_stack::Result<(), CompileError> {
-        if (input_type == &DataType::Binary || target_type == &DataType::Binary)
-            && input_type != target_type
-        {
-            return Err(Report::new(CompileError {
+        match CastTarget::between(input_type, target_type) {
+            Ok(_) => Ok(()),
+            Err(refusal) => Err(Report::new(CompileError {
                 code: CompileErrorCode::UnsupportedCast,
-                message: "BYTES conversions require bytes_from_utf8, bytes_to_utf8, base64 or hex \
-                          functions"
-                    .to_string(),
+                message: refusal.to_string(),
                 span: span.into().into(),
-            }));
-        }
-        if is_supported_type(input_type) && is_supported_type(target_type) {
-            Ok(())
-        } else {
-            Err(Report::new(CompileError {
-                code: CompileErrorCode::UnsupportedCast,
-                message: format!(
-                    "casts are only implemented for supported nervix VM types, found {:?} AS {:?}",
-                    input_type, target_type
-                ),
-                span: span.into().into(),
-            }))
+            })),
         }
     }
 }
@@ -999,6 +990,7 @@ pub const fn builtin_arm_execution(lowering: &BuiltinLowering) -> ArmExecution {
         | BuiltinLowering::UrlQueryValues
         | BuiltinLowering::UrlDecode => ArmExecution::SelectedRows,
         BuiltinLowering::Datetime(function) => function.arm_execution(),
+        BuiltinLowering::ListStatistic(statistic) => statistic.arm_execution(),
     }
 }
 
@@ -1081,6 +1073,7 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
             can_error: false,
             null_propagation: NullPropagation::Strict,
         },
+        BuiltinLowering::ListStatistic(statistic) => statistic.semantics(),
         BuiltinLowering::Datetime(function) => OperationSemantics {
             volatility: Volatility::Immutable,
             dependency_scope: DependencyScope::Constant,
@@ -1751,18 +1744,9 @@ fn builtin_output_type(
             if let BuiltinLowering::Mean = lowering {
                 require_numeric_arg(function, input, span)?;
                 Ok(DataType::Float64)
-            } else if input.is_ordered() || input == RegisterType::Boolean {
-                Ok(element)
             } else {
-                Err(Report::new(CompileError {
-                    code: CompileErrorCode::UnsupportedFunction,
-                    message: format!(
-                        "function '{}' requires ordered scalar elements, found {:?}",
-                        function.as_str(),
-                        element
-                    ),
-                    span: span.into(),
-                }))
+                list_statistics::require_ordered_elements(function, &element, input, span)?;
+                Ok(element)
             }
         }
         BuiltinLowering::Count => {
@@ -1924,6 +1908,9 @@ fn builtin_output_type(
             let input = require_supported_register_type(function, &arg_types[0], span.clone())?;
             require_integral_arg(function, input, span)?;
             Ok(DataType::Utf8)
+        }
+        BuiltinLowering::ListStatistic(statistic) => {
+            statistic.output_type(function, arg_types, span)
         }
         BuiltinLowering::Datetime(datetime) => {
             let operands = datetime.operands();
