@@ -477,7 +477,9 @@ grammar. Kinded endpoint, codec and connector heads are offered as one item, suc
 reference kinds are offered. Clients do not merge independent statement parsers' suggestions.
 The [statement-head contract](architecture.md#statement-heads-and-body-properties) defines those
 boundaries; the [CLI completion guide](client-tools-cli.md#completion) describes cursor edits
-and transaction-aware choices.
+and transaction-aware choices. [Visual Creation And Shared
+Completion](./visual-creation.md#text-completion) describes how the server resolves these
+expectations and the console's typed choices.
 
 These authoring requests remain available while an earlier administrative command is pending;
 they do not acknowledge or complete its effect. Command completion above retains its durable
