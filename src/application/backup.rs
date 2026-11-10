@@ -431,12 +431,11 @@ impl SessionServiceImpl {
                     sections.push(self.fetch_captured_section(&inventory, section).await?);
                 }
             }
+            let Some(parameters) = capture.parameters.as_ref() else {
+                return Err(Report::new(BackupError::ClusterParametersUnseeded));
+            };
             captures.push(DomainCapture {
-                entity_label_policy: capture
-                    .parameters
-                    .as_ref()
-                    .map(nervix_models::EntityLabelPolicy::from)
-                    .ok_or_else(|| Report::new(BackupError::ClusterParametersUnseeded))?,
+                entity_label_policy: nervix_models::EntityLabelPolicy::from(parameters),
                 domain: domain.clone(),
                 revision: capture.applied.index,
                 raft_log: RaftLogPosition {

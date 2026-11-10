@@ -1320,6 +1320,18 @@ impl CreateSchema {
     pub(crate) fn configuration_to_canonical_plexus(
         &self,
     ) -> error_stack::Result<String, CanonicalPlexusError> {
+        self.definition().to_canonical_plexus()
+    }
+}
+
+impl crate::SchemaDefinition {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        self.as_ref().to_canonical_plexus()
+    }
+}
+
+impl crate::SchemaRef<'_> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let fields = self
             .fields
             .iter()
@@ -1986,7 +1998,8 @@ impl CreateIngestor {
         ))
     }
 
-    pub(crate) fn configuration_to_canonical_plexus(
+    /// Canonical execution configuration, excluding descriptive entity labels.
+    pub fn configuration_to_canonical_plexus(
         &self,
     ) -> error_stack::Result<String, CanonicalPlexusError> {
         let timestamp = match &self.timestamp_source {

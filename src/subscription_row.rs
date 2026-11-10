@@ -23,7 +23,9 @@ use nervix_client_wire::{
     CellWriter, EncodedFrame, RowBranch, RowSchema, ServerFrame, SessionLimits, SubscriptionHandle,
     SubscriptionOpened, SubscriptionRowsEncoder, SubscriptionType, WireEncodeError,
 };
-use nervix_models::{BranchName, CreateSchema, DomainName, FieldName, RelayName, SchemaField};
+use nervix_models::{
+    BranchName, CreateSchema, DomainName, FieldName, RelayName, SchemaField, SchemaRef,
+};
 
 pub use crate::client_row::SubscriptionRowEncodingError;
 use crate::{
@@ -35,7 +37,7 @@ use crate::{
 /// The declared branch schema needed to describe concrete branch keys to a client.
 pub struct SubscriptionBranchSchema<'a> {
     pub name: &'a BranchName,
-    pub schema: &'a CreateSchema,
+    pub schema: SchemaRef<'a>,
     pub fields: &'a [FieldName],
 }
 
@@ -58,7 +60,7 @@ fn subscription_row_branch(
     branch: SubscriptionBranchSchema<'_>,
 ) -> Result<RowBranch, Report<SubscriptionRowEncodingError>> {
     let mut schema_fields = BTreeMap::new();
-    for field in &branch.schema.fields {
+    for field in branch.schema.fields {
         if schema_fields.insert(field.name.clone(), field).is_some() {
             return Err(Report::new(
                 SubscriptionRowEncodingError::DuplicateBranchSchemaField {
@@ -1033,7 +1035,7 @@ mod tests {
             &payload,
             Some(SubscriptionBranchSchema {
                 name: &branch_name,
-                schema: &branch,
+                schema: branch.definition(),
                 fields: &branch_fields,
             }),
         )
@@ -1120,7 +1122,7 @@ mod tests {
             &payload,
             Some(SubscriptionBranchSchema {
                 name: &branch_name,
-                schema: &branch,
+                schema: branch.definition(),
                 fields: &branch_fields,
             }),
         )
@@ -1440,7 +1442,7 @@ mod tests {
             &payload,
             Some(SubscriptionBranchSchema {
                 name: &branch_name,
-                schema: &branch,
+                schema: branch.definition(),
                 fields: &branch_fields,
             }),
         )

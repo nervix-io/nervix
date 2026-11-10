@@ -403,6 +403,7 @@ Feature: Bounded typed reorderer and correlator state inspection
       replicated state: true
       outputs: 1
       output 0: into=ordered construction=present branch=NODE-WIDE flush=1h max-batch-size=1MiB
+      labels: {}
       branches: unavailable (owner_unavailable)
       rows: unavailable (owner_unavailable)
       state bytes: unavailable (owner_unavailable)
@@ -416,6 +417,7 @@ Feature: Bounded typed reorderer and correlator state inspection
       replicated state: true
       outputs: 1
       output 0: into=settled construction=present branch=NODE-WIDE flush=IMMEDIATE
+      labels: {}
       branches: unavailable (owner_unavailable)
       rows: unavailable (owner_unavailable)
       state bytes: unavailable (owner_unavailable)

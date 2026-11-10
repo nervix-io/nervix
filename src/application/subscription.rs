@@ -1398,7 +1398,7 @@ impl SessionServiceImpl {
             nervix_models::ResolvedBranching::Branched { branch, schema, .. } => {
                 Some(SubscriptionBranchSchema {
                     name: branch,
-                    schema,
+                    schema: schema.as_ref(),
                     fields: &branch_fields,
                 })
             }

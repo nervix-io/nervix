@@ -95,6 +95,9 @@ ownership and schema/state fingerprints. The window model digest uses the same d
 Changing only metadata therefore preserves every execution and state identity. No record path
 reads labels or reconstructs them from a Model. [Entity Labels](entity-labels.md) owns their
 validation, transaction and inspection contract.
+Resolved branching owns a metadata-free key schema definition. Client endpoint contracts render
+only the ingestor's execution configuration, input schema definition and resolved branch-key
+schema, so metadata never changes producer attachment identity on a later configuration update.
 
 Registry validation rejects invalid candidate Models before they become an active graph.
 Execution-revision construction resolves references and lowers the remaining schedule-specific

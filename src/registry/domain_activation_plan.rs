@@ -384,30 +384,30 @@ impl WireSchemaLookup for WireSchemas {
         &self,
         name: &WireSchemaName,
     ) -> Result<nervix_models::WireSchemaRef<'_, nervix_models::JsonType>, Self::Error> {
-        self.json
-            .get(name)
-            .map(nervix_models::WireSchemaDefinition::as_ref)
-            .ok_or_else(|| name.clone())
+        match self.json.get(name) {
+            Some(schema) => Ok(schema.as_ref()),
+            None => Err(name.clone()),
+        }
     }
 
     fn cbor_wire_schema(
         &self,
         name: &WireSchemaName,
     ) -> Result<nervix_models::WireSchemaRef<'_, nervix_models::CborType>, Self::Error> {
-        self.cbor
-            .get(name)
-            .map(nervix_models::WireSchemaDefinition::as_ref)
-            .ok_or_else(|| name.clone())
+        match self.cbor.get(name) {
+            Some(schema) => Ok(schema.as_ref()),
+            None => Err(name.clone()),
+        }
     }
 
     fn avro_wire_schema(
         &self,
         name: &WireSchemaName,
     ) -> Result<nervix_models::WireSchemaRef<'_, nervix_models::AvroType>, Self::Error> {
-        self.avro
-            .get(name)
-            .map(nervix_models::WireSchemaDefinition::as_ref)
-            .ok_or_else(|| name.clone())
+        match self.avro.get(name) {
+            Some(schema) => Ok(schema.as_ref()),
+            None => Err(name.clone()),
+        }
     }
 }
 

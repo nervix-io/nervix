@@ -2160,7 +2160,7 @@ pub enum ResolvedBranching {
     Unbranched,
     Branched {
         branch: BranchName,
-        schema: CreateSchema,
+        schema: crate::SchemaDefinition,
         partitions: BranchPartitions,
     },
 }
@@ -2172,12 +2172,12 @@ impl ResolvedBranching {
 
     pub fn branched(
         branch: BranchName,
-        schema: CreateSchema,
+        schema: impl Into<crate::SchemaDefinition>,
         partitions: BranchPartitions,
     ) -> Self {
         Self::Branched {
             branch,
-            schema,
+            schema: schema.into(),
             partitions,
         }
     }
@@ -2225,7 +2225,7 @@ impl ResolvedBranching {
         }
     }
 
-    pub fn schema(&self) -> Option<&CreateSchema> {
+    pub fn schema(&self) -> Option<&crate::SchemaDefinition> {
         match self {
             Self::Unbranched => None,
             Self::Branched { schema, .. } => Some(schema),

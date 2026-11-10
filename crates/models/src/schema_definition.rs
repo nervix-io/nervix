@@ -10,9 +10,14 @@
     nervix::layer(vocabulary, reason = "owns typed internal schema inputs")
 )]
 
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use serde::{Deserialize, Serialize};
+
 use crate::{CreateSchema, SchemaField, SchemaName};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct SchemaDefinition {
     pub name: SchemaName,
     pub fields: Vec<SchemaField>,
@@ -32,6 +37,22 @@ impl CreateSchema {
 impl SchemaDefinition {
     pub fn as_ref(&self) -> SchemaRef<'_> {
         self.into()
+    }
+}
+impl SchemaRef<'_> {
+    pub fn to_owned(self) -> SchemaDefinition {
+        SchemaDefinition {
+            name: self.name.clone(),
+            fields: self.fields.to_vec(),
+        }
+    }
+}
+impl From<CreateSchema> for SchemaDefinition {
+    fn from(schema: CreateSchema) -> Self {
+        Self {
+            name: schema.name,
+            fields: schema.fields,
+        }
     }
 }
 impl<'a> From<&'a CreateSchema> for SchemaRef<'a> {

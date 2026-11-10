@@ -93,6 +93,9 @@ Labels are control-plane metadata. A label-only commit leaves execution and stat
 tasks, branch state, allowances, resource bindings, connections, buffered work and acknowledgement
 outcomes intact. It requires no pause, force flush, rebuild, reconnection or relocation. A mixed
 transaction still applies the normal safety contract for its actual configuration changes.
+Client endpoint contracts and resolved branch-key schemas use configuration only. Later
+configuration edits retain attachments and state whenever their actual execution contracts allow it,
+even after metadata was edited.
 
 Labels persist with the entity through registry snapshots, consensus replay, restart and archive
 restore. `WITHOUT STATE` omits runtime state and retains labels. Dropping an entity removes its

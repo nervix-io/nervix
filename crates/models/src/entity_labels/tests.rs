@@ -32,6 +32,53 @@ fn limits() -> EntityLabelLimits {
 }
 
 #[test]
+fn resolved_branch_schemas_preserve_configuration_across_label_edits() {
+    let mut schema = crate::CreateSchema {
+        labels: labels(&[("owner", "First")]),
+        name: "tenant_key".try_into().assured("the schema name is valid"),
+        fields: vec![crate::SchemaField {
+            name: "tenant".try_into().assured("the field name is valid"),
+            ty: crate::ParseAsType::String,
+            optional: false,
+            sensitive: true,
+        }],
+    };
+    let branch = "tenants".try_into().assured("the branch name is valid");
+    let before =
+        crate::ResolvedBranching::branched(branch, schema.clone(), crate::BranchPartitions::ONE);
+    schema.labels = labels(&[("owner", "Second")]);
+    let after = crate::ResolvedBranching::branched(
+        before.branch().assured("the fixture is branched").clone(),
+        schema.clone(),
+        crate::BranchPartitions::ONE,
+    );
+    assert_eq!(before, after);
+    assert!(before.same_key_as(&after));
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&after)
+        .assured("the complete resolved branch archives");
+    assert_eq!(
+        rkyv::from_bytes::<crate::ResolvedBranching, rkyv::rancor::Error>(&bytes)
+            .assured("the current resolved branch restores"),
+        after,
+    );
+    let canonical = schema
+        .definition()
+        .to_canonical_plexus()
+        .assured("the key schema renders");
+    assert_eq!(
+        canonical,
+        "CREATE SCHEMA tenant_key (\n  tenant STRING SENSITIVE\n);"
+    );
+    schema.fields[0].sensitive = false;
+    let changed = crate::ResolvedBranching::branched(
+        before.branch().assured("the fixture is branched").clone(),
+        schema,
+        crate::BranchPartitions::ONE,
+    );
+    assert!(!before.same_key_as(&changed));
+}
+
+#[test]
 fn keys_accept_exactly_the_declared_ascii_alphabet() {
     for key in ["a", "0", "team/path", "a.b_c-d/0", "9/._-"] {
         let parsed = LabelKey::try_from(key.to_owned()).assured("the key follows the grammar");

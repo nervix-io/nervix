@@ -943,7 +943,9 @@ pub(in crate::registry) fn resolved_branch_selection(
         return Ok(ResolvedBranching::unbranched());
     };
     let branch = branch_model(domain, identifier, models, branch_ref)?;
-    let schema = schema_model(domain, identifier, models, &branch.schema)?.clone();
+    let schema = schema_model(domain, identifier, models, &branch.schema)?
+        .definition()
+        .to_owned();
     Ok(ResolvedBranching::branched(
         branch_ref.clone(),
         schema,

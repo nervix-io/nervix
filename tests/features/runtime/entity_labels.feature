@@ -88,6 +88,8 @@ Feature: Domain entity labels
     When these Plexus commands are executed on the leader node
       """
       BEGIN;
+      SET LABELS ON SCHEMA incoming { 'owner' = 'Platform' };
+      SET LABELS ON SCHEMA tenant_key { 'owner' = 'Platform' };
       SET LABELS ON INGESTOR orders_in { 'owner' = 'Platform' };
       SET LABELS ON RELAY orders { 'owner' = 'Platform' };
       COMMIT;
@@ -100,6 +102,8 @@ Feature: Domain entity labels
     When these Plexus commands are executed on the leader node
       """
       BEGIN;
+      SET LABELS ON SCHEMA incoming { 'owner' = 'Operations' };
+      SET LABELS ON SCHEMA tenant_key { 'owner' = 'Operations' };
       SET LABELS ON INGESTOR orders_in { 'owner' = 'Operations' };
       ALTER CLIENT PRODUCER INGESTOR orders_in REPLACE ROUTE TO orders
         INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant
@@ -249,6 +253,7 @@ Feature: Domain entity labels
       BEGIN;
       SET LABELS ON SCHEMA incoming { 'owner' = 'Platform' };
       SET LABELS ON BRANCH tenants { 'owner' = 'Platform' };
+      SET LABELS ON SCHEMA tenant_key { 'owner' = 'Platform' };
       SET LABELS ON RELAY orders { 'owner' = 'Platform' };
       SET LABELS ON INGESTOR orders_in { 'owner' = 'Platform' };
       SET LABELS ON DEDUPLICATOR distinct_ids { 'owner' = 'Platform' };
@@ -461,15 +466,16 @@ Feature: Domain entity labels
   Scenario Outline: Label keys cannot cross domains with identical entity names
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
+    And the active domain is saved as placeholder "first_domain"
     And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA labelled_event ( value U32 ) LABELS { 'owner' = 'First' };
       """
-    And the active domain is "{{domain}}_second"
+    And the active domain is "second_{{test_id}}"
     And the leader node is configured with these Plexus commands
       """
-      CREATE UNPACED DOMAIN {{domain}}_second;
+      CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA labelled_event ( value U32 ) LABELS { 'owner' = 'Second' };
       """
     When these Plexus commands are executed on the leader node
@@ -484,7 +490,7 @@ Feature: Domain entity labels
       """
       /labels/owner = "Second updated"
       """
-    Given the active domain is "{{domain}}"
+    Given the active domain is "{{first_domain}}"
     When these Plexus commands are executed on the leader node
       """
       SHOW LABELS ON SCHEMA labelled_event FORMAT JSON;
