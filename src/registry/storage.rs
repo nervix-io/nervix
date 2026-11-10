@@ -24,7 +24,7 @@ use std::{path::Path, str::FromStr};
 use ahash::{HashMap, HashSet};
 use error_stack::{Report, ResultExt};
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, Readable as _, Snapshot};
-use meticulous::{OptionExt, ResultExt as _};
+use meticulous::OptionExt;
 #[cfg(test)]
 use nervix_models::{AlterRelay, DropModel};
 use nervix_models::{
@@ -1682,6 +1682,7 @@ mod properties;
 mod tests {
     use std::{collections::BTreeSet, fs};
 
+    use meticulous::ResultExt as _;
     use nervix_models::{
         AckMode, AlterEmitter, AlterJunction, AlterProcessorOperation, AlterRelay,
         AlterRelayOperation, AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema,
