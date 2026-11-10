@@ -337,11 +337,10 @@ impl LicensingRecord {
         let operation = match activation.decision.operation {
             StoredDecisionOperation::Apply => DecisionOperation::Apply,
             StoredDecisionOperation::ClusterKeyRotation => {
-                binding.generation = binding
-                    .generation
-                    .checked_sub(1)
-                    .filter(|generation| *generation > 0)
-                    .ok_or_else(|| Report::new(LicenseDecisionError::Metadata))?;
+                binding.generation = match binding.generation.checked_sub(1) {
+                    Some(generation) if generation > 0 => generation,
+                    _ => return Err(Report::new(LicenseDecisionError::Metadata)),
+                };
                 DecisionOperation::CompleteClusterKeyRotation {
                     pending_key: &identity.kid,
                 }
