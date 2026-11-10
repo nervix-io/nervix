@@ -4,9 +4,10 @@
 //! - **Owns.** The active transport, immutable response headers, optional ping cadence, the
 //!   inbound activity deadline and bounded missed-ping response window retained across
 //!   cancellation, and the Close a connection this client ends offers its peer: going away when
-//!   that deadline ends it, or the status of a frame the peer sent that failed the read.
-//! - **Depends on.** Connector outcomes, execution primitives, recovery classes and WebSocket
-//!   transport.
+//!   that deadline ends it, the status of a frame the peer sent that failed the read, or the
+//!   status of the failure that ended its signaling handshake.
+//! - **Depends on.** Connector outcomes, signaling outcomes, execution primitives, recovery
+//!   classes and WebSocket transport.
 //! - **Must not know.** Configuration Models, Plexus, domains, relays, registry or host admission.
 
 #![cfg_attr(
@@ -45,6 +46,7 @@ use tokio_tungstenite::{
 };
 
 use super::{WEBSOCKETS, WebsocketsConnectionIngestorFailure, pings::WebsocketPings};
+use crate::WebsocketSignalingError;
 
 /// An explicit client deadline retains its key; a derived keep-alive/default keeps its bound.
 #[derive(Debug, Clone, Copy)]
@@ -203,6 +205,36 @@ impl From<&ProtocolError> for ConnectionEnding {
             | ProtocolError::InvalidHeader(_)
             | ProtocolError::HandshakeIncomplete
             | ProtocolError::HttparseError(_) => Self::Release,
+        }
+    }
+}
+
+/// How a connection ends when its signaling handshake fails, before it reaches its first read: the
+/// Close names what the peer sent, what the peer left undone or which of this client's own
+/// programs failed.
+impl From<&WebsocketSignalingError> for ConnectionEnding {
+    fn from(failure: &WebsocketSignalingError) -> Self {
+        match failure {
+            // A read failed while the handshake ran, on what the peer sent or on the transport.
+            WebsocketSignalingError::Receive(read) => {
+                let read: &WebsocketError = read;
+                Self::from(read)
+            }
+            // A frame the peer sent matched a FAIL JAQ guard: it violates the protocol's policy.
+            WebsocketSignalingError::Rejected { .. } => Self::Close(CloseCode::Policy),
+            // The peer left the handshake unfinished within its TIMEOUT, and this client leaves
+            // for another connection, as the idle verdict does.
+            WebsocketSignalingError::Timeout { .. } => Self::Close(CloseCode::Away),
+            // This client's own programs failed the handshake: a SEND JAQ program did not produce
+            // exactly one value, the format could not encode it, or a CAPTURE program failed or
+            // produced no object. RFC 6455 erratum 3227 extends this status to clients.
+            WebsocketSignalingError::SendProgram { .. }
+            | WebsocketSignalingError::SendEncode { .. }
+            | WebsocketSignalingError::Capture { .. } => Self::Close(CloseCode::Error),
+            // This client's own write failed, so the transport takes no Close either.
+            WebsocketSignalingError::Send(_) => Self::Release,
+            // TCP ended, or the peer's own Close began the closing handshake.
+            WebsocketSignalingError::Closed => Self::Release,
         }
     }
 }
