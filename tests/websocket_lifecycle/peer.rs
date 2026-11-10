@@ -2,8 +2,9 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** Listening connections, bounded events, opening cancellation, public connection
-//!   confirmation, payload release, graceful-close observations, how an unread connection ended,
-//!   measured reconnect instants, scripted subprotocol answers and measured client ping arrivals.
+//!   confirmation, payload release, graceful-close observations, a first message above the
+//!   client's limit, how an unread connection ended, measured reconnect instants, scripted
+//!   subprotocol answers and measured client ping arrivals.
 //! - **Depends on.** Execution primitives, I/O errors and the WebSocket protocol.
 //! - **Must not know.** Scenario state, connector internals or runtime ownership handles.
 
@@ -124,7 +125,7 @@ pub(super) enum PeerEvent {
     /// A client ping arrived.
     ReceivedPing(Instant),
     /// The client released the connection this peer never read, and this is how it ended.
-    SilentConnectionEnded(UnreadEnding),
+    UnreadConnectionEnded(UnreadEnding),
 }
 
 /// How the client ended a connection whose peer never read it.
@@ -486,7 +487,72 @@ impl WebsocketPeer {
             // The client released the unread connection before it opened the replacement.
             let ending = UnreadEnding::read(silent).await?;
             events_tx
-                .send(PeerEvent::SilentConnectionEnded(ending))
+                .send(PeerEvent::UnreadConnectionEnded(ending))
+                .await
+                .map_err(io::Error::other)?;
+            while let Some(message) = replacement.next().await {
+                nervix_primitives::task::consume_budget().await;
+                match message.map_err(io::Error::other)? {
+                    Message::Close(_) => {
+                        reply_to_close(&mut replacement).await?;
+                        break;
+                    }
+                    _ => replacement.flush().await.map_err(io::Error::other)?,
+                }
+            }
+            Ok(())
+        });
+        Self {
+            events,
+            payload: None,
+            task: AbortOnDropHandle::new(task),
+        }
+    }
+
+    /// Accepts one connection and sends it one text message of `size` bytes, which a client
+    /// whose message limit is smaller refuses, then never reads that connection again. It
+    /// reports how the client ended it as soon as TCP ends, while it accepts the replacement the
+    /// client opens, so the two reports arrive in the order they happened. Over the replacement it
+    /// sends one payload and answers until the client closes it.
+    pub(super) fn oversized_message(listener: TcpListener, size: usize) -> Self {
+        // Both connections and the refused one's ending, so a report never waits on the observer.
+        let (events_tx, events) = mpsc::channel(3);
+        let task = nervix_primitives::task::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let mut refused = tokio_tungstenite::accept_async(stream)
+                .await
+                .map_err(io::Error::other)?;
+            events_tx
+                .send(PeerEvent::Connected(Instant::now()))
+                .await
+                .map_err(io::Error::other)?;
+            refused
+                .send(Message::Text("x".repeat(size)))
+                .await
+                .map_err(io::Error::other)?;
+            let refused_ending = async {
+                let ending = UnreadEnding::read(refused).await?;
+                events_tx
+                    .send(PeerEvent::UnreadConnectionEnded(ending))
+                    .await
+                    .map_err(io::Error::other)
+            };
+            let replacement = async {
+                let (stream, _) = listener.accept().await?;
+                let replacement = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .map_err(io::Error::other)?;
+                events_tx
+                    .send(PeerEvent::Connected(Instant::now()))
+                    .await
+                    .map_err(io::Error::other)?;
+                io::Result::Ok(replacement)
+            };
+            let (refused_ending, replacement) = tokio::join!(refused_ending, replacement);
+            refused_ending?;
+            let mut replacement = replacement?;
+            replacement
+                .send(Message::Text("{\"user_id\":43}".into()))
                 .await
                 .map_err(io::Error::other)?;
             while let Some(message) = replacement.next().await {

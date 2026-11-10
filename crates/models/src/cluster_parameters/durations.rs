@@ -189,3 +189,54 @@ impl StateSnapshotInterval {
     )]
     pub const DEFAULT: Duration = Duration::from_secs(30);
 }
+
+/// Budget for a licensing protocol request, including name resolution.
+pub struct LicensingRequestTimeout;
+impl SettingDefinition for LicensingRequestTimeout {
+    type Class = ClusterParameters;
+    type Value = Duration;
+    type Context = ();
+    type Error = ClusterParameterError;
+    const NAME: &'static str = "licensing-request-timeout";
+    const DERIVATION: Option<&'static str> = None;
+    fn default_value(_: &()) -> Duration {
+        Duration::from_secs(30)
+    }
+    fn validate(value: &Duration, _: &()) -> Result<(), Report<ClusterParameterError>> {
+        ClusterParameterKey::LicensingRequestTimeout.validate_duration(*value)
+    }
+}
+
+/// Maximum backoff between licensing request retries.
+pub struct LicensingRetryBackoffMax;
+impl SettingDefinition for LicensingRetryBackoffMax {
+    type Class = ClusterParameters;
+    type Value = Duration;
+    type Context = ();
+    type Error = ClusterParameterError;
+    const NAME: &'static str = "licensing-retry-backoff-max";
+    const DERIVATION: Option<&'static str> = None;
+    fn default_value(_: &()) -> Duration {
+        Duration::from_secs(600)
+    }
+    fn validate(value: &Duration, _: &()) -> Result<(), Report<ClusterParameterError>> {
+        ClusterParameterKey::LicensingRetryBackoffMax.validate_duration(*value)
+    }
+}
+
+/// Maximum idle interval on the licensing notification stream.
+pub struct LicensingStreamIdleTimeout;
+impl SettingDefinition for LicensingStreamIdleTimeout {
+    type Class = ClusterParameters;
+    type Value = Duration;
+    type Context = ();
+    type Error = ClusterParameterError;
+    const NAME: &'static str = "licensing-stream-idle-timeout";
+    const DERIVATION: Option<&'static str> = None;
+    fn default_value(_: &()) -> Duration {
+        Duration::from_secs(90)
+    }
+    fn validate(value: &Duration, _: &()) -> Result<(), Report<ClusterParameterError>> {
+        ClusterParameterKey::LicensingStreamIdleTimeout.validate_duration(*value)
+    }
+}

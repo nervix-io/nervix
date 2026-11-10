@@ -2311,6 +2311,8 @@ fn execute_nullif(
     array_ref_to_typed_array(output)
 }
 
+mod list_arithmetic;
+
 fn execute_builtin(
     lowering: &BuiltinLowering,
     registers: &RegisterBank,
@@ -2475,6 +2477,19 @@ fn execute_builtin(
         BuiltinLowering::ListStatistic(statistic) => {
             list_statistics::execute_list_statistic(*statistic, &column(0)?, row_errors, span)
         }
+        BuiltinLowering::ListArithmetic(operation) => match operation.arithmetic() {
+            Some(arithmetic) if operation.has_scalar() => list_arithmetic::scalar(
+                arithmetic,
+                &column(0)?,
+                registers.any_operand(inputs[1])?,
+                row_errors,
+                span,
+            ),
+            Some(arithmetic) => {
+                list_arithmetic::pair(arithmetic, &column(0)?, &column(1)?, row_errors, span)
+            }
+            None => list_arithmetic::absolute(&column(0)?, row_errors, span),
+        },
         BuiltinLowering::Dot => Ok(execute_list_dot(
             &column(0)?,
             &column(1)?,

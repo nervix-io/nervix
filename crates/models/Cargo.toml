@@ -38,6 +38,7 @@ thiserror = { workspace = true }
 ubyte = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["serde"] }
+zeroize = { workspace = true }
 
 [target.'cfg(target_pointer_width = "64")'.dependencies]
 arrow-array = { workspace = true }

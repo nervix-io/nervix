@@ -144,11 +144,6 @@ impl MembershipRecord {
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "the bounded command stays inline; boxing every normal Raft record would add an \
-              allocation and change its archived representation"
-)]
 enum EntryPayloadRecord {
     Blank,
     Normal(ConsensusCommand),

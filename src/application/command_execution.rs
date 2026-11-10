@@ -55,7 +55,7 @@ use super::{
     session_service::{SessionServiceImpl, conflicting_reference, expired_reference},
     statement_routing::is_persistent_statement,
     subscription::{PendingSessionCommand, SessionCommandOperation, SessionSubscriptions},
-    transaction::is_queueable_transaction_statement,
+    transaction::{is_queueable_transaction_statement, transaction_statement_label},
 };
 
 #[cfg(feature = "testing")]
@@ -252,6 +252,11 @@ pub(in crate::application) enum PersistentCommandRequestError {
     NonServerTransactionStatement,
     #[error("a durable transaction append is missing its expected queue position")]
     MissingTransactionPosition,
+    #[error(
+        "{statement} cannot be queued in a transaction; a transaction applies to one existing \
+         domain and queues only that domain's configuration statements"
+    )]
+    UnqueueableStatement { statement: &'static str },
 }
 
 impl PersistentCommandRequest {
@@ -290,8 +295,11 @@ impl PersistentCommandRequest {
             None => hasher.update(&[]),
         };
         let mut digest_statement = statement.clone();
+        if let Statement::ActivateLicense(activate) = &mut digest_statement {
+            zeroize::Zeroize::zeroize(&mut activate.license_key);
+        }
         if let Statement::CreateUser(create) = &mut digest_statement {
-            create.body.password.clear();
+            zeroize::Zeroize::zeroize(&mut create.body.password);
         }
         let encoded = match &digest_statement {
             Statement::Backup(backup) => {
@@ -341,11 +349,29 @@ impl PersistentCommandRequest {
                             PersistentCommandRequestError::NonServerTransactionStatement,
                         ));
                     };
+                    if matches!(
+                        statement,
+                        Statement::ActivateLicense(_) | Statement::RefreshLicense(_)
+                    ) {
+                        return Err(Report::new(
+                            PersistentCommandRequestError::UnqueueableStatement {
+                                statement: transaction_statement_label(statement),
+                            },
+                        ));
+                    }
                     let Some(position) = command.expected_transaction_position else {
                         return Err(Report::new(
                             PersistentCommandRequestError::MissingTransactionPosition,
                         ));
                     };
+                    if !is_queueable_transaction_statement(statement) {
+                        durable_operations.push(
+                            CommandExecutionTransactionOperation::RefuseUnqueueable {
+                                statement_label: transaction_statement_label(statement).to_owned(),
+                            },
+                        );
+                        continue;
+                    }
                     durable_operations.push(CommandExecutionTransactionOperation::Queue(Box::new(
                         nervix_consensus::TransactionStatementRequest {
                             request_reference: command.request_reference.clone(),
@@ -641,6 +667,13 @@ impl SessionServiceImpl {
             .await;
 
         let effect = match &request.body {
+            PersistentCommandRequestBody::Statement {
+                statement: Statement::ActivateLicense(activate),
+                ..
+            } => self
+                .prepare_license_activation(&reference, activate)
+                .await
+                .map_err(|error| Box::new(command_error(format!("{error:#}"))))?,
             PersistentCommandRequestBody::Statement {
                 statement: Statement::AlterCluster(alter),
                 ..
@@ -954,6 +987,10 @@ impl SessionServiceImpl {
                     .await;
                 }
             },
+            CommandExecutionEffect::ActivateLicense { binding, decision } => {
+                self.apply_license_activation(&execution.reference, *binding, *decision)
+                    .await
+            }
             CommandExecutionEffect::CreateUser {
                 if_not_exists,
                 name,
@@ -1626,6 +1663,125 @@ mod tests {
 
         drop(second);
         assert_eq!(owners.len(), 0);
+    }
+
+    #[test]
+    fn activation_request_identity_omits_the_credential_and_keeps_the_activation_kind() {
+        let request = |kind, key: &str| {
+            let statement = Statement::ActivateLicense(nervix_models::ActivateLicense {
+                kind,
+                license_key: key.to_owned(),
+            });
+            let operation = SessionCommandOperation::Execute(PendingSessionCommand {
+                request_reference: CommandExecutionReference::parse("activation.request")
+                    .assured("the reference is valid"),
+                expected_transaction_position: None,
+                source: "ACTIVATE LICENSE".to_owned(),
+                statement: ClientStatement::Server(statement),
+                domain: None,
+            });
+            PersistentCommandRequest::from_operations(&[operation], None)
+                .assured("activation semantics encode")
+                .assured("activation is persistent")
+        };
+        let first = request(nervix_models::ActivationKind::Persistent, "first-secret");
+        let retry = request(nervix_models::ActivationKind::Persistent, "changed-secret");
+        let ephemeral = request(nervix_models::ActivationKind::Ephemeral, "first-secret");
+        assert_eq!(first.digest, retry.digest);
+        assert_ne!(first.digest, ephemeral.digest);
+        assert_eq!(first.domain, None);
+    }
+
+    #[test]
+    fn unqueueable_user_creation_keeps_only_the_refusal_and_following_operation() {
+        let operation = SessionCommandOperation::Queue(PendingSessionCommand {
+            request_reference: CommandExecutionReference::parse("transaction.request")
+                .assured("the reference is valid"),
+            expected_transaction_position: Some(0),
+            source: "CREATE USER operator WITH PASSWORD 'fixture-password'".to_owned(),
+            statement: ClientStatement::Server(Statement::CreateUser(CreateStatement::new(
+                CreateUser {
+                    name: UserName::parse("operator").assured("the name is valid"),
+                    password: "fixture-password".to_owned(),
+                },
+                false,
+            ))),
+            domain: Some(domain()),
+        });
+        let request = PersistentCommandRequest::transaction(
+            &[
+                operation,
+                SessionCommandOperation::Commit {
+                    expected_preview: None,
+                },
+            ],
+            domain(),
+            "BEGIN; CREATE USER operator WITH PASSWORD 'fixture-password'; COMMIT",
+            None,
+            CommandExecutionTransactionTarget::New {
+                id: "fixture".to_owned(),
+                activity: nervix_consensus::TransactionActivity::from_timeout(
+                    Timestamp::from_unix_nanos(1),
+                    Duration::from_secs(30),
+                ),
+            },
+        )
+        .assured("the request preserves the transaction prefix and its refusal");
+        let PersistentCommandRequestBody::Transaction(request) = request.body else {
+            panic!("the request is a transaction")
+        };
+        assert_eq!(
+            request.operations,
+            vec![
+                CommandExecutionTransactionOperation::RefuseUnqueueable {
+                    statement_label: "CREATE USER".to_owned()
+                },
+                CommandExecutionTransactionOperation::Commit {
+                    expected_preview: None
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn durable_transaction_preparation_rejects_credentials_before_retaining_a_body() {
+        let statements = [
+            Statement::ActivateLicense(nervix_models::ActivateLicense {
+                kind: nervix_models::ActivationKind::Persistent,
+                license_key: "fixture-secret".to_owned(),
+            }),
+            Statement::RefreshLicense(nervix_models::RefreshLicense),
+        ];
+        for statement in statements {
+            let operation = SessionCommandOperation::Queue(PendingSessionCommand {
+                request_reference: CommandExecutionReference::parse("transaction.request")
+                    .assured("the reference is valid"),
+                expected_transaction_position: Some(0),
+                source: "fixture credential must stay local".to_owned(),
+                statement: ClientStatement::Server(statement),
+                domain: Some(domain()),
+            });
+            let result = PersistentCommandRequest::transaction(
+                &[operation],
+                domain(),
+                "fixture query",
+                Some(0),
+                CommandExecutionTransactionTarget::Existing {
+                    id: "fixture".to_owned(),
+                    activity: nervix_consensus::TransactionActivity::from_timeout(
+                        Timestamp::from_unix_nanos(1),
+                        Duration::from_secs(30),
+                    ),
+                },
+            );
+            let Err(error) = result else {
+                panic!("cluster licensing cannot enter a domain transaction")
+            };
+            assert!(matches!(
+                error.current_context(),
+                PersistentCommandRequestError::UnqueueableStatement { .. }
+            ));
+        }
     }
 
     #[test]

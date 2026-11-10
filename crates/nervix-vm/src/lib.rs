@@ -122,8 +122,8 @@ pub use runtime::{
 };
 pub use semantics::{
     BinaryDescriptor, BuiltinDescriptor, BuiltinLowering, CastDescriptor, DependencyScope,
-    ExpressionSemantics, NullPropagation, OperationSemantics, UnaryDescriptor, Volatility,
-    binary_descriptor, binary_op_semantics, binary_output_type, builtin_descriptor,
+    ExpressionSemantics, ListArithmetic, NullPropagation, OperationSemantics, UnaryDescriptor,
+    Volatility, binary_descriptor, binary_op_semantics, binary_output_type, builtin_descriptor,
     builtin_function_semantics, builtin_signature, cast_descriptor, cast_semantics, expr_semantics,
     unary_descriptor, unary_op_semantics,
 };

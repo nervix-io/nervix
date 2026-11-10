@@ -482,6 +482,8 @@ The current contract includes the free licensing singleton in snapshots, capture
 creation and restore commands, and typed quota refusals in membership verdicts. These shapes advance
 the same fingerprint as every other consensus and prerequisite shape.
 
+The current fingerprint also fences signed licensing activation and decision commands, retained trust documents, committed licensing time and transaction refusals projected without executable Models. These consensus request and snapshot shapes share the contract with emitter instance identities.
+
 All nodes in a running cluster use one current wire contract. A fixed fingerprint covers the set of
 supported operations and their encoded shapes. It is one of the prerequisites every hello carries,
 so a node whose fingerprint differs is refused at join as a wire-contract mismatch, and a hello of

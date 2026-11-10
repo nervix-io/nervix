@@ -1,48 +1,15 @@
 //! The closed protocol refusal catalog and RFC 9457 projection.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** Stable refusal codes and their status, retryability and problem-detail projection.
+//! - **Owns.** Typed service refusals and the shared catalog's RFC 9457 projection.
 //! - **Depends on.** Maintained serde/URL encodings and typed request identities.
 //! - **Must not know.** HTTP servers, storage, retry scheduling, Models or clocks.
 
+pub use nervix_licensing_vocabulary::ProblemCode;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
-
-macro_rules! problem_codes {
-    ($($variant:ident => ($code:literal, $status:literal, $title:literal, $retry:literal)),* $(,)?) => {
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-        pub enum ProblemCode { $(#[serde(rename = $code)] $variant,)* }
-        impl ProblemCode {
-            pub const fn as_str(self) -> &'static str { match self { $(Self::$variant => $code,)* } }
-            pub const fn status(self) -> u16 { match self { $(Self::$variant => $status,)* } }
-            pub const fn title(self) -> &'static str { match self { $(Self::$variant => $title,)* } }
-            pub const fn retryable(self) -> bool { match self { $(Self::$variant => $retry,)* } }
-        }
-    };
-}
-
-problem_codes! {
-    InvalidRequest => ("invalid_request", 400, "Invalid request", false),
-    SignatureInvalid => ("signature_invalid", 401, "Invalid signature", false),
-    ChallengeInvalid => ("challenge_invalid", 401, "Invalid challenge", false),
-    LicenseKeyInvalid => ("license_key_invalid", 403, "Invalid license key", false),
-    LicenseKeyRevoked => ("license_key_revoked", 403, "Revoked license key", false),
-    LicenseNotActive => ("license_not_active", 403, "License is not active", false),
-    KindNotAllowed => ("kind_not_allowed", 403, "Activation kind is not allowed", false),
-    QuotaExhausted => ("quota_exhausted", 409, "Activation quota is exhausted", false),
-    AlreadyActivated => ("already_activated", 409, "Cluster is already activated", false),
-    ProtocolUnsupported => ("protocol_unsupported", 400, "Unsupported protocol", false),
-    RateLimited => ("rate_limited", 429, "Rate limited", true),
-    Unavailable => ("unavailable", 503, "Service unavailable", true),
-    ActivationUnknown => ("activation_unknown", 404, "Unknown activation", false),
-    BindingMismatch => ("binding_mismatch", 409, "Activation binding mismatch", false),
-    GenerationMismatch => ("generation_mismatch", 409, "Cluster key generation mismatch", false),
-    RequestConflict => ("request_conflict", 409, "Request identity conflict", false),
-    ProofInvalid => ("proof_invalid", 401, "Invalid key possession proof", false),
-    Internal => ("internal", 500, "Internal service error", true),
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProblemKind {
@@ -135,14 +102,12 @@ struct ProblemWire {
 #[error("problem details contradict the protocol's refusal code")]
 struct ProblemShapeError;
 
-impl ProblemCode {
-    fn problem_type(self) -> Url {
-        use meticulous::ResultExt as _;
-        let base = Url::parse("https://licensing.nervix.io/problems/")
-            .assured("the compiled service problem namespace is an absolute HTTPS URL");
-        base.join(self.as_str())
-            .assured("catalog codes are nonempty relative path segments")
-    }
+fn problem_type(code: ProblemCode) -> Url {
+    use meticulous::ResultExt as _;
+    let base = Url::parse("https://licensing.nervix.io/problems/")
+        .assured("the compiled service problem namespace is an absolute HTTPS URL");
+    base.join(code.as_str())
+        .assured("catalog codes are nonempty relative path segments")
 }
 
 impl Serialize for ProblemDetails {
@@ -153,7 +118,7 @@ impl Serialize for ProblemDetails {
             _ => None,
         };
         ProblemWire {
-            r#type: code.problem_type(),
+            r#type: problem_type(code),
             title: self.title.clone(),
             status: code.status(),
             code,
@@ -170,7 +135,7 @@ impl Serialize for ProblemDetails {
 impl<'de> Deserialize<'de> for ProblemDetails {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let wire = ProblemWire::deserialize(deserializer)?;
-        if wire.r#type != wire.code.problem_type()
+        if wire.r#type != problem_type(wire.code)
             || wire.status != wire.code.status()
             || wire.retryable != wire.code.retryable()
         {

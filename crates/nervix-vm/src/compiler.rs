@@ -3412,6 +3412,15 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
         | FunctionName::Min
         | FunctionName::Max
         | FunctionName::Mean
+        | FunctionName::ListAdd
+        | FunctionName::ListSub
+        | FunctionName::ListMul
+        | FunctionName::ListDiv
+        | FunctionName::ListAddScalar
+        | FunctionName::ListSubScalar
+        | FunctionName::ListMulScalar
+        | FunctionName::ListDivScalar
+        | FunctionName::ListAbs
         | FunctionName::Dot
         | FunctionName::Distance
         | FunctionName::Datetime(_)
