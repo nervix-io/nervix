@@ -7783,6 +7783,7 @@ dependencies = [
  "indexmap 2.14.2",
  "meticulous",
  "nervix-crypto",
+ "nervix-models",
  "nervix-primitives",
  "nervix-test-environment",
  "reqwest 0.12.28",
@@ -7971,6 +7972,7 @@ dependencies = [
  "strum 0.26.3",
  "thiserror 2.0.21",
  "toml 0.8.2",
+ "ubyte",
  "url",
  "uuid",
 ]

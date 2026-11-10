@@ -55,7 +55,7 @@ use crate::{
     raft_record::{EntryRecord, LogIdRecord, StoredMembershipRecord, VoteRecord},
     read_key,
     records::{Records, ResourceRecords, ScheduleRecords},
-    replication::{MAX_APPEND_BATCH_ENTRIES, append_batch_target_bytes},
+    replication::append_batch_target_bytes,
     snapshot::{
         KEY_MANIFEST, SealedSnapshot, SectionWriter, SnapshotGenerations, SnapshotManifest,
         SnapshotManifestRecord, SnapshotRetention, SnapshotSection, generation_prefix,
@@ -96,13 +96,13 @@ const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
 const KEYSPACE_LOGS: &str =
-    "raft_payload_identity_licensing_capability_tls_inference_reset_epoch_engine_host_logs";
+    "raft_infrastructure_capabilities_identity_licensing_tls_inference_reset_epoch_engine_host_logs";
 const KEYSPACE_META: &str =
-    "raft_payload_identity_licensing_capability_tls_inference_reset_epoch_engine_host_meta";
+    "raft_infrastructure_capabilities_identity_licensing_tls_inference_reset_epoch_engine_host_meta";
 const KEYSPACE_STATE_MACHINE: &str =
-    "raft_payload_identity_licensing_capability_tls_inference_reset_epoch_engine_host_state";
+    "raft_infrastructure_capabilities_identity_licensing_tls_inference_reset_epoch_engine_host_state";
 const KEYSPACE_SNAPSHOT: &str =
-    "raft_payload_identity_licensing_capability_tls_inference_reset_epoch_engine_host_snapshots";
+    "raft_infrastructure_capabilities_identity_licensing_tls_inference_reset_epoch_engine_host_snapshots";
 const KEY_CLUSTER_IDENTITY: &[u8] = b"K";
 const KEY_LICENSING: &[u8] = b"L";
 /// Working memory reserved for ordinary metadata and log storage relative to its operation unit.
@@ -236,7 +236,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    ClusterState = 24,
+    ClusterState = 26,
 }
 
 #[derive(Debug)]
@@ -718,6 +718,7 @@ impl AppliedRange {
 pub(super) struct StoreState {
     db: Database,
     pub(super) executor: Executor,
+    append_batch_entries: u64,
     admission: WorkingSetAdmission,
     pub(super) faults: StorageFault,
     failed: AtomicBool,
@@ -1416,7 +1417,7 @@ impl StoreInner {
                         (start, end),
                         LogReadLimit::Bounded {
                             bytes: append_batch_target_bytes(&inner.executor),
-                            entries: MAX_APPEND_BATCH_ENTRIES,
+                            entries: inner.append_batch_entries,
                         },
                     )?;
                     let continuation = decoded.continuation;
@@ -1447,8 +1448,12 @@ pub(super) struct FjallStore {
 }
 
 impl FjallStore {
-    pub(super) async fn from_database(db: Database, executor: Executor) -> io::Result<Self> {
-        Self::from_database_with_fault(db, executor, StorageFault::default()).await
+    pub(super) async fn from_database(
+        db: Database,
+        executor: Executor,
+        operations: crate::RaftOperationSettings,
+    ) -> io::Result<Self> {
+        Self::from_database_with_fault(db, executor, StorageFault::default(), operations).await
     }
 
     #[cfg(feature = "testing")]
@@ -1456,14 +1461,16 @@ impl FjallStore {
         db: Database,
         executor: Executor,
         fault: StorageFault,
+        operations: crate::RaftOperationSettings,
     ) -> io::Result<Self> {
-        Self::from_database_with_fault(db, executor, fault).await
+        Self::from_database_with_fault(db, executor, fault, operations).await
     }
 
     async fn from_database_with_fault(
         db: Database,
         executor: Executor,
         fault: StorageFault,
+        operations: crate::RaftOperationSettings,
     ) -> io::Result<Self> {
         let admission = WorkingSetAdmission::new(&executor)?;
         let WorkingSet { reservation, turn } =
@@ -1539,6 +1546,7 @@ impl FjallStore {
                                 shared: Arc::new(StoreState {
                                     db,
                                     executor: store_executor,
+                                    append_batch_entries: *operations.append_batch_entries.value(),
                                     admission,
                                     faults: fault,
                                     failed: AtomicBool::new(false),
@@ -1947,7 +1955,7 @@ impl RaftLogReader<TypeConfig> for FjallLogReader {
                     bounds,
                     LogReadLimit::Bounded {
                         bytes: append_batch_target_bytes(&inner.executor),
-                        entries: MAX_APPEND_BATCH_ENTRIES,
+                        entries: inner.append_batch_entries,
                     },
                 )?;
                 Ok(decoded.entries)

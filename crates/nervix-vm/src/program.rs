@@ -908,6 +908,7 @@ pub enum WindowAggregateFunction {
     Avg,
     BoolAnd,
     BoolOr,
+    CollectVec,
     Corr,
     Count,
     CountIf,
@@ -983,6 +984,7 @@ impl WindowAggregateFunction {
             Self::Avg
             | Self::BoolAnd
             | Self::BoolOr
+            | Self::CollectVec
             | Self::Count
             | Self::CountIf
             | Self::First
@@ -1008,6 +1010,7 @@ impl WindowAggregateFunction {
             | Self::ApproxTopK
             | Self::BoolAnd
             | Self::BoolOr
+            | Self::CollectVec
             | Self::Count
             | Self::CountIf
             | Self::First

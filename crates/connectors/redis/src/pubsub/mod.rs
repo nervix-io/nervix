@@ -68,9 +68,7 @@ use nervix_connector::{
     EmitterRecord, EmitterRecordId, EmitterStartResult, EmitterWriteError, PerRecordOutcome,
     RecordEmitter, ServiceUrl, client_tls_paths, optional_client_config_value, read_tls_file,
 };
-use nervix_dns::{
-    DnsLookupError, DnsLookupFailure, DnsLookupReport, DnsResolver, HOOK_LOOKUP_BUDGET,
-};
+use nervix_dns::{DnsLookupError, DnsLookupFailure, DnsLookupReport, DnsResolver};
 use nervix_models::{
     ClientConfigEntry, ClientConfigSchema, ClientDeadline, ClientPoolBounds, ConnectorKind,
     RedisChannelName,
@@ -102,7 +100,7 @@ impl AsyncDNSResolver for RedisDns {
         port: u16,
     ) -> RedisFuture<'a, Box<dyn Iterator<Item = SocketAddr> + Send + 'a>> {
         Box::pin(async move {
-            let addresses = self.0.resolve(host, port, HOOK_LOOKUP_BUDGET).await;
+            let addresses = self.0.resolve(host, port, self.0.hook_budget()).await;
             match addresses {
                 Ok(addresses) => {
                     let iter: Box<dyn Iterator<Item = SocketAddr> + Send + 'a> =

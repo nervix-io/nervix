@@ -320,6 +320,11 @@ impl ProcessorPartitionMoves {
         };
         let commands = self.commands.clone();
         nervix_primitives::task::spawn(async move {
+            runtime
+                .inner
+                .fault_injection
+                .pause_processor_partition_forget_if_armed(&subject.domain, &subject.entity)
+                .await;
             let result = nervix_primitives::expect_lint!(
                 nervix::lifecycle_call,
                 "a holder forgets one claimed key once its claimant installed the key",
@@ -809,6 +814,10 @@ impl Runtime {
         };
         let holder_owner =
             self.partition_unit_owner(&subject.domain, &subject.entity, subject.holder)?;
+        self.inner
+            .fault_injection
+            .pause_processor_partition_install_if_armed(&subject.domain, &subject.entity)
+            .await;
         let branch = Some(key.clone());
         for checkpoint in released.checkpoints {
             nervix_primitives::task::consume_budget().await;

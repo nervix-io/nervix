@@ -485,6 +485,7 @@ All paths are relative to the repository root.
 | `src/runtime/message_error.rs` | Structured message errors, the rows whose required outputs are missing, and execution of prepared error-record programs |
 | `src/runtime/window_processor.rs`, `window_accumulator/`, `window_state.rs` | Branch-local windows, their aggregate structures, and their snapshots |
 | `benches/window_sketches.rs` | The cost of admitting retained rows into pane sketches, from a new pane for every row to a thousand rows per pane |
+| `benches/window_collection.rs` | Complete collection-route emission at 64 and 4,096 retained rows, including Arrow gathering and IPC qualification |
 | `src/runtime/window_archive.rs` | A captured window as bounded archive Arrow groups, and the window snapshot rebuilt from them |
 | `src/runtime/subscription_predicate.rs` | Session subscription filters |
 
@@ -1165,7 +1166,10 @@ and diagnostics.
   scalar operand.
 
 Registry validation compiles the same route with the same compiler when the processor is applied.
-It also rejects `BYTES` arguments and checks the sketch budget.
+It also rejects arguments containing `BYTES`, checks the sketch budget, and requires a message
+`WIDTH` or `MAX STATE SIZE` for `COLLECT_VEC`. Collection refuses a nullable argument with a typed
+route error and a `coalesce` instruction. Its injected result is a required `VEC` whose non-null
+item has the argument's exact type, including a nested array or vector.
 
 Cold state inspection projects the same argument program through
 `CompiledWindowRoute::argument_inspection_fields` with the input schema's sensitivity and the
@@ -1202,6 +1206,31 @@ For each batch, the task works through these steps:
 
 Tumbling and sliding windows use this same path, with different `WIDTH` and `STEP`.
 
+Collection captures immutable Arrow row addresses cooperatively. It first checks cumulative string and nested
+list offsets and reserves the complete gather payload and metadata together from relay memory;
+no queued gather holds a partial grant while asking for the rest. The bounded data worker sorts
+addresses by the same `(timestamp, sequence)` key that `FIRST` and `LAST` use and copies contiguous
+runs directly from their Arrow columns, with exact selected child capacities so an empty vector
+cannot reserve its fixed element width in absent children. It does not materialize a scalar value
+for each row.
+Gathering checks cancellation between runs and preserves nested types and floating-point bits.
+Accepted retained work waits for a worker place under the branch task's existing lifetime.
+
+Before a collection route publishes, its final output is checked against the relay decoded limit
+and qualified by the bounded IPC encoder against the encoded limit. That qualification has a cost
+separate from destination encoding; `window_collection` benchmarks the complete route emission,
+including this check. A typed build, admission or size failure reaches the existing window
+emission-failure owner: every retained acknowledgement fails, the window clears, and earlier
+routes keep their output. Snapshots and archives still carry only the existing input and evaluated
+argument columns; restore rebuilds the shared sequence from those rows.
+
+The relay IPC limit is also the interconnect relay payload limit; stream metadata is carried
+separately. A session subscription has its own negotiated row/frame contract. Its row encoder
+reports `RowsSkippedCause::EncodingFailed` when a row cannot fit that client's limits, rather than
+passing an oversized frame to the transport. That consumer-specific contract does not change a
+window's relay emission or couple branch execution to a subscribing client's settings.
+
+
 | Structure | Functions | Algorithm | Retraction when the window steps |
 | --- | --- | --- | --- |
 | `counter` | `COUNT` | Exact 64-bit count | Subtract |
@@ -1211,6 +1240,7 @@ Tumbling and sliding windows use this same path, with different `WIDTH` and `STE
 | `moments` | `AVG`, variances, standard deviations | Two-pass centered count, mean, and M2 with one Chan merge per run, in a two-stack window | Refold typed surviving runs |
 | `co_moments` | Covariances, `CORR` | Two-pass centered co-moments with one Chan merge per run; `CORR` clamped to `[-1, 1]` | Refold typed surviving runs |
 | `extremes`, `sequence`, `arg_extremes` | `MIN`/`MAX`, `FIRST`/`LAST`, `ARG_MIN`/`ARG_MAX` | Monotonic candidate deque ordered by value, arrival, or key; ties keep the earliest row | Drop front candidates older than the first survivor |
+| `sequence` | `COLLECT_VEC` | Gather every retained argument in ingestion-low-watermark/admission order, sharing the argument and endpoint structure with `FIRST`/`LAST` | Read only the surviving rows; no extra retained state |
 | `linear_histogram` | `PERCENTILE_LINEAR_HISTOGRAM` | Fixed-range buckets, answered with a bucket midpoint | Immediately, or after the configured delay on the domain clock |
 | `hll` | `APPROX_COUNT_DISTINCT` | HyperLogLog over the first 8 bytes of a BLAKE3 hash of a type-tagged key, with linear counting at small cardinalities | Rebuilt from survivors |
 | `quantile_sketch` | `APPROX_QUANTILE` | t-digest capped at its capacity, merging the least-cost adjacent centroids; exact while it holds every value | Rebuilt from survivors |

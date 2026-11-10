@@ -340,7 +340,10 @@ impl Runtime {
             unit: request.placement.unit,
         };
         nervix_primitives::time::timeout(
-            KafkaStartRequest::TIMEOUT,
+            <KafkaStartRequest as nervix_interconnect::InterconnectRequest>::DEADLINE.resolve(
+                self.inner.interconnect_request_timeout,
+                nervix_interconnect::InterconnectLiveness::default(),
+            ),
             self.answer_kafka_start_within_deadline(request),
         )
         .await
@@ -577,7 +580,11 @@ impl Runtime {
             self.answer_kafka_start(request).await?
         } else {
             dispatcher
-                .request_with_timeout(&coordinator, request, KafkaStartRequest::TIMEOUT)
+                .request_with_timeout(
+                    &coordinator,
+                    request,
+                    dispatcher.request_deadline::<KafkaStartRequest>(),
+                )
                 .await
                 .change_context(StateReplicationError::Request {
                     target: coordinator.clone(),

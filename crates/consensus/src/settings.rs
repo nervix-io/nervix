@@ -18,7 +18,8 @@
     )
 )]
 
-use std::{convert::Infallible, time::Duration};
+mod operations;
+use std::time::Duration;
 
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -26,6 +27,7 @@ use nervix_models::{
     NodeCapabilities, Prerequisites, RaftLogDurability, Setting, SettingDefinition,
     TIMING_COMPATIBILITY_FACTOR, TimingPrerequisite,
 };
+pub use operations::*;
 use thiserror::Error;
 use ubyte::ByteUnit;
 
@@ -190,7 +192,7 @@ impl SettingDefinition for RaftSnapshotEntryThreshold {
     type Class = NodeCapabilities;
     type Value = u64;
     type Context = ();
-    type Error = Infallible;
+    type Error = RaftOperationError;
 
     const NAME: &'static str = "raft-snapshot-entry-threshold";
     const DERIVATION: Option<&'static str> = None;
@@ -199,7 +201,12 @@ impl SettingDefinition for RaftSnapshotEntryThreshold {
         10_000
     }
 
-    fn validate(_: &u64, _: &()) -> Result<(), Report<Infallible>> {
+    fn validate(value: &u64, _: &()) -> Result<(), Report<RaftOperationError>> {
+        if *value == u64::MAX {
+            return Err(Report::new(RaftOperationError::Value {
+                setting: Self::NAME,
+            }));
+        }
         Ok(())
     }
 }
@@ -211,7 +218,7 @@ impl SettingDefinition for RaftSnapshotByteThreshold {
     type Class = NodeCapabilities;
     type Value = ByteUnit;
     type Context = ();
-    type Error = Infallible;
+    type Error = RaftOperationError;
 
     const NAME: &'static str = "raft-snapshot-byte-threshold";
     const DERIVATION: Option<&'static str> = None;
@@ -220,7 +227,7 @@ impl SettingDefinition for RaftSnapshotByteThreshold {
         ByteUnit::Mebibyte(64)
     }
 
-    fn validate(_: &ByteUnit, _: &()) -> Result<(), Report<Infallible>> {
+    fn validate(_: &ByteUnit, _: &()) -> Result<(), Report<RaftOperationError>> {
         Ok(())
     }
 }
@@ -232,7 +239,7 @@ impl SettingDefinition for RaftCoveredLogEntriesRetained {
     type Class = NodeCapabilities;
     type Value = u64;
     type Context = ();
-    type Error = Infallible;
+    type Error = RaftOperationError;
 
     const NAME: &'static str = "raft-covered-log-entries-retained";
     const DERIVATION: Option<&'static str> = None;
@@ -241,7 +248,7 @@ impl SettingDefinition for RaftCoveredLogEntriesRetained {
         1_000
     }
 
-    fn validate(_: &u64, _: &()) -> Result<(), Report<Infallible>> {
+    fn validate(_: &u64, _: &()) -> Result<(), Report<RaftOperationError>> {
         Ok(())
     }
 }
@@ -253,7 +260,7 @@ impl SettingDefinition for RaftCoveredLogBytesRetained {
     type Class = NodeCapabilities;
     type Value = ByteUnit;
     type Context = ();
-    type Error = Infallible;
+    type Error = RaftOperationError;
 
     const NAME: &'static str = "raft-covered-log-bytes-retained";
     const DERIVATION: Option<&'static str> = None;
@@ -262,7 +269,7 @@ impl SettingDefinition for RaftCoveredLogBytesRetained {
         ByteUnit::Mebibyte(64)
     }
 
-    fn validate(_: &ByteUnit, _: &()) -> Result<(), Report<Infallible>> {
+    fn validate(_: &ByteUnit, _: &()) -> Result<(), Report<RaftOperationError>> {
         Ok(())
     }
 }
@@ -274,7 +281,7 @@ impl SettingDefinition for RaftRetainedLogCap {
     type Class = NodeCapabilities;
     type Value = ByteUnit;
     type Context = ();
-    type Error = Infallible;
+    type Error = RaftOperationError;
 
     const NAME: &'static str = "raft-retained-log-cap";
     const DERIVATION: Option<&'static str> = None;
@@ -283,7 +290,7 @@ impl SettingDefinition for RaftRetainedLogCap {
         ByteUnit::Gibibyte(1)
     }
 
-    fn validate(_: &ByteUnit, _: &()) -> Result<(), Report<Infallible>> {
+    fn validate(_: &ByteUnit, _: &()) -> Result<(), Report<RaftOperationError>> {
         Ok(())
     }
 }
@@ -300,7 +307,7 @@ pub struct RaftRetentionSettings {
 
 impl RaftRetentionSettings {
     /// Resolves each bound that is not given through its definition's default.
-    pub fn resolve(bounds: RaftRetentionBounds) -> Result<Self, Report<Infallible>> {
+    pub fn resolve(bounds: RaftRetentionBounds) -> Result<Self, Report<RaftOperationError>> {
         Ok(Self {
             snapshot_entry_threshold: Setting::resolve(bounds.snapshot_entry_threshold, &())?,
             snapshot_byte_threshold: Setting::resolve(bounds.snapshot_byte_threshold, &())?,
@@ -311,13 +318,14 @@ impl RaftRetentionSettings {
     }
 
     /// The retention machinery's policy: these bounds, with the reclamation wait it owns.
-    pub fn policy(&self) -> RaftRetentionPolicy {
+    pub fn policy(&self, operations: &RaftOperationSettings) -> RaftRetentionPolicy {
         RaftRetentionPolicy::with_bounds(
             *self.snapshot_entry_threshold.value(),
             self.snapshot_byte_threshold.value().as_u64(),
             *self.covered_entries_retained.value(),
             self.covered_bytes_retained.value().as_u64(),
             self.retained_log_cap.value().as_u64(),
+            operations,
         )
     }
 }

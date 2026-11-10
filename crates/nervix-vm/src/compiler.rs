@@ -536,6 +536,9 @@ impl Compiler {
         }
         let first_type = self.infer_expr_type(&args[0])?;
         match function {
+            WindowAggregateFunction::CollectVec => Ok(DataType::List(StdArc::new(Field::new(
+                "item", first_type, false,
+            )))),
             WindowAggregateFunction::ApproxCountDistinct => {
                 if !Self::is_window_orderable(&first_type) {
                     return Err(Report::new(CompileError {
@@ -1592,6 +1595,7 @@ impl Compiler {
                     let window_function = invocation.function;
                     if let WindowAggregateFunction::ApproxCountDistinct
                     | WindowAggregateFunction::ApproxTopK
+                    | WindowAggregateFunction::CollectVec
                     | WindowAggregateFunction::Count
                     | WindowAggregateFunction::CountIf = window_function
                     {
