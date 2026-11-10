@@ -3506,6 +3506,13 @@ sequenceDiagram
   reply, so it adds no network wait and never delays the host's reconnect; a write the transport
   refuses is recovered and reported at `debug`.
   Incoming frame or message overflow fails the read and ends the connection, as `fail_read` declares.
+  Every failed read keeps the transport's typed cause beneath the host's read failure, and the
+  connection classifies that cause before it is released. A frame the client refuses earns the
+  peer the Close RFC 6455 section 7.1.7 asks for, offered exactly like the idle verdict's:
+  `1009` (message too big) for a frame or message beyond `max_frame_size` or `max_message_size`,
+  `1007` (invalid frame payload data) for message text or a Close reason that is not UTF-8, and
+  `1002` (protocol error) for any other framing violation. A transport that broke, already ended
+  or is already closing can carry no frame and is released without one.
   The host reconnects on its policy. Suspension closes the connection while retaining successful
   handshake payloads, which drain before another connection opens; close clears the queue.
   Transport failure requires another resume of the retained ingestor.

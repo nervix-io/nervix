@@ -3569,7 +3569,13 @@ one accepted frame can wait for room, and the transport can assemble a message w
 message and frame limits. If a full handoff prevents signaling from completing, the signaling
 `TIMEOUT` fails that connection and clears its undelivered handshake data before retrying. An
 oversized incoming frame or message also ends the connection with a transient read failure;
-reconnection supplies no durable replay guarantee.
+reconnection supplies no durable replay guarantee. Ending it sends the peer a Close frame with
+status `1009` (message too big) if the connection takes the frame at once. A frame that breaks the
+WebSocket framing rules ends the connection the same way with status `1002` (protocol error), and
+message text or a Close reason that is not valid UTF-8 with `1007` (invalid frame payload data). As
+with the idle deadline, Nervix waits neither to write the frame nor for the peer's reply, so the
+Close never delays the reconnect. A connection whose TCP has already ended or failed is released
+without a Close.
 
 For `ws` and `wss`, each initial connection and resume resolves the URL host through the node's
 asynchronous resolver. It tries the returned addresses in order within the configured

@@ -1,5 +1,5 @@
 //! Real-transport checks of the connection's frame and header ownership, configured pings and the
-//! Close a silent peer is offered when the idle deadline ends its connection.
+//! Close a peer is offered when the idle deadline or a refused frame ends its connection.
 //!
 //! Layer: test harness.
 //! - **Owns.** Observing the production connection owner through a local protocol peer, and
@@ -14,16 +14,23 @@
 
 use futures_util::FutureExt as _;
 use nervix_primitives::task::unconstrained;
-use tokio::io::AsyncReadExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{
         Error as WebsocketError,
-        protocol::{CloseFrame, Role, frame::coding::CloseCode},
+        error::{CapacityError, TlsError},
+        protocol::{
+            CloseFrame, Role,
+            frame::{
+                Frame, FrameHeader,
+                coding::{CloseCode, Control, Data, OpCode},
+            },
+        },
     },
 };
 
-use super::*;
+use super::{connection::FailedReadEnding, *};
 
 #[nervix_primitives::test]
 async fn a_message_retains_its_upgrade_snapshot_and_exact_data_frame_kind() {
@@ -198,13 +205,196 @@ async fn inbound_message_and_frame_limits_end_the_exact_connection_with_the_driv
         let Err(report) = result else {
             panic!("the inbound bytes exceed the declared limit");
         };
-        assert!(report.contains::<tokio_tungstenite::tungstenite::Error>());
+        assert!(
+            matches!(
+                report.downcast_ref::<WebsocketError>(),
+                Some(WebsocketError::Capacity(CapacityError::MessageTooLong {
+                    size: 8,
+                    max_size: 4,
+                }))
+            ),
+            "{key}: {report:#}"
+        );
         assert!(matches!(
             report.current_context(),
             IngestorError::Read { .. }
         ));
         assert!(ingestor.needs_resume());
+        // The client read the whole frame before refusing it, so TCP ends in order behind the
+        // Close it offered.
+        let ending = timeout(Duration::from_secs(60), unread_ending(peer))
+            .await
+            .assured("the client releases the connection within the fixture budget");
+        let UnreadEnding::Closed(Some(frame)) = ending else {
+            panic!("a {key} overflow ends the connection with a Close frame before TCP ends");
+        };
+        assert_eq!(frame.code, CloseCode::Size, "{key}");
     }
+}
+
+/// A frame RFC 6455 forbids a peer to send, with the violation the client's transport names.
+struct ViolatingFrame {
+    frame: Frame,
+    violation: ProtocolError,
+}
+
+/// Frames that break RFC 6455 section 5, each written as is through the peer's own transport.
+fn violating_frames() -> [ViolatingFrame; 3] {
+    let mut reserved_bit = Frame::message(b"payload".to_vec(), OpCode::Data(Data::Binary), true);
+    reserved_bit.header_mut().rsv1 = true;
+    let mut fragmented_ping = Frame::ping(Vec::new());
+    fragmented_ping.header_mut().is_final = false;
+    [
+        ViolatingFrame {
+            frame: reserved_bit,
+            violation: ProtocolError::NonZeroReservedBits,
+        },
+        ViolatingFrame {
+            frame: Frame::message(b"payload".to_vec(), OpCode::Data(Data::Continue), true),
+            violation: ProtocolError::UnexpectedContinueFrame,
+        },
+        ViolatingFrame {
+            frame: fragmented_ping,
+            violation: ProtocolError::FragmentedControlFrame,
+        },
+    ]
+}
+
+#[nervix_primitives::test]
+async fn a_peer_protocol_violation_reads_a_protocol_error_close_and_keeps_the_driver_cause() {
+    for case in violating_frames() {
+        let (mut ingestor, mut peer) =
+            tests::connected_pair_with(Vec::new(), WebsocketsUpgradeHeaders::default()).await;
+        peer.send(Message::Frame(case.frame))
+            .await
+            .assured("the peer's transport writes the frame as given");
+        let result = ingestor
+            .next_batch(
+                IngestorBatchRequest {
+                    max_messages: std::num::NonZeroUsize::MIN,
+                    batch_timeout: None,
+                },
+                &IngestorReadCancellation::new(),
+            )
+            .await;
+        let Err(report) = result else {
+            panic!("{:?} fails the read", case.violation);
+        };
+        let Some(WebsocketError::Protocol(violation)) = report.downcast_ref::<WebsocketError>()
+        else {
+            panic!("the read keeps the transport's typed violation: {report:#}");
+        };
+        assert_eq!(violation, &case.violation);
+        assert!(matches!(
+            report.current_context(),
+            IngestorError::Read { .. }
+        ));
+        assert!(ingestor.needs_resume());
+        let ending = timeout(Duration::from_secs(60), unread_ending(peer))
+            .await
+            .assured("the client releases the connection within the fixture budget");
+        let UnreadEnding::Closed(Some(frame)) = ending else {
+            panic!(
+                "{:?} ends the connection with a Close frame before TCP ends",
+                case.violation
+            );
+        };
+        assert_eq!(frame.code, CloseCode::Protocol, "{:?}", case.violation);
+    }
+}
+
+#[nervix_primitives::test]
+async fn text_that_is_not_utf8_reads_an_invalid_payload_close_and_keeps_the_driver_cause() {
+    // An invalid two-byte sequence, as message text and as the reason of a Close the peer sends.
+    let not_utf8 = [
+        Frame::message(vec![0xC3, 0x28], OpCode::Data(Data::Text), true),
+        // Status 1000, then the reason.
+        Frame::from_payload(
+            FrameHeader {
+                opcode: OpCode::Control(Control::Close),
+                ..FrameHeader::default()
+            },
+            vec![0x03, 0xE8, 0xC3, 0x28],
+        ),
+    ];
+    for frame in not_utf8 {
+        let (mut ingestor, mut peer) =
+            tests::connected_pair_with(Vec::new(), WebsocketsUpgradeHeaders::default()).await;
+        peer.send(Message::Frame(frame))
+            .await
+            .assured("the peer's transport writes the frame as given");
+        let result = ingestor
+            .next_batch(
+                IngestorBatchRequest {
+                    max_messages: std::num::NonZeroUsize::MIN,
+                    batch_timeout: None,
+                },
+                &IngestorReadCancellation::new(),
+            )
+            .await;
+        let Err(report) = result else {
+            panic!("text that is not UTF-8 fails the read");
+        };
+        assert!(
+            matches!(
+                report.downcast_ref::<WebsocketError>(),
+                Some(WebsocketError::Utf8)
+            ),
+            "{report:#}"
+        );
+        assert!(matches!(
+            report.current_context(),
+            IngestorError::Read { .. }
+        ));
+        assert!(ingestor.needs_resume());
+        let ending = timeout(Duration::from_secs(60), unread_ending(peer))
+            .await
+            .assured("the client releases the connection within the fixture budget");
+        let UnreadEnding::Closed(Some(frame)) = ending else {
+            panic!("text that is not UTF-8 ends the connection with a Close frame before TCP ends");
+        };
+        assert_eq!(frame.code, CloseCode::Invalid);
+    }
+}
+
+#[nervix_primitives::test]
+async fn a_peer_that_ends_tcp_first_is_released_without_a_close() {
+    let (mut ingestor, mut peer) =
+        tests::connected_pair_with(Vec::new(), WebsocketsUpgradeHeaders::default()).await;
+    // The peer ends its half of TCP and keeps reading what the client sends after.
+    peer.get_mut()
+        .shutdown()
+        .await
+        .assured("a connected socket ends its sending half");
+    let result = ingestor
+        .next_batch(
+            IngestorBatchRequest {
+                max_messages: std::num::NonZeroUsize::MIN,
+                batch_timeout: None,
+            },
+            &IngestorReadCancellation::new(),
+        )
+        .await;
+    let Err(report) = result else {
+        panic!("TCP ended without the closing handshake");
+    };
+    assert!(
+        matches!(
+            report.downcast_ref::<WebsocketError>(),
+            Some(WebsocketError::Protocol(
+                ProtocolError::ResetWithoutClosingHandshake
+            ))
+        ),
+        "{report:#}"
+    );
+    assert!(ingestor.needs_resume());
+    let ending = timeout(Duration::from_secs(60), unread_ending(peer))
+        .await
+        .assured("the client releases the connection within the fixture budget");
+    assert!(
+        matches!(ending, UnreadEnding::WithoutClose),
+        "a connection whose TCP already ended is released without a Close"
+    );
 }
 
 /// How the client ended a connection whose peer never read it.
@@ -325,5 +515,145 @@ async fn the_idle_verdict_never_waits_for_a_transport_that_cannot_take_its_close
         panic!("the idle verdict returns at once although the transport cannot take its Close");
     };
     assert!(report.contains::<nervix_connector::DeadlineElapsed>());
+    assert!(ingestor.needs_resume());
+}
+
+#[test]
+fn a_failed_read_offers_a_close_only_for_what_the_peer_sent() {
+    let close_bearing = [
+        (
+            WebsocketError::Capacity(CapacityError::MessageTooLong {
+                size: 8,
+                max_size: 4,
+            }),
+            CloseCode::Size,
+        ),
+        (WebsocketError::Utf8, CloseCode::Invalid),
+        (
+            WebsocketError::Protocol(ProtocolError::NonZeroReservedBits),
+            CloseCode::Protocol,
+        ),
+        (
+            WebsocketError::Protocol(ProtocolError::MaskedFrameFromServer),
+            CloseCode::Protocol,
+        ),
+        (
+            WebsocketError::Protocol(ProtocolError::FragmentedControlFrame),
+            CloseCode::Protocol,
+        ),
+        (
+            WebsocketError::Protocol(ProtocolError::ControlFrameTooBig),
+            CloseCode::Protocol,
+        ),
+        (
+            WebsocketError::Protocol(ProtocolError::UnknownControlFrameType(11)),
+            CloseCode::Protocol,
+        ),
+        (
+            WebsocketError::Protocol(ProtocolError::UnknownDataFrameType(3)),
+            CloseCode::Protocol,
+        ),
+        (
+            WebsocketError::Protocol(ProtocolError::UnexpectedContinueFrame),
+            CloseCode::Protocol,
+        ),
+        (
+            WebsocketError::Protocol(ProtocolError::ExpectedFragment(Data::Text)),
+            CloseCode::Protocol,
+        ),
+        (
+            WebsocketError::Protocol(ProtocolError::InvalidOpcode(15)),
+            CloseCode::Protocol,
+        ),
+        (
+            WebsocketError::Protocol(ProtocolError::InvalidCloseSequence),
+            CloseCode::Protocol,
+        ),
+    ];
+    for (failure, status) in close_bearing {
+        assert_eq!(
+            FailedReadEnding::from(&failure),
+            FailedReadEnding::Close(status),
+            "{failure}"
+        );
+    }
+    // The transport broke, already ended or is already closing: no frame reaches the peer.
+    let released = [
+        WebsocketError::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+        WebsocketError::Tls(TlsError::InvalidDnsName),
+        WebsocketError::ConnectionClosed,
+        WebsocketError::AlreadyClosed,
+        WebsocketError::WriteBufferFull(Message::Ping(Vec::new())),
+        WebsocketError::Protocol(ProtocolError::ResetWithoutClosingHandshake),
+        WebsocketError::Protocol(ProtocolError::ReceivedAfterClosing),
+        WebsocketError::Protocol(ProtocolError::SendAfterClosing),
+        // Only the opening upgrade fails with these.
+        WebsocketError::Capacity(CapacityError::TooManyHeaders),
+        WebsocketError::AttackAttempt,
+        WebsocketError::Protocol(ProtocolError::HandshakeIncomplete),
+        WebsocketError::Protocol(ProtocolError::SecWebSocketAcceptKeyMismatch),
+    ];
+    for failure in released {
+        assert_eq!(
+            FailedReadEnding::from(&failure),
+            FailedReadEnding::Release,
+            "{failure}"
+        );
+    }
+}
+
+#[nervix_primitives::test]
+async fn a_failed_read_never_waits_for_a_transport_that_cannot_take_its_close() {
+    let config = vec![ClientConfigEntry {
+        key: "max_message_size".to_string(),
+        value: "4".to_string(),
+    }];
+    let (mut ingestor, mut unread_peer) =
+        tests::connected_pair_with(config, WebsocketsUpgradeHeaders::default()).await;
+    // The oversized message is in the client's socket before its transport fills.
+    unread_peer
+        .send(Message::Binary(vec![0; 8]))
+        .await
+        .assured("the peer can send its small test frame");
+    let connection = ingestor
+        .connection
+        .as_mut()
+        .assured("the pair is connected");
+    // The peer reads nothing, so the client's transport fills until it takes no more. Each
+    // write is polled outside the cooperative budget, so only a full transport refuses one.
+    let chunk = vec![0_u8; 64 * 1024];
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let written =
+            unconstrained(connection.relay.send(Message::Binary(chunk.clone()))).now_or_never();
+        match written {
+            Some(Ok(())) => {}
+            Some(Err(error)) => panic!("the unread transport stays open: {error}"),
+            None => break,
+        }
+    }
+    // A fresh cooperative budget for the one poll below.
+    nervix_primitives::task::yield_now().await;
+    let verdict = ingestor
+        .next_batch(
+            IngestorBatchRequest {
+                max_messages: std::num::NonZeroUsize::MIN,
+                batch_timeout: None,
+            },
+            &IngestorReadCancellation::new(),
+        )
+        .now_or_never();
+    let Some(Err(report)) = verdict else {
+        panic!("the failed read returns at once although the transport cannot take its Close");
+    };
+    assert!(
+        matches!(
+            report.downcast_ref::<WebsocketError>(),
+            Some(WebsocketError::Capacity(
+                CapacityError::MessageTooLong { .. }
+            ))
+        ),
+        "{report:#}"
+    );
     assert!(ingestor.needs_resume());
 }

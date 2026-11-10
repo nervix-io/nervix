@@ -115,7 +115,7 @@ async fn peer_receives_close(world: &mut ScenarioWorld) {
             PeerEvent::Upgraded { .. }
             | PeerEvent::SignalingCompleted(_)
             | PeerEvent::ReceivedPing(_)
-            | PeerEvent::SilentConnectionEnded(_) => {
+            | PeerEvent::UnreadConnectionEnded(_) => {
                 panic!(
                     "the lifecycle peer reports neither subprotocol offers, pings nor unread \
                      connections"
