@@ -3397,7 +3397,10 @@ button {
 .create-window-bound,
 .create-correlator-match,
 .create-correlator-left-timeout,
-.create-correlator-right-timeout {
+.create-correlator-right-timeout,
+.create-inferencer-state-initial,
+.create-wasm-rejected-state,
+.create-wasm-global-error {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
@@ -3420,7 +3423,17 @@ button {
 .create-correlator-left-timeout legend,
 .create-correlator-right-timeout legend,
 .create-window-aggregate-references legend,
-.create-correlator-route-references legend {
+.create-correlator-route-references legend,
+.create-inferencer-state-initial legend,
+.create-wasm-rejected-state legend,
+.create-wasm-global-error legend,
+.create-generator-route-references legend,
+.create-inferencer-route-references legend,
+.create-wasm-route-references legend,
+.create-inferencer-inputs legend,
+.create-inferencer-state legend,
+.create-inferencer-outputs legend,
+.create-tensor-shape legend {
   color: var(--text-d);
   font-size: 10px;
   font-weight: 700;
@@ -3430,6 +3443,12 @@ button {
 .create-processor-keys,
 .create-processor-window,
 .create-processor-correlation,
+.create-generator-source,
+.create-processor-binding,
+.create-inferencer-tensors,
+.create-tensor-dimensions,
+.create-wasm-limits,
+.create-wasm-policies,
 .create-processor-state,
 .create-processor-routes,
 .create-processor-route,
@@ -3447,6 +3466,11 @@ button {
 .create-processor-keys,
 .create-processor-window,
 .create-processor-correlation,
+.create-generator-source,
+.create-processor-binding,
+.create-inferencer-tensors,
+.create-wasm-limits,
+.create-wasm-policies,
 .create-processor-state,
 .create-processor-routes,
 .create-processor-route {
@@ -3459,6 +3483,11 @@ button {
 .create-processor-keys h3,
 .create-processor-window h3,
 .create-processor-correlation h3,
+.create-generator-source h3,
+.create-processor-binding h3,
+.create-inferencer-tensors h3,
+.create-wasm-limits h3,
+.create-wasm-policies h3,
 .create-processor-state h3,
 .create-processor-routes h3,
 .create-processor-invocations h4 {
@@ -3475,6 +3504,12 @@ button {
 .create-processor-state-actions,
 .create-processor-route-list,
 .create-processor-route-actions,
+.create-inferencer-input-list,
+.create-inferencer-state-list,
+.create-inferencer-output-list,
+.create-inferencer-tensor-actions,
+.create-inferencer-generated,
+.create-tensor-dimension,
 .create-processor-assignment-row,
 .create-processor-inherited-field,
 .create-processor-invocation,
@@ -3488,6 +3523,9 @@ button {
 .create-processor-inputs button,
 .create-processor-keys button,
 .create-processor-correlation button,
+.create-generator-source button,
+.create-inferencer-tensors button,
+.create-wasm-policies button,
 .create-processor-state button,
 .create-processor-routes button,
 .create-processor-mode button {
@@ -3504,6 +3542,9 @@ button {
 .create-processor-inputs button.active,
 .create-processor-keys button.active,
 .create-processor-correlation button.active,
+.create-generator-source button.active,
+.create-inferencer-tensors button.active,
+.create-wasm-policies button.active,
 .create-processor-state button.active,
 .create-processor-routes button.active,
 .create-processor-mode button.active {
@@ -3513,7 +3554,14 @@ button {
 }
 
 .create-window-aggregate-references,
-.create-correlator-route-references {
+.create-correlator-route-references,
+.create-generator-route-references,
+.create-inferencer-route-references,
+.create-wasm-route-references,
+.create-inferencer-inputs,
+.create-inferencer-state,
+.create-inferencer-outputs,
+.create-tensor-shape {
   display: grid;
   gap: 8px;
   min-width: 0;
@@ -3525,8 +3573,16 @@ button {
 
 .create-window-aggregate-references p,
 .create-correlator-route-references p,
+.create-generator-route-references p,
+.create-inferencer-route-references p,
+.create-wasm-route-references p,
 .create-processor-window p,
-.create-processor-correlation p {
+.create-processor-correlation p,
+.create-generator-source p,
+.create-processor-binding p,
+.create-inferencer-tensors p,
+.create-wasm-limits p,
+.create-wasm-policies p {
   margin: 0;
   color: var(--text-d);
   font-size: 10px;
@@ -3879,4 +3935,24 @@ button {
 
 .restore-impact .inspector-body {
   width: 100%;
+}
+
+/* Generator, inferencer and WASM processor forms: the derived execution mode and the size of one
+   tensor axis read as values rather than prose. */
+.create-inferencer-tensors .create-inferencer-execution-mode {
+  color: var(--text-c);
+  font-weight: 700;
+}
+
+.create-tensor-dimension .create-tensor-dimension-size {
+  flex: 0 1 90px;
+  min-width: 0;
+  height: 29px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 10px;
 }

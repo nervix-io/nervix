@@ -641,6 +641,7 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
         relays,
         processors: HashMap::default(),
         wasm_state_reset: None,
+        partition_transition: None,
     };
     if let Some(retention) = route.branch.retention() {
         branch.branch = Some(retention.branch.clone());
@@ -699,6 +700,7 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
         relays,
         processors,
         wasm_state_reset: unit_revision.reset().cloned(),
+        partition_transition: None,
     })
 }
 
@@ -1191,9 +1193,11 @@ pub(in crate::runtime) async fn bind_published_processor_plans(
             }
             let owner = NodeUnitRef::new(identity.clone(), unit);
             let unit_revision = ProcessorUnitRevision::of(node, unit)?;
+            let partition_transition = partition_claims::UnitPartitionTransition::of(node, unit);
             if let Some(published) = previous.get(&owner)
                 && spec.reuses_prepared_revision(Some(&published.source))
                 && published.unit_revision == unit_revision
+                && published.template.partition_transition == partition_transition
             {
                 plans.insert(owner, published.clone());
                 continue;
@@ -1205,6 +1209,7 @@ pub(in crate::runtime) async fn bind_published_processor_plans(
                 template.owner = owner.clone();
                 template.revision = ProcessorPlanRevision::new();
                 template.wasm_state_reset = unit_revision.reset().cloned();
+                template.partition_transition = partition_transition;
                 template
             } else {
                 let mut template = materialize_processor_instance_template(
@@ -1238,6 +1243,7 @@ pub(in crate::runtime) async fn bind_published_processor_plans(
                     .change_context_lazy(|| PlanningError::PrepareWasmProcessor {
                         node: spec.spec.processor.clone(),
                     })?;
+                template.partition_transition = partition_transition;
                 template
             };
             let published = StdArc::new(PublishedProcessorPlan {

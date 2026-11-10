@@ -1090,6 +1090,16 @@ test-visual-window-correlator *args: build-web-console wasm-processor-guests dow
     cargo test --package nervix-scenarios --test scenarios -- \
         --input tests/features/web-console/visual_create_window_correlator.feature "$@"
 
+# Create generators, inferencers and WASM processors through the web console's visual forms on
+# in-process one- and three-node clusters, with only the in-process server's prerequisites.
+[positional-arguments]
+test-visual-generator-inferencer-wasm *args: build-web-console wasm-processor-guests download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/web-console/visual_create_generator_inferencer_wasm.feature "$@"
+
 # Exercise coordinated WASM guest-state resets through in-process nodes: the RESET statement on the
 # session's active domain, its retries and refusals, and the operator and guest-requested resets.
 [positional-arguments]
@@ -1850,6 +1860,14 @@ test-mysql *args:
 # Run the WebSockets transport and signaling owners without unrelated connector test roots.
 test-websockets *args:
     cargo test --package nervix-connector-websockets --lib -- {{ args }}
+
+# Exercise outbound connection behavior through the public graph without preparing unrelated
+# host-language and paced-simulation drivers.
+test-websockets-runtime *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input 'tests/features/runtime/websocket_connection*.feature' {{ quote(args) }}
 
 # Diagnose one WebSockets owner check with its replayable schedule. `test-shuttle` remains the
 # inventory, completion and nondeterminism gate for qualification.

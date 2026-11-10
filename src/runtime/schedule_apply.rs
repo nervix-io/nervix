@@ -20,7 +20,9 @@
 
 use error_stack::ResultExt as _;
 
-use super::*;
+use super::{
+    partition_claims::UnitPartitionTransition, relay_repartition::InstalledRegistrations, *,
+};
 
 /// What one node has applied of the cluster schedule its leader publishes.
 ///
@@ -473,6 +475,7 @@ impl Runtime {
         revision: &ExecutionRevision,
         reassignments: &[NodeRef],
         local_node_id: Option<&ClusterNodeName>,
+        repartitioned: &BTreeSet<RelayName>,
     ) -> error_stack::Result<bool, RuntimeError> {
         let Some(local_node_id) = local_node_id else {
             return Ok(false);
@@ -583,8 +586,12 @@ impl Runtime {
             } else {
                 None
             };
+            // A relay the swap repartitions has its owner and state tasks replaced with its
+            // services, by the repartition and the swap's relay transition.
+            let repartitioned_relay = entity.kind == ModelKind::Relay
+                && repartitioned.contains(&RelayName::from(&entity.identifier));
 
-            if entity.kind == ModelKind::Relay {
+            if entity.kind == ModelKind::Relay && !repartitioned_relay {
                 let relay = RelayName::from(&entity.identifier);
                 for unit in previous_local_units.difference(&desired_local_units) {
                     let previous =
@@ -710,7 +717,9 @@ impl Runtime {
             // rows already queued to it under the generation they were dispatched in, and the unit
             // starts a new task once the placement has issued the successor. The relay's local
             // dispatch stays gated meanwhile, so nothing is queued between the two.
-            if let Some(relay) = materialized_relay.as_ref() {
+            if let Some(relay) = materialized_relay.as_ref()
+                && !repartitioned_relay
+            {
                 for unit in previous_local_units.intersection(&desired_local_units) {
                     let previous =
                         self.inner
@@ -730,7 +739,9 @@ impl Runtime {
                             relay: relay.clone(),
                         })
                         .change_context_lazy(build)?;
-                    if let Some(services) = relay_services.as_ref() {
+                    if let Some(services) = relay_services.as_ref()
+                        && !desired_node.is_holding_unit(*unit)
+                    {
                         services.remove_local_unit_runtime_consumer(AckMode::Detached, *unit);
                     }
                 }
@@ -755,7 +766,9 @@ impl Runtime {
                 }
             }
 
-            if let Some(relay) = materialized_relay {
+            if let Some(relay) = materialized_relay
+                && !repartitioned_relay
+            {
                 relay_states_moved = true;
                 let services = self
                     .inner
@@ -783,7 +796,9 @@ impl Runtime {
                                 relay: relay.clone(),
                             })
                             .change_context_lazy(build)?;
-                        if let Some(services) = services.as_ref() {
+                        if let Some(services) = services.as_ref()
+                            && !desired_node.is_holding_unit(*unit)
+                        {
                             services.remove_local_unit_runtime_consumer(AckMode::Detached, *unit);
                         }
                     }
@@ -813,8 +828,13 @@ impl Runtime {
                                 .get(&relay)
                                 .verified("the domain plan covers every scheduled relay")
                                 .retention,
-                            receiver: services
-                                .add_local_unit_runtime_consumer(AckMode::Detached, *unit),
+                            receiver: if desired_node.is_holding_unit(*unit) {
+                                services.dormant_unit_fan_in(AckMode::Detached, *unit)
+                            } else {
+                                services.add_local_unit_runtime_consumer(AckMode::Detached, *unit)
+                            },
+                            transition: UnitPartitionTransition::of(desired_node, *unit),
+                            parked_capacity: services.owner_capacity(),
                         },
                     );
                     if let Some(mut execution) = self.inner.executions.get_mut(domain) {
@@ -831,7 +851,7 @@ impl Runtime {
                 }
             }
 
-            if entity.kind == ModelKind::Relay {
+            if entity.kind == ModelKind::Relay && !repartitioned_relay {
                 let relay = RelayName::from(&entity.identifier);
                 for unit in desired_local_units.difference(&previous_local_units) {
                     let Some(services) = relay_services.clone() else {
@@ -840,6 +860,10 @@ impl Runtime {
                         })
                         .change_context(build()));
                     };
+                    // A unit holding only keys the previous count placed in it has no owner.
+                    if !services.declares_unit(*unit) {
+                        continue;
+                    }
                     let retention = activation_plan
                         .relays
                         .get(&relay)
@@ -980,8 +1004,22 @@ impl Runtime {
         // desired fingerprints before constructing state so the post-swap stale-state purge does
         // not discard the newly attached state instance.
         self.install_state_identities(&revision);
+        let installed = self
+            .inner
+            .executions
+            .get(domain)
+            .map(|execution| execution.revision.clone());
+        let repartitioned =
+            Box::pin(self.repartition_relays(domain, &revision, local_node_id)).await?;
+        let registrations = InstalledRegistrations::new(installed.as_deref(), &repartitioned);
         let mut materialized_routing_changed = self
-            .rebind_reassigned_nodes(domain, &revision, &reassignments, local_node_id)
+            .rebind_reassigned_nodes(
+                domain,
+                &revision,
+                &reassignments,
+                local_node_id,
+                &repartitioned,
+            )
             .await?;
 
         for entity in entities {
@@ -1081,7 +1119,9 @@ impl Runtime {
                             relay: relay.clone(),
                         })
                         .change_context_lazy(build)?;
-                    services.remove_local_unit_runtime_consumer(AckMode::Detached, unit);
+                    if registrations.counts(&relay, entity, Some(unit)) {
+                        services.remove_local_unit_runtime_consumer(AckMode::Detached, unit);
+                    }
                 }
                 for previous in previous_placement_tasks {
                     nervix_primitives::task::consume_budget().await;
@@ -1123,8 +1163,14 @@ impl Runtime {
                                     .get(&relay)
                                     .verified("the domain plan covers every scheduled relay")
                                     .retention,
-                                receiver: services
-                                    .add_local_unit_runtime_consumer(AckMode::Detached, unit),
+                                receiver: if desired_node.is_holding_unit(unit) {
+                                    services.dormant_unit_fan_in(AckMode::Detached, unit)
+                                } else {
+                                    services
+                                        .add_local_unit_runtime_consumer(AckMode::Detached, unit)
+                                },
+                                transition: UnitPartitionTransition::of(desired_node, unit),
+                                parked_capacity: services.owner_capacity(),
                             },
                         );
                         state_tasks.push((RelayUnitRef::new(relay.clone(), unit), task));
@@ -1241,7 +1287,9 @@ impl Runtime {
                     };
                     if had_old_task {
                         for input in &old_emitter.inputs {
-                            if let Some(services) = execution.relay_services.get(&input.relay) {
+                            if let Some(services) = execution.relay_services.get(&input.relay)
+                                && registrations.counts(&input.relay, entity, None)
+                            {
                                 services.remove_local_runtime_consumer(old_emitter.mode);
                             }
                         }
@@ -1358,7 +1406,9 @@ impl Runtime {
                         .unwrap_or_default();
                     if !old_tasks.is_empty() {
                         for input in &old_plan.inputs {
-                            if let Some(services) = execution.relay_services.get(&input.relay) {
+                            if let Some(services) = execution.relay_services.get(&input.relay)
+                                && registrations.counts(&input.relay, entity, None)
+                            {
                                 services.remove_local_runtime_consumer(old_plan.mode);
                             }
                         }
@@ -1624,6 +1674,7 @@ impl Runtime {
                 for relay in &old_spec.spec.input_relays {
                     if let Some(services) = execution.relay_services.get(relay)
                         && had_old_task
+                        && registrations.counts(relay, entity, Some(unit))
                     {
                         services.remove_local_unit_runtime_consumer(old_spec.spec.mode, unit);
                     }
@@ -1642,10 +1693,13 @@ impl Runtime {
                             })
                             .change_context(build()));
                         };
-                        inputs.push((
-                            relay.clone(),
-                            services.add_local_unit_runtime_consumer(desired_spec.spec.mode, unit),
-                        ));
+                        // A unit holding only keys the previous count placed in it takes no input.
+                        let input = if desired_node.is_holding_unit(unit) {
+                            services.dormant_unit_fan_in(desired_spec.spec.mode, unit)
+                        } else {
+                            services.add_local_unit_runtime_consumer(desired_spec.spec.mode, unit)
+                        };
+                        inputs.push((relay.clone(), input));
                     }
                     let task = spawn_processor_node_runtime_with_handoffs(
                         ProcessorRuntimeContext::new(self.clone(), domain.clone()),
@@ -1660,7 +1714,7 @@ impl Runtime {
             }
         }
 
-        self.apply_dynamic_model_updates(domain, dynamic_updates)
+        self.apply_dynamic_model_updates(domain, &revision, dynamic_updates)
             .await?;
         let processor_plans = self
             .bind_installed_processor_plans(domain, &revision)
@@ -1707,6 +1761,9 @@ impl Runtime {
             execution
                 .mqtt_ingestor_clients
                 .retain(|name, prepared| prepared.agrees_with(name, &revision));
+            execution.routing.relay_transitions =
+                super::relay_repartition::relay_transitions(&revision);
+            self.observe_partition_epochs(domain, &revision);
             execution.revision = revision;
             execution.routing.message_error_plans = message_error_plans;
             execution.routing.processor_plans = processor_plans;
@@ -1772,7 +1829,8 @@ impl Runtime {
         // initial checkpoint. Publishing the identity first is safe because the selected inputs
         // remain fenced until the same schedule reaches Ready.
         self.install_state_identities(&revision);
-        self.apply_dynamic_model_updates(domain, updates).await?;
+        self.apply_dynamic_model_updates(domain, &revision, updates)
+            .await?;
         if let Some(mut execution) = self.inner.executions.get_mut(domain) {
             let message_error_plans = Arc::new(
                 BoundMessageErrorRoutes::bind(
@@ -1791,6 +1849,9 @@ impl Runtime {
             execution
                 .mqtt_ingestor_clients
                 .retain(|name, prepared| prepared.agrees_with(name, &revision));
+            execution.routing.relay_transitions =
+                super::relay_repartition::relay_transitions(&revision);
+            self.observe_partition_epochs(domain, &revision);
             execution.revision = revision;
             execution.routing.message_error_plans = message_error_plans;
             execution.routing.processor_plans = processor_plans;
@@ -1802,18 +1863,25 @@ impl Runtime {
             })
             .change_context(build()));
         }
-        if updates
-            .iter()
-            .any(|update| !matches!(update, DynamicExecutionUpdate::WasmStateReset { .. }))
-        {
+        // A reset fences only its selected inputs, and a retired transition changes no route, so
+        // neither flushes what the domain's routes buffer.
+        if updates.iter().any(|update| {
+            !matches!(
+                update,
+                DynamicExecutionUpdate::WasmStateReset { .. }
+                    | DynamicExecutionUpdate::PartitionTransitionRetired { .. }
+            )
+        }) {
             self.force_flush_domain(domain);
         }
         Ok(())
     }
 
+    /// Applies `updates` in place, while the execution still has the revision before `desired`.
     pub(super) async fn apply_dynamic_model_updates(
         &self,
         domain: &DomainName,
+        desired: &ExecutionRevision,
         updates: &[DynamicExecutionUpdate],
     ) -> error_stack::Result<(), RuntimeError> {
         let build = || RuntimeError::build_domain_execution(domain);
@@ -1860,6 +1928,9 @@ impl Runtime {
                 // Endpoint routing reads only a VHOST's hostnames. The certificate belongs to the
                 // HTTPS listener, which installs it from the same admitted state on every node.
                 DynamicExecutionUpdate::VhostTlsVersion => {}
+                DynamicExecutionUpdate::PartitionTransitionRetired { node } => {
+                    Box::pin(self.retire_partition_transition(domain, node, desired)).await;
+                }
                 DynamicExecutionUpdate::EmitterFlush { emitter, policy } => {
                     let commands = if let Some(execution) = self.inner.executions.get(domain)
                         && let Some(task) = execution.emitter_tasks.get(&NodeRef {
@@ -2169,10 +2240,7 @@ impl Runtime {
 }
 
 #[cfg(test)]
-#[cfg_attr(
-    nervix_lint,
-    nervix::layer(harness, reason = "test module remains outside product execution")
-)]
+#[path = "schedule_apply_tests.rs"]
 mod tests;
 
 #[cfg(test)]

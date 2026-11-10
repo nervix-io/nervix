@@ -1,5 +1,6 @@
 //! Repository tooling, outside the product layer order.
-//! Owns: the six structural debt counts and their downward-only baseline gate.
+//! Owns: the six structural debt counts, their downward-only baseline gate and the refusal of
+//! authored cryptography outside AWS-LC, which no baseline admits.
 //! Depends on: source and compiler reports, the pinned analyzer, Cargo's release graph and Git.
 //! Must not know: product runtime execution or manually curated source locations.
 
@@ -12,7 +13,7 @@ use std::{
     process::Command,
 };
 
-use anyhow::{Context as _, Result, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 use nervix_lint_report::source::{self, SourceInput};
 
 use crate::{crap, matrix};
@@ -37,7 +38,7 @@ const COUNTS: [(&str, &str); 6] = [
     ),
     (
         "non_aws_lc_crypto",
-        "authored cryptography and product dependencies outside AWS-LC",
+        "product dependency edges onto cryptography outside AWS-LC",
     ),
 ];
 
@@ -176,10 +177,11 @@ pub fn measure_sources(
         .iter()
         .map(|file| (file.path.as_str(), file))
         .collect();
+    let mut authored_cryptography = Vec::new();
     for site in source::scan(product)
         .map_err(|error| anyhow::anyhow!("Rust source analysis failed: {error:?}"))?
     {
-        let detail = if site.rule == "non_aws_lc_crypto" {
+        if site.rule == source::AUTHORED_NON_AWS_LC_CRYPTO {
             let source = by_path
                 .get(site.path.as_str())
                 .context("source site has no discovered file")?;
@@ -188,13 +190,14 @@ pub fn measure_sources(
                 .lines()
                 .nth(site.line.saturating_sub(1))
                 .context("source site has no line")?;
-            format!(
-                "non_aws_lc_crypto (authored): {}",
-                line.split_whitespace().collect::<Vec<_>>().join(" ")
-            )
-        } else {
-            site.rule.clone()
-        };
+            authored_cryptography.push(Site {
+                path: site.path,
+                line: site.line,
+                detail: line.split_whitespace().collect::<Vec<_>>().join(" "),
+            });
+            continue;
+        }
+        let detail = site.rule.clone();
         sites
             .get_mut(&site.rule)
             .with_context(|| format!("unrecognized source rule {}", site.rule))?
@@ -204,6 +207,7 @@ pub fn measure_sources(
                 detail,
             });
     }
+    refuse_authored_cryptography(&authored_cryptography)?;
     let paths: Vec<_> = files.iter().map(|file| file.path.clone()).collect();
     let unreachable = crap::unreachable_sources(root, &paths)?;
     ensure!(
@@ -246,6 +250,25 @@ pub fn measure_sources(
         .expect("declared count")
         .extend(graph_sites.iter().cloned());
     Ok(sites)
+}
+
+/// Authored cryptography outside AWS-LC is a defect with no baseline, as a second AWS-LC module
+/// is: every site fails the gate, so none can be counted, listed as debt or written into the
+/// baseline.
+fn refuse_authored_cryptography(sites: &[Site]) -> Result<()> {
+    if sites.is_empty() {
+        return Ok(());
+    }
+    let listed = sites
+        .iter()
+        .map(|site| format!("  {}", site.render()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    bail!(
+        "authored cryptography outside AWS-LC is refused: take it from the nervix-crypto \
+         boundary, or record a BLAKE3 operation's non-security purpose; docs/src/cryptography.md \
+         owns the rule:\n{listed}"
+    );
 }
 
 fn read_baseline(path: &Path) -> Result<BTreeMap<String, usize>> {
@@ -462,6 +485,41 @@ mod tests {
             .collect()
     }
 
+    /// A Git repository whose one discovered source is `src/lib.rs`.
+    fn repository(source: &str) -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(directory.path())
+            .status()
+            .unwrap();
+        fs::create_dir(directory.path().join("src")).unwrap();
+        fs::write(directory.path().join("src/lib.rs"), source).unwrap();
+        directory
+    }
+
+    /// The pinned analyzer under `target`, reporting these `src/lib.rs` functions with their
+    /// cyclomatic complexity.
+    fn analyzer(target: &Path, functions: &[(&str, f64)]) {
+        let entries = functions
+            .iter()
+            .map(|(name, complexity)| {
+                format!(
+                    r#"{{"file":"./src/lib.rs","function":"{name}","line":1,"cyclomatic":{complexity:.1}}}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'cargo-crap 0.6.1'; exit 0; \
+             fi\nprintf '%s' '{{\"version\":\"0.6.1\",\"entries\":[{entries}]}}'\n"
+        );
+        let executable = crap::executable(target);
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, script).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     #[test]
     fn baseline_requires_exactly_the_measured_count_names() {
         let directory = tempfile::tempdir().unwrap();
@@ -513,10 +571,10 @@ mod tests {
             Site {
                 path: "Cargo.lock".into(),
                 line: 42,
-                detail: "non_aws_lc_crypto (graph): owner 1 -> sha2 1".into()
+                detail: "non_aws_lc_crypto: owner 1 -> sha2 1".into()
             }
             .render(),
-            "Cargo.lock:42: non_aws_lc_crypto (graph): owner 1 -> sha2 1"
+            "Cargo.lock:42: non_aws_lc_crypto: owner 1 -> sha2 1"
         );
     }
 
@@ -564,33 +622,15 @@ mod tests {
 
     #[test]
     fn structural_scanner_and_complexity_threshold_share_discovered_files() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = repository("fn lower(x: u64) -> u32 { x as u32 }\n");
         let root = directory.path();
-        Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(root)
-            .status()
-            .unwrap();
-        fs::create_dir(root.join("src")).unwrap();
-        fs::write(
-            root.join("src/lib.rs"),
-            "fn lower(x: u64) -> u32 { x as u32 }\n",
-        )
-        .unwrap();
         fs::write(
             root.join("src/tests.rs"),
             "fn test(x: u64) -> u32 { x as u32 }\n",
         )
         .unwrap();
         let target = root.join("target");
-        let executable = crap::executable(&target);
-        fs::create_dir_all(executable.parent().unwrap()).unwrap();
-        let script = r#"#!/bin/sh
-if [ "$1" = --version ]; then echo 'cargo-crap 0.6.1'; exit 0; fi
-printf '%s' '{"version":"0.6.1","entries":[{"file":"./src/lib.rs","function":"at_limit","line":1,"cyclomatic":30.0},{"file":"./src/lib.rs","function":"over_limit","line":1,"cyclomatic":31.0}]}'
-"#;
-        fs::write(&executable, script).unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        analyzer(&target, &[("at_limit", 30.0), ("over_limit", 31.0)]);
         let files = load_files(root).unwrap();
         let sites = measure_sources(root, &target, &files, &[]).unwrap();
         assert_eq!(
@@ -604,6 +644,63 @@ printf '%s' '{"version":"0.6.1","entries":[{"file":"./src/lib.rs","function":"at
                 .render()
                 .contains("over_limit has cyclomatic complexity 31")
         );
+    }
+
+    #[test]
+    fn authored_cryptography_fails_the_gate_with_every_site_and_writes_no_baseline() {
+        let directory = repository(
+            "#[cfg(nervix_lint)]\nuse sha2::Sha256;\nfn fingerprint() { blake3::hash(b\"x\"); }\n",
+        );
+        let root = directory.path();
+        let target = root.join("target");
+        let files = load_files(root).unwrap();
+        let error = measure_sources(root, &target, &files, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("authored cryptography outside AWS-LC is refused"),
+            "{error}"
+        );
+        assert!(
+            error.contains("\n  src/lib.rs:2: use sha2::Sha256;"),
+            "{error}"
+        );
+        assert!(
+            error.contains("\n  src/lib.rs:3: fn fingerprint() { blake3::hash(b\"x\"); }"),
+            "{error}"
+        );
+        let path = root.join(BASELINE);
+        let original = serde_json::to_string(&baseline(1)).unwrap();
+        fs::write(&path, &original).unwrap();
+        let result = execute(
+            root,
+            true,
+            None,
+            || Ok(()),
+            || Ok(()),
+            || measure_sources(root, &target, &files, &[]),
+        );
+        assert!(result.unwrap_err().to_string().contains("is refused"));
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn the_cryptography_count_holds_only_product_graph_edges() {
+        let directory = repository(
+            "/// Non-security BLAKE3: identifies controlled fixture content.\nfn fingerprint() { \
+             blake3::hash(b\"x\"); }\n",
+        );
+        let root = directory.path();
+        let target = root.join("target");
+        analyzer(&target, &[("fingerprint", 1.0)]);
+        let edge = Site {
+            path: "Cargo.lock".into(),
+            line: 7,
+            detail: "non_aws_lc_crypto: nervix-models 1 -> sha2 1".into(),
+        };
+        let files = load_files(root).unwrap();
+        let sites = measure_sources(root, &target, &files, std::slice::from_ref(&edge)).unwrap();
+        assert_eq!(sites["non_aws_lc_crypto"], [edge]);
     }
 
     #[test]

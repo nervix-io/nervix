@@ -19,7 +19,7 @@ use nervix_primitives::{
 use super::*;
 use crate::{
     runtime::{
-        processor_branch_task::run_processor_node_runtime,
+        processor_branch_task::{ProcessorNodeChannels, run_processor_node_runtime},
         window_state::{
             WindowSnapshotLifetime, WindowSnapshotSchemas, decode_window_processor_snapshot,
             encode_window_processor_snapshot,
@@ -131,6 +131,7 @@ impl OpenWindowFixture {
             .collect(),
             processors: [(processor.clone(), window)].into_iter().collect(),
             wasm_state_reset: None,
+            partition_transition: None,
         };
         Self {
             processor,
@@ -319,8 +320,35 @@ impl OpenWindowFixture {
         input: &RelayBroadcast<RelayRecordBatch>,
         handoffs: Vec<ProcessorBranchHandoff>,
     ) -> RunningProcessor {
+        self.spawn(runtime, domain, input, handoffs, false)
+    }
+
+    /// Start the processor's task over `input` on `runtime` as a unit in its template's partition
+    /// transition, whose claim tasks report through the task's own commands.
+    fn start_in_transition(
+        &self,
+        runtime: &Runtime,
+        domain: &DomainName,
+        input: &RelayBroadcast<RelayRecordBatch>,
+    ) -> RunningProcessor {
+        self.spawn(runtime, domain, input, Vec::new(), true)
+    }
+
+    fn spawn(
+        &self,
+        runtime: &Runtime,
+        domain: &DomainName,
+        input: &RelayBroadcast<RelayRecordBatch>,
+        handoffs: Vec<ProcessorBranchHandoff>,
+        in_transition: bool,
+    ) -> RunningProcessor {
         let (shutdown, shutdown_rx) = watch::channel(false);
         let (commands, command_rx) = mpsc::channel(1);
+        let claim_reports = if in_transition {
+            Some(commands.clone())
+        } else {
+            None
+        };
         let task = nervix_primitives::task::spawn(run_processor_node_runtime(
             ProcessorRuntimeContext::new(runtime.clone(), domain.clone()),
             self.template.clone(),
@@ -329,7 +357,10 @@ impl OpenWindowFixture {
                 RelayRuntimeFanIn::new(input.new_receiver()),
             )],
             shutdown_rx,
-            command_rx,
+            ProcessorNodeChannels {
+                commands: command_rx,
+                claim_reports,
+            },
             handoffs,
             Duration::from_secs(60),
         ));
@@ -399,6 +430,31 @@ impl RunningProcessor {
             .expect("the processor keeps its response")
     }
 
+    /// The branches the processor names for an inspection that reads `selection`, in the order it
+    /// names them, or its refusal.
+    async fn inspected_branches(
+        &self,
+        selection: nervix_models::StateInspectionBranchSelection,
+    ) -> error_stack::Result<Vec<Option<BranchKey>>, BranchStateReadError> {
+        let (response, answer) = oneshot::channel();
+        self.commands
+            .send(ProcessorNodeCommand::SelectStateBranches {
+                selection,
+                response,
+            })
+            .await
+            .expect("the processor takes its command");
+        let selected = timeout(WAIT, answer)
+            .await
+            .expect("the processor answers its command")
+            .expect("the processor keeps its response")?;
+        let mut keys = Vec::with_capacity(selected.branches.len());
+        for branch in selected.branches {
+            keys.push(branch.key);
+        }
+        Ok(keys)
+    }
+
     async fn handoff(self) -> Vec<ProcessorBranchHandoff> {
         let (response, handoffs) = oneshot::channel();
         self.commands
@@ -444,6 +500,104 @@ async fn ack_outcome(mut completion: AckCompletion) -> AckOutcome {
     })
     .await
     .expect("the input is settled")
+}
+
+/// A window processor unit whose branch's keys move between units parks the input of a key that may
+/// lie in another unit. When the transition retires, every key lies in its partition, so the unit
+/// runs that input where it waits and withdraws its published holdings.
+#[nervix_primitives::test]
+async fn a_retired_transition_runs_the_input_its_processor_unit_parked() {
+    let mut fixture = OpenWindowFixture::new();
+    let unit = Unit::partition(5);
+    let partitions = |count: u16| {
+        nervix_models::BranchPartitions::Direct(
+            std::num::NonZeroU16::new(count).expect("the test counts are positive"),
+        )
+    };
+    // Unit 5 of a branch growing from four partitions to eight: four placed `beta` in unit 1.
+    let transition = partition_claims::UnitPartitionTransition {
+        branch: named::<BranchName>("by_tenant"),
+        epoch: nervix_models::PartitionEpochNumber::FIRST.next(),
+        current: RelayPartitioning::of_partitions(partitions(8)),
+        previous: RelayPartitioning::of_partitions(partitions(4)),
+        unit,
+    };
+    fixture.template.owner = NodeUnitRef::new(fixture.template.owner.node.clone(), unit);
+    fixture.template.partition_transition = Some(transition.clone());
+    let directory = tempfile::tempdir().expect("the state directory opens");
+    let (runtime, domain) = fixture.runtime(Executor::default(), &directory);
+    // A schedule publishes the state identity of each unit it places; the fixture's covers only
+    // the single unit.
+    runtime.publish_unit_state_assignment(
+        DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::WindowProcessor,
+                fixture.processor.clone(),
+            ),
+            unit,
+        ),
+        ScheduledStateAssignment {
+            identity: ScheduledStateIdentity {
+                schema_fingerprint: nervix_models::SchemaFingerprint::from_digest([7; 32]),
+                inferencer_model: None,
+                wasm_state_generations: None,
+            },
+            checkpoint_owners: None,
+        },
+    );
+    let input = RelayBroadcast::with_capacity(nonzero_capacity(4));
+    let processor = fixture.start_in_transition(&runtime, &domain, &input);
+    let held =
+        || runtime.partition_transition_holdings(&domain, &transition.branch, transition.epoch);
+    timeout(WAIT, async {
+        while held().is_empty() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the unit publishes its holdings once it restored its branches");
+
+    let beta = string_branch_key("tenant", "beta");
+    input
+        .broadcast(fixture.input_batch(&beta, 20, AckSet::empty()))
+        .await
+        .expect("the input queues");
+    // A checkpoint first takes every queued input. No unit of the previous count answers in this
+    // runtime, so `beta`'s input waits for the catalog of the keys they hold.
+    let parked = processor
+        .checkpoint()
+        .await
+        .expect("the processor checkpoints its branches");
+    assert_eq!(
+        branch_lifetimes(&parked),
+        Vec::new(),
+        "an input whose key may lie in another unit waits for its key's state"
+    );
+
+    processor
+        .commands
+        .send(ProcessorNodeCommand::PartitionTransitionRetired)
+        .await
+        .expect("the processor takes its retirement");
+    let retired = processor
+        .checkpoint()
+        .await
+        .expect("the processor checkpoints its branches");
+    let lifetimes = branch_lifetimes(&retired);
+    assert_eq!(
+        lifetimes
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>(),
+        vec![beta],
+        "a retired unit runs the input it parked, which begins its key there"
+    );
+    assert!(
+        held().is_empty(),
+        "a retired unit withdraws the holdings it published"
+    );
+    processor.stop().await;
 }
 
 /// On a node that has just started, a window processor task restores its branches before the
@@ -745,7 +899,7 @@ async fn handed_over_branches_resume_only_under_the_lifecycle_they_belong_to() {
     let (runtime, domain) = fixture.runtime(Executor::default(), &directory);
     let alpha = string_branch_key("tenant", "alpha");
     let context = ProcessorRuntimeContext::new(runtime.clone(), domain.clone());
-    let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
+    let mut instances = ProcessorBranches::new();
     let mut last_persisted_lru_lsm = 0;
     let handoff = || ProcessorBranchHandoff {
         key: alpha.clone(),
@@ -815,4 +969,94 @@ async fn handed_over_branches_resume_only_under_the_lifecycle_they_belong_to() {
         instances.states().is_empty() && instances.version() == 0 && last_persisted_lru_lsm == 0,
         "a failed attempt installs nothing"
     );
+}
+
+/// The branches a pending restore has not installed hold rows no branch task can copy yet, so the
+/// processor refuses to name the branches any inspection reads, selecting none of them, rather than
+/// answering with fewer branches than its lifecycle names. Once a later attempt installs every
+/// branch, it names them in canonical order and exactly the branch a read selects.
+#[nervix_primitives::test]
+async fn a_processor_restoring_its_branches_refuses_to_name_the_branches_an_inspection_reads() {
+    use nervix_models::StateInspectionBranchSelection as Selection;
+
+    let fixture = OpenWindowFixture::new();
+    let directory = tempfile::tempdir().expect("the state directory opens");
+    let executor = single_worker_executor();
+    let (runtime, domain) = fixture.runtime(executor.clone(), &directory);
+    let alpha = string_branch_key("tenant", "alpha");
+    let beta = string_branch_key("tenant", "beta");
+    let beta_fingerprint = beta
+        .as_ref()
+        .expect("a string branch key is concrete")
+        .fingerprint();
+    fixture
+        .store_checkpoints(
+            &runtime,
+            &domain,
+            5,
+            &[
+                OpenBranch {
+                    key: alpha.clone(),
+                    incarnation: 3,
+                    latency: 10,
+                },
+                OpenBranch {
+                    key: beta.clone(),
+                    incarnation: 4,
+                    latency: 100,
+                },
+            ],
+        )
+        .await;
+    let filled = FilledCpuClass::fill(&executor, nervix_execution::CpuClass::Bulk).await;
+    let input = RelayBroadcast::with_capacity(nonzero_capacity(4));
+    let processor = fixture.start(&runtime, &domain, &input, Vec::new());
+
+    for selection in [
+        Selection::All,
+        Selection::Unbranched,
+        Selection::Branch(beta_fingerprint),
+    ] {
+        let refusal = processor
+            .inspected_branches(selection)
+            .await
+            .expect_err("a processor that has not restored its branches names none of them");
+        assert!(
+            matches!(refusal.current_context(), BranchStateReadError::Unrestored),
+            "the selection is refused as unrestored, found {refusal:?}"
+        );
+    }
+
+    filled.release().await;
+    let restored = processor.restored_lifecycle().await;
+    assert_eq!(
+        branch_lifetimes(&restored),
+        vec![(alpha.clone(), 3), (beta.clone(), 4)],
+        "the later attempt installs every branch its lifecycle names"
+    );
+    assert_eq!(
+        processor
+            .inspected_branches(Selection::All)
+            .await
+            .expect("a restored processor names its branches"),
+        vec![alpha.clone(), beta.clone()],
+        "a read of all branches names every restored branch in canonical order"
+    );
+    assert_eq!(
+        processor
+            .inspected_branches(Selection::Branch(beta_fingerprint))
+            .await
+            .expect("a restored processor names the branch a read selects"),
+        vec![beta.clone()],
+        "a read of one branch names exactly that branch"
+    );
+    assert_eq!(
+        processor
+            .inspected_branches(Selection::Unbranched)
+            .await
+            .expect("a restored processor answers a read of its unbranched state"),
+        Vec::<Option<BranchKey>>::new(),
+        "a branched processor holds no unbranched state"
+    );
+    processor.stop().await;
 }

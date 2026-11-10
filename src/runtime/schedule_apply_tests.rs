@@ -1,9 +1,16 @@
-//! Schedule materialization and revision ownership tests.
+//! Applying committed schedules to this node's runtime.
 //!
-//! Layer: test harness, outside the product layer order.
-//! - **Owns.** Schedule-application regression fixtures and assertions.
-//! - **Depends on.** Runtime internals and typed graph vocabulary.
-//! - **Must not know.** Live cluster coordination or external connector systems.
+//! Layer: test harness.
+//!
+//! - **Owns.** Focused tests of schedule application: placement-derived state, paused and stale
+//!   schedules, applied revisions, standalone processor nodes and entity swaps.
+//! - **Depends on.** The production schedule application path and the runtime's test fixtures.
+//! - **Must not know.** Production control-plane orchestration or external connector behavior.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
 
 use std::collections::BTreeMap;
 

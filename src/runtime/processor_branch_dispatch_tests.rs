@@ -28,7 +28,7 @@ async fn report_of_dispatched_input(
     runtime: &Runtime,
     domain: &DomainName,
     domain_clock: &DomainClock,
-    instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+    instances: &mut ProcessorBranches,
 ) -> (String, AckOutcome) {
     let processor = named::<ModelName>("route_orders");
     let input_relay = named::<RelayName>("orders");
@@ -78,7 +78,7 @@ async fn processor_input_accepted_after_its_clock_stopped_fails_as_an_internal_e
         .domain_clock_lifecycle(&domain)
         .expect("the fixture installs the domain's clock")
         .stop(0);
-    let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
+    let mut instances = ProcessorBranches::new();
 
     let (message, outcome) =
         report_of_dispatched_input(&runtime, &domain, &domain_clock, &mut instances).await;
@@ -102,16 +102,16 @@ async fn processor_input_for_a_branch_task_that_stopped_fails_as_an_internal_err
     drop(input_rx);
     let (commands, _command_rx) = mpsc::channel(1);
     let task = nervix_primitives::task::spawn(std::future::pending::<()>());
-    let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
+    let mut instances = ProcessorBranches::new();
     instances.insert_restored(
         None,
         Timestamp::from_unix_nanos(1_000_000_000),
         1,
-        ProcessorBranchTask {
+        ProcessorBranchSlot::Live(ProcessorBranchTask {
             input: input_tx,
             commands,
             task: nervix_primitives::sync::blocking::Mutex::new(Some(AbortOnDropHandle::new(task))),
-        },
+        }),
     );
 
     let (message, outcome) =

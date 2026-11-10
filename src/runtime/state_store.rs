@@ -995,6 +995,41 @@ impl LatestSnapshotWriter {
             .map(|_| ())
     }
 
+    /// Write `entry` as the latest snapshot of `placement` whatever revision the placement held
+    /// before. Only state that moved into a placement holding no live state is written this way:
+    /// a revision the placement kept from an earlier lifetime of its key is not newer than it.
+    fn replace_latest_snapshot(
+        &self,
+        placement: &RuntimeStatePlacement,
+        entry: &PersistedRuntimeStateEntry,
+    ) -> error_stack::Result<(), RuntimePersistenceError> {
+        self.with_installation(|| {
+            let namespace = backup::active_namespace(
+                &self.db.snapshot(),
+                &self.restore_publications,
+                &placement.domain,
+            )?;
+            let placement_key = namespace.key(placement)?;
+            let current_lsm = self.latest_lsm(placement)?;
+            let encoded = StoredCheckpoint::Inline(entry.clone()).encode()?;
+            let mut batch = self.db.batch();
+            batch.insert(&self.latest, placement_key.clone(), encoded);
+            if let Some(previous_lsm) = current_lsm
+                && previous_lsm != entry.lsm
+            {
+                batch.remove(&self.lsm_index, index_key(&placement_key, previous_lsm));
+            }
+            batch.insert(
+                &self.lsm_index,
+                index_key(&placement_key, entry.lsm),
+                placement_key,
+            );
+            batch.commit().map_err(|cause| {
+                Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+            })
+        })
+    }
+
     fn write_latest_snapshot_checked(
         &self,
         placement: &RuntimeStatePlacement,
@@ -2065,6 +2100,39 @@ impl RuntimeStateStore {
                 move |_charge, _cancellation| {
                     writer.write_latest_snapshot(&placement, saved.revision(), saved.bytes())
                 },
+            )
+            .await
+            .change_context(RuntimePersistenceError::StorageExecution)??;
+        self.synchronize().await
+    }
+
+    /// Write the state of a key that moved here from another unit of its entity as the latest
+    /// snapshot of `placement`, and return once it is on stable storage, so the unit it left can
+    /// forget it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a claimed key's state is installed once, before its branch resumes here"
+        )
+    )]
+    pub(in crate::runtime) async fn install_moved_snapshot(
+        &self,
+        placement: &RuntimeStatePlacement,
+        snapshot: PersistedRuntimeStateEntry,
+    ) -> error_stack::Result<(), RuntimePersistenceError> {
+        let writer = self.latest_snapshot_writer();
+        let placement = placement.clone();
+        let reservation = self
+            .executor
+            .reserve(MemoryClass::Bulk, 1)
+            .await
+            .change_context(RuntimePersistenceError::StorageAdmission)?;
+        self.executor
+            .run_storage(
+                StorageClass::Filesystem,
+                reservation,
+                move |_charge, _cancellation| writer.replace_latest_snapshot(&placement, &snapshot),
             )
             .await
             .change_context(RuntimePersistenceError::StorageExecution)??;
