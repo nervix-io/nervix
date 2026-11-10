@@ -37,6 +37,7 @@ impl PeerRefusal {
 mod operations;
 #[cfg(test)]
 mod tests;
+mod timing;
 mod trust;
 use operations::Route;
 
@@ -671,19 +672,7 @@ impl Model {
     }
 
     fn at(&self, condition: &str) -> DateTime<Utc> {
-        let duration = self
-            .plan
-            .operating
-            .duration(condition)
-            .assured("validated fixture plan supplies duration");
-        let ConditionDuration::Bounded { seconds } = duration else {
-            panic!("fixture requires a bounded duration for {condition}");
-        };
-        self.now
-            .checked_add_signed(TimeDelta::seconds(
-                i64::try_from(seconds).assured("fixture duration fits i64"),
-            ))
-            .assured("fixture deadline fits chrono")
+        timing::RefreshTiming::bounded_at(self.now, &self.plan.operating, condition)
     }
 
     fn decision(&self, binding: Activation, request: Uuid, revision: u64) -> Decision {
@@ -717,30 +706,7 @@ impl Model {
                 limits().bytes,
             )
             .assured("fixture facts resolve through shared protocol");
-        let refresh_after = self.at(REFRESH_INTERVAL);
-        let overdue_duration = match self
-            .plan
-            .operating
-            .duration(REFRESH_OVERDUE)
-            .assured("validated overdue duration")
-        {
-            ConditionDuration::Bounded { seconds } => seconds,
-            ConditionDuration::Unbounded => panic!("overdue duration is bounded"),
-        };
-        let overdue_at = refresh_after
-            .checked_add_signed(TimeDelta::seconds(
-                i64::try_from(overdue_duration).assured("fixture duration fits i64"),
-            ))
-            .assured("fixture deadline fits chrono");
-        let valid_until = match self
-            .plan
-            .operating
-            .duration(OFFLINE_ALLOWANCE)
-            .assured("validated offline allowance")
-        {
-            ConditionDuration::Unbounded => None,
-            ConditionDuration::Bounded { .. } => Some(self.at(OFFLINE_ALLOWANCE)),
-        };
+        let refreshed = timing::RefreshTiming::new(self.now, &self.plan.operating);
         Decision {
             doc: DecisionKind::LicenseDecision,
             protocol: 1,
@@ -767,9 +733,9 @@ impl Model {
                 operating: resolved.values().operating.clone(),
             },
             timing: DecisionTiming {
-                refresh_after,
-                overdue_at,
-                valid_until,
+                refresh_after: refreshed.refresh_after,
+                overdue_at: refreshed.overdue_at,
+                valid_until: refreshed.valid_until,
                 term_ends_at,
                 ephemeral_expires_at: expiry,
             },
