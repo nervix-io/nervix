@@ -30,6 +30,7 @@ use thiserror::Error;
 use crate::{
     datetime::{DatetimeFormat, DatetimeParser, FormatDefect, ParseFormat, ParserZoneMismatch},
     json::{JsonExtraction, JsonOperation, JsonOutput, JsonTarget, JsonTargetDefect},
+    list_statistics::ListStatisticName,
     program::{
         BinaryOp, CalendarUnit, CaseArm, CastFailure, DateBinWidth, DatePart, DatetimeFunction,
         DatetimeFunctionName, DatetimeUnit, Disambiguation, Expr, FieldRef, FixedTimeUnit,
@@ -37,6 +38,8 @@ use crate::{
         SpannedNode, UnaryOp, Zone, spanned,
     },
 };
+
+mod list_statistics;
 
 /// A compile-time frontend failure together with the semantic operation it belongs to.
 #[derive(Debug, Clone, PartialEq, Error)]
@@ -239,6 +242,16 @@ pub enum FrontendErrorKind {
         count: NonZeroU64,
         unit: FixedTimeUnit,
     },
+    #[error("function '{function}' expects {expected} arguments, found {found}")]
+    ListStatisticArity {
+        function: ListStatisticName,
+        expected: ArgumentCount,
+        found: usize,
+    },
+    #[error("function 'list_quantile' requires its percentile to be a numeric literal")]
+    NonLiteralListPercentile,
+    #[error("function 'list_quantile' requires a percentile from 0 to 100, found {percentile}")]
+    ListPercentileOutOfRange { percentile: f64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
@@ -1518,12 +1531,15 @@ fn lower_expression_with_span(
                 .iter()
                 .map(|argument| lower_expression_with_span(argument, scope_policy, span))
                 .collect::<FrontendResult<Vec<_>>>()?;
-            match function.as_str().parse::<DatetimeFunctionName>() {
-                Ok(datetime) => datetime.lower_call(args, span)?,
-                Err(_) => Expr::Call {
+            if let Ok(datetime) = function.as_str().parse::<DatetimeFunctionName>() {
+                datetime.lower_call(args, span)?
+            } else if let Ok(statistic) = function.as_str().parse::<ListStatisticName>() {
+                statistic.lower_call(args, span)?
+            } else {
+                Expr::Call {
                     function: FunctionName::parse(function.as_str()),
                     args,
-                },
+                }
             }
         }
         ModelExpression::UdfCall {

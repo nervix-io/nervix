@@ -1618,7 +1618,8 @@ impl Compiler {
                 | FunctionName::Sum
                 | FunctionName::Min
                 | FunctionName::Max
-                | FunctionName::Mean = function
+                | FunctionName::Mean
+                | FunctionName::ListStatistic(_) = function
                 {
                     return Ok(true);
                 }
@@ -3395,7 +3396,8 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
         | FunctionName::Mean
         | FunctionName::Dot
         | FunctionName::Distance
-        | FunctionName::Datetime(_) => None,
+        | FunctionName::Datetime(_)
+        | FunctionName::ListStatistic(_) => None,
     }
 }
 

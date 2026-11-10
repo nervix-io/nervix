@@ -141,7 +141,11 @@ Lowering also removes surface forms the compiler does not need to know about:
 
 Lowering resolves datetime builtins further than other calls, because their literal arguments
 choose the kernel. It resolves literal units, time zones, formats, and bin widths once into a
-`DatetimeFunction`, and the call keeps only its row-valued arguments. Every other name is parsed,
+`DatetimeFunction`, and the call keeps only its row-valued arguments. The list statistics resolve
+the same way into a `ListStatistic` in `frontend/list_statistics.rs`: `list_quantile` reads its
+percentile from its numeric literal and `list_median` names the 50th percentile, so each call keeps
+only its list, and a percentile that is no literal or lies outside 0 to 100 is a `FrontendError`.
+Every other name is parsed,
 case-insensitively, into the closed `FunctionName` enum. An alias such as `ceiling`, `power`, or
 `substring` maps to the same variant as `ceil`, `pow`, or `substr`, and messages always use the
 canonical name. A name that matches nothing becomes `FunctionName::Unknown`, which the compiler
@@ -465,6 +469,7 @@ All paths are relative to the repository root.
 | `crates/nervix-vm/src/text_column.rs` | The bounded builder for `STRING` and `BYTES` values whose length an argument chooses |
 | `crates/nervix-vm/src/text_search.rs`, `regexp.rs` | Splitting, joining, `LIKE`, `contains_any`, NFC normalization, and regular expressions with their caches |
 | `crates/nervix-vm/src/membership.rs`, `extremum.rs`, `count.rs` | `IN` sets, `greatest`, `least`, and `clamp`, and integer counts read without narrowing |
+| `crates/nervix-vm/src/list_statistics.rs` and its `frontend/`, `semantics/` and `runtime/` children | The list statistics: their names, resolved percentile, semantics and arm execution; the lowering of their literal percentile; their element and result types and the order check `min` and `max` share; their kernels |
 | `crates/nervix-vm/src/bytes.rs` | Encodings, hashes, and UTF-8 conversion of `BYTES` |
 | `crates/nervix-vm/src/json.rs` | Typed JSON extraction over one parse per document |
 | `crates/nervix-vm/src/ip_address.rs`, `url_component.rs` | IP addresses, CIDR networks, and URL components |
@@ -1027,6 +1032,16 @@ The reference owns each family's contract. These notes describe its implementati
   - Construction and `concat` use Arrow `interleave`. `slice` builds indices for one `take`.
   - `ListElements` in the catalog decides, when the call is compiled, which functions reject
     nested elements, so no batch reaches a kernel with an element type it cannot read.
+  - The list statistics in `runtime/list_statistics.rs` work on each list's slice of the child
+    buffer. A variance or standard deviation calls the window statistics' `moments` kernel and
+    `Estimator` in `nervix-simd-kernels` once per list, after one non-finite mask over the whole
+    child buffer marks the lists that fail. A quantile copies one list's values at a time into a
+    scratch buffer the batch reuses, selects the lower rank with `select_nth_unstable_by` under
+    Arrow's total order and takes the least value above it for the upper rank, interpolating with
+    the window quantiles' `QuantileRank`, so the column is never reordered. `list_argmin` and
+    `list_argmax` scan the child values where they lie, comparing them as `min` and `max` do and
+    replacing the extreme only on a strictly more extreme value. A variance runs over the whole
+    batch in a conditional arm, like `mean`; a quantile runs over the selected rows only.
 - **Bytes, encodings, and hashes.** `BYTES` is an Arrow `Binary` column.
   - Encoders check each output's length against the column before encoding.
   - `bytes_from_utf8` reuses the text's buffers without copying.

@@ -145,7 +145,7 @@ Every builtin follows these rules unless its own description says otherwise:
 | --- | --- |
 | Types | Arguments are never converted implicitly. A function that accepts several types, such as `abs` over every numeric type, takes each of them as it is. |
 | Nulls | A null argument produces a null result. `coalesce`, `nullif`, `concat`, `concat_ws`, `is_null`, `greatest`, and `least` define their own null handling, and a function can also yield null for present arguments where its description says so, such as `regexp_substr` without a match, `nth` past the end of a list, or `url_host` of a URL without a host. |
-| Optional results | A result is optional when any argument is. `is_null`, `IS [NOT] DISTINCT FROM`, `now`, `uuid_v4`, `uuid_v7`, and `read_headers` are never optional; `coalesce`, `greatest`, and `least` are optional only when every argument is; and `TRY_CAST`, `JSON_VALUE`, `TRY_JSON_VALUE`, `nullif`, `LOOKUP_HASH_MAP`, `read_header`, `url_host`, `url_port`, `url_query`, `url_fragment`, `url_query_value`, and the list functions `first`, `last`, `nth`, `sum`, `min`, `max`, and `mean` are always optional. An optional result initializes a required field only through an expression that is never null, such as `coalesce(<result>, <default>)`; assigning it directly is rejected when the statement is applied with `SET field '<field>' may be null but the output field is required`. |
+| Optional results | A result is optional when any argument is. `is_null`, `IS [NOT] DISTINCT FROM`, `now`, `uuid_v4`, `uuid_v7`, and `read_headers` are never optional; `coalesce`, `greatest`, and `least` are optional only when every argument is; and `TRY_CAST`, `JSON_VALUE`, `TRY_JSON_VALUE`, `nullif`, `LOOKUP_HASH_MAP`, `read_header`, `url_host`, `url_port`, `url_query`, `url_fragment`, `url_query_value`, the list functions `first`, `last`, `nth`, `sum`, `min`, `max`, and `mean`, and the [list statistics](#list-statistics) are always optional. An optional result initializes a required field only through an expression that is never null, such as `coalesce(<result>, <default>)`; assigning it directly is rejected when the statement is applied with `SET field '<field>' may be null but the output field is required`. |
 | Sensitivity | A result is sensitive when any argument is sensitive, including results such as `length(...)`, `is_null(...)`, and `count(...)` that do not contain the argument's value. A conditional is sensitive when its operand, any condition, or any result is. Literals and calls without arguments are not sensitive. Only `leak_sensitive(...)` removes sensitivity. |
 | Volatility | Every builtin is deterministic except `now()`, which returns one value for an execution, and `uuid_v4()` and `uuid_v7()`, which return a new value for every message. |
 | Errors | A function that can fail reports a per-message error and yields null for that message. Inside a conditional, only the selected arm can report one. [Errors](#errors) describes how an error reaches the message's error policy. |
@@ -1838,6 +1838,56 @@ rather than counting the elements of one list. A window route therefore cannot u
 functions, even inside an aggregate's argument, where `SUM(count(input.values))` is rejected as a
 nested aggregate. Everywhere else these names are the list functions above.
 
+### List Statistics
+
+Eight functions describe the values of one `ARRAY` or `VEC`, beside `sum`, `mean`, `min`, and
+`max`:
+
+| Function | Elements | Returns | Null when |
+| --- | --- | --- | --- |
+| `list_var_pop(list)`, `list_stddev_pop(list)` | numeric | optional `F64` | the list is empty |
+| `list_var_samp(list)`, `list_stddev_samp(list)` | numeric | optional `F64` | the list has fewer than two elements |
+| `list_median(list)` | numeric | optional `F64` | the list is empty |
+| `list_quantile(list, percentile)` | numeric; `percentile` a numeric literal from 0 to 100 | optional `F64` | the list is empty |
+| `list_argmin(list)`, `list_argmax(list)` | numeric, `BOOL`, `STRING`, `DATETIME` | optional `I64` | the list is empty |
+
+The results are always optional, as those of `mean`, `min`, and `first` are, and a null list gives
+null.
+
+- **Variance and standard deviation.** Each element is read as the nearest `F64`, and the moments
+  are kept centered on the list's own mean, as the window statistics keep theirs, so a variance is
+  never the difference of two large sums of squares. The population forms divide by the number of
+  elements `n` and the sample forms by `n - 1`; a standard deviation is the square root of its
+  variance.
+- **Median and quantile.** `list_quantile` is exact over all of the list's elements: it orders them
+  and interpolates linearly at rank `percentile / 100 * (n - 1)`, the rule
+  [`APPROX_QUANTILE`](#approximate-sketches) follows within its exact range. `list_median(list)` is
+  `list_quantile(list, 50)`. Elements order by the IEEE 754 total order, so equal values and
+  `-0.0` beside `0.0` give one result whatever their written order. The percentile is read once,
+  when the statement is applied, from an integer or decimal literal such as `90` or `99.5`. Any
+  other expression, a negative literal such as `-1` included, is refused with `function
+  'list_quantile' requires its percentile to be a numeric literal`, and a literal outside 0 to 100
+  with `function 'list_quantile' requires a percentile from 0 to 100, found 101`.
+- **Index of the extreme.** `list_argmin` and `list_argmax` return the zero-based position of the
+  least or greatest element, counted as `nth` counts. Elements order as `min` and `max` order them,
+  floats by the IEEE 754 total order, and the first of equal elements wins, so
+  `nth(list, list_argmin(list))` is `min(list)` and `nth(list, list_argmax(list))` is `max(list)`.
+  Neither function fails.
+- **Errors.** A variance, standard deviation, median, or quantile of a list holding NaN or an
+  infinity reports `invalid_argument` with `list_median input contains a non-finite element`,
+  naming the function, and a result that is not finite reports `list_var_pop produced a non-finite
+  result`, as the variance of `[1e308, -1e308]` does. The function yields null for that message.
+- **Types.** A nested `ARRAY` or `VEC` element is refused when the statement is applied, with
+  `function 'list_var_pop' requires ARRAY or VEC elements of a scalar type`, and so is a
+  non-numeric element of the dispersion and quantile functions, with `function 'list_median'
+  requires numeric input, found Utf8`, and a `BYTES` element of `list_argmin` and `list_argmax`,
+  with `function 'list_argmax' requires ordered scalar elements, found Binary`.
+
+The `list_` prefix keeps these names apart from the window aggregates. In a window route `VAR_POP`,
+`STDDEV_SAMP`, and the other aggregates keep their meaning, and a list statistic may appear inside
+an aggregate's argument, as `AVG(list_stddev_pop(input.history))` averages the spread of each
+retained row's list.
+
 ## Window Aggregates
 
 A [window processor](processors.md#window-processor) route computes its output from aggregates over
@@ -2149,6 +2199,8 @@ errors. `T` is the argument's type, and a list is an `ARRAY` or a `VEC`.
 | `mean` | optional `F64` | [Array And Vector Functions](#array-and-vector-functions) |
 | `dot` | element type | [Array And Vector Functions](#array-and-vector-functions) |
 | `distance` | `F64` | [Array And Vector Functions](#array-and-vector-functions) |
+| `list_var_pop`, `list_var_samp`, `list_stddev_pop`, `list_stddev_samp`, `list_median`, `list_quantile` | optional `F64` | [List Statistics](#list-statistics) |
+| `list_argmin`, `list_argmax` | optional `I64` | [List Statistics](#list-statistics) |
 | `COUNT`, `COUNT_IF`, `APPROX_COUNT_DISTINCT` | `I64` | [Window Aggregates](#window-aggregates) |
 | `BOOL_AND`, `BOOL_OR` | `BOOL` | [Window Aggregates](#window-aggregates) |
 | `SUM`, `MIN`, `MAX`, `FIRST`, `LAST` | the argument's type | [Window Aggregates](#window-aggregates) |

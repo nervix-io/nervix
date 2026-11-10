@@ -31,11 +31,14 @@ use crate::{
     extremum::Extremum,
     ip_address::NetworkSource,
     json::JsonOutput,
+    list_statistics::ListStatistic,
     membership::MembershipSet,
     program::{BinaryOp, CastFailure, DatetimeFunction, Expr, FunctionName, SpannedExpr, UnaryOp},
     regexp::{RegexpCall, RegexpFunction},
     text_search::ContainsAnyCall,
 };
+
+mod list_statistics;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Volatility {
@@ -434,6 +437,7 @@ pub enum BuiltinLowering {
     /// An `IN` test, with the set of constants it was compiled with.
     Membership(MembershipSet),
     Datetime(DatetimeFunction),
+    ListStatistic(ListStatistic),
 }
 
 impl RegisterType {
@@ -990,6 +994,7 @@ pub const fn builtin_arm_execution(lowering: &BuiltinLowering) -> ArmExecution {
         | BuiltinLowering::UrlQueryValues
         | BuiltinLowering::UrlDecode => ArmExecution::SelectedRows,
         BuiltinLowering::Datetime(function) => function.arm_execution(),
+        BuiltinLowering::ListStatistic(statistic) => statistic.arm_execution(),
     }
 }
 
@@ -1123,6 +1128,7 @@ pub fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescriptor> 
         FunctionName::Least => BuiltinLowering::Extremum(Extremum::Least),
         FunctionName::Clamp => BuiltinLowering::Clamp,
         FunctionName::Datetime(function) => BuiltinLowering::Datetime(function.clone()),
+        FunctionName::ListStatistic(statistic) => BuiltinLowering::ListStatistic(*statistic),
         FunctionName::LeakSensitive
         | FunctionName::LookupHashMap
         | FunctionName::ReadHeader
@@ -1217,6 +1223,7 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
             can_error: false,
             null_propagation: NullPropagation::Strict,
         },
+        BuiltinLowering::ListStatistic(statistic) => statistic.semantics(),
         BuiltinLowering::Datetime(function) => OperationSemantics {
             volatility: Volatility::Immutable,
             dependency_scope: DependencyScope::Constant,
@@ -1883,18 +1890,9 @@ fn builtin_output_type(
             if let BuiltinLowering::Mean = lowering {
                 require_numeric_arg(function, input, span)?;
                 Ok(DataType::Float64)
-            } else if input.is_ordered() || input == RegisterType::Boolean {
-                Ok(element)
             } else {
-                Err(Report::new(CompileError {
-                    code: CompileErrorCode::UnsupportedFunction,
-                    message: format!(
-                        "function '{}' requires ordered scalar elements, found {:?}",
-                        function.as_str(),
-                        element
-                    ),
-                    span: span.into(),
-                }))
+                list_statistics::require_ordered_elements(function, &element, input, span)?;
+                Ok(element)
             }
         }
         BuiltinLowering::Count => {
@@ -2055,6 +2053,9 @@ fn builtin_output_type(
             let input = require_supported_register_type(function, &arg_types[0], span.clone())?;
             require_integral_arg(function, input, span)?;
             Ok(DataType::Utf8)
+        }
+        BuiltinLowering::ListStatistic(statistic) => {
+            statistic.output_type(function, arg_types, span)
         }
         BuiltinLowering::Datetime(datetime) => {
             let operands = datetime.operands();

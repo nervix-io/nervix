@@ -11,6 +11,7 @@ use crate::{
     ip_address::{IpFamily, NetworkDefect},
     ir::{RegisterRef, RegisterType},
     json::JsonDefect,
+    list_statistics::FloatListStatistic,
     program::Span,
 };
 
@@ -64,6 +65,9 @@ pub enum SideErrorReason {
     NegativeShiftCount(ShiftOperation),
     #[error("{0} produced a non-finite result")]
     NonFiniteResult(FloatOperation),
+    /// A statistic over one list whose list holds a value that is not finite.
+    #[error("{0} input contains a non-finite element")]
+    NonFiniteListElement(FloatListStatistic),
     #[error("cannot cast value to {target}")]
     CastFailed { target: RegisterType },
     #[error("invalid regular expression: {0}")]
@@ -157,6 +161,7 @@ impl SideErrorReason {
             Self::DivisionByZero(_) => ErrorCode::DivisionByZero,
             Self::NegativeShiftCount(_)
             | Self::NonFiniteResult(_)
+            | Self::NonFiniteListElement(_)
             | Self::InvalidRegularExpression(_)
             | Self::PatternSetTooLarge
             | Self::LikePatternTooLong
@@ -388,6 +393,9 @@ pub enum FloatOperation {
     Sqrt,
     #[strum(to_string = "tan")]
     Tan,
+    /// A statistic over one list read in floating point.
+    #[strum(to_string = "{0}")]
+    ListStatistic(FloatListStatistic),
 }
 
 /// Row-aligned side errors recorded while a program executes.
