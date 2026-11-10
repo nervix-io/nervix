@@ -31,6 +31,7 @@ error-stack = { workspace = true }
 fjall = { workspace = true }
 futures-util = { workspace = true }
 imbl = { workspace = true }
+indexmap = { workspace = true }
 meticulous = { workspace = true }
 nervix-crypto = { workspace = true }
 nervix-execution = { workspace = true }
@@ -43,6 +44,7 @@ nervix-recovery = { workspace = true }
 openraft = { workspace = true }
 rkyv = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 sorted-vec = { workspace = true }
 storekey = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
@@ -50,6 +52,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 ubyte = { workspace = true }
+url = { workspace = true }
 uuid = { workspace = true, features = ["serde"] }
 zeroize = { workspace = true }
 
@@ -58,8 +61,8 @@ alloc_count = { workspace = true }
 bolero = { workspace = true }
 nervix-arbitrary = { workspace = true }
 nervix-dns = { workspace = true }
+nervix-licensing-protocol = { workspace = true, features = ["testing"] }
 nervix-model-harness = { workspace = true }
 rcgen = { workspace = true }
-serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

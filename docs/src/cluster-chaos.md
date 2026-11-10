@@ -97,7 +97,7 @@ Bolero obligation, and none of those discharges a suite.
 | `suite.sh`, `suites.json`, `suite-report.jq` | The suites: catalog, shard budgets, runs, verdict records, summaries and suite cleanup |
 | `compose.yaml`, `compose.diagnostic.yaml`, `compose.outward-tls.yaml` | The deployment, its diagnostic overlay and the outward TLS overlay of a three-node leader crash |
 | `compose.fresh-cluster.yaml`, `compose.fresh-cluster.diagnostic.yaml` | The second cluster that a [fresh-cluster restore](#restore-into-a-fresh-cluster) starts, and its diagnostic overlay |
-| `fixtures/` | The Plexus graphs, record generators, the WASM guest and an explicit mixed plan |
+| `fixtures/` | The Plexus graphs, record generators, the WASM guest, the ONNX model and an explicit mixed plan |
 | `tests/` | The runner's self-tests |
 | `.github/workflows/chaos.yaml`; the `chaos-*` and `build-diagnostic` jobs of `.github/workflows/docker-build.yaml` | CI |
 
@@ -215,6 +215,8 @@ reference to one repository digest before shards start. A run builds and install
 | `fixtures/baseline.plexus` | The graph every scenario installs. It is described in the list below the table |
 | `fixtures/generate-baseline.jq` | The records: a run-scoped `event_id`, a `sequence`, the branches `alpha`, `beta` and `gamma` in turn, and content derived from the sequence |
 | `fixtures/stateful.plexus`, `fixtures/generate-stateful.jq` | The stateful scenario's graph and its two interleaved branches |
+| `fixtures/stateful-inference.plexus` | The stateful scenario's inferencer, its output relay and its emitter, installed after `fixtures/stateful.plexus` |
+| `fixtures/onnx/models/running_sum.onnx` | The stateful inferencer's model: it adds its input to the state it carries and scores the sum |
 | `fixtures/binding-endpoints.plexus`, `fixtures/generate-endpoints.jq` | The binding client graph and its typed records |
 | `fixtures/paced.plexus`, `fixtures/generate-paced.jq` | The paced domain's graph and its two interleaved branches |
 | `fixtures/wasm/processors/branch-counter.wat` | The stateful scenario's prebuilt WASM guest, in WebAssembly text |
@@ -238,6 +240,11 @@ guest ABI. The `nervix-wasm` package's `chaos_branch_counter` test, part of `jus
 the checked-in module differs from what the generator writes. The same test drives the module
 through the host to prove its per-branch counts and its restore from saved state.
 
+The inferencer's model is a checked-in ONNX file, written by `scripts/train_simple_onnx.py`. The
+run uploads exactly that file as resource `chaos_running_model` and records its SHA-256 and size
+under `fixtures.onnx`. `scripts/tests/test_train_simple_onnx.py`, part of `just test-docs`, fails
+while the checked-in model differs from what the generator writes.
+
 ### Building Nothing
 
 A run compiles nothing:
@@ -247,6 +254,7 @@ A run compiles nothing:
 - every tool is a pinned image
 - the graphs are Plexus text
 - the guest is WebAssembly text
+- the model is a checked-in ONNX file
 
 CI holds this to the letter. The job that runs a shard removes every Rust toolchain directory from
 the `PATH` the suite runs with. The job fails if `cargo`, `rustc` or `rustup` is still reachable.
@@ -1822,7 +1830,7 @@ just chaos run stateful --image nervix:debian --nodes 1 --fault cluster-restart
 keeps its own traffic and exact ledger. A separate kcat container produces records to
 `chaos_state_input`, one a second and one kcat call per record. Two branches, `alpha` and `beta`,
 interleave strictly by sequence, and every record carries its branch index. An `ACK PARALLEL`
-ingestor with its own consumer group feeds four processors, each with its own attached Kafka emitter
+ingestor with its own consumer group feeds five processors, each with its own attached Kafka emitter
 and output topic:
 
 - **The deduplicator `chaos_dedup`.** Every fourth record of a branch repeats the key of a record 3,
@@ -1836,6 +1844,12 @@ and output topic:
   branch.
 - **The WASM processor `chaos_counter`.** Each branch's guest counts the rows it has processed,
   saves that count as its state, and emits every row with all of its input fields and the count.
+- **The stateful inferencer `chaos_running`.** `fixtures/stateful-inference.plexus` installs it
+  after the rest of the graph. It runs the checked-in running-sum model from resource
+  `chaos_running_model` on a constant `[1, 0]` input. Its `STATE` carries each branch's sum, so the
+  one-element score it emits for every row counts the rows that branch's state reflects. Its
+  emitter `chaos_inferred_emitter` writes `chaos_inferred_output` with `MODE ACK SEQUENTIAL`, so an
+  output delivered twice arrives twice in a row.
 
 The stateful graph declares its own `chaos_state_branch`. Its partitioned case uses four units:
 `alpha` lands in partition 2 and `beta` in partition 0. Placement evidence records every unit, and
@@ -1867,8 +1881,13 @@ the Kafka consumers in place.
    inspection, and requires the outputs to stay unchanged throughout.
 
 `stateful/milestone.json` keeps that evidence. The image exposes no publication milestone for
-deduplicator, window or materialized relay state. Their durability verdicts therefore rest on this
-drained and held boundary rather than on an observed publication, and the result says so.
+deduplicator, window, inferencer or materialized relay state. Their durability verdicts therefore
+rest on this drained and held boundary rather than on an observed publication, and the result says
+so.
+
+`DESCRIBE` does not read an inferencer, so the runner places `chaos_running` from the schedule
+section of `SHOW CLUSTER STATUS`, one line per unit, and every other stateful entity from its
+`DESCRIBE` answer.
 
 **The fault.** The load resumes for four more records and holds again, and version 3 is published.
 The runner reads the fault's boundaries while the load holds, which takes several broker round trips.
@@ -1891,7 +1910,7 @@ stops the load and waits for the stateful group to commit through the final boun
 
 **The verdicts.** Records are classified by sequence: before the milestone; in the volatile
 interval from the milestone to the end of the fault's recovery; and after recovery.
-`verify-state-evidence.sh` judges each processor against the accepted-input ledger, with three
+`verify-state-evidence.sh` judges each processor against the accepted-input ledger, with four
 expectations:
 
 - **Replays.** An identical replay of a record after a fault is a replay duplicate, counted
@@ -1903,6 +1922,8 @@ expectations:
   - a record after the milestone must carry at least profile version 2
   - every guest count must reach at least its branch index, because the checkpoint the guest
     restores reflects every acknowledged input
+  - every inferencer count after the fault must continue from a sum that holds at least the
+    branch's records before the milestone, so no branch's state resets below the milestone
 - **The volatile interval.** It permits what periodic checkpoints and replayed acknowledgements
   allow: a duplicate of a key first seen there may pass; a window row from it may be lost or
   aggregated twice; its profile version may fall back to version 2; and a guest may count the same
@@ -1911,6 +1932,16 @@ expectations:
   permits repeated delivery, neither the number of distinct volatile inputs nor the observed output
   duplicates bounds the guest's count excess. The verdict records observed duplicates and
   post-recovery excess separately; it does not infer an unobserved callback count.
+- **The inferencer's restored count.** An inferencer output carries no record identity, so an
+  output equal to its branch's previous output is the replay. The inferencer acknowledges a row
+  after it dispatches the row's output, and persists its state on the snapshot interval. A branch
+  therefore continues after the fault from a restored count `C`: the updates after its last
+  checkpoint are skipped, and a volatile row the source redelivers counts again. `C` must be at
+  least the branch's records before the milestone and at most its records admitted before
+  recovery. Every count after the fault that does not follow the branch's previous count by one,
+  such as the first count `C + 1` of the restored branch or an output a former owner delivered
+  before its fence took effect, must start again from such a `C`. The verdict records every
+  restored count, the final counts and their excess over the accepted records.
 
 Every verdict also requires:
 
@@ -1920,11 +1951,16 @@ Every verdict also requires:
 - windows of 12 rows of one branch, with the sums they report
 - guest counts that equal the branch index before the fault and advance by one per record after
   recovery
+- inferencer outputs that are each one whole count of an accepted branch, that count 1, 2, 3 and
+  so on before the fault, through at least every record of the branch before the milestone, and
+  that end with as many outputs advancing by one as the branch has records after recovery
+- without a fault, inferencer counts that reach exactly each branch's accepted records
 - never the profile default or another branch's profile
 - before a fault, every window made of 12 consecutive rows
 
-A durability verdict that its fault did not exercise fails as missing evidence. An example is a run
-that ended before a duplicate of a milestone key arrived after recovery. `stateful/verdict-*.json`
+A durability verdict that its fault did not exercise fails as missing evidence. Examples are a run
+that ended before a duplicate of a milestone key arrived after recovery, and a branch with no
+inferencer count after the fault. `stateful/verdict-*.json`
 keeps each processor's verdict. A failing verdict is a product finding, and the run continues to the
 baseline ledger before it exits nonzero. `results/stateful-progress.json` records the deployment,
 boundaries, milestone, timings and every verdict.

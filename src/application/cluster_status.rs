@@ -187,6 +187,7 @@ mod tests {
 
     fn peer() -> GossipNode {
         GossipNode {
+            licensing: None,
             parameters: None,
             node_id: ClusterNodeName::parse("node-3").expect("valid peer name"),
             incarnation: ClusterNodeIncarnation::new(7),

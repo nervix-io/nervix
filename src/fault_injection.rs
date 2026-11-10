@@ -190,6 +190,7 @@ pub struct FaultInjection {
 #[derive(Debug)]
 struct FaultInjectionState {
     licensing_quotas: watch::Sender<[Option<u64>; 2]>,
+    licensing_clock_offset: watch::Sender<std::time::Duration>,
     orphaned_domain_pauses: orphaned_domain_pause::OrphanedDomainPauses,
     /// One bounded command-reply script per scenario domain, absent from ordinary builds.
     command_reply_scripts: DashMap<DomainName, CommandReplyScript, RandomState>,
@@ -540,6 +541,7 @@ impl Default for FaultInjection {
         Self {
             inner: Arc::new(FaultInjectionState {
                 licensing_quotas: watch::channel([None; 2]).0,
+                licensing_clock_offset: watch::channel(std::time::Duration::ZERO).0,
                 orphaned_domain_pauses: orphaned_domain_pause::OrphanedDomainPauses::default(),
                 command_reply_scripts: DashMap::default(),
                 emitter_faults: DashMap::default(),
