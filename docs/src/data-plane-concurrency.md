@@ -3713,8 +3713,9 @@ external partition recovery verify admission and observation during an isolated 
 
 The testing-only processor-flush seam borrows one pause from the command-pause registry by its
 exact domain/processor identity, releases the map guard before waiting and removes the one-shot
-entry after release. Its callable declares that bounded test protocol. The scenario and failed-body
-cleanup release the pause; another processor and a later completion pass an already-claimed pause.
+entry after release. The shared pause owner declares that bounded test protocol. The scenario and
+failed-body cleanup release the pause; another processor and a later completion pass an
+already-claimed pause.
 Ordinary builds contain neither that call nor its registry. It observes a real flush obligation
 before completion without changing the drain count or the product's flush and gate deadlines.
 

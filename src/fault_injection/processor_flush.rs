@@ -33,17 +33,6 @@ impl FaultInjection {
         ));
     }
 
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            bounded,
-            reason = "a scenario holds one processor flush completion before its accounting \
-                      settles",
-            key = "one test processor",
-            bound = "one keyed read and at most one removal; no guard survives the one-shot test \
-                     wait"
-        )
-    )]
     pub(crate) async fn pause_processor_flush_completion_if_armed(&self, processor: DomainNodeRef) {
         self.pause_command_if_armed(CommandPausePoint::ProcessorFlushCompletion(processor))
             .await;

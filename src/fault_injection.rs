@@ -2748,6 +2748,16 @@ impl FaultInjection {
         pause.wait_until_reached().await;
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "a scenario holds its one-shot command or processor-completion point",
+            key = "one typed test pause point",
+            bound = "one keyed read and at most one removal; no guard survives the test wait, \
+                     which explicit release or scenario cleanup ends"
+        )
+    )]
     async fn pause_command_if_armed(&self, point: CommandPausePoint) {
         let Some(pause) = self
             .inner
