@@ -69,6 +69,10 @@ use crate::{
 #[path = "connector_payload_tests.rs"]
 mod payload_tests;
 
+#[cfg(test)]
+#[path = "connector_metadata_tests.rs"]
+mod metadata_tests;
+
 pub(in crate::registry) fn validate_ingestor_source(
     domain: &DomainName,
     identifier: &ModelName,
@@ -1769,6 +1773,14 @@ pub(in crate::registry) fn validate_ingestor_filter_where_for_internal_schemas(
             ),
         }));
     }
+    let capabilities = input.entity_kind().capabilities();
+    let mut bindings = vec![CompileBinding::readonly(
+        "payload",
+        StdArc::new(capabilities.payload.arrow_schema()),
+    )];
+    if let Some(schema) = capabilities.metadata.arrow_schema() {
+        bindings.push(CompileBinding::readonly("metadata", StdArc::new(schema)));
+    }
     validate_where_program_for_internal_schemas(
         ModelValidationContext {
             domain,
@@ -1783,10 +1795,7 @@ pub(in crate::registry) fn validate_ingestor_filter_where_for_internal_schemas(
             allow_header_reads: true,
             ..CompileOptions::default()
         },
-        &[CompileBinding::readonly(
-            "payload",
-            StdArc::new(input.entity_kind().capabilities().payload.arrow_schema()),
-        )],
+        &bindings,
     )
 }
 

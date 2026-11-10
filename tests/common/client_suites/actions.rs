@@ -14,12 +14,16 @@ use tokio::io::{AsyncWrite, AsyncWriteExt as _};
 const REQUEST_PREFIX: &str = "NERVIX-SUITE-ACTION";
 const ACTION_NAME: &str = "refuse-next-subscription-opening";
 const CLEAR_ACTION_NAME: &str = "clear-subscription-opening-refusals";
+const CLOCK_ACTION_NAME: &str = "refuse-next-clock-attachment";
+const CLEAR_CLOCK_ACTION_NAME: &str = "clear-clock-attachment-refusals";
 
 /// A testing-build action the scenario explicitly supports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SuiteAction {
     RefuseNextSubscriptionOpening,
     ClearSubscriptionOpeningRefusals,
+    RefuseNextClockAttachment,
+    ClearClockAttachmentRefusals,
 }
 
 impl SuiteAction {
@@ -27,6 +31,8 @@ impl SuiteAction {
         match name {
             ACTION_NAME => Ok(Self::RefuseNextSubscriptionOpening),
             CLEAR_ACTION_NAME => Ok(Self::ClearSubscriptionOpeningRefusals),
+            CLOCK_ACTION_NAME => Ok(Self::RefuseNextClockAttachment),
+            CLEAR_CLOCK_ACTION_NAME => Ok(Self::ClearClockAttachmentRefusals),
             _ => Err(io::Error::other(format!("unknown suite action: {name}"))),
         }
     }
@@ -35,6 +41,8 @@ impl SuiteAction {
         match self {
             Self::RefuseNextSubscriptionOpening => ACTION_NAME,
             Self::ClearSubscriptionOpeningRefusals => CLEAR_ACTION_NAME,
+            Self::RefuseNextClockAttachment => CLOCK_ACTION_NAME,
+            Self::ClearClockAttachmentRefusals => CLEAR_CLOCK_ACTION_NAME,
         }
     }
 }
