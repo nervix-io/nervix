@@ -1056,9 +1056,10 @@ async fn rejected_stream_opening_retains_the_transport_cause() {
     } = connected_transports().await;
     transport_b
         .register_stream_handler::<ResourceStreamRequest, _, _>(|_context, _request| async {
-            Err::<StreamingResponse, _>(StreamHandlerError::with_cause(Report::new(
-                io::Error::other("stream source unavailable"),
-            )))
+            Err::<StreamingResponse, _>(StreamHandlerError::with_cause(
+                Report::new(io::Error::other("stream source unavailable"))
+                    .change_context(io::Error::other("opening the stream producer failed")),
+            ))
         })
         .expect("resource stream handler should register");
     timeout(Duration::from_secs(5), async {
@@ -1082,6 +1083,15 @@ async fn rejected_stream_opening_retains_the_transport_cause() {
     ));
     assert!(error.contains::<TransportError>());
     assert!(!error.contains::<RemoteOperationFailureKind>());
+    let Some(TransportError::RemoteRejected { message, .. }) =
+        error.downcast_ref::<TransportError>()
+    else {
+        panic!("the refused opening retains its remote diagnostic");
+    };
+    assert!(
+        message.contains("stream source unavailable"),
+        "the reporting boundary preserves the stream handler's underlying cause: {message}",
+    );
 
     transport_a.shutdown().await;
     transport_b.shutdown().await;

@@ -1075,7 +1075,7 @@ impl StreamOpeningFailure {
                 kind: RemoteOperationFailureKind::from(failure),
                 report: error,
             },
-            None => Self::Request(RemoteRequestFailure::ResponseEncode(error.to_string())),
+            None => Self::Request(RemoteRequestFailure::ResponseEncode(format!("{error:#}"))),
         }
     }
 }
