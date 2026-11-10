@@ -215,6 +215,10 @@ prost = { workspace = true }
 prost-reflect = { workspace = true, features = ["serde"] }
 prost-types = { workspace = true }
 protox = { workspace = true }
+reqwest = { workspace = true, default-features = false, features = [
+  "json",
+  "http2",
+] }
 rkyv = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
@@ -246,6 +250,7 @@ upon = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
 webpki-roots = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 alloc_count = { workspace = true }
@@ -360,6 +365,7 @@ members = [
   "crates/expiry-map",
   "crates/interconnect",
   "crates/licensing-protocol",
+  "crates/licensing-test-service",
   "crates/licensing-vocabulary",
   "crates/jaq",
   "crates/nervix-wasm",
@@ -429,6 +435,12 @@ arrow-select = "58"
 arrow-string = "58"
 ascii-dag = "0.9"
 astral-tokio-tar = { version = "0.6.4", default-features = false }
+axum = { version = "0.8.9", default-features = false, features = [
+  "http1",
+  "http2",
+  "json",
+  "tokio",
+] }
 jose-b64 = { version = "0.1.2", default-features = false, features = ["json"] }
 jose-jws = { version = "0.1.2", default-features = false }
 jsonwebtoken = { version = "11.1.0", default-features = false, features = [
@@ -625,6 +637,7 @@ nervix-expiry-map = { package = "nervix-expiry-map", path = "crates/expiry-map" 
 nervix-interconnect = { package = "nervix-interconnect", path = "crates/interconnect" }
 nervix-jaq = { package = "nervix-jaq", path = "crates/jaq" }
 nervix-licensing-protocol = { package = "nervix-licensing-protocol", path = "crates/licensing-protocol" }
+nervix-licensing-test-service = { path = "crates/licensing-test-service" }
 nervix-licensing-vocabulary = { path = "crates/licensing-vocabulary" }
 nervix-model-harness = { package = "nervix-model-harness", path = "crates/model-harness" }
 nervix-models = { package = "nervix-models", path = "crates/models" }

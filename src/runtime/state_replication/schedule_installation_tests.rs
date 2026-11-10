@@ -82,9 +82,10 @@ impl InstallationFixture {
     #[cfg(not(feature = "shuttle"))]
     fn request(&self) -> nervix_interconnect::PrepareForcedOwnershipRecoveryRequest {
         nervix_interconnect::PrepareForcedOwnershipRecoveryRequest {
-            recovery_budget: *nervix_models::ForcedRecoveryBudget::resolve_duration(None)
-                .expect("the declared recovery default validates")
-                .value(),
+            recovery_budget: nervix_models::ClusterParameterDuration::try_from(
+                nervix_models::ClusterParameterValues::default().forced_recovery_budget(),
+            )
+            .expect("the declared recovery default fits the transport value"),
             operation_id: "await-installation".to_owned(),
             source: named("node-1"),
             destination: named("node-2"),

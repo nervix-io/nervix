@@ -306,6 +306,8 @@ fn test_session_service(
             session_limits: nervix_client_wire::SessionLimits::from(
                 nervix_models::SessionCapabilities::default().bounds(),
             ),
+            licensing_requests: super::licensing::LicensingRequests::default(),
+            licensing_test_support: super::licensing::ConfiguredLicensingTestSupport::default(),
             cluster: cluster.clone(),
             consensus: consensus.proposer(),
             consensus_administrator: consensus.administrator(),
@@ -681,6 +683,7 @@ pub(in crate::application) async fn build_test_service_inner(
         operations: nervix_consensus::RaftOperationSettings::default(),
         database: nervix_models::DatabaseSettings::<nervix_models::ConsensusDatabase>::default()
             .capabilities(None),
+        licensing: nervix_consensus::LicensingEnvironment::default(),
         cluster_name: "test".to_string(),
         node_id: expected_leader.clone(),
         interconnect_advertise_addr: interconnect.local_addr().into(),

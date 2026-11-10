@@ -16,6 +16,9 @@ fn parameters(input: &[u8; 384]) -> ClusterParameterValues {
         entity_gate_poll_interval: Some(generated.entity_gate_poll_interval()),
         domain_drain_poll_interval: Some(generated.domain_drain_poll_interval()),
         runtime_readiness_propagation_bound: Some(generated.runtime_readiness_propagation_bound()),
+        licensing_request_timeout: Some(generated.licensing_request_timeout()),
+        licensing_retry_backoff_max: Some(generated.licensing_retry_backoff_max()),
+        licensing_stream_idle_timeout: Some(generated.licensing_stream_idle_timeout()),
         password_iterations: Some(generated.password_iterations()),
         node_unavailability_timeout: Some(generated.node_unavailability_timeout()),
         domain_drain_timeout: Some(generated.domain_drain_timeout()),
@@ -243,7 +246,10 @@ fn delayed_observations_and_installations_preserve_the_newest_coherent_revision(
 /// Every duration keeps its complete nanosecond value in both public and compact stored forms.
 #[test]
 fn bounded_durations_preserve_nanoseconds_at_both_ends_of_their_domain() {
-    let definitions: [fn(Duration) -> ClusterParameterChange; 12] = [
+    let definitions: [fn(Duration) -> ClusterParameterChange; 15] = [
+        ClusterParameterChange::LicensingRequestTimeout,
+        ClusterParameterChange::LicensingRetryBackoffMax,
+        ClusterParameterChange::LicensingStreamIdleTimeout,
         ClusterParameterChange::ForcedRecoveryBudget,
         ClusterParameterChange::OwnershipHandoffPollInterval,
         ClusterParameterChange::EntityGatePollInterval,

@@ -75,7 +75,15 @@ pub(super) fn spawn(arguments: MembershipReconciliation) -> JoinHandle<()> {
                 match administrator_for_membership_reconcile
                     .maybe_initialize(|usage| {
                         membership_licensing
-                            .admit(crate::licensing::QuotaName::ClusterNodes, usage, 1, false)
+                            .admit_snapshot(
+                                proposer_for_parameter_seeding
+                                    .observer()
+                                    .licensing_snapshot(),
+                                crate::licensing::QuotaName::ClusterNodes,
+                                usage,
+                                1,
+                                false,
+                            )
                             .map(|_| ())
                     })
                     .await
@@ -136,7 +144,15 @@ pub(super) fn spawn(arguments: MembershipReconciliation) -> JoinHandle<()> {
             if let Err(error) = administrator_for_membership_reconcile
                 .reconcile_nodes(cluster_for_membership_reconcile.gossip_state(), |usage| {
                     membership_licensing
-                        .admit(crate::licensing::QuotaName::ClusterNodes, usage, 1, false)
+                        .admit_snapshot(
+                            proposer_for_parameter_seeding
+                                .observer()
+                                .licensing_snapshot(),
+                            crate::licensing::QuotaName::ClusterNodes,
+                            usage,
+                            1,
+                            false,
+                        )
                         .map(|_| ())
                 })
                 .await

@@ -367,8 +367,8 @@ expression scope and an emitter's `INSTANCES` declaration.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
-Consensus's `raft_node_policy_engine_host_instances_epoch_` keyspaces and current
-`ClusterState` metadata encoding, 28, identify its stored shapes, including the partition count of every resolved
+Consensus's `raft_node_policy_engine_host_instances_license_activation_epoch_` keyspaces and current
+`ClusterState` metadata encoding, 30, identify its stored shapes, including the partition count of every resolved
 branch declaration in the committed schedule, the partition epoch the schedule records for each
 branch whose count changed, and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations and a `RESET WASM PROCESSOR ... STATE` that takes
@@ -1465,7 +1465,8 @@ and generation-scoped subscription queues install their byte budgets under their
 lock. Before an opening, no peer-derived subscription budget exists; ending or replacing a
 generation cannot publish a later generation's limits.
 
-Cluster duration definitions store exact u64 nanoseconds behind their `Setting` values, validate
-the same positive bounded duration domain, and project public durations without allocation.
+Cluster duration definitions retain semantic `Duration` values. The complete parameter record
+uses its validated eight-byte seconds/nanoseconds projection without allocating. A captured
+recovery request carries exact u64 nanoseconds and validates its duration range at the destination.
 Their public JSON remains seconds and nanoseconds. Both stored and public decoders cross the
 definition's validation boundary; an invalid stored scalar cannot become a valid policy by defaulting.

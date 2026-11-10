@@ -63,6 +63,19 @@ impl SettingsArgs {
                 .cluster_parameters
                 .runtime_readiness_propagation_bound
                 .map(|value| value.0),
+            licensing_request_timeout: self
+                .cluster_parameters
+                .licensing_request_timeout
+                .map(|duration| duration.0),
+            licensing_retry_backoff_max: self
+                .cluster_parameters
+                .licensing_retry_backoff_max
+                .map(|duration| duration.0),
+            licensing_stream_idle_timeout: self
+                .cluster_parameters
+                .licensing_stream_idle_timeout
+                .map(|duration| duration.0),
+
             tls_cipher_suites: self.cluster_parameters.tls_cipher_suites,
             tls_key_exchange_groups: self.cluster_parameters.tls_key_exchange_groups,
             password_iterations: self.cluster_parameters.password_iterations,

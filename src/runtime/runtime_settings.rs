@@ -74,9 +74,7 @@ impl RuntimeSettings {
             vm: nervix_vm::VmSettings::default(),
             wasm_engine: nervix_wasm::WasmEngineSettings::default(),
             inspection: super::StateInspectionSettings::default(),
-            state_snapshot_interval: StateSnapshotInterval::resolve_duration(
-                state_snapshot_interval,
-            )?,
+            state_snapshot_interval: Setting::resolve(state_snapshot_interval, &())?,
             restore_staging_max_bytes: Setting::new(restore_staging_max_bytes, &())
                 .assured("the local restore capability accepts every optional byte bound"),
         })
@@ -100,7 +98,7 @@ impl RuntimeSettings {
     }
 
     pub fn state_snapshot_interval(&self) -> Duration {
-        self.state_snapshot_interval.value().as_duration()
+        *self.state_snapshot_interval.value()
     }
 
     /// The restore staging quota the operator gave, if any.

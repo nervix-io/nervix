@@ -30,6 +30,7 @@ const TOLERANCE: Duration = Duration::from_millis(500);
 #[test]
 fn licensing_refusal_stops_a_newcomer_with_its_typed_cause_until_admitted() {
     let refusal = crate::licensing::LicensingRefusal {
+        state: nervix_licensing_vocabulary::AdmissionState::OverLimit,
         condition: crate::licensing::QuotaName::ClusterNodes,
         limit: 3,
         current_usage: 3,

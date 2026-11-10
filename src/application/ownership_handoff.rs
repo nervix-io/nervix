@@ -812,13 +812,14 @@ impl SessionServiceImpl {
             request.destination_incarnation,
             "destination",
         )?;
-        let budget = nervix_models::ForcedRecoveryBudget::resolve_duration(Some(
+        let budget = nervix_models::Setting::<nervix_models::ForcedRecoveryBudget>::new(
             request.recovery_budget.as_duration(),
-        ))
+            &(),
+        )
         .change_context(OwnershipHandoffError::Participant(
             "the captured forced-recovery budget is invalid".to_owned(),
         ))?;
-        let deadline = nervix_primitives::time::Instant::now() + budget.value().as_duration();
+        let deadline = nervix_primitives::time::Instant::now() + *budget.value();
         self.inner
             .runtime
             .prepare_forced_ownership_recovery(request, deadline)

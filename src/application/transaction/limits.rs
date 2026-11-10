@@ -45,10 +45,8 @@ impl TransactionLimits {
         bounds: TransactionBounds,
     ) -> Result<Self, Report<nervix_models::ClusterParameterError>> {
         Ok(Self {
-            idle_timeout: TransactionIdleTimeout::resolve_duration(bounds.idle_timeout)?,
-            tombstone_retention: TransactionTombstoneRetention::resolve_duration(
-                bounds.tombstone_retention,
-            )?,
+            idle_timeout: Setting::resolve(bounds.idle_timeout, &())?,
+            tombstone_retention: Setting::resolve(bounds.tombstone_retention, &())?,
             max_statements: Setting::resolve(
                 bounds.max_statements.map(|value| value.arch_into()),
                 &(),
@@ -59,11 +57,11 @@ impl TransactionLimits {
     }
 
     pub fn idle_timeout(&self) -> Duration {
-        self.idle_timeout.value().as_duration()
+        *self.idle_timeout.value()
     }
 
     pub fn tombstone_retention(&self) -> Duration {
-        self.tombstone_retention.value().as_duration()
+        *self.tombstone_retention.value()
     }
 
     pub fn max_statements(&self) -> usize {

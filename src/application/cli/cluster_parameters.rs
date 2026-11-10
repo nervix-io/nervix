@@ -33,6 +33,12 @@ pub struct ClusterParameterArgs {
     pub tls_key_exchange_groups: Option<nervix_crypto_policy::TlsKeyExchangeGroups>,
     #[arg(long = nervix_models::PasswordIterations::NAME, env = "NERVIX_PASSWORD_ITERATIONS", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::PasswordIterations, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
     pub password_iterations: Option<u64>,
+    #[arg(long = nervix_models::LicensingRequestTimeout::NAME, env = "NERVIX_LICENSING_REQUEST_TIMEOUT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::LicensingRequestTimeout, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    pub licensing_request_timeout: Option<HumanDuration>,
+    #[arg(long = nervix_models::LicensingRetryBackoffMax::NAME, env = "NERVIX_LICENSING_RETRY_BACKOFF_MAX", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::LicensingRetryBackoffMax, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    pub licensing_retry_backoff_max: Option<HumanDuration>,
+    #[arg(long = nervix_models::LicensingStreamIdleTimeout::NAME, env = "NERVIX_LICENSING_STREAM_IDLE_TIMEOUT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::LicensingStreamIdleTimeout, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    pub licensing_stream_idle_timeout: Option<HumanDuration>,
     #[arg(long = nervix_models::DomainDrainTimeout::NAME, env = "NERVIX_DOMAIN_DRAIN_TIMEOUT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::DomainDrainTimeout, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
     pub domain_drain_timeout: Option<HumanDuration>,
     #[arg(long = nervix_models::EntityGateDeadline::NAME, env = "NERVIX_ENTITY_GATE_DEADLINE", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::EntityGateDeadline, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
@@ -67,6 +73,9 @@ impl ClusterParameterArgs {
             tls_cipher_suites: seeds.tls_cipher_suites,
             tls_key_exchange_groups: seeds.tls_key_exchange_groups,
             password_iterations: seeds.password_iterations,
+            licensing_request_timeout: seeds.licensing_request_timeout.map(HumanDuration),
+            licensing_retry_backoff_max: seeds.licensing_retry_backoff_max.map(HumanDuration),
+            licensing_stream_idle_timeout: seeds.licensing_stream_idle_timeout.map(HumanDuration),
             domain_drain_timeout: seeds.domain_drain_timeout.map(HumanDuration),
             entity_gate_deadline: seeds.entity_gate_deadline.map(HumanDuration),
             max_batch_messages: seeds.max_batch_messages,
@@ -106,6 +115,18 @@ impl ClusterParameterArgs {
         command_line.optional(
             nervix_models::RuntimeReadinessPropagationBound::NAME,
             self.runtime_readiness_propagation_bound,
+        );
+        command_line.optional(
+            nervix_models::LicensingRequestTimeout::NAME,
+            self.licensing_request_timeout,
+        );
+        command_line.optional(
+            nervix_models::LicensingRetryBackoffMax::NAME,
+            self.licensing_retry_backoff_max,
+        );
+        command_line.optional(
+            nervix_models::LicensingStreamIdleTimeout::NAME,
+            self.licensing_stream_idle_timeout,
         );
         command_line.optional(nervix_models::TlsCipherSuites::NAME, self.tls_cipher_suites);
         command_line.optional(

@@ -58,6 +58,9 @@ impl Arbitrary<'_> {
             entity_gate_poll_interval: Some(parameter_duration(entropy)),
             domain_drain_poll_interval: Some(parameter_duration(entropy)),
             runtime_readiness_propagation_bound: Some(parameter_duration(entropy)),
+            licensing_request_timeout: Some(parameter_duration(entropy)),
+            licensing_retry_backoff_max: Some(parameter_duration(entropy)),
+            licensing_stream_idle_timeout: Some(parameter_duration(entropy)),
             password_iterations: Some(
                 entropy.boundary_biased(1..=nervix_models::PasswordIterations::MAXIMUM),
             ),

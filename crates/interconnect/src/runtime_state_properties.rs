@@ -506,11 +506,10 @@ impl<'a> Messages<'a> {
                     .arbitrary
                     .entropy()
                     .boundary_biased(1..=u64::from(u32::MAX) * 1_000_000_000);
-                let recovery_budget = *nervix_models::ForcedRecoveryBudget::resolve_duration(Some(
+                let recovery_budget = nervix_models::ClusterParameterDuration::try_from(
                     std::time::Duration::from_nanos(nanos),
-                ))
-                .assured("the generated positive budget fits the policy domain")
-                .value();
+                )
+                .assured("the generated positive budget fits the policy domain");
                 Message::ForcedPrepare(self.forced_preparation(recovery_budget))
             }
         }
@@ -920,9 +919,8 @@ fn runtime_state_wire_variant_boundaries() {
             std::time::Duration::new(7, 19),
             std::time::Duration::from_secs(u64::from(u32::MAX)),
         ] {
-            let budget = *nervix_models::ForcedRecoveryBudget::resolve_duration(Some(duration))
-                .assured("the current preparation boundary budget validates")
-                .value();
+            let budget = nervix_models::ClusterParameterDuration::try_from(duration)
+                .assured("the current preparation boundary budget fits the transport value");
             let mut messages = Messages::new(b"captured-recovery-boundaries");
             Message::ForcedPrepare(messages.forced_preparation(budget))
                 .check(&executor)

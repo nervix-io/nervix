@@ -3182,7 +3182,10 @@ fn apply_event(
                         .cluster_events
                         .update(|events| events.record(session, notice));
                 }
-                NoticeKind::ClusterParameters | NoticeKind::Runtime | NoticeKind::ControlPlane => {
+                NoticeKind::ClusterParameters
+                | NoticeKind::Runtime
+                | NoticeKind::ControlPlane
+                | NoticeKind::Licensing => {
                     let line = notice_line(notice);
                     signals.terminal_lines.update(|lines| lines.push(line));
                 }

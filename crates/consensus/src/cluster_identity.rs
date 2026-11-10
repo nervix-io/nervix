@@ -66,6 +66,7 @@ pub struct ClusterIdentity {
     pub cluster_uid: Uuid,
     pub created_at: Timestamp,
     pub key_generation: NonZeroU64,
+    pub ever_activated: bool,
     pub kid: KeyId,
     pub public_jwk: PublicKey,
 }
@@ -78,6 +79,7 @@ pub struct ClusterIdentityRecord {
     cluster_uid: Uuid,
     created_at: Timestamp,
     key_generation: NonZeroU64,
+    ever_activated: bool,
     current_key: ClusterKey,
     retired_key: Option<RetiredClusterKey>,
     pending_key: Option<PendingClusterKey>,
@@ -89,6 +91,7 @@ struct ClusterIdentityFields {
     cluster_uid: Uuid,
     created_at: Timestamp,
     key_generation: NonZeroU64,
+    ever_activated: bool,
     current_key: ClusterKey,
     retired_key: Option<RetiredClusterKey>,
     pending_key: Option<PendingClusterKey>,
@@ -154,6 +157,10 @@ impl ClusterKey {
 }
 
 impl ClusterIdentityRecord {
+    pub(crate) fn mark_activated(&mut self) {
+        self.ever_activated = true;
+    }
+
     pub(crate) fn cluster_uid(&self) -> Uuid {
         self.cluster_uid
     }
@@ -163,6 +170,7 @@ impl ClusterIdentityRecord {
             cluster_uid: self.cluster_uid,
             created_at: self.created_at,
             key_generation: self.key_generation,
+            ever_activated: self.ever_activated,
             kid: self.current_key.kid.clone(),
             public_jwk: self.current_key.public_jwk.clone(),
         }
@@ -226,6 +234,7 @@ impl ClusterIdentityRecord {
             cluster_uid,
             created_at,
             key_generation: NonZeroU64::MIN,
+            ever_activated: false,
             current_key: ClusterKey {
                 kid: signer.key_id().clone(),
                 public_jwk: signer.public_key().clone(),
@@ -245,6 +254,7 @@ impl TryFrom<ClusterIdentityFields> for ClusterIdentityRecord {
             cluster_uid: fields.cluster_uid,
             created_at: fields.created_at,
             key_generation: fields.key_generation,
+            ever_activated: fields.ever_activated,
             current_key: fields.current_key,
             retired_key: fields.retired_key,
             pending_key: fields.pending_key,

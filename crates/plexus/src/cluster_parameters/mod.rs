@@ -149,6 +149,24 @@ impl<'src> OfferedAssignments<'src> {
                 ClusterParameterChange::RuntimeReadinessPropagationBound,
             ),
             assignment(
+                ClusterParameterKey::LicensingRequestTimeout,
+                Identifier::LicensingRequestTimeout,
+                duration_value(),
+                ClusterParameterChange::LicensingRequestTimeout,
+            ),
+            assignment(
+                ClusterParameterKey::LicensingRetryBackoffMax,
+                Identifier::LicensingRetryBackoffMax,
+                duration_value(),
+                ClusterParameterChange::LicensingRetryBackoffMax,
+            ),
+            assignment(
+                ClusterParameterKey::LicensingStreamIdleTimeout,
+                Identifier::LicensingStreamIdleTimeout,
+                duration_value(),
+                ClusterParameterChange::LicensingStreamIdleTimeout,
+            ),
+            assignment(
                 ClusterParameterKey::PasswordIterations,
                 Identifier::PasswordIterations,
                 u64_value("integer_literal"),
