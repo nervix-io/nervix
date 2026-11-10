@@ -21,6 +21,8 @@ pub(in crate::application) fn requires_request_domain(statement: &Statement) -> 
     !matches!(
         statement,
         Statement::AlterCluster(_)
+            | Statement::ActivateLicense(_)
+            | Statement::RefreshLicense(_)
             | Statement::CreateDomain(_)
             | Statement::CreateUser(_)
             | Statement::Backup(_)
@@ -42,6 +44,8 @@ pub(in crate::application) fn requires_existing_domain(statement: &Statement) ->
     !matches!(
         statement,
         Statement::AlterCluster(_)
+            | Statement::ActivateLicense(_)
+            | Statement::RefreshLicense(_)
             | Statement::CreateDomain(_)
             | Statement::CreateUser(_)
             | Statement::Backup(_)
@@ -102,6 +106,7 @@ pub(in crate::application) fn is_persistent_statement(statement: &Statement) -> 
         || matches!(
             statement,
             Statement::AlterCluster(_)
+                | Statement::ActivateLicense(_)
                 | Statement::CreateDomain(_)
                 | Statement::CreateUser(_)
                 | Statement::CreateResource(_)
@@ -168,5 +173,19 @@ mod tests {
         assert!(!requires_existing_domain(&statement));
         assert!(requires_leader(&statement));
         assert!(is_persistent_statement(&statement));
+    }
+    #[test]
+    fn licensing_activation_is_durable_and_refresh_is_an_immediate_cluster_operation() {
+        let activation = Statement::ActivateLicense(nervix_models::ActivateLicense {
+            kind: nervix_models::ActivationKind::Persistent,
+            license_key: "NVXK-TESTABCD-fixture-secret".to_owned(),
+        });
+        let refresh = Statement::RefreshLicense(nervix_models::RefreshLicense);
+        for (statement, persistent) in [(activation, true), (refresh, false)] {
+            assert!(!requires_request_domain(&statement));
+            assert!(!requires_existing_domain(&statement));
+            assert!(requires_leader(&statement));
+            assert_eq!(is_persistent_statement(&statement), persistent);
+        }
     }
 }

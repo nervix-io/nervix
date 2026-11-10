@@ -8,7 +8,6 @@
 use std::collections::BTreeSet;
 
 use error_stack::{Report, ResultExt as _};
-use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
 
@@ -37,54 +36,9 @@ pub struct DecisionContext<'a> {
     pub known_conditions_revisions: &'a BTreeSet<u64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BindingField {
-    Activation,
-    Cluster,
-    Kind,
-    Key,
-    Generation,
-    Expiry,
-    Creation,
-    Request,
-    License,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RevisionField {
-    Decision,
-    Conditions,
-    IssuedAt,
-    ReusedDecision,
-    ReusedConditions,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TimingField {
-    RefreshOrder,
-    ValidUntil,
-    Term,
-    Ephemeral,
-    Creation,
-}
-
-#[derive(Debug, Error)]
-pub enum DecisionRejection {
-    #[error("the decision envelope or signing authorization is invalid")]
-    Envelope,
-    #[error("decision protocol {received} is unsupported")]
-    Protocol { received: u8 },
-    #[error("the decision names a different licensing service")]
-    Service,
-    #[error("the decision does not match its committed binding: {field:?}")]
-    Binding { field: BindingField },
-    #[error("the decision violates monotone revision identity: {field:?}")]
-    Revision { field: RevisionField },
-    #[error("the decision timing is invalid: {field:?}")]
-    Timing { field: TimingField },
-    #[error("the decision conditions, status or acknowledged transitions are invalid")]
-    Content,
-}
+pub use nervix_licensing_vocabulary::{
+    BindingField, DecisionRejection, RevisionField, TimingField,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecisionDisposition {

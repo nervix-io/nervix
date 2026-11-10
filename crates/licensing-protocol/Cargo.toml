@@ -8,6 +8,9 @@ version.workspace = true
 [lints]
 workspace = true
 
+[features]
+testing = []
+
 [dependencies]
 base64 = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }

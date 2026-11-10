@@ -658,6 +658,8 @@ pub(in crate::application) fn is_queueable_transaction_statement(statement: &Sta
 pub(in crate::application) fn transaction_statement_label(statement: &Statement) -> &'static str {
     match statement {
         Statement::CreateDomain(_) => "CREATE DOMAIN",
+        Statement::ActivateLicense(_) => "ACTIVATE LICENSE",
+        Statement::RefreshLicense(_) => "REFRESH LICENSE",
         Statement::CreateUser(_) => "CREATE USER",
         Statement::UploadResource(_) => "UPLOAD RESOURCE",
         Statement::Backup(_) => "BACKUP",

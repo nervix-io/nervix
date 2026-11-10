@@ -21,8 +21,12 @@ use rkyv::{
 use serde::{Deserialize, Serialize};
 use strum::EnumIter;
 use thiserror::Error;
+use value::ParameterSetting;
 
-use crate::{Setting, SettingDefinition};
+use crate::SettingDefinition;
+#[doc(hidden)]
+pub mod value;
+mod value_archive;
 
 pub(crate) mod archive;
 mod durations;
@@ -162,9 +166,9 @@ macro_rules! parameter_values {
         #[serde(deny_unknown_fields)]
         pub struct ClusterParameterValues {
             $(
-                #[serde(with = "archive")]
-                #[rkyv(with = archive::ValidatedSetting)]
-                $field: Setting<$definition>,
+                #[serde(with = "value_archive")]
+                #[rkyv(with = value_archive::ValidatedSetting)]
+                $field: ParameterSetting<$definition>,
             )+
         }
 
@@ -173,7 +177,7 @@ macro_rules! parameter_values {
                 use serde::de::Error as _;
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
-                struct Fields { $(#[serde(with = "archive")] $field: Setting<$definition>,)+ }
+                struct Fields { $(#[serde(with = "value_archive")] $field: ParameterSetting<$definition>,)+ }
                 let fields = Fields::deserialize(deserializer)?;
                 let values = Self {
                     $($field: fields.$field,)+
@@ -188,7 +192,7 @@ macro_rules! parameter_values {
         {
             fn deserialize(&self, deserializer: &mut D) -> Result<ClusterParameterValues, D::Error> {
                 let values = ClusterParameterValues {
-                    $($field: Setting::new(self.$field.deserialize(deserializer)?, &())
+                    $($field: ParameterSetting::from_stored(self.$field.deserialize(deserializer)?)
                         .map_err(|error| D::Error::new(error.into_error()))?,)+
                 };
                 values.validate_tls().map_err(|error| D::Error::new(error.into_error()))?;
@@ -225,18 +229,18 @@ macro_rules! parameter_values {
 
         impl ClusterParameterValues {
             pub fn resolve(seed: ClusterParameterSeedValues) -> Result<Self, Report<ClusterParameterError>> {
-                let values = Self { $($field: Setting::resolve(seed.$field, &())?,)+ };
+                let values = Self { $($field: ParameterSetting::resolve(seed.$field, &())?,)+ };
                 values.validate_tls()?;
                 Ok(values)
             }
 
-            $(pub fn $field(&self) -> $value { *self.$field.value() })+
+            $(pub fn $field(&self) -> $value { self.$field.value() })+
 
             /// Validate every proposed value before returning the complete candidate.
             pub fn changed(&self, updates: &ClusterParameterUpdates) -> Result<Self, Report<ClusterParameterError>> {
                 let mut next = *self;
                 for update in updates.iter() {
-                    match update { $(ClusterParameterChange::$definition(value) => { next.$field = Setting::new(*value, &())?; },)+ }
+                    match update { $(ClusterParameterChange::$definition(value) => { next.$field = ParameterSetting::new(*value, &())?; },)+ }
                 }
                 next.validate_tls()?;
                 Ok(next)
@@ -250,7 +254,7 @@ macro_rules! parameter_values {
                 vec![$(
                     DescribedClusterParameter {
                         parameter: ClusterParameterKey::$definition,
-                        value: parameter_text!(self.$field.value(), $kind),
+                        value: parameter_text!(&self.$field.value(), $kind),
                     },
                 )+]
             }
@@ -299,6 +303,9 @@ macro_rules! parameter_values {
 }
 
 parameter_values! {
+    licensing_request_timeout: LicensingRequestTimeout(Duration) => Duration,
+    licensing_retry_backoff_max: LicensingRetryBackoffMax(Duration) => Duration,
+    licensing_stream_idle_timeout: LicensingStreamIdleTimeout(Duration) => Duration,
     node_unavailability_timeout: NodeUnavailabilityTimeout(Duration) => Duration,
     domain_drain_timeout: DomainDrainTimeout(Duration) => Duration,
     entity_gate_deadline: EntityGateDeadline(Duration) => Duration,
@@ -443,6 +450,11 @@ impl AlterCluster {
 impl ClusterParameterValues {
     /// The validated bounds a host captures together for one HTTP publication.
     pub fn http_header_limits(&self) -> crate::HttpHeaderLimits {
-        crate::HttpHeaderLimits::new(self.http_header_bytes, self.http_header_fields)
+        crate::HttpHeaderLimits::new(
+            crate::Setting::new(self.http_header_bytes(), &())
+                .assured("the parameter was validated"),
+            crate::Setting::new(self.http_header_fields(), &())
+                .assured("the parameter was validated"),
+        )
     }
 }

@@ -57,6 +57,7 @@ pub mod inferencer;
 pub mod ingestor;
 pub mod junction;
 pub mod lexer;
+pub mod licensing;
 pub mod lookup;
 pub mod lookup_query;
 pub mod node_control;
