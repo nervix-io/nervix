@@ -99,7 +99,7 @@ impl PendingProcessorBranchRestore {
         &mut self,
         context: &ProcessorRuntimeContext,
         template: &BranchInstanceTemplate,
-        instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+        instances: &mut ProcessorBranches,
         last_persisted_lru_lsm: &mut u64,
     ) -> error_stack::Result<(), ProcessorBranchTaskError> {
         let attempt = self
@@ -115,7 +115,7 @@ impl PendingProcessorBranchRestore {
         &mut self,
         context: &ProcessorRuntimeContext,
         template: &BranchInstanceTemplate,
-        instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+        instances: &mut ProcessorBranches,
         last_persisted_lru_lsm: &mut u64,
     ) -> error_stack::Result<(), ProcessorBranchTaskError> {
         let runtime = &context.runtime_handle;
@@ -244,7 +244,7 @@ impl RestoredBranches {
         self,
         context: &ProcessorRuntimeContext,
         template: &BranchInstanceTemplate,
-        instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+        instances: &mut ProcessorBranches,
     ) -> u64 {
         let Self {
             lifecycle,
@@ -262,7 +262,7 @@ impl RestoredBranches {
                 restored.key,
                 restored.last_ingestion,
                 restored.incarnation,
-                task,
+                ProcessorBranchSlot::Live(task),
             );
         }
         let lsm = lifecycle.lsm();

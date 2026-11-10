@@ -737,6 +737,7 @@ fn parses_describe_resource_summary_statement() {
 fn describe_context_suggestions_include_resource_and_stream() {
     let input = "DESCRIBE ";
     let suggestions = suggest_statement(input, input.len());
+    assert!(suggestions.contains(&"BRANCH".to_string()));
     assert!(suggestions.contains(&"CLUSTER".to_string()));
     assert!(suggestions.contains(&"DEDUPLICATOR".to_string()));
     assert!(suggestions.contains(&"DOMAIN".to_string()));
@@ -812,6 +813,24 @@ fn parses_describe_relay_statement() {
             }],
         })
     );
+}
+
+#[test]
+fn parses_describe_branch_statement() {
+    let parsed = parse_statement("DESCRIBE BRANCH by_tenant;").expect("parse should succeed");
+    assert_eq!(
+        parsed,
+        Statement::DescribeBranch(nervix_models::DescribeBranch {
+            branch: BranchName::try_from("by_tenant").expect("valid branch name"),
+        })
+    );
+}
+
+#[test]
+fn describe_branch_suggests_only_a_branch_reference_after_its_keyword() {
+    let input = "DESCRIBE BRANCH ";
+    let suggestions = suggest_statement(input, input.len());
+    assert_eq!(suggestions, vec!["ref:branch".to_string()]);
 }
 
 #[test]

@@ -588,8 +588,9 @@ General notes:
   field is optional and none is sensitive
 - a route expression may read any declared field; `CREATE` and `ALTER` refuse a route that reads a
   field its entity does not declare, naming the ingestor, the route's relay and the fields the
-  entity does declare. `FILTER WHERE` reads headers but not `metadata.<field>`
-- an ingestor builds a metadata column only for the fields its route expressions or its
+  entity does declare. `FILTER WHERE` reads the same declared metadata fields and, when the
+  entity offers headers, its headers
+- an ingestor builds a metadata column only for the fields its arrival filter, route expressions or
   `TIMESTAMP AT metadata.<field>` read; an ingestor that reads none visits no metadata values and
   builds no metadata columns
 - a message whose connector hands over a value its field's declared type cannot hold, such as a
@@ -900,7 +901,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Connector events | None declared. |
 | Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
-| Metadata | Not offered: Application batches have no broker envelope, peer address or external message attributes; the native schema describes each row. |
+| Metadata | metadata.user: STRING OPTIONAL |
 | Payload facts | payload.bytes: U64<br>payload.rows: U64 |
 | Every live node | no; scheduled owner |
 | Position class | none |
@@ -936,11 +937,19 @@ Every clause is required and there are no defaults:
 
 Timestamp selection, `FILTER WHERE`, route construction, `WHERE`, branch construction, route
 `FLUSH`, `ON MESSAGE ERROR`, and `ON GENERAL ERROR` behave as for every ingestor; `message` and
-`input` read the submitted row. Client batches carry no transport headers or metadata, so
-`read_header`, `read_headers`, and `metadata.*` are unavailable. The ingestor executes on its one
-scheduled cluster node. A producer is opened on a session that any live node may serve, and that
+`input` read the submitted row. `metadata.user` is the opening session's authenticated user name,
+shared by every row of every batch that producer submits. It is a `STRING` field with the metadata
+namespace's optional type, and an authenticated producer always supplies it. The name is canonical
+lowercase, including when the application signed in with uppercase letters. A submitted field
+cannot replace this identity. `FILTER WHERE metadata.user = 'alice'` selects Alice's batches;
+`SET who = metadata.user` copies the identity into an optional `STRING` output field.
+
+Client batches carry no transport headers and refuse `read_header` and `read_headers`.
+The ingestor executes on its one scheduled cluster node. A producer is opened on a session that
+any live node may serve, and that
 node forwards the producer's batches to the ingestor's node; a console session, like every console
-session, is served only by the leader.
+session, is served only by the leader. Forwarding preserves each producer's authenticated identity
+independently, including when producers of different users share the same node-to-node link.
 
 `ALTER CLIENT PRODUCER INGESTOR ... SET FROM SCHEMA ...` replaces the complete ingestor body, and
 `SET QUIESCE SUSPEND` restates the only quiesce mode. `SHOW CREATE INGESTOR` renders the
@@ -3435,7 +3444,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Position class | none |
 | Acknowledgement confirmation | none |
 | Buffers | accepted signaling frames retained for ingestor reads: set by handshake_buffer_capacity messages (default 16), each at most max_message_size bytes; when full, holds back what fills it<br>one accepted frame waiting for handoff room: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>the incoming message assembled by the transport: set by max_message_size bytes (default 67108864), with each frame bounded by max_frame_size bytes (default 16777216); when exceeded, fails the read and reconnects on the retry policy |
-| Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: `idle_timeout_ms`; when omitted, three ping_interval_ms intervals, or 30 s without configured pings<br>writing a configured ping: fixed 1s<br>close: fixed 1s |
+| Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame, including one catch-up response window after a missed client ping: `idle_timeout_ms`; when omitted, three ping_interval_ms intervals, or 30 s without configured pings<br>writing a configured ping: fixed 1s<br>close: fixed 1s |
 | Driver limits | The opening upgrade response carries at most 124 header fields, and at most 64 KiB arrives before its head ends; a larger response fails that connection attempt.<br>The response head arrives within 512 reads that, after the 64th, average at least 128 bytes; a peer that trickles it fails that connection attempt. |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |
 
@@ -3506,8 +3515,9 @@ CREATE WEBSOCKETS CONNECTION INGESTOR market_trades
 ```
 
 With no `idle_timeout_ms`, a peer that sends nothing for three ping intervals, 60 seconds here, is
-reconnected. A client without `ping_interval_ms` only answers its peer's pings and allows 30 seconds
-of silence.
+reconnected when the client has kept its ping cadence. A client without `ping_interval_ms` only
+answers its peer's pings and allows 30 seconds of silence. A missed client ping has the bounded
+response opportunity described below.
 
 The client's Nervix-owned `CONFIG` is strict, with lowercase, case-sensitive keys:
 
@@ -3516,7 +3526,7 @@ The client's Nervix-owned `CONFIG` is strict, with lowercase, case-sensitive key
 | `endpoint` | Required `ws://` or `wss://` URL with a host, without a fragment and without user information. Its path and query are sent in the upgrade request. |
 | `connect_timeout_ms` | Positive whole milliseconds for DNS, TCP, TLS and upgrade together; omitted means 30000. |
 | `ping_interval_ms` | Positive whole milliseconds between client pings after signaling completes; omitted means only answering peer pings. |
-| `idle_timeout_ms` | Positive whole milliseconds without an inbound frame before reconnecting. When omitted, three configured ping intervals apply, or 30000 without configured pings. |
+| `idle_timeout_ms` | Positive whole milliseconds without an inbound frame before reconnecting, also bounding the response window of one catch-up ping after a missed client interval. When omitted, three configured ping intervals apply, or 30000 without configured pings. |
 | `handshake_buffer_capacity` | Accepted signaling messages retained before readiness: 1–65535, default 16. A full queue backpressures the connection within the signaling `TIMEOUT`. |
 | `max_message_size` | Positive whole bytes per incoming message, including fragmented messages: at most 4294967295, default 67108864 (64 MiB). |
 | `max_frame_size` | Positive whole bytes per incoming frame: at most 4294967295, default 16777216 (16 MiB). |
@@ -3554,8 +3564,21 @@ trust root, and the bundled and native roots alone verify the server.
 
 After signaling succeeds, the idle timer starts. An explicit idle timeout overrides the
 ping-derived value. Every received frame, including a ping or pong, refreshes activity. Sending a
-client ping or cancelling a read leaves the inactivity deadline in place. The idle deadline is
-physical time and a silent connection is closed and retried on the host's reconnect cadence.
+regular client ping or cancelling a read leaves the inactivity deadline in place.
+
+The host may spend longer than that deadline handing a payload off, or the node may stop polling
+the connection while busy. If the deadline expires after two ping intervals without either an
+inbound frame or a successfully written client ping, Nervix has missed a full ping interval. It
+writes one catch-up ping before judging the peer silent and gives the peer one idle-bound response
+window, measured from that successful write. Further pings and read cancellation do not renew this
+window. A received frame restores ordinary activity tracking; a peer that does not answer still
+expires. The ping write retains its one-second bound.
+
+This rule also applies with an explicit `idle_timeout_ms`. On-schedule pings do not extend the
+ordinary idle bound. Without configured client pings, the deadline stays in physical time across
+handoff and cancelled reads. A silent connection is closed and retried on the host's reconnect
+cadence.
+
 Closing it sends the peer a Close frame with status `1001` (going away) if the connection takes the
 frame at once. Nervix waits neither to write the frame nor for the peer's reply, so a peer that has
 stopped reading never delays the reconnect.

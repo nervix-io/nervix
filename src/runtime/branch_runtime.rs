@@ -2761,6 +2761,7 @@ mod tests {
                     relays: HashMap::default(),
                     processors: HashMap::default(),
                     wasm_state_reset: None,
+                    partition_transition: None,
                 },
                 ack_boundary: BranchInstanceAckBoundary::Preserve,
                 flush_policy: RuntimeFlushPolicy::Each {
@@ -2912,6 +2913,7 @@ mod tests {
                     relays: HashMap::default(),
                     processors: HashMap::default(),
                     wasm_state_reset: None,
+                    partition_transition: None,
                 },
                 ack_boundary: BranchInstanceAckBoundary::Preserve,
                 flush_policy: RuntimeFlushPolicy::Each {

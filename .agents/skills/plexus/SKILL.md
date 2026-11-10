@@ -22,7 +22,8 @@ lowercase HTTP field names, and on an emitter that keeps one value per header na
 header name once: a repeated literal name is refused when the statement is validated.
 For outbound WebSockets, read the `WEBSOCKETS CONNECTION` section of Ingestors for literal upgrade
 headers, subprotocol offers, response-header reads, frame metadata and the closed client CONFIG key
-set, including the trust roots `tls_ca_file` adds to and how inspection redacts an endpoint. Offer
+set, including idle deadlines after a delayed host handoff, the trust roots `tls_ca_file` adds to
+and how inspection redacts an endpoint. Offer
 subprotocols only through `HEADERS { 'sec-websocket-protocol' = '...' }`, and expect the peer to
 select one of them: any other answer fails the connection.
 For ClickHouse HTTP connection tuning, client certificates, compression and which insert failures
@@ -85,6 +86,8 @@ Java and JVM programs follow [JVM Client Library](../../../docs/src/client-libra
 Ruby applications follow [Ruby Client Library](../../../docs/src/client-library-ruby.md),
 and C and C++ programs follow [C And C++ Client Library](../../../docs/src/client-library-c.md).
 Read its execution, clock and endpoint sections before choosing application-side lifecycle handling.
+For using the authenticated producer identity in arrival filters and routes, read
+[Client Ingestors](../../../docs/src/ingestors.md#client-ingestors) before choosing metadata fields.
 For typed state inspection in Python, Ruby or JVM applications, read that host guide's
 `Inspect Materialized State` section for page/refusal metadata, opaque continuation and retained
 schema/frame lifetimes before suggesting application code.
