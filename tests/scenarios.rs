@@ -8003,7 +8003,7 @@ async fn then_failed_append_leader_confirms_linearizable_read(
     );
 }
 
-#[given(expr = "append-stream setup attempts toward node {string} are observed")]
+#[given(expr = "replication setup attempts toward node {string} are observed")]
 fn given_append_setup_attempts_are_observed(world: &mut ScenarioWorld, target: String) {
     let target = expand_placeholders(world, &target);
     let target_name = crate::common::cluster::node_name(&target);
@@ -8012,7 +8012,7 @@ fn given_append_setup_attempts_are_observed(world: &mut ScenarioWorld, target: S
         if source == target {
             continue;
         }
-        let attempts = world.fault_injection.consensus_append_stream_attempt_count(
+        let attempts = world.fault_injection.consensus_replication_attempt_count(
             &crate::common::cluster::node_name(&source),
             &target_name,
         );
@@ -8025,7 +8025,7 @@ fn given_append_setup_attempts_are_observed(world: &mut ScenarioWorld, target: S
     });
 }
 
-#[then(expr = "append-stream setup attempts toward node {string} respect the caller retry delay")]
+#[then(expr = "replication setup attempts toward node {string} respect the caller retry delay")]
 fn then_append_setup_attempts_respect_retry_delay(world: &mut ScenarioWorld, target: String) {
     let target = expand_placeholders(world, &target);
     let observation = world
@@ -8047,7 +8047,7 @@ fn then_append_setup_attempts_respect_retry_delay(world: &mut ScenarioWorld, tar
     for (source, baseline) in observation.attempts_at_start {
         let attempts = world
             .fault_injection
-            .consensus_append_stream_attempt_count(
+            .consensus_replication_attempt_count(
                 &crate::common::cluster::node_name(&source),
                 &target_name,
             )
@@ -8056,7 +8056,7 @@ fn then_append_setup_attempts_respect_retry_delay(world: &mut ScenarioWorld, tar
         total_attempts = total_attempts.saturating_add(attempts);
         assert!(
             attempts <= maximum,
-            "source '{source}' attempted {attempts} append-stream setups to departed '{target}'; \
+            "source '{source}' attempted {attempts} replication setups to departed '{target}'; \
              the caller retry delay permits at most {maximum} in this observation"
         );
     }

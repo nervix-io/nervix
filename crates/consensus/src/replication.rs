@@ -213,6 +213,8 @@ where
         let Some(first) = input.next().await else {
             return Ok(Box::pin(futures_util::stream::empty()));
         };
+        self.append_stream_open_recorder
+            .record_replication_attempt(&self.target);
         if !first.entries.is_empty() {
             return self.open_replication_data(first, input, None).await;
         }

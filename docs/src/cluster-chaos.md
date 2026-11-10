@@ -2078,7 +2078,14 @@ paths, each with its own attached Kafka emitter and output topic:
   six-second windows: their count, bounds and sum, an `APPROX_COUNT_DISTINCT` of the index modulo 3,
   and an `APPROX_QUANTILE` median. A window that computes sketches takes duration bounds.
 - **The reingestor `chaos_life_rotate`.** It moves every record onto the LRU-bounded branches, which
-  four branches keep evicting.
+  four branches keep evicting. A second attached reingestor crosses from that relay to
+  `chaos_life_rotation_delivery` under the existing sixteen-instance branch declaration before the
+  external emitter. The exact delivery oracle thus tests the rotating relay while the emitter
+  retains pending publication under its own stable branch lifetime. Directly sharing the two-instance
+  branch with the emitter would also exercise intentional emitter-buffer retirement: its NoACK
+  can replay an ingestor's other successful paths before any injected fault. Dedicated emitter
+  lifecycle scenarios cover that discard contract; this fixture retains its strict pre-fault
+  exact-count, window, field and eviction assertions, its 500ms traffic cadence and its deadlines.
 
 Four pipelines have their own ingestors, which the run produces to directly:
 

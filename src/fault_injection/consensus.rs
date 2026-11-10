@@ -74,7 +74,7 @@ impl FaultInjection {
         test_probe.append_submission_failure().await
     }
 
-    pub fn consensus_append_stream_attempt_count(
+    pub fn consensus_replication_attempt_count(
         &self,
         node: &ClusterNodeName,
         target: &ClusterNodeName,
@@ -88,6 +88,6 @@ impl FaultInjection {
             .probe
             .as_ref()
             .verified("the harness started this node before observing consensus");
-        state.test_probe.append_stream_attempt_count(target)
+        state.test_probe.replication_attempt_count(target)
     }
 }

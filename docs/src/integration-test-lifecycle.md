@@ -228,6 +228,14 @@ pacer also counts accepted, connected, failed, cancelled and completed connectio
 bytes. These observations do not inspect TLS or frame bytes or establish ordering the product
 relies on.
 
+The departed-follower retry scenario observes logical replication attempts after the caller's first
+request, so a refused initial management probe is visible even when no data stream is attempted.
+It retains the nonzero-attempt assertion and the elapsed-time bound derived from the caller's 200ms
+retry delay. A native regression holds the caller input pending, observes zero attempts, releases
+it and observes exactly one refused management-probe attempt with zero data attempts/openings;
+another confirms that ended input records no attempt. Neither observation changes replication,
+transport admission, retry delays or deadlines.
+
 A focused startup scenario occupies the observability port to force the first launch to fail
 before runtime initialization.
 The harness joins that attempt and retries on a fresh observability port within the same readiness
