@@ -9,7 +9,8 @@
 //!   connects with and the conflict among identities its instances render alike, the batches a read
 //!   gathers from its connection's read-ahead and how a read ends when the host cancels it, manual
 //!   acknowledgement of publishes and its confirmation once written, the local replay of publishes
-//!   the host rejected, and retirement of obsolete broker sessions.
+//!   the host rejected, retirement of obsolete broker sessions and ownership of pending SUBACK
+//!   across cancellation of the host's wait.
 //! - **Depends on.** The connector contract, the crate's connection options and its broker
 //!   connection through the node DNS resolver, the driver task that keeps each connection's event
 //!   loop polled, the vocabulary's typed client configuration, `error-stack`, Tokio and `rumqttc`.
@@ -34,6 +35,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry},
     future::Future,
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
+    pin::Pin,
     time::Duration,
 };
 
@@ -405,6 +407,28 @@ impl UnstartedConnection {
     }
 }
 
+/// One SUBSCRIBE/SUBACK exchange, started only after DNS, transport and CONNACK completed.
+/// A caller borrows its wait, preserving the socket and partial parser if that wait is cancelled.
+/// No task drives it during suspension, and terminal close drops it. The outer box keeps the
+/// connection phase's established size.
+struct SubscriptionSetup {
+    completion: Pin<Box<dyn Future<Output = MqttTopicIngestorResult<UnstartedConnection>> + Send>>,
+}
+
+impl SubscriptionSetup {
+    fn new(
+        completion: impl Future<Output = MqttTopicIngestorResult<UnstartedConnection>> + Send + 'static,
+    ) -> Box<Self> {
+        Box::new(Self {
+            completion: Box::pin(completion),
+        })
+    }
+
+    async fn wait(&mut self) -> MqttTopicIngestorResult<UnstartedConnection> {
+        self.completion.as_mut().await
+    }
+}
+
 /// The publishes an ingestor instance reads from its broker connection: the read-ahead its
 /// connection's driver hands them over through, and a fake connection in the checks of how a read
 /// meets the host's cancellation.
@@ -751,26 +775,6 @@ impl MqttTopicIngestorPlan {
         subscription.preserve_retain = true;
         subscription
     }
-
-    async fn subscribed_connection(
-        &self,
-        instance_index: u64,
-    ) -> MqttTopicIngestorResult<UnstartedConnection> {
-        let mut connection = self.client(instance_index)?;
-        self.establish_subscription(&mut connection).await?;
-        Ok(connection)
-    }
-
-    /// A resumed broker session already holds its subscription; a fresh session needs SUBACK.
-    async fn establish_subscription(
-        &self,
-        connection: &mut UnstartedConnection,
-    ) -> MqttTopicIngestorResult<()> {
-        if connection.connect().await? {
-            return Ok(());
-        }
-        connection.subscribe(self.subscription(), self.qos).await
-    }
 }
 
 /// The publish one acknowledgement settles, kept whole because a rejected publish is delivered
@@ -842,11 +846,13 @@ enum Gathered {
 }
 
 /// One instance's connection phase. A refused subscription or grant cannot reuse its broker session
-/// until the existing retirement exchange has completed; dropping a running connection preserves no
-/// such debt.
+/// until cleanup and a replacement connection reach their subscription exchange; dropping a
+/// running connection preserves no such debt. Pending SUBACK keeps its exact future across caller
+/// cancellation.
 enum MqttIngestorConnection {
     Disconnected,
     RetiringSubscription,
+    Establishing(Box<SubscriptionSetup>),
     Running(Box<MqttConnection>),
 }
 
@@ -1009,8 +1015,8 @@ impl IngestorConnector for MqttTopicIngestor {
         !matches!(self.connection, MqttIngestorConnection::Running(_))
     }
 
-    /// Suspension disconnects while the broker retains a persistent session, so what arrives
-    /// meanwhile waits in the broker's offline queue.
+    /// Suspension disconnects an established session and keeps an unobserved subscription grant.
+    /// The pending exchange stays unpolled until resume or terminal close.
     async fn suspend(&mut self) -> IngestorResult<()> {
         self.disconnect();
         Ok(())
@@ -1021,24 +1027,51 @@ impl IngestorConnector for MqttTopicIngestor {
             return Err(Report::new(conflict.clone())
                 .change_context(IngestorError::Resume { connector: MQTT }));
         }
-        if let MqttIngestorConnection::RetiringSubscription = self.connection {
-            self.plan
-                .retire(self.instance_index)
+        if let MqttIngestorConnection::Disconnected | MqttIngestorConnection::RetiringSubscription =
+            self.connection
+        {
+            if let MqttIngestorConnection::RetiringSubscription = self.connection {
+                self.plan
+                    .retire(self.instance_index)
+                    .await
+                    .change_context(IngestorError::Resume { connector: MQTT })?;
+                // Keep retirement debt through the cancellable connection phase, until its
+                // subscription exchange is published below. A cancelled replacement may have
+                // left another empty persistent session behind.
+            }
+            let mut connection = self
+                .plan
+                .client(self.instance_index)
+                .change_context(IngestorError::Resume { connector: MQTT })?;
+            let session_present = connection
+                .connect()
                 .await
                 .change_context(IngestorError::Resume { connector: MQTT })?;
-            self.connection = MqttIngestorConnection::Disconnected;
+            if session_present {
+                // Broker-only resume keeps its accepted grant and queued QoS publishes, without
+                // allocating another outbound packet identifier.
+                self.install_connection(connection);
+            } else {
+                let filter = self.plan.subscription();
+                let qos = self.plan.qos;
+                self.connection =
+                    MqttIngestorConnection::Establishing(SubscriptionSetup::new(async move {
+                        connection.subscribe(filter, qos).await?;
+                        Ok(connection)
+                    }));
+            }
         }
-        if let MqttIngestorConnection::Disconnected = self.connection {
-            let connection = match self.plan.subscribed_connection(self.instance_index).await {
+        if let MqttIngestorConnection::Establishing(setup) = &mut self.connection {
+            let connection = match setup.wait().await {
                 Ok(connection) => connection,
                 Err(error) => {
-                    if let Some(
-                        MqttTopicIngestorError::SubscriptionRefused
-                        | MqttTopicIngestorError::SubscriptionDowngraded { .. },
-                    ) = error.downcast_ref::<MqttTopicIngestorError>()
-                    {
-                        self.connection = MqttIngestorConnection::RetiringSubscription;
-                    }
+                    self.connection = match error.downcast_ref::<MqttTopicIngestorError>() {
+                        Some(
+                            MqttTopicIngestorError::SubscriptionRefused
+                            | MqttTopicIngestorError::SubscriptionDowngraded { .. },
+                        ) => MqttIngestorConnection::RetiringSubscription,
+                        _ => MqttIngestorConnection::Disconnected,
+                    };
                     return Err(error.change_context(IngestorError::Resume { connector: MQTT }));
                 }
             };
@@ -1048,7 +1081,8 @@ impl IngestorConnector for MqttTopicIngestor {
     }
 
     async fn close(&mut self) -> IngestorResult<()> {
-        self.disconnect();
+        self.connection = MqttIngestorConnection::Disconnected;
+        self.replay.clear();
         Ok(())
     }
 }
@@ -1110,9 +1144,9 @@ impl BrokerIngestorConnector for MqttTopicIngestor {
     async fn reject(&mut self, positions: &[Self::Position]) -> IngestorResult<()> {
         let ended = match &self.connection {
             MqttIngestorConnection::Running(connection) => connection.has_ended(),
-            MqttIngestorConnection::Disconnected | MqttIngestorConnection::RetiringSubscription => {
-                true
-            }
+            MqttIngestorConnection::Disconnected
+            | MqttIngestorConnection::RetiringSubscription
+            | MqttIngestorConnection::Establishing(_) => true,
         };
         if ended {
             self.disconnect();

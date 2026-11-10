@@ -2315,6 +2315,13 @@ pending retirement. Permission granted later permits a fresh subscription attemp
 persistent session keeps its original grant across reconnects; changing the filter or QoS retires
 that session.
 
+After connection setup completes, if a quiesce change cancels the wait for a subscription grant,
+the ingestor retains that pending exchange and continues it on resume. Earlier connection waits
+remain cancellable and release their resources; a replacement still keeps its retirement pending. It does not replace an unobserved `SUBACK`
+with a fresh connection's retained-session answer or discard a session that was granted.
+An unready setup stays unpolled during suspension and ends on terminal close. Established
+subscriptions retain their ordinary disconnect and persistent-session resume behavior.
+
 #### MQTT metadata and user properties
 
 Each publish's packet supplies its metadata and headers:

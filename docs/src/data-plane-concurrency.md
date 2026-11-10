@@ -88,6 +88,14 @@ and unavailable-endpoint scenarios are registered for active, order and stressed
 diagnostics. MQTT sockets, asynchronous waits and concurrent-map internals remain outside the
 tracked-lock detector; its lanes qualify only the tracked paths the surrounding lifecycle reaches.
 
+After connection setup, an MQTT ingestor exclusively owns its pending SUBSCRIBE/SUBACK future.
+Cancelling the caller's borrowed wait preserves the protocol exchange; terminal close drops it.
+Earlier connection waits remain cancellable, and cancellation of a replacement keeps its retirement
+debt. The registered production-owner Shuttle check explores cancellation, completion and close
+through a controlled completion, without modeling a network. Scripted wire checks cover the
+subscription refusal, granted publish and transport lifetimes. These asynchronous paths add no
+tracked lock and remain outside Deloxide's detector.
+
 Pulsar input retirement uses the same cold lifecycle boundary: it snapshots typed plans, releases
 the registry guard and stops the exact ingestor tasks before comparing resolved subscription
 identities and removing an unused owned subscription. Matching replacements retain their backlog.
