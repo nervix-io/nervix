@@ -28,6 +28,13 @@ public final class InspectionTests {
                 }
             }
             // ANCHOR: inspection
+            try (var cancel = deadline(); var outcome = session.command("DESCRIBE LICENSE;", cancel);
+                    var licenseInspection = outcome.stateInspection()) {
+                assertNotNull(licenseInspection);
+                assertNull(licenseInspection.domain()); assertNull(licenseInspection.entityName());
+                assertEquals("LICENSE", licenseInspection.entityKind());
+                assertNull(licenseInspection.rejection()); assertEquals(3, licenseInspection.counts().rows());
+            }
             Nervix.Inspection inspection;
             try (var cancel = deadline(); var outcome = session.command(
                     "SHOW RELAY " + relay + " MATERIALIZED STATE FOR UNBRANCHED LIMIT 1 FORMAT JSON;", cancel)) {

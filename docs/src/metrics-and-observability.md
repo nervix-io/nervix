@@ -305,6 +305,36 @@ no refusal event to these four reasons. No execution identity, domain or user ap
 See [Bounded History And Expired Identities](./client-session-protocol.md#bounded-history-and-expired-identities)
 for retention and admission semantics.
 
+## Licensing Metrics
+
+The `nervix_licensing_` families expose the published policy and process-local admission events.
+Label values come from fixed declarations, with every applicable labelled child initialized to
+zero. Replicated gauges describe the exporting node's applied state; use the leader's values for
+a cluster total. Sum refusal-counter rates across nodes as leadership moves. A process restart
+resets its counters.
+
+| Suffix | Kind and labels | Free policy |
+| --- | --- | --- |
+| `state` | Gauge, `state`: `free`, `licensed_fresh`, `licensed_due`, `licensed_overdue`, `lapsed`, `stopped`, `releasing`, `degraded` | `free` is 1; the other states are 0. |
+| `decision_revision` | Gauge | Absent until a committed decision exists. |
+| `deadline_timestamp_seconds` | Gauge, `deadline`: `refresh_after`, `overdue_at`, `valid_until`, `term_ends_at`, `ephemeral_expires_at`, `next_grant` | A sample is absent when its deadline does not exist. |
+| `licensing_time_seconds` | Gauge | The committed licensing timestamp as Unix seconds, present after first installation. |
+| `requests_total` | Counter, `operation` and `outcome` | On the leader, every operation/outcome pair starts at 0. |
+| `stream_connected` | Gauge | On the leader, 0. |
+| `transitions_active` | Gauge | 0. |
+| `over_limit` | Gauge, catalog `condition` | Every cluster quota starts at 0. |
+| `admissions_refused_total` | Counter, catalog `condition` and refusal `state` | Every cluster quota/refusal-state pair starts at 0. |
+
+Request operations are `activation.create`, `activation.refresh`, `activation.release`,
+`activation.rotate_key` and `events.subscribe`. Outcomes are `committed`, `rejected_by_cluster`,
+`refused_by_service`, `unreachable` and `timeout`. Refusal states are `within_grace`, `over_limit`,
+`lapsed` and `stopped`. Connectivity and request families are leader-local. Free mode supplies no
+decision or deadline and makes no licensing request. The shipped unlimited quotas produce no
+admission refusals.
+
+See [Cluster Licensing](node-settings.md#cluster-licensing) for `DESCRIBE LICENSE` and the
+committed node/domain usage definitions.
+
 ## Client Ingestors
 
 The six client-ingestor families describe the node that executes the ingestor and use `domain` and

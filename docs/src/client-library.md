@@ -720,6 +720,10 @@ and `frame.batch()` using each section's schema. `counts` describe the complete 
 `continuation` resumes bounded pages. Typed cells preserve sensitivity, integer widths, float bits,
 datetime nanoseconds and bytes. `state.to_json()` and `state.display_text()` render the same value.
 
+`DESCRIBE LICENSE;` returns the same typed envelope with `StateInspectionEntity::ClusterLicense`
+and summary/quota sections, including when no domain is selected. Match `StateInspectionEntity::DomainNode`
+to access the domain and graph-node reference of a materialized-state observation.
+
 The other libraries read the same envelope through their own typed inspection objects, which
 each guide shows with a tested example: [Python](client-library-python.md#inspect-materialized-state),
 [Ruby](client-library-ruby.md#inspect-materialized-state),
