@@ -159,6 +159,7 @@ fn wire_outcome(
         transaction: None,
         transaction_admission: None,
         inspection: None,
+        entity_labels: None,
         wasm_state: None,
         state: None,
         resource: None,
