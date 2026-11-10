@@ -1,7 +1,7 @@
 //! Compact validated storage for complete cluster parameter values.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** Lossless inline duration storage under the parameter's existing validated range.
+//! - **Owns.** Lossless inline storage under each parameter's existing validated range.
 //! - **Depends on.** Setting definitions, semantic values and current representation codecs.
 //! - **Must not know.** Parsing, consensus commands, clocks or runtime installation.
 
@@ -17,6 +17,13 @@ pub trait ParameterValue: Copy {
     type Stored: Copy + fmt::Debug + PartialEq + Eq;
     fn store(self) -> Self::Stored;
     fn read(stored: Self::Stored) -> Self;
+}
+
+/// The one stored representation selected by an existing parameter declaration.
+pub trait ParameterDefinition: SettingDefinition {
+    type Stored: Copy + fmt::Debug + PartialEq + Eq;
+    fn store(value: Self::Value) -> Self::Stored;
+    fn read(stored: Self::Stored) -> Self::Value;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize)]
@@ -54,50 +61,34 @@ unchanged!(
     nervix_crypto_policy::TlsKeyExchangeGroups
 );
 
-pub struct ParameterSetting<T: SettingDefinition>
-where
-    T::Value: ParameterValue,
-{
-    stored: <T::Value as ParameterValue>::Stored,
+pub struct ParameterSetting<T: ParameterDefinition> {
+    stored: T::Stored,
     marker: PhantomData<T>,
 }
-impl<T: SettingDefinition> Copy for ParameterSetting<T> where T::Value: ParameterValue {}
-impl<T: SettingDefinition> Clone for ParameterSetting<T>
-where
-    T::Value: ParameterValue,
-{
+impl<T: ParameterDefinition> Copy for ParameterSetting<T> {}
+impl<T: ParameterDefinition> Clone for ParameterSetting<T> {
     fn clone(&self) -> Self {
         *self
     }
 }
-impl<T: SettingDefinition> PartialEq for ParameterSetting<T>
-where
-    T::Value: ParameterValue,
-{
+impl<T: ParameterDefinition> PartialEq for ParameterSetting<T> {
     fn eq(&self, other: &Self) -> bool {
         self.stored == other.stored
     }
 }
-impl<T: SettingDefinition> Eq for ParameterSetting<T> where T::Value: ParameterValue {}
-impl<T: SettingDefinition> fmt::Debug for ParameterSetting<T>
-where
-    T::Value: ParameterValue,
-{
+impl<T: ParameterDefinition> Eq for ParameterSetting<T> {}
+impl<T: ParameterDefinition> fmt::Debug for ParameterSetting<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Setting")
             .field("name", &T::NAME)
             .finish_non_exhaustive()
     }
 }
-
-impl<T: SettingDefinition<Context = ()>> ParameterSetting<T>
-where
-    T::Value: ParameterValue,
-{
+impl<T: ParameterDefinition<Context = ()>> ParameterSetting<T> {
     pub(super) fn new(value: T::Value, context: &()) -> Result<Self, Report<T::Error>> {
         T::validate(&value, context)?;
         Ok(Self {
-            stored: value.store(),
+            stored: T::store(value),
             marker: PhantomData,
         })
     }
@@ -105,15 +96,13 @@ where
         Self::new(value.unwrap_or_else(|| T::default_value(context)), context)
     }
     pub(crate) fn value(&self) -> T::Value {
-        T::Value::read(self.stored)
+        T::read(self.stored)
     }
-    pub(super) fn stored(&self) -> &<T::Value as ParameterValue>::Stored {
+    pub(super) fn stored(&self) -> &T::Stored {
         &self.stored
     }
-    pub(super) fn from_stored(
-        stored: <T::Value as ParameterValue>::Stored,
-    ) -> Result<Self, Report<T::Error>> {
-        Self::new(T::Value::read(stored), &())
+    pub(super) fn from_stored(stored: T::Stored) -> Result<Self, Report<T::Error>> {
+        Self::new(T::read(stored), &())
     }
 }
 
@@ -247,5 +236,74 @@ mod tests {
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&value)
             .assured("the structurally current malformed coordinate archives");
         assert!(rkyv::from_bytes::<DurationParts, rkyv::rancor::Error>(&bytes).is_err());
+    }
+
+    #[test]
+    fn bounded_counts_keep_their_complete_public_range_and_label_limits_keep_every_bit() {
+        use crate::cluster_parameters::{
+            ClientBatchRows, CommandExecutionCapacity, MaxBatchMessages, ReplicaCount,
+            TransactionMaxOpen, TransactionMaxStatements,
+        };
+        macro_rules! count_storage {
+            ($definition:ty) => {
+                assert_eq!(std::mem::size_of::<ParameterSetting<$definition>>(), 4);
+                assert!(
+                    ParameterSetting::<$definition>::new(u64::from(u32::MAX) + 1, &()).is_err()
+                );
+            };
+        }
+        count_storage!(TransactionMaxStatements);
+        count_storage!(TransactionMaxOpen);
+        count_storage!(CommandExecutionCapacity);
+        count_storage!(ReplicaCount);
+        count_storage!(MaxBatchMessages);
+        count_storage!(ClientBatchRows);
+        for count in [1, u64::from(u32::MAX)] {
+            let values = ClusterParameterValues::resolve(ClusterParameterSeedValues {
+                transaction_max_statements: Some(count),
+                transaction_max_open: Some(count),
+                command_execution_capacity: Some(count),
+                replica_count: Some(count),
+                max_batch_messages: Some(count),
+                client_batch_rows: Some(count),
+                entity_labels_max_count: Some(u64::MAX),
+                entity_labels_max_key_bytes: Some(u64::MAX),
+                entity_labels_max_value_bytes: Some(u64::MAX),
+                entity_labels_max_bytes: Some(u64::MAX),
+                ..Default::default()
+            })
+            .assured("the complete original count ranges remain valid");
+            for actual in [
+                values.transaction_max_statements(),
+                values.transaction_max_open(),
+                values.command_execution_capacity(),
+                values.replica_count(),
+                values.max_batch_messages(),
+                values.client_batch_rows(),
+            ] {
+                assert_eq!(actual, count);
+            }
+            for actual in [
+                values.entity_labels_max_count(),
+                values.entity_labels_max_key_bytes(),
+                values.entity_labels_max_value_bytes(),
+                values.entity_labels_max_bytes(),
+            ] {
+                assert_eq!(actual, u64::MAX);
+            }
+            let json = serde_json::to_vec(&values).assured("the full policy serializes");
+            assert_eq!(
+                serde_json::from_slice::<ClusterParameterValues>(&json)
+                    .assured("the public u64 policy decodes"),
+                values
+            );
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&values)
+                .assured("the current compact policy archives");
+            assert_eq!(
+                rkyv::from_bytes::<ClusterParameterValues, rkyv::rancor::Error>(&bytes)
+                    .assured("the complete current policy unarchives"),
+                values
+            );
+        }
     }
 }

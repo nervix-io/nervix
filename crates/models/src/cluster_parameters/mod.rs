@@ -161,8 +161,36 @@ macro_rules! parameter_cli_text {
     };
 }
 
+// Storage widths preserve each declaration's validated range and public semantic type.
+macro_rules! parameter_storage {
+    ($definition:ident) => {
+        impl value::ParameterDefinition for $definition {
+            type Stored = <Self::Value as value::ParameterValue>::Stored;
+            fn store(value: Self::Value) -> Self::Stored {
+                <Self::Value as value::ParameterValue>::store(value)
+            }
+            fn read(stored: Self::Stored) -> Self::Value {
+                <Self::Value as value::ParameterValue>::read(stored)
+            }
+        }
+    };
+    ($definition:ident, $stored:ty) => {
+        impl value::ParameterDefinition for $definition {
+            type Stored = $stored;
+            fn store(value: Self::Value) -> Self::Stored {
+                <$stored>::try_from(value)
+                    .assured("the declaration validates its stored count range")
+            }
+            fn read(stored: Self::Stored) -> Self::Value {
+                u64::from(stored)
+            }
+        }
+    };
+}
+
 macro_rules! parameter_values {
-    ($($field:ident: $definition:ident($value:ty) => $kind:ident,)+) => {
+    ($($field:ident: $definition:ident($value:ty) => $kind:ident $(as $stored:ty)?,)+) => {
+        $(parameter_storage!($definition $(, $stored)?);)+
         /// The complete cluster policy. Each field has one class, default and validation owner.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Archive, RkyvSerialize)]
         #[serde(deny_unknown_fields)]
@@ -315,11 +343,11 @@ parameter_values! {
     transaction_tombstone_retention: TransactionTombstoneRetention(Duration) => Duration,
     command_retry_validity: CommandRetryValidity(Duration) => Duration,
     state_snapshot_interval: StateSnapshotInterval(Duration) => Duration,
-    transaction_max_statements: TransactionMaxStatements(u64) => Count,
+    transaction_max_statements: TransactionMaxStatements(u64) => Count as u32,
     transaction_max_source_bytes: TransactionMaxSourceBytes(u64) => Bytes,
-    transaction_max_open: TransactionMaxOpen(u64) => Count,
-    command_execution_capacity: CommandExecutionCapacity(u64) => Count,
-    replica_count: ReplicaCount(u64) => Count,
+    transaction_max_open: TransactionMaxOpen(u64) => Count as u32,
+    command_execution_capacity: CommandExecutionCapacity(u64) => Count as u32,
+    replica_count: ReplicaCount(u64) => Count as u32,
     resource_max_archive_bytes: ResourceMaxArchiveBytes(u64) => Bytes,
     resource_max_extracted_bytes: ResourceMaxExtractedBytes(u64) => Bytes,
     resource_max_file_count: ResourceMaxFileCount(u64) => Count,
@@ -327,13 +355,13 @@ parameter_values! {
     entity_labels_max_key_bytes: EntityLabelsMaxKeyBytes(u64) => Bytes,
     entity_labels_max_value_bytes: EntityLabelsMaxValueBytes(u64) => Bytes,
     entity_labels_max_bytes: EntityLabelsMaxBytes(u64) => Bytes,
-    max_batch_messages: MaxBatchMessages(u64) => Count,
+    max_batch_messages: MaxBatchMessages(u64) => Count as u32,
     client_producer_session_bytes: ClientProducerSessionBytes(u64) => Bytes,
     client_consumer_session_bytes: ClientConsumerSessionBytes(u64) => Bytes,
     udf_code_bytes: UdfCodeBytes(u64) => Bytes,
     http_header_bytes: HttpHeaderBytes(u64) => Bytes,
     http_header_fields: HttpHeaderFields(u64) => Count,
-    client_batch_rows: ClientBatchRows(u64) => Count,
+    client_batch_rows: ClientBatchRows(u64) => Count as u32,
     tls_cipher_suites: TlsCipherSuites(nervix_crypto_policy::TlsCipherSuites) => AlgorithmNames,
     tls_key_exchange_groups: TlsKeyExchangeGroups(nervix_crypto_policy::TlsKeyExchangeGroups) => AlgorithmNames,
     password_iterations: PasswordIterations(u64) => Count,

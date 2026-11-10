@@ -367,8 +367,15 @@ expression scope and an emitter's `INSTANCES` declaration.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
-Consensus's `raft_entity_labels_` keyspaces and current
-`ClusterState` metadata encoding, 30, identify its stored shapes, including the partition count of every resolved
+Cluster parameter declarations select their one inline stored representation after validating the
+semantic value. The six count settings already bounded by `u32::MAX` use four-byte storage; their
+public values and JSON remain unsigned 64-bit integers. All four entity-label limits retain their
+complete unsigned 64-bit range. Duration settings preserve their declared range and nanosecond
+precision in eight bytes. Decoding validates the same declaration before publishing a parameter
+value.
+
+Consensus's `raft_entity_policy_` keyspaces and current
+`ClusterState` metadata encoding, 31, identify its stored shapes, including the partition count of every resolved
 branch declaration in the committed schedule, the partition epoch the schedule records for each
 branch whose count changed, and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations and a `RESET WASM PROCESSOR ... STATE` that takes
