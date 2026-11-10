@@ -63,9 +63,15 @@ impl WindowCollectionBenchmark {
             (from.clone(), Arc::new(input.clone())),
             (to.clone(), Arc::new(output_schema.clone())),
         ]);
-        let compiled =
-            CompiledWindowAggregateProgram::compile(&aggregate, &[from], &to, &schemas, None)
-                .assured("the benchmark route compiles");
+        let compiled = CompiledWindowAggregateProgram::compile(
+            &aggregate,
+            &[from],
+            &to,
+            &schemas,
+            None,
+            nervix_vm::VmSettings::default(),
+        )
+        .assured("the benchmark route compiles");
         let plan = WindowAccumulatorPlan::new([&compiled.route], None, None);
         let mut state = WindowProcessorState::new(&plan, 1);
         let count = i64::try_from(rows.get()).assured("a benchmark window is addressable");
