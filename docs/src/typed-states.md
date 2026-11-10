@@ -352,7 +352,7 @@ transport offset conversion. The SDK's indexed authoring and typed-inspection vi
 empty JSON value arrays. These driver representations never enter semantic Models or plans.
 
 A NATS ingestor or emitter Model distinguishes `NATS SUBJECT` and `NATS STREAM` entities in its archived union.
-The registry's `NERVIX PAY HOPS ` archive signature identifies the current Model layout, including
+The registry's `NERVIX EMIT INST` archive signature identifies the current Model layout, including
 that union, the endpoint kind, the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
 encoding, a Pulsar subscription's required type and an owned subscription's required start position,
 a Kafka consumer group's required start position, the required 16-bit branch partition count,
@@ -362,13 +362,13 @@ the receive count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the sessi
 service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC
 emitter writes beside its publishing mode, its retained-publication flag and MQTT 5 property
 mappings, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a `PATTERN`,
-that header state, inferencer state bindings with their initial expressions, and the typed `payload`
-expression scope.
+that header state, inferencer state bindings with their initial expressions, the typed `payload`
+expression scope and an emitter's `INSTANCES` declaration.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
-Consensus's `raft_payload_identity_licensing_capability_tls_inference_reset_epoch_` keyspaces and current
-`ClusterState` metadata encoding, 24, identify its stored shapes, including the partition count of every resolved
+Consensus's `raft_infrastructure_capabilities_identity_licensing_tls_inference_reset_epoch_engine_host_instances_` keyspaces and current
+`ClusterState` metadata encoding, 27, identify its stored shapes, including the partition count of every resolved
 branch declaration in the committed schedule, the partition epoch the schedule records for each
 branch whose count changed, and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations and a `RESET WASM PROCESSOR ... STATE` that takes

@@ -306,6 +306,11 @@ pub(crate) enum RegistryError {
         domain: DomainName,
         ingestor: nervix_models::IngestorName,
     },
+    #[error("emitter '{emitter}' has invalid instancing in domain '{domain}'")]
+    EmitterInstancing {
+        domain: DomainName,
+        emitter: nervix_models::EmitterName,
+    },
     #[error("{parameter} limit {maximum} is below {actual} required by resource {resource:?}")]
     ResourceParameterLimit {
         resource: nervix_models::ResourceId,

@@ -18,9 +18,9 @@ use nervix_models::{
     ClientConfigKey, ClientConfigNamespace, ClientConfigOwner, ClientConfigPresence,
     ClientConfigValue, ClientDeclaration, ClientPooling, ConnectorKind, DeclaredBounds,
     EmitterBatchLegality, EmitterBodyForm, EmitterEntityCapabilities, EmitterEntityKind,
-    EmitterReferenceKind, HeaderModel, IngestorEntityCapabilities, IngestorEntityKind,
-    IngestorReferenceKind, LocatorDeclaration, LocatorName, OmittedDeadline, OptionDeclaration,
-    OptionForm, OptionPresence, OptionValue, OtelEmitterEntity, OtelValueField,
+    EmitterInstancingCapability, EmitterReferenceKind, HeaderModel, IngestorEntityCapabilities,
+    IngestorEntityKind, IngestorReferenceKind, LocatorDeclaration, LocatorName, OmittedDeadline,
+    OptionDeclaration, OptionForm, OptionPresence, OptionValue, OtelEmitterEntity, OtelValueField,
     SYSLOG_FRAME_LIMITS, SyslogEmitterEntity, WaitBound,
 };
 use serde_json::{Value, json};
@@ -327,6 +327,7 @@ fn option_template(options: &[OptionDeclaration]) -> String {
 fn emitter(kind: EmitterEntityKind) -> Value {
     let EmitterEntityCapabilities {
         events,
+        instancing,
         headers,
         reference,
         body,
@@ -354,6 +355,12 @@ fn emitter(kind: EmitterEntityKind) -> Value {
         EmitterBatchLegality::Unavailable { reason } => (format!("unavailable: {reason}"), None),
     };
     let maximum = maximum.map(|limit| limit.to_string());
+    let instancing = match instancing {
+        EmitterInstancingCapability::Instances => {
+            "INSTANCES <count> | INSTANCES PER PARTITION".to_owned()
+        }
+        EmitterInstancingCapability::Single { reason } => format!("single: {reason}"),
+    };
     let modes: Vec<_> = publishing_modes
         .iter()
         .map(|mode| format!("{}{}", mode.kind.example(), requirements(mode.requires)))
@@ -374,6 +381,7 @@ fn emitter(kind: EmitterEntityKind) -> Value {
         "entity": kind.phrase(), "connector": kind.connector().keyword(), "events": events,
         "reference": reference, "locator": locator(declared_locator), "options": options,
         "modes": modes, "headers": header_model(headers),
+        "instancing": instancing,
         "batch": batch, "batch_maximum": maximum, "body": body,
         "batch_transformation": requires_batch_transformation,
         "envelope": envelope, "properties": properties,

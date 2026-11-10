@@ -482,6 +482,8 @@ The current contract includes the free licensing singleton in snapshots, capture
 creation and restore commands, and typed quota refusals in membership verdicts. These shapes advance
 the same fingerprint as every other consensus and prerequisite shape.
 
+The current fingerprint also fences signed licensing activation and decision commands, retained trust documents, committed licensing time and transaction refusals projected without executable Models. These consensus request and snapshot shapes share the contract with emitter instance identities.
+
 All nodes in a running cluster use one current wire contract. A fixed fingerprint covers the set of
 supported operations and their encoded shapes. It is one of the prerequisites every hello carries,
 so a node whose fingerprint differs is refused at join as a wire-contract mismatch, and a hello of
@@ -817,10 +819,14 @@ do. Only the failed class carries the answering node's own description, because 
 another node's subsystem is opaque to the caller and that text exists for the operator reading it.
 State snapshot exchange, dataflow node status, domain and entity drain status, entity gating, metric
 description, relay, hash map and ingestor description, hash map queries, and subscription-interest
-visibility all answer in these terms. An ingestor description is the execution owner's report of
-the ingestor. Its last decode rejection crosses as a typed record: a reference, an instant, a codec
-name, field paths, an optional Kafka or syslog position and the rendered codec diagnostic. The
-asking node renders that record; it never parses one.
+visibility all answer in these terms. A dataflow node status request names one execution unit of
+its node, so an emitter with several [instances](emitters.md#emitter-instances) is asked about each
+instance at that instance's owner; a node scheduled as one unit is asked about its `Single` unit.
+A domain or entity drain status reports each publishing emitter with the unit that publishes, so
+instances of one emitter are reported apart. An ingestor description is the execution owner's
+report of the ingestor. Its last decode rejection crosses as a typed record: a reference, an
+instant, a codec name, field paths, an optional Kafka or syslog position and the rendered codec
+diagnostic. The asking node renders that record; it never parses one.
 
 Each handler registration publishes a complete replacement dispatch table, so an arriving operation
 finds its handler without taking a lock and registrations that race each other all take effect.

@@ -756,6 +756,9 @@ pub struct DataflowNodeStatusRequest {
     pub domain: DomainName,
     pub kind: ModelKind,
     pub name: ModelName,
+    /// The execution unit asked about: the node's `Single` unit, or one instance of an emitter
+    /// with several, which its owner reports as unavailable while that instance has no task.
+    pub unit: Unit,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -789,6 +792,8 @@ impl EmitterPublishingDrainStateEnvelope {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EmitterPublishingDrainStatusEnvelope {
     pub emitter: EmitterName,
+    /// The unit of the emitter that publishes: its single unit, or one of its instances.
+    pub unit: Unit,
     pub state: EmitterPublishingDrainStateEnvelope,
     pub pending_messages: u64,
     pub retry_backoff_millis: Option<u64>,

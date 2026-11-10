@@ -1973,6 +1973,20 @@ impl BranchPartitions {
         }
     }
 
+    /// The units of a relay of this branch that instance `instance` of an emitter with `instances`
+    /// instances serves: every partition `p` with `p mod instances = instance`, and the `Single`
+    /// unit of a branch of one partition, which instance 0 serves. An unbranched relay serves as a
+    /// branch of one partition.
+    pub fn units_served_by(self, instance: u64, instances: std::num::NonZeroU64) -> Vec<Unit> {
+        let mut served = Vec::new();
+        for (ordinal, unit) in (0_u64..).zip(self.units()) {
+            if ordinal % instances.get() == instance {
+                served.push(unit);
+            }
+        }
+        served
+    }
+
     /// The unit that owns a key whose seed is `seed`: the `Single` unit of a branch of one
     /// partition, and `Partition(seed mod n)` of a branch of n partitions.
     pub fn unit_of(self, seed: PartitionSeed) -> Unit {

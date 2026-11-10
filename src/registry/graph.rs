@@ -389,6 +389,10 @@ impl ActiveGraph {
                 scheduled =
                     scheduled.with_units(&instancing.unit_layout().units().collect::<Vec<_>>());
             }
+            if let Some(instancing) = &node.emitter_units {
+                scheduled =
+                    scheduled.with_units(&instancing.unit_layout().units().collect::<Vec<_>>());
+            }
             nodes.push(scheduled);
         }
         nodes
@@ -574,6 +578,7 @@ pub(crate) struct ActiveNode {
     pub(crate) config: Arc<Model>,
     pub(crate) resolved_branching: Option<ResolvedBranching>,
     pub(in crate::registry) ingestor_units: Option<super::ingestor_units::IngestorUnits>,
+    pub(in crate::registry) emitter_units: Option<super::emitter_units::EmitterUnits>,
 }
 
 impl ActiveNode {

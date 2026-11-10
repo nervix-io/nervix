@@ -116,6 +116,7 @@ wire_enum!(ALL_MODEL_CHANGE_ASPECTS: ModelChangeAspect => wire::ModelChangeAspec
     EmitterConstruction,
     EmitterErrorPolicies,
     EmitterMaterializedState,
+    EmitterInstances,
     IngestorSource,
     IngestorCodec,
     IngestorTimestamp,

@@ -3932,6 +3932,18 @@ A count change uses the ownership-handoff preparation boundary to preserve the o
 Start planning separately validates the complete resolved unit declaration.
 `AlreadyRunning` and `IngestorNotRunning` name the exact ingestor unit, allowing a sibling instance
 to start or stop independently.
+
+An emitter entity that runs one instance refuses `INSTANCES` with the vocabulary's typed
+`SingleInstanceRefusal`, carrying the entity kind and its declared `SingleEmitterReason`, such as
+`ICEBERG TABLE emitters commit through one table writer, so they refuse INSTANCES`. The grammar
+reports it at the `INSTANCES` token, `ALTER` reports it beneath `AlterEmitterError::SingleInstance`,
+and a statement that reaches the registry without the grammar reports it beneath
+`EmitterInstancingError::SingleInstance`. The registry's `EmitterInstancingError` also covers a
+count whose execution units cannot be represented, `INSTANCES PER PARTITION` over inputs without a
+branch, and an input relay that does not share the other inputs' branch; the surrounding
+`RegistryError::EmitterInstancing` names the domain and emitter. Emitter execution planning refuses
+a scheduled unit set that does not match the declaration with a typed `UnitDeclaration` naming the
+emitter, as start planning does for an ingestor.
 Per-unit DESCRIBE requests and status records preserve the unit selected by their caller.
 `UnitIndexError` is the vocabulary's pure refusal for an instance ordinal outside its compact
 identity range. Semantic JSON validates that bound during deserialization. The client wire decoder
