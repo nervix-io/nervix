@@ -66,12 +66,10 @@ pub(in crate::registry) enum UnitLayout {
 }
 
 impl UnitLayout {
-    pub fn of(node: &ActiveNode) -> Self {
-        if let Some(instancing) = &node.ingestor_units {
-            return instancing.unit_layout();
-        }
-        if matches!(
-            node.kind,
+    /// Whether a branch's partitions divide a node of `kind` into units.
+    pub fn divides_by_partitions(kind: ModelKind) -> bool {
+        matches!(
+            kind,
             ModelKind::Relay
                 | ModelKind::Junction
                 | ModelKind::Deduplicator
@@ -81,10 +79,18 @@ impl UnitLayout {
                 | ModelKind::Inferencer
                 | ModelKind::WasmProcessor
                 | ModelKind::Generator
-        ) && let Some(partitions) = node
-            .resolved_branching
-            .as_ref()
-            .and_then(|branch| branch.partitions())
+        )
+    }
+
+    pub fn of(node: &ActiveNode) -> Self {
+        if let Some(instancing) = &node.ingestor_units {
+            return instancing.unit_layout();
+        }
+        if Self::divides_by_partitions(node.kind)
+            && let Some(partitions) = node
+                .resolved_branching
+                .as_ref()
+                .and_then(|branch| branch.partitions())
             && partitions.count().get() > 1
         {
             return Self::Partitions(partitions.count());

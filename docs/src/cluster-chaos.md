@@ -431,7 +431,7 @@ The focused checks run parts of the runner on their own:
 | Recipe | Checks |
 | --- | --- |
 | `just test-chaos-network-preflight [CASE]` | The real network-fault preflight and its refusal controls; a case name runs one control with the live installation, effect and healing check |
-| `just test-chaos-rate-probe` | The production link transfer and ICMP probes, with delayed Docker launches and starts, stalled, partial, lost and refused transfers, failed log reads and cleanup, and invalid clocks |
+| `just test-chaos-rate-probe` | The production link transfer and ICMP probes, with delayed Docker launches and starts, stalled, partial, lost and refused transfers, failed log reads and cleanup, and invalid clocks. A stalled launch keeps its helper's Docker events while other runs publish more events than the daemon's replay buffer holds |
 | `just test-chaos-degraded-evidence` | The degraded-link controller, parser and effect limits at 40 and 400 packets |
 | `just test-chaos-outward-tls` | The [outward TLS verdict](#crash-scenarios) against observations that pass and that contradict the policy: committed lists that name or omit the probed members, a stale, different or unreported running record, a revision that did not advance, a console target that answered against expectation, failed or is missing, an interconnect that admitted the probe or is missing, an unrestricted offer, and malformed descriptions. Also the probe against local servers that admit both members, exclude the suite, exclude the group or present another name's certificate, against a port that refuses the connection, and without its OpenSSL configuration |
 | `just test-chaos-hold-quorum` | The mixed-instability hold check for a degraded link that leaves every voter in a quorum |
@@ -744,7 +744,11 @@ and its peer filter. An installed qdisc alone cannot pass; the effect must be me
   reads.
 - `*.probe.json` keeps the launch, wait, ping, log and removal outcomes, with the launch and sample
   times. A failed observation names the stage that took the time and keeps the helper's raw
-  streams and Docker's state and events for it.
+  streams, Docker's state for it and its Docker events from before its launch through its removal.
+- Those events are a window of the run's [live event recording](#the-live-docker-event-recording),
+  with its bounds in `*.helper-events.recording.json`. A launch can be held for its whole bound, and
+  other runs sharing the daemon can meanwhile push the helper's creation out of the daemon's replay
+  buffer.
 
 **Sample size.** A loss floor is a claim about a random sample, so even a working fault misses it
 with some probability. The larger sample keeps that probability negligible without lowering a
@@ -794,6 +798,12 @@ own bounds. Inside a verifier self-check it records its run label before it crea
 its records into the check's evidence directory as it takes them, so when the check's deadline or
 a signal ends it first, the check's controller still removes the owners and keeps the records; see
 [The Verifier Self-Check](#the-verifier-self-check).
+
+Like a run, the rate-probe self-test records its run label's Docker events live from before it
+creates anything. While its stalled-launch control holds the helper's launch, volumes under a noise
+label of their own publish 320 unrelated events, more than the daemon's replay buffer holds. The
+control still requires the helper's creation and removal in the probe's record, from a covered
+window of the recording, and it proves that a replay no longer holds that creation.
 
 ### Network Preflight
 
@@ -881,6 +891,11 @@ Each Docker-event check works on a window:
   beside it.
 - A recording that is missing, starts after a window opens, or ends before it closes fails the run
   as a controller failure. That includes a recording whose subscriber exited.
+
+A failed link probe keeps its helper's Docker events the same way, as a window of the recording; see
+[Link Degradation](#link-degradation). Its observation failure stands either way. When the
+recording does not cover that window, the probe's record keeps the window's status instead of
+events, and the window's bounds keep its verdict.
 
 When diagnostics are captured, after every heal, a final marker closes the recording. The recording
 must then cover the whole run within 64 MiB, and `diagnostics/docker-events.recording.json` keeps
@@ -2709,7 +2724,8 @@ exit work, and a part can leave the group. The controller therefore kills whatev
 check's session once the bound has exited. No bound changed.
 
 The parts of the check give Docker resources run labels of their own, such as the network and
-namespace owners of the rate-probe self-test, `rate-probe-check-<pid>-<n>`. Each part records its
+namespace owners of the rate-probe self-test, `rate-probe-check-<pid>-<n>`, and the noise volumes of
+its stalled-launch control, `rate-probe-check-<pid>-<n>-noise`. Each part records its
 label in `run-ids.txt` of the check's evidence directory before it creates anything under it, and
 the rate-probe self-test writes its records into `rate-probe/` there as it takes them. However the
 check ends, by itself, at its deadline or by a signal, its controller then cleans up every recorded

@@ -35,7 +35,8 @@ pub(super) const DEFAULT_STATE_REPLICATION_POLL_INTERVAL: Duration = Duration::f
 const STATE_CHECKPOINT_ANNOUNCEMENT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 /// How many changes one page of an owner's branch checkpoint catalog lists. A change is a branch key
 /// and a revision, so a page stays far below the replication class's message limit.
-const BRANCH_CHECKPOINT_LISTING_PAGE: NonZeroUsize = nonzero_ext::nonzero!(256_usize);
+pub(in crate::runtime) const BRANCH_CHECKPOINT_LISTING_PAGE: NonZeroUsize =
+    nonzero_ext::nonzero!(256_usize);
 mod error;
 pub(crate) use self::error::{AwaitedReplicas, StateReplicationError};
 

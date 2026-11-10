@@ -765,7 +765,7 @@ mod tests {
         let node = node.with_resolved_branching(Some(crate::ResolvedBranching::branched(
             branch, schema, partitions,
         )));
-        assert!(node.units_match_declaration());
+        assert!(node.units_match_declaration(&[]));
         node
     }
 

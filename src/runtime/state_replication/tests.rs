@@ -2907,3 +2907,61 @@ fn a_checkpoint_of_a_replaced_generation_is_refused_before_it_is_published() {
 
 #[path = "recovery_lifetime_tests.rs"]
 mod recovery_lifetime_tests;
+
+/// Evicting a window branch of a partitioned window processor withdraws the state the evicting
+/// partition unit retains for it, not the state of the same key under the processor's single unit.
+#[nervix_primitives::test]
+async fn evicting_a_window_branch_withdraws_the_state_of_the_unit_that_evicts_it() {
+    let runtime = Runtime::default();
+    let domain = DomainName::parse("payments").expect("the test domain is valid");
+    let processor = ModelName::parse("pair_window").expect("the test processor is valid");
+    let unit = nervix_models::Unit::partition(3);
+    runtime.publish_unit_state_assignment(
+        DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::WindowProcessor,
+                processor.clone(),
+            ),
+            unit,
+        ),
+        ScheduledStateAssignment {
+            identity: ScheduledStateIdentity {
+                schema_fingerprint: SchemaFingerprint::from_digest([7; 32]),
+                inferencer_model: None,
+                wasm_state_generations: None,
+            },
+            checkpoint_owners: None,
+        },
+    );
+    let branch = crate::runtime::test_fixtures::string_branch_key("tenant", "beta");
+    let placement = runtime
+        .state_placement_for_unit(
+            &domain,
+            RuntimeStateKind::WindowProcessor,
+            ModelKind::WindowProcessor,
+            processor.clone(),
+            unit,
+            branch.clone(),
+        )
+        .expect("the partition unit's window state is placed");
+    runtime
+        .replicated_window_processor_state(placement.clone())
+        .expect("the partition unit retains the branch's window state");
+    assert!(
+        runtime
+            .inner
+            .replicated_window_processor_states
+            .contains_key(&placement)
+    );
+    runtime
+        .release_evicted_window_state(&domain, &processor, unit, &branch)
+        .expect("the evicting unit's placement resolves");
+    assert!(
+        !runtime
+            .inner
+            .replicated_window_processor_states
+            .contains_key(&placement),
+        "the evicted branch's window state stays retained under its partition unit"
+    );
+}

@@ -309,6 +309,16 @@ docker_event_recording_finish diagnostics/docker-events.recording.json 67108864 
     || never_started_status=$?
 [[ "${never_started_status}" -eq 2 ]] \
     || fail "closing a recording that never started returned ${never_started_status}, expected 2"
+# Nor does it cover a window: the controller places no marker and writes neither events nor bounds.
+never_started_status=0
+docker_event_window "$(date +%s%N)" "${tmp_dir}/never-started.ndjson" --role node \
+    2>"${tmp_dir}/never-started.txt" || never_started_status=$?
+[[ "${never_started_status}" -eq 2 ]] \
+    || fail "a window of a recording that never started returned ${never_started_status}, expected 2"
+[[ ! -e "${tmp_dir}/never-started.ndjson" && ! -e "${tmp_dir}/never-started.recording.json" ]] \
+    || fail 'a window of a recording that never started wrote events or bounds'
+grep -Fq 'no live Docker event recording started' "${tmp_dir}/never-started.txt" \
+    || fail 'a window of a recording that never started did not say so'
 
 # The recorder against the local daemon. A run-labeled node is killed, the daemon then publishes
 # 320 unrelated volume events, and the node is started again: the window must still hold the kill.
