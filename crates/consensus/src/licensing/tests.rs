@@ -35,6 +35,7 @@ fn committed_domain_admission_serializes_competing_creates_and_preserves_updates
     );
     let result = apply_consensus_command(&mut state, &command("second"));
     let refusal = LicensingRefusal {
+        state: nervix_licensing_vocabulary::AdmissionState::OverLimit,
         condition: QuotaName::ClusterDomains,
         limit: 1,
         current_usage: 1,
@@ -117,6 +118,29 @@ fn bolero_licensing_record_preserves_time_mode_and_complete_trust_documents() {
                     },
                 });
             }
+            if arbitrary.entropy().flag() {
+                let binding = activation_binding(&mut arbitrary);
+                record.mode = LicensingMode::Activated(Box::new(ActivationState {
+                    binding,
+                    decision: StoredDecision {
+                        bytes: arbitrary.non_empty_string(),
+                        revision: arbitrary.entropy().between(1..=u64::MAX),
+                        conditions_revision: arbitrary.entropy().between(1..=u64::MAX),
+                        issued_at: arbitrary.timestamp(),
+                        received_at: arbitrary.timestamp(),
+                        request_id: uuid::Uuid::from_bytes(std::array::from_fn(|_| {
+                            arbitrary.entropy().byte()
+                        })),
+                    },
+                }));
+            }
+            if let LicensingMode::Activated(activation) = &record.mode {
+                record.licensing_time = record
+                    .licensing_time
+                    .max(activation.binding.created_at)
+                    .max(activation.decision.issued_at)
+                    .max(activation.decision.received_at);
+            }
             let encoded = DurableBatch::encode(&record, 64 * 1024)
                 .assured("three bounded opaque trust documents fit the record budget");
             let restored: LicensingRecord = crate::storage_decode(&encoded)
@@ -127,4 +151,38 @@ fn bolero_licensing_record_preserves_time_mode_and_complete_trust_documents() {
                 serde_json::from_slice(&json).assured("the complete JSON record decodes");
             assert_eq!(restored, record);
         });
+}
+
+pub(crate) fn activation_binding(arbitrary: &mut Arbitrary<'_>) -> ActivationBinding {
+    let kind = if arbitrary.entropy().flag() {
+        nervix_licensing_vocabulary::ActivationKind::Persistent
+    } else {
+        nervix_licensing_vocabulary::ActivationKind::Ephemeral
+    };
+    let latest = Timestamp::from_unix_nanos(i64::MAX - 1);
+    let created_at = arbitrary.timestamp().min(latest);
+    let ephemeral_expires_at = match kind {
+        nervix_licensing_vocabulary::ActivationKind::Persistent => None,
+        nervix_licensing_vocabulary::ActivationKind::Ephemeral => Some(
+            created_at
+                .checked_add(std::time::Duration::from_nanos(1))
+                .assured("generator leaves one timestamp nanosecond"),
+        ),
+    };
+    ActivationBinding {
+        activation_id: uuid::Uuid::from_bytes(std::array::from_fn(|_| arbitrary.entropy().byte())),
+        kind,
+        created_at,
+        ephemeral_expires_at,
+        license_key_id: "TESTABCD".to_owned(),
+    }
+}
+
+pub(crate) fn received_decision(arbitrary: &mut Arbitrary<'_>) -> ReceivedLicenseDecision {
+    ReceivedLicenseDecision {
+        bytes: arbitrary.non_empty_string(),
+        trust: Vec::new(),
+        received_at: arbitrary.timestamp(),
+        request_id: uuid::Uuid::from_bytes(std::array::from_fn(|_| arbitrary.entropy().byte())),
+    }
 }

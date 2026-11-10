@@ -33,18 +33,15 @@ impl SessionServiceImpl {
         domain: &DomainName,
         replacement: bool,
     ) -> Result<Quota, Report<DomainLicensingAdmissionError>> {
-        let usage = self
-            .inner
-            .consensus
-            .observer()
-            .licensing_snapshot()
-            .usage
-            .cluster_domains;
-        match self
-            .inner
-            .licensing
-            .admit(QuotaName::ClusterDomains, usage, 1, replacement)
-        {
+        let snapshot = self.inner.consensus.observer().licensing_snapshot();
+        let usage = snapshot.usage.cluster_domains;
+        match self.inner.licensing.admit_snapshot(
+            snapshot,
+            QuotaName::ClusterDomains,
+            usage,
+            1,
+            replacement,
+        ) {
             Ok(constraint) => Ok(constraint.quota),
             Err(report) => Err(report.change_context(DomainLicensingAdmissionError {
                 domain: domain.clone(),

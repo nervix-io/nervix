@@ -81,7 +81,11 @@ impl StateKeyspace {
     fn recover(&self) -> io::Result<StateMachineData> {
         let metadata = StateMetadata::read(&self.sm)?
             .ok_or_else(|| io::Error::other(StorageFailure::InvalidState))?;
-        StateMachineData::load(&self.sm, metadata)
+        StateMachineData::load(
+            &self.sm,
+            metadata,
+            Arc::new(crate::LicensingEnvironment::default()),
+        )
     }
 }
 

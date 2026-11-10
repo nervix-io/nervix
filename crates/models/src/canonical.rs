@@ -994,6 +994,17 @@ impl Statement {
             }
             Self::ShowClusterStatus(_) => Ok("SHOW CLUSTER STATUS;".to_string()),
             Self::DescribeCluster(_) => Ok("DESCRIBE CLUSTER;".to_string()),
+            Self::ActivateLicense(activate) => {
+                let kind = match activate.kind {
+                    nervix_licensing_vocabulary::ActivationKind::Persistent => "PERSISTENT",
+                    nervix_licensing_vocabulary::ActivationKind::Ephemeral => "EPHEMERAL",
+                };
+                Ok(format!(
+                    "ACTIVATE LICENSE {kind} WITH KEY {};",
+                    string_literal(&activate.license_key)
+                ))
+            }
+            Self::RefreshLicense(_) => Ok("REFRESH LICENSE;".to_string()),
             Self::DescribeLicense(_) => Ok("DESCRIBE LICENSE;".to_string()),
             Self::ShowTransactions(_) => Ok("SHOW TRANSACTIONS;".to_string()),
             Self::DescribeTransaction(describe) => Ok(describe.to_canonical_plexus()),
@@ -3495,7 +3506,7 @@ impl crate::StateBranchSelection {
                     let value = expression_to_plexus(&Expression::Literal(field.value.clone()))?;
                     rendered.push(format!("{} = {value}", field.name.as_str()));
                 }
-                format!("BRANCH VALUES {{ {} }}", rendered.join(", "))
+                format!("BRANCH KEY {{ {} }}", rendered.join(", "))
             }
         })
     }

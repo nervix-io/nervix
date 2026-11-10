@@ -2911,5 +2911,12 @@ mod wasm_processor_state;
 )]
 mod tests;
 
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod inferencer_handoff_tests;
+
 #[cfg(all(test, not(feature = "loom")))]
 mod schedule_installation_tests;

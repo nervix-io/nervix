@@ -508,7 +508,10 @@ as text edits; [CLI Completion](./client-tools-cli.md#completion) describes thei
 
 Semantic completion of placement members offers only placement-eligible runtime nodes. HTTP
 endpoint, WebSocket endpoint and Syslog listener ingestors execute on every cluster node, so their
-declared execution policy excludes them from these suggestions.
+declared execution policy excludes them from these suggestions. A name that more than one eligible
+entity shares is ambiguous in a rule and is not suggested either. The placement-member choice target
+answers from the same rule, so the REPL, a visual form and the rule's validation agree on every
+member.
 
 Choice lookups on the concurrent lane return typed values for structured client controls. A domain
 dependency selects internal schemas, branches, relays, codecs, VHOSTs, signaling protocols,
@@ -530,7 +533,10 @@ The same dependencies with the output-relay target select the input branch, and 
 materialized-relay target select only relays with materialized state in that branch. A generator
 reads no input, so its materialized relay uses the generator-materialized-relay target: with a
 domain alone it offers unbranched relays with materialized state, and with a domain and a branch
-reference the relays with materialized state branched by exactly that branch. Route
+reference the relays with materialized state branched by exactly that branch. A placement form
+asks the placement-member target with a domain for each `FROM` and `TO` member; it offers the
+placement-eligible runtime nodes, with the attached transaction prefix applied, and its page digest
+includes each candidate's definition. Route
 construction of an unbranched or named branch uses the ingestor relay targets, while branch keys
 and record fields use the branch-field and relay-field targets. These processor targets resolve
 against the attached transaction prefix, and their page digests include the selected input
@@ -1117,6 +1123,7 @@ reports, so a client routes notices by kind and never by their text:
 | `ClusterParameters` | A committed cluster-parameter revision the serving node installed | `Info` |
 | `Runtime` | A failure the runtime of the serving node, or of another node, recovered from | `Error` |
 | `ControlPlane` | A control-plane failure the serving node recovered from | `Error` |
+| `Licensing` | A licensing lifecycle observation or a refresh/policy warning | `Info`, `Warning` |
 
 A membership notice reports only a change of the live set. Model changes, subscriptions opening or
 closing and domain starts change what members publish through gossip, not which members are live,
@@ -1391,7 +1398,8 @@ into the FlatBuffers builder; no JSON object, map of fields, or intermediate row
 Plexus type has exactly one cell type, `DATETIME` travels as signed nanoseconds, floats keep their
 exact bits, and `BYTES` travels as raw octets. A sensitive field is written as `RedactedCell` in
 every row, whether or not it held a value, so the frame reveals neither the value nor its nullness.
-A null in a nullable field is `NullCell`; a list element is never null or redacted.
+A null in a nullable field is `NullCell`; a list element is never null or redacted. A null fixed
+array has no visible elements: physical child nulls masked by its Arrow validity are not encoded.
 
 A frame holds rows of one concrete branch. Its branch key is written once per frame, with sensitive
 key fields redacted, and is absent exactly when the relay is unbranched. The encoder groups the

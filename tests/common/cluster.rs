@@ -1083,6 +1083,7 @@ impl LeadershipMove {
 
 #[derive(Debug, Clone)]
 pub(crate) struct TestClusterConfig {
+    pub licensing_test_support: nervix_server::ConfiguredLicensingTestSupport,
     pub replica_count: usize,
     pub scheduler_mode: Option<SchedulerMode>,
     pub state_snapshot_interval: Duration,
@@ -1128,6 +1129,7 @@ pub(crate) struct TestClusterConfig {
 impl Default for TestClusterConfig {
     fn default() -> Self {
         Self {
+            licensing_test_support: nervix_server::ConfiguredLicensingTestSupport::default(),
             replica_count: TEST_REPLICA_COUNT,
             scheduler_mode: None,
             state_snapshot_interval: TEST_STATE_SNAPSHOT_INTERVAL,
@@ -4818,6 +4820,7 @@ impl NodeHandle {
             .settings(settings)
             .detection(self.config.node_detection(&self.spec.node_id)?)
             .fault_injection(self.fault_injection.clone())
+            .licensing_test_support(self.config.licensing_test_support.clone())
             .graceful_shutdown_drain(self.config.graceful_shutdown_drain)
             .build();
         let shutdown = application.shutdown.clone();

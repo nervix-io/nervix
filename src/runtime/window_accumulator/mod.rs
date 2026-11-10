@@ -55,6 +55,8 @@ mod sums;
 mod two_stacks;
 
 #[cfg(test)]
+mod collection_array_tests;
+#[cfg(test)]
 mod collection_properties;
 #[cfg(test)]
 mod collection_tests;

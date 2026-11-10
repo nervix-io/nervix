@@ -3956,3 +3956,105 @@ button {
   font: inherit;
   font-size: 10px;
 }
+
+/* A corridor placement's ordered members, one row per member with its move and remove actions. */
+.create-placement-members {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.create-placement-members:empty {
+  display: none;
+}
+
+.create-placement-member {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-c);
+  font-size: 11px;
+}
+
+.create-placement-member.invalid {
+  border-color: color-mix(in srgb, #fb7185 55%, var(--border));
+  color: #fb7185;
+}
+
+.create-placement-member-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.create-placement-member button {
+  min-width: 26px;
+  min-height: 24px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface-hi);
+  color: var(--text-c);
+  font: inherit;
+}
+
+.create-placement-member button:disabled {
+  opacity: 0.45;
+}
+
+/* A sidebar section's header beside the action that creates an entity of that section. */
+.nav-section {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.nav-section .nav-header {
+  border: 0;
+}
+
+.nav-create {
+  min-width: 32px;
+  border: 0;
+  border-left: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-d);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.nav-create:hover,
+.nav-create:focus-visible {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--cyan);
+}
+
+.sidebar-create-menu {
+  top: 34px;
+  right: 6px;
+  min-width: 190px;
+}
+
+.sidebar-create-menu button {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.sidebar-create-menu button:hover,
+.sidebar-create-menu button:focus-visible {
+  background: color-mix(in srgb, var(--cyan) 11%, transparent);
+}

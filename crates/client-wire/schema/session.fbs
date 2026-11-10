@@ -214,6 +214,8 @@ enum ChoiceTarget : ubyte {
   EmitterErrorRelay,
   SchemaField,
   GeneratorMaterializedRelay,
+  /// Runtime nodes a placement rule may name as a FROM or TO member. Requires a domain.
+  PlacementMember,
 }
 
 enum DomainPaceChoice : ubyte {
@@ -2427,7 +2429,9 @@ enum NoticeKind : ubyte {
   /// A failure the runtime of the serving node, or of another node, recovered from.
   Runtime,
   /// A control-plane failure the serving node recovered from.
-  ControlPlane
+  ControlPlane,
+  /// A licensing lifecycle observation or policy warning.
+  Licensing
 }
 
 table ServerNotice {

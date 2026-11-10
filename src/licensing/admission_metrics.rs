@@ -19,6 +19,8 @@ use crate::metrics::RuntimeMetrics;
 pub(super) struct AdmissionMetrics {
     nodes: IntCounter,
     domains: IntCounter,
+    lapsed_nodes: IntCounter,
+    lapsed_domains: IntCounter,
 }
 
 impl AdmissionMetrics {
@@ -40,15 +42,28 @@ impl AdmissionMetrics {
             .register_collector(Box::new(family.clone()))
             .assured("licensing admission metrics are registered once per node");
         Self {
+            lapsed_nodes: family.with_label_values(&[QuotaName::ClusterNodes.as_str(), "lapsed"]),
+            lapsed_domains: family
+                .with_label_values(&[QuotaName::ClusterDomains.as_str(), "lapsed"]),
             nodes: family.with_label_values(&[QuotaName::ClusterNodes.as_str(), "over_limit"]),
             domains: family.with_label_values(&[QuotaName::ClusterDomains.as_str(), "over_limit"]),
         }
     }
 
     pub(super) fn record(&self, refusal: &LicensingRefusal) {
-        match refusal.condition {
-            QuotaName::ClusterNodes => self.nodes.inc(),
-            QuotaName::ClusterDomains => self.domains.inc(),
+        match (refusal.condition, refusal.state) {
+            (QuotaName::ClusterNodes, nervix_licensing_vocabulary::AdmissionState::OverLimit) => {
+                self.nodes.inc()
+            }
+            (QuotaName::ClusterDomains, nervix_licensing_vocabulary::AdmissionState::OverLimit) => {
+                self.domains.inc()
+            }
+            (QuotaName::ClusterNodes, nervix_licensing_vocabulary::AdmissionState::Lapsed) => {
+                self.lapsed_nodes.inc()
+            }
+            (QuotaName::ClusterDomains, nervix_licensing_vocabulary::AdmissionState::Lapsed) => {
+                self.lapsed_domains.inc()
+            }
         }
     }
 }

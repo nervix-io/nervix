@@ -685,6 +685,9 @@ struct ScenarioWorld {
     domain_write_load: Option<DomainWriteLoad>,
     follower_commands_memory: Option<FollowerCommandsMemoryObservation>,
     transaction_qualification: Option<TransactionQualificationObservation>,
+    licensing_service: Option<nervix_licensing_test_service::Service>,
+    licensing_notice_client: Option<Client>,
+    licensing_clock_offset: Duration,
     cluster_config: TestClusterConfig,
     temp_root: Option<TempDir>,
     formatter_root: Option<TempDir>,
@@ -22847,6 +22850,41 @@ async fn then_selector_has_value_containing(
         value.contains(&expected),
         "expected selector '{selector}' value to contain '{expected}', got '{value}'"
     );
+}
+
+/// The element `selector` names holds the document focus, as a dialog that closes returns focus
+/// to the control that opened it.
+#[then(expr = "selector {string} is focused")]
+async fn then_selector_is_focused(world: &mut ScenarioWorld, selector: String) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before selector assertions");
+    let selector = expand_placeholders(world, &selector);
+    let script = format!(
+        r#"
+        () => {{
+            const element = document.querySelector({selector:?});
+            return element !== null && element === document.activeElement;
+        }}
+        "#
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let focused = page
+            .evaluate::<(), bool>(&script, None::<&()>)
+            .await
+            .expect("selector focus must be readable");
+        if focused {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected selector '{selector}' to hold the document focus within 10s of this step"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 #[then(expr = "selector {string} is scrolled to bottom")]

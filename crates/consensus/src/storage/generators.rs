@@ -1053,7 +1053,7 @@ fn transaction_target(arbitrary: &mut Arbitrary<'_>) -> CommandExecutionTransact
 fn transaction_request_operation(
     arbitrary: &mut Arbitrary<'_>,
 ) -> CommandExecutionTransactionOperation {
-    match arbitrary.entropy().byte() % 3 {
+    match arbitrary.entropy().byte() % 4 {
         0 => {
             let request_reference = arbitrary.execution_reference();
             let expected_position = any_count(arbitrary);
@@ -1064,7 +1064,13 @@ fn transaction_request_operation(
         1 => CommandExecutionTransactionOperation::Commit {
             expected_preview: optional(arbitrary, Arbitrary::transaction_preview_identity),
         },
-        _ => CommandExecutionTransactionOperation::Revert,
+        2 => CommandExecutionTransactionOperation::Revert,
+        _ => CommandExecutionTransactionOperation::RefuseUnqueueable {
+            statement_label: arbitrary
+                .entropy()
+                .pick(["CREATE USER", "CREATE DOMAIN", "BACKUP"])
+                .to_owned(),
+        },
     }
 }
 
@@ -1138,7 +1144,7 @@ fn command_execution_effect(
     arbitrary: &mut Arbitrary<'_>,
     reference: &CommandExecutionReference,
 ) -> CommandExecutionEffect {
-    match arbitrary.entropy().byte() % 8 {
+    match arbitrary.entropy().byte() % 9 {
         7 => CommandExecutionEffect::AlterCluster {
             changes: arbitrary.cluster_parameter_values().assignments(),
             applied: optional(arbitrary, Arbitrary::cluster_parameter_record).map(Box::new),
@@ -1170,6 +1176,10 @@ fn command_execution_effect(
         5 => CommandExecutionEffect::DropNode {
             identity: arbitrary.node_identity(),
             member_at_admission: arbitrary.entropy().flag(),
+        },
+        8 => CommandExecutionEffect::ActivateLicense {
+            binding: Box::new(crate::licensing::tests::activation_binding(arbitrary)),
+            decision: Box::new(crate::licensing::tests::received_decision(arbitrary)),
         },
         _ => CommandExecutionEffect::Restore(Box::new(restore_execution(arbitrary))),
     }
@@ -1348,6 +1358,7 @@ fn command_execution_result(
         CommandExecutionEffect::CreateDomain { .. }
         | CommandExecutionEffect::AlterCluster { .. }
         | CommandExecutionEffect::CreateUser { .. }
+        | CommandExecutionEffect::ActivateLicense { .. }
         | CommandExecutionEffect::DropNode { .. } => {}
     }
     result
@@ -1824,6 +1835,10 @@ fn complete_application_command(arbitrary: &mut Arbitrary<'_>) -> ConsensusComma
 enum CommandVariant {
     AnnounceNodeRecord,
     InstallClusterIdentity,
+    ActivateLicense,
+    ApplyLicenseDecision,
+    InstallTrustDocuments,
+    AdvanceLicensingTime,
     SeedClusterParameters,
     AlterClusterParameters,
     AdmitCommandExecution,
@@ -1874,6 +1889,10 @@ impl CommandVariant {
         match command {
             ConsensusCommand::AnnounceNodeRecord { .. } => Self::AnnounceNodeRecord,
             ConsensusCommand::InstallClusterIdentity { .. } => Self::InstallClusterIdentity,
+            ConsensusCommand::ActivateLicense { .. } => Self::ActivateLicense,
+            ConsensusCommand::ApplyLicenseDecision { .. } => Self::ApplyLicenseDecision,
+            ConsensusCommand::InstallTrustDocuments { .. } => Self::InstallTrustDocuments,
+            ConsensusCommand::AdvanceLicensingTime { .. } => Self::AdvanceLicensingTime,
             ConsensusCommand::SeedClusterParameters { .. } => Self::SeedClusterParameters,
             ConsensusCommand::AlterClusterParameters { .. } => Self::AlterClusterParameters,
             ConsensusCommand::AdmitCommandExecution { .. } => Self::AdmitCommandExecution,
@@ -1959,6 +1978,20 @@ fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> Consens
         },
         CommandVariant::InstallClusterIdentity => ConsensusCommand::InstallClusterIdentity {
             identity: Box::new(crate::cluster_identity::tests::identity(arbitrary)),
+        },
+        CommandVariant::ActivateLicense => ConsensusCommand::ActivateLicense {
+            binding: Box::new(crate::licensing::tests::activation_binding(arbitrary)),
+            decision: Box::new(crate::licensing::tests::received_decision(arbitrary)),
+        },
+        CommandVariant::ApplyLicenseDecision => ConsensusCommand::ApplyLicenseDecision {
+            decision: Box::new(crate::licensing::tests::received_decision(arbitrary)),
+            expected_revision: arbitrary.entropy().any_u64(),
+        },
+        CommandVariant::InstallTrustDocuments => ConsensusCommand::InstallTrustDocuments {
+            documents: Vec::new(),
+        },
+        CommandVariant::AdvanceLicensingTime => ConsensusCommand::AdvanceLicensingTime {
+            observed_at: arbitrary.timestamp(),
         },
         CommandVariant::SeedClusterParameters => ConsensusCommand::SeedClusterParameters {
             values: arbitrary.cluster_parameter_values(),
@@ -2205,7 +2238,7 @@ fn seeded_bytes(seed: u64, length: usize) -> Vec<u8> {
 
 /// Every variant and shape of the transaction, commit plan, report and command execution records
 /// [`state_machine`] promises to reach, as [`RecordWalk`] names them.
-const EXPECTED_RECORDS: [&str; 47] = [
+const EXPECTED_RECORDS: [&str; 48] = [
     "ReplicatedTransaction::session",
     "ReplicatedTransaction::command",
     "ReplicatedTransaction::latest_preview",
@@ -2239,6 +2272,7 @@ const EXPECTED_RECORDS: [&str; 47] = [
     "CommandExecutionEffect::TransactionRequest",
     "CommandExecutionEffect::Statement",
     "CommandExecutionEffect::CreateUser",
+    "CommandExecutionEffect::ActivateLicense",
     "CommandExecutionEffect::DropNode",
     "CommandExecutionEffect::Restore",
     "RestoreExecution::completed_steps",
@@ -2416,6 +2450,9 @@ impl RecordWalk {
             }
             CommandExecutionEffect::Statement { .. } => {
                 self.see("CommandExecutionEffect::Statement");
+            }
+            CommandExecutionEffect::ActivateLicense { .. } => {
+                self.see("CommandExecutionEffect::ActivateLicense");
             }
             CommandExecutionEffect::CreateUser { .. } => {
                 self.see("CommandExecutionEffect::CreateUser");

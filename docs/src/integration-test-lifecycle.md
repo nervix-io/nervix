@@ -1384,6 +1384,15 @@ had not already published.
 
 ## Product Deadlines And Harness Deadlines
 
+TTL lifecycle scenarios account for the expiry scan as well as the idle duration. Relay and
+processor owners expire branches on scans; observing a branch neither scans nor refreshes it.
+The production scan cadence is 30 seconds, so a 30-second TTL and a 60-second observation leave
+almost no margin when the first scan precedes the branch's expiry and the next scan runs late.
+Focused TTL scenarios configure the existing branch expiration scan override to 100 milliseconds
+before cluster startup, keeping the declared TTL and the absence assertions intact. The stateful
+inferencer TTL outline uses this cadence on one and three nodes and still requires both returning
+branches to start from `INITIAL` after their relay presence and retained state have disappeared.
+
 Two kinds of deadline meet in every scenario.
 
 A **product deadline** is configuration a node enforces on itself: its shutdown and drain timeouts,
