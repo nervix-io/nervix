@@ -549,10 +549,6 @@ class InventoryTests(unittest.TestCase):
         }
         for target, version in {
             "benchmark-metrics-report": 1,
-            "runtime-window-collection": 1,
-            "runtime-window-snapshots": 5,
-            "runtime-window-sealed-checkpoints": 5,
-            "backup-window-groups": 5,
             "ingestor-describe-envelope": 11,
             "plexus-model": 60,
             "plexus-archive-model": 63,
@@ -581,6 +577,10 @@ class InventoryTests(unittest.TestCase):
             "backup-capture-wire": 3,
             "backup-capture-wire-malformed": 3,
             "backup-section-mapping": 4,
+            "runtime-window-collection": 1,
+            "runtime-window-snapshots": 5,
+            "runtime-window-sealed-checkpoints": 5,
+            "backup-window-groups": 5,
 
             "inferencer-state-snapshots-malformed": 1,
             "inferencer-native-snapshot-projection": 1,
