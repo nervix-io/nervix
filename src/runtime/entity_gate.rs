@@ -413,9 +413,10 @@ impl NodeQuiesceCounters {
     }
 
     pub(super) fn outstanding_work_for(&self, purpose: EntityGatePurpose) -> usize {
-        if purpose == EntityGatePurpose::OwnershipHandoff {
-            // A handoff carries parked messages to the destination. Read flush obligations
-            // first: acquiring a completed flush also observes work it resumed from parking.
+        if purpose.keeps_parked_work() {
+            // A handoff carries parked messages to the destination, and a partition change to the
+            // unit's next supervisor. Read flush obligations first: acquiring a completed flush
+            // also observes work it resumed from parking.
             return self
                 .force_flush_obligations()
                 .checked_add(self.admitted_work())
@@ -1143,7 +1144,7 @@ impl Runtime {
                 deadline,
                 &reason,
             ),
-            EntityGatePurpose::ModelAlteration => {
+            EntityGatePurpose::ModelAlteration | EntityGatePurpose::PartitionChange => {
                 self.engage_entity_gates(domain, &scope.relays, deadline, &reason)
             }
         };
@@ -1172,7 +1173,9 @@ impl Runtime {
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         let quiesce_cause = match purpose {
-            EntityGatePurpose::ModelAlteration => IngestorQuiesceCause::EntityHold,
+            EntityGatePurpose::ModelAlteration | EntityGatePurpose::PartitionChange => {
+                IngestorQuiesceCause::EntityHold
+            }
             EntityGatePurpose::OwnershipHandoff => IngestorQuiesceCause::OwnershipHandoff,
             EntityGatePurpose::WasmStateReset(_) => IngestorQuiesceCause::EntityHold,
         };
@@ -1637,7 +1640,7 @@ impl Runtime {
                     ))
             })
             .map(|tracker| {
-                if purpose == EntityGatePurpose::OwnershipHandoff {
+                if purpose.keeps_parked_work() {
                     tracker.outstanding_for_ownership_handoff()
                 } else {
                     tracker.outstanding()

@@ -2,7 +2,9 @@
 # Sourced by the degraded-links and mixed-instability scenarios after partition-scenario.sh. Owns
 # degrading one directed node link with Pumba netem: the qualified profiles, measuring the link with
 # ICMP and with a transfer its receiver counts, installing one owned netem configuration on the sender
-# after every node interface proved default, and healing it through the injector's SIGTERM.
+# after every node interface proved default, and healing it through the injector's SIGTERM. A failed
+# ICMP helper's Docker events come from the live recording of docker-event-recording.sh, which its
+# controller keeps for the run label every helper carries.
 
 link_degradation_fail() {
     failure_category="$1"
@@ -45,16 +47,16 @@ link_ping_keep_state() {
         >"${evidence}.helper-state.json" 2>&1 || link_ping_state_status=$?
 }
 
-# Keeps the daemon's events for the failed ping helper HELPER_ID since REQUESTED_MS, through its
-# removal, beside EVIDENCE. Sets link_ping_events_status.
+# Keeps the Docker events of the failed ping helper HELPER_ID from REQUESTED_NS, before its launch,
+# through its removal, beside EVIDENCE, with the window's bounds in its .recording.json. They are a
+# window of the run's live recording, never a replay of the daemon's buffer of its 256 most recent
+# events, which other runs sharing the daemon can overrun while a launch is held for its whole
+# bound. Sets link_ping_events_status to the window's status, zero once recorded markers bracket it.
 link_ping_keep_events() {
-    local evidence="$1" helper_id="$2" requested_ms="$3"
-    local removed_ns
-    removed_ns="$(date +%s%N)"
+    local evidence="$1" helper_id="$2" requested_ns="$3"
     link_ping_events_status=0
-    run_bounded 20 docker events --format '{{json .}}' --filter "container=${helper_id}" \
-        --since "$((requested_ms / 1000))" --until "$((removed_ns / 1000000000 + 1))" \
-        >"${evidence}.helper-events.ndjson" 2>&1 || link_ping_events_status=$?
+    docker_event_window "${requested_ns}" "${evidence}.helper-events.ndjson" \
+        --container "${helper_id}" 2>"${evidence}.helper-events.log" || link_ping_events_status=$?
 }
 
 # Samples RECEIVER from SENDER's network namespace in approximately four seconds, and summarizes
@@ -65,8 +67,8 @@ link_ping_keep_events() {
 # profile and healthy observation uses forty packets. The helper starts under the launch bound and
 # its sample ends under the probe's own 30-second bound. The helper reports when its sample began
 # and ended on the uptime clock the controller reads too, so the probe's record tells Docker control
-# time apart from the sample. A failed helper keeps its raw streams and Docker's own state and
-# events for it before it is removed.
+# time apart from the sample. A failed helper keeps its raw streams and Docker's own state for it
+# before it is removed, and its Docker events through its removal from the run's live recording.
 link_ping() {
     [[ "$#" -eq 4 ]] || {
         link_degradation_fail observation 'link ping needs output, sender, receiver and profile'
@@ -134,7 +136,7 @@ link_ping() {
         run_bounded 20 docker container rm --force "${helper_id}" \
             >"${evidence}.helper-removal.log" 2>&1 || removal_status=$?
         if [[ "${helper_failed}" == true ]]; then
-            link_ping_keep_events "${evidence}" "${helper_id}" "$((requested_ns / 1000000))"
+            link_ping_keep_events "${evidence}" "${helper_id}" "${requested_ns}"
         fi
     fi
     local docker_state=null docker_events='[]'

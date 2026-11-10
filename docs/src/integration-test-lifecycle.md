@@ -166,6 +166,19 @@ three nodes. Preparation includes the console, ONNX fixtures/runtime, WASM guest
 used for resource uploads and completion. Additional arguments reach the runner unchanged; the
 complete ordinary suite, completion walks and concurrency checks retain their separate verdicts.
 
+## Focused WebSocket Connection Checks
+
+`just test-websockets-runtime` selects the outbound connection declarations, bounds and
+delayed-handoff features through the ordinary one- and three-node harness. It prepares the console,
+ONNX runtime, WASM guests, formatter, CLI and deadlock reporter. Arguments such as `--name`, `--concurrency` and
+`--retry` reach the runner unchanged; broad scenario and CI runs retain their full prerequisites.
+
+The delayed-handoff fixture occupies the real decoder workers, observes its payload waiting in
+their bounded queue, and releases the workers after the configured idle bound. Its holds release
+on drop even when a step fails. The responsive peer accepts one connection and releases the next
+payload only after a client ping. Its stop result is retained until node teardown and port release
+finish, then asserted, so a connection failure remains visible and does not prevent cleanup.
+
 ## Delayed Consensus Heartbeat Answers
 
 The leader-lease regression uses a testing-only control on each follower's consensus probe. The
@@ -4416,8 +4429,9 @@ shard's `scenario-logs-<I>` artifact carries its `tests/logs`.
 Server processes write their logs into their own temporary directories, and a failure quotes the
 tail it needs.
 
-The scenario tracing default enables the consensus owner's trace contexts and vote send/completion
-events, while retaining the replication module's debug selection and OpenRaft's existing filter.
+The scenario tracing default enables the consensus owner's receiver contexts and vote
+send/completion events at `debug`, while retaining the replication module's debug selection and
+OpenRaft's existing filter.
 The concrete local listener distinguishes same-named nodes in parallel isolated clusters. Vote
 events retain the peer, vote, deadline, elapsed transport time and existing result; receiver
 contexts identify the node whose Raft API accepted the request. These infrequent election events
@@ -4427,6 +4441,24 @@ enable OpenRaft debug events to compare received append gaps and API-to-core pro
 neither a passing replay nor a final leader snapshot establishes why an earlier election stalled.
 Compare the same cluster's request, processing and reply boundaries with runner load and scheduler
 evidence; the Cucumber task's stall detector does not observe every node worker.
+
+The default selects nothing more verbose than `debug`, which
+`the_scenario_default_selects_nothing_more_verbose_than_debug` in
+`src/application/tracing_setup_filter_tests.rs` holds. A scenario run records through one process
+subscriber, and the `log` bridge that subscriber installs hands it every record a dependency writes
+through the `log` crate, up to the most verbose level the filter selects for any target, to be
+judged one record at a time. Cranelift writes `trace` records throughout every module it compiles,
+and a node compiles the module of a WASM processor it installs before it reports the revision
+prepared: after a restart or a restore, and on every node other than the one whose transaction
+validated the module. From 3 November 2026 the default selected `nervix_consensus=trace` for the
+vote events, and one compile of the suite's 1.77 MB Rust guest took 23.8 to 26.7 seconds on a
+development host where it takes 4.2 to 4.6 seconds with the default at `debug` or with no
+subscriber. CI shards spent about 31 seconds on it on an otherwise idle core, and longer under
+load, against the 40 seconds a revision has to become prepared and ready: the scenario cluster's
+10-second node-unavailability timeout plus the 30-second readiness propagation bound. `CREATE
+SUBSCRIPTION` after a cluster restart or a restore then timed out waiting for the revision to become
+ready, and a transaction step on three nodes timed out waiting for its followers to prepare it. An
+explicit `RUST_LOG` that selects `trace` anywhere brings that cost back for its run.
 
 The materialized input round and the delayed-coordinator publication observation each own a
 `BackupPhase`. It captures the existing 120-second deadline before dispatching the operation through

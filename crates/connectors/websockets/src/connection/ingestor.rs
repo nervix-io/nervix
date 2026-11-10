@@ -253,6 +253,7 @@ pub struct WebsocketsConnectionIngestor {
 
 mod connection;
 mod handshake;
+mod pings;
 use connection::{WebsocketConnection, WebsocketRead};
 
 enum WebsocketPingOutcome {
@@ -277,7 +278,10 @@ impl WebsocketsConnectionIngestor {
             return Ok(WebsocketPingOutcome::Interrupted);
         };
         match outcome {
-            Ok(Ok(())) => Ok(WebsocketPingOutcome::Sent),
+            Ok(Ok(())) => {
+                connection.ping_written();
+                Ok(WebsocketPingOutcome::Sent)
+            }
             Ok(Err(error)) => {
                 self.connection = None;
                 Err(Report::new(error).change_context(IngestorError::Read {

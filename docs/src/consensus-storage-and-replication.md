@@ -518,8 +518,8 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_infrastructure_capabilities_identity_licensing_tls_inference_reset_logs`, `raft_infrastructure_capabilities_identity_licensing_tls_inference_reset_meta`, `raft_infrastructure_capabilities_identity_licensing_tls_inference_reset_state`, and
-`raft_infrastructure_capabilities_identity_licensing_tls_inference_reset_snapshots`. Opening it validates the complete keyspace namespace before reading
+`raft_infrastructure_capabilities_identity_licensing_tls_inference_reset_epoch_logs`, `raft_infrastructure_capabilities_identity_licensing_tls_inference_reset_epoch_meta`, `raft_infrastructure_capabilities_identity_licensing_tls_inference_reset_epoch_state`, and
+`raft_infrastructure_capabilities_identity_licensing_tls_inference_reset_epoch_snapshots`. Opening it validates the complete keyspace namespace before reading
 any records. The committed cluster-parameter record stores ordered typed TLS cipher suites and
 key-exchange groups; recovery validates their complete pair before returning that record.
 This namespace identifies the current Model shape, including the separate JSON
@@ -532,8 +532,9 @@ MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an M
 writes beside its publishing mode, its retained-publication flag and MQTT 5 property mappings, a
 `REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription,
 whether a polled HTTP request's header holds a literal or names a client secret, the endpoint kind
-whose signaling data exists only on its WebSockets variant, and the branch partition count every
-resolved branch declaration of the committed schedule carries. It identifies
+whose signaling data exists only on its WebSockets variant, the branch partition count every
+resolved branch declaration of the committed schedule carries, and the partition epoch the
+committed schedule records for every branch whose count changed. It identifies
 the current statement shape as well, which the statements a transaction keeps are stored in:
 `ALTER BRANCH` among those statements, an `ALTER INGESTOR` or `ALTER EMITTER` operation that
 changes one part of its entity's body, an envelope clause or the properties, or one part of a
@@ -541,7 +542,7 @@ construction where it stands, including the typed `payload` expression scope and
 `RESET WASM PROCESSOR ... STATE` that names its processor and scope and takes its domain from
 the transaction, as the step effect and commit plan step keep it too. The database also stores
 incarnation-bound node capability claims under record-family tag `C`. Its state metadata
-requires the current `ClusterState` encoding, 23, including the cluster identity reference,
+requires the current `ClusterState` encoding, 24, including the cluster identity reference,
 committed cluster parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,
@@ -620,16 +621,19 @@ node name and concrete local interconnect address. OpenRaft captures that contex
 its core. Parallel isolated clusters may use the same node names; the listener address distinguishes
 their core events in a shared log. The span belongs to that consensus lifetime and exposes no
 command, record or credential values.
-The unary append, vote and pre-vote receivers also establish trace-level contexts with the same
+The unary append, vote and pre-vote receivers also establish debug-level contexts with the same
 local node and listener address. When detailed tracing is selected, their existing OpenRaft API
 events distinguish arrival at the Raft API from processing by that node's core. The annotations
 change no request, deadline or retry policy.
-Vote and pre-vote clients emit trace-level send and completion events with the local endpoint,
+Vote and pre-vote clients emit debug-level send and completion events with the local endpoint,
 peer, vote, request deadline, elapsed transport time and result. The elapsed measurement spans
 encoding, connection admission, the exchange and response decoding. An outer OpenRaft timeout may
 cancel the request before its completion event; its timeout event remains the outcome in that
 case. These infrequent requests take one additional monotonic-clock reading when they begin;
-completion timing and result formatting are evaluated only when their trace event is enabled.
+completion timing and result formatting are evaluated only when their debug event is enabled.
+Selecting them therefore never needs a `trace` directive, which would make the process's log
+bridge hand every dependency's `trace` record to the filter (see [the scenario tracing
+default](integration-test-lifecycle.md#how-failure-reaches-ci-output)).
 
 Durable record decoding and recovered catalog checks preserve decoding or nested report causes
 inside the standard-error carrier that the storage trait accepts. The carrier's ordinary rendering

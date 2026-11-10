@@ -5054,7 +5054,7 @@ impl ProtocolReceiver {
 
     #[tracing::instrument(
         name = "receive_raft_append",
-        level = "trace",
+        level = "debug",
         skip_all,
         fields(node = %self.inner.local_node_id, local_addr = %self.inner.interconnect.local_addr()),
     )]
@@ -5067,7 +5067,7 @@ impl ProtocolReceiver {
 
     #[tracing::instrument(
         name = "receive_raft_vote",
-        level = "trace",
+        level = "debug",
         skip_all,
         fields(node = %self.inner.local_node_id, local_addr = %self.inner.interconnect.local_addr()),
     )]
@@ -5080,7 +5080,7 @@ impl ProtocolReceiver {
 
     #[tracing::instrument(
         name = "receive_raft_pre_vote",
-        level = "trace",
+        level = "debug",
         skip_all,
         fields(node = %self.inner.local_node_id, local_addr = %self.inner.interconnect.local_addr()),
     )]
@@ -5438,7 +5438,7 @@ where
         self.connectivity.check().map_err(unreachable_err)?;
         let rpc_timeout = option.hard_ttl();
         let started = Instant::now();
-        tracing::trace!(
+        tracing::debug!(
             node = %self.local_node_id,
             local_addr = %self.interconnect.local_addr(),
             peer = %self.target,
@@ -5455,7 +5455,7 @@ where
                     rpc_timeout,
                 )
                 .await;
-            tracing::trace!(
+            tracing::debug!(
                 node = %self.local_node_id,
                 local_addr = %self.interconnect.local_addr(),
                 peer = %self.target,
@@ -5487,7 +5487,7 @@ where
         self.connectivity.check().map_err(unreachable_err)?;
         let rpc_timeout = option.hard_ttl();
         let started = Instant::now();
-        tracing::trace!(
+        tracing::debug!(
             node = %self.local_node_id,
             local_addr = %self.interconnect.local_addr(),
             peer = %self.target,
@@ -5504,7 +5504,7 @@ where
                     rpc_timeout,
                 )
                 .await;
-            tracing::trace!(
+            tracing::debug!(
                 node = %self.local_node_id,
                 local_addr = %self.interconnect.local_addr(),
                 peer = %self.target,

@@ -1708,11 +1708,15 @@ moves its exact hard group; an unqualified member selects all its declared units
 [Control Plane](./control-plane.md) for activation and [Typed States And Validation
 Boundaries](./typed-states.md) for required state.
 
-`ALTER BRANCH <branch> SET PARTITIONS <n>` on a domain that is running or paused is refused before
-anything is committed with `TransactionPlanningError::BranchPartitionsRequireStoppedDomain`, which
-names the operation, the domain and the branch and states the stopped-domain path, such as `branch
-'by_tenant' changes its partition count only while its domain is stopped: STOP domain 'payments',
-run ALTER BRANCH, then START it`. A domain build whose committed schedule lacks a unit its relay
+`ALTER BRANCH <branch> SET PARTITIONS <n>` to a count other than the current one, while the branch's
+previous partition count still has keys to move, is refused before anything is committed with
+`TransactionPlanningError::BranchPartitionsStillMoving`, which names the operation, the domain, the
+branch and both counts, such as `branch 'by_tenant' in domain 'payments' is still moving keys placed
+under its previous partition count 4 to its current count 8; change its partition count again once
+DESCRIBE BRANCH reports no previous partitions`. A claim that cannot move a key, because its holder's
+owner does not answer or refuses, keeps the key's records parked and tries again; it reports a
+`PartitionClaimError` naming the entity and unit at `warn`. `DESCRIBE BRANCH` reports `keys pending:
+unavailable` with the `TransitionHoldingsError` that names the unit whose owner did not answer. A domain build whose committed schedule lacks a unit its relay
 needs reports `ExecutionBuildError::RelayUnitNotScheduled`, naming the relay and the unit.
 
 The domain-wide placement editor retains typed name and positive-integer rank parse failures
@@ -2609,7 +2613,7 @@ Finding that Core is already uniform is an ordinary completion outcome carrying 
 effective and committed records; it proposes no additional membership entry, even when a preceding
 joint observation became stale before Core handled the request.
 
-Trace-level vote and pre-vote transport completion events record the existing nested result before
+Debug-level vote and pre-vote transport completion events record the existing nested result before
 its foreign-error conversion, beside the local listener, peer and elapsed time. A transport error
 and a peer's typed refusal therefore remain distinguishable in the diagnostic. Cancellation by
 OpenRaft can end the exchange before that event; its own timeout then records the outcome. These
@@ -3388,6 +3392,15 @@ every other event stays with the filter. The rule takes no decision away from th
 subscriber's maximum level stays the filter's, and an event the filter refuses costs what it would
 without the rule. The scenario run's subscriber, which writes
 `tests/logs/scenarios.log`, applies the same rule to its own default.
+
+The subscriber's maximum level is also the level up to which the `log` crate hands it every record a
+dependency writes, to be judged one record at a time. Cranelift writes `trace` records throughout
+every WASM module and every Roto UDF it compiles, so a filter that selects `trace` for any target
+makes each such compile several times as long: about six times for the 1.77 MB guest of the scenario
+suite. A node compiles the module of a WASM processor it installs before it reports the revision
+prepared, so under such a filter a large module can outlast the budget a revision has to become
+prepared and ready. The scenario run's default therefore selects nothing above `debug`, and the
+consensus vote boundaries and receiver contexts it collects are recorded at `debug`.
 
 The node drops Lapin's report of a message its broker returned. Lapin logs every
 returned message at `warn` under the target `lapin::returned_messages`, with the whole message, its

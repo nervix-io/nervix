@@ -62,6 +62,8 @@ mod capabilities;
 mod materialized;
 #[path = "parameters.rs"]
 mod parameters;
+#[path = "partition_claims.rs"]
+mod partition_claims;
 #[path = "process_target.rs"]
 mod process_target;
 #[path = "progress.rs"]
