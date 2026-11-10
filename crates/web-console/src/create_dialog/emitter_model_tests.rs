@@ -24,7 +24,8 @@ use super::{
         AssignmentDraft, FlushDraft, InheritDraft, InheritedFieldDraft, InvocationDraft,
         MessageErrorDraft,
     },
-    processor_draft::{InputDraft, StateDependencyDraft, StatePolicyDraft},
+    processor_draft::{StateDependencyDraft, StatePolicyDraft},
+    processor_input_draft::InputDraft,
 };
 
 fn expression(value: &Expression) -> String {

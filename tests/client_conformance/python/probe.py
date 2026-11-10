@@ -1144,6 +1144,12 @@ def run_upload(session, report):
 def run_inspection(session, report):
     import gc
 
+    license_outcome = execute(session, "DESCRIBE LICENSE;")
+    license = license_outcome.state_inspection
+    assert license is not None and license.domain is None and license.entity_name is None
+    assert license.entity_kind == "LICENSE" and license.counts.rows == 3 and license.counts.branches == 0
+    assert len(license.units) == 1 and [part.name for part in license.units[0].sections] == ["summary", "quotas"]
+    report("INSPECTION license rows=3")
     outcome = execute(session, "SHOW RELAY events MATERIALIZED STATE FOR UNBRANCHED LIMIT 1 FORMAT JSON;")
     inspection = outcome.state_inspection
     assert inspection is not None

@@ -15,7 +15,6 @@
 )]
 
 use error_stack::{Report, ResultExt as _};
-use meticulous::ResultExt as _;
 use nervix_models::{
     CreateSubscription, Expression, FieldName, FieldReference, FieldScope, ModelKind, NodeRef,
     RelayName, SubscriptionDeliveryBehavior, SubscriptionName, expression_to_plexus,
@@ -23,7 +22,7 @@ use nervix_models::{
 use nervix_plexus::{parse_expression, subscribe::parse_batch_sample_rate};
 use thiserror::Error;
 
-use super::SelectedReference;
+use super::{SelectedReference, inserted_reference::InsertedReference};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SubscriptionDraft {
@@ -100,13 +99,8 @@ impl SubscriptionDraft {
     /// Appends a reference to `field` of the relay record, spelled the way the canonical renderer
     /// spells an `input` field.
     pub(super) fn insert_field_reference(&mut self, field: FieldName) {
-        let reference = Expression::Field(FieldReference::scoped(FieldScope::Input, field));
-        let rendered = expression_to_plexus(&reference)
-            .assured("a field reference holds no float literal, the only expression that fails");
-        if !self.filter.trim().is_empty() && !self.filter.ends_with(char::is_whitespace) {
-            self.filter.push(' ');
-        }
-        self.filter.push_str(&rendered);
+        InsertedReference::Field(FieldReference::scoped(FieldScope::Input, field))
+            .append_to(&mut self.filter);
     }
 
     pub(super) fn filter_reading(&self) -> FilterReading {

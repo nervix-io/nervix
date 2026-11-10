@@ -222,6 +222,35 @@ indented `cluster identity` prerequisite names that configured value; the uninde
 names the permanent generated identity. [Backup And Restore](backup-and-restore.md#what-a-restore-recreates)
 explains why a fresh cluster restored from an archive keeps its own UUID and key.
 
+## Cluster Licensing
+
+A cluster uses the embedded free policy from its first bootstrap. Both current quotas,
+`cluster.nodes` and `cluster.domains`, are unlimited. Node usage counts committed voters and
+learners; domain usage counts committed domain records, including stopped domains. Returning
+members and updates to an existing domain do not consume another slot.
+
+```plexus
+DESCRIBE LICENSE;
+```
+
+Every node answers this read-only command without a selected domain or a leader redirect.
+It reports `mode: free`, `policy: free`, the public cluster identity, committed licensing time,
+`processing: running`, and each quota's committed usage and limit. Followers describe their own
+applied revision. The same observation accompanies the command as a typed state-inspection
+envelope with a cluster-license entity, a single unit and shared Row sections; applications can
+read it without parsing the display text.
+
+The immutable published policy is the permission source for each admission. Domain planning
+captures its quota constraint, and the committed creation checks that constraint against the
+actual domain count. Membership admission checks before adding a learner or voter. A refusal
+keeps its typed licensing cause through the owner's error boundary; it does not remove existing
+domains or members. Free mode has no processing stop or next licensing deadline.
+
+The free licensing record is installed atomically with the first committed cluster identity,
+using that identity's creation timestamp. Replication, snapshots and restart preserve it. Its
+time is a committed fact rather than a read of each answering node's clock. See
+[Licensing Metrics](metrics-and-observability.md#licensing-metrics) for the matching observations.
+
 ## The Prerequisite List Is Closed
 
 The prerequisites are cluster identity; the trust root; the node-to-node wire contract; the
