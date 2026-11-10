@@ -20,7 +20,18 @@
 use error_stack::ResultExt as _;
 use nervix_connector_websockets::CompiledSignalingProtocol;
 
-use super::*;
+use super::{
+    emitter_supervision::EmitterInput, partition_claims::UnitPartitionTransition,
+    relay_repartition::relay_transitions, *,
+};
+use crate::emitter_execution_plan::EmitterInputUnits;
+
+/// One locally placed emitter unit a rebuild starts, with the relay consumers it reads.
+struct EmitterSpec {
+    emitter: EmitterExecutionPlan,
+    unit: Unit,
+    inputs: Vec<EmitterInput>,
+}
 
 pub(super) struct ActivatedDomainSurfaces {
     pub(super) codecs: HashMap<CodecName, Arc<CompiledCodec>>,
@@ -250,6 +261,7 @@ impl Runtime {
         self.publish_routed_endpoints(domain, &execution);
         execution.routing.activate(self, domain);
         execution.routing.publish();
+        self.observe_partition_epochs(domain, &execution.revision);
         self.inner
             .domain_routings
             .insert(domain.clone(), execution.routing.shared());
@@ -554,8 +566,13 @@ impl Runtime {
                             partitioning: relay.branch_presences.partitioning(),
                             state,
                             retention: planned.retention,
-                            receiver: relay
-                                .runtime_consumer_fan_in_for_unit(AckMode::Detached, unit),
+                            receiver: if node.is_holding_unit(unit) {
+                                relay.dormant_unit_fan_in(AckMode::Detached, unit)
+                            } else {
+                                relay.runtime_consumer_fan_in_for_unit(AckMode::Detached, unit)
+                            },
+                            transition: UnitPartitionTransition::of(node, unit),
+                            parked_capacity: relay.owner_capacity(),
                         });
                     }
                 }
@@ -564,24 +581,50 @@ impl Runtime {
                 let emitter = emitter_plans
                     .emitter(&EmitterName::from(&node.identifier))
                     .assured("every scheduled emitter has a plan from this schedule");
-                let mut inputs = Vec::with_capacity(emitter.inputs.len());
                 for input in &emitter.inputs {
-                    let Some(relay) = relay_builders.get_mut(&input.relay) else {
+                    if !relay_builders.contains_key(&input.relay) {
                         return Err(Report::new(ExecutionBuildError::MissingInputRelay {
                             node: node.identity(),
                             relay: input.relay.clone(),
                         })
                         .change_context(build()));
-                    };
-                    if node.executes_on(local_node_id) {
-                        inputs.push((
-                            input.relay.clone(),
-                            relay.runtime_consumer_fan_in_for_mode(emitter.mode),
-                        ));
                     }
                 }
-                if node.executes_on(local_node_id) {
-                    emitter_specs.push((emitter.as_ref().clone(), inputs));
+                for unit in node.units_executing_on(local_node_id) {
+                    // An instance that serves no partition runs no task and holds no consumer.
+                    if emitter.is_idle(unit) {
+                        continue;
+                    }
+                    let mut inputs = Vec::new();
+                    for input in &emitter.inputs {
+                        let relay = relay_builders
+                            .get_mut(&input.relay)
+                            .verified("every input relay was checked above");
+                        match emitter.input_units(unit, input) {
+                            EmitterInputUnits::WholeRelay => inputs.push(EmitterInput {
+                                relay: input.relay.clone(),
+                                relay_unit: None,
+                                fan_in: relay.runtime_consumer_fan_in_for_mode(emitter.mode),
+                            }),
+                            EmitterInputUnits::Units(relay_units) => {
+                                for relay_unit in relay_units {
+                                    inputs.push(EmitterInput {
+                                        relay: input.relay.clone(),
+                                        relay_unit: Some(relay_unit),
+                                        fan_in: relay.runtime_consumer_fan_in_for_unit(
+                                            emitter.mode,
+                                            relay_unit,
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    emitter_specs.push(EmitterSpec {
+                        emitter: emitter.as_ref().clone(),
+                        unit,
+                        inputs,
+                    });
                 }
             }
         }
@@ -656,10 +699,13 @@ impl Runtime {
                         })
                         .change_context(build()));
                     };
-                    inputs.push((
-                        input_relay.clone(),
-                        relay.runtime_consumer_fan_in_for_unit(node_spec.spec.mode, unit),
-                    ));
+                    // A unit holding only keys the previous count placed in it takes no input.
+                    let input = if node.is_holding_unit(unit) {
+                        relay.dormant_unit_fan_in(node_spec.spec.mode, unit)
+                    } else {
+                        relay.runtime_consumer_fan_in_for_unit(node_spec.spec.mode, unit)
+                    };
+                    inputs.push((input_relay.clone(), input));
                 }
                 processor_input_specs.push((NodeUnitRef::new(node.identity.clone(), unit), inputs));
             }
@@ -729,6 +775,11 @@ impl Runtime {
                 let services = relay_services.get(&relay).cloned().verified(
                     "these maps were built from the same scheduled relay nodes this loop walks",
                 );
+                // A unit holding only keys the previous count placed in it has no owner: no
+                // producer places a key in it.
+                if !services.declares_unit(unit) {
+                    continue;
+                }
                 let retention = activation_plan
                     .relays
                     .get(&relay)
@@ -767,6 +818,7 @@ impl Runtime {
             BoundMessageErrorRoutes::bind(
                 revision.message_errors.clone(),
                 MessageErrorRouteBindingContext {
+                    vm_settings: self.inner.vm_settings,
                     relay_services: &relay_services,
                     materialized_stream_specs: &materialized_stream_specs,
                     lookups: &lookup_runtimes,
@@ -797,6 +849,7 @@ impl Runtime {
         }
 
         let execution_build_deps = ExecutionBuildDeps {
+            vm_settings: self.inner.vm_settings,
             domain,
             relay_schemas: &relay_schemas,
             relay_branchings: &relay_branchings,
@@ -814,8 +867,15 @@ impl Runtime {
                 continue;
             };
             let mut prepared = Some(
-                GeneratorTaskSpec::bind(domain, generator, first, &relay_services, &udf_executor)
-                    .change_context_lazy(build)?,
+                GeneratorTaskSpec::bind(
+                    domain,
+                    generator,
+                    first,
+                    &relay_services,
+                    &udf_executor,
+                    self.inner.vm_settings,
+                )
+                .change_context_lazy(build)?,
             );
             while let Some(unit) = units.next() {
                 let mut spec = if units.peek().is_some() {
@@ -846,27 +906,33 @@ impl Runtime {
             relay_state_tasks.insert(key, task);
         }
 
-        for (emitter, inputs) in emitter_specs {
+        for EmitterSpec {
+            emitter,
+            unit,
+            inputs,
+        } in emitter_specs
+        {
             let entity = NodeRef {
                 kind: ModelKind::Emitter,
                 identifier: ModelName::from(&emitter.name),
             };
-            emitter_tasks.insert(
-                entity,
-                self.spawn_emitter_task(
+            let deps = self
+                .emitter_task_deps(execution_build_deps, &emitter)
+                .change_context_lazy(build)?;
+            let task = self
+                .spawn_emitter_task(
                     EmitterTaskBuildDeps {
                         domain,
                         shutdown_tx: &shutdown_tx,
                         codecs: &codecs,
-                        deps: self
-                            .emitter_task_deps(execution_build_deps, &emitter)
-                            .change_context_lazy(build)?,
+                        deps,
                     },
                     emitter,
+                    unit,
                     inputs,
                 )
-                .change_context_lazy(build)?,
-            );
+                .change_context_lazy(build)?;
+            emitter_tasks.insert(NodeUnitRef::new(entity, unit), task);
         }
 
         let ReingestorRuntimes {
@@ -907,6 +973,7 @@ impl Runtime {
                         relay_state_epoch: self.relay_state_epoch(domain),
                         materialized_stream_specs,
                         materialized_stream_owner_nodes,
+                        relay_transitions: relay_transitions(&revision),
                         codecs,
                         signaling_protocols,
                         processor_plans,
@@ -1067,6 +1134,7 @@ impl Runtime {
             BoundMessageErrorRoutes::bind(
                 revision.message_errors.clone(),
                 MessageErrorRouteBindingContext {
+                    vm_settings: self.inner.vm_settings,
                     relay_services: &relay_services,
                     materialized_stream_specs: &materialized_stream_specs,
                     lookups: &lookups,
@@ -1080,6 +1148,7 @@ impl Runtime {
             Some(state) => state.start_version,
             None => 0,
         };
+        let transitions = relay_transitions(&revision);
         Ok(DomainExecution {
             mqtt_ingestor_clients: HashMap::default(),
             revision,
@@ -1101,6 +1170,7 @@ impl Runtime {
                     relay_state_epoch: self.relay_state_epoch(domain),
                     materialized_stream_specs,
                     materialized_stream_owner_nodes,
+                    relay_transitions: transitions,
                     codecs,
                     signaling_protocols,
                     processor_plans: HashMap::default(),

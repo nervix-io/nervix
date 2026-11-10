@@ -12,10 +12,10 @@ use nervix_models::{
     AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterTransportIngestorOperation,
     AlterWireSchema, AlterWireSchemaOperation, Backup, BackupCapture, BackupResources, BackupScope,
     ClientIngestorEntity, CordonNode, CreateDomain, CreateResource, CreateStatement, CreateUser,
-    DescribeClient, DescribeCluster, DescribeCorrelator, DescribeDeduplicator, DescribeDomain,
-    DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction, DescribeLicense,
-    DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer,
-    DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
+    DescribeBranch, DescribeClient, DescribeCluster, DescribeCorrelator, DescribeDeduplicator,
+    DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction,
+    DescribeLicense, DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay,
+    DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
     DescribeWindowProcessor, DomainConfig, DomainPace, DomainTimeRate, DrainNode, DropModel,
     DropNode, EmitterBatchLegality, EmitterBodyForm, EmitterEntityKind, EmitterEnvelopeAlteration,
     EmitterReferenceKind, ExistingUserPolicy, FieldName, HttpIngestorEntity, IngestorAlteration,
@@ -169,6 +169,7 @@ pub enum StatementVariant {
     DescribeCluster,
     DescribeLicense,
     AlterBranch,
+    DescribeBranch,
     AlterCluster,
 }
 
@@ -203,6 +204,7 @@ impl StatementVariant {
             Statement::AlterGenerator(_) => Self::AlterGenerator,
             Statement::AlterPlacement(_) => Self::AlterPlacement,
             Statement::AlterBranch(_) => Self::AlterBranch,
+            Statement::DescribeBranch(_) => Self::DescribeBranch,
             Statement::Drop(_) => Self::Drop,
             Statement::DropNode(_) => Self::DropNode,
             Statement::CordonNode(_) => Self::CordonNode,
@@ -269,6 +271,7 @@ enum EmitterOperationForm {
     SetFlush,
     SetGeneralError,
     Envelope,
+    SetInstances,
 }
 
 /// One targeted change an emitter's envelope takes.
@@ -674,6 +677,9 @@ impl Arbitrary<'_> {
             StatementVariant::DescribeLookup => {
                 Statement::DescribeLookup(DescribeLookup { name: self.name() })
             }
+            StatementVariant::DescribeBranch => Statement::DescribeBranch(DescribeBranch {
+                branch: self.name(),
+            }),
             StatementVariant::DescribeEndpoint => {
                 Statement::DescribeEndpoint(DescribeEndpoint { name: self.name() })
             }
@@ -1234,6 +1240,9 @@ impl Arbitrary<'_> {
         if !plexus || !capabilities.envelope.is_empty() || !capabilities.properties.is_empty() {
             forms.push(EmitterOperationForm::Envelope);
         }
+        if !plexus || capabilities.instancing.refusal(kind).is_none() {
+            forms.push(EmitterOperationForm::SetInstances);
+        }
         forms
     }
 
@@ -1302,6 +1311,9 @@ impl Arbitrary<'_> {
             },
             EmitterOperationForm::Envelope => AlterEmitterOperation::AlterEnvelope {
                 alteration: Box::new(self.envelope_alteration(kind)),
+            },
+            EmitterOperationForm::SetInstances => AlterEmitterOperation::SetInstances {
+                instances: self.emitter_instances_of(kind),
             },
         }
     }

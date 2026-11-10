@@ -40,8 +40,8 @@ use crate::{
     EmitterBatchLegality, EmitterBodyForm, EmitterDeclaration, EmitterEntityBody,
     EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind, IngestDeliveryKind,
     IngestQuiesceMode, IngestorAlteration, IngestorDeclaration, IngestorEntityCapabilities,
-    IngestorEntityModel, IngestorInput, IngestorMetadataDeclaration, IngestorReferenceKind,
-    PositionClass, RetryPolicy, SchemaName,
+    IngestorEntityModel, IngestorInput, IngestorMetadataDeclaration, IngestorMetadataField,
+    IngestorMetadataType, IngestorReferenceKind, PositionClass, RetryPolicy, SchemaName,
 };
 
 /// Application producers submitting native Arrow batches of one internal schema.
@@ -135,7 +135,10 @@ impl IngestorDeclaration for ClientProducerIngestor {
         events: crate::DeclaredEvents::NONE,
         instancing: crate::IngestorInstancingCapability::Single,
         headers: None,
-        metadata: IngestorMetadataDeclaration::NONE,
+        metadata: IngestorMetadataDeclaration::new(&[IngestorMetadataField::new(
+            "user",
+            IngestorMetadataType::String,
+        )]),
         payload: crate::IngestorPayloadDeclaration::BATCH,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Schema,
@@ -276,6 +279,10 @@ pub struct ClientConsumerEmitter {
 impl EmitterDeclaration for ClientConsumerEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         events: crate::DeclaredEvents::NONE,
+        // Application sessions consume the rows through the emitter's one consumer stream.
+        instancing: crate::EmitterInstancingCapability::Single {
+            reason: crate::SingleEmitterReason::OneConsumerStream,
+        },
         headers: None,
         reference: EmitterReferenceKind::Schema,
         body: EmitterBodyForm::Native,

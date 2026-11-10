@@ -85,7 +85,7 @@ fn ingest_payload_bytes_use_the_existing_column_builder_without_visiting_metadat
 fn ingest_payload_batch_facts_keep_the_original_counts_through_selection() {
     let metadata = IngestFilterMapMetadata::client_batch(
         projection(IngestorPayloadDeclaration::BATCH, &["bytes", "rows"]),
-        4_096,
+        &nervix_connector::NoIngestMetadata(4_096),
         3,
     )
     .assured("a three-row client batch projects its original facts");

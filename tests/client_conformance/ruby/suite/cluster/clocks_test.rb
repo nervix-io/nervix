@@ -2,6 +2,60 @@
 
 module RubySuite
   class ClocksTest < ClusterTest
+    def test_refused_clock_restoration_reports_its_cause_and_recovers
+      relay = Relay.new(cluster.leader)
+      following = nil
+      armed = false
+      begin
+        following = cluster.connect(server: relay.uri, seeds: [])
+        completed('ATTACH DOMAIN CLOCK;', following)
+        token = RubySuite.deadline
+        initial = following.domain_clock(cluster.domain)
+        assert_instance_of NX::DomainClock, initial
+        assert_equal NX::ClockState::UNPACED, initial.state
+        relay.cut
+        armed = true
+        Actions.request('refuse-next-clock-attachment')
+        relay.restore
+        # ANCHOR: clock_restoration_failed
+        interrupted = following.next_clock_event(cancel: token)
+        assert_equal NX::ClockEventKind::INTERRUPTED, interrupted.kind
+        assert_equal cluster.domain, interrupted.domain
+        refused = following.next_clock_event(cancel: token)
+        assert_equal NX::ClockEventKind::RESTORATION_FAILED, refused.kind
+        assert_equal cluster.domain, refused.domain
+        failure = refused.restoration_failure
+        assert_instance_of NX::RestorationFailure, failure
+        assert_equal NX::RestorationCause::IN_TRANSACTION, failure.cause
+        refute_empty failure.message
+        assert_operator failure.retry_after_nanos, :>, 0
+        # The attachment stays desired; a later attempt restores its state.
+        loop do
+          restored = following.next_clock_event(cancel: token)
+          assert_equal cluster.domain, restored.domain
+          if restored.kind == NX::ClockEventKind::STATE
+            assert_equal NX::ClockState::UNPACED, restored.state
+            assert_equal initial.generation, restored.generation
+            break
+          end
+          assert_equal NX::ClockEventKind::RESTORATION_FAILED, restored.kind
+          assert_equal NX::RestorationCause::IN_TRANSACTION, restored.restoration_failure.cause
+        end
+        # ANCHOR_END: clock_restoration_failed
+        completed('DETACH DOMAIN CLOCK;', following)
+      ensure
+        begin
+          Actions.request('clear-clock-attachment-refusals') if armed
+        ensure
+          begin
+            following&.close
+          ensure
+            relay.close
+          end
+        end
+      end
+    end
+
     def test_attached_clock_projections_ticks_generations_and_detach
       domain = "#{cluster.domain}_#{unique('clock')}"
       completed("CREATE PACED DOMAIN #{domain} WITH PERIOD 100ms SKEW 10ms;")

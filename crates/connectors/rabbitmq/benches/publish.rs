@@ -171,7 +171,13 @@ impl<'runtime> PublicationBenchmark<'runtime> {
                 FieldTable::default(),
             ))
             .await;
-            let dns = require(DnsResolver::load(DnsConfiguration::system()).await);
+            let dns = require(
+                DnsResolver::load(
+                    DnsConfiguration::system(),
+                    nervix_dns::DnsSettings::default(),
+                )
+                .await,
+            );
             let mut emitter = require(
                 RabbitMqQueueEmitter::open(
                     RabbitMqQueueEmitterConfig {

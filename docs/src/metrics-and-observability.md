@@ -113,6 +113,11 @@ Nervix records these raw metric families:
   physical node
 - `nervix_branch_evictions_total`: total concrete branches evicted on the physical node, split by
   `reason="lru"` or `reason="ttl"`
+- `nervix_branch_partition_epoch`: the partition epoch a branch executes in on the physical node
+- `nervix_branch_partition_keys_pending`: concrete keys the physical node's units still have to move
+  while their branch changes its partition count
+- `nervix_branch_partition_keys_claimed_total`: total concrete keys the physical node's units claimed
+  from the unit a previous partition count placed them in
 - `nervix_ingestor_quiesce_buffered_records`: raw payloads currently retained in an ingestor's
   per-instance quiesce buffers, including a payload that is draining until its messages enter
   their ingest group
@@ -587,9 +592,11 @@ prove subscriber processing. An unanswered or failed publish does not count this
 
 Emitter destination observations describe the host's interaction with a connector, separately
 from delivered graph traffic. Both interaction families carry `domain`, `emitter`,
-`physical_node_id`, `connector` and `entity`. Connector names use the vocabulary's display form,
-such as `REDIS`; entities use their declared name, such as `PUBSUB`. `operation` is `publish` or
-`commit`. Each starting emitter registers every operation/outcome child and histogram at zero,
+`physical_node_id`, `instance`, `connector` and `entity`. `instance` is the index of an emitter
+[instance](emitters.md#emitter-instances), or `-` for an emitter that runs one instance, so every
+instance of one emitter on one node keeps its own children. Connector names use the vocabulary's
+display form, such as `REDIS`; entities use their declared name, such as `PUBSUB`. `operation` is
+`publish` or `commit`. Each starting emitter registers every operation/outcome child and histogram at zero,
 even if that connector has no separate commit operation.
 
 `nervix_emitter_publish_attempts_total` records one outcome per nonempty host publish attempt or
@@ -627,13 +634,13 @@ an attempt has no domain timestamp. Each duration line includes its full selecto
 
 ```text
 destination:
-  nervix_emitter_publish_attempts_total{domain="prod",emitter="notifications_out",physical_node_id="node-1",connector="REDIS",entity="PUBSUB",operation="publish",outcome="succeeded"} total=2 wall_rate_per_sec=0.5 domain_rate_per_sec=- wall_rate_ema_1m_per_sec=0.4 wall_rate_ema_15m_per_sec=0.1 domain_rate_ema_1m_per_sec=- domain_rate_ema_15m_per_sec=-
-  nervix_emitter_publish_duration_seconds{domain="prod",emitter="notifications_out",physical_node_id="node-1",connector="REDIS",entity="PUBSUB",operation="publish"} count=2 sum_seconds=0.003
+  nervix_emitter_publish_attempts_total{domain="prod",emitter="notifications_out",physical_node_id="node-1",instance="-",connector="REDIS",entity="PUBSUB",operation="publish",outcome="succeeded"} total=2 wall_rate_per_sec=0.5 domain_rate_per_sec=- wall_rate_ema_1m_per_sec=0.4 wall_rate_ema_15m_per_sec=0.1 domain_rate_ema_1m_per_sec=- domain_rate_ema_15m_per_sec=-
+  nervix_emitter_publish_duration_seconds{domain="prod",emitter="notifications_out",physical_node_id="node-1",instance="-",connector="REDIS",entity="PUBSUB",operation="publish"} count=2 sum_seconds=0.003
 ```
 
 ### Emitter outcomes and lifecycle
 
-These host observations carry the same five identity labels as destination attempts. Every
+These host observations carry the same six identity labels as destination attempts. Every
 bounded child exists at zero when its emitter starts. Counters retain their process-local history
 across task restarts; the failure gauge describes the current task. `DESCRIBE EMITTER` includes
 every family in `destination:`, with its full selector and `total`, or `value` for the gauge.
@@ -672,7 +679,7 @@ unavailability from historical failures and recovery attempts.
 The [Emitter Batching](./emitter-batching.md#inspection-and-tuning) architecture chapter connects
 these observations to packing boundaries, retry ownership and scoped performance measurements.
 
-Payload observations use the same five identity labels as destination attempts. They have no
+Payload observations use the same six identity labels as destination attempts. They have no
 branch-key, record, request or error-text label. Every child exists at zero when its emitter starts.
 `DESCRIBE EMITTER` includes the same totals in its owner-routed `destination:` section.
 
@@ -806,6 +813,18 @@ Prometheus exposes branch lifecycle state without a concrete branch-key label:
   once when branch eviction begins on that physical node, even if multiple local graph nodes hold
   the key. `reason="lru"` is a `MAX INSTANCES ... EVICT LRU` capacity eviction; `reason="ttl"` is
   idle expiration.
+- `nervix_branch_partition_epoch{domain,branch,physical_node_id}` is the partition epoch the branch
+  executes in on that physical node: `1` until its first partition count change, then one more for
+  each committed change.
+- `nervix_branch_partition_keys_pending{domain,branch,physical_node_id}` is a gauge of the concrete
+  keys the physical node's units of the branch's deduplicators, window and WASM processors,
+  inferencers that declare state and materialized relays still have to move while the branch changes its partition count: the keys
+  each holds that the current count places in another unit, and the keys each is claiming. It is
+  `0` once every key lies in its partition; the summed value across the cluster is what
+  `DESCRIBE BRANCH` reports as `keys pending`.
+- `nervix_branch_partition_keys_claimed_total{domain,branch,physical_node_id}` counts each key the
+  physical node's units claimed from the unit the previous count placed it in; within one epoch,
+  the summed value across the cluster is what `DESCRIBE BRANCH` reports as `keys claimed`.
 
 Normal shutdown, schedule replacement, and runtime detachment reduce the live gauge but do not
 increment the eviction counter. Relay branch presence and its TTL or LRU decisions exist only on

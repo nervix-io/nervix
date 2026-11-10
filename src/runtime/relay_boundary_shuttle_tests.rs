@@ -228,6 +228,199 @@ fn shuttle_a_partition_handoff_fences_its_delivery_and_materialized_reads_while_
     );
 }
 
+/// One key of each partition of the relay `services` serve, found by the relay's own routing.
+fn keys_by_partition(
+    services: &RelayBoundaryServices,
+    partitions: u32,
+) -> std::collections::BTreeMap<Unit, Option<BranchKey>> {
+    let mut keys = std::collections::BTreeMap::new();
+    for candidate in 0..1024 {
+        let key = string_branch_key("tenant", &format!("tenant-{candidate}"));
+        let unit = services
+            .unit_of(&key)
+            .assured("a concrete key names a declared partition");
+        keys.entry(unit).or_insert(key);
+        if keys.len() == usize::try_from(partitions).assured("the fixture count fits usize") {
+            return keys;
+        }
+    }
+    panic!("1024 keys name every one of {partitions} partitions")
+}
+
+/// The batch a consumer received, acknowledged, or `None` when it received nothing.
+fn received_key(consumer: &mut RelayRuntimeFanIn) -> Option<Option<BranchKey>> {
+    match consumer.try_recv() {
+        RelayTryRecv::Batch(delivered) => {
+            let key = delivered.key.clone();
+            delivered.ack_success();
+            Some(key)
+        }
+        RelayTryRecv::Empty | RelayTryRecv::Closed => None,
+    }
+}
+
+/// The two instances of an emitter with `INSTANCES 2` read a relay of four partitions through one
+/// consumer of each partition they serve: instance 0 partitions 0 and 2, instance 1 partitions 1
+/// and 3. While instance 1 moves (its partitions fenced, its consumers removed and their
+/// successors registered), instance 0 receives exactly its own partitions' batches, and each batch
+/// of instance 1 reaches the consumer of its own partition at most once or ends unacknowledged.
+#[test]
+fn shuttle_emitter_instances_receive_only_their_partitions_while_a_sibling_moves() {
+    check_dfs(
+        || {
+            shuttle::future::block_on(async {
+                let partitions = nervix_models::BranchPartitions::Direct(nonzero!(4u16));
+                let services = Arc::new(RelayBoundaryServices::new(
+                    RelayBoundaryFanout::branch_collapse_with_capacity(nonzero!(1usize)),
+                    0,
+                    0,
+                    Vec::new(),
+                    None,
+                    RelayBranchPresences::fresh(RelayPartitioning::of_partitions(partitions)),
+                    Arc::new(crate::runtime_ack::AckRootTracker::default()),
+                ));
+                let instances = nonzero!(2u64);
+                let staying = partitions.units_served_by(0, instances);
+                let moving = partitions.units_served_by(1, instances);
+                assert_eq!(staying, [Unit::partition(0), Unit::partition(2)]);
+                assert_eq!(moving, [Unit::partition(1), Unit::partition(3)]);
+                let keys = keys_by_partition(&services, 4);
+                let mut staying_consumers = Vec::new();
+                for unit in &staying {
+                    staying_consumers
+                        .push(services.add_local_unit_runtime_consumer(AckMode::Attached, *unit));
+                }
+                let mut moving_consumers = Vec::new();
+                for unit in &moving {
+                    moving_consumers
+                        .push(services.add_local_unit_runtime_consumer(AckMode::Attached, *unit));
+                }
+
+                // The relay owner publishes one batch to every partition, in partition order.
+                let mut completions = Vec::new();
+                let mut batches = Vec::new();
+                for (unit, key) in &keys {
+                    let mut batch = quiesce_test_batch();
+                    batch.key = key.clone();
+                    let (root, completion) = AckSet::root();
+                    batch.acks = vec![root];
+                    completions.push((*unit, completion));
+                    batches.push((*unit, batch));
+                }
+                let owner_services = services.clone();
+                let owner = nervix_primitives::task::spawn(async move {
+                    let mut results = Vec::new();
+                    for (unit, batch) in batches {
+                        let result = owner_services
+                            .fanout_owner_batch(
+                                &domain("default"),
+                                &named("orders"),
+                                unit,
+                                &batch,
+                                &ConfiguredFaultInjection::default(),
+                            )
+                            .await;
+                        results.push((unit, result.is_ok()));
+                    }
+                    results
+                });
+
+                // Instance 1 moves: each of its partitions is fenced until its consumer is
+                // replaced, and what the old consumer already took is handed over first.
+                let moving_services = services.clone();
+                let moving_units = moving.clone();
+                let mover = nervix_primitives::task::spawn(async move {
+                    let mut leases = Vec::new();
+                    for unit in &moving_units {
+                        let gate = moving_services
+                            .fanout
+                            .unit_dispatch_gate(*unit)
+                            .assured("a partition has a dispatch gate");
+                        let mut lease = RelayDispatchGateLease::engage(
+                            gate,
+                            Instant::now() + Duration::from_secs(86_400),
+                            "move an emitter instance",
+                        );
+                        assert!(lease.wait_quiescent().await);
+                        leases.push(lease);
+                    }
+                    let mut handed_over = Vec::new();
+                    for (unit, mut consumer) in moving_units.iter().zip(moving_consumers) {
+                        if let Some(key) = received_key(&mut consumer) {
+                            handed_over.push((*unit, key));
+                        }
+                        drop(consumer);
+                        moving_services
+                            .remove_local_unit_runtime_consumer(AckMode::Attached, *unit);
+                    }
+                    let mut successors = Vec::new();
+                    for unit in &moving_units {
+                        successors.push(
+                            moving_services
+                                .add_local_unit_runtime_consumer(AckMode::Attached, *unit),
+                        );
+                    }
+                    drop(leases);
+                    (handed_over, successors)
+                });
+
+                let (handed_over, mut successors) =
+                    mover.await.assured("the moving instance finishes its move");
+                let published = owner.await.assured("the relay owner finishes publishing");
+                for (unit, mut consumer) in staying.iter().zip(staying_consumers) {
+                    let key = received_key(&mut consumer);
+                    assert_eq!(
+                        key.as_ref(),
+                        Some(&keys[unit]),
+                        "instance 0 receives the batch of its partition {unit:?}"
+                    );
+                    assert!(
+                        received_key(&mut consumer).is_none(),
+                        "instance 0 receives nothing but its own partitions' batches"
+                    );
+                }
+                let mut delivered_moving = handed_over;
+                for (unit, consumer) in moving.iter().zip(successors.iter_mut()) {
+                    if let Some(key) = received_key(consumer) {
+                        delivered_moving.push((*unit, key));
+                    }
+                }
+                for (unit, key) in &delivered_moving {
+                    assert!(moving.contains(unit));
+                    assert_eq!(
+                        key, &keys[unit],
+                        "a moved partition receives only its own batch"
+                    );
+                }
+                for (unit, completion) in completions {
+                    let outcome = completion.wait().await;
+                    let deliveries = delivered_moving
+                        .iter()
+                        .filter(|(delivered, _)| *delivered == unit)
+                        .count();
+                    if staying.contains(&unit) {
+                        assert_eq!(outcome, AckOutcome::Ack);
+                        continue;
+                    }
+                    assert!(
+                        deliveries <= 1,
+                        "a moved partition's batch is delivered at most once"
+                    );
+                    let admitted = published
+                        .iter()
+                        .any(|(published, ok)| *published == unit && *ok);
+                    if outcome == AckOutcome::Ack {
+                        assert!(deliveries == 1 && admitted);
+                    } else {
+                        assert!(matches!(outcome, AckOutcome::NoAck(_)));
+                    }
+                }
+            });
+        },
+        Some(128),
+    );
+}
+
 #[test]
 fn shuttle_owner_fanout_fails_its_ack_while_an_attached_consumer_moves() {
     check_random(

@@ -66,10 +66,13 @@ async fn a_stop_drain_recovers_the_same_instance_and_finishes_before_close() {
         )
         .assured("the fixture batch is buffered");
     let faults = ConfiguredFaultInjection::default();
-    let mut backoff = RuntimeReconnectBackoff::from_policy(ParsedRetryPolicy {
-        backoff: Duration::from_millis(1),
-        max_backoff: Duration::from_millis(2),
-    });
+    let mut backoff = RuntimeReconnectBackoff::from_policy(
+        ParsedRetryPolicy {
+            backoff: Duration::from_millis(1),
+            max_backoff: Duration::from_millis(2),
+        },
+        nervix_connector::RetryBackoffSettings::default(),
+    );
     let (_shutdown, mut shutdown_rx) = watch::channel(false);
     let (_stop, mut stop_rx) = watch::channel(None);
     let mut control = EmitterPublishControl {

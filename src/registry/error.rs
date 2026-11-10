@@ -20,6 +20,7 @@ use nervix_models::{
     EndpointType, FieldName, IngestorEntityKind, IngestorMetadataType, ModelKind, ModelName,
     RelayName,
 };
+use nervix_vm::program::WindowAggregateFunction;
 use thiserror::Error;
 
 /// The metadata fields an ingestor entity declares, as a refusal names them after the entity's
@@ -305,6 +306,11 @@ pub(crate) enum RegistryError {
         domain: DomainName,
         ingestor: nervix_models::IngestorName,
     },
+    #[error("emitter '{emitter}' has invalid instancing in domain '{domain}'")]
+    EmitterInstancing {
+        domain: DomainName,
+        emitter: nervix_models::EmitterName,
+    },
     #[error("{parameter} limit {maximum} is below {actual} required by resource {resource:?}")]
     ResourceParameterLimit {
         resource: nervix_models::ResourceId,
@@ -513,6 +519,22 @@ pub(crate) enum RegistryError {
         route: RelayName,
         demand: usize,
         argument: usize,
+    },
+    #[error(
+        "window processor '{processor}' in domain '{domain}' route '{route}' failed to compile \
+         its aggregate output"
+    )]
+    WindowRouteCompile {
+        domain: DomainName,
+        processor: ModelName,
+        route: RelayName,
+    },
+    #[error("window processor '{processor}' in domain '{domain}' route '{route}': {} requires a message WIDTH or MAX STATE SIZE", .function.plexus_name())]
+    WindowCollectionMissingBound {
+        domain: DomainName,
+        processor: ModelName,
+        route: RelayName,
+        function: WindowAggregateFunction,
     },
     #[error(
         "window processor '{processor}' in domain '{domain}' route '{route}' uses a sketch and \

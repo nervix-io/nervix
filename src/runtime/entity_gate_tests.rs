@@ -152,7 +152,11 @@ fn domain_drain_status_reports_structured_emitter_publishing_state() {
         (&committing, 5_usize),
     ] {
         runtime.inner.emitter_buffers.insert(
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone()),
+            DomainNodeUnitRef::single(DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::Emitter,
+                emitter.clone(),
+            )),
             Arc::new(AtomicUsize::new(pending_messages)),
         );
     }
@@ -178,6 +182,7 @@ fn domain_drain_status_reports_structured_emitter_publishing_state() {
         status.emitter_publishing[0],
         EmitterPublishingDrainStatus {
             emitter: confirming,
+            unit: Unit::SINGLE,
             state: EmitterPublishingDrainState::AwaitingConfirmation,
             pending_messages: 3,
             retry_backoff: None,
@@ -968,6 +973,7 @@ async fn preceding_lease_expiry_does_not_release_a_reengaged_hold() {
 #[test]
 fn emitter_entity_pause_gates_every_input_relay() {
     let emitter = CreateEmitter {
+        instances: nervix_models::EmitterInstances::ONE,
         name: named("combined_emitter"),
         from: ProcessorInputs::new(
             vec![named("source_b"), named("source_a")],

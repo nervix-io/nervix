@@ -919,8 +919,8 @@ may also hold one completed frame of at most `max_message_size` bytes while its 
 An oversized stream frame closes only its connection; it neither fails the listener's ingestor read
 nor makes the host reconnect. UDP admission separately drops and counts a datagram above
 `max_message_size`, after receiving it into a fixed 65,535-byte scratch buffer. The shared stream
-intake queue holds at most 64 frames and applies backpressure; that queue does not limit the
-connection count or total connection-local retention.
+intake queue holds at most the node's `syslog-intake-queue-capacity` frames and applies backpressure;
+that queue does not limit the connection count or total connection-local retention.
 
 A wait ends at a client deadline key, a statement clause such as `ACK TIMEOUT`, a protocol interval
 another client key sets, such as MQTT's `keep_alive_ms`, a fixed bound Nervix sets, or the driver's
@@ -938,7 +938,7 @@ thing for every connector:
 
 A read that waits for whatever the peer sends next is bounded by the protocol's keep-alive or by
 `idle_timeout_ms`, and a write by `timeout_ms` or the retry policy. A key's value is a positive whole
-number of milliseconds no longer than about 146 years, the vocabulary's `ClientDeadline` rule, and
+number of milliseconds no longer than about 292 years, the vocabulary's `ClientDeadline` rule, and
 the connector contract's `ConfiguredDeadline` reads each key once, so no connector parses its own. A
 connector that dials for itself and reads `connect_timeout_ms` allows 30 seconds where the client
 leaves the key out, and so does a listener that bounds the TLS handshake of a connection it accepted
@@ -1585,7 +1585,12 @@ returns; see [Confirmed acknowledgements](#confirmed-acknowledgements).
 
 A client ingestor's plan is not a connector plan: it carries the input schema, its compiled form, the
 producer policy of window, ACK timeout, and retry backoff, and the endpoint contract digest producers
-attach to. It declares no header model or metadata field and supports only `SUSPEND`.
+attach to. It declares no header model and supports only `SUSPEND`. Its first metadata field is
+`user: STRING`, the canonical user name authenticated by the producer's opening session. The
+session supplies that typed identity to the local or forwarded open; the endpoint retains it per
+attachment and the batch projection supplies it on every row, independently of payload fields.
+As with other metadata fields, its schema type is optional; an authenticated producer always
+supplies the value. Producers sharing a forwarding link keep their individual identities.
 
 Every ingestor entity declares its required, non-sensitive `payload` fields beside its metadata.
 All declare `bytes: U64`; `CLIENT PRODUCER` also declares `rows: U64`. The registry validates the
@@ -1650,7 +1655,7 @@ read context. They never become absent values. The generic retained row and Arro
 `U32` through quiesce and projection without widening it; the FIFO sequence number stays text.
 
 The host projects metadata lazily. When an ingestor binds its programs, the host records which
-declared fields its route programs and its `TIMESTAMP AT metadata.<field>` read, and every ingest
+declared fields its arrival filter, route programs and `TIMESTAMP AT metadata.<field>` read, and every ingest
 group of the ingestor builds Arrow columns for those fields and no others. A group of an ingestor
 that reads none visits no metadata value at all. A message whose value for a read field is
 unrepresentable or invalid is refused once its ingestor's `FILTER WHERE` has kept it and before
@@ -2342,6 +2347,20 @@ therefore adds no allocation to recovery. The host protocol borrows its existing
 Startup preparation shares a mutually exclusive state with a live producer instead of increasing
 its native footprint. Kafka and Pulsar box only their temporary preparation; their live producer
 and its existing confirmation or retirement owners stay inline.
+
+Every emitter entity declares `Single { reason } | Instances` once in the vocabulary, beside its
+other capabilities. Grammar, validation, inspection and the capability export consume that
+declaration, and a `Single` entity refuses `INSTANCES` with its declared reason before the
+statement reaches the registry. The registry resolves `INSTANCES n` or `INSTANCES PER PARTITION`
+into exact `Instance(i)` unit placements, and the emitter execution plan records which units of
+each input relay every instance serves: relay partition `p` for instance `p mod n`, and an
+unpartitioned relay's single unit for instance 0. The host runs each locally placed instance as
+its own emitter task, with its own connector instance, buffer, retry schedule and backoff,
+readiness handle, confirmation window and metric children, and resolves client configuration
+templates for the instance's index. Each instance registers one receiver per relay unit it serves
+with that unit's audience, so a partition's handoff waits only for its own partition's work. An
+instance that serves no relay unit runs no task. Moving one instance stops and starts only that
+instance; its siblings keep their tasks and open connectors.
 
 `EmitterLifecycle::resume` acquires the connection; a transient publish failure calls `suspend`
 then `resume` on that same instance after the policy's backoff. A failed resume retains that owner,
@@ -3296,8 +3315,8 @@ sequenceDiagram
   `NATS SUBJECT` instance reconnects never reach it, while a stream keeps them for its consumer as
   long as its retention and limits allow.
 - **Syslog stream listener.** Each accepted TCP or TLS connection has one task that owns its frame
-  buffer and reads into it directly, at most 8 KiB per read and never beyond the connection's
-  frame bound of `max_message_size` plus the eleven bytes of the longest octet count and its
+  buffer and reads into it directly, at most the node's `syslog-read-chunk-bytes` per read and never
+  beyond the connection's frame bound of `max_message_size` plus the eleven bytes of the longest octet count and its
   space. Framing moves a cursor through the buffer and copies each payload into the frame the
   intake queue carries; the bytes before the cursor are discarded once, when the next read needs
   room, so the bytes a read delivers are moved at most once however many frames they hold. The
@@ -3502,9 +3521,16 @@ sequenceDiagram
   data reads. Protocol control frames remain transport concerns.
   `idle_timeout_ms` bounds silence; omission derives three configured ping intervals, or thirty
   seconds without configured pings. Received data and control frames refresh the absolute activity
-  deadline; local pings and read cancellation do not. An explicit idle value overrides derivation.
-  The connection that owns the deadline ends itself when it passes: it polls one going-away Close
-  (status `1001`, RFC 6455 section 7.1.7) outside the cooperative budget, writing it only if the
+  deadline; regular local pings and read cancellation do not. An explicit idle value overrides
+  derivation. At expiry, two ping intervals without an inbound frame or successfully written client
+  ping establish a missed client interval. The connection writes one catch-up ping and allows one
+  existing idle-bound response window from its successful write. This window survives cancelled
+  reads and is never renewed by further pings or another local delay; an inbound frame restores
+  ordinary activity tracking. The ping write keeps its fixed one-second bound. The same rule
+  applies to an explicit idle value; without client pings the physical activity deadline is retained
+  across handoff and cancellation. On-schedule pings keep the ordinary silent-peer bound.
+  The connection that owns the deadline ends itself once the peer is judged silent: it polls one
+  going-away Close (status `1001`, RFC 6455 section 7.1.7) outside the cooperative budget, writing it only if the
   transport takes it at once, and is then released. The verdict waits for neither the write nor a
   reply, so it adds no network wait and never delays the host's reconnect; a write the transport
   refuses is recovered and reported at `debug`.
@@ -3869,3 +3895,19 @@ do not re-open the connector or alter its retry, quiesce, finish or acknowledgem
 Trust roots, identity and ALPN remain properties of the concrete client configuration.
 [Cryptography](cryptography.md#outward-tls-policy) owns the exact governed-path and driver-owned-gap
 inventory.
+
+## Local Host Capabilities
+
+The shared host retry law takes a validated positive multiplier and a jitter percentage from
+`NodeCapabilities`. Initial delay and maximum delay continue to come from the declared retry
+policy. Between attempts the host multiplies the delay, optionally adds zero through the selected
+percentage, and clamps it to the policy ceiling, including arithmetic overflow. Defaults preserve
+doubling without jitter. MQTT's event-loop reconnect uses the same law as ingestor and emitter
+host retries. Reset still restores the policy's initial delay.
+
+Kafka's domain-assignment retry and partition watch, and the Syslog stream intake queue and read
+chunk, likewise receive typed node capabilities. The stream queue remains bounded with
+backpressure, and each read remains bounded by the remaining frame allowance. Driver deadlines,
+prefetch, pool lifetimes and keep-alive depend on an external system and belong in that entity's
+declared client keys or Plexus clauses. The complete local options and defaults are in
+[Node Settings](node-settings.md#engine-and-connector-host-capabilities).

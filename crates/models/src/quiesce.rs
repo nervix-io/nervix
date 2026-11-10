@@ -94,6 +94,10 @@ pub enum DynamicModelUpdate {
     /// does not read the certificate, so no execution node changes; every node's HTTPS listener
     /// installs the new certificate instead.
     VhostTlsVersion { vhost: VhostName },
+    /// The partition transition of the branch dividing a node that keeps state per key retired:
+    /// every key lies in its partition. The node's units stop claiming keys where they run, and
+    /// the units that held only keys the previous count placed in them end.
+    PartitionTransitionRetired { node: NodeRef },
 }
 
 impl DynamicModelUpdate {
@@ -107,6 +111,7 @@ impl DynamicModelUpdate {
             }
             Self::Emitter { emitter, .. } => NodeRef::new(ModelKind::Emitter, emitter.clone()),
             Self::VhostTlsVersion { vhost } => NodeRef::new(ModelKind::Vhost, vhost.clone()),
+            Self::PartitionTransitionRetired { node } => node.clone(),
         }
     }
 
@@ -117,7 +122,8 @@ impl DynamicModelUpdate {
             Self::RelayCapacity { .. }
             | Self::Processor { .. }
             | Self::WasmStateReset { .. }
-            | Self::Emitter { .. } => ActivationAction::Activate,
+            | Self::Emitter { .. }
+            | Self::PartitionTransitionRetired { .. } => ActivationAction::Activate,
             Self::VhostTlsVersion { .. } => ActivationAction::RefreshHttpsListener,
         }
     }
@@ -234,6 +240,7 @@ declare_model_change_aspects! {
     EmitterConstruction => EntityPause, None, false;
     EmitterErrorPolicies => EntityPause, None, false;
     EmitterMaterializedState => EntityPause, None, false;
+    EmitterInstances => EntityPause, None, false;
     IngestorSource => EntityPause, None, false;
     IngestorCodec => EntityPause, None, false;
     IngestorTimestamp => EntityPause, None, false;
@@ -277,7 +284,7 @@ declare_model_change_aspects! {
     EntityReplaced => Dynamic, None, false;
     EntityCreated => Dynamic, None, false;
     EntityDropped => Dynamic, None, false;
-    BranchPartitions => DomainPause, None, false;
+    BranchPartitions => EntityPause, None, false;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1123,8 +1130,10 @@ fn branch_change_aspects(
         changes.push(ModelChangeAspect::BranchLifecycle);
     }
     if base.partitions != candidate.partitions {
-        // The count decides which unit of every relay the branch branches owns each key, so it
-        // changes only on a stopped domain, whose next start schedules the new units.
+        // The count decides which unit of every node the branch branches owns each key. A change
+        // begins the branch's next partition epoch: its nodes and the nodes writing to its relays
+        // pause while they take the new units, and every key the previous count placed elsewhere
+        // moves when its next record reaches its new partition.
         changes.push(ModelChangeAspect::BranchPartitions);
     }
     changes
@@ -1304,6 +1313,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     let CreateEmitter {
         name: base_name,
         from: base_from,
+        instances: base_instances,
         body: base_body,
         envelope: base_envelope,
         connector: base_emitter,
@@ -1317,6 +1327,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     let CreateEmitter {
         name: candidate_name,
         from: candidate_from,
+        instances: candidate_instances,
         body: candidate_body,
         envelope: candidate_envelope,
         connector: candidate_emitter,
@@ -1370,6 +1381,9 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     }
     if base_batch != candidate_batch {
         changes.push(ModelChangeAspect::EmitterBatchPolicy);
+    }
+    if base_instances != candidate_instances {
+        changes.push(ModelChangeAspect::EmitterInstances);
     }
     if base_flush_policy != candidate_flush_policy {
         changes.push_dynamic(
@@ -1492,6 +1506,7 @@ mod tests {
 
     fn emitter() -> CreateEmitter {
         CreateEmitter {
+            instances: crate::EmitterInstances::ONE,
             name: named("emit"),
             from: ProcessorInputs::single(named("events")),
             body: EmitterBody::Codec {

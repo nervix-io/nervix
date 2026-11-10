@@ -1865,6 +1865,7 @@ with `... cannot retain BYTES in aggregate demand <n> argument <m>`.
 | `AVG(value)` | numeric | `F64` | no row has a value |
 | `MIN(value)`, `MAX(value)` | numeric, `BOOL`, `STRING`, or `DATETIME` | the argument's type | no row has a value |
 | `FIRST(value)`, `LAST(value)` | any | the argument's type | no row has a value |
+| `COLLECT_VEC(value)` | any required value | required `VEC<value type>` | never; a window emits only while it retains a row |
 | `ARG_MIN(value, key)`, `ARG_MAX(value, key)` | any value; a numeric, `BOOL`, `STRING`, or `DATETIME` key | the value's type | no row has both a value and a key |
 | `VAR_POP(value)`, `STDDEV_POP(value)` | numeric | `F64` | no row has a value |
 | `VAR_SAMP(value)`, `STDDEV_SAMP(value)` | numeric | `F64` | fewer than two rows have a value |
@@ -1876,22 +1877,31 @@ with `... cannot retain BYTES in aggregate demand <n> argument <m>`.
 | `APPROX_QUANTILE(value, percentile, capacity)` | numeric; constant percentile 0–100 and capacity 32–4096 | `F64` | no row has a value |
 | `APPROX_TOP_K(value, k, capacity)` | numeric, `BOOL`, `STRING`, or `DATETIME`; constants `1 <= k <= capacity <= 4096` | `VEC<value type>` | never; empty when no row contributes |
 
-The [approximate sketches](#approximate-sketches) describe the last three.
+`COLLECT_VEC` returns every retained argument value, ordered by ingestion low watermark and then
+admission, as `FIRST` and `LAST` are. It preserves the argument's exact type: collecting an
+`ARRAY<F32, 2>` produces `VEC<ARRAY<F32, 2>>`, and collecting a `VEC` adds one list level. The
+argument must be required, because list elements are never null. An optional argument is refused
+when the processor is applied; use `coalesce` to choose its explicit value. A collecting route
+requires a message `WIDTH` or `MAX STATE SIZE`; a duration alone does not bound its retained values.
+List functions such as `nth`, `mean`, `slice`, and `dot` can consume the result in the same route.
+
+The [approximate sketches](#approximate-sketches) describe the last three table entries.
 
 **Nulls.** A row contributes to an aggregate only when every argument that aggregate reads is
 present, so a null argument contributes nothing. `COUNT` is the exception: it counts every retained
 row whatever its argument holds, so `SUM(input.amount) / COUNT(input.amount)` is not the mean of an
 optional field; use `AVG`. A window emits only while it retains at least one row, so an aggregate
 whose arguments are all required always has a value, except the sample statistics and `CORR`, which
-can be undefined in any window. `COUNT`, `COUNT_IF`, `APPROX_COUNT_DISTINCT`, and `APPROX_TOP_K` are
+can be undefined in any window. `COUNT`, `COUNT_IF`, `COLLECT_VEC`, `APPROX_COUNT_DISTINCT`, and `APPROX_TOP_K` are
 never optional; `VAR_SAMP`, `STDDEV_SAMP`, `COVAR_SAMP`, and `CORR` are always optional; every other
 aggregate is optional exactly when an argument it reads is. Assign an aggregate that can be null to
 an `OPTIONAL` field or give it a value with `COALESCE`; assigning it to a required field is rejected
 when the processor is applied.
 
 **Order and ties.** `MIN`, `MAX`, `ARG_MIN`, and `ARG_MAX` return the earliest admitted row among
-rows with equal keys. `FIRST` and `LAST` order rows by their ingestion low watermark, then by
-admission. `BOOL` orders `false` before `true`, `STRING` orders by bytes, and floating-point keys
+rows with equal keys. `FIRST`, `LAST`, and `COLLECT_VEC` order rows by their ingestion low watermark,
+then by admission. Element zero of a collection equals `FIRST` and its last element equals `LAST`
+over the same argument. `BOOL` orders `false` before `true`, `STRING` orders by bytes, and floating-point keys
 order NaN above every other value and treat both zeros as equal.
 
 **Population and sample.** `VAR_POP`, `STDDEV_POP`, and `COVAR_POP` divide by the number of
@@ -1921,7 +1931,9 @@ a non-finite argument is reported by the first function, in alphabetical order, 
 that reads it, such as `AVG requires finite floating-point arguments`. At emission, a `SUM` that
 does not fit its type, such as `SUM of the window does not fit Float32`, or a statistic that
 overflows `F64` fails the window: every retained row's acknowledgement fails, the window is
-cleared, and routes the window emitted before the failing one keep their output.
+cleared, and routes the window emitted before the failing one keep their output. The same rule
+applies when a collected list cannot be built or exceeds the node's relay output limits; that is a
+window emission failure before publication, with its typed cause retained.
 
 **Sensitivity.** An aggregate is sensitive when an argument reads a sensitive field, including
 `COUNT`, `COUNT_IF`, `APPROX_COUNT_DISTINCT`, and `APPROX_TOP_K`, whose results do not contain the
@@ -1932,7 +1944,7 @@ field that is not sensitive.
 arguments share it: `AVG`, the variances, and the standard deviations of one argument share a
 `moments` structure; the covariances and `CORR` of one argument pair, in the same order, share
 `co_moments`; `COUNT_IF`, `BOOL_AND`, and `BOOL_OR` share a `truth_counter`; `ARG_MIN` and `ARG_MAX`
-share `arg_extremes`; `MIN` and `MAX` share `extremes`; `FIRST` and `LAST` share a `sequence`;
+share `arg_extremes`; `MIN` and `MAX` share `extremes`; `FIRST`, `LAST`, and `COLLECT_VEC` share a `sequence`;
 `APPROX_QUANTILE` calls with one argument and capacity share a `quantile_sketch`; and
 `PERCENTILE_LINEAR_HISTOGRAM` calls with one argument, bucket count, bounds, and delay share a
 `linear_histogram`. `DESCRIBE WINDOW PROCESSOR` lists every structure with the functions it serves
@@ -2004,16 +2016,17 @@ measured accuracy beyond the exactness above.
 
 ## Limits
 
-Every limit an expression can reach is fixed by Nervix rather than configured, except the window
-state size a window processor declares:
+Expression rejection limits are fixed by Nervix. A window processor declares its state-size bound;
+local execution admission and caches follow the node's
+[engine capabilities](./node-settings.md#engine-and-connector-host-capabilities).
 
 | Limit | Bound | Reached by |
 | --- | --- | --- |
 | Text or octets one `STRING` or `BYTES` column holds | 2,147,483,647 bytes for the results of one call in one batch | The functions of [Result Size](#result-size), which fail each message that does not fit with `overflow`, and [`format_datetime`](#writing-values), which fails the batch |
 | Parts of one `split` result | 65,536 | `split`, with `overflow` |
 | LIKE pattern | 4,096 bytes | `like` and `ilike`, with `invalid_argument` |
-| `contains_any` set | 128 non-null patterns and 65,536 bytes of pattern text; 64 distinct sets prepared per batch | `contains_any`, with `invalid_argument` |
-| Compiled regular expression | 10 MiB; 64 compiled patterns cached per call | Regular-expression functions, with `invalid_argument` |
+| `contains_any` set | 128 non-null patterns and 65,536 bytes of pattern text | `contains_any`, with `invalid_argument` |
+| Compiled regular expression | 10 MiB | Regular-expression functions, with `invalid_argument` |
 | JSON document | 16,777,216 bytes and 128 levels of nesting | `JSON_VALUE` and `JSON_EXISTS`, with `invalid_argument`; `TRY_JSON_VALUE` yields null |
 | JSON path | 64 steps; array index up to 4,294,967,295 | Rejected when the statement is parsed |
 | `DATETIME` | `1677-09-21T00:12:43.145224192Z` through `2262-04-11T23:47:16.854775807Z`, in nanoseconds | Datetime functions and conversions, with `overflow` |
@@ -2033,7 +2046,7 @@ Two measured facts, from the [VM batch-size sweep](plexus-overview.md) and from 
 workloads below, shape what an expression costs:
 
 - Per-message cost falls steeply up to about a thousand messages per batch and then flattens.
-  Batches above 1,024 messages execute on the node's data workers, whose admission and hand-off
+  With the default inline limit, batches above 1,024 messages execute on the node's data workers, whose admission and hand-off
   cost more than a small batch does to execute.
 - An expression costs what its functions do for the messages that evaluate them. Inside a
   conditional arm, some operations run only for the messages that select the arm, so their cost
@@ -2152,6 +2165,7 @@ errors. `T` is the argument's type, and a list is an `ARRAY` or a `VEC`.
 | `COUNT`, `COUNT_IF`, `APPROX_COUNT_DISTINCT` | `I64` | [Window Aggregates](#window-aggregates) |
 | `BOOL_AND`, `BOOL_OR` | `BOOL` | [Window Aggregates](#window-aggregates) |
 | `SUM`, `MIN`, `MAX`, `FIRST`, `LAST` | the argument's type | [Window Aggregates](#window-aggregates) |
+| `COLLECT_VEC` | required `VEC` of the argument's exact type | [Window Aggregates](#window-aggregates) |
 | `ARG_MIN`, `ARG_MAX` | the value's type | [Window Aggregates](#window-aggregates) |
 | `AVG`, `VAR_POP`, `VAR_SAMP`, `STDDEV_POP`, `STDDEV_SAMP`, `COVAR_POP`, `COVAR_SAMP`, `CORR` | `F64` | [Window Aggregates](#window-aggregates) |
 | `PERCENTILE_LINEAR_HISTOGRAM` | `F64` | [Linear Histogram Percentiles](#linear-histogram-percentiles) |

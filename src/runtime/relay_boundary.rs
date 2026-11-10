@@ -49,10 +49,10 @@ pub(super) const RELAY_BUFFER_DIRECTION_CONCRETE: &str = "concrete";
 /// channel its sender resumes still finds its watermark there, and a receiver's sweep of watermarks
 /// unreconciled for the whole retention raises its retired-channel floor over a live channel's next
 /// batch only when that batch is delayed for longer than the difference.
-const RELAY_CHANNEL_IDLE_ROTATION: Duration = Duration::from_secs(300);
+const RELAY_CHANNEL_IDLE_ROTATION: Duration = nervix_models::HOST_RELAY_ADMISSION_BOUND;
 const _: () = assert!(
     RELAY_CHANNEL_IDLE_ROTATION.as_nanos()
-        < nervix_interconnect::RELAY_CHANNEL_RETENTION.as_nanos(),
+        < nervix_models::HOST_RELAY_ADMISSION_BOUND.as_nanos() * 2,
     "an idle relay channel rotates before its receiver's watermark retention ends"
 );
 
@@ -592,12 +592,6 @@ impl RelayOwnerBranchState {
     }
 }
 
-pub(super) struct RelayStateTask {
-    pub(super) unit: Unit,
-    pub(super) shutdown: watch::Sender<bool>,
-    pub(super) task: JoinHandle<()>,
-}
-
 #[derive(Debug, Clone, Copy, strum::Display)]
 pub(super) enum RelayTaskKind {
     #[strum(serialize = "relay state")]
@@ -615,29 +609,6 @@ pub(super) enum RelayTaskStopError {
         task: RelayTaskKind,
         grace: Duration,
     },
-}
-
-impl RelayStateTask {
-    pub(super) async fn stop(
-        mut self,
-        grace: Duration,
-    ) -> error_stack::Result<(), RelayTaskStopError> {
-        self.shutdown.send_replace(true);
-        match nervix_primitives::time::timeout(grace, &mut self.task).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(Report::new(error).change_context(RelayTaskStopError::Join {
-                task: RelayTaskKind::State,
-            })),
-            Err(_) => {
-                self.task.abort();
-                self.task.join_after_shutdown("relay state").await;
-                Err(Report::new(RelayTaskStopError::DrainTimeout {
-                    task: RelayTaskKind::State,
-                    grace,
-                }))
-            }
-        }
-    }
 }
 
 impl RelayOwnerTask {
@@ -1324,19 +1295,6 @@ impl RelayRuntimeFanIn {
 /// A relay owner consumes the retention decision made with the rest of its domain plan.
 pub(super) use crate::registry::PlannedRelayRetention as RelayRetention;
 
-/// One materialized relay unit's runtime task: the relay and unit it serves, the replicated state
-/// it maintains, the branch retention limits it enforces, and the fan-in it consumes.
-pub(super) struct RelayStateTaskSpec {
-    pub(super) relay: RelayName,
-    /// The unit whose keys this task materializes. Its fan-in registers with this partition's
-    /// fixed audience, so sibling partitions occupy none of its queue capacity.
-    pub(super) unit: Unit,
-    pub(super) partitioning: RelayPartitioning,
-    pub(super) state: MaterializedRelayStateOriginator,
-    pub(super) retention: RelayRetention,
-    pub(super) receiver: RelayRuntimeFanIn,
-}
-
 impl RelayBoundaryServices {
     fn transit_for_unit(&self, unit: Unit) -> &Arc<RelayTransit> {
         match self.unit_runtime_consumers.get(&unit) {
@@ -1402,6 +1360,62 @@ impl RelayBoundaryServices {
         key: &Option<BranchKey>,
     ) -> error_stack::Result<Unit, RelayPartitionError> {
         self.partitioning.unit_of(key)
+    }
+
+    /// The `CAPACITY` of each unit owner's buffer, in batches.
+    pub(super) fn owner_capacity(&self) -> usize {
+        self.fanout
+            .consumers()
+            .owner_capacity
+            .load(Ordering::Acquire)
+    }
+
+    /// Whether the partition count these services place keys by schedules `unit`.
+    pub(super) fn declares_unit(&self, unit: Unit) -> bool {
+        self.branch_presences.of(unit).is_some()
+    }
+
+    /// The input of a consumer unit that holds only keys the branch's previous partition count
+    /// placed there: an audience of the relay's fan-out no producer dispatches to, since the
+    /// current count places no key in `unit`. Delivery counts no such consumer.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a holding unit's consumer takes its dormant input once when it is installed"
+        )
+    )]
+    pub(super) fn dormant_unit_fan_in(&self, mode: AckMode, unit: Unit) -> RelayRuntimeFanIn {
+        let audiences = self.fanout.consumers().unit_audiences(unit);
+        let audience = match mode {
+            AckMode::Attached => &audiences.attached,
+            AckMode::Detached => &audiences.detached,
+        };
+        RelayRuntimeFanIn::new(audience.new_receiver())
+    }
+
+    /// Services of the same relay on the same fan-out, for the partition count `presences` place
+    /// keys by. The fan-out keeps its subscribers, common consumers and the audiences of the units
+    /// both counts share; every runtime consumer registers with the new services afresh.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a partition count change replaces the relay's services once per activation"
+        )
+    )]
+    pub(super) fn repartitioned(&self, presences: RelayBranchPresences) -> Self {
+        let services = Self::new(
+            self.fanout.clone(),
+            0,
+            0,
+            self.remote_runtime_consumers.load().as_ref().clone(),
+            self.remote_dispatcher.clone(),
+            presences,
+            self.domain_ack_tracker.clone(),
+        );
+        services.replace_owner_routes(self.owners.load().as_ref().clone());
+        services
     }
 
     /// Whether this node's owner of the unit that owns `key` holds `key`'s branch. A key that names
@@ -1729,7 +1743,14 @@ impl RelayBoundaryServices {
                 return Err(Box::new(batch.clone()));
             }
         };
-        let batch_ipc = match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
+        let batch_ipc = match batch
+            .batch
+            .encode_arrow_ipc(
+                dispatcher.executor(),
+                nervix_execution::QueueAdmission::RefuseWhenFull,
+            )
+            .await
+        {
             Ok(bytes) => bytes,
             Err(error) => {
                 for registration in remote_acks.registrations().iter().flatten() {
@@ -1993,7 +2014,14 @@ impl RelayBoundaryServices {
             };
             let (batch_ipc, decoded_bytes) = match encoded_body.clone() {
                 Some(bytes) => bytes,
-                None => match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
+                None => match batch
+                    .batch
+                    .encode_arrow_ipc(
+                        dispatcher.executor(),
+                        nervix_execution::QueueAdmission::RefuseWhenFull,
+                    )
+                    .await
+                {
                     Ok(bytes) => {
                         let bytes = (
                             bytes,
@@ -2355,6 +2383,25 @@ impl ConcreteRelayRuntime {
 }
 
 impl RelayBoundaryBuilder {
+    /// The `CAPACITY` of each unit owner's buffer, in batches.
+    pub(super) fn owner_capacity(&self) -> usize {
+        self.fanout
+            .consumers()
+            .owner_capacity
+            .load(Ordering::Acquire)
+    }
+
+    /// The input of a consumer unit that holds only keys its branch's previous partition count
+    /// placed there: an audience no producer dispatches to, counted by no delivery.
+    pub(super) fn dormant_unit_fan_in(&self, mode: AckMode, unit: Unit) -> RelayRuntimeFanIn {
+        let audiences = self.fanout.consumers().unit_audiences(unit);
+        let audience = match mode {
+            AckMode::Attached => &audiences.attached,
+            AckMode::Detached => &audiences.detached,
+        };
+        RelayRuntimeFanIn::new(audience.new_receiver())
+    }
+
     pub(super) fn runtime_consumer_fan_in_for_unit(
         &mut self,
         mode: AckMode,
@@ -2726,254 +2773,6 @@ impl Runtime {
                 .remove_relay_unit(&domain, &relay, unit);
         });
         Ok(RelayOwnerTask { shutdown, task })
-    }
-
-    pub(in crate::runtime) fn spawn_relay_state_task(
-        &self,
-        domain: &DomainName,
-        spec: RelayStateTaskSpec,
-    ) -> RelayStateTask {
-        let RelayStateTaskSpec {
-            relay,
-            unit,
-            partitioning,
-            mut state,
-            retention:
-                RelayRetention {
-                    branch_ttl,
-                    branch_capacity,
-                },
-            receiver,
-        } = spec;
-        let runtime = self.clone();
-        let domain = domain.clone();
-        let expiration_scan_interval = self.inner.branch_instance_expiration_scan_interval;
-        let (shutdown, shutdown_rx) = watch::channel(false);
-        let quiesce_counters =
-            self.node_quiesce_counters(&domain, NodeRef::new(ModelKind::Relay, &relay));
-        let force_flush = self.force_flush_participant(&domain, quiesce_counters.clone());
-        let task = nervix_primitives::task::spawn(async move {
-            let interaction_input = RelayInteractionInput::immediate(relay.clone(), receiver);
-            let mut interaction = RelayInteraction::new(
-                vec![interaction_input],
-                shutdown_rx,
-                Some(force_flush),
-                Some(quiesce_counters),
-            )
-            .verified(
-                "the registry validated this input, and a non-empty input list builds an \
-                 interaction",
-            );
-            let relay_model_name = ModelName::from(&relay);
-            let ownership_entity =
-                DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay_model_name);
-            let freeze_watch = OwnershipHandoffFreezeWatch::for_unit(
-                &runtime,
-                DomainNodeUnitRef::new(ownership_entity, unit),
-            );
-            let clock = match runtime.bind_domain_clock(&domain) {
-                Ok(clock) => clock,
-                Err(error) => {
-                    runtime.events().report_error(format!(
-                        "materialized relay '{}' in domain '{}' could not bind its clock: \
-                         {error:#}",
-                        relay.as_str(),
-                        domain.as_str()
-                    ));
-                    return;
-                }
-            };
-            let activated_at = match clock.snapshot() {
-                Ok(snapshot) => snapshot.now(),
-                Err(error) => {
-                    runtime.events().report_error(format!(
-                        "materialized relay '{}' in domain '{}' could not read its activation \
-                         time: {error:#}",
-                        relay.as_str(),
-                        domain.as_str(),
-                    ));
-                    return;
-                }
-            };
-            let mut branch_instances = state.read().restored_branch_instances(activated_at);
-            let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
-            'state_task: loop {
-                nervix_primitives::task::consume_budget().await;
-                if !freeze_watch.observe().is_frozen()
-                    && let Some(branch_ttl) = branch_ttl
-                    && Instant::now() >= next_expiration_scan
-                {
-                    let now = match clock.snapshot().map(|snapshot| snapshot.now()) {
-                        Ok(now) => now,
-                        Err(error) => {
-                            runtime.events().report_error(format!(
-                                "materialized relay '{}' in domain '{}' lost its clock: {error:#}",
-                                relay.as_str(),
-                                domain.as_str(),
-                            ));
-                            break 'state_task;
-                        }
-                    };
-                    for (key, _) in branch_instances.expire(now, branch_ttl) {
-                        nervix_primitives::task::consume_budget().await;
-                        if let Err(error) = runtime.delete_materialized_stream_key(&mut state, &key)
-                        {
-                            warn!(
-                                domain = domain.as_str(),
-                                relay = relay.as_str(),
-                                error = %format_args!("{error:#}"),
-                                "materialized relay assignment changed during branch expiration"
-                            );
-                            break 'state_task;
-                        }
-                    }
-                    next_expiration_scan = Instant::now() + expiration_scan_interval;
-                    continue;
-                }
-                let expiration_sleep = if freeze_watch.observe().is_frozen() {
-                    Some(OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL)
-                } else {
-                    branch_ttl.map(|_| {
-                        next_expiration_scan
-                            .checked_duration_since(Instant::now())
-                            .unwrap_or(Duration::ZERO)
-                    })
-                };
-                let mut wake = RuntimeWake::never();
-                if let Some(sleep) = expiration_sleep {
-                    match RuntimeWake::after(sleep) {
-                        Ok(scheduled) => wake = scheduled,
-                        Err(error) => {
-                            warn!(
-                                domain = domain.as_str(),
-                                relay = relay.as_str(),
-                                error = %format_args!("{error:#}"),
-                                "materialized relay state task could not schedule its next scan"
-                            );
-                            break 'state_task;
-                        }
-                    }
-                }
-                let work = match interaction.next(wake).await {
-                    Ok(work) => work,
-                    Err(failure) => {
-                        let reason = format!("{:#}", failure.error);
-                        warn!(
-                            domain = domain.as_str(),
-                            relay = relay.as_str(),
-                            error = %reason,
-                            "materialized relay interaction failed"
-                        );
-                        failure.acks.no_ack(format!(
-                            "state task for relay '{}' failed: {reason}",
-                            relay.as_str()
-                        ));
-                        continue;
-                    }
-                };
-                let (event, _work) = work.into_parts();
-                let batch = match event {
-                    RelayInteractionEvent::Batch {
-                        relay: input_relay,
-                        batch,
-                    } => {
-                        debug_assert_eq!(input_relay, relay);
-                        // The fan-in carries the batches of every unit this node owns and of the
-                        // units whose owners route to its consumers; another unit's keys are that
-                        // unit's state, never this one's.
-                        if partitioning.unit_of(&batch.key).ok() != Some(unit) {
-                            continue;
-                        }
-                        batch
-                    }
-                    RelayInteractionEvent::Wake => continue,
-                    RelayInteractionEvent::ForceFlush(completion) => {
-                        completion.complete();
-                        continue;
-                    }
-                    RelayInteractionEvent::Command(command) => match command {},
-                    RelayInteractionEvent::Stopped(reason) => {
-                        debug!(
-                            domain = domain.as_str(),
-                            relay = relay.as_str(),
-                            ?reason,
-                            "materialized relay interaction stopped"
-                        );
-                        break;
-                    }
-                };
-                let branch_key = batch.key.clone();
-                let now = match clock.snapshot().map(|snapshot| snapshot.now()) {
-                    Ok(now) => now,
-                    Err(error) => {
-                        let reason = format!(
-                            "materialized relay '{}' in domain '{}' lost its clock: {error:#}",
-                            relay.as_str(),
-                            domain.as_str(),
-                        );
-                        runtime.events().report_error(reason.clone());
-                        for ack in batch.acks.iter() {
-                            ack.no_ack(reason.clone());
-                        }
-                        break;
-                    }
-                };
-                branch_instances
-                    .get_or_try_create_with(branch_key.clone(), now, |_, _| {
-                        Ok::<(), std::convert::Infallible>(())
-                    })
-                    .assured("the tracking closure's error type is Infallible");
-                if let Some(branch_capacity) = branch_capacity {
-                    for (evicted_key, _) in branch_instances.evict_lru_to_capacity(branch_capacity)
-                    {
-                        nervix_primitives::task::consume_budget().await;
-                        if let Err(error) =
-                            runtime.delete_materialized_stream_key(&mut state, &evicted_key)
-                        {
-                            warn!(
-                                domain = domain.as_str(),
-                                relay = relay.as_str(),
-                                error = %format_args!("{error:#}"),
-                                "materialized relay assignment changed during branch eviction"
-                            );
-                            break 'state_task;
-                        }
-                    }
-                }
-                let messages = match batch.try_into_messages() {
-                    Ok(messages) => messages,
-                    Err(error_and_batch) => {
-                        let error = error_and_batch.error;
-                        warn!(
-                            domain = domain.as_str(),
-                            relay = relay.as_str(),
-                            scope = %BranchScope::from(&branch_key),
-                            error = %format_args!("{error:#}"),
-                            "failed to decode scheduled materialized relay batch"
-                        );
-                        continue;
-                    }
-                };
-                let records = messages.into_iter().map(|message| message.record);
-                if let Err(error) = runtime
-                    .apply_materialized_stream_records(&mut state, &branch_key, records)
-                    .await
-                {
-                    warn!(
-                        domain = domain.as_str(),
-                        relay = relay.as_str(),
-                        error = %format_args!("{error:#}"),
-                        "materialized relay assignment changed while applying a batch"
-                    );
-                    break 'state_task;
-                }
-            }
-        });
-        RelayStateTask {
-            unit,
-            shutdown,
-            task,
-        }
     }
 }
 

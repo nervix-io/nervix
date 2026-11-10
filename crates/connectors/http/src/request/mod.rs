@@ -579,9 +579,12 @@ mod tests {
         let plan = HttpRequestIngestorPlan {
             tls_policy: Default::default(),
             config,
-            dns: DnsResolver::load(nervix_dns::DnsConfiguration::system())
-                .await
-                .expect("the host resolver configuration loads in tests"),
+            dns: DnsResolver::load(
+                nervix_dns::DnsConfiguration::system(),
+                nervix_dns::DnsSettings::default(),
+            )
+            .await
+            .expect("the host resolver configuration loads in tests"),
             method: "GET".to_string(),
             headers: vec![HttpRequestHeader {
                 name: "x-tenant".to_string(),

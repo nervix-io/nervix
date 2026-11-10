@@ -21,6 +21,14 @@ fn compile_assignment(
     expression: &str,
     result_type: DataType,
 ) -> error_stack::Result<CompiledProgram, CompileError> {
+    compile_assignment_with_settings(expression, result_type, crate::VmSettings::default())
+}
+
+fn compile_assignment_with_settings(
+    expression: &str,
+    result_type: DataType,
+    settings: crate::VmSettings,
+) -> error_stack::Result<CompiledProgram, CompileError> {
     let input = StdArc::new(Schema::new(vec![
         Field::new("text", DataType::Utf8, true),
         Field::new("pattern", DataType::Utf8, true),
@@ -34,10 +42,14 @@ fn compile_assignment(
         .map(|field| field.as_ref().clone())
         .collect::<Vec<_>>();
     fields.push(Field::new("result", result_type, true));
-    compile_program_for_bindings(
+    crate::compile_program_with_options_for_bindings(
         &program,
         StdArc::new(Schema::new(fields)),
         [CompileBinding::writable("input", input)],
+        crate::CompileOptions {
+            settings,
+            ..crate::CompileOptions::default()
+        },
     )
 }
 
@@ -137,6 +149,32 @@ fn literal_multi_pattern_sets_are_prepared_once() {
             }
         })
         .verified("the dynamic call lowers to a builtin");
-    assert!(matches!(dynamic_call.0, ContainsAnyCall::Dynamic));
+    assert!(matches!(dynamic_call.0, ContainsAnyCall::Dynamic { .. }));
     assert_eq!(dynamic_call.1, 2);
+}
+
+#[test]
+fn configured_pattern_sets_reach_the_dynamic_builtin() {
+    let settings = crate::VmSettings::resolve(crate::VmSettingOverrides {
+        pattern_sets_per_batch: Some(2),
+        ..crate::VmSettingOverrides::default()
+    })
+    .verified("a two-set cache is valid");
+    let program = compile_assignment_with_settings(
+        "contains_any(input.text, vec(input.pattern, 'beta'))",
+        DataType::Boolean,
+        settings,
+    )
+    .verified("the dynamic expression compiles with its node capabilities");
+    let capacity = program
+        .instructions
+        .iter()
+        .find_map(|instruction| match &instruction.kind {
+            InstructionKind::Builtin {
+                lowering: BuiltinLowering::ContainsAny(ContainsAnyCall::Dynamic { capacity }),
+                ..
+            } => Some(capacity.get()),
+            _ => None,
+        });
+    assert_eq!(capacity, Some(2));
 }

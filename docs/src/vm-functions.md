@@ -483,6 +483,7 @@ All paths are relative to the repository root.
 | `src/runtime/message_error.rs` | Structured message errors, the rows whose required outputs are missing, and execution of prepared error-record programs |
 | `src/runtime/window_processor.rs`, `window_accumulator/`, `window_state.rs` | Branch-local windows, their aggregate structures, and their snapshots |
 | `benches/window_sketches.rs` | The cost of admitting retained rows into pane sketches, from a new pane for every row to a thousand rows per pane |
+| `benches/window_collection.rs` | Complete collection-route emission at 64 and 4,096 retained rows, including Arrow gathering and IPC qualification |
 | `src/runtime/window_archive.rs` | A captured window as bounded archive Arrow groups, and the window snapshot rebuilt from them |
 | `src/runtime/subscription_predicate.rs` | Session subscription filters |
 
@@ -721,10 +722,10 @@ section of the reference says what each context does with a row error.
 
 | Artifact | Prepared | Held | Bound |
 | --- | --- | --- | --- |
-| Constant regular expression | Once, when the call is lowered (`ConstantPattern`) | Inside the program; one search cache is borrowed from the regex's pool for each batch, so no row takes a lock | 10 MiB compiled size, 2 MiB lazy-DFA search cache |
-| Pattern read from a field | On a miss, on the executing thread | `DynamicPatterns`, one cache per call site per program, shared by clones and across batches. Each batch loads one `ArcSwap` snapshot and publishes a miss copy-on-write. | 64 patterns, oldest compiled evicted first; rows that repeat the previous row's pattern skip the lookup |
+| Constant regular expression | Once, when the call is lowered (`ConstantPattern`) | Inside the program; one search cache is borrowed from the regex's pool for each batch, so no row takes a lock | 10 MiB fixed compiled size; lazy-DFA search cache from `vm-regex-search-cache-bytes` (2 MiB by default) |
+| Pattern read from a field | On a miss, on the executing thread | `DynamicPatterns`, one cache per call site per program, shared by clones and across batches. Each batch loads one `ArcSwap` snapshot and publishes a miss copy-on-write. | `vm-dynamic-pattern-cache-capacity` patterns (64 by default), oldest compiled evicted first; rows that repeat the previous row's pattern skip the lookup |
 | Constant `contains_any` list | Once, as an Aho-Corasick matcher | Inside the program | 128 patterns and 64 KiB; over that, each non-null row fails |
-| Per-row `contains_any` set | On a miss, for each batch | A per-call cache for one batch; a hit borrows the Arrow strings without allocating | 64 sets per batch |
+| Per-row `contains_any` set | On a miss, for each batch | A per-call cache for one batch; a hit borrows the Arrow strings without allocating | `vm-pattern-sets-per-batch` sets (64 by default) |
 | `IN` set | Once, from evaluated constant elements | `MembershipSet` | Up to 8 fixed-width values compared in turn; larger fixed-width sets and every `STRING` set hashed |
 | Constant CIDR network | Once, when the call is lowered | Inside the program | A per-row network is reparsed only when its text differs from the previous row's |
 | Datetime zone and format | Once, when the call is lowered | Inside the resolved call | A 256-byte longest formatted value, checked at compile time |
@@ -775,8 +776,8 @@ The VM's entry point alone decides where a program runs:
 
 | Condition | Where it runs |
 | --- | --- |
-| At most `INLINE_ROW_LIMIT` (1,024) rows, and no injected function whose `FunctionExecutionPolicy` is `Extension` | Inline, on the caller's task |
-| More than 1,024 rows, and no such function | On the node's data workers, admitted through the bounded executor |
+| At most `vm-inline-row-limit` rows (1,024 by default), and no injected function whose `FunctionExecutionPolicy` is `Extension` | Inline, on the caller's task |
+| More than the configured inline row limit, and no such function | On the node's data workers, admitted through the bounded executor |
 | Any `Inject` instruction whose injector's `FunctionExecutionPolicy` is `Extension` | On the node's extension workers, admitted through the bounded executor, whatever the batch size. Every UDF call does this. |
 
 The node resolves worker, queue and memory capacities once at startup;
@@ -793,6 +794,12 @@ Admission can refuse. A class whose wait queue is full refuses the execution wit
 `RuntimeError::ExecutionNotAdmitted`, and a job that panics on its worker returns
 `RuntimeError::ExecutionPanicked`. Both are batch errors, which reach the node's error policy as
 the report of the planned step that ran the program, like any other batch failure.
+
+The compiling node resolves these admission and cache capabilities once and carries them in the
+compiled program. Set `--vm-inline-row-limit 0` to admit every nonempty batch to Data workers;
+Extension calls keep their Extension class. Cache capacities affect reuse and admission affects
+where work runs; neither changes row errors or expression results. See
+[Engine And Connector Host Capabilities](node-settings.md#engine-and-connector-host-capabilities).
 
 An inline execution never yields and has no cancellation point: it runs every instruction over
 its batch to completion, and the batch's size and the limits above bound that work. An admitted
@@ -949,8 +956,8 @@ guidance:
 - **Variable-length work.** Ragged lists, text search, and JSON ran at single-digit millions.
 - **Failures.** Dense failures made checked arithmetic about six times slower, because each failed
   row builds an error.
-- **The executor hop.** Crossing the 1,024-row threshold admits the execution onto the data
-  workers, which costs more than executing a small batch.
+- **The executor hop.** Crossing the configured inline threshold (1,024 rows in these measurements)
+  admits the execution onto the data workers, which costs more than executing a small batch.
 - **Conditional arms.** A regular expression in an arm that selects half the batch costs about
   twelve times one that selects none.
 - **JSON sharing.** Four extractions from one document cost less than a third of four extractions
@@ -1148,7 +1155,10 @@ and diagnostics.
   scalar operand.
 
 Registry validation compiles the same route with the same compiler when the processor is applied.
-It also rejects `BYTES` arguments and checks the sketch budget.
+It also rejects arguments containing `BYTES`, checks the sketch budget, and requires a message
+`WIDTH` or `MAX STATE SIZE` for `COLLECT_VEC`. Collection refuses a nullable argument with a typed
+route error and a `coalesce` instruction. Its injected result is a required `VEC` whose non-null
+item has the argument's exact type, including a nested array or vector.
 
 Cold state inspection projects the same argument program through
 `CompiledWindowRoute::argument_inspection_fields` with the input schema's sensitivity and the
@@ -1185,6 +1195,31 @@ For each batch, the task works through these steps:
 
 Tumbling and sliding windows use this same path, with different `WIDTH` and `STEP`.
 
+Collection captures immutable Arrow row addresses cooperatively. It first checks cumulative string and nested
+list offsets and reserves the complete gather payload and metadata together from relay memory;
+no queued gather holds a partial grant while asking for the rest. The bounded data worker sorts
+addresses by the same `(timestamp, sequence)` key that `FIRST` and `LAST` use and copies contiguous
+runs directly from their Arrow columns, with exact selected child capacities so an empty vector
+cannot reserve its fixed element width in absent children. It does not materialize a scalar value
+for each row.
+Gathering checks cancellation between runs and preserves nested types and floating-point bits.
+Accepted retained work waits for a worker place under the branch task's existing lifetime.
+
+Before a collection route publishes, its final output is checked against the relay decoded limit
+and qualified by the bounded IPC encoder against the encoded limit. That qualification has a cost
+separate from destination encoding; `window_collection` benchmarks the complete route emission,
+including this check. A typed build, admission or size failure reaches the existing window
+emission-failure owner: every retained acknowledgement fails, the window clears, and earlier
+routes keep their output. Snapshots and archives still carry only the existing input and evaluated
+argument columns; restore rebuilds the shared sequence from those rows.
+
+The relay IPC limit is also the interconnect relay payload limit; stream metadata is carried
+separately. A session subscription has its own negotiated row/frame contract. Its row encoder
+reports `RowsSkippedCause::EncodingFailed` when a row cannot fit that client's limits, rather than
+passing an oversized frame to the transport. That consumer-specific contract does not change a
+window's relay emission or couple branch execution to a subscribing client's settings.
+
+
 | Structure | Functions | Algorithm | Retraction when the window steps |
 | --- | --- | --- | --- |
 | `counter` | `COUNT` | Exact 64-bit count | Subtract |
@@ -1194,6 +1229,7 @@ Tumbling and sliding windows use this same path, with different `WIDTH` and `STE
 | `moments` | `AVG`, variances, standard deviations | Two-pass centered count, mean, and M2 with one Chan merge per run, in a two-stack window | Refold typed surviving runs |
 | `co_moments` | Covariances, `CORR` | Two-pass centered co-moments with one Chan merge per run; `CORR` clamped to `[-1, 1]` | Refold typed surviving runs |
 | `extremes`, `sequence`, `arg_extremes` | `MIN`/`MAX`, `FIRST`/`LAST`, `ARG_MIN`/`ARG_MAX` | Monotonic candidate deque ordered by value, arrival, or key; ties keep the earliest row | Drop front candidates older than the first survivor |
+| `sequence` | `COLLECT_VEC` | Gather every retained argument in ingestion-low-watermark/admission order, sharing the argument and endpoint structure with `FIRST`/`LAST` | Read only the surviving rows; no extra retained state |
 | `linear_histogram` | `PERCENTILE_LINEAR_HISTOGRAM` | Fixed-range buckets, answered with a bucket midpoint | Immediately, or after the configured delay on the domain clock |
 | `hll` | `APPROX_COUNT_DISTINCT` | HyperLogLog over the first 8 bytes of a BLAKE3 hash of a type-tagged key, with linear counting at small cardinalities | Rebuilt from survivors |
 | `quantile_sketch` | `APPROX_QUANTILE` | t-digest capped at its capacity, merging the least-cost adjacent centroids; exact while it holds every value | Rebuilt from survivors |
@@ -1428,12 +1464,12 @@ Treat this as the checklist for a new builtin, or for a new family.
 
 **Limits:**
 
-- Column limits: 2,147,483,647 bytes of text or bytes in one column; 1,024 rows before execution
-  moves to the node's data workers.
-- Regular expressions: 10 MiB compiled and a 2 MiB search cache per pattern, and 64 field-supplied
-  patterns cached per call.
-- Pattern sets: 128 patterns and 64 KiB per constant `contains_any` list, and 64 per-row pattern
-  sets per batch.
+- Column limits: 2,147,483,647 bytes of text or bytes in one column. The node's `vm-inline-row-limit`
+  controls admission to its data workers.
+- Regular expressions: 10 MiB compiled. Search caches and retained field-supplied patterns follow
+  `vm-regex-search-cache-bytes` and `vm-dynamic-pattern-cache-capacity`.
+- Pattern sets: 128 patterns and 64 KiB per constant `contains_any` list. The node's
+  `vm-pattern-sets-per-batch` controls retained per-row matchers without changing these rejection limits.
 - Text functions: 4 KiB `LIKE` patterns and 65,536 `split` parts.
 - JSON: 16 MiB, 128-level documents, and 64-step paths.
 - Datetimes: 256-byte formatted values.
