@@ -72,17 +72,34 @@ fn required_float_lists(rows: &[Option<&[f64]>]) -> ArrayRef {
     )
 }
 
+/// Arrow's cells for lists of `T`: each row's present values, or `None` for a null list.
+fn list_cells<T: Copy>(
+    rows: impl IntoIterator<Item = Option<impl AsRef<[T]>>>,
+) -> Vec<Option<Vec<Option<T>>>> {
+    let mut cells = Vec::new();
+    for row in rows {
+        let Some(values) = row else {
+            cells.push(None);
+            continue;
+        };
+        let mut cell = Vec::with_capacity(values.as_ref().len());
+        for value in values.as_ref() {
+            cell.push(Some(*value));
+        }
+        cells.push(Some(cell));
+    }
+    cells
+}
+
 fn float_lists(rows: &[Option<&[f64]>]) -> ArrayRef {
     StdArc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(
-        rows.iter()
-            .map(|row| row.map(|values| values.iter().copied().map(Some).collect::<Vec<_>>())),
+        list_cells(rows.iter().copied()),
     ))
 }
 
 fn integer_arrays(rows: &[Option<[i64; 4]>]) -> ArrayRef {
     StdArc::new(FixedSizeListArray::from_iter_primitive::<Int64Type, _, _>(
-        rows.iter()
-            .map(|row| row.map(|values| values.iter().copied().map(Some).collect::<Vec<_>>())),
+        list_cells(rows.iter().copied()),
         4,
     ))
 }
@@ -748,15 +765,11 @@ impl GeneratedLists {
     /// The rows, each null or a list, and the Arrow column holding them after the skipped rows.
     fn column(&self) -> (Vec<Option<Vec<f64>>>, ArrayRef) {
         let width = self.fixed_width.map(|width| usize::from(width % 8) + 1);
-        let rows = self
-            .rows
-            .iter()
-            .map(|row| row.values(width))
-            .collect::<Vec<_>>();
-        let cells = rows.iter().map(|row| {
-            row.as_ref()
-                .map(|values| values.iter().copied().map(Some).collect::<Vec<_>>())
-        });
+        let mut rows = Vec::with_capacity(self.rows.len());
+        for row in &self.rows {
+            rows.push(row.values(width));
+        }
+        let cells = list_cells(rows.iter().map(Option::as_deref));
         let column: ArrayRef = match width {
             Some(width) => StdArc::new(
                 FixedSizeListArray::from_iter_primitive::<Float64Type, _, _>(

@@ -26,6 +26,7 @@
 
 use std::{cmp::Ordering, ops::Range};
 
+use arch_into::ArchInto as _;
 use arrow_array::{
     Array, ArrowNativeTypeOp, BooleanArray, Float64Array, Int64Array, PrimitiveArray, StringArray,
     types::{
@@ -357,7 +358,7 @@ fn quantile_of<T: NumericElement>(
                 present.push(*value);
             }
         }
-        let count = u64::try_from(present.len()).assured("a list holds fewer than 2^64 values");
+        let count: u64 = present.len().arch_into();
         let Some(rank) = QuantileRank::new(percentile, count) else {
             output.push(None);
             continue;
