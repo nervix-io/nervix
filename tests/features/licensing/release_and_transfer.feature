@@ -44,6 +44,7 @@ Feature: Cluster licensing release and transfer
       CREATE DOMAIN released_free_policy CLOCK UNPACED START '2026-11-06T00:00:00Z';
       """
     When the cluster is restarted
+    And the licensing service clock catches up with the cluster
     And the licensing service becomes reachable
     Then node "node-1" eventually describes this license without a selected domain
       """
