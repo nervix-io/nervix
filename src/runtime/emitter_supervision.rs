@@ -669,6 +669,7 @@ mod tests {
         let error = runtime
             .emitter_task_deps(
                 ExecutionBuildDeps {
+                    vm_settings: nervix_vm::VmSettings::default(),
                     domain: &domain("edge"),
                     relay_schemas: &relay_schemas,
                     relay_branchings: &relay_branchings,
@@ -925,6 +926,7 @@ mod tests {
         let no_input = runtime
             .emitter_task_deps(
                 ExecutionBuildDeps {
+                    vm_settings: nervix_vm::VmSettings::default(),
                     domain: &edge,
                     relay_schemas: &relay_schemas,
                     relay_branchings: &relay_branchings,
@@ -944,6 +946,7 @@ mod tests {
         let no_branching = runtime
             .emitter_task_deps(
                 ExecutionBuildDeps {
+                    vm_settings: nervix_vm::VmSettings::default(),
                     domain: &edge,
                     relay_schemas: &relay_schemas,
                     relay_branchings: &relay_branchings,

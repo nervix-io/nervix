@@ -471,6 +471,7 @@ impl CompiledHttpRequestFields {
             HTTP_REQUEST_NAMESPACE,
             &bindings,
             context.udfs,
+            context.settings,
         )
         .change_context(HttpRequestFieldsError::Lookups {
             emitter: emitter.clone(),
@@ -1066,6 +1067,7 @@ mod tests {
                 output,
             },
             RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &materialized,
                 available_lookups: &lookups,
                 current_branching: &branching,
@@ -1098,6 +1100,7 @@ mod tests {
                 output: None,
             },
             RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &materialized,
                 available_lookups: &lookups,
                 current_branching: &branching,

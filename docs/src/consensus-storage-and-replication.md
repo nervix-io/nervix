@@ -518,8 +518,8 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_payload_identity_licensing_capability_tls_inference_reset_epoch_instances_logs`, `raft_payload_identity_licensing_capability_tls_inference_reset_epoch_instances_meta`, `raft_payload_identity_licensing_capability_tls_inference_reset_epoch_instances_state`, and
-`raft_payload_identity_licensing_capability_tls_inference_reset_epoch_instances_snapshots`. Opening it validates the complete keyspace namespace before reading
+`raft_payload_identity_licensing_capability_tls_inference_reset_epoch_engine_host_instances_logs`, `raft_payload_identity_licensing_capability_tls_inference_reset_epoch_engine_host_instances_meta`, `raft_payload_identity_licensing_capability_tls_inference_reset_epoch_engine_host_instances_state`, and
+`raft_payload_identity_licensing_capability_tls_inference_reset_epoch_engine_host_instances_snapshots`. Opening it validates the complete keyspace namespace before reading
 any records. The committed cluster-parameter record stores ordered typed TLS cipher suites and
 key-exchange groups; recovery validates their complete pair before returning that record.
 This namespace identifies the current Model shape, including the separate JSON

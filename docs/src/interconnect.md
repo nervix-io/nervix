@@ -1159,6 +1159,12 @@ normal frame and ACK operations use retained owners rather than a node-wide shar
 A delivery is held back rather than failed while relay memory on either end has no room for it at
 the moment, because that lack of room ends as the node's other relay work resolves.
 
+A receive-bound refusal creates no receiver attempt. The sender can slice the body again at the
+same unused channel position. If one row cannot fit, the current delivery's unadmitted suffix
+fails; an admitted prefix retains its acknowledgement owners. A later fitting delivery can reuse
+the unused position. Producer submissions are not route-buffer boundaries: rows from separate
+submissions can be collected into the same concrete branch delivery under `FLUSH EACH`.
+
 A receiver refuses a grant for capacity when its relay budget cannot reserve the body, the largest
 decoded batch and decode scratch, when its application queue has no item left, when the capacity it
 keeps for terminal admission outcomes is taken, or when the delivery's channel still has an

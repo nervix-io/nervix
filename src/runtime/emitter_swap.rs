@@ -172,7 +172,11 @@ impl Runtime {
                     }
                     let deps = self
                         .emitter_task_deps(
-                            ExecutionBuildDeps::from_routing(domain, &execution),
+                            ExecutionBuildDeps::from_routing(
+                                domain,
+                                &execution,
+                                self.inner.vm_settings,
+                            ),
                             &desired_emitter,
                         )
                         .change_context_lazy(build)?;

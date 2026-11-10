@@ -1328,7 +1328,11 @@ impl Runtime {
                     }
                     let runtimes = self
                         .start_reingestor_runtimes(
-                            ExecutionBuildDeps::from_routing(domain, &routing),
+                            ExecutionBuildDeps::from_routing(
+                                domain,
+                                &routing,
+                                self.inner.vm_settings,
+                            ),
                             &shutdown,
                             RelayRuntimeHandles {
                                 services: &routing.relay_services,
@@ -1397,6 +1401,7 @@ impl Runtime {
                                         unit,
                                         &execution.relay_services,
                                         &execution.udfs,
+                                        self.inner.vm_settings,
                                     )
                                     .change_context_lazy(build)?,
                                 );
@@ -1598,6 +1603,7 @@ impl Runtime {
                 BoundMessageErrorRoutes::bind(
                     revision.message_errors.clone(),
                     MessageErrorRouteBindingContext {
+                        vm_settings: self.inner.vm_settings,
                         relay_services: &execution.relay_services,
                         materialized_stream_specs: &execution.materialized_stream_specs,
                         lookups: &execution.lookups,
@@ -1703,6 +1709,7 @@ impl Runtime {
                 BoundMessageErrorRoutes::bind(
                     revision.message_errors.clone(),
                     MessageErrorRouteBindingContext {
+                        vm_settings: self.inner.vm_settings,
                         relay_services: &execution.relay_services,
                         materialized_stream_specs: &execution.materialized_stream_specs,
                         lookups: &execution.lookups,

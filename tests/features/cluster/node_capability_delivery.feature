@@ -56,7 +56,7 @@ Feature: Relay delivery across a node capability roll
       | lowered | 8KiB   | 2KiB  | 2    |
 
   @node_capability_unfit
-  Scenario: A refused oversized row leaves its channel ready for the next smaller batch
+  Scenario Outline: A refused oversized row leaves its channel ready for the next smaller batch with <stagger> between branch buffers
     Given the production sticky scheduler is configured
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And node-2 starts with interconnect-relay-batch-bytes = 2KiB
@@ -87,11 +87,23 @@ Feature: Relay delivery across a node capability roll
       RELOCATE EMITTER output ONTO NODE node-3 IGNORE PREFERENCES;
       """
     Then node "node-1" eventually describes committed capabilities for node "node-2"
+    Given relay payloads for domain "{{domain}}" are held before their grant requests
+    When relay payload grant requests for domain "{{domain}}" are released
     Given client "app" is connected to node "node-3"
     When client "app" opens consumer "output" on emitter "output" expecting fields "id STRING, amount I64, tenant STRING"
     And client "app" opens producer "input" on ingestor "input" expecting fields "id STRING, amount I64, tenant STRING"
-    And producer "input" submits 2 interleaved rows with 4096-byte ids as batch "too large"
+    Given ingestor "input" pauses before buffering branch '{"tenant":"globex"}'
+    When producer "input" submits 2 interleaved rows with 4096-byte ids as batch "too large"
+    Then ingestor "input" reaches its buffer pause for branch '{"tenant":"globex"}'
+    And batch "too large" remains pending for "<stagger>"
+    When ingestor "input" releases its buffer pause for branch '{"tenant":"globex"}'
     Then batch "too large" fails processing because "rejected"
+    And node "node-2" has refused 2 oversized branch rows in domain "{{domain}}"
     When producer "input" submits 2 interleaved rows with 32-byte ids as batch "fits"
     Then consumer "output" receives 2 interleaved rows with 32-byte ids exactly once and acknowledges them
     And batch "fits" completes
+
+    Examples:
+      | stagger |
+      | 0ms     |
+      | 300ms   |

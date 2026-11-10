@@ -1593,6 +1593,7 @@ mod tests {
             },
             None,
             RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
                 current_branching: &ResolvedBranching::unbranched(),
@@ -1968,6 +1969,7 @@ mod tests {
             },
             None,
             RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
                 current_branching: &branching,
@@ -2068,6 +2070,7 @@ mod tests {
             },
             None,
             RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
                 current_branching: &branching,
@@ -2162,6 +2165,7 @@ mod tests {
             },
             None,
             RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
                 current_branching: &ResolvedBranching::unbranched(),
@@ -2227,6 +2231,7 @@ mod tests {
             },
             None,
             RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
                 current_branching: &ResolvedBranching::unbranched(),
@@ -2331,6 +2336,7 @@ mod tests {
             },
             None,
             RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
                 current_branching: &branching,
@@ -2408,6 +2414,7 @@ mod tests {
                 output_sensitivity: VmSchemaSensitivity::default(),
             },
             RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
                 current_branching: &ResolvedBranching::unbranched(),
@@ -2716,6 +2723,7 @@ mod tests {
                 output_sensitivity: VmSchemaSensitivity::default(),
             },
             RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
                 current_branching: &ResolvedBranching::unbranched(),
@@ -2816,9 +2824,10 @@ mod tests {
             &[expression("input.sequence")],
             input_schema.arrow_schema(),
             None,
+            nervix_vm::VmSettings::default(),
         )
         .expect("reorderer key program should compile");
-        let records = (0..=VM_INLINE_ROW_LIMIT)
+        let records = (0..=VmInlineRowLimit::DEFAULT)
             .map(|sequence| {
                 test_runtime_row([
                     (
@@ -2854,6 +2863,6 @@ mod tests {
         .await
         .expect("large VM batch should execute");
 
-        assert_eq!(output.batch.row_count(), VM_INLINE_ROW_LIMIT + 1);
+        assert_eq!(output.batch.row_count(), VmInlineRowLimit::DEFAULT + 1);
     }
 }
