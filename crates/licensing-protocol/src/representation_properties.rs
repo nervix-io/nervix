@@ -3,7 +3,14 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use meticulous::{OptionExt as _, ResultExt as _};
 
-use crate::{conditions::*, documents::*, problems::*, requests::*, test_fixture::*};
+use crate::{
+    conditions::*,
+    documents::*,
+    notifications::{DecisionNotification, Notification, NotificationState, TrustNotification},
+    problems::*,
+    requests::*,
+    test_fixture::*,
+};
 
 pub fn number(input: &[u8]) -> u64 {
     let mut bytes = [0; 8];
@@ -59,6 +66,32 @@ fn bolero_protocol_json_roundtrip() {
         .for_each(|input| {
             let value = number(input);
             let text = text(input);
+
+            for notification in [
+                Notification::Sync(NotificationState {
+                    notification_revision: value,
+                    decision_revision: value.reverse_bits(),
+                    conditions_revision: value.rotate_left(1),
+                    trust_serial: value.rotate_right(1),
+                }),
+                Notification::Decision(DecisionNotification {
+                    notification_revision: value,
+                    decision_revision: value.reverse_bits(),
+                    reason: text.clone(),
+                }),
+                Notification::Trust(TrustNotification {
+                    notification_revision: value,
+                    trust_serial: value.reverse_bits(),
+                }),
+            ] {
+                let encoded = notification
+                    .encode()
+                    .assured("bounded typed hint serializes");
+                let decoded = Notification::decode(notification.kind(), &encoded)
+                    .assured("the matching current hint decodes");
+                assert_eq!(decoded, notification);
+                assert_eq!(decoded.encode().assured("decoded hint serializes"), encoded);
+            }
             let mut decision = fixture.decision();
             decision.decision_revision = value;
             decision.license.plan.plan_code = text.clone();
