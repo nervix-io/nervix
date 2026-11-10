@@ -3676,9 +3676,18 @@ by one across the runner's entire cluster tier. The scenario performs the action
 `NERVIX-SUITE-CONFIRMED <sequence> <action>` to the runner's standard input. Requests and
 confirmations are single ASCII lines, at most 256 bytes including the newline. The declared action
 `refuse-next-subscription-opening` arms every node to refuse its next subscription
-opening as unavailable, since a restored session can reach any seed. The second declared action,
-`clear-subscription-opening-refusals`, clears any unused refusals on every node; the fault fixture
-requests it in teardown even when the test failed, so a refusal cannot reach a later test.
+opening as unavailable, since a restored session can reach any seed.
+`refuse-next-clock-attachment` similarly refuses each node's next clock attachment with the typed
+`InTransaction` attach refusal. The client ordinarily defers restoration while it holds a
+transaction, so this testing-build fault makes the refusal observable on demand without changing
+that client policy. `clear-subscription-opening-refusals` and `clear-clock-attachment-refusals`
+clear the respective unused refusals on every node. Each fault fixture requests its clearing
+action in teardown even when the test failed, so a refusal cannot reach a later test. The clock
+test reads the initial unpaced clock from the attach reply's cached snapshot, cuts its relay,
+arms the refusal before restoring the relay, and asserts `INTERRUPTED`, `RESTORATION_FAILED`
+with cause/message/positive wait, then the
+restored `STATE` of the same domain and generation. Extra refused attempts may precede that state
+when reconnection visits another armed node.
 An unknown action, malformed or repeated sequence, failed action or undelivered confirmation fails
 the scenario. The host
 adapter waits at most 120 seconds for its exact confirmation; the scenario's whole-run deadline
@@ -3691,9 +3700,9 @@ teardowns, including on failure. The JVM suite's `Actions` adapter writes each r
 deadline, so one daemon thread reads confirmations, a line of at most 256 bytes at a time, into a
 one-line queue that the waiting request reads within its 120 seconds. Once input ends, a line
 outgrows its bound or reading fails, every later request fails at once. A test's
-`Actions.Refusals` resource clears an armed refusal when it closes, including after a failed
-assertion. Hosts reuse this exchange without another dependency; it is a test harness contract,
-with no product endpoint.
+`Actions.Refusals` and `Actions.ClockRefusals` resources clear their armed refusals when they close,
+including after a failed assertion. Hosts reuse this exchange without another dependency; it is a
+test harness contract, with no product endpoint.
 
 The step that reads the run waits for the runner to end, for the duration the step names and never
 longer than 600 seconds, so a suite that stops making progress fails with its own report inside the

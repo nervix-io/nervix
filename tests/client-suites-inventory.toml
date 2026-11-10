@@ -8,6 +8,31 @@
 
 [[test]]
 host = "python"
+identity = "cluster/test_clocks.py::test_a_refused_clock_restoration_reports_its_cause_and_recovers"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.ClockTests#aRefusedClockRestorationReportsItsCauseAndRecovers"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::ClocksTest#test_refused_clock_restoration_reports_its_cause_and_recovers"
+tier = "cluster"
+
+[[test]]
+host = "c"
+identity = "test_b9_refused_clock_restoration_reports_its_cause_and_recovers"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_b9_refused_clock_restoration_reports_its_cause_and_recovers"
+tier = "cluster"
+
+[[test]]
+host = "python"
 identity = "cluster/test_inspection.py::test_inspection_metadata_and_verified_frames_survive_their_parents"
 tier = "cluster"
 
@@ -173,17 +198,17 @@ tier = "cluster"
 
 [[test]]
 host = "python"
-identity = "cluster/test_connect.py::test_a_session_opens_over_tls_with_the_certificate_authority"
+identity = "cluster/test_connect.py::test_a_session_opens_with_the_certificate_authority"
 tier = "cluster"
 
 [[test]]
 host = "python"
-identity = "cluster/test_connect.py::test_every_tls_requirement_reaches_the_tls_listener"
+identity = "cluster/test_connect.py::test_every_tls_requirement_matches_the_listener_transport"
 tier = "cluster"
 
 [[test]]
 host = "python"
-identity = "cluster/test_connect.py::test_a_session_that_does_not_trust_the_listener_fails_to_connect"
+identity = "cluster/test_connect.py::test_connection_trust_matches_the_listener_transport"
 tier = "cluster"
 
 [[test]]

@@ -51,6 +51,7 @@ mod backup_cut;
 #[cfg(test)]
 mod backup_cut_tests;
 mod client_inspection;
+mod clock_attachment;
 mod cluster_identity;
 mod command_pause_point;
 mod command_reconciliation;
@@ -209,6 +210,9 @@ struct FaultInjectionState {
     /// One-shot, node-local refusals of the next subscription a node is asked to open, each removed
     /// when its node delivers it.
     refused_subscription_openings: DashMap<ClusterNodeName, (), RandomState>,
+    /// One-shot, node-local clock attachment refusals, consumed by the next attach or cleared
+    /// by the host test's teardown.
+    refused_clock_attachments: DashMap<ClusterNodeName, (), RandomState>,
     wasm_reset_publication_authority_losses:
         DashMap<DomainName, WasmResetPublicationAuthorityLoss, RandomState>,
     failed_wasm_reset_publications: DashMap<DomainName, WasmResetPublicationFailure, RandomState>,
@@ -545,6 +549,7 @@ impl Default for FaultInjection {
                 refused_runtime_installations: DashMap::default(),
                 refused_interest_visibility: DashMap::default(),
                 refused_subscription_openings: DashMap::default(),
+                refused_clock_attachments: DashMap::default(),
                 wasm_reset_publication_authority_losses: DashMap::default(),
                 failed_wasm_reset_publications: DashMap::default(),
                 failed_entity_gate_engagements: DashMap::default(),

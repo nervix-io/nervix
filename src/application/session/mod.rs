@@ -1082,7 +1082,16 @@ async fn serve_ordered(
             if admission.admit().is_err() {
                 return;
             }
-            if subscriptions.transaction_active() {
+            let in_transaction = subscriptions.transaction_active();
+            #[cfg(feature = "testing")]
+            let in_transaction = shared
+                .service
+                .inner
+                .runtime
+                .fault_injection()
+                .take_clock_attachment_refusal(shared.service.inner.consensus.local_node_id())
+                || in_transaction;
+            if in_transaction {
                 let outcome = DomainClockAttachOutcome {
                     disposition: DomainClockAttachDisposition::Refused(
                         DomainClockAttachRefusal::InTransaction,
