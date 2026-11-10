@@ -7,6 +7,7 @@
 
 use futures_util::FutureExt as _;
 use nervix_primitives::sync::{Mutex, MutexGuard, Notify};
+use nervix_recovery::Discarded as _;
 
 #[derive(Default)]
 pub(in crate::application) struct LicensingRequests {
@@ -25,9 +26,9 @@ impl LicensingRequests {
         let turn = self.turn.lock().await;
         // An uncontended foreground request is itself the requested attempt. Do not leave its
         // stored permit to bypass the next automatic backoff.
-        match self.refresh.notified().now_or_never() {
-            Some(()) | None => {}
-        }
+        self.refresh.notified().now_or_never().discarded(
+            "the foreground attempt owns the turn whether its stored wakeup was consumed or absent",
+        );
         turn
     }
 
