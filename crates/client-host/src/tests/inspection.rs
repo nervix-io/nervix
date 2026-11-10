@@ -10,7 +10,7 @@ mod fixture;
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_core::wire::{StateInspectionResult, StateInspectionStage};
-use nervix_models::{Unit, UnitKind};
+use nervix_models::{StateInspectionEntity, Unit, UnitKind};
 
 use crate::{FailureKind, Inspection, InspectionUnitKind, Part};
 
@@ -31,19 +31,28 @@ fn check(input: &[u8]) {
         0 => StateInspectionStage::Live,
         _ => StateInspectionStage::Stored,
     };
-    let state = fixture::page(unit, stage, value);
+    let mut state = fixture::page(unit, stage, value);
+    if input.get(10).copied().unwrap_or(0) % 2 == 1 {
+        state.entity = StateInspectionEntity::ClusterLicense;
+    }
     let inspection = Inspection::new(state.clone());
     assert_eq!(inspection.state(), &state);
     assert_eq!(inspection.json(), state.to_json());
-    assert_eq!(inspection.domain(), state.entity.domain.as_str());
-    assert_eq!(
-        inspection.entity_kind(),
-        state.entity.node.kind.keyword_phrase()
-    );
-    assert_eq!(
-        inspection.entity_name(),
-        state.entity.node.identifier.as_str()
-    );
+    match &state.entity {
+        StateInspectionEntity::DomainNode(entity) => {
+            assert_eq!(inspection.domain(), Some(entity.domain.as_str()));
+            assert_eq!(inspection.entity_kind(), entity.node.kind.keyword_phrase());
+            assert_eq!(
+                inspection.entity_name(),
+                Some(entity.node.identifier.as_str())
+            );
+        }
+        StateInspectionEntity::ClusterLicense => {
+            assert_eq!(inspection.domain(), None);
+            assert_eq!(inspection.entity_kind(), "LICENSE");
+            assert_eq!(inspection.entity_name(), None);
+        }
+    }
     assert_eq!(inspection.rejection(), None);
     let StateInspectionResult::Page(page) = state.result else {
         panic!("the fixture is a page");
@@ -119,6 +128,7 @@ fn inspection_views_preserve_boundary_values() {
     for input in [&[][..], &[0; 10], &[255; 10], &[1; 10], &[2; 10]] {
         check(input);
     }
+    check(&[255; 11]);
     let mut state = fixture::page(Unit::SINGLE, StateInspectionStage::Live, 0);
     let StateInspectionResult::Page(page) = &mut state.result else {
         panic!("the fixture is a page");

@@ -51,6 +51,7 @@ mod emitter_start_plan;
 #[cfg(feature = "testing")]
 mod fault_injection;
 mod inferencer_state_snapshot;
+pub mod licensing;
 pub mod memory_pressure;
 pub mod metrics;
 pub(crate) mod registry;
@@ -92,6 +93,14 @@ pub struct ConfiguredFaultInjection {
 
 #[cfg(not(feature = "testing"))]
 impl ConfiguredFaultInjection {
+    pub(crate) const fn licensing_quota(
+        &self,
+        _name: nervix_licensing_vocabulary::QuotaName,
+        quota: nervix_licensing_vocabulary::Quota,
+    ) -> nervix_licensing_vocabulary::Quota {
+        quota
+    }
+
     pub(crate) const fn gossip_send_delay(
         &self,
         _destination: &nervix_models::ClusterNodeName,

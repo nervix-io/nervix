@@ -650,8 +650,10 @@ public final class Nervix {
     /** An independently owned typed state page or refusal, with the complete lossless JSON view. */
     public static final class Inspection extends Handle {
         private Inspection(long pointer) { super(pointer); }
+        /** The graph domain, or null for a cluster license inspection. */
         public String domain() { return read(Native::inspectionDomain); }
         public String entityKind() { return read(Native::inspectionEntityKind); }
+        /** The graph entity name, or null for a cluster license inspection. */
         public String entityName() { return read(Native::inspectionEntityName); }
         public String json() { return read(Native::inspectionJson); }
         public InspectionRejection rejection() { return read(p -> optional(InspectionRejection.values(), Native.inspectionRejection(p))); }

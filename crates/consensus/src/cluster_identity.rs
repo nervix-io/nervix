@@ -10,7 +10,7 @@
     nervix::layer(engine, reason = "owns replicated cluster identity")
 )]
 
-mod archive;
+pub(crate) mod archive;
 mod signer;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -158,7 +158,7 @@ impl ClusterIdentityRecord {
         self.cluster_uid
     }
 
-    fn public(&self) -> ClusterIdentity {
+    pub(crate) fn public(&self) -> ClusterIdentity {
         ClusterIdentity {
             cluster_uid: self.cluster_uid,
             created_at: self.created_at,
@@ -259,6 +259,7 @@ pub(super) fn install(
     identity: &ClusterIdentityRecord,
 ) -> AppliedConsensusCommand {
     if state.cluster_identity.is_none() {
+        state.licensing = Some(Arc::new(crate::LicensingRecord::free(identity.created_at)));
         state.cluster_identity = Some(Arc::new(identity.clone()));
     }
     AppliedConsensusCommand::applied(StateMachineChanges::default())

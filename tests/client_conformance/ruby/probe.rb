@@ -978,6 +978,11 @@ module Probe
   end
 
   def self.run_inspection(session)
+    license = session.native.execute(session.native.prepare('DESCRIBE LICENSE;')).state_inspection
+    unless license.domain.nil? && license.entity_name.nil? && license.entity_kind == 'LICENSE' && license.counts.rows == 3 && license.counts.branches.zero?
+      raise 'typed cluster licensing observation'
+    end
+    report('INSPECTION license rows=3')
     execution = session.native.prepare('SHOW RELAY events MATERIALIZED STATE FOR UNBRANCHED LIMIT 1 FORMAT JSON;')
     outcome = session.native.execute(execution)
     inspection = outcome.state_inspection

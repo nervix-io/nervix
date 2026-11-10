@@ -56,14 +56,23 @@ impl Inspection {
     pub fn state(&self) -> &StateInspection {
         &self.state
     }
-    pub fn domain(&self) -> &str {
-        self.state.entity.domain.as_str()
+    pub fn domain(&self) -> Option<&str> {
+        self.state
+            .entity
+            .domain_node()
+            .map(|entity| entity.domain.as_str())
     }
     pub fn entity_kind(&self) -> &str {
-        self.state.entity.node.kind.keyword_phrase()
+        match self.state.entity.domain_node() {
+            Some(entity) => entity.node.kind.keyword_phrase(),
+            None => "LICENSE",
+        }
     }
-    pub fn entity_name(&self) -> &str {
-        self.state.entity.node.identifier.as_str()
+    pub fn entity_name(&self) -> Option<&str> {
+        self.state
+            .entity
+            .domain_node()
+            .map(|entity| entity.node.identifier.as_str())
     }
     pub fn rejection(&self) -> Option<InspectionRejection> {
         match self.state.result {

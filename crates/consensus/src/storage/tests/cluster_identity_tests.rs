@@ -18,7 +18,9 @@ use crate::{
     ConsensusCommand,
     cluster_identity::tests::{candidate, inconsistent_candidate},
     durable_batch::DurableBatch,
-    storage::{KEY_CLUSTER_IDENTITY, KEY_METADATA, StateMetadata, StateMetadataRecord},
+    storage::{
+        KEY_CLUSTER_IDENTITY, KEY_LICENSING, KEY_METADATA, StateMetadata, StateMetadataRecord,
+    },
 };
 
 #[nervix_primitives::test]
@@ -34,6 +36,13 @@ async fn first_installed_identity_survives_reopen_snapshot_installation_and_reop
         )
         .await?;
     let revision = source.store.inner.state().runtime_revision;
+    let licensing = source
+        .store
+        .inner
+        .state()
+        .licensing
+        .clone()
+        .verified("licensing installs with identity");
     source
         .apply(
             2,
@@ -48,6 +57,10 @@ async fn first_installed_identity_survives_reopen_snapshot_installation_and_reop
         Some(&first)
     );
     let mut source = source.reopen().await?;
+    assert_eq!(
+        source.store.inner.state().licensing.as_deref(),
+        Some(licensing.as_ref())
+    );
     assert_eq!(
         source.store.inner.state().cluster_identity.as_deref(),
         Some(&first)
@@ -65,6 +78,10 @@ async fn first_installed_identity_survives_reopen_snapshot_installation_and_reop
     );
     let target = target.reopen().await?;
     assert_eq!(
+        target.store.inner.state().licensing.as_deref(),
+        Some(licensing.as_ref())
+    );
+    assert_eq!(
         target.store.inner.state().cluster_identity.as_deref(),
         Some(&first)
     );
@@ -73,6 +90,7 @@ async fn first_installed_identity_survives_reopen_snapshot_installation_and_reop
 
 enum StorageDamage {
     MissingIdentity,
+    MissingLicensing,
     MetadataDisagrees,
     KeyDisagrees,
 }
@@ -81,6 +99,7 @@ enum StorageDamage {
 async fn incomplete_or_disagreeing_identity_storage_cannot_open_as_a_new_cluster() -> TestResult {
     for damage in [
         StorageDamage::MissingIdentity,
+        StorageDamage::MissingLicensing,
         StorageDamage::MetadataDisagrees,
         StorageDamage::KeyDisagrees,
     ] {
@@ -97,6 +116,9 @@ async fn incomplete_or_disagreeing_identity_storage_cannot_open_as_a_new_cluster
         match damage {
             StorageDamage::MissingIdentity => {
                 harness.store.inner.sm.remove(KEY_CLUSTER_IDENTITY)?;
+            }
+            StorageDamage::MissingLicensing => {
+                harness.store.inner.sm.remove(KEY_LICENSING)?;
             }
             StorageDamage::MetadataDisagrees => {
                 let mut metadata = StateMetadata::read(&harness.store.inner.sm)?
