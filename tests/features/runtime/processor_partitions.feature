@@ -338,7 +338,7 @@ Feature: Partitioned processors and generators
       """
     When these Plexus commands are executed through the client on the leader node
       """
-      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 'eta' };
+      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH KEY { tenant = 'eta' };
       """
     Then within "10s" DESCRIBE WASM PROCESSOR "counting_guest" on the leader node contains
       """
@@ -373,7 +373,7 @@ Feature: Partitioned processors and generators
 
     When these Plexus commands are executed through the client on the leader node
       """
-      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 'acme' };
+      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH KEY { tenant = 'acme' };
       """
     Then within "10s" DESCRIBE WASM PROCESSOR "counting_guest" on the leader node contains
       """

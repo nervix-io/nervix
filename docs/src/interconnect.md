@@ -327,6 +327,12 @@ tasks. Responses carry the complete classified failure chain. A transport succes
 the receiver performed the requested action; the Raft-backed `Publishing` and `Ready` schedule
 phases remain the durability and usability boundaries.
 
+The coordinator retains a runtime reply's typed failure beneath the context of its action:
+unpublished preparation, abort, or committed preparation/activation. The owner's complete cause
+therefore reaches the command diagnostic, including a selected branch that has no active
+execution. A transport failure uses the same action context; it does not by itself establish that
+a reset generation was published.
+
 One more management request belongs to the same operation. A processor that declares
 `ON REJECTED STATE RESET` raises a refused guest-state lifetime from the node that owns the branch,
 and that node forwards it to the current leader as a typed recovery request naming the domain, the
