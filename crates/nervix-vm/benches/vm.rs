@@ -31,6 +31,8 @@ mod list_statistics;
 
 #[path = "vm/list_arithmetic.rs"]
 mod list_arithmetic;
+#[path = "vm/list_shapes.rs"]
+mod list_shapes;
 
 #[cfg(feature = "benchmark-allocations")]
 #[path = "vm/allocation_probe.rs"]
@@ -2870,6 +2872,7 @@ criterion_group!(
     string_search_benches,
     workloads::workload_shape_benches,
     list_statistics::list_statistic_benches,
+    list_shapes::list_shape_benches,
     list_arithmetic::benches
 );
 criterion_main!(benches);

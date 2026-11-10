@@ -327,7 +327,11 @@ fn materialize_nodes(
                             &output.relay,
                             relay_schemas,
                             udfs,
-                            vm_settings,
+                            nervix_vm::CompileOptions {
+                                settings: vm_settings,
+                                window_message_width: width.fixed_message_width(),
+                                ..nervix_vm::CompileOptions::default()
+                            },
                         )
                         .map_err(|reason| {
                             reason.change_context(PlanningError::WindowOutputCompilation {

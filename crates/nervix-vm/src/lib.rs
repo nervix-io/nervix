@@ -52,6 +52,7 @@ mod frontend;
 mod ip_address;
 mod ir;
 mod json;
+mod list_shape;
 mod list_statistics;
 mod membership;
 mod numeric;

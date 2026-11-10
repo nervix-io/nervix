@@ -173,6 +173,10 @@ pub enum FrontendErrorKind {
         expected: CastTargetKind,
         found: ParseAsType,
     },
+    #[error("function '{function}' has invalid shape arguments")]
+    ListShapeArguments {
+        function: crate::program::ListShapeFunctionName,
+    },
     #[error("function '{function}' expects {expected} arguments, found {found}")]
     DatetimeArity {
         function: DatetimeFunctionName,
@@ -1531,7 +1535,12 @@ fn lower_expression_with_span(
                 .iter()
                 .map(|argument| lower_expression_with_span(argument, scope_policy, span))
                 .collect::<FrontendResult<Vec<_>>>()?;
-            if let Ok(datetime) = function.as_str().parse::<DatetimeFunctionName>() {
+            if let Ok(shape) = function
+                .as_str()
+                .parse::<crate::program::ListShapeFunctionName>()
+            {
+                shape.lower_call(args, span)?
+            } else if let Ok(datetime) = function.as_str().parse::<DatetimeFunctionName>() {
                 datetime.lower_call(args, span)?
             } else if let Ok(statistic) = function.as_str().parse::<ListStatisticName>() {
                 statistic.lower_call(args, span)?
@@ -1645,6 +1654,8 @@ fn lower_expression_with_span(
     };
     Ok(spanned(expression, span))
 }
+
+mod list_shape;
 
 impl DatetimeFunctionName {
     /// Lowers a call of this datetime builtin. The literals that select what the call computes are

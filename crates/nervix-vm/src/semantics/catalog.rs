@@ -160,6 +160,7 @@ pub fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescriptor> 
         FunctionName::Least => BuiltinLowering::Extremum(Extremum::Least),
         FunctionName::Clamp => BuiltinLowering::Clamp,
         FunctionName::Datetime(function) => BuiltinLowering::Datetime(function.clone()),
+        FunctionName::ListShape(function) => BuiltinLowering::ListShape(function.clone()),
         FunctionName::ListStatistic(statistic) => BuiltinLowering::ListStatistic(*statistic),
         FunctionName::LeakSensitive
         | FunctionName::LookupHashMap

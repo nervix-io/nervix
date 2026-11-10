@@ -680,6 +680,11 @@ pub enum RuntimeError {
     CollectionMissingArguments { operation: &'static str },
     #[error("collection input must be ARRAY or VEC, found {actual:?}")]
     CollectionExpectedList { actual: DataType },
+    #[error("{operation} requires fixed ARRAY input, found {actual:?}")]
+    CollectionExpectedFixed {
+        operation: &'static str,
+        actual: DataType,
+    },
     #[error("collection {data_type:?} has the wrong Arrow backing array")]
     CollectionBackingMismatch { data_type: DataType },
     #[error("{operation} requires element type {expected:?}, found {actual:?}")]
