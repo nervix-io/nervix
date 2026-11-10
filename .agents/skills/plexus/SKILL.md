@@ -22,8 +22,8 @@ lowercase HTTP field names, and on an emitter that keeps one value per header na
 header name once: a repeated literal name is refused when the statement is validated.
 For outbound WebSockets, read the `WEBSOCKETS CONNECTION` section of Ingestors for literal upgrade
 headers, subprotocol offers, response-header reads, frame metadata and the closed client CONFIG key
-set, including idle deadlines after a delayed host handoff, the trust roots `tls_ca_file` adds to
-and how inspection redacts an endpoint. Offer
+set, including idle deadlines after a delayed host handoff, the trust roots `tls_ca_file` adds to,
+peer Close diagnostics during signaling and how inspection redacts an endpoint. Offer
 subprotocols only through `HEADERS { 'sec-websocket-protocol' = '...' }`, and expect the peer to
 select one of them: any other answer fails the connection.
 For ClickHouse HTTP connection tuning, client certificates, compression and which insert failures
@@ -141,6 +141,8 @@ For activation, refresh, `ROTATE LICENSE CLUSTER KEY`, `RELEASE LICENSE`, `DESCR
 effective policy, credential handling and quota usage, read
 [Node Settings → Cluster Licensing](../../../docs/src/node-settings.md#cluster-licensing) and
 [Licensing Metrics](../../../docs/src/metrics-and-observability.md#licensing-metrics).
+For notification freshness, reconnects and polling fallback, use that chapter’s event-stream contract.
+Treat notification hints as requests to obtain a verified decision, never as permissions.
 Keep licensing commands cluster-scoped and obtain credentials and trust provisioning externally;
 Plexus supplies no service-address or trust-anchor override.
 For source UUID inspection and restore behavior, read

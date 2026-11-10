@@ -17,7 +17,7 @@ use nervix_licensing_protocol::{
     problems::{ProblemDetails, ProblemKind},
     requests::{
         ChallengeRequest, ChallengeResponse, ClientDescription, ClientProduct, CommittedState,
-        RefreshState, Request, RequestCommon, Secret, TrustHeld,
+        RefreshState, Request, RequestCommon, Secret, StreamTicket, TrustHeld,
     },
 };
 use nervix_models::Timestamp;
@@ -61,6 +61,8 @@ pub(super) enum LicensingRequestError {
     Shutdown,
     #[error("the pending release yielded to a foreground licensing command")]
     Foreground,
+    #[error("licensing event stream has an invalid content type")]
+    ContentType,
 }
 
 pub(super) enum Operation {
@@ -244,7 +246,7 @@ impl<'a> LicensingClient<'a> {
             nervix_primitives::select! {
                 result = &mut work => return result,
                 _ = self.service.inner.drain_support_shutdown.cancelled() => return Err(Report::new(LicensingRequestError::Shutdown)),
-                _ = self.service.inner.licensing_requests.refresh_requested(), if yields_to_foreground => return Err(Report::new(LicensingRequestError::Foreground)),
+                _ = self.service.inner.licensing_requests.foreground_requested(), if yields_to_foreground => return Err(Report::new(LicensingRequestError::Foreground)),
                 changed = topology.changed() => {
                     if !changed || self.service.inner.consensus.current_leader_tenure().as_ref() != Some(&tenure) {
                         return Err(Report::new(LicensingRequestError::Leadership));
@@ -387,16 +389,15 @@ impl<'a> LicensingClient<'a> {
         }
     }
 
-    async fn request(
+    fn common(
         &self,
         cluster: &ClusterLicensingState,
-        operation: &Operation,
+        identity: &nervix_consensus::ClusterIdentity,
         request_id: Uuid,
         challenge: ChallengeResponse,
         now: Timestamp,
-    ) -> Result<Request, Report<LicensingRequestError>> {
-        let identity = operation.identity(cluster);
-        let common = RequestCommon {
+    ) -> RequestCommon {
+        RequestCommon {
             protocol: 1,
             request_id,
             challenge: challenge.challenge,
@@ -410,7 +411,24 @@ impl<'a> LicensingClient<'a> {
             },
             key_generation: identity.key_generation.get(),
             trust_held: held(cluster),
-        };
+        }
+    }
+
+    async fn request(
+        &self,
+        cluster: &ClusterLicensingState,
+        operation: &Operation,
+        request_id: Uuid,
+        challenge: ChallengeResponse,
+        now: Timestamp,
+    ) -> Result<Request, Report<LicensingRequestError>> {
+        let common = self.common(
+            cluster,
+            operation.identity(cluster),
+            request_id,
+            challenge,
+            now,
+        );
         match operation {
             Operation::Create { kind, license_key } => Ok(Request::Create {
                 common,
@@ -455,6 +473,93 @@ impl<'a> LicensingClient<'a> {
             }
         }
     }
+
+    /// One fresh, single-use ticket per connection; the stream owner fences its tenure.
+    pub(super) async fn subscribe(
+        &self,
+        cluster: &ClusterLicensingState,
+        last_event: Option<u64>,
+    ) -> Result<reqwest::Response, Report<LicensingRequestError>> {
+        timeout(self.budget, async {
+            let LicensingMode::Activated(activation) = &cluster.record.mode else {
+                return Err(Report::new(LicensingRequestError::Leadership));
+            };
+            let challenge = self.challenge(cluster).await?;
+            let now = clock::observe(self.service.inner.runtime.fault_injection());
+            let request_id = clock::request_id(self.service.inner.runtime.fault_injection());
+            let ticket = StreamTicket {
+                common: self.common(cluster, &cluster.identity, request_id, challenge, now),
+                activation_id: activation.binding.activation_id,
+                state: CommittedState {
+                    applied_decision_revision: activation.decision.revision,
+                    applied_conditions_revision: activation.decision.conditions_revision,
+                    licensing_time: cluster.record.licensing_time.into_datetime(),
+                },
+            };
+            let executor = self.service.inner.runtime.executor();
+            let reservation = executor
+                .try_reserve(
+                    MemoryClass::Management,
+                    executor.limits().management_event_bytes.as_u64(),
+                )
+                .change_context(LicensingRequestError::Admission)?;
+            let signer = self
+                .service
+                .inner
+                .consensus
+                .cluster_signer()
+                .await
+                .change_context(LicensingRequestError::Signing)?
+                .verified("an activated cluster has its signing identity");
+            let ticket = Zeroizing::new(
+                signer
+                    .sign(ticket, self.environment.limits(), reservation)
+                    .await
+                    .change_context(LicensingRequestError::Signing)?,
+            );
+            let route = format!(
+                "/v1/activations/{}/events",
+                activation.binding.activation_id
+            );
+            let mut request = self
+                .client
+                .get(
+                    self.environment
+                        .service()
+                        .join(&route)
+                        .assured("the typed activation forms an absolute protocol path"),
+                )
+                .header(reqwest::header::ACCEPT, "text/event-stream")
+                .bearer_auth(&*ticket);
+            if let Some(revision) = last_event {
+                request = request.header("last-event-id", revision.to_string());
+            }
+            let response = request.send().await.map_err(|error| {
+                Report::new(error.without_url()).change_context(LicensingRequestError::Transport)
+            })?;
+            if !response.status().is_success() {
+                let problem: ProblemDetails = self.body(response).await?;
+                return Err(Report::new(LicensingRequestError::Refused {
+                    kind: problem.kind,
+                }));
+            }
+            let Some(content_type) = response.headers().get(reqwest::header::CONTENT_TYPE) else {
+                return Err(Report::new(LicensingRequestError::ContentType));
+            };
+            let content_type = content_type
+                .to_str()
+                .change_context(LicensingRequestError::ContentType)?;
+            let content_type = content_type
+                .parse::<mime::Mime>()
+                .change_context(LicensingRequestError::ContentType)?;
+            if content_type.essence_str() != "text/event-stream" {
+                return Err(Report::new(LicensingRequestError::ContentType));
+            }
+            Ok(response)
+        })
+        .await
+        .change_context(LicensingRequestError::Timeout)?
+    }
 }
 
 fn held(cluster: &ClusterLicensingState) -> TrustHeld {
@@ -489,9 +594,9 @@ fn failed_attempt(error: &LicensingRequestError) -> (bool, Option<crate::licensi
             kind.code().retryable(),
             Some(RequestEvent::RefusedByService(kind.code())),
         ),
-        LicensingRequestError::Response | LicensingRequestError::Bounds => {
-            (false, Some(RequestEvent::RejectedByCluster))
-        }
+        LicensingRequestError::Response
+        | LicensingRequestError::Bounds
+        | LicensingRequestError::ContentType => (false, Some(RequestEvent::RejectedByCluster)),
         LicensingRequestError::Admission
         | LicensingRequestError::Signing
         | LicensingRequestError::Consensus => (true, None),

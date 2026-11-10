@@ -480,7 +480,11 @@ async fn an_oversized_message_peer_reports_the_refused_connection_ending_before_
 #[nervix_primitives::test]
 async fn a_failed_handshake_peer_reports_the_failed_connection_ending_before_the_reconnect() {
     timeout(PEER_WAIT, async {
-        for first in [FirstHandshake::Refused, FirstHandshake::Stalled] {
+        for first in [
+            FirstHandshake::Refused,
+            FirstHandshake::Stalled,
+            FirstHandshake::Closed,
+        ] {
             for policy_violation in [true, false] {
                 let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
                     .await
@@ -498,7 +502,24 @@ async fn a_failed_handshake_peer_reports_the_failed_connection_ending_before_the
                         "{\"error\":\"subscription refused\"}"
                     );
                 }
-                if policy_violation {
+                if let FirstHandshake::Closed = first {
+                    let close = failed
+                        .next()
+                        .await
+                        .assured("the peer sends its Close")
+                        .assured("the Close is a valid frame");
+                    let Message::Close(Some(frame)) = close else {
+                        panic!("the peer closes with its policy refusal");
+                    };
+                    assert_eq!(frame.code, CloseCode::Policy);
+                    assert_eq!(frame.reason, "subscription refused");
+                    if policy_violation {
+                        failed
+                            .flush()
+                            .await
+                            .assured("the client answers the peer's Close");
+                    }
+                } else if policy_violation {
                     failed
                         .close(Some(CloseFrame {
                             code: CloseCode::Policy,
@@ -519,6 +540,9 @@ async fn a_failed_handshake_peer_reports_the_failed_connection_ending_before_the
                         panic!("the peer reads the client's Close behind its subscription");
                     };
                     assert_eq!(frame.code, CloseCode::Policy);
+                    if let FirstHandshake::Closed = first {
+                        assert_eq!(frame.reason, "subscription refused");
+                    }
                 } else {
                     assert!(
                         matches!(ending, UnreadEnding::WithoutClose),

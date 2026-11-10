@@ -21,6 +21,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{ServiceError, limits};
+pub(crate) mod notifications;
 
 #[derive(Debug, thiserror::Error)]
 #[error("licensing peer refused the request: {code}", code = .kind.code().as_str())]
@@ -86,6 +87,7 @@ pub enum Tamper {
 }
 
 struct HeldActivation {
+    notification_revision: u64,
     binding: Activation,
     public_key: nervix_licensing_protocol::keys::PublicKey,
     decision: Decision,
@@ -111,6 +113,7 @@ struct Challenge {
 }
 
 pub struct Model {
+    notifications: notifications::Notifications,
     pub(crate) bundle: EmbeddedTrustBundle,
     pub(crate) requests: Vec<Request>,
     pub(crate) request_count: u64,
@@ -179,6 +182,7 @@ impl Model {
             documents: vec![SignedTrustDocument::Signatures(SignatureSet { signatures })],
         };
         Ok(Self {
+            notifications: notifications::Notifications::default(),
             bundle,
             requests: Vec::new(),
             request_count: 0,
@@ -228,6 +232,7 @@ impl Model {
             .conditions_revision
             .checked_add(1)
             .assured("a bounded scenario cannot exhaust revisions");
+        self.notify_change();
     }
     pub fn activation_count(&self) -> usize {
         self.activations.len()
@@ -501,6 +506,7 @@ impl Model {
         self.activations.insert(
             activation_id,
             HeldActivation {
+                notification_revision: 0,
                 binding,
                 public_key: cluster_key.clone(),
                 decision,

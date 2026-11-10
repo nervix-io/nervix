@@ -188,6 +188,12 @@ on drop even when a step fails. The responsive peer accepts one connection and r
 payload only after a client ping. Its stop result is retained until node teardown and port release
 finish, then asserted, so a connection failure remains visible and does not prevent cleanup.
 
+The failed-signaling peer can initiate a Close with a status and reason. It records the client's
+exact reply and the replacement connection as separate events; the scenario requires the reply
+first, then the replacement's payload. The peer's isolated harness controls exercise both a client
+that flushes the exact reply and one that releases its connection without answering, so a missing
+Close cannot satisfy the public oracle.
+
 ## Delayed Consensus Heartbeat Answers
 
 The leader-lease regression uses a testing-only control on each follower's consensus probe. The
