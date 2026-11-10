@@ -182,34 +182,8 @@ impl Client {
                             return Err(Report::new(ClientError::UploadResource(status)));
                         }
                     };
-                    let reply = UploadReply::decode(response.get_ref())
-                        .change_context(ClientError::InvalidUploadReply)?;
-                    if let Some(request_id) = reply.request_id
-                        && request_id != UPLOAD_REQUEST_ID
-                    {
-                        return Err(Report::new(ClientError::UnexpectedReply {
-                            request: RequestKind::UploadResource,
-                        }));
-                    }
-                    let received = match &reply.disposition {
-                        UploadDisposition::Installed {
-                            upload_identity, ..
-                        } => Some(upload_identity),
-                        UploadDisposition::Failed {
-                            upload_identity, ..
-                        } => upload_identity.as_ref(),
-                        UploadDisposition::NotLeader(_) => None,
-                    };
-                    if let Some(received) = received
-                        && received != &upload_identity
-                    {
-                        return Err(Report::new(ClientError::UploadIdentityMismatch {
-                            expected: upload_identity.clone(),
-                            received: received.clone(),
-                        }));
-                    }
                     let outcome =
-                        CommandOutcome::from_upload(reply, upload_identity.clone(), calls);
+                        Self::validate_upload_reply(response.get_ref(), &upload_identity, calls)?;
                     match outcome.routing() {
                         Routing::Redirect(leader) => {
                             debug!(
@@ -266,6 +240,44 @@ impl Client {
                 }))
             }
         }
+    }
+
+    /// Decode and correlate a reply before its outcome can drive upload routing.
+    fn validate_upload_reply(
+        frame: &VerifiedFrame<UploadReplyFrame>,
+        upload_identity: &ResourceUploadIdentity,
+        calls: NonZeroU32,
+    ) -> error_stack::Result<CommandOutcome, ClientError> {
+        let reply = UploadReply::decode(frame).change_context(ClientError::InvalidUploadReply)?;
+        if let Some(request_id) = reply.request_id
+            && request_id != UPLOAD_REQUEST_ID
+        {
+            return Err(Report::new(ClientError::UnexpectedReply {
+                request: RequestKind::UploadResource,
+            }));
+        }
+        let received = match &reply.disposition {
+            UploadDisposition::Installed {
+                upload_identity, ..
+            } => Some(upload_identity),
+            UploadDisposition::Failed {
+                upload_identity, ..
+            } => upload_identity.as_ref(),
+            UploadDisposition::NotLeader(_) => None,
+        };
+        if let Some(received) = received
+            && received != upload_identity
+        {
+            return Err(Report::new(ClientError::UploadIdentityMismatch {
+                expected: upload_identity.clone(),
+                received: received.clone(),
+            }));
+        }
+        Ok(CommandOutcome::from_upload(
+            reply,
+            upload_identity.clone(),
+            calls,
+        ))
     }
 
     /// How many calls an upload has opened once it opened the call of its zero-based `attempt`.

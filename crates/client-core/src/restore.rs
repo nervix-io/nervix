@@ -338,24 +338,7 @@ impl Client {
                 .validate_restore_reply(response.get_ref(), &generation, reference)
                 .await?;
             let outcome = match reply.disposition {
-                RestoreDisposition::Outcome(outcome) => {
-                    if outcome.execution_reference != *reference {
-                        let mut exchange = self.inner.exchange.lock().await;
-                        if Arc::ptr_eq(&exchange.generation, &generation) {
-                            exchange
-                                .interrupt(ExchangeEnd::ExecutionMismatch {
-                                    expected: reference.clone(),
-                                    received: outcome.execution_reference.clone(),
-                                })
-                                .await;
-                        }
-                        return Err(Report::new(ClientError::ExecutionReferenceMismatch {
-                            expected: reference.clone(),
-                            received: outcome.execution_reference,
-                        }));
-                    }
-                    CommandOutcome::from(*outcome)
-                }
+                RestoreDisposition::Outcome(outcome) => CommandOutcome::from(*outcome),
                 RestoreDisposition::UploadFailed { failure, message } => {
                     if history.is_uncertain() {
                         return Err(Report::new(ClientError::RestoreStreamRefused {
@@ -418,7 +401,29 @@ impl Client {
                 }
             });
         match validated {
-            Ok(reply) => Ok(reply),
+            Ok(reply) => match reply.disposition {
+                RestoreDisposition::Outcome(outcome)
+                    if outcome.execution_reference != *reference =>
+                {
+                    let mut exchange = self.inner.exchange.lock().await;
+                    if Arc::ptr_eq(&exchange.generation, generation) {
+                        exchange
+                            .interrupt(ExchangeEnd::ExecutionMismatch {
+                                expected: reference.clone(),
+                                received: outcome.execution_reference.clone(),
+                            })
+                            .await;
+                    }
+                    Err(Report::new(ClientError::ExecutionReferenceMismatch {
+                        expected: reference.clone(),
+                        received: outcome.execution_reference,
+                    }))
+                }
+                disposition => Ok(RestoreReply {
+                    disposition,
+                    ..reply
+                }),
+            },
             Err(report) => {
                 let mut exchange = self.inner.exchange.lock().await;
                 if Arc::ptr_eq(&exchange.generation, generation) {
