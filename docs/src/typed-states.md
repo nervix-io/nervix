@@ -367,8 +367,8 @@ expression scope.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
-Consensus's `raft_payload_identity_capability_tls_inference_reset_` keyspaces and current `ClusterState`
-metadata encoding, 22, identify its stored shapes, including the partition count of every resolved branch
+Consensus's `raft_inferencer_description_` keyspaces and current `ClusterState`
+metadata encoding, 23, identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations and a `RESET WASM PROCESSOR ... STATE` that takes
 its domain from the transaction. The runtime state store's

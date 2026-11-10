@@ -397,6 +397,7 @@ async fn end_branch_at_its_grace(window: &PublishedWindow) {
             &branch_stop,
             PublishedBranchState::WindowProcessor(window.state.clone()),
             snapshot_requests,
+            (),
         )
         .expect("a persisting runtime starts a snapshot task");
     drop(branch_requests);
@@ -465,6 +466,7 @@ async fn a_stopping_runtime_has_the_snapshot_task_of_a_silent_branch_write_and_e
             &branch_stop,
             PublishedBranchState::WindowProcessor(window.state.clone()),
             snapshot_requests,
+            (),
         )
         .expect("a persisting runtime starts a snapshot task");
     assert_eq!(window.persisted_revision(), None);
@@ -549,6 +551,7 @@ async fn a_stopping_domain_does_not_wait_for_another_domains_snapshot_task() {
             &branch_stop,
             PublishedBranchState::WindowProcessor(window.state.clone()),
             snapshot_requests,
+            (),
         )
         .expect("a persisting runtime starts a snapshot task");
     let other = domain("other");

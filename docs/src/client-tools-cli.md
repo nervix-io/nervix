@@ -353,6 +353,7 @@ applying one model change:
 | `LIST DOMAINS` | list domains with pace and status |
 | `BEGIN` / `COMMIT` / `REVERT` | open, apply, or discard a replicated transaction on the leader |
 | `DESCRIBE TRANSACTION ['<id>'] [OPERATION <n>] [FORMAT TEXT \| JSON]` | read the attached transaction, or one named by id, without changing it |
+| `DESCRIBE INFERENCER <name>` | inspect the active domain's model binding, tensor declarations and state summary from its execution owners |
 | `UPLOAD RESOURCE <name> VERSION '<dir>'` | stream a local directory as a new version of that resource in the active domain |
 | `BACKUP CLUSTER TO '<file>'` / `BACKUP DOMAIN [<name>] TO '<file>'` | back up configuration, users and resources into a local archive file |
 | `DESCRIBE BACKUP '<file>' [FORMAT TEXT \| JSON]` | read and verify a local archive without contacting a server |

@@ -233,15 +233,36 @@ pub(in crate::runtime) fn spawn_processor_node_runtime_with_handoffs(
 ) -> ScheduledNodeTask {
     let shutdown_rx = shutdown_tx.subscribe();
     let (commands, command_rx) = mpsc::channel(1);
-    let task = nervix_primitives::task::spawn(run_processor_node_runtime(
-        context,
-        template,
-        inputs,
-        shutdown_rx,
-        command_rx,
-        handoffs,
-        expiration_scan_interval,
-    ));
+    let task = if template.owner.node.kind == ModelKind::Inferencer {
+        let metrics = context.runtime_handle.inferencer_state_metrics(
+            &context.domain,
+            &template.owner.node.identifier,
+            template.owner.unit,
+        );
+        nervix_primitives::task::spawn(async move {
+            let _inferencer_state_metrics = metrics;
+            run_processor_node_runtime(
+                context,
+                template,
+                inputs,
+                shutdown_rx,
+                command_rx,
+                handoffs,
+                expiration_scan_interval,
+            )
+            .await;
+        })
+    } else {
+        nervix_primitives::task::spawn(run_processor_node_runtime(
+            context,
+            template,
+            inputs,
+            shutdown_rx,
+            command_rx,
+            handoffs,
+            expiration_scan_interval,
+        ))
+    };
     ScheduledNodeTask { commands, task }
 }
 

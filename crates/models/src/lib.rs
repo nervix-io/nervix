@@ -42,6 +42,7 @@ mod execution_unit;
 mod expression;
 mod http_request;
 mod inferencer_model_fingerprint;
+mod inferencer_state_summary;
 mod ingestor_input;
 mod json_path;
 mod message_error;
@@ -274,6 +275,7 @@ pub use http_request::{
     HttpMethod, HttpOrigin, HttpRequestFieldError, HttpTarget,
 };
 pub use inferencer_model_fingerprint::InferencerModelFingerprint;
+pub use inferencer_state_summary::{InferencerReplicaProgress, InferencerStateSummary};
 pub use ingestor_input::{IngestorInput, TransportIngestorInput};
 pub use json_path::{JsonPath, JsonPathError, JsonPathStep};
 pub use message_error::{
@@ -394,9 +396,9 @@ pub use statement::{
     CreateEndpoint, CreateGenerator, CreateIngestor, CreateLookup, CreateRelay, CreateResource,
     CreateSignalingProtocol, CreateStatement, CreateSubscription, CreateUser, CreateVhost,
     DeleteSubscription, DescribeClient, DescribeCluster, DescribeCorrelator, DescribeDeduplicator,
-    DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction,
-    DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer,
-    DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
+    DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeInferencer, DescribeIngestor,
+    DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay,
+    DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
     DescribeWindowProcessor, DomainConfig, DomainPace, DomainStartPoint, DomainState, DomainStatus,
     DomainTick, DrainNode, DropModel, DropNode, EndpointKind, EndpointType, ErrorPolicies,
     GeneralErrorPolicy, IngestTimestampSource, InspectionFormat, LookupQuery,

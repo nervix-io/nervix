@@ -265,6 +265,7 @@ mod generator;
 mod http_request_fields;
 mod inferencer;
 mod inferencer_archive;
+mod inferencer_observation;
 mod inferencer_output;
 mod inferencer_state;
 pub(crate) use inferencer_archive::CapturedInferencer;

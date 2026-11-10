@@ -78,7 +78,7 @@ pub(crate) use error::RegistryError;
 pub(crate) use execution_revision::ExecutionRevisionError;
 pub(crate) use execution_revision::{
     DynamicExecutionUpdate, EntitySwapExecution, ExecutionDelta, ExecutionNode, ExecutionRevision,
-    PlannedClusterRevision,
+    PlannedClusterRevision, inferencer_model_fingerprint,
 };
 pub(crate) use graph::{ActiveGraph, EdgeKind};
 pub(crate) use ingestor_plan::{

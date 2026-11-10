@@ -1388,6 +1388,7 @@ async fn deduplicator_snapshot_task_persists_published_keys_on_interval() {
             &shutdown_tx,
             PublishedBranchState::Deduplicator(state.clone()),
             snapshot_request_tx,
+            (),
         )
         .expect("persisted runtime should spawn a snapshot task");
     let mut keyspace = ReplicatedDeduplicatorState::keyspace(&state);
@@ -1450,6 +1451,7 @@ async fn deduplicator_snapshot_task_persists_published_keys_after_the_branch_tas
             &shutdown_tx,
             PublishedBranchState::Deduplicator(state.clone()),
             snapshot_request_tx,
+            (),
         )
         .expect("persisted runtime should spawn a snapshot task");
     let mut keyspace = ReplicatedDeduplicatorState::keyspace(&state);
@@ -1665,6 +1667,7 @@ async fn window_processor_snapshot_task_persists_published_state_on_interval() {
             &shutdown_tx,
             PublishedBranchState::WindowProcessor(state.clone()),
             snapshot_request_tx,
+            (),
         )
         .expect("persisted runtime should spawn a snapshot task");
     let live_state = WindowProcessorState::new(

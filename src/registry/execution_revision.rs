@@ -113,7 +113,7 @@ pub(crate) struct ExecutionNode {
 }
 
 /// The complete pinned model and ordered STATE declaration define one tensor-state lifetime.
-pub(super) fn inferencer_model_fingerprint(
+pub(crate) fn inferencer_model_fingerprint(
     node: &ScheduledNode,
 ) -> Option<nervix_models::InferencerModelFingerprint> {
     let nervix_models::Model::Inferencer(model) = node.config.as_ref() else {

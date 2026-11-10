@@ -2443,6 +2443,21 @@ back the selected handoff. The current wire fingerprint identifies this required
 peers must use the same current contract. Its fingerprint also includes the required committed
 cluster-parameter publication.
 
+## Inferencer Unit Observation
+
+An inferencer describe request names the domain, inferencer, execution unit and expected pinned
+model fingerprint. Its receiver verifies the current model binding and that it executes that
+unit. The reply carries typed branch and byte counts, publication and persistence revisions, and
+the owner's confirmed progress for its current replicas. The control plane composes these unit
+facts with the stored tensor declarations and placement before rendering the description.
+
+Collection visits immutable state publications on the bounded executor, checks cancellation
+between entries and reads only counts and revision metadata. It never encodes a tensor or a branch
+key. Revision zero is a known baseline; absence means no progress was observed. The per-unit
+revision at each stage is the highest observed branch-local revision, not a common checkpoint.
+This request uses the ordinary bounded control-request transport and deadline. It neither requests
+publication nor changes replication progress or gossip.
+
 ## Cluster Parameter Observations
 
 The existing authenticated gossip exchange publishes a coherent `cluster_parameters` value: the
