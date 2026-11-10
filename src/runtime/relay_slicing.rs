@@ -102,7 +102,10 @@ impl RemoteDispatcher {
                         }));
                     }
                     let encoded = selected
-                        .encode_arrow_ipc(self.executor())
+                        .encode_arrow_ipc(
+                            self.executor(),
+                            nervix_execution::QueueAdmission::RefuseWhenFull,
+                        )
                         .await
                         .change_context(RemoteDispatchError::Send {
                             target: node.clone(),

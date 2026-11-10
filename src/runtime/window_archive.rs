@@ -613,7 +613,11 @@ impl WindowCheckpointBuilder {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use arrow_array::{ArrayRef, BooleanArray, Int64Array, StringArray};
+    use arrow_array::{
+        ArrayRef, BooleanArray, Int64Array, StringArray,
+        builder::{FixedSizeListBuilder, Int64Builder, ListBuilder},
+    };
+    use arrow_schema::{DataType, Field};
     use meticulous::ResultExt as _;
     use nervix_arbitrary::Entropy;
     use nervix_models::ParseAsType;
@@ -638,16 +642,16 @@ mod tests {
 
     /// Every exact aggregate family, a histogram percentile with a delay, and nullable string and
     /// boolean arguments, over small integers whose sums and means are exact in `F64`.
-    const AGGREGATES: &str = "SET samples = COUNT(input.latency), total = SUM(input.latency), \
-                              first_label = FIRST(input.label), last_label = LAST(input.label), \
-                              smallest = MIN(input.latency), largest = MAX(input.latency), \
-                              mean_latency = AVG(input.latency), healthy = \
-                              BOOL_AND(input.healthy), p50 = \
-                              PERCENTILE_LINEAR_HISTOGRAM(input.latency, 50, 10, 0, 100, '2s')";
+    const AGGREGATES: &str =
+        "SET samples = COUNT(input.latency), total = SUM(input.latency), first_label = \
+         FIRST(input.label), last_label = LAST(input.label), smallest = MIN(input.latency), \
+         largest = MAX(input.latency), mean_latency = AVG(input.latency), healthy = \
+         BOOL_AND(input.healthy), p50 = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 50, 10, 0, \
+         100, '2s'), collected = COLLECT_VEC(input.values)";
 
     /// The outputs whose aggregates are exact, so a restored window answers them as the live
     /// window did.
-    const EXACT_OUTPUTS: [&str; 8] = [
+    const EXACT_OUTPUTS: [&str; 9] = [
         "samples",
         "total",
         "first_label",
@@ -656,6 +660,7 @@ mod tests {
         "largest",
         "healthy",
         "p50",
+        "collected",
     ];
 
     /// The mean merges each admission run's result in floating point, so its last digits depend
@@ -696,6 +701,23 @@ mod tests {
         }
     }
 
+    async fn emitted_if_retained(window: &TestWindow) -> Option<RuntimeRecordBatch> {
+        if window.state.entries.is_empty() {
+            None
+        } else {
+            Some(window.emitted().await)
+        }
+    }
+
+    fn nested_argument_type() -> ParseAsType {
+        ParseAsType::Vec {
+            element: Box::new(ParseAsType::Array {
+                element: Box::new(ParseAsType::I64),
+                len: std::num::NonZeroU32::new(2).verified("a pair has two elements"),
+            }),
+        }
+    }
+
     fn window() -> TestWindow {
         let input = [
             OptionalTestField {
@@ -713,8 +735,13 @@ mod tests {
                 ty: ParseAsType::Bool,
                 optional: true,
             },
+            OptionalTestField {
+                name: "values",
+                ty: nested_argument_type(),
+                optional: false,
+            },
         ];
-        let output = [
+        let mut output = vec![
             OptionalTestField {
                 name: "samples",
                 ty: ParseAsType::I64,
@@ -761,6 +788,13 @@ mod tests {
                 optional: true,
             },
         ];
+        output.push(OptionalTestField {
+            name: "collected",
+            ty: ParseAsType::Vec {
+                element: Box::new(nested_argument_type()),
+            },
+            optional: false,
+        });
         TestWindow::new(AGGREGATES, &input, &output)
     }
 
@@ -779,6 +813,11 @@ mod tests {
             let mut labels = Vec::with_capacity(rows);
             let mut healthy = Vec::with_capacity(rows);
             let mut timestamps = Vec::with_capacity(rows);
+            let element = Field::new("item", DataType::Int64, false);
+            let pair_type = DataType::FixedSizeList(StdArc::new(element.clone()), 2);
+            let pairs = FixedSizeListBuilder::new(Int64Builder::new(), 2).with_field(element);
+            let mut nested =
+                ListBuilder::new(pairs).with_field(Field::new("item", pair_type, false));
             for _ in 0..rows {
                 let latency = i64::try_from(entropy.between(0..=100))
                     .verified("the latency was drawn below 101");
@@ -790,6 +829,12 @@ mod tests {
                 latencies.push(latency);
                 labels.push(label);
                 healthy.push(health);
+                for _ in 0..entropy.count(2) {
+                    nested.values().values().append_value(entropy.any_i64());
+                    nested.values().values().append_value(entropy.any_i64());
+                    nested.values().append(true);
+                }
+                nested.append(true);
                 let advance = i64::try_from(entropy.between(0..=3))
                     .verified("the advance was drawn below four");
                 clock = clock
@@ -801,6 +846,7 @@ mod tests {
                 StdArc::new(Int64Array::from(latencies)),
                 StdArc::new(StringArray::from(labels)),
                 StdArc::new(BooleanArray::from(healthy)),
+                StdArc::new(nested.finish()),
             ];
             let refused = window.admit(columns, &timestamps).await;
             assert!(
@@ -1148,7 +1194,7 @@ mod tests {
                 runtime.block_on(async {
                     let mut window = window();
                     fill(&mut window, &mut entropy, rows).await;
-                    let before = window.emitted().await;
+                    let before = emitted_if_retained(&window).await;
                     let mut published = window
                         .state
                         .to_snapshot()
@@ -1185,9 +1231,24 @@ mod tests {
                         "pending delayed removals keep their expiry"
                     );
                     window.state = native;
-                    let from_native = window.emitted().await;
+                    let from_native = emitted_if_retained(&window).await;
                     window.state = archived;
-                    let from_archive = window.emitted().await;
+                    let from_archive = emitted_if_retained(&window).await;
+                    let Some(before) = before else {
+                        assert!(
+                            from_native.is_none(),
+                            "an empty native window emits nothing"
+                        );
+                        assert!(
+                            from_archive.is_none(),
+                            "an empty archived window emits nothing"
+                        );
+                        return;
+                    };
+                    let from_native =
+                        from_native.verified("the native window retains every live row");
+                    let from_archive =
+                        from_archive.verified("the archived window retains every live row");
                     for field in EXACT_OUTPUTS {
                         assert_eq!(
                             batch_value(&from_archive, field),

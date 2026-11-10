@@ -375,6 +375,7 @@ class InventoryTests(unittest.TestCase):
             "runtime-state-snapshots-malformed",
             "runtime-state-store-checkpoints",
             "runtime-window-snapshots",
+            "runtime-window-collection",
             "runtime-window-snapshots-malformed",
             "runtime-window-sealed-checkpoints",
             "runtime-arrow-bodies",
@@ -546,6 +547,10 @@ class InventoryTests(unittest.TestCase):
         }
         for target, version in {
             "benchmark-metrics-report": 1,
+            "runtime-window-collection": 1,
+            "runtime-window-snapshots": 5,
+            "runtime-window-sealed-checkpoints": 5,
+            "backup-window-groups": 5,
             "node-settings-command-line": 8,
             "ingestor-describe-envelope": 11,
             "plexus-model": 60,

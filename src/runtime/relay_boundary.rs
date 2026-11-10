@@ -1743,7 +1743,14 @@ impl RelayBoundaryServices {
                 return Err(Box::new(batch.clone()));
             }
         };
-        let batch_ipc = match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
+        let batch_ipc = match batch
+            .batch
+            .encode_arrow_ipc(
+                dispatcher.executor(),
+                nervix_execution::QueueAdmission::RefuseWhenFull,
+            )
+            .await
+        {
             Ok(bytes) => bytes,
             Err(error) => {
                 for registration in remote_acks.registrations().iter().flatten() {
@@ -2007,7 +2014,14 @@ impl RelayBoundaryServices {
             };
             let (batch_ipc, decoded_bytes) = match encoded_body.clone() {
                 Some(bytes) => bytes,
-                None => match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
+                None => match batch
+                    .batch
+                    .encode_arrow_ipc(
+                        dispatcher.executor(),
+                        nervix_execution::QueueAdmission::RefuseWhenFull,
+                    )
+                    .await
+                {
                     Ok(bytes) => {
                         let bytes = (
                             bytes,
