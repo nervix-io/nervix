@@ -15,6 +15,8 @@ async fn each_performed_action_is_confirmed_once_in_request_order() -> io::Resul
     for (sequence, name) in [
         (1, "refuse-next-subscription-opening"),
         (2, "clear-subscription-opening-refusals"),
+        (3, "refuse-next-clock-attachment"),
+        (4, "clear-clock-attachment-refusals"),
     ] {
         nervix_primitives::task::consume_budget().await;
         let line = format!("NERVIX-SUITE-ACTION {sequence} {name}");
@@ -36,10 +38,12 @@ async fn each_performed_action_is_confirmed_once_in_request_order() -> io::Resul
         performed,
         [
             SuiteAction::RefuseNextSubscriptionOpening,
-            SuiteAction::ClearSubscriptionOpeningRefusals
+            SuiteAction::ClearSubscriptionOpeningRefusals,
+            SuiteAction::RefuseNextClockAttachment,
+            SuiteAction::ClearClockAttachmentRefusals,
         ]
     );
-    assert_eq!(input, b"NERVIX-SUITE-CONFIRMED 1 refuse-next-subscription-opening\nNERVIX-SUITE-CONFIRMED 2 clear-subscription-opening-refusals\n");
+    assert_eq!(input, b"NERVIX-SUITE-CONFIRMED 1 refuse-next-subscription-opening\nNERVIX-SUITE-CONFIRMED 2 clear-subscription-opening-refusals\nNERVIX-SUITE-CONFIRMED 3 refuse-next-clock-attachment\nNERVIX-SUITE-CONFIRMED 4 clear-clock-attachment-refusals\n");
     assert!(
         actions
             .handle(

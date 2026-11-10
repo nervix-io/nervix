@@ -25,9 +25,6 @@ use tracing::{debug, info};
 
 use crate::{NervixRaft, storage::FjallStore};
 
-/// How often retention is reconsidered when nothing else wakes it.
-const RETENTION_INTERVAL: Duration = Duration::from_secs(5);
-
 /// What a node keeps of its Raft log, and when it snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RaftRetentionPolicy {
@@ -43,6 +40,8 @@ pub struct RaftRetentionPolicy {
     pub retained_log_cap_bytes: u64,
     /// How long a mutation waits for reclamation before it fails.
     pub retention_admission_timeout: Duration,
+    pub retention_interval: Duration,
+    pub retention_admission_poll: Duration,
 }
 
 impl RaftRetentionPolicy {
@@ -53,6 +52,7 @@ impl RaftRetentionPolicy {
         covered_entries_retained: u64,
         covered_bytes_retained: u64,
         retained_log_cap_bytes: u64,
+        operations: &crate::RaftOperationSettings,
     ) -> Self {
         Self {
             snapshot_entry_threshold,
@@ -60,7 +60,9 @@ impl RaftRetentionPolicy {
             covered_entries_retained,
             covered_bytes_retained,
             retained_log_cap_bytes,
-            retention_admission_timeout: Duration::from_secs(30),
+            retention_admission_timeout: *operations.retention_admission_timeout.value(),
+            retention_interval: *operations.retention_interval.value(),
+            retention_admission_poll: *operations.retention_admission_poll.value(),
         }
     }
 }
@@ -68,7 +70,7 @@ impl RaftRetentionPolicy {
 impl Default for RaftRetentionPolicy {
     /// The policy of the retention settings' defaults.
     fn default() -> Self {
-        crate::RaftRetentionSettings::default().policy()
+        crate::RaftRetentionSettings::default().policy(&crate::RaftOperationSettings::default())
     }
 }
 
@@ -121,7 +123,7 @@ impl RetentionTask {
     }
 
     pub(crate) async fn run(mut self) {
-        let mut ticks = interval(RETENTION_INTERVAL);
+        let mut ticks = interval(self.policy.retention_interval);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             nervix_primitives::task::consume_budget().await;

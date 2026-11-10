@@ -291,6 +291,7 @@ async fn attach_producer(
     let (reply, attached) = oneshot::channel();
     commands
         .send(EndpointCommand::Attach(AttachCommand {
+            user: UserName::parse("fixture_user").assured("a literal user name"),
             expected_fields: fields(),
             limits: ClientProducerLimits {
                 batches: NonZeroU32::new(4).assured("a literal non-zero count"),

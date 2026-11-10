@@ -12,8 +12,6 @@
     nervix::layer(engine, reason = "owns the boundary declared above")
 )]
 
-use std::time::Duration;
-
 use nervix_execution::Executor;
 use nervix_models::{
     ClusterNodeIdentity, DomainName, StateInspectionBranchSelection, StateInspectionOrigin,
@@ -84,7 +82,7 @@ impl InterconnectRequest for ReadWasmStatePage {
 
     const NAME: &'static str = "read_wasm_state_page";
     const CLASS: PoolClass = PoolClass::Commands;
-    const TIMEOUT: Duration = Duration::from_secs(10);
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Request;
 }
 
 #[cfg(all(

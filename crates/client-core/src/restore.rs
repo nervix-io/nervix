@@ -66,9 +66,6 @@ const RESTORE_CHUNK_BYTES: usize = 256 * 1024;
 // non-empty chunk always encodes.
 const _: () = assert!(RESTORE_CHUNK_BYTES <= SESSION_LIMITS.frame_bytes() / 2);
 
-/// Restore frames queued for the stream before the archive reader waits for the transport.
-const RESTORE_FRAME_CAPACITY: usize = 8;
-
 /// The request identity of a restore's start frame. Every attempt is a stream of its own that
 /// exactly one reply answers, so the identity only has to be non-zero.
 const RESTORE_REQUEST_ID: RequestId = RequestId::new(NonZeroU64::MIN);
@@ -302,7 +299,7 @@ impl Client {
                     ));
                 }
                 Err(AttemptFailure::Transport(status))
-                    if upload_status_is_retryable(&status) && Self::await_retry(attempt).await =>
+                    if upload_status_is_retryable(&status) && self.await_retry(attempt).await =>
                 {
                     match self
                         .recover_session(RecoveryMode::Replace, RecoveryDeadline::RetryBudget)
@@ -374,7 +371,7 @@ impl Client {
                         .await?
                 }
                 Routing::AwaitElection | Routing::AwaitOutcome
-                    if Self::await_retry(attempt).await => {}
+                    if self.await_retry(attempt).await => {}
                 Routing::AwaitElection if history.is_uncertain() => {
                     return Err(Report::new(ClientError::RetryDeadline));
                 }
@@ -530,7 +527,8 @@ impl RestoreStreamAttempt {
             archive_bytes,
             frame_timeout,
         } = self;
-        let (frames, outbound) = mpsc::channel(RESTORE_FRAME_CAPACITY);
+        let (frames, outbound) =
+            mpsc::channel(connector.capabilities().restore_frame_capacity().get());
         let feeder = nervix_primitives::task::spawn(feed(
             start,
             archive,

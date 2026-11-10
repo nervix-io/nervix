@@ -117,9 +117,10 @@ fn execution_with_deadline_reporting_emitter(
     let (report, reported) = oneshot::channel();
     let emitter = named::<EmitterName>("published");
     let task = deadline_reporting_emitter(&execution, report);
-    execution
-        .emitter_tasks
-        .insert(NodeRef::new(ModelKind::Emitter, &emitter), task);
+    execution.emitter_tasks.insert(
+        NodeUnitRef::new(NodeRef::new(ModelKind::Emitter, &emitter), Unit::SINGLE),
+        task,
+    );
     (execution, reported)
 }
 
@@ -758,10 +759,12 @@ fn relay_state_task_applying_as_it_stops(
             .await
             .expect("the relay's assignment stays authoritative");
     });
+    let (commands, _command_rx) = mpsc::channel(1);
     RelayStateTask {
         shutdown,
         task,
         unit,
+        commands,
     }
 }
 

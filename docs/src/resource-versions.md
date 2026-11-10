@@ -59,7 +59,8 @@ activation decision, so a stop, restart, or reassignment cannot select another v
 
 The HTTPS listener runs on every live node, independent of Raft leadership and graph placement,
 like every other entity that binds a configured listening port. It presents the TLS VHOSTs of the
-runtime revision its node applied.
+runtime revision its node applied. Its handshakes take the committed [outward TLS
+policy](cryptography.md#outward-tls-policy), a `DYNAMIC` certificate installation included.
 
 Visual client-mount and VHOST-TLS forms select a resource and one of its completed versions through
 typed session choices. Their drafts may submit `LATEST`; neither form resolves it locally or

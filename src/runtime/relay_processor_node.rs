@@ -2632,7 +2632,13 @@ mod tests {
             value_schema.arrow_schema(),
             &[named("right_profiles")],
             value_schema.arrow_schema(),
-            None,
+            runtime_udf_compile_options(
+                None,
+                VmCompileOptions {
+                    settings: nervix_vm::VmSettings::default(),
+                    ..VmCompileOptions::default()
+                },
+            ),
         )
         .assured("the fixture's CORRELATE WHERE compiles");
         processor.kind = ModelKind::Correlator;

@@ -228,9 +228,12 @@ pub(in crate::registry) fn ensure_window_processor_output_schemas(
     for output in window_processor.output_routes.outputs() {
         let output_schema = schema_for_ack_model(domain, identifier, models, &output.relay)?;
         let sketches = validate_window_processor_output(
-            domain,
-            identifier,
-            models,
+            ModelValidationContext {
+                domain,
+                identifier,
+                models,
+            },
+            window_processor,
             output,
             output_schema,
             input_schemas,
@@ -393,14 +396,18 @@ fn effective_wasm_output_filter_map_schema(
 }
 
 fn validate_window_processor_output(
-    domain: &DomainName,
-    identifier: &ModelName,
-    models: &ModelIndex,
+    context: ModelValidationContext<'_, '_>,
+    processor: &CreateWindowProcessor,
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
     input_schemas: &[(&RelayName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
 ) -> Result<Vec<WindowSketchConfig>, Report<RegistryError>> {
+    let ModelValidationContext {
+        domain,
+        identifier,
+        models,
+    } = context;
     let aggregate = lower_window_assignments(&output.construction).map_err(|reason| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -488,6 +495,7 @@ fn validate_window_processor_output(
         },
         output,
         &aggregate.inner,
+        processor,
         output_schema,
         input_schema,
         branch_schema,

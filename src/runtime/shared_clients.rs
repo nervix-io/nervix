@@ -348,7 +348,7 @@ impl Drop for PoolWaitGuard {
 pub(in crate::runtime) struct PoolWaitRegistration {
     pub(in crate::runtime) slot: Arc<PoolWaitSlot>,
     runtime: Runtime,
-    key: DomainNodeRef,
+    key: DomainNodeUnitRef,
 }
 
 impl Drop for PoolWaitRegistration {
@@ -524,7 +524,7 @@ impl Runtime {
     )]
     pub(in crate::runtime) fn register_pool_wait(
         &self,
-        waiter: DomainNodeRef,
+        waiter: DomainNodeUnitRef,
         client: ClientName,
         interactions: EmitterInteractionMetrics,
     ) -> PoolWaitRegistration {
@@ -537,7 +537,7 @@ impl Runtime {
         }
     }
 
-    pub(in crate::runtime) fn pool_wait(&self, waiter: &DomainNodeRef) -> Option<PoolWait> {
+    pub(in crate::runtime) fn pool_wait(&self, waiter: &DomainNodeUnitRef) -> Option<PoolWait> {
         let slot = self.inner.pool_waits.get(waiter)?;
         let wait = slot.active.load_full()?;
         Some((*wait).clone())
@@ -566,6 +566,7 @@ mod tests {
         runtime.inner.metrics.register_emitter_interactions(
             &domain("pool_wait"),
             &named::<EmitterName>("emitter"),
+            Unit::SINGLE,
             None,
             nervix_models::EmitterEntityKind::Postgres(nervix_models::PostgresEmitterEntity::Table),
         )
@@ -574,11 +575,11 @@ mod tests {
     #[nervix_primitives::test]
     async fn retained_pool_wait_reports_only_pending_borrows_and_clears_on_cancel() {
         let runtime = Runtime::new();
-        let key = DomainNodeRef::node_in(
+        let key = DomainNodeUnitRef::single(DomainNodeRef::node_in(
             domain("pool_wait"),
             ModelKind::Emitter,
             named::<EmitterName>("emitter"),
-        );
+        ));
         let registration =
             runtime.register_pool_wait(key.clone(), named("database"), pool_metrics(&runtime));
         let slot = registration.slot.clone();
@@ -635,11 +636,11 @@ mod tests {
     #[test]
     fn pool_registration_teardown_preserves_a_replacement_emitter() {
         let runtime = Runtime::new();
-        let key = DomainNodeRef::node_in(
+        let key = DomainNodeUnitRef::single(DomainNodeRef::node_in(
             domain("pool_wait"),
             ModelKind::Emitter,
             named::<EmitterName>("emitter"),
-        );
+        ));
         let first =
             runtime.register_pool_wait(key.clone(), named("database"), pool_metrics(&runtime));
         let replacement =

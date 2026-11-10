@@ -87,6 +87,8 @@ const EVENT_LINE_PREFIX_BYTES: usize = EVENT_LINE_BYTES - EVENT_LINE_SUFFIX.len(
 const _: () = assert!(EVENT_LINE_BYTES > EVENT_LINE_SUFFIX.len());
 const _: () = assert!(EVENT_BUFFER_BYTES == 1024 * 1024);
 
+mod connection_args;
+
 #[derive(Parser, Debug, Clone)]
 #[command(name = "nervix-cli")]
 #[command(about = "Interactive Nervix client")]
@@ -122,9 +124,8 @@ struct Args {
     /// Password for the registry user; prompted for interactively when unset
     #[arg(long, env = "NERVIX_PASSWORD")]
     password: Option<String>,
-    /// Overall BACKUP command wait across all domain cuts, redirects and reconnects (default 10m)
-    #[arg(long, global = true, value_parser = nervix_models::parse_duration_text)]
-    backup_wait_timeout: Option<std::time::Duration>,
+    #[command(flatten)]
+    connection: connection_args::ConnectionArgs,
     /// Run Plexus statements once and exit instead of starting the interactive REPL
     #[arg(long, conflicts_with = "suggest")]
     command: Option<String>,
@@ -275,6 +276,8 @@ struct GrpcCompleter {
 
 #[derive(Debug, Error)]
 enum ClientError {
+    #[error("invalid client connection capabilities")]
+    InvalidConnectionCapabilities,
     /// The client's report of why no session opened is beneath.
     #[error("failed to connect to the server")]
     Connect,
@@ -1239,6 +1242,9 @@ fn print_completions(shell: Shell) {
 }
 
 fn connect_options_from_args(args: &Args) -> Result<ConnectOptions, StackReport<ClientError>> {
+    let mut options = args.connection.connect_options();
+    nervix_client_core::ClientCapabilities::from_options(&options)
+        .change_context(ClientError::InvalidConnectionCapabilities)?;
     let ca_certificate_pem = match args.tls_ca_cert.as_ref() {
         Some(path) => Some(std::fs::read(path).change_context(ClientError::LoadTlsCaCertificate)?),
         None => None,
@@ -1248,7 +1254,7 @@ fn connect_options_from_args(args: &Args) -> Result<ConnectOptions, StackReport<
         None => rpassword::prompt_password(format!("Password for {}: ", args.username))
             .map_err(|cause| StackReport::new(cause).change_context(ClientError::ReadPassword))?,
     };
-    Ok(ConnectOptions {
+    options = ConnectOptions {
         dns: ConnectDns::Configuration(DnsConfiguration {
             resolver_configuration: args.dns_resolver_config.clone(),
             hosts_file: args.dns_hosts_file.clone(),
@@ -1265,11 +1271,9 @@ fn connect_options_from_args(args: &Args) -> Result<ConnectOptions, StackReport<
         ca_certificate_pem,
         username: Some(args.username.clone()),
         password: Some(password),
-        backup_wait_timeout: args
-            .backup_wait_timeout
-            .unwrap_or(ConnectOptions::default().backup_wait_timeout),
-        ..ConnectOptions::default()
-    })
+        ..options
+    };
+    Ok(options)
 }
 
 #[derive(Clone)]
@@ -1716,6 +1720,27 @@ mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
 
     use super::*;
+
+    #[test]
+    fn connection_capabilities_are_parsed_and_forwarded() {
+        let args = Args::try_parse_from([
+            "nervix-cli",
+            "--password",
+            "secret",
+            "--connect-timeout",
+            "7s",
+            "--request-timeout",
+            "11s",
+            "--retry-timeout",
+            "13s",
+        ])
+        .assured("the CLI accepts explicit connection capabilities");
+        let options =
+            connect_options_from_args(&args).assured("the connection capabilities validate");
+        assert_eq!(options.connect_timeout, std::time::Duration::from_secs(7));
+        assert_eq!(options.request_timeout, std::time::Duration::from_secs(11));
+        assert_eq!(options.retry_timeout, std::time::Duration::from_secs(13));
+    }
 
     #[test]
     fn backup_wait_and_recovery_arguments_use_shared_connect_options() {

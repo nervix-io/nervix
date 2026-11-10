@@ -133,6 +133,30 @@ fn processor_relay_choices_round_trip_with_the_first_input_reference() {
 }
 
 #[test]
+fn generator_materialized_relay_choices_round_trip_with_and_without_a_branch() {
+    let domain = ChoiceSelection {
+        value: ChoiceValue::Domain(name("tenant")),
+    };
+    let branch = ChoiceSelection {
+        value: ChoiceValue::Model(nervix_models::NodeRef::new(
+            nervix_models::ModelKind::Branch,
+            name::<nervix_models::ModelName>("by_tenant"),
+        )),
+    };
+    for dependencies in [vec![domain.clone()], vec![domain, branch]] {
+        let message = ClientMessage {
+            request_id: request(4),
+            request: ClientRequest::Choice(ChoiceLookupRequest::new(
+                ChoiceTarget::GeneratorMaterializedRelay,
+                dependencies,
+                "notifications".to_string(),
+            )),
+        };
+        assert_eq!(round_trip_client(&message), message);
+    }
+}
+
+#[test]
 fn bolero_processor_choice_request_round_trip() {
     bolero::check!()
         .with_iterations(128)

@@ -50,7 +50,7 @@ fn shuttle_a_reply_of_another_kind_racing_registration_interrupts_every_waiter()
 /// Registration and cancellation race the reader, which reads `violation`'s reply to the command
 /// and a later frame. Every waiter ends, the first cause survives, and the later frame is unread.
 async fn races_registration(violation: &Violation) {
-    let events = SessionEvents::new();
+    let events = SessionEvents::new(crate::ClientCapabilities::default());
     let generation = events.emitters.begin_generation();
     let pending = Arc::new(SyncMutex::new(PendingReplies::new()));
     let (frames, _outbound) = mpsc::channel(1);
@@ -199,7 +199,7 @@ fn reply_frame(reply: Reply) -> EncodedFrame<ServerFrame> {
 fn shuttle_a_closed_request_registry_ends_its_silent_reader() {
     check_random_and_pct(|| {
         shuttle::future::block_on(async {
-            let events = SessionEvents::new();
+            let events = SessionEvents::new(crate::ClientCapabilities::default());
             let generation = events.emitters.begin_generation();
             let pending = Arc::new(SyncMutex::new(PendingReplies::new()));
             let reader = ExchangeReader::new(pending.clone(), events.emitters.clone(), generation);

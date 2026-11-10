@@ -823,6 +823,7 @@ pub(in crate::registry) fn emitter(
     client: &str,
 ) -> Model {
     Model::Emitter(CreateEmitter {
+        instances: nervix_models::EmitterInstances::ONE,
         name: EmitterName::parse(name).expect("valid identifier"),
         from: ProcessorInputs::single(RelayName::parse(from_relay).expect("valid identifier")),
         body: nervix_models::EmitterBody::Codec {

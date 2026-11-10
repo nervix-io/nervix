@@ -99,7 +99,7 @@ use nervix_interconnect::{
     EntityGateReleaseResponse as RemoteEntityGateReleaseResponse,
     EntityGateRequest as RemoteEntityGateRequest, EntityGateResponse as RemoteEntityGateResponse,
     Envelope, LookupRequest as RemoteLookupRequest, LookupResponse as RemoteLookupResponse,
-    MAX_CONCURRENT_HEALTH_PROBES, OwnershipHandoffFailure, PeerResolver,
+    OwnershipHandoffFailure, PeerResolver,
     PrepareForcedOwnershipRecoveryRequest as RemotePrepareForcedOwnershipRecoveryRequest,
     RemoteOperationFailure, RemoteOperationSubject, RuntimeErrorEvent as RemoteRuntimeErrorEvent,
     StreamHandlerError, StreamingResponse,
@@ -121,10 +121,7 @@ use ownership_handoff::{FORCED_OWNERSHIP_RECOVERY_BUDGET, ForcedOwnershipRecover
 use public_listener::{PublicListener, PublicListenerKind};
 #[cfg(feature = "testing")]
 use scheduling::VOTER_OBSERVATION_GRACE;
-use scheduling::{
-    KafkaPartitionWatcherKey, KafkaPartitionWatcherTask, LEADER_KAFKA_PARTITION_WATCH_INTERVAL,
-    StartupVoterObservations,
-};
+use scheduling::{StartupVoterObservations, run_kafka_partition_watchers};
 use session::grpc::SessionGrpcService;
 pub use session_service::SessionServiceImpl;
 use session_service::{
@@ -188,6 +185,7 @@ mod node_settings;
 mod observability_http;
 mod observation;
 mod ownership_handoff;
+mod partition_transition;
 mod placement_groups;
 mod preflight;
 pub use nervix_execution::{
@@ -546,7 +544,12 @@ impl Application {
             "starting nervix server"
         );
 
-        let db = ApplicationStartup::open_node_database(db_path.clone(), &executor).await?;
+        let db = ApplicationStartup::open_node_database(
+            db_path.clone(),
+            &executor,
+            capabilities.node_database,
+        )
+        .await?;
         let registry = Arc::new(
             match Registry::from_database(db.clone(), Some(db_path.as_path())) {
                 Ok(registry) => registry,
@@ -559,6 +562,7 @@ impl Application {
         let runtime = {
             let mapping_input = Runtime::with_environment(
                 RuntimeEnvironment {
+                    interconnect_request_timeout: settings.interconnect.request_timeout(),
                     executor,
                     client_endpoints,
                     outward_tls: outward_tls.clone(),
@@ -632,10 +636,9 @@ impl Application {
                 join_terms: settings.join_terms(),
             },
             interconnect_tls,
-            nervix_interconnect::TransportOptions {
-                peer_receive: Some(peer_receive),
-                ..Default::default()
-            },
+            settings
+                .interconnect
+                .options(Some(peer_receive), Some(settings.shutdown.drain_timeout())),
             startup.runtime.executor().clone(),
             PeerResolver::new(dns),
         )
@@ -658,6 +661,8 @@ impl Application {
             executor: startup.runtime.executor().clone(),
             raft_timings,
             raft_retention,
+            operations: settings.consensus_operations,
+            database: capabilities.consensus_database,
         };
         let consensus_result = startup
             .open_consensus(consensus_settings, &fault_injection)
@@ -1146,6 +1151,7 @@ impl Application {
             }
             sleep(settings.membership.gossip_interval()).await;
         };
+        interconnect.install_cluster_parameters(record.values);
         runtime.install_cluster_parameters(record.values);
         registry.install_cluster_parameters(record.values);
         // Runtime admission waits for the same or a later committed publication before installing
@@ -1524,11 +1530,13 @@ impl Application {
                                 else {
                                     continue;
                                 };
+                                let current_domain = current_schedule.domain(&domain);
                                 #[cfg(feature = "testing")]
                                 let mut schedule = graph.schedule_for_domain_with_mode(
                                     &domain,
                                     &schedulable_node_ids,
                                     usize::try_from(automatic_schedule_input.runtime_state().parameters.verified("scheduling starts after parameter seeding").values.replica_count()).assured("the committed replica count fits a supported target"),
+                                    current_domain,
                                     scheduler_mode,
                                  &scheduling_capabilities,);
                                 #[cfg(not(feature = "testing"))]
@@ -1536,8 +1544,9 @@ impl Application {
                                     &domain,
                                     &schedulable_node_ids,
                                     usize::try_from(automatic_schedule_input.runtime_state().parameters.verified("scheduling starts after parameter seeding").values.replica_count()).assured("the committed replica count fits a supported target"),
-                                 &scheduling_capabilities,);
-                                let current_domain = current_schedule.domain(&domain);
+                                    current_domain,
+                                    &scheduling_capabilities,
+                                );
                                 let mut failover_existing = current_domain.cloned();
                                 if let Some(existing) = &mut failover_existing {
                                     let failover_moves =
@@ -1722,7 +1731,7 @@ impl Application {
                     let interconnect = interconnect_for_health.clone();
                     async move {
                         let outcome = match interconnect
-                            .request(target.node_id(), ApplicationHealthProbe)
+                            .request_with_timeout(target.node_id(), ApplicationHealthProbe, interconnect.liveness().probe_timeout())
                             .await
                         {
                             Ok(identity) if &identity == target.identity() => {
@@ -1755,7 +1764,7 @@ impl Application {
                         )
                     }
                 }))
-                .buffer_unordered(MAX_CONCURRENT_HEALTH_PROBES);
+                .buffer_unordered(settings.interconnect.health_probes());
                 tokio::pin!(probe_results);
                 // Let each bounded probe finish even when gossip publishes another update.
                 // Cancelling the round on every update can indefinitely hide an unreachable
@@ -2086,8 +2095,10 @@ impl Application {
 
         service.register_wasm_state_reset_service(shutdown.clone())?;
         service.register_wasm_state_recovery_interconnect_handler()?;
+        service.register_partition_transition_handler()?;
         service.register_stopping_node_drain_handler()?;
         service.register_wasm_state_recovery_coordinator(shutdown.clone());
+        service.register_partition_transition_retirement(shutdown.clone());
 
         let entity_drain_service = service.clone();
         interconnect
@@ -2184,7 +2195,7 @@ impl Application {
                     let result = match service.handle_lookup_request(request).await {
                         Ok(Some(record)) => {
                             let mapping_input = record
-                                .encode_arrow_ipc(service.inner.runtime.executor())
+                                .encode_arrow_ipc(service.inner.runtime.executor(), nervix_execution::QueueAdmission::RefuseWhenFull)
                                 .await
                                 .map(|body| Some(body.to_vec()));
                             match mapping_input {
@@ -2632,34 +2643,7 @@ impl Application {
         let kafka_schedule_service = service.clone();
         let kafka_schedule_shutdown = shutdown.clone();
         background_tasks.push(nervix_primitives::task::spawn(async move {
-            let mut schedule_rx = kafka_schedule_service.inner.consensus.subscribe_schedule();
-            let mut tasks: HashMap<KafkaPartitionWatcherKey, KafkaPartitionWatcherTask> =
-                HashMap::new();
-
-            loop {
-                nervix_primitives::task::consume_budget().await;
-                let schedule = kafka_schedule_service
-                    .inner
-                    .consensus
-                    .current_schedule()
-                    .await;
-                kafka_schedule_service
-                    .reconcile_kafka_partition_watchers(&schedule, &mut tasks)
-                    .await;
-                nervix_primitives::select! {
-                    _ = kafka_schedule_shutdown.cancelled() => break,
-                    changed = schedule_rx.changed() => {
-                        if changed.is_err() {
-                            break;
-                        }
-                    }
-                    _ = sleep(LEADER_KAFKA_PARTITION_WATCH_INTERVAL) => {}
-                }
-            }
-
-            for (_, watcher) in tasks {
-                watcher.task.stop().await;
-            }
+            run_kafka_partition_watchers(kafka_schedule_service, kafka_schedule_shutdown).await;
         }));
 
         let (interconnect_relay_payload_lane, interconnect_relay_payload_rx) =

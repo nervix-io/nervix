@@ -9,19 +9,21 @@ never evidence of its owner or effect.
 formatting is applied by the former and checked by the latter. The compiler emits ordinary
 `nervix::` diagnostics. The six structural counts compare with `debt-baseline.json`; a count
 may decrease and cannot increase. `just ratchet --update` records a decrease only after the
-complete gate passes. No numeric allowance controls a semantic rule.
+complete gate passes. No numeric allowance controls a semantic rule, and two defects have no count
+at all: the gate refuses authored cryptography outside AWS-LC and a product graph that does not
+link exactly one AWS-LC module, whatever the baseline holds.
 
 ## Components
 
 | Part | Location | Responsibility |
 | --- | --- | --- |
 | Compiler driver | `tools/nervix-lint/driver` | Registers the `nervix` tool, validates source contracts and expectations, resolves definitions, normalized receivers, aliases, UFCS, trait selections and macro origins, emits the `nervix::` diagnostics and writes one side report per compilation, including its review candidates for the audit. |
-| Rule catalog and reports | `tools/nervix-lint/report` | The finite API recognition the driver applies (`report/src/rules.rs`), side-report validation and summaries, and the stable source parser behind the structural counts. |
+| Rule catalog and reports | `tools/nervix-lint/report` | The finite API recognition the driver applies (`report/src/rules.rs`), side-report validation and summaries, and the stable source parser behind the structural counts and the authored-cryptography refusal. |
 | Fixtures | `tools/nervix-lint/fixtures`, `tools/nervix-lint/fixture-macros` | The allowed and rejected compiler cases, authored-macro cases and paired doctests that qualify each rule. |
 | Declared matrix | `tools/nervix-lint/configurations.toml` | The configurations the gate analyzes and the memory admission of their compilations. |
 | Runner | `tools/nervix-lint/ratchet`, `nervix-ratchet analyze` (`just typed-ratchet`) | Runs bounded concurrent Cargo children from one thread, computes the report identity, reuses complete evidence and refuses missing, partial, stale or foreign reports. Aggregation calls the report crate in-process. |
 | Workspace wrapper | `nervix-ratchet wrap` | Runs the driver as a child beneath the compiler wrapper the host configures, records every compilation and admits it against host memory through the shared advisory-lock queue. |
-| Gate | `nervix-ratchet gate` (`just ratchet`) | Requires the complete diagnostic gate, reads the product's dependency graph with `cargo tree` and compares the six structural counts with `debt-baseline.json`. |
+| Gate | `nervix-ratchet gate` (`just ratchet`) | Requires the complete diagnostic gate, reads the product's dependency graph with `cargo tree`, compares the six structural counts with `debt-baseline.json`, and refuses authored cryptography outside AWS-LC and a second AWS-LC module. |
 | Complexity analyzer | `nervix-ratchet crap` | Pins and runs the analyzer behind `functions_over_complexity_30`. |
 | Audit | `tools/nervix-lint/ratchet/src/audit` (`nervix-ratchet audit`, `just lint-audit`) | Consumes one in-process matrix report and attributes review candidates to the history that produced them. |
 | Diagnostic owner applicability | `nervix-ratchet applicability` (`just validate-deloxide-applicability`) | Reads the typed matrix report and compares diagnostic tracked-lock owners with the workload inventory's owner declarations. Its projection uses the shared matrix schema and findings without materializing unused completion payloads. The Python lane validates its inventory and delegates this comparison without opening compiler evidence. |
@@ -75,7 +77,7 @@ contract and a violated contract require different corrections.
 | `as_casts` | Count actual Rust cast expressions, not words in imports, attributes or qualified paths. | `use Value as Alias`; `r#as`; `<Type as Trait>::item`; ordinary literals. | An expression using `as`, including a const expression nested in a qualified type. | Stable source parser; inactive cfg, raw identifiers, nested syntax, macro fragments and bounded source properties. Clippy independently denies conversions in its broader build scope. |
 | `testing_feature_struct_fields` | A product struct has one field shape rather than a shape selected by `testing`. | A test-only item, an API gate or a conditional documentation attribute. | A named or tuple struct field whose presence depends on `testing`, including a conditional `cfg` attribute. | Stable source parser; field ownership, tuple, inactive, compound-predicate and `cfg_attr` controls. Enum fields are outside this specific struct rule. |
 | `files_over_3000_lines` | Keep product and in-crate test files within a source-size bound. | At most 3,000 lines, counting a final line without a newline. | An eligible file with more than 3,000 lines. | Source discovery and physical line count; exact boundary and newly authored source tests. |
-| `non_aws_lc_crypto` | Nervix-authored cryptography comes from the AWS-LC boundary, and no change brings other cryptography into the product graph. [Cryptography](cryptography.md#the-count) owns what counts. | AWS-LC through the boundary; a classified non-security hash; a non-cryptographic checksum. | An authored use of a counted crate, `OsRng`, `getrandom` or a direct provider install, and a product dependency edge onto a crate implementing cryptography outside AWS-LC. A product graph linking a second AWS-LC module is refused outright rather than counted. | Stable source parser; import, rename, glob, `self`/`super`, inactive, macro, boundary and look-alike controls and the registered bounded `typed-non-aws-lc-crypto` property; the product graph through `cargo tree` for both release targets, with recorded-tree, malformed-graph, added-dependency and second-AWS-LC-module gate tests. |
+| `non_aws_lc_crypto` | Nervix-authored cryptography comes from the AWS-LC boundary, and no change brings other cryptography into the product graph. [Cryptography](cryptography.md#the-check-and-the-count) owns what the check refuses and what the count counts. | AWS-LC through the boundary; a classified non-security hash; a non-cryptographic checksum. | An authored use of a listed crate, `OsRng`, `getrandom` or a direct provider install, which the gate refuses outright under the source rule `authored_non_aws_lc_crypto`; a product dependency edge onto a crate implementing cryptography outside AWS-LC, which the count records. A product graph linking a second AWS-LC module is refused outright too. | Stable source parser; import, rename, glob, `self`/`super`, inactive, `nervix_lint`, macro, boundary and look-alike controls, the gate's refusal and graph-only count tests, and the registered bounded `typed-non-aws-lc-crypto` property; the product graph through `cargo tree` for both release targets, with recorded-tree, malformed-graph, added-dependency and second-AWS-LC-module gate tests. |
 | `functions_over_complexity_30` | Keep each function's decisions within a cyclomatic complexity of 30. At full coverage a function's CRAP score equals its complexity, so a function above 30 exceeds a CRAP threshold of 30 at any coverage. [Function complexity](#function-complexity) owns the analyzer and its limits. | A function the pinned analyzer scores at most 30; an existing function above 30 that grows, which keeps the count. | A function newly scored above 30, including one in an inactive configuration or an in-crate test file. | Pinned cargo-crap analysis over source discovery; exact 30/31 boundary, inactive configuration, macro, trait and nesting limits, eligibility, and missing, failing, other-version, skipped-source, empty, configured, undiscovered and unreadable-file fixtures. |
 
 The Option/Result adapter catalog covers `and_then`, `filter`, `map`, `map_err`, `map_or`,
@@ -261,8 +263,8 @@ representations and every generated location in ordinary and sanitizer execution
 ## Host Memory Admission
 
 An analysis compilation needs about the memory of rustc's own check of its target, and the server
-library's dwarfs every other. Its diagnostic analysis reaches about 18.1 GiB, while other analyses
-stay below the 4 GiB threshold. Its 19 GiB reservation rounds up to cover the measured peak. Every
+library's dwarfs every other. Its diagnostic analysis reaches about 19.3 GiB, while other analyses
+stay below the 4 GiB threshold. Its 20 GiB reservation rounds up to cover the measured peak. Every
 configuration builds in a directory of its own, and up to four configurations analyze at once, a
 bound `--jobs` or `NERVIX_TYPED_RATCHET_JOBS` sets otherwise; the evidence keeps the declared order
 whatever order they end in, and once one analysis fails no configuration starts another.
@@ -377,15 +379,17 @@ blanket warning suppression, missing reason, unused expectation or expectation c
 operation fails. Arithmetic reasons state the actual ceiling, capacity or modular computation;
 “cannot overflow” does not justify wrapping. A retained defect names its repair task.
 
-Source counts have no semantic exception channel. A current structural occurrence remains counted
-until its owner changes it; a compiler expectation cannot hide its inactive source. Likewise,
-source provenance cannot be waived by declaring a lifecycle or error contract.
+Source counts and refusals have no semantic exception channel. A current structural occurrence
+remains counted, or refused, until its owner changes it; a compiler expectation cannot hide its
+inactive source. Likewise, source provenance cannot be waived by declaring a lifecycle or error
+contract.
 
-The cryptography count's source-owned non-security purpose is part of that rule's definition,
-not a compiler expectation. The [classification register](cryptography.md#classification-register)
-specifies its Rustdoc form and lexical scope. It classifies only the operation's BLAKE3 uses;
-containers, empty reasons, neighboring operations and other algorithms remain counted. Source
-fixtures and the bounded `typed-non-aws-lc-crypto` property qualify those distinctions.
+The authored-cryptography check's source-owned non-security purpose is part of that rule's
+definition, not a compiler expectation. The [classification
+register](cryptography.md#classification-register) specifies its Rustdoc form and lexical scope.
+It classifies only the operation's BLAKE3 uses; containers, empty reasons, purposes stated only
+under `cfg_attr(nervix_lint, ...)`, neighboring operations and other algorithms remain refused.
+Source fixtures and the bounded `typed-non-aws-lc-crypto` property qualify those distinctions.
 
 Review still owns the truth of reasons, lifetime classifications, architectural roles and bounds.
 The compiler checks their placement, shape and supported effects, not arbitrary whole-program

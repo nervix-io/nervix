@@ -62,7 +62,8 @@ one production behavior, which is what every node uses:
   Production bundles use the system clock.
 - **Identity entropy.** The process epoch and relay grant identifiers are drawn from the transport's
   configured entropy, which in production takes AWS-LC's secure random values through
-  `nervix-crypto`. A simulation supplies its deterministic callback through the same seam.
+  `nervix-crypto` ([Digests And Randomness](cryptography.md#digests-and-randomness)). A simulation
+  supplies its deterministic callback through the same seam.
 - **Deadlines.** Every transport deadline is an instant of the boundary's clock,
   `nervix_primitives::time`, whose timers are Tokio's, so it follows the clock of the runtime it
   runs on: connection setup, request and progress timeouts, reconnect backoff, relay grant
@@ -94,12 +95,14 @@ fixed set is TLS 1.3 AES-256-GCM/SHA-384 and AES-128-GCM/SHA-256, with P-256, P-
 X25519MLKEM768 key exchange, in the pinned AWS-LC provider's relative preference order. Each
 client/server bundle checks this membership at construction; a policy failure retains its typed
 cause beneath the TLS configuration error. A peer offering only ChaCha20 or standalone X25519
-fails the rustls handshake. [Cryptography](cryptography.md#algorithm-policy) owns the algorithm
-classification and distinguishes this preparation from a validated FIPS build.
+fails the rustls handshake. [Cryptography](cryptography.md#interconnect-tls) owns the algorithm
+classification, explains why the set is a fixed contract rather than a setting, and distinguishes
+this preparation from a validated FIPS build.
 
 This TLS restriction permits a rolling restart with the preceding full AWS-LC algorithm set:
 both sides offer AES-GCM and P-256. The independent interconnect wire fingerprint and cluster join
-requirements still apply. Outward session and connector TLS keep their existing algorithms.
+requirements still apply. Outward session and connector TLS follow the committed [outward
+policy](cryptography.md#outward-tls-policy) instead, which never reaches the interconnect.
 
 Cluster discovery supplies the current node identity, incarnation, and advertised endpoint for each
 peer. A bootstrap seed, configured or recovered, is the exception: the initiating node knows the
@@ -814,10 +817,14 @@ do. Only the failed class carries the answering node's own description, because 
 another node's subsystem is opaque to the caller and that text exists for the operator reading it.
 State snapshot exchange, dataflow node status, domain and entity drain status, entity gating, metric
 description, relay, hash map and ingestor description, hash map queries, and subscription-interest
-visibility all answer in these terms. An ingestor description is the execution owner's report of
-the ingestor. Its last decode rejection crosses as a typed record: a reference, an instant, a codec
-name, field paths, an optional Kafka or syslog position and the rendered codec diagnostic. The
-asking node renders that record; it never parses one.
+visibility all answer in these terms. A dataflow node status request names one execution unit of
+its node, so an emitter with several [instances](emitters.md#emitter-instances) is asked about each
+instance at that instance's owner; a node scheduled as one unit is asked about its `Single` unit.
+A domain or entity drain status reports each publishing emitter with the unit that publishes, so
+instances of one emitter are reported apart. An ingestor description is the execution owner's
+report of the ingestor. Its last decode rejection crosses as a typed record: a reference, an
+instant, a codec name, field paths, an optional Kafka or syslog position and the rendered codec
+diagnostic. The asking node renders that record; it never parses one.
 
 Each handler registration publishes a complete replacement dispatch table, so an arriving operation
 finds its handler without taking a lock and registrations that race each other all take effect.
@@ -1151,6 +1158,12 @@ normal frame and ACK operations use retained owners rather than a node-wide shar
 
 A delivery is held back rather than failed while relay memory on either end has no room for it at
 the moment, because that lack of room ends as the node's other relay work resolves.
+
+A receive-bound refusal creates no receiver attempt. The sender can slice the body again at the
+same unused channel position. If one row cannot fit, the current delivery's unadmitted suffix
+fails; an admitted prefix retains its acknowledgement owners. A later fitting delivery can reuse
+the unused position. Producer submissions are not route-buffer boundaries: rows from separate
+submissions can be collected into the same concrete branch delivery under `FLUSH EACH`.
 
 A receiver refuses a grant for capacity when its relay budget cannot reserve the body, the largest
 decoded batch and decode scratch, when its application queue has no item left, when the capacity it
@@ -1936,8 +1949,9 @@ Two opens racing for one owner start one link.
 The opening frame names the serving node, and the owning node refuses a link whose named node is
 not the peer it authenticated. Each forwarded producer then has a key the serving node assigns and
 never reuses within its process, so a late frame about an ended producer can never reach a later
-one. The serving node sends `Open` with the domain, ingestor, expected fields, credit, and the
-largest batch one submission may carry, then the producer's `Submit` frames carrying the Arrow IPC
+one. The serving node sends `Open` with the session's authenticated typed user name, the domain,
+ingestor, expected fields, credit, and the largest batch one submission may carry, then the
+producer's `Submit` frames carrying the Arrow IPC
 bytes of each batch and its `Clear` frames, and finally `Close` or `Detach`. The owning node answers
 with `Opened` and the producer's description or `Refused` with its refusal, then the producer's
 `Admitting`, `Outcome` and `Admission` frames, and finally `Ended` with a reason or `Closed`. The
@@ -1945,6 +1959,11 @@ serving node checked the committed domain, schedule and ingestor before it forwa
 an owning node that runs no endpoint of the ingestor yet, as one that has not installed its domains
 again since it started, refuses it as `EndpointUnavailable` rather than classifying the endpoint
 from its own installation.
+
+The owner retains each producer's user identity separately and supplies it as `metadata.user` on
+that producer's batch rows. The authenticated serving node supplies the identity at open; it does
+not come from submitted Arrow fields or the link's peer name.
+
 Frames of one producer keep their order in both directions, so its open precedes its batches and
 its outcomes, admission changes, and end follow the answer to its open. A batch travels at most once
 over the link, and the frames are validated and charged to the relay memory class like every other
@@ -2478,14 +2497,43 @@ and obey the ordinary Bulk chunk bound. No operator payload crosses the intercon
 or row maps; the coordinator uses the shared Arrow-to-Row writer at the session reporting boundary.
 
 The configured inspection deadline controls stream admission/setup via
-`request_stream_with_timeout`; ordinary `request_stream` obtains its request type's default
-from the pure `InterconnectStreamRequest::default_timeout()` getter. Static request deadlines keep
-their existing values; the inspection getter reads `StateInspectionReadTimeout`'s definition,
-so that definition owns the sole default and configured callers retain the same override path.
+`request_stream_with_timeout`; ordinary `request_stream` resolves its request type's
+`InterconnectStreamRequest::DEADLINE` against the local transport request budget. Inspection uses
+the ordinary request ratio, ten seconds at the declared default. Configured inspection callers
+retain their explicit elapsed-time override, while other typed RPCs preserve their declared
+relative budgets.
 The complete frontend inspection also has that elapsed-time bound. Failed or cancelled reads retain
 no historical cursor or page cache. The existing materialized dependency/generator snapshot request
 and its grouping, confirmation, integrity and admission behavior remain unchanged.
 
+## Declared Transport Policy
+
+[Node Settings](node-settings.md#transport-resolver-and-database-capacities) lists the transport
+capacity and deadline options, derived request reserves and the committed per-node view.
+The application root constructs transport options from those validated declarations. Bulk
+receive windows retain their independent memory backing and their receiver-specific bounds.
+
+After the authenticated binding reply, the outbound stream partition reads h2's negotiated
+maximum send-stream count. It caps local capacity to that limit by shrinking shared slots while
+retaining each traffic reserve. A limit unable to hold all reserves and shared traffic produces
+the typed `Http2StreamCapacity` capacity refusal. Negotiation runs before publication with exclusive
+ownership of the partition, reusing its existing semaphores. Leasing and draining count that
+actual capacity, preserving the existing drain fence. h2 remains the owner of peer SETTINGS,
+per-stream and connection credit, readiness, frame splitting and later flow-control updates;
+Nervix does not maintain another HTTP/2 credit algorithm.
+
+The wire routes, reset limits and control-envelope ceilings remain part of the current wire
+contract. A socket submission carries at most one 16 KiB initial HTTP/2 DATA frame, explicitly
+selected on both builders. Larger configured receive windows permit more frames in flight.
+Reconnect jitter varies a delay downward within the declared fraction, never above its ceiling.
+Its default of zero consumes no random draws and preserves the current retry schedule.
+
+Liveness uses the running committed unavailability policy. Existing connections receive an
+update through the primitive watch channel; an outstanding ping stays outstanding while its
+remaining deadline changes. Relay retention and sweeping derive from the host's admission bound,
+and grant, cancellation and progress-send budgets derive from the configured request/progress
+budgets. Admission lifetime, row acknowledgements, cancellation choice and watermark ordering
+retain their existing owners and guarantees.
 ## Processor State Page Operation
 
 `read_processor_state_page` is the process-targeted Bulk stream request, on the Snapshot subquota,
@@ -2501,6 +2549,15 @@ capture published generations instead of asking branch tasks. Sealed window meta
 are decoded under bounded admission, with cancellation and storage charges retained through
 encoding. A zero-row request returns only counts for the processor's `DESCRIBE` summary.
 
+A deduplicator or window inspection during repartitioning additionally requests the complete
+selected branch-fingerprint catalog and a set of copies to exclude. Count-only census requests
+use an empty exclusion set. The returned catalog precedes exclusion, while counts, rows and
+continuation positions describe only the selected authoritative copies. The coordinator compares
+each page's catalog with its census and refuses raced membership as `not_ready`. Ordinary requests
+carry no partition selection or catalog. The receiver checks catalog presence, selector membership
+and the filtered branch count before accepting a page. Catalog metadata stays inside the existing
+bounded descriptor, with no new stream framing or checkpoint-transfer operation.
+
 The stream frames an eight-byte little-endian descriptor length, a bounded typed rkyv descriptor and
 one native Arrow snapshot section per returned section. The descriptor carries the read origin, the
 complete counts, the returned offset and last branch, the returned rows as runs of one section and
@@ -2514,8 +2571,7 @@ exactly the declared field list, and checks the run rows, the returned offset an
 against the descriptor before any row reaches a Row frame. A typed refusal carries no body. No operator payload crosses as Row frames or row maps; the
 coordinator writes Row frames at the session reporting boundary, as for materialized pages.
 The inspection deadline controls stream admission and setup through
-`request_stream_with_timeout`, and the request type's `default_timeout()` reads
-`StateInspectionReadTimeout` like the materialized page operation.
+`request_stream_with_timeout`, and the request type's `DEADLINE` projects from the configured request budget, like the materialized page operation. The caller's explicit remaining inspection deadline remains authoritative.
 
 ## WASM State Page Operation
 
@@ -2536,6 +2592,7 @@ whether entries remain after the last one. A refusal carries the envelope's type
 caps the entries at what one Commands payload holds: every archived entry fits 512 bytes, and room
 for two entries is left for the unit's own facts. A coordinator refuses a page that returned no
 entry while entries remained and it allowed some, instead of issuing a continuation that cannot
-advance. The request runs under the configured inspection deadline through
-`request_with_timeout`; its static default is ten seconds. Branches cross the interconnect only as
-fingerprints, and no guest state bytes travel with the facts.
+advance. The request runs under the caller's remaining inspection deadline through
+`request_with_timeout`, and its `DEADLINE` projects from the configured request budget, like the
+other state inspection page operations. Branches cross the interconnect only as fingerprints, and
+no guest state bytes travel with the facts.

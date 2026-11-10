@@ -212,7 +212,7 @@ impl Client {
             // Once the archive's retry validity ends the server refuses it as expired, which is
             // not retried, so the attempts end with the archive's retention.
             let retry_permitted =
-                failure.current_context().is_retryable() && Self::await_retry(attempt).await;
+                failure.current_context().is_retryable() && self.await_retry(attempt).await;
             if !retry_permitted {
                 return Err(failure);
             }
@@ -248,7 +248,7 @@ impl Client {
         attempt: usize,
     ) -> Result<(), Report<BackupDownloadError>> {
         let Routing::Redirect(leader) = Routing::for_redirect(redirect) else {
-            if Self::await_retry(attempt).await {
+            if self.await_retry(attempt).await {
                 return Ok(());
             }
             return Err(Report::new(BackupDownloadError::NoLeader));

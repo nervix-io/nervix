@@ -2,6 +2,12 @@
 
 *Plexus, the Nervix graph definition language.*
 
+Processor state inspection reports `not_ready` when installation or forget changes a branch catalog
+between its partition census and owner page, or when two holders identify no installed claimant.
+It returns no partial page or inflated counts. A census that exceeds the session byte budget is
+`reply_too_large`; failed Bulk admission remains `not_ready`, and unavailable owners and expired
+read deadlines retain their existing typed outcomes. These refusals contain no branch field values.
+
 Secure random values come from `nervix-crypto`. Its pinned AWS-LC generator returns complete
 random bytes or aborts if sufficient entropy cannot be obtained; it has no recoverable entropy
 failure to classify as a record, authentication or transport rejection. No default value replaces
@@ -470,6 +476,12 @@ subsections after the boundary table follow this order.
 | Data plane | `RuntimeError` above `ExecutionBuildError`; `IngestorStartError`, `EmitterStartError` and `GeneratorError`; `PlannedGeneralError`, `RouteOutputError`, `RelayProcessorError` and the other node contexts; `RuntimePersistenceError`; the domain clock's `DomainClockAccessError` and `DomainClockWaitError` | A report for the node's policy, with the acknowledgements of the work that failed, or a structured message error for a route |
 | Control plane | `AppError`, `DomainAlterError`, `BackupError`, `RestoreRefusal` and the transaction and lifecycle errors | A report the session edge turns into a command result |
 | Edges | The session service's `GrpcAuthenticationError`, `SessionTransactionBindingError` and `SnapshotEncodingError`; `ClientError` and the Rust client's `DomainClockReadError`; the CLI's and the benchmark command's own contexts | A command disposition, a status, an `NX_ERROR_*` kind, or the rendered chain |
+
+A window route compilation failure retains its compiler report beneath
+`RegistryError::WindowRouteCompile`, which names the domain, processor and output relay.
+`WindowRouteCompileError::CollectionArgumentNullable` names `COLLECT_VEC` and directs an optional
+argument to `coalesce`. `RegistryError::WindowCollectionMissingBound` names the same route and
+function when neither a message width nor a state limit bounds retained collection.
 
 ### Boundaries
 
@@ -1708,11 +1720,15 @@ moves its exact hard group; an unqualified member selects all its declared units
 [Control Plane](./control-plane.md) for activation and [Typed States And Validation
 Boundaries](./typed-states.md) for required state.
 
-`ALTER BRANCH <branch> SET PARTITIONS <n>` on a domain that is running or paused is refused before
-anything is committed with `TransactionPlanningError::BranchPartitionsRequireStoppedDomain`, which
-names the operation, the domain and the branch and states the stopped-domain path, such as `branch
-'by_tenant' changes its partition count only while its domain is stopped: STOP domain 'payments',
-run ALTER BRANCH, then START it`. A domain build whose committed schedule lacks a unit its relay
+`ALTER BRANCH <branch> SET PARTITIONS <n>` to a count other than the current one, while the branch's
+previous partition count still has keys to move, is refused before anything is committed with
+`TransactionPlanningError::BranchPartitionsStillMoving`, which names the operation, the domain, the
+branch and both counts, such as `branch 'by_tenant' in domain 'payments' is still moving keys placed
+under its previous partition count 4 to its current count 8; change its partition count again once
+DESCRIBE BRANCH reports no previous partitions`. A claim that cannot move a key, because its holder's
+owner does not answer or refuses, keeps the key's records parked and tries again; it reports a
+`PartitionClaimError` naming the entity and unit at `warn`. `DESCRIBE BRANCH` reports `keys pending:
+unavailable` with the `TransitionHoldingsError` that names the unit whose owner did not answer. A domain build whose committed schedule lacks a unit its relay
 needs reports `ExecutionBuildError::RelayUnitNotScheduled`, naming the relay and the unit.
 
 The domain-wide placement editor retains typed name and positive-integer rank parse failures
@@ -2328,6 +2344,11 @@ Each failure reports its owner's typed context above the cause it kept:
   for a WASM processor's instance and the output its guest emitted. The VM, Arrow, ONNX or relay
   batch failure stays beneath. A WASM output route's FILTER-MAP reports the `PlannedGeneralError`
   step a planned batch reports, and the callback whose output did not forward is named by its kind.
+  Collection uses typed row-count, nested-offset, working-size, admission, execution, Arrow-build
+  and output-carriage contexts in `WindowProcessorError`. Its final decoded and encoded limits
+  are checked before publication; the original executor or Arrow body report stays beneath.
+  Failure follows the window emission rule: fail every retained acknowledgement and clear the
+  window, preserving output already emitted by earlier routes.
   Window statistics reject non-finite arguments or results at their respective boundaries.
   Overflow of a finite-input intermediate sum is handled by the moment kernel's normalized mean,
   so it does not itself classify the window as failed; constant overflow-scale runs keep zero
@@ -3911,6 +3932,18 @@ A count change uses the ownership-handoff preparation boundary to preserve the o
 Start planning separately validates the complete resolved unit declaration.
 `AlreadyRunning` and `IngestorNotRunning` name the exact ingestor unit, allowing a sibling instance
 to start or stop independently.
+
+An emitter entity that runs one instance refuses `INSTANCES` with the vocabulary's typed
+`SingleInstanceRefusal`, carrying the entity kind and its declared `SingleEmitterReason`, such as
+`ICEBERG TABLE emitters commit through one table writer, so they refuse INSTANCES`. The grammar
+reports it at the `INSTANCES` token, `ALTER` reports it beneath `AlterEmitterError::SingleInstance`,
+and a statement that reaches the registry without the grammar reports it beneath
+`EmitterInstancingError::SingleInstance`. The registry's `EmitterInstancingError` also covers a
+count whose execution units cannot be represented, `INSTANCES PER PARTITION` over inputs without a
+branch, and an input relay that does not share the other inputs' branch; the surrounding
+`RegistryError::EmitterInstancing` names the domain and emitter. Emitter execution planning refuses
+a scheduled unit set that does not match the declaration with a typed `UnitDeclaration` naming the
+emitter, as start planning does for an ingestor.
 Per-unit DESCRIBE requests and status records preserve the unit selected by their caller.
 `UnitIndexError` is the vocabulary's pure refusal for an instance ordinal outside its compact
 identity range. Semantic JSON validates that bound during deserialization. The client wire decoder

@@ -318,6 +318,17 @@ pub(super) struct RemoteBranchRead<'a> {
     pub(super) schema: &'a StdArc<arrow_schema::Schema>,
 }
 
+/// One key's read of one materialized relay, as it consults the units that may hold the key's
+/// row.
+struct MaterializedUnitRead<'a> {
+    routing: &'a DomainRoutingSnapshot,
+    domain: &'a DomainName,
+    relay: &'a RelayName,
+    branch_key: &'a Option<BranchKey>,
+    schema: &'a StdArc<arrow_schema::Schema>,
+    fields: &'a [MaterializedFieldInterest],
+}
+
 pub(super) struct MaterializedRelayRead<'a> {
     pub(super) relay: &'a RelayName,
     pub(super) key_mode: MaterializedLookupKeyMode,
@@ -651,30 +662,109 @@ impl Runtime {
         {
             return Ok(None);
         }
-        let owner = routing.materialized_stream_owner_of(relay, unit);
-        if let Some(owner) = owner
-            && !self.is_local_node(&owner)
-        {
-            let read = RemoteBranchRead {
-                owner: &owner,
-                unit,
-                domain,
-                relay,
-                branch_key: &placement_branch_key,
-                schema,
-            };
-            return self
-                .remote_materialized_stream_values_for_branch(read, fields)
-                .await;
-        }
-        self.local_materialized_stream_values_for_branch(
+        let read = MaterializedUnitRead {
             routing,
             domain,
             relay,
-            &placement_branch_key,
+            branch_key: &placement_branch_key,
+            schema,
             fields,
+        };
+        let found = self.materialized_unit_values(&read, unit, unit).await?;
+        if found.is_some() {
+            return Ok(found);
+        }
+        // While the relay's branch moves keys placed under its previous partition count, a key's
+        // row may still lie in the unit that count placed it in, until the key's own unit claims
+        // it. That row is the value the key had before the claim's first write, so reading it
+        // after the key's unit missed orders this read before that write; reading the key's unit
+        // again after the holder missed sees a row the claim installed in between.
+        let Some(previous) = routing.relay_previous_partitioning(relay) else {
+            return Ok(None);
+        };
+        let Ok(holder) = previous.unit_of(&placement_branch_key) else {
+            return Ok(None);
+        };
+        if holder == unit {
+            return Ok(None);
+        }
+        let held = self.materialized_unit_values(&read, holder, unit).await?;
+        if held.is_some() {
+            return Ok(held);
+        }
+        self.materialized_unit_values(&read, unit, unit).await
+    }
+
+    /// The values `read` asks for, from the row `unit` of the relay holds for its key: locally,
+    /// or from the node that owns the unit. `current` is the unit the current partition count
+    /// places the key in.
+    async fn materialized_unit_values(
+        &self,
+        read: &MaterializedUnitRead<'_>,
+        unit: Unit,
+        current: Unit,
+    ) -> error_stack::Result<Option<Vec<Option<RuntimeValue>>>, MaterializedReadError> {
+        let owner = read.routing.materialized_stream_owner_of(read.relay, unit);
+        if let Some(owner) = owner
+            && !self.is_local_node(&owner)
+        {
+            let remote = RemoteBranchRead {
+                owner: &owner,
+                unit,
+                domain: read.domain,
+                relay: read.relay,
+                branch_key: read.branch_key,
+                schema: read.schema,
+            };
+            return self
+                .remote_materialized_stream_values_for_branch(remote, read.fields)
+                .await;
+        }
+        if unit != current {
+            return self.held_materialized_stream_values(read, unit);
+        }
+        self.local_materialized_stream_values_for_branch(
+            read.routing,
+            read.domain,
+            read.relay,
+            read.branch_key,
+            read.fields,
         )
         .await
+    }
+
+    /// The values `read` asks for from the row this node's state of `unit`, a unit the relay's
+    /// previous partition count placed the key in, still holds for the key.
+    fn held_materialized_stream_values(
+        &self,
+        read: &MaterializedUnitRead<'_>,
+        unit: Unit,
+    ) -> error_stack::Result<Option<Vec<Option<RuntimeValue>>>, MaterializedReadError> {
+        let entity = DomainNodeRef::node_in(read.domain.clone(), ModelKind::Relay, read.relay);
+        let Some(published) = self
+            .inner
+            .state_replication_routing
+            .materialized_unit(&DomainNodeUnitRef::new(entity, unit))
+        else {
+            return Ok(None);
+        };
+        let Some(record) = published.record(read.branch_key) else {
+            return Ok(None);
+        };
+        let mut values = Vec::with_capacity(read.fields.len());
+        for field in read.fields {
+            let value = record
+                .row
+                .value_at(field.column_index)
+                .change_context_lazy(|| MaterializedReadError::Field {
+                    domain: read.domain.clone(),
+                    relay: read.relay.clone(),
+                    branch: read.branch_key.clone(),
+                    field: field.name.clone(),
+                })?;
+            values.push(value);
+        }
+        Ok(Some(values))
     }
 
     pub(super) fn materialized_stream_key_is_visible(
@@ -974,6 +1064,7 @@ impl Runtime {
                             &assignment.value,
                             Some(&routing.udfs),
                             execution_now,
+                            self.inner.vm_settings,
                         )
                         .await
                         .map_err(|reason| {

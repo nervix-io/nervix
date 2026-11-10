@@ -44,8 +44,8 @@ use futures_util::{Stream, StreamExt as _, stream::BoxStream};
 use meticulous::OptionExt as _;
 use nervix_execution::{Executor, Reservation};
 use nervix_interconnect::{
-    ChargedItem, DuplexItems, DuplexReceiver, DuplexSendProgress, DuplexSender,
-    InterconnectDuplexRequest as _, RequestError, Transport,
+    ChargedItem, DuplexItems, DuplexReceiver, DuplexSendProgress, DuplexSender, RequestError,
+    Transport,
 };
 use nervix_models::ClusterNodeName;
 use nervix_primitives::{
@@ -69,28 +69,6 @@ use crate::{
 #[cfg(test)]
 mod append_setup_tests;
 
-/// How many entries one append batch may gather before the byte target stops it. Prefix
-/// verification avoids speculative data during initial conflict search; this cap bounds each
-/// admitted batch, including a conflict if the follower changes after prefix verification.
-pub(crate) const MAX_APPEND_BATCH_ENTRIES: u64 = 256;
-/// How many submitted batches one follower may leave unacknowledged.
-pub(crate) const MAX_OUTSTANDING_APPEND_BATCHES: usize = 16;
-/// How many submitted bytes one follower may leave unacknowledged. The node's aggregate command
-/// budget bounds the encoded copies across all followers independently.
-pub(crate) const MAX_OUTSTANDING_APPEND_BYTES: u64 = 16 * 1024 * 1024;
-/// How long an append stream with a batch outstanding may go without an answer while its follower
-/// also accepts none of the leader's bytes.
-const APPEND_STREAM_IDLE_BOUND: Duration = Duration::from_secs(5);
-/// The ceiling on an initial empty replication probe's soft request deadline.
-const REPLICATION_PROBE_DEADLINE_CEILING: Duration = Duration::from_secs(5);
-
-const _: () = assert!(
-    MAX_OUTSTANDING_APPEND_BATCHES > 0
-        && MAX_APPEND_BATCH_ENTRIES > 0
-        && !APPEND_STREAM_IDLE_BOUND.is_zero(),
-    "append pipeline policy inputs must be nonzero",
-);
-
 /// What one append batch aims to carry when the log reader fills it.
 ///
 /// A single semantic command is never split, so a batch gathers whole commands up to this size and
@@ -111,11 +89,15 @@ pub(crate) enum AppendPath {
 }
 
 /// Heartbeat answers may arrive throughout the worker's lease-sized hard TTL. Initial empty
-/// replication probes retain their shorter soft TTL and five-second ceiling.
-pub(crate) fn append_request_deadline(option: &RPCOption, path: AppendPath) -> Duration {
+/// replication probes retain their shorter soft TTL and configured append-idle ceiling.
+pub(crate) fn append_request_deadline(
+    option: &RPCOption,
+    path: AppendPath,
+    idle_bound: Duration,
+) -> Duration {
     match path {
         AppendPath::Heartbeat => option.hard_ttl(),
-        AppendPath::Replication => option.soft_ttl().min(REPLICATION_PROBE_DEADLINE_CEILING),
+        AppendPath::Replication => option.soft_ttl().min(idle_bound),
     }
 }
 
@@ -274,7 +256,8 @@ where
                     .request_with_timeout(
                         &self.target,
                         prefix,
-                        wire::OpenAppendStream::SETUP_TIMEOUT,
+                        self.interconnect
+                            .duplex_setup_deadline::<wire::OpenAppendStream>(),
                     )
                     .await
                     .map_err(|error| unreachable_err(error.into_error()))?;
@@ -307,6 +290,7 @@ where
             let answers = open_append_stream(
                 &self.interconnect,
                 &self.executor,
+                self.operations,
                 &self.local_node_id,
                 &self.target,
                 self.append_stream_open_recorder
@@ -320,7 +304,13 @@ where
         };
         // One setup deadline covers prefix verification, local admission and stream headers.
         // Data setup has no dependency on the caller's heartbeat-derived soft TTL.
-        match timeout(wire::OpenAppendStream::SETUP_TIMEOUT, setup).await {
+        match timeout(
+            self.interconnect
+                .duplex_setup_deadline::<wire::OpenAppendStream>(),
+            setup,
+        )
+        .await
+        {
             Ok(result) => result,
             Err(_) => Err(stream_failed(
                 &self.target,
@@ -385,6 +375,7 @@ struct AppendSubmission {
     sender: DuplexSender<wire::OpenAppendStream>,
     outstanding: mpsc::Sender<Submitted>,
     submitted_bytes: u64,
+    outstanding_limit_bytes: u64,
     batch_target_bytes: u64,
     acknowledged: mpsc::UnboundedReceiver<u64>,
     _fault: AppendSubmissionFault,
@@ -404,7 +395,7 @@ impl AppendSubmission {
         if self._fault.take(&request).await {
             let failure = std::io::Error::other("injected append submission failure");
             let failure = Report::new(failure).change_context(RequestError::Encode {
-                request: wire::OpenAppendStream::NAME,
+                request: <wire::OpenAppendStream as nervix_interconnect::InterconnectDuplexRequest>::NAME,
             });
             return Err(SubmissionStopped::StreamFailed(failure));
         }
@@ -441,7 +432,7 @@ impl AppendSubmission {
         while self
             .submitted_bytes
             .checked_add(self.batch_target_bytes)
-            .is_none_or(|total| total > MAX_OUTSTANDING_APPEND_BYTES)
+            .is_none_or(|total| total > self.outstanding_limit_bytes)
         {
             nervix_primitives::task::consume_budget().await;
             let Some(acknowledged) = self.acknowledged.recv().await else {
@@ -602,6 +593,7 @@ impl AppendStreamGeneration {
 async fn open_append_stream<S>(
     interconnect: &Transport,
     executor: &Executor,
+    operations: crate::RaftOperationSettings,
     local_node_id: &ClusterNodeName,
     target: &ClusterNodeName,
     fault: AppendSubmissionFault,
@@ -626,7 +618,8 @@ where
         .map_err(|error| stream_failed(target, error))?;
     let sender_progress = sender.progress();
 
-    let (outstanding_tx, outstanding_rx) = mpsc::channel(MAX_OUTSTANDING_APPEND_BATCHES);
+    let (outstanding_tx, outstanding_rx) =
+        mpsc::channel(*operations.outstanding_append_batches.value());
     let (acknowledge_tx, acknowledge_rx) = mpsc::unbounded_channel();
     let cancel_submission = CancellationToken::new();
     let submission_guard = cancel_submission.clone().drop_guard();
@@ -634,6 +627,7 @@ where
         sender,
         outstanding: outstanding_tx,
         submitted_bytes: 0,
+        outstanding_limit_bytes: operations.outstanding_append_bytes.value().as_u64(),
         batch_target_bytes: append_batch_target_bytes(executor),
         acknowledged: acknowledge_rx,
         _fault: fault,
@@ -678,7 +672,7 @@ where
         sender_progress,
         outstanding: outstanding_rx,
         acknowledge: acknowledge_tx,
-        idle_bound: AppendStreamIdleBound::new(APPEND_STREAM_IDLE_BOUND),
+        idle_bound: AppendStreamIdleBound::new(*operations.append_idle_bound.value()),
         target: target.clone(),
         finished: false,
         _submission: submission_guard,
@@ -784,19 +778,24 @@ mod tests {
     #[test]
     fn heartbeat_answer_uses_the_lease_without_extending_replication_probes() {
         let lease = RPCOption::new(Duration::from_millis(1_992));
+        let idle_bound = Duration::from_secs(5);
         assert_eq!(
-            append_request_deadline(&lease, AppendPath::Heartbeat),
+            append_request_deadline(&lease, AppendPath::Heartbeat, idle_bound),
             Duration::from_millis(1_992)
         );
         assert_eq!(
-            append_request_deadline(&lease, AppendPath::Replication),
+            append_request_deadline(&lease, AppendPath::Replication, idle_bound),
             Duration::from_millis(1_494)
         );
 
         let long_probe = RPCOption::new(Duration::from_secs(12));
         assert_eq!(
-            append_request_deadline(&long_probe, AppendPath::Replication),
-            REPLICATION_PROBE_DEADLINE_CEILING
+            append_request_deadline(&long_probe, AppendPath::Replication, idle_bound),
+            idle_bound
+        );
+        assert_eq!(
+            append_request_deadline(&long_probe, AppendPath::Replication, Duration::from_secs(2)),
+            Duration::from_secs(2)
         );
     }
 
@@ -807,20 +806,11 @@ mod tests {
     /// How long each answer takes from a follower that accepts no further bytes.
     const PROMPT_ANSWER: Duration = Duration::from_secs(4);
 
-    const _: () = assert!(
-        ACCEPTANCE_CADENCE.as_nanos() < APPEND_STREAM_IDLE_BOUND.as_nanos()
-            && PROMPT_ANSWER.as_nanos() < APPEND_STREAM_IDLE_BOUND.as_nanos(),
-        "every step of a healthy stream must fit inside one idle bound",
-    );
-    const _: () = assert!(
-        SLOW_ANSWER.as_nanos() > 2 * APPEND_STREAM_IDLE_BOUND.as_nanos()
-            && 2 * PROMPT_ANSWER.as_nanos() > APPEND_STREAM_IDLE_BOUND.as_nanos(),
-        "each healthy stream must outlast the idle bound it would miss if nothing moved",
-    );
-
     #[nervix_primitives::test(start_paused = true)]
     async fn a_follower_that_keeps_accepting_bytes_is_not_cut_while_its_answer_is_outstanding() {
-        let mut idle_bound = AppendStreamIdleBound::new(APPEND_STREAM_IDLE_BOUND);
+        let mut idle_bound = AppendStreamIdleBound::new(
+            <crate::AppendIdleBound as nervix_models::SettingDefinition>::default_value(&()),
+        );
         let started_at = Instant::now();
         let sender_accepted_at = Cell::new(started_at);
         // The follower keeps taking the leader's bytes and answers only after several bounds.
@@ -847,7 +837,9 @@ mod tests {
     #[nervix_primitives::test(start_paused = true)]
     async fn an_outstanding_batch_with_neither_an_answer_nor_accepted_bytes_is_cut_after_the_bound()
     {
-        let mut idle_bound = AppendStreamIdleBound::new(APPEND_STREAM_IDLE_BOUND);
+        let mut idle_bound = AppendStreamIdleBound::new(
+            <crate::AppendIdleBound as nervix_models::SettingDefinition>::default_value(&()),
+        );
         let started_at = Instant::now();
 
         let answered = idle_bound.answer(pending::<()>(), || started_at).await;
@@ -857,14 +849,17 @@ mod tests {
             "a stream that neither answered nor accepted bytes for the bound must be cut"
         );
         assert!(
-            started_at.elapsed() >= APPEND_STREAM_IDLE_BOUND,
+            started_at.elapsed()
+                >= <crate::AppendIdleBound as nervix_models::SettingDefinition>::default_value(&()),
             "the stream must not be cut before the whole bound passed"
         );
     }
 
     #[nervix_primitives::test(start_paused = true)]
     async fn a_follower_that_stops_accepting_bytes_is_cut_one_bound_after_its_last_acceptance() {
-        let mut idle_bound = AppendStreamIdleBound::new(APPEND_STREAM_IDLE_BOUND);
+        let mut idle_bound = AppendStreamIdleBound::new(
+            <crate::AppendIdleBound as nervix_models::SettingDefinition>::default_value(&()),
+        );
         let started_at = Instant::now();
         let sender_accepted_at = Cell::new(started_at);
         let answer = async {
@@ -880,11 +875,13 @@ mod tests {
             "a follower that stopped accepting bytes and never answered must be cut"
         );
         let since_last_acceptance = sender_accepted_at.get().elapsed();
-        let noticed_late = APPEND_STREAM_IDLE_BOUND
-            .checked_add(ACCEPTANCE_CADENCE)
-            .assured("an idle bound plus an acceptance cadence of seconds fits in a Duration");
+        let noticed_late =
+            <crate::AppendIdleBound as nervix_models::SettingDefinition>::default_value(&())
+                .checked_add(ACCEPTANCE_CADENCE)
+                .assured("an idle bound plus an acceptance cadence of seconds fits in a Duration");
         assert!(
-            since_last_acceptance >= APPEND_STREAM_IDLE_BOUND
+            since_last_acceptance
+                >= <crate::AppendIdleBound as nervix_models::SettingDefinition>::default_value(&())
                 && since_last_acceptance < noticed_late,
             "the stream must be cut one whole bound after the last acceptance, not \
              {since_last_acceptance:?} after it"
@@ -893,7 +890,9 @@ mod tests {
 
     #[nervix_primitives::test(start_paused = true)]
     async fn each_answer_restarts_the_bound_for_the_next_outstanding_batch() {
-        let mut idle_bound = AppendStreamIdleBound::new(APPEND_STREAM_IDLE_BOUND);
+        let mut idle_bound = AppendStreamIdleBound::new(
+            <crate::AppendIdleBound as nervix_models::SettingDefinition>::default_value(&()),
+        );
         let started_at = Instant::now();
 
         let first = idle_bound.answer(sleep(PROMPT_ANSWER), || started_at).await;

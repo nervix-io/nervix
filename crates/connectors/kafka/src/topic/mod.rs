@@ -33,7 +33,7 @@ pub use rdkafka as testing_rdkafka;
 mod delivery;
 mod ingestor;
 mod retirement;
-
+mod settings;
 use std::{
     ffi::c_int,
     future::Future,
@@ -76,6 +76,9 @@ use rdkafka::{
     producer::{BaseRecord, Producer, PurgeConfig, ThreadedProducer},
 };
 use retirement::{NativeClient, RetirementCharge, Retiring};
+pub use settings::{
+    KafkaDomainAssignmentRetry, KafkaTopicIngestorSettings, KafkaTopicSettingsError,
+};
 use thiserror::Error;
 
 const KAFKA: &str = "kafka";

@@ -64,12 +64,34 @@ use crate::{
 };
 
 /// The frame length prefix. One frame carries one encoded value and nothing else.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the current duplex wire form uses a u32 length prefix"
+    )
+)]
 const FRAME_HEADER_BYTES: usize = 4;
 
 /// How much of the next frame may already have arrived while the current one is still incomplete.
 /// A peer that buries a frame boundary further than this has stopped following the framing.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "bounds early next-frame bytes under the current framing-abuse contract"
+    )
+)]
 const FRAME_CARRY_SLACK_BYTES: u64 = 64 * 1024;
 /// What a reader charges before it has seen how large this stream's frames are.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "initial frame accounting uses one 4 KiB charge granule before the declared \
+                  length is read"
+    )
+)]
 const INITIAL_FRAME_CHARGE: u64 = 4 * 1024;
 
 /// The decoding of one frame a receive took off the stream, kept until a receive finishes it.

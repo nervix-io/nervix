@@ -246,6 +246,16 @@ copying the mapping arithmetic.
 {{#include ../../tests/client_conformance/c/suite/contract.h:clock_project}}
 ```
 
+After `NX_CLOCK_EVENT_INTERRUPTED`, a temporarily refused attachment reports
+`NX_CLOCK_EVENT_RESTORATION_FAILED` with its typed cause, borrowed message and positive retry wait
+in nanoseconds. The library keeps retrying; a later `STATE` restores the clock without another
+application attach. This example runs independently in both C and C++ and follows a scenario's
+injected `IN_TRANSACTION` refusal:
+
+```c
+{{#include ../../tests/client_conformance/c/suite/contract.h:clock_restoration_failed}}
+```
+
 ## Publish Through A Client Ingestor
 
 The shared C binding exposes the same producers and consumers to C and C++ hosts,

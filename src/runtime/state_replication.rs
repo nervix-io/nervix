@@ -35,7 +35,8 @@ pub(super) const DEFAULT_STATE_REPLICATION_POLL_INTERVAL: Duration = Duration::f
 const STATE_CHECKPOINT_ANNOUNCEMENT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 /// How many changes one page of an owner's branch checkpoint catalog lists. A change is a branch key
 /// and a revision, so a page stays far below the replication class's message limit.
-const BRANCH_CHECKPOINT_LISTING_PAGE: NonZeroUsize = nonzero_ext::nonzero!(256_usize);
+pub(in crate::runtime) const BRANCH_CHECKPOINT_LISTING_PAGE: NonZeroUsize =
+    nonzero_ext::nonzero!(256_usize);
 mod error;
 pub(crate) use self::error::{AwaitedReplicas, StateReplicationError};
 
@@ -1055,7 +1056,12 @@ impl Runtime {
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                 break;
             };
-            requests.push(self.request_state_sync_with_timeout(source, placement, None, remaining));
+            requests.push(self.request_state_sync_with_deadline(
+                source,
+                placement,
+                None,
+                nervix_interconnect::RequestDeadline::Explicit(remaining),
+            ));
         }
         while let Some(response) = requests.next().await {
             nervix_primitives::task::consume_budget().await;
@@ -2315,12 +2321,12 @@ impl Runtime {
                       revision"
         )
     )]
-    pub(super) async fn request_state_sync_with_timeout(
+    pub(super) async fn request_state_sync_with_deadline(
         &self,
         target_node_id: &ClusterNodeName,
         placement: &RuntimeStatePlacement,
         after_lsm: Option<u64>,
-        response_timeout: Duration,
+        response_deadline: nervix_interconnect::RequestDeadline,
     ) -> error_stack::Result<Option<PersistedRuntimeStateEntry>, StateReplicationError> {
         let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
             return Err(Report::new(StateReplicationError::DispatcherUnavailable {
@@ -2335,7 +2341,10 @@ impl Runtime {
                     placement: placement.to_remote(),
                     after_lsm,
                 },
-                response_timeout,
+                response_deadline.resolve(
+                    dispatcher.interconnect.request_timeout(),
+                    dispatcher.interconnect.liveness(),
+                ),
             )
             .await
             .change_context_lazy(|| StateReplicationError::Request {
@@ -2381,7 +2390,13 @@ impl Runtime {
             self.announce_checkpoint(offsets.placement(), offsets.replication(), lsm);
         }
         offsets
-            .wait_for_replica_quorum(lsm, SyncKafkaOffsets::default_timeout())
+            .wait_for_replica_quorum(
+                lsm,
+                SyncKafkaOffsets::DEADLINE.resolve(
+                    self.inner.interconnect_request_timeout,
+                    nervix_interconnect::InterconnectLiveness::default(),
+                ),
+            )
             .await
     }
 
@@ -2411,7 +2426,13 @@ impl Runtime {
         }
         self.announce_checkpoint(offsets.placement(), offsets.replication(), lsm);
         offsets
-            .wait_for_replica_quorum(lsm, SyncKafkaOffsets::default_timeout())
+            .wait_for_replica_quorum(
+                lsm,
+                SyncKafkaOffsets::DEADLINE.resolve(
+                    self.inner.interconnect_request_timeout,
+                    nervix_interconnect::InterconnectLiveness::default(),
+                ),
+            )
             .await
     }
 

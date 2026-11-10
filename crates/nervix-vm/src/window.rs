@@ -167,7 +167,7 @@ pub enum WindowAggregateStorageKind {
     /// The count, mean and centered second moment of one argument, for `AVG`, variance and
     /// standard deviation.
     Moments,
-    /// The earliest and latest contributing row by arrival, for `FIRST` and `LAST`.
+    /// Retained values ordered by arrival, for `FIRST`, `LAST` and `COLLECT_VEC`.
     Sequence,
     /// The exact or compensated sum of one argument, for `SUM`.
     Sum,
@@ -267,7 +267,7 @@ impl WindowAggregateFunction {
             }
             Self::Corr | Self::CovarPop | Self::CovarSamp => WindowAggregateStorageKind::CoMoments,
             Self::Count => WindowAggregateStorageKind::Counter,
-            Self::First | Self::Last => WindowAggregateStorageKind::Sequence,
+            Self::CollectVec | Self::First | Self::Last => WindowAggregateStorageKind::Sequence,
             Self::Max | Self::Min => WindowAggregateStorageKind::Extremes,
             Self::PercentileLinearHistogram => WindowAggregateStorageKind::Histogram,
             Self::Sum => WindowAggregateStorageKind::Sum,

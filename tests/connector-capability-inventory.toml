@@ -74,6 +74,13 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "metadata.user"
+entity = "CLIENT PRODUCER INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/client_producer_metadata.feature", scenario = "Client producer routes and arrival filters read the authenticated user on every batch row" },
+]
+
+[[capability]]
 capability = "MODE NO ACK"
 entity = "HTTP ENDPOINT INGESTOR"
 scenarios = [

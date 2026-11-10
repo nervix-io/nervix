@@ -89,6 +89,7 @@ fn one_instance_exposes_its_single_execution_and_several_instances_keep_distinct
         &named("instances"),
         std::slice::from_ref(&owner),
         0,
+        None,
         &crate::registry::uniform_capabilities(std::slice::from_ref(&owner)),
     );
     let identity = NodeRef::new(ModelKind::Ingestor, named::<ModelName>("source"));
@@ -117,6 +118,7 @@ fn one_instance_exposes_its_single_execution_and_several_instances_keep_distinct
         &named("instances"),
         std::slice::from_ref(&owner),
         0,
+        None,
         &crate::registry::uniform_capabilities(std::slice::from_ref(&owner)),
     );
     let source = &schedule.nodes[&identity];
@@ -133,6 +135,7 @@ fn independent_instances_spread_primaries_and_keep_their_own_replicas() {
         &named("instances"),
         &nodes,
         1,
+        None,
         &crate::registry::uniform_capabilities(&nodes),
     );
     let source = &schedule.nodes[&NodeRef::new(ModelKind::Ingestor, named::<ModelName>("source"))];
@@ -183,6 +186,7 @@ fn per_partition_groups_bind_only_the_corresponding_instance_and_relay_unit() {
         &named("instances"),
         &[named("node-1"), named("node-2"), named("node-3")],
         1,
+        None,
         &crate::registry::uniform_capabilities(&[
             named("node-1"),
             named("node-2"),

@@ -38,6 +38,7 @@ impl EmitterConnectorStarter {
                     topic: connector.topic.clone(),
                     mode: connector.mode,
                     retry_policy: plan.retry_policy,
+                    retry_settings: context.runtime.inner.connector_host.retry,
                     default_client_id: format!(
                         "{}~{}",
                         context.domain.as_str(),
