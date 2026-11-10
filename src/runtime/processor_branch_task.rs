@@ -1958,5 +1958,5 @@ mod dispatch_tests;
     nervix_lint,
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
-#[path = "processor_branch_task/tests.rs"]
+#[path = "processor_branch_task_tests.rs"]
 mod tests;
