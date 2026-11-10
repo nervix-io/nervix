@@ -11,6 +11,14 @@
     nervix_lint,
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "an entity swap of schedule publication replaces one emitter's unit tasks and \
+                  consumer registrations once per published revision"
+    )
+)]
 
 use error_stack::ResultExt as _;
 
