@@ -254,7 +254,7 @@ Deduplication state is branch-local. Duplicate details are logged at `debug` or 
 
 ```plexus
 SHOW DEDUPLICATOR unique_notifications STATE
-  FOR BRANCH VALUES { tenant = 'alpha' } LIMIT 100 FORMAT JSON;
+  FOR BRANCH KEY { tenant = 'alpha' } LIMIT 100 FORMAT JSON;
 ```
 
 `SHOW DEDUPLICATOR <name> STATE` reads one immutable publication per selected branch through the
@@ -351,7 +351,7 @@ pause.
 SHOW REORDERER ordered_notifications STATE
   FOR ALL BRANCHES LIMIT 100 FORMAT JSON;
 SHOW REORDERER ordered_notifications STATE
-  FOR BRANCH VALUES { tenant = 'alpha' } FORMAT TEXT;
+  FOR BRANCH KEY { tenant = 'alpha' } FORMAT TEXT;
 ```
 
 `SHOW REORDERER <name> STATE` reads the rows the reorderer holds back, as one `pending` section per
@@ -708,11 +708,11 @@ domain is a different processor and keeps its state. The scope is mandatory:
 USE sales;
 RESET WASM PROCESSOR normalize_events STATE FOR UNBRANCHED;
 RESET WASM PROCESSOR normalize_events STATE FOR ALL BRANCHES;
-RESET WASM PROCESSOR normalize_events STATE FOR BRANCH VALUES { tenant = 'acme' };
+RESET WASM PROCESSOR normalize_events STATE FOR BRANCH KEY { tenant = 'acme' };
 ```
 
 Use `FOR UNBRANCHED` only for an unbranched processor. Use `FOR ALL BRANCHES` or exact
-`FOR BRANCH VALUES` fields only for a branched processor. Values must match the declared branch
+`FOR BRANCH KEY` fields only for a branched processor. Key fields must match the declared branch
 schema exactly. A selected branch must already be active; the command does not create one.
 The selected branch loses its previous guest computation state and starts from the guest's initial
 state. Sibling branches keep their state and continue processing.

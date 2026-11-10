@@ -899,7 +899,7 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   the policy discards state for none of those under either value. Only an owner loss whose forced
   recovery cannot prepare the new owner recreates guest state without the guest's verdict.
 - To intentionally replace an existing WASM processor's guest state, use
-  `RESET WASM PROCESSOR <processor> STATE FOR UNBRANCHED|ALL BRANCHES|BRANCH VALUES { <field> = <literal>, ... };`.
+  `RESET WASM PROCESSOR <processor> STATE FOR UNBRANCHED|ALL BRANCHES|BRANCH KEY { <field> = <literal>, ... };`.
   It acts on the session's active domain, so `USE` that domain first.
   Choose the explicit scope that matches its declared branch, and supply every branch-key field
   with an exact typed literal for one selected branch. The processor must be running and the
