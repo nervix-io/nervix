@@ -78,7 +78,7 @@ The complete cluster-parameter record uses each declaration's validated inline s
 entity-label limits retain their full 64-bit range. The direct parameter property compares complete
 archive and JSON round trips; consensus state and log properties recover every field through their
 production storage codecs. The
-`raft_entity_policy_` namespace and `ClusterState` encoding 31 identify this current archive layout.
+`raft_entity_policy_` namespace and `ClusterState` encoding 32 identify this current archive layout.
 
 `RESET WASM PROCESSOR ... STATE` statement generators draw a processor and an unbranched,
 all-branches or concrete-branch scope; the statement takes its domain from the transaction that

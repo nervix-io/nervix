@@ -114,6 +114,10 @@ fails with `NX_ERROR_INVALID_ARGUMENT`. [Reading Typed Materialized
 State](client-implementation-manual.md#reading-typed-materialized-state) states what a client must
 preserve.
 
+`SHOW WASM PROCESSOR <processor> STATE` returns the same inspection handle. Its units have no
+sections; the JSON document carries the processor's pinned module as `wasm_binding` and each unit's
+lifetimes, counts and branch entries as `wasm`.
+
 ```c
 {{#include ../../tests/client_conformance/c/suite/contract.h:inspection}}
 ```

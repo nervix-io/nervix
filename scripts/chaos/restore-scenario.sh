@@ -64,16 +64,19 @@ restore_seed_guest_state() {
 # deployment's replica count confirmed, written to OUTPUT.
 restore_guest_checkpoints_committed() {
     local output="$1"
-    domain_cli_command 'DESCRIBE WASM PROCESSOR chaos_padded FORMAT JSON;' >"${output%.json}.txt" 2>&1 \
+    # A refused read (an owner failing over, a deadline) fails the command and is sampled again.
+    domain_cli_command 'SHOW WASM PROCESSOR chaos_padded STATE FORMAT JSON;' >"${output%.json}.txt" 2>&1 \
         || return 1
     # The answer is the JSON document after the administration container's own progress lines.
     sed -n '/^{/,$p' "${output%.json}.txt" >"${output}"
+    # One page must list every branch entry, so a continuation means entries were left unread.
     jq -e --argjson branches "${#restore_branches[@]}" --argjson replicas "${CHAOS_REPLICA_COUNT:-0}" '
-        [.units[].checkpoints[]] as $checkpoints
-        | ([.units[].checkpoint_counts.total] | add) == $branches
-        and all(.units[]; .checkpoint_counts.failed == 0)
+        [.units[].wasm.branches[].checkpoint | select(. != null)] as $checkpoints
+        | .outcome == "page" and .continuation == null
+        and ([.units[].wasm.checkpoints.total] | add) == $branches
+        and all(.units[]; .wasm.checkpoints.failed == 0)
         and ($checkpoints | length) == $branches
-        and all($checkpoints[]; .stage == "ReplicaConfirmed"
+        and all($checkpoints[]; .stage == "replica_confirmed"
                 and .committed_revision == .latest_revision
                 and .required_replicas == $replicas and .confirmed_replicas == $replicas)
     ' "${output}" >/dev/null 2>&1

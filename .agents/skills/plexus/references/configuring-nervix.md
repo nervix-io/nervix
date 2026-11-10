@@ -734,6 +734,9 @@ Choose checks relevant to the configured graph:
   the key's partition and its owner.
 - `SHOW RELAY <relay> MATERIALIZED STATE;` inspects materialized data and placement, masking
   `SENSITIVE` payload fields and branch-key fields on both the owner and other nodes.
+- `SHOW WASM PROCESSOR <processor> STATE;` reads guest-state lifetimes, resets, recoveries and
+  every selected branch's checkpoint at each unit's owner, with the same selection and paging
+  clauses.
 - `DESCRIBE INGESTOR`, `DESCRIBE JUNCTION`, other processor-specific `DESCRIBE` commands, and
   `DESCRIBE EMITTER` inspect runtime state and edge metrics. `SHOW INGESTORS;` lists every ingestor
   with the connector and entity it reads (`from=<CONNECTOR> <ENTITY>`), its owner and state, and a
@@ -752,9 +755,9 @@ Choose checks relevant to the configured graph:
   `nervix_branch_instances` per domain, branch declaration, and physical node, plus
   `nervix_branch_evictions_total` split by `reason="lru"` or `reason="ttl"`.
 - A server error, negative acknowledgement or log names a concrete branch as `branch <fingerprint>`
-  or `unbranched`, never by key values. Match the fingerprint to the one `DESCRIBE WASM PROCESSOR`
-  and `DESCRIBE BACKUP` print, and read key values from a subscription, which masks `SENSITIVE`
-  key fields.
+  or `unbranched`, never by key values. Match the fingerprint to the one
+  `SHOW WASM PROCESSOR <processor> STATE` and `DESCRIBE BACKUP` print, and read key values from a
+  subscription, which masks `SENSITIVE` key fields.
 - `DESCRIBE RESOURCE` confirms uploads and reports `latest`, the completed version `VERSION LATEST`
   would bind now; `SHOW CREATE` shows the version each existing binding stores.
 - `BACKUP CLUSTER TO '<file>';` or `BACKUP DOMAIN [<name>] TO '<file>' [WITHOUT RESOURCES]

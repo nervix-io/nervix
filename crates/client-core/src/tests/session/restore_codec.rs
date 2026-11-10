@@ -694,7 +694,6 @@ async fn assert_retry_preserves_the_original_archive(reply: ScriptedReply) {
             transaction_admission: None,
             inspection: None,
             entity_labels: None,
-            wasm_state: None,
             state: None,
             resource: None,
             backup: None,

@@ -613,7 +613,6 @@ fn subscription_outcome(
         transaction_admission: None,
         inspection: None,
         entity_labels: None,
-        wasm_state: None,
         state: None,
         resource: None,
         backup: None,

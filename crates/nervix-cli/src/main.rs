@@ -809,9 +809,9 @@ fn is_json_inspection_command(query: &str) -> bool {
     };
     match statement {
         Statement::DescribeTransaction(describe) => describe.format == InspectionFormat::Json,
-        Statement::DescribeWasmProcessor(describe) => describe.format == InspectionFormat::Json,
         Statement::ShowRelayMaterializedState(show) => show.format == InspectionFormat::Json,
         Statement::ShowProcessorState(show) => show.format == InspectionFormat::Json,
+        Statement::ShowWasmProcessorState(show) => show.format == InspectionFormat::Json,
         _ => false,
     }
 }
@@ -868,7 +868,7 @@ async fn run_json_inspection_mode(
             message: outcome.message,
         }));
     }
-    if outcome.inspection.is_none() && outcome.state.is_none() && outcome.wasm_state.is_none() {
+    if outcome.inspection.is_none() && outcome.state.is_none() {
         let message = "the inspection response contained no typed report";
         print_json_inspection_error("REPORT_MISSING", message);
         return Err(StackReport::new(ClientError::InspectionFailed {
@@ -1902,7 +1902,10 @@ mod tests {
             "SHOW RELAY events MATERIALIZED STATE FOR UNBRANCHED LIMIT 1 FORMAT JSON;"
         ));
         assert!(is_json_inspection_command(
-            "DESCRIBE WASM PROCESSOR worker FORMAT JSON;"
+            "SHOW WASM PROCESSOR worker STATE FOR ALL BRANCHES LIMIT 1 FORMAT JSON;"
+        ));
+        assert!(!is_json_inspection_command(
+            "SHOW WASM PROCESSOR worker STATE;"
         ));
         assert!(is_json_inspection_command(
             "SHOW REORDERER held STATE FOR ALL BRANCHES LIMIT 2 FORMAT JSON;"

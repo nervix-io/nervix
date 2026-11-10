@@ -273,19 +273,22 @@ stateful_checkpoints_committed() {
     local host="$1"
     local output="$2"
     cli_host="${host}"
-    domain_cli_command 'DESCRIBE WASM PROCESSOR chaos_counter FORMAT JSON;' >"${output%.json}.txt" 2>&1 \
+    # A refused read (an owner failing over, a deadline) fails the command and is sampled again.
+    domain_cli_command 'SHOW WASM PROCESSOR chaos_counter STATE FORMAT JSON;' >"${output%.json}.txt" 2>&1 \
         || return 1
     # The answer is the JSON document after the administration container's own progress lines.
     sed -n '/^{/,$p' "${output%.json}.txt" >"${output}"
     local active_units=1
     if ((stateful_partitions > 1)); then active_units=2; fi
+    # One page must list every branch entry, so a continuation means entries were left unread.
     jq -e --argjson replicas "${CHAOS_REPLICA_COUNT:-0}" --argjson active_units "${active_units}" '
-        [.units[].checkpoints[]] as $checkpoints
-        | ([.units[].checkpoint_counts.total] | add) == 2
-        and ([.units[] | select(.checkpoint_counts.total > 0)] | length) == $active_units
-        and all(.units[]; .checkpoint_counts.failed == 0)
+        [.units[].wasm.branches[].checkpoint | select(. != null)] as $checkpoints
+        | .outcome == "page" and .continuation == null
+        and ([.units[].wasm.checkpoints.total] | add) == 2
+        and ([.units[] | select(.wasm.checkpoints.total > 0)] | length) == $active_units
+        and all(.units[]; .wasm.checkpoints.failed == 0)
         and ($checkpoints | length) == 2
-        and all($checkpoints[]; .stage == "ReplicaConfirmed"
+        and all($checkpoints[]; .stage == "replica_confirmed"
                 and .committed_revision == .latest_revision
                 and .required_replicas == $replicas and .confirmed_replicas == $replicas)
     ' "${output}" >/dev/null 2>&1
@@ -460,7 +463,7 @@ stateful_recover() {
     stateful_recovered_ms="$(( $(epoch_ms) - node_fault_started_ms ))"
     cli_host="${node_hosts[0]}"
     cli_command 'SHOW CLUSTER STATUS;' >"${case_dir}/recovered/cluster-status.txt" 2>&1 || true
-    domain_cli_command 'DESCRIBE WASM PROCESSOR chaos_counter FORMAT JSON;' \
+    domain_cli_command 'SHOW WASM PROCESSOR chaos_counter STATE FORMAT JSON;' \
         >"${case_dir}/recovered/wasm-checkpoints.txt" 2>&1 || true
     stateful_profiles_at "${stateful_profile_milestone}" "${node_hosts[0]}" "${case_dir}/recovered/profiles" || true
 }

@@ -974,7 +974,6 @@ fn command_outcome(disposition: CommandDisposition, subscription: bool) -> Comma
         transaction: None,
         transaction_admission: None,
         inspection: None,
-        wasm_state: None,
         state: None,
         resource: None,
         subscription: subscription.then(|| Box::new(opened)),
