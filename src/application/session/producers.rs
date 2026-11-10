@@ -41,7 +41,7 @@ use nervix_client_wire::{
 use nervix_models::{
     ClientOutcomeUncertainty, ClientProducerEndReason, ClientProducerGrant, ClientProducerRefusal,
     ClientSubmissionOutcome, ClientSubmissionRefusal, DomainStatus, IngestorInput,
-    MAX_CLIENT_PRODUCERS_PER_SESSION,
+    MAX_CLIENT_PRODUCERS_PER_SESSION, UserName,
 };
 use nervix_primitives::sync::{Arc, blocking::Mutex, mpsc};
 use nervix_recovery::Discarded as _;
@@ -277,12 +277,13 @@ impl SessionProducers {
         shared: &Arc<SessionShared>,
         request_id: RequestId,
         open: OpenIngestorRequest,
+        user: UserName,
         in_transaction: bool,
     ) {
         let producer = ProducerId::opened_by(request_id);
         let domain = open.domain.clone();
         let ingestor = open.ingestor.clone();
-        let opened = self.attach(shared, open, in_transaction).await;
+        let opened = self.attach(shared, open, user, in_transaction).await;
         let (route, hold) = match opened {
             Ok(attached) => attached,
             Err(OpenRefusal { refusal, message }) => {
@@ -364,6 +365,7 @@ impl SessionProducers {
         &self,
         shared: &Arc<SessionShared>,
         open: OpenIngestorRequest,
+        user: UserName,
         in_transaction: bool,
     ) -> Result<(OpenedRoute, ProducerHold), OpenRefusal> {
         let OpenIngestorRequest {
@@ -490,6 +492,7 @@ impl SessionProducers {
         let max_batch_bytes = NonZeroU64::new(max_batch_bytes)
             .assured("a frame limit leaves room for a batch beside the submission envelope");
         let request = ProducerOpen {
+            user,
             domain: domain.clone(),
             ingestor: ingestor.clone(),
             expected_fields,

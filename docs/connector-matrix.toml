@@ -4,7 +4,6 @@
 [entity."CLIENT PRODUCER"]
 ingest_headers = "Native Arrow batches cross an application session; producers submit batches and consumers explicitly acknowledge delivery attempts, with no broker envelope."
 ingest_locator = "The body references the native schema; there is no external topic, queue or table to locate."
-metadata = "Application batches have no broker envelope, peer address or external message attributes; the native schema describes each row."
 mirror = "Native Arrow batches cross an application session; producers submit batches and consumers explicitly acknowledge delivery attempts, with no broker envelope."
 
 [entity."HTTP REQUEST"]

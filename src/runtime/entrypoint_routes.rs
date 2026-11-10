@@ -117,7 +117,7 @@ pub(super) struct BoundEntryRoute {
 pub(super) struct BoundIngestorRoutes {
     /// Every route in declared order, which is never empty.
     pub(super) routes: Vec<BoundEntryRoute>,
-    /// The declared metadata fields these routes and the ingestor's `TIMESTAMP AT` read, whose
+    /// The declared metadata fields the arrival filter, routes and `TIMESTAMP AT` read, whose
     /// columns, and no others, every ingest group of the ingestor builds.
     pub(super) metadata: Arc<IngestMetadataProjection>,
 }
@@ -248,6 +248,7 @@ impl ExecutionBuildDeps<'_> {
                     self.compile_context(&unbranched),
                     RuntimeFilterScope::Ingestor {
                         allow_header_reads: ingestor.reads_headers(),
+                        metadata: ingestor.metadata_declaration(),
                         payload: ingestor.payload_declaration(),
                     },
                 )
@@ -312,11 +313,8 @@ impl ExecutionBuildDeps<'_> {
         })
     }
 
-    /// The declared metadata fields routes and `TIMESTAMP AT` read, plus the payload facts the
-    /// arrival filter and routes read.
-    ///
-    /// A route program is the only program that binds the `metadata` namespace, and the clause is
-    /// the only other reader, so an ingestor reading neither builds no metadata column.
+    /// The metadata fields the arrival filter, routes and `TIMESTAMP AT` read, plus their payload
+    /// facts. An ingestor reading neither builds no metadata column.
     fn metadata_projection(
         ingestor: &IngestorSpec,
     ) -> Result<Arc<IngestMetadataProjection>, Report<IngestMetadataError>> {
@@ -335,7 +333,9 @@ impl ExecutionBuildDeps<'_> {
         }
         if let Some(filter) = &ingestor.filter_where {
             for (namespace, field) in collect_program_field_refs(&filter.program().inner) {
-                if namespace == INGEST_PAYLOAD_NAMESPACE {
+                if namespace == INGEST_METADATA_NAMESPACE {
+                    read.push(field);
+                } else if namespace == INGEST_PAYLOAD_NAMESPACE {
                     payload_read.push(field);
                 }
             }
@@ -658,6 +658,51 @@ mod tests {
         let route = &bound.routes.routes[0];
         assert_eq!(route.relay, named("keyed"));
         assert!(matches!(route.branch, BoundRouteBranch::Constructed(_)));
+    }
+
+    #[test]
+    fn client_user_metadata_is_projected_when_only_the_arrival_filter_reads_it() {
+        let fixture = EntrypointTestDomain {
+            relays: &["events"],
+            fields: FIELDS,
+            branch_fields: &[],
+        };
+        let domain = domain("default");
+        let plans = fixture.plan(
+            &domain,
+            vec![Model::Ingestor(CreateIngestor {
+                name: named("source"),
+                output_routes: with_inherit_all(ProcessorOutputs::single(named("events")))
+                    .with_flush_policy(FlushPolicy::Immediate)
+                    .with_branch(OutputBranch::Unbranched),
+                input: nervix_models::IngestorInput::Client(
+                    nervix_models::ClientProducerIngestor {
+                        schema: named("entrypoint_payload"),
+                        mode: nervix_models::ClientIngestMode {
+                            window: nervix_models::AckWindow::Sequential,
+                            ack_timeout: "30s".to_string(),
+                            retry_policy: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                        },
+                    },
+                ),
+                timestamp_source: None,
+                general_error_policy: GeneralErrorPolicy::Log,
+                filter_where: Some(expression("metadata.user = 'alice'")),
+            })],
+        );
+        let plan = plans
+            .ingestor(&named("source"), Unit::SINGLE)
+            .assured("the fixture schedules the client ingestor");
+        let surfaces = NodeSurfaces::of(&fixture);
+        let bound = surfaces
+            .deps(&domain)
+            .bind_ingestor(&plan.ingestor, &fixture.codec().schema())
+            .assured("the arrival filter binds the client's declared metadata");
+        assert!(bound.filter_where.is_some());
+        assert!(bound.routes.metadata.reads_any());
     }
 
     #[test]
