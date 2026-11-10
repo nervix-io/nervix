@@ -42,18 +42,18 @@ use nervix_interconnect::{
     LookupResponse as RemoteLookupResponse, RemoteOperationFailure, RemoteOperationSubject,
 };
 use nervix_models::{
-    BranchPartitions, ClusterNodeName, CodecName, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
-    CreateEndpoint, CreateIngestor, CreateJunction, CreateLookup, CreatePlacement,
-    CreateReingestor, CreateReorderer, CreateUdf, CreateWasmProcessor, CreateWindowProcessor,
-    DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
-    DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor,
-    DescribeRelay, DescribeReorderer, DescribeResource, DescribeUdf, DescribeWasmProcessor,
-    DescribeWindowProcessor, DomainName, DomainStatus, EmitterName, FieldName, IngestorName,
-    InspectionFormat, LookupName, LookupQuery, Model, ModelKind, ModelName, NodeRef, ParseAsType,
+    BranchPartitions, ClusterNodeName, CodecName, CreateCodec, CreateCorrelator,
+    CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction,
+    CreateLookup, CreatePlacement, CreateReingestor, CreateReorderer, CreateUdf,
+    CreateWasmProcessor, CreateWindowProcessor, DescribeCorrelator, DescribeDeduplicator,
+    DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction,
+    DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer,
+    DescribeResource, DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainName,
+    DomainSchedule, DomainStatus, EmitterName, FieldName, IngestorName, InspectionFormat,
+    LookupName, LookupQuery, Model, ModelKind, ModelName, NodeRef, ParseAsType,
     ResourceDescription, ResourceId, ResourceName, ResourceUsage, ResourceVersion,
-    ResourceVersionDescription, ResourceVersionEntries, ScheduledNode,
-    SchemaName, DomainSchedule, Unit, UnitKind,
-    UniquelyKindedModel, WasmStateInspection,
+    ResourceVersionDescription, ResourceVersionEntries, ScheduledNode, SchemaName,
+    UniquelyKindedModel, Unit, UnitKind, WasmStateInspection,
 };
 use nervix_vm::window::{WindowAggregateProgram, lower_window_assignments};
 use tracing::{debug, warn};
@@ -61,7 +61,8 @@ use tracing::{debug, warn};
 use super::{
     command_result::CommandResult,
     describe_output::{
-        EmitterInstanceStatus, EmitterInstanceSummary, append_metrics_lines, dataflow_node_status_from_envelope, dataflow_node_status_to_envelope,
+        EmitterInstanceStatus, EmitterInstanceSummary, append_metrics_lines,
+        dataflow_node_status_from_envelope, dataflow_node_status_to_envelope,
         format_correlator_describe_output, format_deduplicator_describe_output,
         format_emitter_describe_output, format_endpoint_describe_output,
         format_ingestor_describe_output, format_ingestor_listing_line,
@@ -1618,10 +1619,7 @@ impl SessionServiceImpl {
             summaries.push(self.emitter_instance_summary(
                 domain,
                 &emitter.name,
-                EmitterInstanceUnit {
-                    unit: *unit,
-                    index,
-                },
+                EmitterInstanceUnit { unit: *unit, index },
                 owner,
                 served,
             ));

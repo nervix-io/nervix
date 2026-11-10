@@ -18,9 +18,9 @@ use nervix_models::{
     ClientConfigKey, ClientConfigNamespace, ClientConfigOwner, ClientConfigPresence,
     ClientConfigValue, ClientDeclaration, ClientPooling, ConnectorKind, DeclaredBounds,
     EmitterBatchLegality, EmitterBodyForm, EmitterEntityCapabilities, EmitterEntityKind,
-    EmitterInstancingCapability, EmitterReferenceKind, HeaderModel, IngestorEntityCapabilities, IngestorEntityKind,
-    IngestorReferenceKind, LocatorDeclaration, LocatorName, OmittedDeadline, OptionDeclaration,
-    OptionForm, OptionPresence, OptionValue, OtelEmitterEntity, OtelValueField,
+    EmitterInstancingCapability, EmitterReferenceKind, HeaderModel, IngestorEntityCapabilities,
+    IngestorEntityKind, IngestorReferenceKind, LocatorDeclaration, LocatorName, OmittedDeadline,
+    OptionDeclaration, OptionForm, OptionPresence, OptionValue, OtelEmitterEntity, OtelValueField,
     SYSLOG_FRAME_LIMITS, SyslogEmitterEntity, WaitBound,
 };
 use serde_json::{Value, json};

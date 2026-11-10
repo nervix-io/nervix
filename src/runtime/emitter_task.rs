@@ -78,7 +78,11 @@ impl EmitterConnectorContext {
     /// The key of this exact emitter unit in the node's emitter registries.
     pub(super) fn registry_key(&self) -> DomainNodeUnitRef {
         DomainNodeUnitRef::new(
-            DomainNodeRef::node_in(self.domain.clone(), ModelKind::Emitter, self.emitter.clone()),
+            DomainNodeRef::node_in(
+                self.domain.clone(),
+                ModelKind::Emitter,
+                self.emitter.clone(),
+            ),
             self.unit,
         )
     }
@@ -1125,7 +1129,11 @@ impl EmitterTask {
                  an interaction",
             );
             let emitter_key = DomainNodeUnitRef::new(
-                DomainNodeRef::node_in(task_domain.clone(), ModelKind::Emitter, task_emitter.clone()),
+                DomainNodeRef::node_in(
+                    task_domain.clone(),
+                    ModelKind::Emitter,
+                    task_emitter.clone(),
+                ),
                 unit,
             );
             let status = runtime.emitter_status(&emitter_key);

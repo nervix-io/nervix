@@ -350,12 +350,14 @@ fn shuttle_emitter_instances_receive_only_their_partitions_while_a_sibling_moves
                             handed_over.push((*unit, key));
                         }
                         drop(consumer);
-                        moving_services.remove_local_unit_runtime_consumer(AckMode::Attached, *unit);
+                        moving_services
+                            .remove_local_unit_runtime_consumer(AckMode::Attached, *unit);
                     }
                     let mut successors = Vec::new();
                     for unit in &moving_units {
                         successors.push(
-                            moving_services.add_local_unit_runtime_consumer(AckMode::Attached, *unit),
+                            moving_services
+                                .add_local_unit_runtime_consumer(AckMode::Attached, *unit),
                         );
                     }
                     drop(leases);
@@ -385,7 +387,10 @@ fn shuttle_emitter_instances_receive_only_their_partitions_while_a_sibling_moves
                 }
                 for (unit, key) in &delivered_moving {
                     assert!(moving.contains(unit));
-                    assert_eq!(key, &keys[unit], "a moved partition receives only its own batch");
+                    assert_eq!(
+                        key, &keys[unit],
+                        "a moved partition receives only its own batch"
+                    );
                 }
                 for (unit, completion) in completions {
                     let outcome = completion.wait().await;
@@ -397,7 +402,10 @@ fn shuttle_emitter_instances_receive_only_their_partitions_while_a_sibling_moves
                         assert_eq!(outcome, AckOutcome::Ack);
                         continue;
                     }
-                    assert!(deliveries <= 1, "a moved partition's batch is delivered at most once");
+                    assert!(
+                        deliveries <= 1,
+                        "a moved partition's batch is delivered at most once"
+                    );
                     let admitted = published
                         .iter()
                         .any(|(published, ok)| *published == unit && *ok);

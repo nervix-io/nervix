@@ -559,9 +559,9 @@ Emitter destination observations describe the host's interaction with a connecto
 from delivered graph traffic. Both interaction families carry `domain`, `emitter`,
 `physical_node_id`, `instance`, `connector` and `entity`. `instance` is the index of an emitter
 [instance](emitters.md#emitter-instances), or `-` for an emitter that runs one instance, so every
-instance of one emitter on one node keeps its own children. Connector names use the vocabulary's display form,
-such as `REDIS`; entities use their declared name, such as `PUBSUB`. `operation` is `publish` or
-`commit`. Each starting emitter registers every operation/outcome child and histogram at zero,
+instance of one emitter on one node keeps its own children. Connector names use the vocabulary's
+display form, such as `REDIS`; entities use their declared name, such as `PUBSUB`. `operation` is
+`publish` or `commit`. Each starting emitter registers every operation/outcome child and histogram at zero,
 even if that connector has no separate commit operation.
 
 `nervix_emitter_publish_attempts_total` records one outcome per nonempty host publish attempt or

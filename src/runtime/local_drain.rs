@@ -493,7 +493,8 @@ impl LocalDomainDrainSources for RuntimeDomainDrainSources<'_> {
     fn publishing_emitters(&self) -> usize {
         let mut publishing = 0;
         for waits in self.runtime.inner.emitter_confirmation_waits.iter() {
-            if &waits.key().entity.domain == self.domain && waits.value().load(Ordering::Acquire) != 0
+            if &waits.key().entity.domain == self.domain
+                && waits.value().load(Ordering::Acquire) != 0
             {
                 LocalDomainDrainStatus::tally(&mut publishing, 1);
             }

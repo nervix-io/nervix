@@ -2779,7 +2779,9 @@ fn alter_emitter_operation_to_plexus(
         }
         AlterEmitterOperation::DropCollect => Ok("DROP COLLECT".to_string()),
         AlterEmitterOperation::SetAttachment { mode } => Ok(format!("SET {}", mode.as_ref())),
-        AlterEmitterOperation::SetInstances { instances } => Ok(format!("SET INSTANCES {instances}")),
+        AlterEmitterOperation::SetInstances { instances } => {
+            Ok(format!("SET INSTANCES {instances}"))
+        }
         AlterEmitterOperation::SetBatch { policy } => {
             Ok(format!("SET {}", emitter_batch_policy_to_plexus(policy)))
         }

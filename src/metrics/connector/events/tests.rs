@@ -63,10 +63,11 @@ fn emitter_events_register_at_zero_and_refuse_undeclared_identities() {
         .iter()
         .map(|label| (label.name(), label.value()))
         .collect();
-    assert_eq!(labels.len(), 6);
+    assert_eq!(labels.len(), 7);
     assert_eq!(labels["domain"], "event_metrics");
     assert_eq!(labels["emitter"], "output");
     assert_eq!(labels["physical_node_id"], "node-1");
+    assert_eq!(labels["instance"], "-");
     assert_eq!(labels["connector"], redis().connector().to_string());
     assert_eq!(labels["entity"], redis().entity_keyword());
     assert_eq!(labels["event"], EVENT.to_string());

@@ -18,9 +18,8 @@ use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use meticulous::OptionExt;
 use nervix_models::{
     ClusterNodeName, DomainName, DomainSchedule, Model, ModelKind, NodeCapabilities, NodeRef,
-    NodeUnitRef,
-    PlacementGroupSchedule, PlacementPolicy, ScheduledNode, ScheduledNodes, SchemaFingerprint,
-    Unit,
+    NodeUnitRef, PlacementGroupSchedule, PlacementPolicy, ScheduledNode, ScheduledNodes,
+    SchemaFingerprint, Unit,
 };
 use num_rational::Ratio;
 use petgraph::{Direction, graph::DiGraph, prelude::NodeIndex, visit::EdgeRef};
@@ -704,7 +703,12 @@ impl ActiveGraph {
                     } else if units.len() > 1 {
                         let (unit_affinity, placement_order) = if node.kind == ModelKind::Emitter {
                             (
-                                served_partition_affinity(&self.graph, index, unit, &assigned_by_unit),
+                                served_partition_affinity(
+                                    &self.graph,
+                                    index,
+                                    unit,
+                                    &assigned_by_unit,
+                                ),
                                 placement_unit_affinity_scores(
                                     &member,
                                     &placement.pairs,
@@ -713,33 +717,33 @@ impl ActiveGraph {
                                 ),
                             )
                         } else if matches!(unit.kind(), nervix_models::UnitKind::Partition(_)) {
-                                let mut affinity = HashMap::new();
-                                partition_locality_affinity(
-                                    &self.graph,
-                                    index,
-                                    unit,
-                                    &assigned_by_unit,
-                                    &mut HashSet::new(),
-                                    &mut affinity,
-                                );
-                                let order = placement_unit_affinity_scores(
+                            let mut affinity = HashMap::new();
+                            partition_locality_affinity(
+                                &self.graph,
+                                index,
+                                unit,
+                                &assigned_by_unit,
+                                &mut HashSet::new(),
+                                &mut affinity,
+                            );
+                            let order = placement_unit_affinity_scores(
+                                &member,
+                                &placement.pairs,
+                                &self.placement.topology,
+                                &assigned_by_unit,
+                            );
+                            (affinity, order)
+                        } else {
+                            (
+                                HashMap::new(),
+                                placement_unit_affinity_scores(
                                     &member,
                                     &placement.pairs,
                                     &self.placement.topology,
                                     &assigned_by_unit,
-                                );
-                                (affinity, order)
-                            } else {
-                                (
-                                    HashMap::new(),
-                                    placement_unit_affinity_scores(
-                                        &member,
-                                        &placement.pairs,
-                                        &self.placement.topology,
-                                        &assigned_by_unit,
-                                    ),
-                                )
-                            };
+                                ),
+                            )
+                        };
                         #[cfg(feature = "testing")]
                         if let Some(random) = &random_assignment_planner {
                             random.unit_assignment(&key, position)
@@ -893,8 +897,8 @@ mod tests {
     use nervix_models::{
         AckMode, BranchSelection, CodecName, CreateIngestor, CreateJunction, EndpointName,
         GeneralErrorPolicy, HttpEndpointIngestor, HttpIngestor, IngestorEntity, IngestorName,
-        ProcessorInputs, SyslogIngestor, SyslogListenerIngestor,
-        WebsocketsEndpointIngestor, WebsocketsIngestor,
+        ProcessorInputs, SyslogIngestor, SyslogListenerIngestor, WebsocketsEndpointIngestor,
+        WebsocketsIngestor,
     };
     use nonzero_ext::nonzero;
 

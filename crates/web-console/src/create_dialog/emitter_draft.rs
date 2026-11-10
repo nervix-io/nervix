@@ -421,9 +421,14 @@ impl EmitterDraft {
         let envelope = self.envelope.build(connector.kind())?;
         let instances = self.build_instances()?;
         if !instances.is_one()
-            && let Some(refusal) = connector.capabilities().instancing.refusal(connector.kind())
+            && let Some(refusal) = connector
+                .capabilities()
+                .instancing
+                .refusal(connector.kind())
         {
-            return Err(Report::new(refusal).change_context(EmitterDraftError::Invalid("instances")));
+            return Err(
+                Report::new(refusal).change_context(EmitterDraftError::Invalid("instances"))
+            );
         }
         let emitter = CreateEmitter {
             instances,

@@ -79,7 +79,8 @@ Nervix resolves S3, GCS or Azure Blob from that client's kind. Its `NAMESPACE`, 
 Database conflict clauses follow `VALUES`.
 
 The optional `INSTANCES` clause follows the complete `FROM` list and its collection policy, and the
-optional input acknowledgement clause follows it, before materialized-state dependencies and `TO`. Omitting it selects `ATTACHED`.
+optional input acknowledgement clause follows it, before materialized-state dependencies and `TO`.
+Omitting the acknowledgement clause selects `ATTACHED`.
 Canonical Plexus and `SHOW CREATE EMITTER` always write the mode explicitly in that position.
 `ALTER <CONNECTOR> <ENTITY> EMITTER ... SET ATTACHED | SET DETACHED` changes the same input contract.
 The head keeps the emitter's connector and entity while that operation changes its body property;
@@ -1184,8 +1185,8 @@ installs the new cadence, and receives a force-flush kick, so buffered output is
 nor re-encoded. Source-predicate, destination, option, publishing-mode, client, codec, envelope,
 construction, collection, batching, attachment, instance and general error policy changes use
 `ENTITY_PAUSE`: Nervix gates all of the emitter's source relays, drains collected input and pending
-emitter output, replaces that emitter's tasks, one per instance, and releases the gates. Changing source membership uses
-`DOMAIN_PAUSE` because it changes graph topology. Other relays continue flowing during an entity
+emitter output, replaces that emitter's tasks, one per instance, and releases the gates. Changing
+source membership uses `DOMAIN_PAUSE` because it changes graph topology. Other relays continue flowing during an entity
 pause; sibling consumers of a gated source may see bounded backpressure until the gate is released.
 The complete candidate graph is validated before any change is committed.
 

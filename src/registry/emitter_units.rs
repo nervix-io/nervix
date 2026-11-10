@@ -81,9 +81,10 @@ impl EmitterUnits {
                 std::alloc::Layout::array::<(Unit, nervix_models::ScheduledUnit)>(capacity)
                     .change_context(EmitterInstancingError::UnaddressableCount { count })
                     .change_context_lazy(context)?;
-                let last = count.get().checked_sub(1).verified(
-                    "a nonzero count has a last instance index",
-                );
+                let last = count
+                    .get()
+                    .checked_sub(1)
+                    .verified("a nonzero count has a last instance index");
                 Unit::try_instance(last)
                     .change_context(EmitterInstancingError::UnaddressableCount { count })
                     .change_context_lazy(context)?;
@@ -120,7 +121,8 @@ impl EmitterUnits {
                 // Reference validation reports a missing input relay with its own error.
                 continue;
             };
-            let resolved = resolved_branch_selection(domain, &identifier, models, &model.branching)?;
+            let resolved =
+                resolved_branch_selection(domain, &identifier, models, &model.branching)?;
             match &shared {
                 None => shared = Some(resolved),
                 Some(expected) => {
@@ -128,10 +130,12 @@ impl EmitterUnits {
                         return Err(Report::new(EmitterInstancingError::DifferentBranch {
                             relay: relay.clone(),
                         })
-                        .change_context(RegistryError::EmitterInstancing {
-                            domain: domain.clone(),
-                            emitter: emitter.name.clone(),
-                        }));
+                        .change_context(
+                            RegistryError::EmitterInstancing {
+                                domain: domain.clone(),
+                                emitter: emitter.name.clone(),
+                            },
+                        ));
                     }
                 }
             }

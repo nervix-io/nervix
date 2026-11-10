@@ -60,7 +60,10 @@ fn sink(instances: EmitterInstances, inputs: &[&str]) -> CreateEmitter {
     };
     sink.instances = instances;
     sink.from = ProcessorInputs::new(
-        inputs.iter().map(|relay| named::<RelayName>(relay)).collect(),
+        inputs
+            .iter()
+            .map(|relay| named::<RelayName>(relay))
+            .collect(),
         Vec::new(),
     );
     sink
@@ -141,7 +144,10 @@ fn a_counted_emitter_is_a_fiber_whose_instances_serve_partitions_modulo_their_co
     let emitter = graph
         .node(ModelKind::Emitter, &named::<ModelName>("sink"))
         .expect("the emitter is active");
-    assert_eq!(emitter.emitter_units, Some(EmitterUnits::Instances(nonzero!(3u64))));
+    assert_eq!(
+        emitter.emitter_units,
+        Some(EmitterUnits::Instances(nonzero!(3u64)))
+    );
     let correspondence = UnitCorrespondence::decide(relay, emitter);
     assert_eq!(correspondence.class, HopClass::Fiber);
     for (relay_unit, served_by) in [(0, 0), (1, 1), (2, 2), (3, 0)] {
@@ -152,9 +158,11 @@ fn a_counted_emitter_is_a_fiber_whose_instances_serve_partitions_modulo_their_co
             [instance(served_by)]
         );
     }
-    let served = [vec![partition(0), partition(3)], vec![partition(1)], vec![
-        partition(2),
-    ]];
+    let served = [
+        vec![partition(0), partition(3)],
+        vec![partition(1)],
+        vec![partition(2)],
+    ];
     for (index, partitions) in (0_u64..).zip(served) {
         assert_eq!(
             correspondence

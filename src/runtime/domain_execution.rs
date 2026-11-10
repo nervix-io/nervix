@@ -761,10 +761,7 @@ impl Runtime {
                 for input in &emitter.inputs {
                     let Some(relay) = relay_builders.get_mut(&input.relay) else {
                         return Err(Report::new(ExecutionBuildError::MissingInputRelay {
-                            node: NodeRef::new(
-                                ModelKind::Emitter,
-                                ModelName::from(&emitter.name),
-                            ),
+                            node: NodeRef::new(ModelKind::Emitter, ModelName::from(&emitter.name)),
                             relay: input.relay.clone(),
                         })
                         .change_context(build()));

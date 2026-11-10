@@ -352,8 +352,7 @@ async fn then_emitter_instances_follow_their_served_partitions(
             .assured("every partition maps to one of the declared instances");
         assert_eq!(
             instance_owner, partition_owner,
-            "instance {instance} must share the owner of partition {partition} it serves: \
-             {status}"
+            "instance {instance} must share the owner of partition {partition} it serves: {status}"
         );
     }
 }
@@ -417,8 +416,8 @@ async fn save_instance_owner_other_than(
 }
 
 #[then(
-    expr = "within {string} node {string} eventually reports {word} {string} instances moved \
-            from node {string} and all other owners unchanged from placeholder prefix {string}"
+    expr = "within {string} node {string} eventually reports {word} {string} instances moved from \
+            node {string} and all other owners unchanged from placeholder prefix {string}"
 )]
 async fn wait_for_only_affected_instance_owners_to_move(
     world: &mut ScenarioWorld,
@@ -523,7 +522,13 @@ async fn wait_for_each_instance_ready_on_its_owner(
 ) {
     let duration = parse_duration_text(&duration).assured("the scenario writes a valid timeout");
     let deadline = PhaseDeadline::after(duration);
-    let node_id = current_leader_node(world).await;
+    // A failover scenario asks after one node stopped, so the leader is the one the running nodes
+    // agree on.
+    let node_id = world
+        .cluster()
+        .wait_for_leader_among_running()
+        .await
+        .expect("the running nodes agree on a leader");
     let mut last_description = None;
     let mut last_error = None;
     loop {

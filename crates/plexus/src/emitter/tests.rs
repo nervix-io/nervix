@@ -2867,7 +2867,10 @@ fn an_instances_clause_follows_the_inputs_and_reads_back_canonically() {
             EmitterInstances::Count(std::num::NonZeroU64::MAX),
         ),
         ("INSTANCES PER PARTITION", EmitterInstances::PerPartition),
-        ("COLLECT FOR 10ms INSTANCES PER PARTITION", EmitterInstances::PerPartition),
+        (
+            "COLLECT FOR 10ms INSTANCES PER PARTITION",
+            EmitterInstances::PerPartition,
+        ),
     ] {
         let source = instanced_kafka_emitter(clause);
         let parsed = parse_create_emitter(&source)
@@ -2922,15 +2925,24 @@ fn completion_offers_instances_only_where_the_entity_runs_several() {
     );
     let prefix = "CREATE KAFKA TOPIC EMITTER spread FROM orders INSTANCES 2 ";
     let suggestions = suggest_create_emitter(prefix, prefix.len());
-    assert!(!suggestions.contains(&"INSTANCES".to_string()), "{suggestions:?}");
+    assert!(
+        !suggestions.contains(&"INSTANCES".to_string()),
+        "{suggestions:?}"
+    );
     for prefix in [
         "CREATE CLIENT CONSUMER EMITTER single FROM orders ",
         "CREATE MQTT TOPIC EMITTER single FROM orders ",
         "CREATE ICEBERG TABLE EMITTER single FROM orders ",
     ] {
         let suggestions = suggest_create_emitter(prefix, prefix.len());
-        assert!(!suggestions.contains(&"INSTANCES".to_string()), "{suggestions:?}");
-        assert!(suggestions.contains(&"ATTACHED".to_string()), "{suggestions:?}");
+        assert!(
+            !suggestions.contains(&"INSTANCES".to_string()),
+            "{suggestions:?}"
+        );
+        assert!(
+            suggestions.contains(&"ATTACHED".to_string()),
+            "{suggestions:?}"
+        );
     }
 }
 
@@ -2946,8 +2958,8 @@ fn a_single_instance_entity_refuses_instances_with_its_declared_reason() {
         ),
         (
             "MQTT TOPIC",
-            "TO mqtt_main TOPIC 'orders' QOS 1 MODE NO ACK RETRY POLICY BACKOFF 1s MAX 30s \
-             ENCODE USING my_codec INHERIT ALL",
+            "TO mqtt_main TOPIC 'orders' QOS 1 MODE NO ACK RETRY POLICY BACKOFF 1s MAX 30s ENCODE \
+             USING my_codec INHERIT ALL",
             "MQTT TOPIC emitters publish through one client identifier, so they refuse INSTANCES",
         ),
         (
@@ -2973,7 +2985,10 @@ fn a_single_instance_entity_refuses_instances_with_its_declared_reason() {
         assert!(format!("{error:?}").contains(message), "{error:?}");
         let prefix = format!("ALTER {head} EMITTER single SET ");
         let suggestions = suggest_alter_emitter(&prefix, prefix.len());
-        assert!(!suggestions.contains(&"INSTANCES".to_string()), "{suggestions:?}");
+        assert!(
+            !suggestions.contains(&"INSTANCES".to_string()),
+            "{suggestions:?}"
+        );
     }
 }
 
@@ -2984,7 +2999,10 @@ fn set_instances_replaces_the_declaration_of_an_entity_that_runs_several() {
             "SET INSTANCES 2",
             EmitterInstances::Count(std::num::NonZeroU64::new(2).assured("two is positive")),
         ),
-        ("SET INSTANCES PER PARTITION", EmitterInstances::PerPartition),
+        (
+            "SET INSTANCES PER PARTITION",
+            EmitterInstances::PerPartition,
+        ),
     ] {
         let source = format!("ALTER KAFKA TOPIC EMITTER spread {operation};");
         let parsed = parse_alter_emitter(&source)
@@ -3000,6 +3018,9 @@ fn set_instances_replaces_the_declaration_of_an_entity_that_runs_several() {
     }
     let prefix = "ALTER KAFKA TOPIC EMITTER spread SET ";
     let suggestions = suggest_alter_emitter(prefix, prefix.len());
-    assert!(suggestions.contains(&"INSTANCES".to_string()), "{suggestions:?}");
+    assert!(
+        suggestions.contains(&"INSTANCES".to_string()),
+        "{suggestions:?}"
+    );
     assert!(parse_alter_emitter("ALTER KAFKA TOPIC EMITTER spread SET INSTANCES 0;").is_err());
 }

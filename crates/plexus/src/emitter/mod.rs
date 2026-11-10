@@ -644,7 +644,9 @@ fn declared_operations<'src>(kind: EmitterEntityKind) -> Vec<Operation<'src>> {
                         &'src [Token],
                         chumsky::error::RichPattern<'src, Token>,
                     >>::expected_found(
-                        [chumsky::error::RichPattern::SomethingElse], None, span
+                        [chumsky::error::RichPattern::SomethingElse],
+                        None,
+                        span,
                     ))
                 }))
                 .boxed(),

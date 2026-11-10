@@ -433,9 +433,9 @@ input relay, which relay units every instance serves (partition `p` for instance
 unpartitioned relay's single unit for instance 0), and refuses a scheduled unit set that does not
 match the declaration. Building, swapping and reassigning register exactly those units' consumer
 edges, local or remote, for each instance placed on the node; an instance that serves none runs
-no task. A reassignment swaps only the instances whose local placement changed. The connector receives ingestor or
-emitter settings and per-record outcomes, never graph placement authority, Models, ACK maps, or
-runtime state. [Connector Crates And The Connector Contract](./connector-contract.md) owns each
+no task. A reassignment swaps only the instances whose local placement changed. The connector
+receives ingestor or emitter settings and per-record outcomes, never graph placement authority,
+Models, ACK maps, or runtime state. [Connector Crates And The Connector Contract](./connector-contract.md) owns each
 external transport's header, retry, ACK, and commit behavior. [Client Session Protocol](./client-session-protocol.md)
 owns native consumer delivery and settlement.
 

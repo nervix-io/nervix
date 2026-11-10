@@ -23,9 +23,8 @@ use meticulous::OptionExt as _;
 use nervix_models::{
     AlterEmitter, AlterEmitterError, AlterEmitterOperation, CreateEmitter, DeclaredPublishing,
     EmitterBodyForm, EmitterEntityKind, EmitterInstances, EmitterPublishingModeKind,
-    EmitterReferenceKind,
-    EnvelopeClauseKind, EnvelopeDeclarationError, GeneralErrorPolicy, Model, OptionDeclaration,
-    OptionForm, OptionPresence, Statement,
+    EmitterReferenceKind, EnvelopeClauseKind, EnvelopeDeclarationError, GeneralErrorPolicy, Model,
+    OptionDeclaration, OptionForm, OptionPresence, Statement,
 };
 use strum::IntoEnumIterator as _;
 
@@ -446,7 +445,9 @@ fn set_instances_is_accepted_exactly_where_the_entity_declares_several_instances
                 let emitter = altered(&created, "SET INSTANCES 2");
                 assert_eq!(
                     emitter.instances,
-                    EmitterInstances::Count(std::num::NonZeroU64::new(2).assured("two is positive")),
+                    EmitterInstances::Count(
+                        std::num::NonZeroU64::new(2).assured("two is positive")
+                    ),
                     "{kind}"
                 );
                 let emitter = altered(&created, "SET INSTANCES PER PARTITION");
