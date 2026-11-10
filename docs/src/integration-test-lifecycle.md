@@ -166,6 +166,19 @@ three nodes. Preparation includes the console, ONNX fixtures/runtime, WASM guest
 used for resource uploads and completion. Additional arguments reach the runner unchanged; the
 complete ordinary suite, completion walks and concurrency checks retain their separate verdicts.
 
+## Focused WebSocket Connection Checks
+
+`just test-websockets-runtime` selects the outbound connection declarations, bounds and
+delayed-handoff features through the ordinary one- and three-node harness. It prepares the console,
+ONNX runtime, WASM guests, formatter, CLI and deadlock reporter. Arguments such as `--name`, `--concurrency` and
+`--retry` reach the runner unchanged; broad scenario and CI runs retain their full prerequisites.
+
+The delayed-handoff fixture occupies the real decoder workers, observes its payload waiting in
+their bounded queue, and releases the workers after the configured idle bound. Its holds release
+on drop even when a step fails. The responsive peer accepts one connection and releases the next
+payload only after a client ping. Its stop result is retained until node teardown and port release
+finish, then asserted, so a connection failure remains visible and does not prevent cleanup.
+
 ## Delayed Consensus Heartbeat Answers
 
 The leader-lease regression uses a testing-only control on each follower's consensus probe. The
