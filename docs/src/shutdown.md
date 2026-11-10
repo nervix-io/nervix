@@ -517,9 +517,10 @@ continue a checkpoint, or settle acknowledgements after the node stopped. Its un
 acknowledgements are negatively acknowledged, and a restart finds whatever that checkpoint had
 already written to the node's storage, exactly as after a forced ending.
 
-A deduplicator or window branch also has a snapshot task, which writes what the branch published
-last on every snapshot interval and once more as the branch stops. That task belongs to the
-runtime, not to its branch task, because it goes on after it: a branch ended at a stop grace
+A deduplicator, window or stateful inferencer branch also has a snapshot task, which writes what
+the branch published last on every snapshot interval and once more as the branch stops. That task
+belongs to the runtime, not to its branch task, because it goes on after it: a branch ended at a
+stop grace
 before its own stop was reached published nothing as it went, so what it published before is the
 newest state a restart can restore, and the snapshot task still writes it. A branch that stops in
 time publishes its state first and waits for that write itself. A branch ended at its grace does
@@ -538,8 +539,9 @@ the placement's other tasks.
 
 Once every task of a stopping domain execution has ended, the stop tells each checkpoint writer of
 the domain to make its last write, then waits, with no grace, for those writes and for the last
-write of each of the domain's deduplicator and window branches, and only then completes. `STOP`, a
-rebuild of the domain's execution and runtime teardown alike therefore never leave such a write
+write of each of the domain's deduplicator, window and stateful inferencer branches, and only then
+completes. `STOP`, a rebuild of the domain's execution and runtime teardown alike therefore never
+leave such a write
 running after the domain's stop, and a stopped domain's stored checkpoints are what its state held
 last. A [stopped backup cut](./backup-and-restore-architecture.md#cut-kinds) and a restart read
 them, and the next `START` resumes its branches and domain offsets from them, while it clears
@@ -747,6 +749,21 @@ staged checkpoint into a guest before the schedule is published, from the module
 it was a replica, so the recovery does not wait for the module to compile. A preparation that fails,
 including a guest that cannot restore a staged checkpoint, publishes the recovery with recreated
 state; see [Forced Recovery](./wasm-state.md#forced-recovery).
+
+A forced recovery of a stateful inferencer stages, for every branch of the lifecycle it recovers,
+the newest tensor snapshot that survives on the destination or on another node the unit is
+assigned to, within the recovery's preparation deadline. A replica receives the generations its
+owner publishes, so a promoted replica continues each branch from at least the generation it last
+received. Inputs admitted after that generation were acknowledged once their output was dispatched
+and are not replayed, so the recovered state skips their updates. A branch the recovered lifecycle
+names, but whose tensors no surviving node holds, starts from its declared `INITIAL` tensors, and
+`SHOW CLUSTER STATUS` reports `state_recovery=reset` with `inferencer:missing_checkpoint`. When no
+surviving node holds the branch lifecycle either, as after losing an owner that had no replica,
+every branch starts from `INITIAL` and the resets name `branch_lifecycle:missing_checkpoint` and
+`inferencer:expired_branch_metadata`. A former owner that returns is fenced by the committed
+schedule and runs none of the recovered branches. A later planned handoff onto it replaces every
+checkpoint it stored for that unit with the ones the handoff carries, so it never resumes from the
+tensors it held before.
 
 ## Topology Cases
 
@@ -992,9 +1009,9 @@ the task's kind, and its name, or `relay owner task did not stop cleanly` and
 `relay state task did not stop cleanly` for a relay's tasks. The grace is two seconds, except that
 a relay owner and an emitter are given the domain drain timeout first. Once the domain's tasks have
 ended, its stop tells the checkpoint writer of each placement's state to make its last write, and
-waits for those writes and for the last write of each of its deduplicator and window branches,
-which a branch ended at its grace left to its snapshot task, before teardown moves to the next
-domain.
+waits for those writes and for the last write of each of its deduplicator, window and stateful
+inferencer branches, which a branch ended at its grace left to its snapshot task, before teardown
+moves to the next domain.
 
 Generators and reingestors share their grace. A generator reads its source relay from the node that
 owns it, and both kinds publish to the node that owns their output relay, so while they work they
@@ -1006,8 +1023,9 @@ its teardown one grace and its reingestors one more, however many of them a stop
 The other kinds persist or replicate state they own, or drain an emitter, as they stop, and are waited
 for one after another, each with a grace of its own.
 
-Once every domain has stopped, runtime teardown tells the snapshot task of every deduplicator and
-window branch that is still waiting for its branch, one no domain stop ended, to write what that
+Once every domain has stopped, runtime teardown tells the snapshot task of every deduplicator,
+window and stateful inferencer branch that is still waiting for its branch, one no domain stop
+ended, to write what that
 branch published last, and every checkpoint writer no domain stop told to make its last write, and
 waits for all of them. A snapshot task and a checkpoint writer hold the runtime and its storage,
 so these waits, the domain's and this one, are what keep the node database from being released
@@ -1138,7 +1156,7 @@ strongly consistent, selected runtime state is checkpointed, and the hot path is
 | Published consensus snapshots | Reopen from the current manifest; a marked installation is finished before state is exposed | Reopen from the current manifest; a marked installation is redone before state is exposed |
 | Durable handoff and forced-recovery preparations | Preserved, then reconciled or activated | Preserved, then reconciled or activated |
 | Runtime-state checkpoints: Kafka domain offsets, deduplicator and window state, materialized relay records | Written once more before their domain's stop completes: Kafka domain offsets and materialized relay records once the tasks that change them have ended, and a deduplicator or window branch what it published last, including a branch ended at its stop grace; a materialized relay, and a window whose retained rows exceed one 8 MiB snapshot section, are sealed to quota-owned files and written as segments synchronized before their header | Reopen at the last completed periodic checkpoint |
-| Stateful inferencer tensors | The branch's final published tensor generation is persisted before its stop completes; `STOP` and `START` retain it | Reopen at the newest surviving snapshot for the same model identity and branch incarnation; admitted inputs after that snapshot are not replayed |
+| Stateful inferencer tensors | The branch's final published tensor generation is persisted before its stop completes, including a branch ended at its stop grace; `STOP` and `START` retain it | Reopen at the newest surviving snapshot for the same model identity and branch incarnation; admitted inputs after that snapshot are not replayed |
 | WASM guest-state checkpoints | Every checkpoint that released an acknowledgement is already synchronized | Reopen at the newest checkpoint on the node's storage, which covers every acknowledged input |
 | Restored backup state: materialized relay rows, WASM guest saves, Kafka domain offsets, branch lifecycle, deduplicator keys and window state | A restore synchronizes a complete chunked namespace and its atomic active-generation pointer before releasing the stopped domain's START gate or resuming its archived lifecycle | Reopens pointer and checkpoints from one complete database view on each assigned owner and replica; a durable pointer alone does not release an incomplete replicated installation gate. A resumed domain retains every restored kind. A normal START continues saved guest state, ingestor positions, branch incarnations, deduplicator keys and windows, and resets materialized rows |
 | External ingestor offsets and emitter commits | Complete when the drain succeeds | Only the external connector's own delivery and transaction guarantee applies |
@@ -1154,7 +1172,8 @@ projects downtime under the recovered authority. The materializer's nonpersisted
 registry starts at that task's activation time in the recovered domain clock, giving restored
 branches a full idle lifetime while preserving their record event watermarks. A failed installation
 retains its durable activation gate across restart. A normal `START` creates a new generation and clears materialized
-rows while retaining compatible WASM, offset, branch lifecycle, deduplicator and window state. Periodic materialized
+rows while retaining compatible WASM, offset, branch lifecycle, deduplicator, window and stateful
+inferencer state. Periodic materialized
 flushes seal to quota-owned files and write bounded database segments, synchronizing their data
 before the replacement header, so a large relay has the same shutdown durability boundary. See
 [Generation Storage](backup-and-restore-architecture.md#generation-storage). A deduplicator or

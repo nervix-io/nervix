@@ -44,6 +44,7 @@ pub(crate) fn candidate(byte: u8) -> ClusterIdentityRecord {
         cluster_uid: uuid::Builder::from_random_bytes([byte; 16]).into_uuid(),
         created_at: Timestamp::from_unix_nanos(i64::from(byte)),
         key_generation: NonZeroU64::MIN,
+        ever_activated: false,
         current_key: key(usize::from(byte % 3)),
         retired_key: None,
         pending_key: None,
@@ -72,6 +73,7 @@ pub(crate) fn identity(arbitrary: &mut Arbitrary<'_>) -> ClusterIdentityRecord {
         cluster_uid: uuid::Builder::from_random_bytes(uid).into_uuid(),
         created_at,
         key_generation: NonZeroU64::new(generation).verified("the draw starts at one or two"),
+        ever_activated: arbitrary.entropy().flag(),
         current_key: key(indices[0]),
         retired_key: if retired {
             Some(RetiredClusterKey {

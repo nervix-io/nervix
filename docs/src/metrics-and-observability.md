@@ -335,7 +335,12 @@ Request operations are `activation.create`, `activation.refresh`, `activation.re
 `refused_by_service`, `unreachable` and `timeout`. Refusal states are `within_grace`, `over_limit`,
 `lapsed` and `stopped`. Connectivity and request families are leader-local. Free mode supplies no
 decision or deadline and makes no licensing request. The shipped unlimited quotas produce no
-admission refusals.
+admission refusals. An activated record supplies its committed revision and existing signed
+deadlines. Deadline ticks change the state gauge without rewriting those deadlines. A malformed or
+unverifiable response increments `rejected_by_cluster`; typed service refusals increment
+`refused_by_service`, and failed transport attempts record `unreachable` or `timeout`. A request is
+`committed` after its verified decision applies. Counters describe attempts on this process and
+supply no licensing authority.
 
 See [Cluster Licensing](node-settings.md#cluster-licensing) for `DESCRIBE LICENSE` and the
 committed node/domain usage definitions.
@@ -872,6 +877,16 @@ phase log records and by `terminating: true` in its status, as described in
 [Shutdown And Recovery](shutdown.md#observability). A timed-out precommit handoff leaves the schedule and metric authority unchanged.
 Unexpected owner loss continues through failover immediately and starts fresh relay metrics on the
 new owner.
+
+The schedule line `SHOW CLUSTER STATUS` prints for a unit whose owner changed names that
+transition as `transition_from=<former owner> state_recovery=<outcome>`. A planned handoff reports
+`complete`. A forced recovery reports `unverified` when it staged the checkpoints that survived, and
+`reset` when it recreated state, followed by `resets=` and each reset as `<component>:<cause>`. The
+components are `branch_aggregated`, `branch_lifecycle`, `deduplicator`, `kafka_offsets`,
+`materialized_relay`, `wasm_processor`, `window_processor` and `inferencer`. The causes are
+`missing_checkpoint`, `invalid_checkpoint`, `conflicting_checkpoint` and `expired_branch_metadata`,
+the last naming branch-local state whose branch lifecycle no surviving node held. See
+[When The Former Owner Is Gone](shutdown.md#when-the-former-owner-is-gone).
 
 Prometheus export is a separate, live process-local registry. Traffic metrics ignore branch
 identity, while lifecycle metrics retain only the bounded declared branch name. Prometheus

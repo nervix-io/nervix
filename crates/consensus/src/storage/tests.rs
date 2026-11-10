@@ -1,6 +1,7 @@
 //! Recovery and publication checks through the Raft storage traits.
 
 mod cluster_identity_tests;
+mod licensing_tests;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -278,6 +279,7 @@ struct Harness {
     directory: TempDir,
     store: FjallStore,
     executor: Executor,
+    licensing: crate::LicensingEnvironment,
 }
 
 impl Harness {
@@ -300,17 +302,25 @@ impl Harness {
         Self::with_executor(Executor::default()).await
     }
     async fn with_executor(executor: Executor) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::with_licensing(executor, crate::LicensingEnvironment::default()).await
+    }
+    async fn with_licensing(
+        executor: Executor,
+        licensing: crate::LicensingEnvironment,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let store = FjallStore::from_database(
             Database::builder(directory.path()).open()?,
             executor.clone(),
             crate::RaftOperationSettings::default(),
+            licensing.clone(),
         )
         .await?;
         Ok(Self {
             directory,
             store,
             executor,
+            licensing,
         })
     }
     async fn reopen(self) -> Result<Self, Box<dyn std::error::Error>> {
@@ -318,18 +328,21 @@ impl Harness {
             directory,
             store,
             executor,
+            licensing,
         } = self;
         drop(store);
         let store = FjallStore::from_database(
             Database::builder(directory.path()).open()?,
             executor.clone(),
             crate::RaftOperationSettings::default(),
+            licensing.clone(),
         )
         .await?;
         Ok(Self {
             directory,
             store,
             executor,
+            licensing,
         })
     }
     fn node() -> ClusterNodeName {
@@ -2766,12 +2779,14 @@ async fn current_record_storage_requires_its_metadata() -> TestResult {
         directory,
         store,
         executor,
+        licensing: _,
     } = harness;
     drop(store);
     let result = FjallStore::from_database(
         Database::builder(directory.path()).open()?,
         executor,
         crate::RaftOperationSettings::default(),
+        crate::LicensingEnvironment::default(),
     )
     .await;
     assert!(matches!(result, Err(error) if error.to_string().contains("recreate")));
@@ -2787,6 +2802,7 @@ async fn current_consensus_storage_rejects_an_unknown_keyspace() -> TestResult {
         database,
         Executor::default(),
         crate::RaftOperationSettings::default(),
+        crate::LicensingEnvironment::default(),
     )
     .await;
     let Err(error) = result else {
