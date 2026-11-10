@@ -251,11 +251,8 @@ fn families(
         output.push(connected);
     }
     let mut transitions = family(6, MetricType::GAUGE);
-    let active_transitions = policy
-        .snapshot
-        .initialized
-        .as_ref()
-        .map_or(0, |initialized| {
+    let active_transitions = match &policy.snapshot.initialized {
+        Some(initialized) => {
             let values = match &initialized.record.mode {
                 nervix_consensus::LicensingMode::Released(release) => release.transitions.values(),
                 _ => match &initialized.verification {
@@ -269,7 +266,9 @@ fn families(
                     transition.deadline > initialized.record.licensing_time.into_datetime()
                 })
                 .count()
-        });
+        }
+        None => 0,
+    };
     sample(&mut transitions, &[], active_transitions.approx_into());
     output.push(transitions);
     let mut over = family(7, MetricType::GAUGE);
