@@ -463,7 +463,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_plexus/corpus"
-domain_version = 63
+domain_version = 64
 features = []
 id = "plexus-model"
 invariant = "Canonical Plexus of a generated Model of every family reparses through the client and server grammars to the complete CREATE statement."
@@ -478,7 +478,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/backup/__fuzz__/backup__tests__bolero_models_exported_through_an_archive_reparse_to_themselves/corpus"
-domain_version = 66
+domain_version = 67
 features = []
 id = "plexus-archive-model"
 invariant = "Complete cluster/domain archives preserve every ordered canonical Model document through export, production restore reads, semantic reparse and byte-exact re-export."
@@ -748,7 +748,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_plexus/corpus"
-domain_version = 70
+domain_version = 71
 features = []
 id = "plexus-statement"
 invariant = "Canonical Plexus of every generated current statement form, session-only forms included, reparses through the client and server grammars to the complete statement."
@@ -778,7 +778,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
-domain_version = 69
+domain_version = 70
 features = []
 id = "plexus-statement-text"
 invariant = "Edited canonical text is either rejected with located diagnostics or read as statements whose canonical Plexus reparses to them."
@@ -793,7 +793,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatted_documents_keep_their_statements/corpus"
-domain_version = 69
+domain_version = 70
 features = []
 id = "plexus-format-document"
 invariant = "Formatting a generated document with gaps, comments and either line ending keeps its statements and comments and is idempotent."
@@ -808,7 +808,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatter_text_is_formatted_or_rejected/corpus"
-domain_version = 68
+domain_version = 69
 features = []
 id = "plexus-format-text"
 invariant = "Edited documents are either refused as unparseable or formatted without changing their statements, idempotently."
@@ -3342,6 +3342,36 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/nervix-vm/src/__fuzz__/runtime__list_cast_tests__bolero_list_conversions_equal_the_scalar_conversion_of_each_element/corpus"
+domain_version = 1
+features = []
+id = "vm-list-conversions"
+invariant = "Every generated VEC or ARRAY column, fixed, ragged, empty, sliced, and with null rows hiding elements or null elements, converts under AS and TRY_CAST to the target type exactly as the scalar AS converts each of its rows' elements, bit for bit: a row with an element AS fails is null and records one typed list element failure under AS alone, a null row stays null without an error, a conversion adds no null element, and every result is a valid Arrow column of the target type."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-vm"
+random_iterations = 256
+source = "crates/nervix-vm/src/runtime_list_cast_tests.rs"
+test = "runtime::list_cast_tests::bolero_list_conversions_equal_the_scalar_conversion_of_each_element"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-vm/src/__fuzz__/runtime__list_cast_tests__bolero_vecs_of_another_length_than_the_array_fail_their_rows/corpus"
+domain_version = 1
+features = []
+id = "vm-list-conversion-lengths"
+invariant = "A generated VEC<I64> column, ragged, empty, sliced and with null rows, becomes an ARRAY of a generated length exactly for the rows holding that length, with their elements kept or widened to F64; a row of any other length is null and records the typed length mismatch with both lengths under AS alone, a null row stays null without an error, and the ARRAY holds no null element."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-vm"
+random_iterations = 256
+source = "crates/nervix-vm/src/runtime_list_cast_tests.rs"
+test = "runtime::list_cast_tests::bolero_vecs_of_another_length_than_the_array_fail_their_rows"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/nervix-vm/src/runtime/list_shape/__fuzz__/runtime__list_shape__properties__bolero_shape_laws_preserve_complete_values_and_validity/corpus"
 domain_version = 1
 features = []
@@ -3353,6 +3383,21 @@ package = "nervix-vm"
 random_iterations = 128
 source = "crates/nervix-vm/src/runtime/list_shape/properties.rs"
 test = "runtime::list_shape::properties::bolero_shape_laws_preserve_complete_values_and_validity"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-vm/src/runtime/__fuzz__/runtime__list_statistics__tests__bolero_list_statistics_match_a_reference_over_fixed_ragged_sliced_and_null_lists/corpus"
+domain_version = 1
+features = []
+id = "vm-list-statistics"
+invariant = "Over generated fixed and ragged F64 lists with null containers, a slice that skips leading rows and at most one NaN, infinity or signed zero in a list, every variance and standard deviation agrees with the exact variance of the list's integer sums within (count + 8) units of the last place of its magnitude, every median and quantile equals by bits the value a full total-order sort interpolates at rank percentile / 100 * (n - 1), list_argmin and list_argmax return the first position a total-order scan finds and nth at that position equals min or max by bits, a null list gives null without an error, and a list holding a non-finite value fails only its own row with invalid_argument."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-vm"
+random_iterations = 256
+source = "crates/nervix-vm/src/runtime/list_statistics_tests.rs"
+test = "runtime::list_statistics::tests::bolero_list_statistics_match_a_reference_over_fixed_ragged_sliced_and_null_lists"
 test_target = "lib"
 
 [[target]]
@@ -4243,7 +4288,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_entity_presentations_keep_declared_rows_and_complete_configuration/corpus"
-domain_version = 38
+domain_version = 39
 features = []
 id = "connector-entity-presentation"
 invariant = "Every generated source and sink entity uses its declared phrase and ordered inspection rows, while the canonical Plexus built from that shared presentation reparses to its complete Model including all options, modes, payload mappings, flush and error policies."
@@ -4318,7 +4363,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/emitter/__fuzz__/emitter__envelope__tests__bolero_envelope_sections_read_back_as_the_envelopes_they_render/corpus"
-domain_version = 9
+domain_version = 10
 features = []
 id = "plexus-emitter-envelopes"
 invariant = "The canonical Plexus of a generated envelope section, of every clause kind and declared property, reads back through the shared envelope grammar as the complete envelope."
@@ -4620,7 +4665,7 @@ test_target = "bin:nervix-web-console"
 [[target]]
 case_timeout_seconds = 30
 corpus = "crates/web-console/src/create_dialog/__fuzz__/create_dialog__emitter_model_tests__bolero_emitter_drafts_preserve_every_complete_entity/corpus"
-domain_version = 7
+domain_version = 8
 features = []
 id = "console-emitter-drafts"
 invariant = "Every declared emitter entity's in-contract browser draft preserves the complete current Model and canonical Plexus, including publication windows, ordered inputs, state, construction, values, envelope, batching, retries and explicit policies; out-of-contract batch bounds retain their exact text and typed refusal."
@@ -4635,7 +4680,7 @@ test_target = "bin:nervix-web-console"
 [[target]]
 case_timeout_seconds = 30
 corpus = "crates/web-console/src/create_dialog/__fuzz__/create_dialog__processor_model_tests__bolero_processor_drafts_preserve_every_complete_model/corpus"
-domain_version = 7
+domain_version = 8
 features = []
 id = "console-processor-drafts"
 invariant = "Every complete junction, deduplicator, reorderer, window processor, correlator, reingestor, generator, inferencer and WASM processor Model filled into its browser draft builds back to the complete original and canonical Plexus, including ordered inputs, predicates, collection, node branch, DEDUPLICATE ON and BY order, exact MAX TIME text, WIDTH and STEP bounds, MAX STATE SIZE, both correlator sides with their collection, CORRELATE WHERE, match policy and timeout actions, a generator's materialized relay and EACH period, a requested resource version and exact file, ordered INPUTS, STATE and OUTPUT SCHEMA tensors with every axis, INITIAL values, MAX FUEL and MAX MEMORY, rejected-state and global error policies, materialized dependencies and every route's construction, branch, flush and error policy, with blank files and tensor or port names, which the forms require, named."

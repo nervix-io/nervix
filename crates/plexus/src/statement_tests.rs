@@ -519,6 +519,42 @@ fn tolerant_conversion_body_does_not_change_route_completion_context() {
 }
 
 #[test]
+fn list_conversion_body_does_not_change_route_completion_context() {
+    let literal = "CREATE JUNCTION merge FROM orders UNBRANCHED TO routed SET result = 1 ";
+    for expression in [
+        "input.readings AS VEC<F32>",
+        "input.matrix AS ARRAY<F64, 64, 2>",
+        "TRY_CAST(input.matrix AS VEC<VEC<I32>>)",
+        "TRY_CAST(input.raw AS VEC<I64> AS ARRAY<STRING, 3>)",
+    ] {
+        let input = format!(
+            "CREATE JUNCTION merge FROM orders UNBRANCHED TO routed SET result = {expression} "
+        );
+        assert_eq!(
+            suggest_statement(literal, literal.len()),
+            suggest_statement(&input, input.len()),
+            "completion changed after {expression}",
+        );
+    }
+
+    for unfinished in [
+        "input.raw AS VEC<",
+        "input.raw AS ARRAY<F32, ",
+        "TRY_CAST(input.raw AS VEC<",
+        "TRY_CAST(input.raw AS ARRAY<VEC<",
+    ] {
+        let input = format!(
+            "CREATE JUNCTION merge FROM orders UNBRANCHED TO routed SET result = {unfinished}"
+        );
+        assert_eq!(
+            suggest_statement(&input, input.len()),
+            Vec::<String>::new(),
+            "a list type position is not an expression operand: {unfinished}"
+        );
+    }
+}
+
+#[test]
 fn reingestor_output_context_suggestions_do_not_leak_schema_keywords() {
     let input = "CREATE REINGESTOR log_splitter FROM incoming_logs TO errors_ss FLUSH IMMEDIATE \
                  ON MESSAGE ERROR LOG ";
