@@ -101,7 +101,7 @@ fn the_analysis_configuration_and_its_expectations_do_not_hide_a_use() {
 #[cfg_attr(nervix_lint, expect(nervix::bare_error_signature, reason = \"fixture\"))]
 fn expected() { blake3::hash(b\"x\"); }
 #[cfg(any(test, nervix_lint))] fn analysis() { hmac::Hmac::<u8>::new(); }
-#[cfg(all(feature = \"fips\", not(nervix_lint)))] mod fips { use pbkdf2::pbkdf2_hmac; }
+#[cfg(all(feature = \"fips\", not(nervix_lint)))] fn fips() { pbkdf2::pbkdf2_hmac(); }
 #[cfg(any())] extern crate argon2;
 #[cfg_attr(nervix_lint, doc = \"Non-security BLAKE3: stated only for the analysis.\")]
 fn conditional_purpose() { blake3::hash(b\"x\"); }
@@ -113,7 +113,7 @@ fn conditional_purpose() { blake3::hash(b\"x\"); }
             at(source, 2, "getrandom", 0),
             at(source, 4, "blake3", 0),
             at(source, 5, "hmac", 0),
-            at(source, 6, "pbkdf2_hmac", 0),
+            at(source, 6, "pbkdf2", 0),
             at(source, 7, "argon2", 0),
             at(source, 9, "blake3", 0),
         ]
