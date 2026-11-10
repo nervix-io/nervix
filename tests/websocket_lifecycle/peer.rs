@@ -2,8 +2,8 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** Listening connections, bounded events, opening cancellation, public connection
-//!   confirmation, payload release, graceful-close observations, measured reconnect instants,
-//!   scripted subprotocol answers and measured client ping arrivals.
+//!   confirmation, payload release, graceful-close observations, how an unread connection ended,
+//!   measured reconnect instants, scripted subprotocol answers and measured client ping arrivals.
 //! - **Depends on.** Execution primitives, I/O errors and the WebSocket protocol.
 //! - **Must not know.** Scenario state, connector internals or runtime ownership handles.
 
@@ -20,12 +20,16 @@ use nervix_primitives::{
     task::{AbortOnDropHandle, JoinError},
     time::{Instant, timeout},
 };
-use tokio_tungstenite::tungstenite::{
-    Error as WebsocketError, Message,
-    error::ProtocolError,
-    handshake::server::{ErrorResponse, Request, Response},
-    http::HeaderValue,
-    protocol::{CloseFrame, frame::coding::CloseCode},
+use tokio::io::AsyncReadExt as _;
+use tokio_tungstenite::{
+    WebSocketStream,
+    tungstenite::{
+        Error as WebsocketError, Message,
+        error::ProtocolError,
+        handshake::server::{ErrorResponse, Request, Response},
+        http::HeaderValue,
+        protocol::{CloseFrame, Role, frame::coding::CloseCode},
+    },
 };
 
 use super::reply_to_close;
@@ -119,6 +123,55 @@ pub(super) enum PeerEvent {
     SignalingCompleted(Instant),
     /// A client ping arrived.
     ReceivedPing(Instant),
+    /// The client released the connection this peer never read, and this is how it ended.
+    SilentConnectionEnded(UnreadEnding),
+}
+
+/// How the client ended a connection whose peer never read it.
+pub(crate) enum UnreadEnding {
+    /// A Close frame, with the status it carried, came before the end of TCP.
+    Closed(Option<CloseFrame<'static>>),
+    /// TCP ended with no Close frame before it.
+    WithoutClose,
+}
+
+impl UnreadEnding {
+    /// Reads everything TCP delivered on a connection the peer never read, once the client has
+    /// released it, then reads it again through the WebSocket driver. Nothing is written back: the
+    /// pongs the driver queues for the unanswered pings go nowhere, so a reply cannot fail the
+    /// reading or hide the frames behind it.
+    async fn read(mut unread: WebSocketStream<TcpStream>) -> io::Result<Self> {
+        let mut delivered = Vec::new();
+        let ended = timeout(PEER_WAIT, unread.get_mut().read_to_end(&mut delivered))
+            .await
+            .map_err(io::Error::other)?;
+        if let Err(error) = ended
+            && !matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+            )
+        {
+            return Err(error);
+        }
+        let mut replay = WebSocketStream::from_raw_socket(
+            tokio::io::join(io::Cursor::new(delivered), tokio::io::sink()),
+            Role::Server,
+            None,
+        )
+        .await;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            match replay.next().await {
+                Some(Ok(Message::Close(frame))) => return Ok(Self::Closed(frame)),
+                Some(Ok(_)) => {}
+                Some(Err(WebsocketError::Protocol(
+                    ProtocolError::ResetWithoutClosingHandshake,
+                )))
+                | None => return Ok(Self::WithoutClose),
+                Some(Err(error)) => return Err(io::Error::other(error)),
+            }
+        }
+    }
 }
 
 /// What a subprotocol peer answers to the `sec-websocket-protocol` offer of every opening upgrade.
@@ -396,8 +449,14 @@ impl WebsocketPeer {
         }
     }
 
+    /// Accepts one connection and sends one payload over it, then never reads it again: the
+    /// client's pings go unanswered. Over the replacement the client opens, it sends a second
+    /// payload, reports how the client ended the unread connection, and answers until the client
+    /// closes the replacement.
     pub(super) fn silent_connection(listener: TcpListener) -> Self {
-        let (events_tx, events) = mpsc::channel(2);
+        // Both connections and the unread one's ending, so a report never waits on the observer
+        // while the replacement's pings go unanswered.
+        let (events_tx, events) = mpsc::channel(3);
         let task = nervix_primitives::task::spawn(async move {
             let (stream, _) = listener.accept().await?;
             let mut silent = tokio_tungstenite::accept_async(stream)
@@ -424,12 +483,17 @@ impl WebsocketPeer {
                 .send(Message::Text("{\"user_id\":43}".into()))
                 .await
                 .map_err(io::Error::other)?;
-            drop(silent);
+            // The client released the unread connection before it opened the replacement.
+            let ending = UnreadEnding::read(silent).await?;
+            events_tx
+                .send(PeerEvent::SilentConnectionEnded(ending))
+                .await
+                .map_err(io::Error::other)?;
             while let Some(message) = replacement.next().await {
                 nervix_primitives::task::consume_budget().await;
                 match message.map_err(io::Error::other)? {
                     Message::Close(_) => {
-                        replacement.flush().await.map_err(io::Error::other)?;
+                        reply_to_close(&mut replacement).await?;
                         break;
                     }
                     _ => replacement.flush().await.map_err(io::Error::other)?,

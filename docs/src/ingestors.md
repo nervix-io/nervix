@@ -3565,6 +3565,9 @@ After signaling succeeds, the idle timer starts. An explicit idle timeout overri
 ping-derived value. Every received frame, including a ping or pong, refreshes activity. Sending a
 client ping or cancelling a read leaves the inactivity deadline in place. The idle deadline is
 physical time and a silent connection is closed and retried on the host's reconnect cadence.
+Closing it sends the peer a Close frame with status `1001` (going away) if the connection takes the
+frame at once. Nervix waits neither to write the frame nor for the peer's reply, so a peer that has
+stopped reading never delays the reconnect.
 Choose a bound that permits the peer's expected idle periods or keepalive cadence. Three ping
 intervals must fit the shared schedulable bound when they supply the deadline; the signaling
 handshake has its own `TIMEOUT`.
