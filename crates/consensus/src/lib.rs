@@ -123,6 +123,7 @@ mod domain_pause_recovery;
 mod durable_batch;
 mod leadership;
 mod lease_refusal;
+mod membership_admission;
 mod membership_interruption;
 #[cfg(feature = "testing")]
 pub use membership_interruption::InterruptedMembership;
@@ -4699,10 +4700,10 @@ impl Administrator {
                         let proposed_under = self.inner.leader_tenure();
                         let admission = timeout(
                             *self.inner.operations.membership_mutation_timeout.value(),
-                            self.inner.raft.add_learner(
+                            membership_admission::catch_up_learner(
+                                &self.inner.raft,
                                 node_id,
-                                BasicNode::new(endpoint.to_string()),
-                                true,
+                                endpoint.to_string(),
                             ),
                         )
                         .await;
