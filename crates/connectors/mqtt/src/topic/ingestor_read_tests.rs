@@ -939,7 +939,8 @@ async fn an_acknowledgement_after_its_connection_ended_fails_and_drops_the_conne
         let ended = match &ingestor.connection {
             super::MqttIngestorConnection::Running(connection) => connection.has_ended(),
             super::MqttIngestorConnection::Disconnected
-            | super::MqttIngestorConnection::RetiringSubscription => {
+            | super::MqttIngestorConnection::RetiringSubscription
+            | super::MqttIngestorConnection::Establishing(_) => {
                 panic!("the ingestor keeps its connection until it reads or acknowledges")
             }
         };
@@ -1050,6 +1051,228 @@ async fn every_downgraded_subscription_fails_before_the_ingestor_is_ready() {
             );
         }
     }
+}
+
+#[test]
+fn subscription_setup_keeps_the_connection_phase_within_two_words() {
+    assert_eq!(
+        std::mem::size_of::<super::MqttIngestorConnection>(),
+        2 * std::mem::size_of::<usize>(),
+        "pending setup adds no space to an established ingestor's connection phase",
+    );
+}
+
+#[nervix_primitives::test]
+async fn cancelled_connection_setup_before_connack_releases_startup_resources() {
+    for replacement in [false, true] {
+        let fixture = DnsFixture::start().await;
+        let broker = ScriptedBroker::start().await;
+        let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
+        let mut ingestor = MqttTopicIngestor::open(&plan, 0)
+            .await
+            .assured("opening does not connect");
+        if replacement {
+            let refusal = async {
+                let mut connection = broker.accept().await;
+                connection.refuse_subscription().await;
+                connection
+            };
+            let (result, connection) = timeout(OBSERVATION_BUDGET, async {
+                tokio::join!(ingestor.resume(), refusal)
+            })
+            .await
+            .assured("the initial refusal completes");
+            assert!(result.is_err());
+            drop(connection);
+        }
+        let mut connection =
+            {
+                let pending = async {
+                    if replacement {
+                        let mut cleanup = broker.accept_expiring_session().await;
+                        let (packet, body) = cleanup.read_packet().await;
+                        assert_eq!(packet, 10);
+                        cleanup.write(&[0xb0, 4, body[0], body[1], 0, 0]).await;
+                        cleanup.expect_session_expiry_zero().await;
+                    }
+                    broker.accept_without_reply().await
+                };
+                let mut resuming = ingestor.resume();
+                timeout(OBSERVATION_BUDGET, async {
+                nervix_primitives::select! {
+                    result = &mut resuming => panic!("setup finished before CONNACK: {result:?}"),
+                    connection = pending => connection,
+                }
+            }).await.assured("the client sends CONNECT")
+            };
+        timeout(OBSERVATION_BUDGET, connection.expect_closed())
+            .await
+            .expect("cancelling setup before CONNACK promptly releases its transport");
+        assert!(ingestor.needs_resume());
+        if replacement {
+            assert!(
+                matches!(
+                    ingestor.connection,
+                    super::MqttIngestorConnection::RetiringSubscription
+                ),
+                "cancelling the replacement connection keeps retirement pending"
+            );
+        }
+    }
+}
+
+#[nervix_primitives::test]
+async fn cancelled_subscription_setup_keeps_a_replacement_refusal() {
+    let fixture = DnsFixture::start().await;
+    let broker = ScriptedBroker::start().await;
+    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
+    let mut ingestor = MqttTopicIngestor::open(&plan, 0)
+        .await
+        .assured("opening does not connect");
+    let refusal = async {
+        let mut connection = broker.accept().await;
+        connection.refuse_subscription().await;
+        connection
+    };
+    let (result, connection) = timeout(OBSERVATION_BUDGET, async {
+        tokio::join!(ingestor.resume(), refusal)
+    })
+    .await
+    .assured("the initial refusal completes");
+    assert!(result.is_err());
+    drop(connection);
+    let (mut connection, packet_id) =
+        {
+            let pending = async {
+                let mut cleanup = broker.accept_expiring_session().await;
+                let (packet, body) = cleanup.read_packet().await;
+                assert_eq!(packet, 10);
+                cleanup.write(&[0xb0, 4, body[0], body[1], 0, 0]).await;
+                cleanup.expect_session_expiry_zero().await;
+                let mut connection = broker.accept().await;
+                let (packet, body) = connection.read_packet().await;
+                assert_eq!(packet, 8, "the replacement is waiting for its SUBACK");
+                (connection, [body[0], body[1]])
+            };
+            let mut resuming = ingestor.resume();
+            timeout(OBSERVATION_BUDGET, async {
+            nervix_primitives::select! {
+                result = &mut resuming => panic!("setup finished before its SUBACK: {result:?}"),
+                pending = pending => pending,
+            }
+        }).await.assured("retirement completes and the replacement asks to subscribe")
+        };
+    // Dropping only the caller's wait must keep this pending protocol exchange on its owner.
+    connection
+        .write(&[0x90, 4, packet_id[0], packet_id[1], 0, 0x87])
+        .await;
+    let result = timeout(OBSERVATION_BUDGET, async {
+        let mut resuming = ingestor.resume();
+        nervix_primitives::select! {
+            result = &mut resuming => result,
+            retained = broker.accept_retained_session() => {
+                let result = resuming.await;
+                drop(retained);
+                result
+            }
+        }
+    })
+    .await
+    .assured("the next wait settles the pending subscription");
+    let error = result.expect_err("a cancelled wait cannot turn the refused subscription ready");
+    assert!(matches!(
+        error.downcast_ref::<MqttTopicIngestorError>(),
+        Some(MqttTopicIngestorError::SubscriptionRefused)
+    ));
+    assert!(ingestor.needs_resume());
+}
+
+#[nervix_primitives::test]
+async fn cancelled_subscription_setup_keeps_a_granted_publish() {
+    let fixture = DnsFixture::start().await;
+    let broker = ScriptedBroker::start().await;
+    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
+    let mut ingestor = MqttTopicIngestor::open(&plan, 0)
+        .await
+        .assured("opening does not connect");
+    let (mut connection, packet_id) =
+        {
+            let pending = async {
+                let mut connection = broker.accept().await;
+                let (packet, body) = connection.read_packet().await;
+                assert_eq!(packet, 8, "the initial session is waiting for its SUBACK");
+                (connection, [body[0], body[1]])
+            };
+            let mut resuming = ingestor.resume();
+            timeout(OBSERVATION_BUDGET, async {
+            nervix_primitives::select! {
+                result = &mut resuming => panic!("setup finished before its SUBACK: {result:?}"),
+                pending = pending => pending,
+            }
+        }).await.assured("the initial session asks to subscribe")
+        };
+    connection
+        .write(&[0x90, 4, packet_id[0], packet_id[1], 0, 1])
+        .await;
+    connection.write_publish(17, &[91]).await;
+    timeout(OBSERVATION_BUDGET, async {
+        let mut resuming = ingestor.resume();
+        nervix_primitives::select! {
+            result = &mut resuming => result,
+            retained = broker.accept_retained_session() => {
+                let result = resuming.await;
+                drop(retained);
+                result
+            }
+        }
+    })
+    .await
+    .assured("the next wait observes the granted subscription")
+    .assured("the granted subscription becomes ready");
+    let cancellation = IngestorReadCancellation::new();
+    let batch = timeout(
+        OBSERVATION_BUDGET,
+        ingestor.next_batch(request(1, None), &cancellation),
+    )
+    .await
+    .assured("the granted session retains its queued publish")
+    .assured("the queued publish remains readable");
+    assert_eq!(Read::of(batch), Read::Completed(vec![91]));
+}
+
+#[nervix_primitives::test]
+async fn closing_pending_subscription_setup_releases_its_connection() {
+    let fixture = DnsFixture::start().await;
+    let broker = ScriptedBroker::start().await;
+    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
+    let mut ingestor = MqttTopicIngestor::open(&plan, 0)
+        .await
+        .assured("opening does not connect");
+    let mut connection = {
+        let pending = async {
+            let mut connection = broker.accept().await;
+            let (packet, _) = connection.read_packet().await;
+            assert_eq!(packet, 8, "the subscription is awaiting SUBACK");
+            connection
+        };
+        let mut resuming = ingestor.resume();
+        timeout(OBSERVATION_BUDGET, async {
+            nervix_primitives::select! {
+                result = &mut resuming => panic!("setup finished before SUBACK: {result:?}"),
+                connection = pending => connection,
+            }
+        })
+        .await
+        .assured("the client sends SUBSCRIBE")
+    };
+    ingestor
+        .close()
+        .await
+        .assured("closing drops the pending exchange");
+    timeout(OBSERVATION_BUDGET, connection.expect_closed())
+        .await
+        .expect("terminal close releases the pending subscription's transport");
+    assert!(ingestor.needs_resume());
 }
 
 #[nervix_primitives::test]

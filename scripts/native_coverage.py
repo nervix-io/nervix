@@ -5,7 +5,7 @@
 `just coverage-native-extras [producer ...]` runs `run`. A producer is an extra check whose recipe
 executes Nervix code natively in its declared mode: `test-typed-ratchet` qualifies compiler-resolved
 source diagnostics, generated reports, semantic fixtures and paired API doctests with the pinned
-compiler's matching LLVM tools; `bench-smoke` exercises every Criterion body once,
+compiler's matching LLVM tools; `bench-smoke` exercises every benchmark body once,
 `test-primitives` runs the primitive boundary's conformance checks, and `plexus-completion-walk`
 walks the Plexus completion graph. `test-shuttle` and `test-loom` collect the canonical inventories,
 `test-turmoil` collects the canonical simulation suite, including its fresh-process attempts,
@@ -250,7 +250,7 @@ CI_PRODUCERS: tuple[Producer, ...] = (
     Producer(
         name="bench-smoke",
         mode="ordinary",
-        prepare=("build-web-console", "wasm-processor-guests", "download-onnxruntime"),
+        prepare=("build-web-console", "wasm-processor-guests", "download-onnxruntime", "check-emitter-flush-graph"),
         instrumented="bench-smoke-bodies",
         finish=(),
     ),

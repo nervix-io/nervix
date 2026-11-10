@@ -22,6 +22,8 @@ use thiserror::Error;
 
 use crate::{RuntimeStateKind, StatePlacementEnvelope};
 
+pub(crate) const OPERATION_FAILURE_HEADER: &str = "x-nervix-operation-failure";
+
 /// What a remote control operation was asked about.
 ///
 /// The subject travels with every failure, so the asking node names what failed without holding on
@@ -126,7 +128,12 @@ impl fmt::Display for RemoteOperationSubject {
 /// yet, and a failure ran the operation and lost. Only `Failed` carries the answering node's own
 /// description, because a failure inside another node's subsystem is opaque to the caller and the
 /// text is for the operator reading it; every other class is fully described by its typed fields.
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, Error)]
+#[derive(
+    Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, Error, strum::EnumDiscriminants,
+)]
+#[strum_discriminants(name(RemoteOperationFailureKind))]
+#[strum_discriminants(derive(strum::AsRefStr, strum::EnumString))]
+#[strum_discriminants(strum(serialize_all = "snake_case"))]
 #[cfg_attr(
     nervix_lint,
     nervix::error_boundary(

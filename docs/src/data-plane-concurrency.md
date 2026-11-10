@@ -88,6 +88,14 @@ and unavailable-endpoint scenarios are registered for active, order and stressed
 diagnostics. MQTT sockets, asynchronous waits and concurrent-map internals remain outside the
 tracked-lock detector; its lanes qualify only the tracked paths the surrounding lifecycle reaches.
 
+After connection setup, an MQTT ingestor exclusively owns its pending SUBSCRIBE/SUBACK future.
+Cancelling the caller's borrowed wait preserves the protocol exchange; terminal close drops it.
+Earlier connection waits remain cancellable, and cancellation of a replacement keeps its retirement
+debt. The registered production-owner Shuttle check explores cancellation, completion and close
+through a controlled completion, without modeling a network. Scripted wire checks cover the
+subscription refusal, granted publish and transport lifetimes. These asynchronous paths add no
+tracked lock and remain outside Deloxide's detector.
+
 Pulsar input retirement uses the same cold lifecycle boundary: it snapshots typed plans, releases
 the registry guard and stops the exact ingestor tasks before comparing resolved subscription
 identities and removing an unused owned subscription. Matching replacements retain their backlog.
@@ -1354,6 +1362,14 @@ One sealed generation is cached and one build is admitted per placement; outstan
 captures keep only their selected row views and shared Arrow carriers. Publication never copies a
 row payload or a whole relay for an established update. Snapshot archives and storage ownership
 retain the current container and backup contract.
+
+Description and fetch are separate bounded exchanges. If the selected owner replaces its sealed
+generation between them, fetch reports the typed not-ready outcome instead of substituting bytes
+or retaining another generation. A withdrawn assignment reports unavailable. Materialized
+dependency reads feed these outcomes into their declared wait, skip or default policy, as they do
+for absence at description time; a later read describes the current generation again. Transfer
+I/O, framing, length, digest and decoding failures remain errors. Generator reads retain their own
+failure-and-retry contract and never reuse a generation that the current owner did not authorize.
 
 A stopped backup selects materialized checkpoint readers alongside its other state from one
 immutable database view. Those readers keep the selected namespace, metadata and chunks through
@@ -3728,6 +3744,16 @@ through the existing test-pause owner and exercises observation, refusal and rel
 pause, network waits and standard-library once publication remain outside the blocking-lock detector.
 The diagnostic parameter workloads reach the surrounding tracked owners; the public scenario and
 external partition recovery verify admission and observation during an isolated process restart.
+
+### Processor Completion Observation In Tests
+
+The testing-only processor-flush seam borrows one pause from the command-pause registry by its
+exact domain/processor identity, releases the map guard before waiting and removes the one-shot
+entry after release. The shared pause owner declares that bounded test protocol. The scenario and
+failed-body cleanup release the pause; another processor and a later completion pass an
+already-claimed pause.
+Ordinary builds contain neither that call nor its registry. It observes a real flush obligation
+before completion without changing the drain count or the product's flush and gate deadlines.
 
 ### Ingestor Read Observations
 

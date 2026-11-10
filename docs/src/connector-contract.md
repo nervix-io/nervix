@@ -2004,11 +2004,26 @@ persistent session retained after that refusal is not an accepted subscription. 
 retain the connector's `RetiringSubscription` phase. Before another
 subscription attempt, it runs the existing retirement exchange: clean CONNECT, UNSUBSCRIBE and
 DISCONNECT with session expiry zero, bounded by the client's connection budget. A failed or
-cancelled retirement keeps that phase, including across suspension; only successful cleanup
-allows another attempt. The retirement helper carries the recurring execution contract because
+cancelled retirement keeps that phase, including across suspension. The phase also survives
+cancellation while connecting its replacement, until that connection reaches its subscription
+exchange; successful cleanup allows another attempt. The retirement helper carries the recurring execution contract because
 `resume` can retry it; teardown also uses it to release stopped inputs. A successfully retained
 session uses its original accepted grant and needs no new `SUBACK`; filter and QoS alterations
 retire it.
+
+After DNS, transport setup and CONNACK complete, the connector owns the fresh session's
+SUBSCRIBE/SUBACK exchange. `resume` borrows that exchange's wait: cancelling the caller preserves
+its exact future, socket and partial parser state. Suspension keeps that pending subscription
+unpolled; resumption continues it. Terminal close drops it. Earlier connection waits remain
+cancellable and release their transport and resolver resources when the caller leaves.
+A cancelled SUBACK wait therefore cannot mistake a retained empty session for an accepted
+subscription, or retire a session whose successful grant and queued publish await observation.
+The setup introduces no task, message buffer, timer, retry loop or additional connection, and
+leaves the established connection phase's size unchanged. Its network waits retain the driver's
+existing bounds. Running subscriptions keep their disconnect and broker-only resume behavior.
+Real scripted wire checks cover refused and granted pending subscriptions, early connection
+cancellation, retirement debt and terminal close. The registered Shuttle check covers the
+production subscription owner's lifetime with controlled completion and no modeled network.
 
 Under `NO ACK`, the client acknowledges every publish on receipt and the broker holds back none.
 Its read-ahead holds 64 outcomes. Once it is full, the task holds the next outcome and polls

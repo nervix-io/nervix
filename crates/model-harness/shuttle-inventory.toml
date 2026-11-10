@@ -100,6 +100,7 @@ checks = [
   "topic::ingestor::driver::shuttle_tests::shuttle_an_acknowledgement_whose_connection_ends_fails_with_the_loss",
   "topic::ingestor::shuttle_tests::shuttle_a_cancelled_read_hands_over_every_publish_the_broker_delivered",
   "topic::ingestor::shuttle_tests::shuttle_a_read_whose_batch_timeout_races_the_cancellation_hands_over_every_publish",
+  "topic::ingestor::shuttle_tests::shuttle_cancelled_subscription_setup_retains_its_owned_completion",
 ]
 name = "nervix-connector-mqtt"
 

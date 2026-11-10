@@ -47,7 +47,7 @@ use super::{
     ForcedOwnershipRecoveryPreparation, IngestorDescribeEnvelope, OwnershipHandoffCheckpoint,
     OwnershipHandoffResponse, PoolClass, PrepareForcedOwnershipRecoveryRequest,
     PrepareOwnershipHandoffStateRequest, ReconcileOwnershipHandoffPreparationsRequest,
-    RemoteOperationFailure, Transport, TransportError, wire,
+    RemoteOperationFailure, RemoteOperationFailureKind, Transport, TransportError, wire,
 };
 use crate::{
     connection::{
@@ -1048,8 +1048,40 @@ type HandlerFuture = Pin<
     Box<dyn Future<Output = Result<(Vec<u8>, Reservation), RemoteRequestFailure>> + Send + 'static>,
 >;
 
+/// A stream opening either refuses the request or reports its operation's typed outcome.
+#[derive(Debug, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "the fixed stream-opening response distinguishes request failures from operation \
+                  refusals"
+    )
+)]
+pub(crate) enum StreamOpeningFailure {
+    #[error(transparent)]
+    Request(#[from] RemoteRequestFailure),
+    #[error("the operation refused the stream")]
+    Operation {
+        kind: RemoteOperationFailureKind,
+        report: Report<StreamHandlerError>,
+    },
+}
+
+impl StreamOpeningFailure {
+    fn handler(error: Report<StreamHandlerError>) -> Self {
+        match error.downcast_ref::<RemoteOperationFailure>() {
+            Some(failure) => Self::Operation {
+                kind: RemoteOperationFailureKind::from(failure),
+                report: error,
+            },
+            None => Self::Request(RemoteRequestFailure::ResponseEncode(format!("{error:#}"))),
+        }
+    }
+}
+
 type StreamHandlerFuture =
-    Pin<Box<dyn Future<Output = Result<StreamingResponse, RemoteRequestFailure>> + Send + 'static>>;
+    Pin<Box<dyn Future<Output = Result<StreamingResponse, StreamOpeningFailure>> + Send + 'static>>;
 
 type DuplexHandlerFuture = Pin<
     Box<dyn Future<Output = Result<OutgoingFrameStream, RemoteRequestFailure>> + Send + 'static>,
@@ -1187,11 +1219,11 @@ where
             if let Some(identity) = request.coordination_identity()
                 && !context.authenticates(identity)
             {
-                return Err(RemoteRequestFailure::CoordinationIdentityMismatch);
+                return Err(RemoteRequestFailure::CoordinationIdentityMismatch.into());
             }
             (handler)(context, request)
                 .await
-                .map_err(|error| RemoteRequestFailure::ResponseEncode(error.to_string()))
+                .map_err(StreamOpeningFailure::handler)
         })
     }
 }
@@ -1419,7 +1451,7 @@ impl RequestState {
         peer_advertised_host: String,
         peer_process_epoch: u64,
         request: RequestEnvelope,
-    ) -> Result<HandledByteStream, RemoteRequestFailure> {
+    ) -> Result<HandledByteStream, StreamOpeningFailure> {
         let handler = self
             .handlers
             .load()
@@ -1434,16 +1466,18 @@ impl RequestState {
                 return Err(RemoteRequestFailure::PayloadTooLarge {
                     actual: payload_bytes,
                     limit: payload_limit,
-                });
+                }
+                .into());
             }
             Some(handler) if handler.class() == request.class => handler,
             Some(handler) => {
                 return Err(RemoteRequestFailure::WrongPoolClass {
                     expected: handler.class(),
                     actual: request.class,
-                });
+                }
+                .into());
             }
-            None => return Err(RemoteRequestFailure::HandlerNotRegistered),
+            None => return Err(RemoteRequestFailure::HandlerNotRegistered.into()),
         };
         let subquota = handler.subquota();
         let admission = self
@@ -2121,6 +2155,9 @@ mod tests {
         {
             Err(failure) => failure,
             Ok(_) => panic!("the occupied class must refuse decoding"),
+        };
+        let StreamOpeningFailure::Request(failure) = failure else {
+            panic!("decode capacity must refuse the request before its operation runs");
         };
         let error = RequestError::RemoteRejected {
             node,

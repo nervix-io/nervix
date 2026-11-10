@@ -556,6 +556,14 @@ can distinguish a node that rejects ownership, an unavailable subject, a subject
 and an operation that ran and failed without parsing display text. Only the final class carries an
 operator-facing reason; callers decide retry and relocation from the class and subject.
 
+A refused byte-stream opening carries the same four operation classes in the fixed
+`x-nervix-operation-failure` response header. The header's vocabulary is derived from
+`RemoteOperationFailure`; the requester binds it to the subject of its typed request. The full
+diagnostic remains the bounded error body. Request decoding, execution admission, I/O and encoding
+failures carry no operation class, so their status or display text cannot turn them into ordinary
+state absence. Successful stream framing, content length, quotas and progress deadlines are
+unchanged. This response-header contract is part of the current wire fingerprint.
+
 Relay metadata uses the same validated control encoding, while relay bodies remain Arrow IPC from
 the source relay to the destination runtime. Bulk operations transfer opaque byte chunks and let
 the owning resource, snapshot, or state protocol interpret the stream.

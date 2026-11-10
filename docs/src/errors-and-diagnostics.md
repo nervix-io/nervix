@@ -362,6 +362,14 @@ into it exactly where that shape is constructed. That construction is the one pl
 current context is cloned or its chain rendered into a field;
 [Guarantees And Limits](#guarantees-and-limits) lists the contexts that still copy a cause as text.
 
+A byte-stream opening projects an operation refusal into its typed failure class and a rendered
+diagnostic at the HTTP response boundary. The requester retains that class beside its own target
+and placement context. A materialized snapshot generation replaced between description and fetch
+is `NotReady`; a withdrawn assignment is `Unavailable`. The dependency owner applies its declared
+WAIT, SKIP or default policy. I/O, malformed framing, length and digest failures remain failed
+transfers. The error body keeps its complete cause chain under the response's existing byte and
+progress bounds, including when the handler reports no operation class.
+
 Leading empty consensus probes return their matching boundary, conflict or higher vote through
 the existing management response. A conflict, higher vote or incomplete acceptance ends that input
 before data-stream admission. A management request failure uses the same unreachable-peer error
@@ -384,6 +392,7 @@ attempt, so reporting an immediate local refusal does not create an unpaced retr
 | Replicated transaction mutation | The Raft response's `TransactionMutationError` | The state machine's typed refusal, cloned from the report's current context when the response is built | The proposer creates a new report from the typed refusal |
 | Consensus append stream and its initial prefix check | The stream's wire records and the management append answer | A matching, conflicting or higher-vote answer, or the request error | A rejected or incomplete prefix is returned as the typed Raft outcome before data admission; a failed management request crosses the foreign-error hook with its complete report before becoming an unreachable-peer error |
 | Interconnect remote operation | The failure's class and subject, with the answering node's description for an executed failure only | The classified result; the local chain is not serialized | The requester keeps the class beside its own target and placement context |
+| Interconnect byte-stream opening | The operation class in the response header and its rendered diagnostic body | A classified operation refusal, or the request failure's complete diagnostic | The requester retains the class with its target context; materialized-state readers reconstruct absence outcomes for the requested placement, while transport failures remain failed transfers |
 | Interconnect connection handshake | The answer's refusal | The `PrerequisiteMismatch` the accepting node judged, seen from that node | The dialing node creates `TransportError::RefusedByPeer` from the mismatch, reversed to its own side |
 | Remote relay payload refused before admission | The refusal's reason text | The rendered chain | The forwarding node resumes it as `TransportError::RelayRejected` beneath its target context; reconciliation also retains the original send report |
 | WASM guest ABI | An integer result code, and the reason on the global-error channel | The code of the guest error's current context, or the rendered chain as the reason of a guest failure | The host creates a guest-call report that holds the code or the reason |

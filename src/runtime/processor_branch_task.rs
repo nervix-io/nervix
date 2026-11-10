@@ -1526,6 +1526,10 @@ async fn run_processor_branch_task(
                 }
                 branch.force_flush(&flush_snapshot).await;
                 quiesce_gauges.observe(&branch, &processor);
+                #[cfg(feature = "testing")]
+                runtime_handle.inner.fault_injection
+                    .pause_processor_flush_completion_if_armed(branch.owner.node.in_domain(&domain))
+                    .await;
                 completion.complete();
             }
             _ = freeze.changed(), if ownership_frozen => {}

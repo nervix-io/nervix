@@ -275,6 +275,59 @@ enum EffectRecord {
     },
 }
 
+impl EffectRecord {
+    fn assert_matches_reading(&self, reading: &LedgerReading) {
+        let generation = match self {
+            Self::Reading {
+                sensor,
+                tick,
+                occurred_at,
+                timestamp_source,
+                value,
+                generation,
+                ..
+            } => {
+                assert!(
+                    !reading.expects_rejection(),
+                    "{} required a window rejection",
+                    reading.reading_id
+                );
+                assert_eq!(sensor, &reading.sensor);
+                assert_eq!(tick, &reading.tick);
+                assert_eq!(parse_timestamp(occurred_at), reading.occurred_at());
+                assert_eq!(timestamp_source, &reading.timestamps);
+                assert_eq!(value, &reading.value);
+                *generation
+            }
+            Self::Rejection {
+                occurred_at,
+                error_code,
+                error_message,
+                generation,
+                ..
+            } => {
+                assert_eq!(
+                    reading.timestamps, "at",
+                    "TIMESTAMP NOW must not reject its event time"
+                );
+                assert_eq!(parse_timestamp(occurred_at), reading.occurred_at());
+                assert_eq!(error_code, "validation");
+                assert!(
+                    error_message.contains(OUTSIDE_WINDOW),
+                    "{} has an unexpected rejection: {error_message}",
+                    reading.reading_id
+                );
+                *generation
+            }
+        };
+        assert_eq!(
+            generation, reading.generation,
+            "reading {} was applied in another START generation",
+            reading.reading_id
+        );
+    }
+}
+
 /// The terminal outcome the ledger records for one reading's batch, and its cause.
 #[derive(Debug)]
 struct LedgerOutcome {
@@ -1135,6 +1188,7 @@ async fn then_every_completed_reading_has_one_effect_from_its_generation(
     let readings = records.readings();
     let outcomes = records.outcomes();
     let effects = records.reading_effects();
+    let notices = records.rejection_notices();
     let mut completed = 0_u32;
     for (reading_id, reading) in &readings {
         let outcome = outcomes
@@ -1144,23 +1198,48 @@ async fn then_every_completed_reading_has_one_effect_from_its_generation(
             continue;
         }
         completed += 1;
-        let Some(EffectRecord::Reading { generation, .. }) = effects.get(reading_id).copied()
-        else {
-            panic!("completed reading {reading_id} has no effect");
+        let effect = match (effects.get(reading_id), notices.get(reading_id)) {
+            (Some(effect), None) | (None, Some(effect)) => *effect,
+            (None, None) => panic!("completed reading {reading_id} has no effect"),
+            (Some(_), Some(_)) => {
+                panic!("completed reading {reading_id} has both a reading and a rejection effect")
+            }
         };
-        assert_eq!(
-            *generation, reading.generation,
-            "reading {reading_id} of generation {} was applied under generation {generation}",
-            reading.generation
-        );
+        effect.assert_matches_reading(reading);
     }
     assert!(completed > 0, "no reading completed");
-    for reading_id in effects.keys() {
+    for reading_id in effects.keys().chain(notices.keys()) {
         assert!(
             readings.contains_key(reading_id),
             "the effect store applied {reading_id}, which the ledger never planned"
         );
     }
+}
+
+#[then(expr = "the paced simulation records readings and window rejections in generation {int}")]
+async fn then_both_effect_paths_are_recorded(world: &mut ScenarioWorld, generation: u64) {
+    let records = world.paced_simulation.records();
+    let mut readings = 0usize;
+    let mut rejections = 0usize;
+    for effect in &records.effects {
+        match effect {
+            EffectRecord::Reading {
+                generation: actual, ..
+            } if *actual == generation => readings += 1,
+            EffectRecord::Rejection {
+                generation: actual, ..
+            } if *actual == generation => rejections += 1,
+            _ => {}
+        }
+    }
+    assert!(
+        readings > 0,
+        "generation {generation} exercised no admitted reading"
+    );
+    assert!(
+        rejections > 0,
+        "generation {generation} exercised no window rejection"
+    );
 }
 
 #[then(

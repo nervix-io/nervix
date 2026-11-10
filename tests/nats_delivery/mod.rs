@@ -71,19 +71,21 @@ async fn controlled_connection_is_lost(world: &mut ScenarioWorld, operation: Str
 /// A retried Core NATS write may duplicate records, but every original member must arrive.
 #[then(
     expr = "within {string} the observed broker receives every record from 1 to {int} by field \
-            {string}"
+            {string}, with {int} padding bytes"
 )]
 async fn observed_broker_receives_every_record(
     world: &mut ScenarioWorld,
     duration: String,
     count: u64,
     field: String,
+    padding_bytes: usize,
 ) {
     let duration = parse_duration_text(&duration).assured("the step supplies a valid duration");
     let deadline = Instant::now()
         .checked_add(duration)
         .assured("the scenario's deadline fits the monotonic clock");
     let mut missing = (1..=count).collect::<std::collections::BTreeSet<_>>();
+    let expected_padding = "x".repeat(padding_bytes);
     let observer = world
         .broker_observer
         .as_mut()
@@ -106,6 +108,11 @@ async fn observed_broker_receives_every_record(
         };
         let payload = serde_json::from_str::<serde_json::Value>(&message.payload)
             .assured("the codec emitted a JSON object");
+        assert_eq!(
+            payload.get("padding").and_then(serde_json::Value::as_str),
+            Some(expected_padding.as_str()),
+            "every external publish keeps the full backpressure padding",
+        );
         let sequence = payload
             .get(&field)
             .assured("the output preserves the sequence field")

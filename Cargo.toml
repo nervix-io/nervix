@@ -18,7 +18,7 @@ path = "src/main.rs"
 [features]
 default = []
 # Exposes opaque benchmark drivers without making runtime internals part of the normal API.
-benchmarks = []
+benchmarks = ["dep:nervix-connector-fake"]
 # Builds a diagnostic node: the thread-blocking locks of the whole graph are tracked by the deadlock
 # detector, which the binary installs at start-up, and the first active deadlock it reports is
 # recorded and ends the process. A diagnostic artifact, never a release product.
@@ -44,7 +44,7 @@ deloxide-stress = [
 # Selects Loom's primitives for the whole graph, and runs the Loom models of the server's owners.
 loom = [
   "nervix-tls/loom",
-  "nervix-connector-fake/loom",
+  "nervix-connector-fake?/loom",
   "nervix-interconnect/loom",
   "nervix-consensus/loom",
   "nervix-execution/loom",
@@ -55,7 +55,7 @@ loom = [
 # I/O modules remain Tokio's real implementations, outside every model.
 shuttle = [
   "nervix-tls/shuttle",
-  "nervix-connector-fake/shuttle",
+  "nervix-connector-fake?/shuttle",
   "dep:shuttle",
   "nervix-client-core/shuttle",
   "nervix-connector/shuttle",
@@ -149,6 +149,7 @@ nervix-client-wire = { workspace = true, features = ["grpc"] }
 nervix-columnar-json = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-connector-clickhouse = { workspace = true }
+nervix-connector-fake = { workspace = true, optional = true }
 nervix-connector-http = { workspace = true }
 nervix-connector-iceberg = { workspace = true }
 nervix-connector-kafka = { workspace = true }
@@ -273,6 +274,11 @@ tempfile = { workspace = true }
 [[bench]]
 harness = false
 name = "admitted_work"
+required-features = ["benchmarks"]
+
+[[bench]]
+harness = false
+name = "emitter_flush"
 required-features = ["benchmarks"]
 
 [[bench]]
@@ -519,6 +525,7 @@ flatc-rust = "0.2.0"
 flate2 = "1"
 futures-channel = "0.3"
 futures-util = "0.3"
+globwalk = "0.9.1"
 gloo-net = "0.7"
 governor = "0.10.4"
 h2 = "0.4"

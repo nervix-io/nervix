@@ -250,6 +250,14 @@ pacer also counts accepted, connected, failed, cancelled and completed connectio
 bytes. These observations do not inspect TLS or frame bytes or establish ordering the product
 relies on.
 
+The departed-follower retry scenario observes logical replication attempts after the caller's first
+request, so a refused initial management probe is visible even when no data stream is attempted.
+It retains the nonzero-attempt assertion and the elapsed-time bound derived from the caller's 200ms
+retry delay. A native regression holds the caller input pending, observes zero attempts, releases
+it and observes exactly one refused management-probe attempt with zero data attempts/openings;
+another confirms that ended input records no attempt. Neither observation changes replication,
+transport admission, retry delays or deadlines.
+
 A focused startup scenario occupies the observability port to force the first launch to fail
 before runtime initialization.
 The harness joins that attempt and retries on a fresh observability port within the same readiness
@@ -416,6 +424,12 @@ Both recipes use absolute feature patterns to keep discovery out of generated bu
 The single-feature recipe repeats its literal alternative so the walker starts in that feature's
 parent directory and selects only that file.
 
+`just test-ingestor-read-metrics`, `just test-endpoint-request-metrics` and
+`just test-emitter-outcomes` use the same absolute-pattern boundary. The first two select their
+single feature; the last selects the runtime features and their `@emitter_outcomes` cases. Relative
+CLI patterns make the maintained walker search the whole working directory, including generated
+build artifacts, before selecting a feature.
+
 The emitter assembly outline observes the emitter's public received-message total before each
 switch between its two source relays. It waits for all three initial A rows before posting B, and
 both B rows before returning to A. An endpoint's `NO ACK` response confirms intake admission;
@@ -568,6 +582,27 @@ library and no server binary is built for it. Every dependency of the package is
 so the server's `testing` feature reaches no ordinary build of the workspace. Cargo runs a test in
 its package's directory, so `main` moves to the workspace root first, and every path a scenario or
 `--input` names stays relative to it.
+
+`--input` accepts a feature file, directory or quoted glob, either relative to the workspace root
+or absolute. A literal file is parsed directly; a directory discovers its feature files; a glob
+walks only below its literal directory prefix. Relative focused inputs therefore do not traverse
+generated build trees. Directory discovery keeps case-insensitive feature extensions, while
+explicit globs keep their case-sensitive matching.
+Matching, Gherkin parsing and outline expansion remain owned by globwalk,
+Gherkin and Cucumber, and discovery keeps deterministic path order before sharding and feature
+prioritization.
+Missing inputs and traversal or parsing errors fail the run. A completed invocation that took up
+no scenarios also fails, including when its name, tag or shard filter matched nothing; its zero
+counts never qualify a workload. The harness regressions cover relative and absolute literal
+files, directories, wildcard/brace/question-mark/character-class patterns and missing inputs.
+
+The scenario-build job also runs `just test-scenario-selection-guards` against its already compiled
+runner after publishing its cache and archives. Two bounded child invocations select a missing glob
+or an unmatched name, and the supervisor requires the specific failure exit and exactly zero
+scenario work. It retains their logs and separate qualification profiles, restores the previous
+logs, and uploads its control counts. These expected failures qualify the guard; they never supply
+ordinary workload or coverage verdicts. An explicit binary and evidence directory replay the same
+check locally without compiling.
 
 The relay-channel turnover scenario posts through an acknowledged HTTP endpoint on a node other
 than the relay owner. Its generated-payload step reuses one HTTP client and requires each request
@@ -4144,11 +4179,11 @@ selections runs the inventory's fixed number of scenarios at once, four, rather 
 build pays for its tracked acquisitions on every lock, and a fixed count puts the same load on its
 nodes locally and on CI's 16-vCPU runner.
 
-The lane resolves every feature pattern against its repository root before passing it to
-Cucumber. A relative pattern would make Cucumber traverse the whole working directory, including
-generated build artifacts. An exact feature uses an absolute pattern with two identical literal
-alternatives, so the walker starts at that feature's parent directory and still selects only
-that file. This bounds discovery without changing the registered examples or their deadlines.
+The lane resolves every feature pattern against its repository root before passing it to the
+scenario harness. Its exact-feature recipes use an absolute pattern with two identical literal
+alternatives. The harness also accepts literal files and relative patterns directly, rooting their
+discovery at the selected directory prefix. Neither form traverses generated build artifacts for
+a focused feature, and neither changes the registered examples or their deadlines.
 
 Under the native coverage collector the lane instruments only workspace crates, the scope the
 ordinary coverage build has. Before starting the workload clock it repeats every selected build

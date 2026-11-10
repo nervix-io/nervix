@@ -90,4 +90,21 @@ impl FaultInjection {
             .verified("the harness started this node before observing consensus");
         state.test_probe.append_stream_attempt_count(target)
     }
+
+    pub fn consensus_replication_attempt_count(
+        &self,
+        node: &ClusterNodeName,
+        target: &ClusterNodeName,
+    ) -> u64 {
+        let state = self
+            .inner
+            .consensus_probes
+            .get(node)
+            .verified("the harness registered this node before observing consensus");
+        let _running_probe = state
+            .probe
+            .as_ref()
+            .verified("the harness started this node before observing consensus");
+        state.test_probe.replication_attempt_count(target)
+    }
 }

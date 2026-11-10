@@ -105,6 +105,12 @@ protect; [Control Plane](./control-plane.md#alter-lock-and-quiesce-classificatio
 changes that normally contribute each level. An ingestor's `ON QUIESCE` mode controls its
 external system's behavior under a hold; it is distinct from the step's quiesce level.
 
+An entity drain's `node_work_items` includes unfinished force-flush obligations as well as
+admitted and parked data. One batch parked on `REQUIRED WAIT` therefore counts as one item after
+its processor's flush settles, and as two while that flush's completion remains outstanding.
+The parked-wait scenario holds that completion explicitly before checking the exact combined count;
+it releases the hold before supplying the missing state and proving that the alteration can finish.
+
 A [client ingestor](./ingestors.md#client-ingestors) under a hold suspends admission: its producers
 are told admission is suspended, batches that were queued but not admitted are refused as
 `suspended`, and batches that arrive during the hold are refused the same way. The drain waits for

@@ -8203,6 +8203,7 @@ dependencies = [
  "flatbuffers",
  "flate2",
  "futures-util",
+ "globwalk",
  "h2",
  "http",
  "http-body-util",

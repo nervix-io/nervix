@@ -71,6 +71,7 @@ pub(super) enum CommandPausePoint {
     IngestorRoutePoll(DomainNodeRef),
     IngestorBranchBuffer(DomainNodeRef, BranchKeyFingerprint),
     OwnershipHandoffFlush(DomainName),
+    ProcessorFlushCompletion(DomainNodeRef),
     ProcessorPartitionInstall(DomainNodeRef),
     ProcessorPartitionForget(DomainNodeRef),
     OwnershipHandoffActivation(DomainName),

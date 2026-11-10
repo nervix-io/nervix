@@ -45,6 +45,7 @@ pub(crate) mod restore_reply_peer;
 pub(crate) mod runner_lag;
 pub(crate) mod runner_observation;
 pub(crate) mod runner_offload;
+pub(crate) mod scenario_input;
 pub(crate) mod scenario_phase;
 pub(crate) mod scenario_schedule;
 pub(crate) mod scenario_shard;

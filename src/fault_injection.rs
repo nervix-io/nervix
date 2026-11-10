@@ -78,6 +78,7 @@ mod materialized_reads;
 mod model_publication;
 mod orphaned_domain_pause;
 mod pause;
+mod processor_flush;
 mod relay_memory;
 mod relay_partition_fanout;
 mod relay_slicing;
@@ -2860,7 +2861,8 @@ impl FaultInjection {
         nervix_lint,
         nervix::context(
             bounded,
-            reason = "one scenario-owned command pause selects at most one waiting attempt",
+            reason = "one scenario-owned command or processor-completion pause selects at most \
+                      one waiting attempt",
             key = "one armed CommandPausePoint",
             bound = "one keyed read and conditional removal; one claimed waiter; guards end \
                      before the test-controlled wait and scenario teardown releases the pause"

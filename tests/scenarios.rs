@@ -8021,7 +8021,7 @@ async fn then_failed_append_leader_confirms_linearizable_read(
     );
 }
 
-#[given(expr = "append-stream setup attempts toward node {string} are observed")]
+#[given(expr = "replication setup attempts toward node {string} are observed")]
 fn given_append_setup_attempts_are_observed(world: &mut ScenarioWorld, target: String) {
     let target = expand_placeholders(world, &target);
     let target_name = crate::common::cluster::node_name(&target);
@@ -8030,7 +8030,7 @@ fn given_append_setup_attempts_are_observed(world: &mut ScenarioWorld, target: S
         if source == target {
             continue;
         }
-        let attempts = world.fault_injection.consensus_append_stream_attempt_count(
+        let attempts = world.fault_injection.consensus_replication_attempt_count(
             &crate::common::cluster::node_name(&source),
             &target_name,
         );
@@ -8043,7 +8043,7 @@ fn given_append_setup_attempts_are_observed(world: &mut ScenarioWorld, target: S
     });
 }
 
-#[then(expr = "append-stream setup attempts toward node {string} respect the caller retry delay")]
+#[then(expr = "replication setup attempts toward node {string} respect the caller retry delay")]
 fn then_append_setup_attempts_respect_retry_delay(world: &mut ScenarioWorld, target: String) {
     let target = expand_placeholders(world, &target);
     let observation = world
@@ -8065,7 +8065,7 @@ fn then_append_setup_attempts_respect_retry_delay(world: &mut ScenarioWorld, tar
     for (source, baseline) in observation.attempts_at_start {
         let attempts = world
             .fault_injection
-            .consensus_append_stream_attempt_count(
+            .consensus_replication_attempt_count(
                 &crate::common::cluster::node_name(&source),
                 &target_name,
             )
@@ -8074,7 +8074,7 @@ fn then_append_setup_attempts_respect_retry_delay(world: &mut ScenarioWorld, tar
         total_attempts = total_attempts.saturating_add(attempts);
         assert!(
             attempts <= maximum,
-            "source '{source}' attempted {attempts} append-stream setups to departed '{target}'; \
+            "source '{source}' attempted {attempts} replication setups to departed '{target}'; \
              the caller retry delay permits at most {maximum} in this observation"
         );
     }
@@ -14870,6 +14870,42 @@ async fn when_ingestor_route_poll_pause_released(world: &mut ScenarioWorld, inge
     world
         .fault_injection
         .release_ingestor_route_poll_pause(&world.ingestor_dispatch_ref(&ingestor));
+}
+
+fn junction_flush_ref(world: &ScenarioWorld, junction: &str) -> nervix_models::DomainNodeRef {
+    nervix_models::DomainNodeRef::node_in(
+        nervix_models::DomainName::try_from(world.domain.as_str())
+            .assured("the scenario domain is an identifier-shaped name"),
+        nervix_models::ModelKind::Junction,
+        nervix_models::ModelName::try_from(expand_placeholders(world, junction).as_str())
+            .assured("the scenario junction is an identifier-shaped name"),
+    )
+}
+
+#[given(expr = "the flush completion of junction {string} is held")]
+fn given_junction_flush_completion_held(world: &mut ScenarioWorld, junction: String) {
+    world
+        .fault_injection
+        .pause_processor_flush_completion(junction_flush_ref(world, &junction));
+}
+
+#[then(expr = "the flush completion hold of junction {string} is reached")]
+async fn then_junction_flush_completion_hold_reached(world: &mut ScenarioWorld, junction: String) {
+    nervix_primitives::time::timeout(
+        Duration::from_secs(10),
+        world
+            .fault_injection
+            .wait_for_processor_flush_completion_pause(&junction_flush_ref(world, &junction)),
+    )
+    .await
+    .expect("the junction finishes its flush while retaining the completion obligation");
+}
+
+#[when(expr = "the flush completion hold of junction {string} is released")]
+fn when_junction_flush_completion_hold_released(world: &mut ScenarioWorld, junction: String) {
+    world
+        .fault_injection
+        .release_processor_flush_completion_pause(&junction_flush_ref(world, &junction));
 }
 
 #[given(expr = "ownership handoff for domain {string} pauses after requesting flush")]
@@ -29931,7 +29967,7 @@ fn consecutive_runs(values: &[i64], limit: usize) -> String {
 /// then requires that it holds exactly one message for each value from 1 to `once`.
 #[then(
     expr = "within {string} NATS JetStream stream {string} holds every record from 1 to {int} by \
-            field {string}, and records 1 to {int} exactly once"
+            field {string}, and records 1 to {int} exactly once, with {int} padding bytes"
 )]
 async fn then_nats_jetstream_stream_holds_records(
     world: &mut ScenarioWorld,
@@ -29940,6 +29976,7 @@ async fn then_nats_jetstream_stream_holds_records(
     last: i64,
     field: String,
     once: i64,
+    padding_bytes: usize,
 ) {
     let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let stream = expand_placeholders(world, &stream);
@@ -29967,7 +30004,7 @@ async fn then_nats_jetstream_stream_holds_records(
         }
         let values = world
             .cluster()
-            .nats_stream_field_values(&stream, &field)
+            .nats_stream_padded_field_values(&stream, &field, padding_bytes)
             .await
             .unwrap_or_else(|error| {
                 panic!("failed to read NATS JetStream stream '{stream}': {error}")
@@ -37623,8 +37660,8 @@ struct ScenarioRunArgs {
     shard: ScenarioShardArgs,
 }
 
-/// Parse the same Gherkin inputs and CLI options as Cucumber's basic parser, keep a shard's own
-/// scenario runs when the run is one shard of a sharded run, then take the limited feature chains
+/// Parse the selected Gherkin files, keep a shard's own scenario runs when the run is one shard of
+/// a sharded run, then take the limited feature chains
 /// up before the bulk. Cucumber may schedule all parsed scenarios at once; admission to a feature
 /// and to a run slot happens in the before hook.
 #[derive(Clone, Debug, Default)]
@@ -37634,17 +37671,17 @@ struct PrioritizedScenarioParser {
 }
 
 impl<I: AsRef<Path>> cucumber::parser::Parser<I> for PrioritizedScenarioParser {
-    type Cli = cucumber::parser::basic::Cli;
+    type Cli = common::scenario_input::ScenarioInput;
     type Output = futures_util::stream::LocalBoxStream<
         'static,
         cucumber::parser::Result<cucumber::gherkin::Feature>,
     >;
 
     fn parse(self, input: I, cli: Self::Cli) -> Self::Output {
-        let parsed = cucumber::parser::Parser::parse(cucumber::parser::Basic::new(), input, cli);
+        let parsed = common::scenario_input::parse_features(&workspace_root(), input.as_ref(), cli);
         let shard = self.shard;
         futures_util::stream::once(async move {
-            let mut features = parsed.collect::<Vec<_>>().await;
+            let mut features = parsed;
             if let Some(shard) = shard {
                 let selection = shard.keep_own_runs(&mut features);
                 println!("scenario {selection}");
@@ -38027,6 +38064,10 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
             messages.push(format!("{hook_errors} hook error(s)"));
         }
         SuiteOutcome::Failed(messages.join(", "))
+    } else if common::scenario_phase::registered_scenario_count() == 0 {
+        SuiteOutcome::Failed(
+            "no scenarios selected; check --input, --name, --tags and --shard".to_owned(),
+        )
     } else {
         SuiteOutcome::Passed
     };

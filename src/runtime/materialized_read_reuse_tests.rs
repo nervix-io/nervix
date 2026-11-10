@@ -316,6 +316,96 @@ impl RemoteGenerationFixture {
 }
 
 #[nervix_primitives::test]
+async fn a_replaced_remote_snapshot_keeps_the_materialized_dependency_policy() {
+    let fixture = RemoteGenerationFixture::new().await;
+    fixture.replace_generation(10, 2);
+    let described_owner = fixture.selected_owner.borrow().clone();
+    let described = described_owner
+        .describe_sealed_materialized_snapshot(&fixture.placement, None)
+        .await
+        .assured("the preceding owner seals its described generation");
+    fixture.replace_generation(20, 3);
+    let replacement_owner = fixture.selected_owner.borrow().clone();
+    let replacement = replacement_owner
+        .describe_sealed_materialized_snapshot(&fixture.placement, None)
+        .await
+        .assured("the replacement owner seals its complete generation");
+    assert_ne!(described, replacement);
+    // The description races replacement before the fetch reaches the same authenticated node.
+    fixture.selected_owner.send_replace(described_owner);
+    let branch = string_branch_key("tenant", "tenant-0");
+    for policy in [
+        MaterializedStatePolicy::RequiredWait,
+        MaterializedStatePolicy::RequiredSkip,
+    ] {
+        let dependencies = [nervix_models::MaterializedStateDependency {
+            relay: fixture.relay.clone(),
+            policy: policy.clone(),
+        }];
+        let result = fixture
+            .reader
+            .resolve_materialized_dependencies(
+                &fixture.routing,
+                &fixture.domain,
+                &branch,
+                &dependencies,
+                Timestamp::from_unix_nanos(1),
+            )
+            .await
+            .assured("replacement is ordinary dependency absence, not a record error");
+        match policy {
+            MaterializedStatePolicy::RequiredWait => {
+                assert!(matches!(result, MaterializedDependencyResolution::Wait))
+            }
+            MaterializedStatePolicy::RequiredSkip => {
+                assert!(matches!(result, MaterializedDependencyResolution::Skip))
+            }
+            MaterializedStatePolicy::Default(_) => {
+                unreachable!("the fixture selects required policies")
+            }
+        }
+    }
+    fixture.fetch_owner.send_replace(Runtime::new());
+    let unavailable = fixture
+        .reader
+        .load_materialized_dependency_values(
+            &fixture.routing,
+            &fixture.domain,
+            &branch,
+            &fixture.relay,
+        )
+        .await
+        .assured("a withdrawn transfer assignment is ordinary dependency absence");
+    assert!(unavailable.is_none());
+
+    fixture.fetch_owner.send_replace(replacement_owner.clone());
+    fixture.selected_owner.send_replace(replacement_owner);
+    let recovered = fixture
+        .reader
+        .load_materialized_dependency_values(
+            &fixture.routing,
+            &fixture.domain,
+            &branch,
+            &fixture.relay,
+        )
+        .await
+        .assured("the next read reaches the complete replacement generation")
+        .assured("the replacement includes this branch");
+    assert_eq!(
+        recovered.get("relay_state.profiles.value"),
+        Some(&RuntimeValue::I64(20))
+    );
+    assert_eq!(
+        recovered.get("relay_state.profiles.payload"),
+        Some(&RuntimeValue::String(format!(
+            "20:{}",
+            "x".repeat(32 * 1024)
+        )))
+    );
+    fixture.shutdown().await;
+}
+
+#[nervix_primitives::test]
 async fn a_partition_handoff_hides_only_its_materialized_dependency_until_the_fence_reopens() {
     let runtime = Runtime::new();
     let local = named("reader");

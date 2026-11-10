@@ -357,10 +357,25 @@ test-scenario-arguments:
 test-scenario-shards:
     python3 -m unittest scripts.tests.test_scenario_shards
 
+# Exercise the compiled runner's expected-empty failures; no scenario workload is qualified.
+test-scenario-selection-guards binary="" evidence="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    binary={{ quote(binary) }}
+    evidence={{ quote(evidence) }}
+    if [[ -z "$binary" ]]; then binary="$(python3 -m scripts.scenario_shards executable)"; fi
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    if [[ -z "$evidence" ]]; then
+        evidence="$(mktemp -d {{ quote(cargo_target_dir + "/scenario-selection-guards.XXXXXXXX") }})"
+    fi
+    python3 -m scripts.scenario_selection_qualification "$binary" "$evidence"
+
 # Prepare the public scenario executable without spending a runtime check's execution budget.
 build-scenarios: tests-deps
     cargo test --package nervix-scenarios --test scenarios --no-run
 
+# --input accepts a feature file, directory or quoted glob, relative to the workspace or absolute.
+# A selection that executes no scenarios fails, including an empty name, tag or shard filter.
 test-scenarios *args: tests-deps test-client-python-api-run
     #!/usr/bin/env bash
     set -euo pipefail
@@ -476,14 +491,14 @@ test-ingestor-read-metrics *args: build-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/ingestor_read_metrics.feature {{ quote(args) }}
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/{ingestor_read_metrics,ingestor_read_metrics}.feature") }} {{ quote(args) }}
 
 # Endpoint request outcome regressions use in-process nodes and the public HTTP listener.
 test-endpoint-request-metrics *args: build-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/endpoint_request_metrics.feature {{ quote(args) }}
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/{endpoint_request_metrics,endpoint_request_metrics}.feature") }} {{ quote(args) }}
 
 # Declared connector events use the real Redis fixture and native client producers.
 test-connector-events *args: build-deps
@@ -686,7 +701,7 @@ test-emitter-outcomes *args: build-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    cargo test --package nervix-scenarios --test scenarios -- --input 'tests/features/runtime/*.feature' --tags '@emitter_outcomes' {{ quote(args) }}
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/*.feature") }} --tags '@emitter_outcomes' {{ quote(args) }}
 
 # Verify emitter outcome owners and the established interaction instrumentation in isolation.
 test-emitter-outcome-owners *args: build-deps
@@ -3497,15 +3512,16 @@ bench *args: build-web-console
     cargo bench --package nervix-columnar-json --bench json_encode -- {{ args }}
     cargo bench --package nervix-vm --bench vm -- {{ args }}
 
-# Exercise every Criterion body once without spending CI's smoke-test budget on release codegen.
-bench-smoke: build-web-console wasm-processor-guests download-onnxruntime bench-smoke-bodies
+# Exercise every benchmark body once without spending CI's smoke-test budget on release codegen.
+bench-smoke: build-web-console wasm-processor-guests download-onnxruntime check-emitter-flush-graph bench-smoke-bodies
 
-# The Criterion bodies `bench-smoke` exercises, without the console build that precedes them there.
+# The benchmark bodies `bench-smoke` exercises, without the console build that precedes them there.
 # `coverage-native-extras` builds the console outside its instrumentation and then runs these in it.
 bench-smoke-bodies:
     cargo bench --profile dev --package nervix-primitives --features native --bench ordinary_cost -- --test
     cargo bench --profile dev --package nervix-server --bench relay_interaction --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench admitted_work --features benchmarks -- --test
+    cargo bench --profile dev --package nervix-server --bench emitter_flush --features benchmarks -- --rows 1 --iterations 1 --trials 1 --warmup 0
     cargo bench --profile dev --package nervix-branch-instances --bench owned_branches -- --test
     cargo bench --profile dev --package nervix-server --bench subscription_row_encoding --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench wasm_checkpoint --features benchmarks -- --test
@@ -3528,6 +3544,24 @@ bench-smoke-bodies:
 # transformation. Extra arguments are forwarded to Criterion.
 bench-admitted-work *args: build-web-console
     cargo bench --package nervix-server --bench admitted_work --features benchmarks -- {{ args }}
+
+# Measure retained full emitter flushes; every iteration checks the delivered-row count.
+bench-emitter-flush *args: build-web-console
+    cargo bench --package nervix-server --bench emitter_flush --features benchmarks -- {{ quote(args) }}
+
+# Keep the scripted boundary outside the ordinary server dependency graph.
+check-emitter-flush-graph:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    graph_dir={{ quote(cargo_target_dir + "/emitter-flush-graphs") }}
+    mkdir -p "${graph_dir}"
+    cargo tree --locked --package nervix-server --edges normal,build --prefix none > "${graph_dir}/ordinary.txt"
+    if rg -q '^nervix-connector-fake ' "${graph_dir}/ordinary.txt"; then
+        printf 'the ordinary server graph includes the benchmark fixture\n' >&2
+        exit 1
+    fi
+    cargo tree --locked --package nervix-server --features benchmarks --edges normal,build --prefix none > "${graph_dir}/benchmark.txt"
+    rg -q '^nervix-connector-fake ' "${graph_dir}/benchmark.txt"
 
 # Real RabbitMQ write costs. Serialize measurements across checkouts of this repository.
 bench-rabbitmq-publish *args:
@@ -3554,6 +3588,10 @@ coverage-bench-primitives output="target/primitives-ordinary-cost.lcov":
 # Exercise the admission benchmark's current emitter context while measuring its line coverage.
 coverage-admitted-work output="target/admitted-work.lcov": build-web-console
     cargo llvm-cov --bench admitted_work --features benchmarks --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- --test
+
+# Cover the flush driver with its publication oracle; instrumented time is not a cost sample.
+coverage-emitter-flush output="target/emitter-flush.lcov": build-web-console
+    cargo llvm-cov --bench emitter_flush --features benchmarks --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- --rows 1 --iterations 1 --trials 1 --warmup 0
 
 # Run only the relay-interaction Criterion suite, including the delivery a node input records for
 # one batch at 1, 64, and 1,024 rows. Extra arguments are forwarded to Criterion.
@@ -4849,6 +4887,15 @@ deps-down:
 # reaches the controller, whose exit trap heals, captures evidence and cleans up.
 chaos *args:
     exec bash scripts/chaos/chaos.sh {{ args }}
+
+# Prepare the maintained Prometheus parser before a connector-metric qualification run.
+prepare-chaos-metrics:
+    test -x target/chaos-metrics/bin/python || python3 -m venv target/chaos-metrics
+    target/chaos-metrics/bin/python -m pip install --disable-pip-version-check --no-deps --only-binary=:all: --require-hashes -r scripts/chaos/metrics-requirements.txt
+
+# Refuse incomplete, stale or incorrectly attributed owner metric evidence.
+test-chaos-connector-metrics *args: prepare-chaos-metrics
+    PYTHONDONTWRITEBYTECODE=1 target/chaos-metrics/bin/python -m unittest scripts.chaos.tests.test_connector_metrics {{ quote(args) }}
 
 # Prove the network preflight and its retained failure outcomes through the external controller.
 test-chaos-network-preflight *cases:

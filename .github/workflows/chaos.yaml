@@ -190,6 +190,12 @@ jobs:
         with:
           tool: just@latest
 
+      - name: Prepare the connector metric verifier
+        if: >-
+          contains(matrix.shard.entries, 'ingestor-metrics-owner-crash') ||
+          contains(matrix.shard.entries, 'emitter-metrics-owner-crash')
+        run: just prepare-chaos-metrics
+
       # The suite runs with just and the pinned jq on a PATH that holds no Rust toolchain,
       # which shows that the external command builds nothing.
       - name: Prepare the controller's tools on a PATH without a Rust toolchain

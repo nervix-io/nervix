@@ -16,6 +16,7 @@
 //!   It also registers causal reply/pause ordering checks for command recovery probes and
 //!   the in-process status reader's committed-uniform readiness cases, and the client suite's
 //!   declared action/confirmation exchange.
+//!   It also registers focused feature-file, directory and glob selection regressions.
 //! - **Depends on.** The node-liveness, node-startup, node-stop, phase-deadline, status-request,
 //!   port-pool, node-bound address, process-cluster convergence, cluster-teardown, scenario-phase,
 //!   suite-watchdog, Redis-client, HTTP-receiver, Iceberg-catalog-gate, backup phase, snapshot receive memory, gRPC-receiver,
@@ -38,6 +39,11 @@
 )]
 
 use websocket_close::reply_to_close;
+
+#[path = "common/scenario_input.rs"]
+mod scenario_input;
+#[path = "common/scenario_input_tests.rs"]
+mod scenario_input_tests;
 
 #[path = "common/command_probe.rs"]
 mod command_probe;
