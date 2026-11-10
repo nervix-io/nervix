@@ -73,7 +73,6 @@ use thiserror::Error;
 use tracing::{debug, warn};
 
 const KAFKA: &str = "kafka";
-const DOMAIN_ASSIGNMENT_RETRY: Duration = Duration::from_millis(100);
 
 /// How long a consumer-group commit waits for its coordinator's answer.
 ///
@@ -300,6 +299,7 @@ impl KafkaGroupCommit {
 /// The complete connector-owned plan for opening Kafka ingestor instances.
 #[derive(Clone)]
 pub struct KafkaTopicIngestorPlan {
+    pub settings: super::KafkaTopicIngestorSettings,
     /// The node-owned executor used by this ingestor and its inspectors.
     pub executor: Executor,
     pub config: Vec<ClientConfigEntry>,
@@ -633,6 +633,7 @@ impl IngestMessageMetadata for KafkaTopicIngestorMessage {
 }
 
 pub struct KafkaTopicIngestor {
+    settings: super::KafkaTopicIngestorSettings,
     control: KafkaControl,
     /// Shared with the driver jobs the ingestor admits. A commit in flight keeps the consumer open
     /// until librdkafka answers it, and whichever holder lets it go last retires it.
@@ -666,6 +667,7 @@ impl IngestorConnector for KafkaTopicIngestor {
         Ok(Self {
             control,
             consumer,
+            settings: plan.settings,
             topic: plan.topic.clone(),
             offset_mode: plan.offset_mode.clone(),
             commits: GroupCommits::new(COMMIT_ANSWER_DEADLINE),
@@ -738,7 +740,7 @@ impl IngestorConnector for KafkaTopicIngestor {
             Ok(IngestorResume::Ready)
         } else {
             Ok(IngestorResume::Waiting {
-                retry_after: DOMAIN_ASSIGNMENT_RETRY,
+                retry_after: self.settings.assignment_retry(),
             })
         }
     }

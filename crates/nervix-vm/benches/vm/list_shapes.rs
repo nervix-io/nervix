@@ -50,7 +50,7 @@ fn matrix_batch(rows: usize) -> TypedBatch {
 pub(super) fn list_shape_benches(criterion: &mut Criterion) {
     let runtime = benchmark_runtime();
     let mut group = criterion.benchmark_group("vm_list_shape");
-    for rows in [1, INLINE_ROW_LIMIT] {
+    for rows in [1, VmInlineRowLimit::DEFAULT] {
         let batch = matrix_batch(rows);
         for (name, expression, output_type) in [
             (

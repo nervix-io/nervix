@@ -2728,9 +2728,11 @@ These async observations introduce no tracked blocking-lock owner. Deloxide cont
 the registered product locks, while the public scenarios and model checks exercise pause ordering
 at their applicable boundaries.
 
-The host suites' declared action channel arms subscription-opening refusals on every node and
-confirms their application before a suite restores its session relay. Its teardown action removes
-unused entries from the testing-only refusal map before another test can open a subscription.
+The host suites' declared action channel arms subscription-opening or clock-attachment refusals on
+every node and confirms their application before a suite restores its session relay. Each
+testing-only map is keyed by node and consumes its entry once at the cold opening boundary,
+releasing its guard before sending the refusal. The respective teardown action removes unused
+entries before another test can open a subscription or attach a clock.
 The map operations and the host's pipe waits are untracked; they add no blocking-lock owner or
 product synchronization protocol. The action owner's ordered-confirmation and deadline checks,
 the Python pipe-adapter checks and the one- and three-node `client_suites.feature` rows hold this
@@ -3678,6 +3680,26 @@ checkpoint locks. These are lifecycle and interleaving claims; no new cross-loca
 protocol is introduced. The concurrent-map ledger records preparation, observation and retirement
 frequency for each affected registry, including the execution-owned immutable MQTT client cache.
 
+## Independent Emitter Instances
+
+Emitter tasks are keyed by `NodeUnitRef`, and the emitter status, readiness, confirmation-wait,
+buffer and pool-wait registries by `DomainNodeUnitRef`, so two instances of one emitter on one node
+never share a registry entry; each task resolves its entries when it starts and retains the
+handles on record paths. An instance registers one receiver per relay unit it serves through the
+relay's existing unit audiences, the same registration a partitioned processor uses, and its relay
+interaction keys its sources by relay and unit. A batch of partition `p` therefore reaches only the
+instance that serves `p`, and a partition's handoff fence waits only for its own audience's
+backlog. No new synchronization protocol or cross-location memory-ordering claim is introduced: the
+unit audiences, their dispatch gates and the routed admission are the existing owners.
+
+The Shuttle check
+`shuttle_emitter_instances_receive_only_their_partitions_while_a_sibling_moves` explores owner
+fan-out of one batch to each of four partitions read by the two instances of an `INSTANCES 2`
+emitter, while instance 1 fences its partitions, withdraws its receivers and registers their
+successors. It asserts that instance 0 receives exactly the batches of its own partitions and is
+acknowledged for them, and that each batch of instance 1 reaches the receiver of its own partition
+at most once or ends unacknowledged, never a sibling.
+
 ## Live Cluster Policy
 
 Runtime timing and resource bounds are immutable publications through the governed `ArcSwap`.
@@ -3764,6 +3786,32 @@ their canonical keys. The catalog epoch and registration number distinguish repl
 when keys, ingestion timestamps and publication revisions repeat. Keys are filtered against
 one domain-clock reading without touching the owning keyspace. A changed expiry prefix fences a
 continuation even when no input has published another generation.
+
+During an active partition transition, the coordinator first reads count-only pages with complete
+selected branch-fingerprint catalogs from the captured unit owners. It chooses the current-count
+partition when that partition publishes an installed branch, otherwise its holder. The following
+owner pages exclude copies selected elsewhere before counting, opening window columns or applying
+row limits. Each page also names its complete catalog before exclusion; a membership change from
+the census returns `not_ready`, so installation and forget cannot produce a successful page with
+duplicate or missing copies. Two holders without an installed claimant likewise refuse the read.
+
+The census and keyed selection retain Bulk memory admission, bounded by one session transfer-byte
+budget; transport descriptors keep their existing Bulk bound, and the frontend's existing read
+deadline covers the census and pages together. Reads outside a transition request no catalogs.
+The release, checkpoint fetch, installation and forget protocol is unchanged, and passive snapshots
+use the same retained publications. This adds no publication, lock or recurring-path lookup.
+Deterministic owner tests cover growing, shrinking and a return to one partition, both unit read
+orders, catalog races and admission refusal. Public one- and three-node cases hold claims before
+installation and before forget and verify exact branch/row/byte counts, retained values and paging.
+
+Those scenario controls are a bounded test protocol keyed by domain, processor and claim phase.
+Each phase retains one armed pause; its keyed read and conditional removal release every shard
+guard before the pause's watch wait. One atomic claim lets only one key wait at that phase, while
+other claims proceed. The scenario waits at most 60 seconds for a phase to be reached and releases
+both phases explicitly; ordinary scenario teardown releases and clears any remaining pause after
+a failed step. The shared one-shot `pause_command_if_armed` owner carries this bounded source
+contract for its exact `CommandPausePoint`; the processor hooks only select their phase's point.
+Product builds use borrowed no-op hooks and retain no pause lookup or wait.
 
 Window inspection reads input and argument views, sequence and lifetime facts, the next duration or
 delayed-removal deadline, and the production state admission charge. Sealed metadata parsing runs

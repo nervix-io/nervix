@@ -86,6 +86,8 @@ Java and JVM programs follow [JVM Client Library](../../../docs/src/client-libra
 Ruby applications follow [Ruby Client Library](../../../docs/src/client-library-ruby.md),
 and C and C++ programs follow [C And C++ Client Library](../../../docs/src/client-library-c.md).
 Read its execution, clock and endpoint sections before choosing application-side lifecycle handling.
+For using the authenticated producer identity in arrival filters and routes, read
+[Client Ingestors](../../../docs/src/ingestors.md#client-ingestors) before choosing metadata fields.
 For typed state inspection in Python, Ruby or JVM applications, read that host guide's
 `Inspect Materialized State` section for page/refusal metadata, opaque continuation and retained
 schema/frame lifetimes before suggesting application code.
@@ -94,6 +96,8 @@ For deduplicator keys and retained window state, read [Runtime Nodes → Inspect
 and [Inspect Retained Window State](../../../docs/src/processors.md#inspect-retained-window-state).
 Follow those sections for sensitive argument projection, branch selectors, paging and the distinction
 between retained rows and window metadata; use each processor's `DESCRIBE` for a count summary.
+For inspections while partitions change, also read [Relay → Changing the partition count](../../../docs/src/relay.md#changing-the-partition-count)
+before interpreting a key's partition or retrying a raced inspection.
 
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
@@ -105,6 +109,11 @@ the CLI's Completion section.
 For live subscription, clock and notice output while editing, and terminal omission notices,
 follow the CLI's [Asynchronous Output](../../../docs/src/client-tools-cli.md#asynchronous-output)
 section.
+For native client deadlines, reconnect pacing and retention, read the CLI's
+[Connection Capabilities](../../../docs/src/client-tools-cli.md#connection-capabilities).
+For VM admission/cache limits, WASM engine resources and connector-host cadences, read
+[Engine And Connector Host Capabilities](../../../docs/src/node-settings.md#engine-and-connector-host-capabilities).
+Keep external-system timing and pool choices in the connector's declared client configuration.
 For secure CLI connections and console leader redirects, follow those chapters' connection
 sections and [Native session TLS](../../../docs/src/installation-cargo.md#native-session-tls).
 For scripted CLI use, read [Modes](../../../docs/src/client-tools-cli.md#modes) and
@@ -178,7 +187,10 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 - Isolation: unbranched or a concrete branch key, branch TTL, optional instance limit, and the
   branch's partition count when one relay owner per branch would funnel too much traffic (see
   [Relay Partitions](https://docs.nervix.io/relay.html#relay-partitions)); the count changes only
-  while the domain is stopped.
+  while the domain is stopped. When one emitter would funnel a partitioned branch back into one
+  node, decide its `INSTANCES` (a count or `PER PARTITION`); read
+  [Emitters → Emitter instances](../../../docs/src/emitters.md#emitter-instances) for the per-key
+  ordering it keeps, the entities that run one instance, and placement.
 - Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference,
   WASM fuel and linear-memory budgets, correlation, materialized state, lookup, generation, or
   repartitioning.
@@ -318,8 +330,13 @@ configuration/lifecycle, `CREATE RESOURCE`, and `RESET WASM PROCESSOR ... STATE`
 administration outside the transaction. Plan restore capacity for independently admitted archive
 metadata and streamed checkpoint I/O, following the backup guidance in `references/configuring-nervix.md`.
 Size node memory for every execution pool, including active snapshots and optional retained materialized-source reads;
-the default startup requirement is 2,723 MiB. Read [Node Settings](https://docs.nervix.io/node-settings.html)
+the default startup requirement is 2,787 MiB, including both database caches. Read [Node Settings](https://docs.nervix.io/node-settings.html)
 for the complete prerequisite checks.
+For Nervix transport, DNS, database or consensus sizing, read
+[Node Settings → Transport, Resolver And Database Capacities](../../../docs/src/node-settings.md#transport-resolver-and-database-capacities).
+These are server provisioning options. Change liveness through committed
+`ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = <duration>;` and verify each node's running
+projection with `DESCRIBE CLUSTER`; changing a local flag does not replace committed cluster policy.
 For detected CPU/memory claims, capability rolls, peer receive bounds and placement weighting, read
 [Node Settings](../../../docs/src/node-settings.md#committed-node-capabilities) and
 [Placement](../../../docs/src/placement.md#capacity-at-the-load-tier). Verify the committed
@@ -381,8 +398,8 @@ and quiesce semantics in `Control Plane`. Put every interdependent `CREATE`, sup
 deduplicator, reorderer, emitter, ingestor, reingestor, generator, and placement changes;
 Nervix classifies the complete model diff and no user-facing pause command exists. Capacity and
 expression-only junction changes and emitter flush changes are dynamic; relay schema or branching
-changes pause the domain; structural junction, emitter/client/codec/collect/publishing-mode or
-attachment changes, ingestor,
+changes pause the domain; structural junction, emitter/client/codec/collect/publishing-mode,
+instance or attachment changes, ingestor,
 emitter source-predicate, and relay materialized-state changes gate and drain only affected
 entities. Changing emitter `FROM` membership pauses the domain because it changes topology.
 Deduplicator key and reorderer ordering changes also use entity pause; their `MAX TIME` changes are
@@ -539,7 +556,9 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   window route `SET`, `input` only inside their arguments, and `COUNT`, `SUM`, `FIRST`, `LAST`,
   `MIN`, and `MAX` are aggregates there, never list functions. Compute window output from aggregates
   and constants, and prefer the dedicated aggregates (`AVG`, `COUNT_IF`, `ARG_MIN`, `ARG_MAX`, the
-  `*_POP` and `*_SAMP` statistics, `CORR`) over hand-built formulas. For `APPROX_COUNT_DISTINCT`,
+  `*_POP` and `*_SAMP` statistics, `CORR`) over hand-built formulas. Before using `COLLECT_VEC`,
+  check its required argument and bounded-retention rules in that reference; use the documented
+  list functions to consume its result. For `APPROX_COUNT_DISTINCT`,
   `APPROX_QUANTILE`, and `APPROX_TOP_K`, read `Approximate Sketches`: the window needs
   `MAX STATE SIZE` after duration `WIDTH` and `STEP`, a branched window a branch with
   `MAX INSTANCES <n> EVICT LRU`, and the precision or capacity sets both accuracy and memory.

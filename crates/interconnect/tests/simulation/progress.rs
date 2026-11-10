@@ -206,7 +206,7 @@ fn progress_through_partition_and_hold(run: ScenarioRun) -> Result<(), Simulatio
                         .await;
                     assert!(unanswered(&outcome), "partitioned query outcome: {outcome:?}");
                     assert!(
-                        ended_within(started, ApplicationRevisionRequest::TIMEOUT),
+                        ended_within(started, ApplicationRevisionRequest::DEADLINE.declared_default()),
                         "the partitioned query ended after {:?}",
                         started.elapsed()
                     );
@@ -228,7 +228,7 @@ fn progress_through_partition_and_hold(run: ScenarioRun) -> Result<(), Simulatio
                         "held query outcome: {outcome:?}"
                     );
                     assert!(
-                        ended_within(started, ApplicationRevisionRequest::TIMEOUT),
+                        ended_within(started, ApplicationRevisionRequest::DEADLINE.declared_default()),
                         "the held query ended after {:?}",
                         started.elapsed()
                     );
@@ -344,7 +344,7 @@ fn progress_through_partition_and_hold(run: ScenarioRun) -> Result<(), Simulatio
                     let outcome = transport.request(&leader, report(&partitioned)).await;
                     assert!(unanswered(&outcome), "partitioned report outcome: {outcome:?}");
                     assert!(
-                        ended_within(started, ApplicationProgressReport::TIMEOUT),
+                        ended_within(started, ApplicationProgressReport::DEADLINE.declared_default()),
                         "the partitioned report ended after {:?}",
                         started.elapsed()
                     );

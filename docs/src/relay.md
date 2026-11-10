@@ -82,12 +82,13 @@ Each partition owner holds:
 A producer resolves its key's partition once, when it binds a concrete branch, and sends that
 branch's batches to the owner of that partition. An owner accepts a batch from another node only for
 a partition it owns, and only when the key it decodes lands in that partition. Each partition owner
-fans its batches out to every runtime consumer and every session subscription of the relay, so a
-consumer and a subscription receive every partition. One key's records pass through one partition
+fans its batches out to the relay's runtime consumers of that partition and to every session
+subscription of the relay, so a whole-relay consumer and a subscription receive every partition. One key's records pass through one partition
 owner, which keeps their order; records of different keys in different partitions are not ordered
 with each other. Processors and generators of the branch run one unit per partition, each reading
-its own partition (see [Processors](processors.md#partitioned-processing)); emitters stay single
-units that read every partition of their input relays.
+its own partition (see [Processors](processors.md#partitioned-processing)). An emitter reads every
+partition of its input relays unless it declares [instances](emitters.md#emitter-instances): then
+each partition owner delivers that partition only to the instance that serves it.
 
 `SHOW CLUSTER STATUS` prints one schedule line per partition of a partitioned relay, naming the
 partition after the relay, such as
@@ -123,10 +124,13 @@ never reappears expires by the branch's TTL in the partition that held it. A mat
 key that may still lie in its old partition reads the old partition when the new one has no row, so
 `REQUIRED SKIP` and defaults apply only to a row that exists in neither.
 
-`SHOW DEDUPLICATOR ... STATE` and `SHOW WINDOW PROCESSOR ... STATE` read what each partition
-publishes. A moving key appears under the partition that held it until its new partition claims it.
-Between the new partition installing the key's state and the old one forgetting its copy, the key
-appears under both.
+`SHOW DEDUPLICATOR ... STATE` and `SHOW WINDOW PROCESSOR ... STATE` list a moving key under
+exactly one partition: its holder until the claimant installs the key, and the claimant from then
+on. The holder's retained checkpoint remains available for transfer until forget completes, and
+contributes no second branch, row or byte count. Selection happens before row limits and paging.
+If installation or forget changes the selected branch catalogs during a read, that read is refused
+as `not_ready`; retry it with a fresh inspection. Continuations keep their usual generation and
+control-revision fences.
 
 While keys may still lie in partitions of the previous count, `DESCRIBE BRANCH` names that count and
 how far moving them has come:

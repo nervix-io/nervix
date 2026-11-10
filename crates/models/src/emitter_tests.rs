@@ -1,4 +1,4 @@
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 
 use crate::{
     AckMode, AlterEmitter, AlterEmitterError, AlterEmitterOperation, ClickHouseEmitter,
@@ -26,6 +26,7 @@ fn ack_mode_default_is_attached() {
 #[test]
 fn emitter_alter_applies_operations_in_order_and_is_atomic() {
     let mut emitter = CreateEmitter {
+        instances: crate::EmitterInstances::ONE,
         name: named("event_emitter"),
         from: ProcessorInputs::single(named("events")),
         body: EmitterBody::Codec {
@@ -120,6 +121,7 @@ fn http_emitter_alter_replaces_body_explicitly_and_rejects_drop_encode() {
         max_backoff: "30s".to_string(),
     };
     let mut emitter = CreateEmitter {
+        instances: crate::EmitterInstances::ONE,
         name: named("request_emitter"),
         from: ProcessorInputs::single(named("events")),
         body: EmitterBody::WithoutBody,
@@ -212,6 +214,7 @@ fn http_emitter_alter_replaces_body_explicitly_and_rejects_drop_encode() {
     );
     assert_eq!(emitter, before);
     let batched = CreateEmitter {
+        instances: crate::EmitterInstances::ONE,
         batch: Some(batch_policy(10, "64KiB")),
         ..emitter
     };
@@ -233,6 +236,7 @@ fn batching_emitter(
     batch: Option<crate::EmitterBatchPolicy>,
 ) -> CreateEmitter {
     CreateEmitter {
+        instances: crate::EmitterInstances::ONE,
         name: named("event_emitter"),
         from: ProcessorInputs::single(named("events")),
         body: EmitterBody::Values,
@@ -481,6 +485,7 @@ fn database_emitters_require_the_batch_clause_and_the_others_do_not() {
 #[test]
 fn emitter_alter_reports_name_and_commit_policy_errors() {
     let emitter = CreateEmitter {
+        instances: crate::EmitterInstances::ONE,
         name: named("event_emitter"),
         from: ProcessorInputs::single(named("events")),
         body: EmitterBody::Codec {
@@ -656,4 +661,66 @@ fn emitter_alter_checks_the_header_and_complete_destination_kind_atomically() {
         }
     );
     assert_eq!(candidate, base);
+}
+
+/// An MQTT topic emitter, whose entity runs one instance because the broker keeps one session per
+/// client identifier.
+fn mqtt_topic_emitter() -> EmitterEntity {
+    EmitterEntity::Mqtt(crate::MqttEmitter::Topic(crate::MqttTopicEmitter {
+        mode: crate::MqttTopicPublishingMode::NoAck {
+            retry_policy: crate::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
+        client: named("broker"),
+        topic: crate::MqttTopicName::try_from("devices/orders")
+            .assured("a literal topic without wildcards is a publication topic"),
+        qos: crate::MqttQos::Qos1,
+    }))
+}
+
+#[test]
+fn set_instances_applies_where_the_entity_runs_several_and_is_refused_where_it_runs_one() {
+    let mut several = batching_emitter(postgres_emitter(), Some(batch_policy(100, "1MiB")));
+    several
+        .apply_alter(&AlterEmitter {
+            kind: crate::EmitterEntityKind::Postgres(crate::PostgresEmitterEntity::Table),
+            emitter: named("event_emitter"),
+            operations: vec![AlterEmitterOperation::SetInstances {
+                instances: crate::EmitterInstances::PerPartition,
+            }],
+        })
+        .assured("a PostgreSQL table emitter declares several instances");
+    assert_eq!(several.instances, crate::EmitterInstances::PerPartition);
+
+    let mut single = batching_emitter(mqtt_topic_emitter(), None);
+    let before = single.clone();
+    let refusal = single
+        .apply_alter(&AlterEmitter {
+            kind: crate::EmitterEntityKind::Mqtt(crate::MqttEmitterEntity::Topic),
+            emitter: named("event_emitter"),
+            operations: vec![
+                AlterEmitterOperation::SetFlush {
+                    flush_policy: FlushPolicy::Each {
+                        interval: "2s".to_string(),
+                        max_batch_size: "2MiB".to_string(),
+                    },
+                },
+                AlterEmitterOperation::SetInstances {
+                    instances: crate::EmitterInstances::Count(
+                        std::num::NonZeroU64::new(3).assured("three is not zero"),
+                    ),
+                },
+            ],
+        })
+        .expect_err("an MQTT topic emitter runs one instance");
+    assert_eq!(
+        refusal.current_context(),
+        &AlterEmitterError::SingleInstance(crate::SingleInstanceRefusal {
+            entity: crate::EmitterEntityKind::Mqtt(crate::MqttEmitterEntity::Topic),
+            reason: crate::SingleEmitterReason::OneClientIdentifier,
+        })
+    );
+    assert_eq!(single, before, "a refused ALTER must not partially apply");
 }

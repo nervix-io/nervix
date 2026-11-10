@@ -31,7 +31,7 @@ use nervix_interconnect::{
 };
 use nervix_models::{
     ClusterNodeName, CoordinationIdentity, DomainName, EntityGateTargets, ModelKind,
-    PauseRequirement, QuiesceSubgraph, RelayName,
+    PauseRequirement, QuiesceSubgraph, RelayName, UnitKind,
 };
 use nervix_primitives::time::{interval, sleep};
 use tracing::{debug, warn};
@@ -107,9 +107,14 @@ fn emitter_publishing_drain_summary(statuses: &[EmitterPublishingDrainStatusEnve
     let statuses = statuses
         .iter()
         .map(|status| {
+            let emitter = status.emitter.as_str();
+            let publisher = match status.unit.kind() {
+                UnitKind::Single => emitter.to_owned(),
+                UnitKind::Instance(index) => format!("{emitter} instance {index}"),
+                UnitKind::Partition(partition) => format!("{emitter} partition {partition}"),
+            };
             let mut detail = format!(
-                "{}:{}(pending={}",
-                status.emitter.as_str(),
+                "{publisher}:{}(pending={}",
                 status.state.as_str(),
                 status.pending_messages,
             );
@@ -132,6 +137,7 @@ fn emitter_publishing_drain_status_envelope(
 ) -> EmitterPublishingDrainStatusEnvelope {
     EmitterPublishingDrainStatusEnvelope {
         emitter: status.emitter,
+        unit: status.unit,
         state: match status.state {
             crate::runtime::EmitterPublishingDrainState::AwaitingConfirmation => {
                 EmitterPublishingDrainStateEnvelope::AwaitingConfirmation
@@ -1247,6 +1253,40 @@ mod tests {
         super::test_fixtures::{TestService, build_test_service},
         *,
     };
+
+    #[test]
+    fn the_drain_summary_names_the_instance_of_an_emitter_that_runs_several() {
+        use super::super::test_fixtures::named;
+
+        let status = |unit, state, pending_messages| EmitterPublishingDrainStatusEnvelope {
+            emitter: named("orders_out"),
+            unit,
+            state,
+            pending_messages,
+            retry_backoff_millis: None,
+            retry_wait_millis: None,
+        };
+        let summary = emitter_publishing_drain_summary(&[
+            status(
+                nervix_models::Unit::SINGLE,
+                EmitterPublishingDrainStateEnvelope::AwaitingConfirmation,
+                3,
+            ),
+            status(
+                nervix_models::Unit::FIRST_INSTANCE,
+                EmitterPublishingDrainStateEnvelope::RetryingCommit,
+                2,
+            ),
+        ]);
+        assert_eq!(
+            summary,
+            format!(
+                ", publishing=[orders_out:{}(pending=3), orders_out instance 0:{}(pending=2)]",
+                EmitterPublishingDrainStateEnvelope::AwaitingConfirmation.as_str(),
+                EmitterPublishingDrainStateEnvelope::RetryingCommit.as_str(),
+            )
+        );
+    }
 
     #[nervix_primitives::test(start_paused = true)]
     async fn unavailable_gate_participants_preserve_request_context() {

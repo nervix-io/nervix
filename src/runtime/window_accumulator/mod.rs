@@ -43,6 +43,9 @@
 mod arguments;
 #[cfg(feature = "benchmarks")]
 pub mod benchmark;
+pub(super) mod collection;
+#[cfg(feature = "benchmarks")]
+pub mod collection_benchmark;
 mod counts;
 mod extremes;
 mod histogram;
@@ -50,6 +53,11 @@ mod moments;
 mod sketches;
 mod sums;
 mod two_stacks;
+
+#[cfg(test)]
+mod collection_properties;
+#[cfg(test)]
+mod collection_tests;
 
 use std::ops::Range;
 
@@ -116,6 +124,22 @@ pub(super) struct WindowRow {
     pub(super) arguments: Arc<WindowArgumentColumns>,
     /// The row's index within `arguments`.
     pub(super) row: usize,
+}
+
+/// The shared ordering of FIRST, LAST and a collected sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct WindowArrival {
+    timestamp: Timestamp,
+    sequence: u64,
+}
+
+impl WindowRow {
+    pub(super) fn arrival(&self) -> WindowArrival {
+        WindowArrival {
+            timestamp: self.timestamp,
+            sequence: self.sequence,
+        }
+    }
 }
 
 /// The rows a window retains, oldest first.

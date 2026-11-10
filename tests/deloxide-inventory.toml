@@ -4372,30 +4372,35 @@ workloads = [
 
 [[owner]]
 path = "src/fault_injection/relay_slicing.rs"
-workloads = ["scenario.node-capability-roll", "stress.node-capability-roll"]
+workloads = [
+  "scenario.node-capability-roll",
+  "scenario.node-capability-unfit",
+  "stress.node-capability-roll",
+  "stress.node-capability-unfit",
+]
 
 [[owner]]
 path = "src/runtime/relay_sizing_position.rs"
 workloads = ["scenario.node-capability-unfit", "stress.node-capability-unfit"]
 
 [[workload]]
-coverage = "The actual rejected Arrow row returns its unused outbound position through the tracked sequence lock while holding its delivery gate, then both concrete branch channels deliver a smaller batch with their original ACK owners. No lock guard crosses an await."
-examples = 1
+coverage = "The rejected Arrow rows return their unused outbound positions through tracked sequence locks. A bounded tracked probe observes both branch refusals before fitting rows are submitted. Both aligned and staggered branch buffers then deliver through their original ACK owners. No lock guard crosses an await."
+examples = 2
 feature = "tests/features/cluster/node_capability_delivery.feature"
 id = "scenario.node-capability-unfit"
 invariant = "Rejecting an oversized single row never consumes the unused sequence or stalls a later fitting batch."
 invocation = "scenarios"
-scenario = "A refused oversized row leaves its channel ready for the next smaller batch"
+scenario = "A refused oversized row leaves its channel ready for the next smaller batch with <stagger> between branch buffers"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "Under scheduling stress: the same production sequence return and subsequent two-branch delivery through the tracked channel and ACK owners."
-examples = 1
+coverage = "Under scheduling stress: the same aligned/staggered buffer cases, bounded refusal probe, production sequence return and subsequent two-branch delivery through tracked channel and ACK owners."
+examples = 2
 feature = "tests/features/cluster/node_capability_delivery.feature"
 id = "stress.node-capability-unfit"
 invariant = "Rejecting an oversized single row never consumes the unused sequence or stalls a later fitting batch."
 invocation = "stress-scenarios"
-scenario = "A refused oversized row leaves its channel ready for the next smaller batch"
+scenario = "A refused oversized row leaves its channel ready for the next smaller batch with <stagger> between branch buffers"
 selections = ["deloxide-stress"]
 
 [[workload]]

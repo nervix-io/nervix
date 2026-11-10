@@ -5,7 +5,7 @@
 
 use super::*;
 
-const INLINE_ROWS: usize = INLINE_ROW_LIMIT;
+const INLINE_ROWS: usize = VmInlineRowLimit::DEFAULT;
 
 fn sliced_batch(batch: &TypedBatch, offset: usize, rows: usize) -> TypedBatch {
     let columns = batch

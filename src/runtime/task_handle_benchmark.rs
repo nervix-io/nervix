@@ -163,11 +163,12 @@ impl TaskHandleBenchmark {
         let pool_metrics = runtime.metrics().register_emitter_interactions(
             &domain,
             &EmitterName::parse("destination").assured("the fixture emitter is valid"),
+            nervix_models::Unit::SINGLE,
             None,
             nervix_models::EmitterEntityKind::Postgres(nervix_models::PostgresEmitterEntity::Table),
         );
         let pool = runtime.register_pool_wait(
-            entity.clone(),
+            DomainNodeUnitRef::single(entity.clone()),
             ClientName::parse("pool").assured("the client is valid"),
             pool_metrics,
         );

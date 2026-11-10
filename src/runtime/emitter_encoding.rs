@@ -1143,6 +1143,7 @@ mod tests {
         let interactions = runtime.inner.metrics.register_emitter_interactions(
             &context.domain,
             &context.emitter,
+            context.unit,
             None,
             nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic),
         );

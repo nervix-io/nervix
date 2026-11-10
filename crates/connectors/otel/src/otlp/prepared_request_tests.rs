@@ -79,9 +79,12 @@ async fn logs_emitter(
         entries.push(("compression", compression));
     }
     entries.push(("timeout_ms", "5000"));
-    let dns = nervix_dns::DnsResolver::load(nervix_dns::DnsConfiguration::system())
-        .await
-        .assured("the host resolver configuration loads in tests");
+    let dns = nervix_dns::DnsResolver::load(
+        nervix_dns::DnsConfiguration::system(),
+        nervix_dns::DnsSettings::default(),
+    )
+    .await
+    .assured("the host resolver configuration loads in tests");
     let mapped_schema = StdArc::new(arrow_schema::Schema::new(vec![
         arrow_schema::Field::new(
             "time",
@@ -698,11 +701,14 @@ async fn a_prepared_grpc_export_reaches_its_receiver_after_a_negative_dns_answer
     )
     .assured("the fixture resolver configuration can be written");
     std::fs::write(&hosts_file, "").assured("the fixture hosts file can be written");
-    let dns = nervix_dns::DnsResolver::load(DnsConfiguration {
-        resolver_configuration,
-        hosts_file,
-        name_servers: NameServers::Explicit(vec![authority.address()]),
-    })
+    let dns = nervix_dns::DnsResolver::load(
+        DnsConfiguration {
+            resolver_configuration,
+            hosts_file,
+            name_servers: NameServers::Explicit(vec![authority.address()]),
+        },
+        nervix_dns::DnsSettings::default(),
+    )
     .await
     .assured("the fixture DNS configuration is valid");
     let named_endpoint = endpoint.replacen("127.0.0.1", name, 1);
@@ -846,9 +852,12 @@ async fn entity_constructors_keep_their_kind_through_the_lifecycle_contract() {
         OtelMetricsEmitterConfig, OtelTracesEmitter, OtelTracesEmitterConfig,
     };
 
-    let dns = nervix_dns::DnsResolver::load(nervix_dns::DnsConfiguration::system())
-        .await
-        .expect("the host resolver loads");
+    let dns = nervix_dns::DnsResolver::load(
+        nervix_dns::DnsConfiguration::system(),
+        nervix_dns::DnsSettings::default(),
+    )
+    .await
+    .expect("the host resolver loads");
     let export = || OtelExportConfig {
         tls_policy: Default::default(),
         config: config(&[

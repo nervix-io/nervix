@@ -1087,6 +1087,7 @@ impl BranchSnapshotCodec for WindowSnapshotCodec {
 )]
 mod tests {
     use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
+    use meticulous::ResultExt as _;
     use nervix_models::ParseAsType;
 
     use super::*;
@@ -1300,6 +1301,7 @@ mod tests {
         input_schema: Arc<crate::runtime_schema::CompiledSchema>,
         argument_schema: StdArc<ArrowSchema>,
         argument_nullable: bool,
+        nested: bool,
     }
 
     /// A generated window, the argument value each of its rows holds, and the branch lifetime and
@@ -1320,7 +1322,17 @@ mod tests {
             Self::with_input_type(ParseAsType::String)
         }
 
+        fn checkpoint_lists() -> Self {
+            Self::with_input_type(ParseAsType::Vec {
+                element: Box::new(ParseAsType::Array {
+                    element: Box::new(ParseAsType::String),
+                    len: std::num::NonZeroU32::new(2).assured("a pair has two elements"),
+                }),
+            })
+        }
+
         fn with_input_type(input_type: ParseAsType) -> Self {
+            let nested = matches!(input_type, ParseAsType::Vec { .. });
             let plan = window_plan(
                 "SET count = COUNT(input.latency)",
                 input_type.clone(),
@@ -1334,7 +1346,40 @@ mod tests {
                 input_schema,
                 argument_schema,
                 argument_nullable,
+                nested,
             }
+        }
+
+        /// Empty and nonempty vectors of fixed string pairs, bounded by the case's scalar
+        /// payload budget so a nested row still fits the smallest generated checkpoint section.
+        fn nested_value(
+            arbitrary: &mut nervix_arbitrary::Arbitrary<'_>,
+            bytes: usize,
+        ) -> RuntimeValue {
+            let count = arbitrary.entropy().count(2);
+            let mut values = Vec::with_capacity(count);
+            for _ in 0..count {
+                let text = arbitrary
+                    .entropy()
+                    .pick(["a", "b", "c"])
+                    .repeat(bytes / count);
+                values.push(RuntimeValue::Array(vec![
+                    RuntimeValue::String(text),
+                    RuntimeValue::String(String::new()),
+                ]));
+            }
+            RuntimeValue::Vec(values)
+        }
+
+        fn value_batch(&self, value: &RuntimeValue) -> RuntimeRecordBatch {
+            let mut builder = self.input_schema.batch_builder(1);
+            builder
+                .append(Some(value))
+                .assured("the generated value matches its declared type");
+            builder.finish_row().assured("the input has one field");
+            builder
+                .finish()
+                .assured("the generated row has its declared schema")
         }
 
         /// A window of `rows` unbranched rows sharing one input and one argument batch, admitted at
@@ -1436,6 +1481,22 @@ mod tests {
                 let high = arbitrary.timestamp();
                 let metadata = RuntimeRecordMetadata::from_ingested_at_watermarks(low, high);
                 let (latency, argument, argument_array): (_, _, ArrayRef) = match column_bytes {
+                    Some(bytes) if self.nested => {
+                        let latency = Self::nested_value(arbitrary, bytes);
+                        let argument = if self.argument_nullable && arbitrary.entropy().flag() {
+                            None
+                        } else {
+                            Some(Self::nested_value(arbitrary, bytes))
+                        };
+                        let array = match &argument {
+                            Some(value) => self.value_batch(value).batch().column(0).clone(),
+                            None => arrow_array::new_null_array(
+                                self.argument_schema.field(0).data_type(),
+                                1,
+                            ),
+                        };
+                        (latency, argument, array)
+                    }
                     Some(bytes) => {
                         let latency = arbitrary.entropy().pick(["a", "b", "c"]).repeat(bytes);
                         let argument = if self.argument_nullable && arbitrary.entropy().flag() {
@@ -1466,8 +1527,8 @@ mod tests {
                     }
                 };
                 let record =
-                    crate::runtime_schema::test_runtime_row([("latency".to_string(), latency)])
-                        .with_metadata(metadata.clone());
+                    RuntimeRow::new(Arc::new(self.value_batch(&latency)), 0, metadata.clone())
+                        .assured("the declared input batch holds one row");
                 argument_values.push(argument);
                 let argument_batch =
                     RecordBatch::try_new(self.argument_schema.clone(), vec![argument_array])
@@ -1649,7 +1710,8 @@ mod tests {
         use meticulous::{OptionExt as _, ResultExt as _};
         use nervix_arbitrary::{Arbitrary, Domain};
 
-        let fixture = WindowSnapshotFixture::checkpoint();
+        let scalar = WindowSnapshotFixture::checkpoint();
+        let nested = WindowSnapshotFixture::checkpoint_lists();
         bolero::check!()
             .with_iterations(128)
             .with_max_len(2048)
@@ -1659,6 +1721,11 @@ mod tests {
                     .build()
                     .assured("a property runtime opens");
                 let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
+                let fixture = if arbitrary.entropy().flag() {
+                    &nested
+                } else {
+                    &scalar
+                };
                 let case = WindowCheckpointCase::generated(arbitrary.entropy());
                 let executor = case.executor();
                 let generated = fixture.generated_checkpoint(&mut arbitrary, &case);
@@ -1696,7 +1763,8 @@ mod tests {
         use meticulous::{OptionExt as _, ResultExt as _};
         use nervix_arbitrary::{Arbitrary, Domain};
 
-        let fixture = WindowSnapshotFixture::checkpoint();
+        let scalar = WindowSnapshotFixture::checkpoint();
+        let nested = WindowSnapshotFixture::checkpoint_lists();
         bolero::check!()
             .with_iterations(64)
             .with_max_len(2048)
@@ -1706,6 +1774,11 @@ mod tests {
                     .build()
                     .assured("a property runtime opens");
                 let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
+                let fixture = if arbitrary.entropy().flag() {
+                    &nested
+                } else {
+                    &scalar
+                };
                 let case = WindowCheckpointCase::generated(arbitrary.entropy());
                 let executor = case.executor();
                 let directory = tempfile::tempdir().assured("the staging directory opens");

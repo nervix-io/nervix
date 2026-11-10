@@ -99,7 +99,7 @@ use nervix_interconnect::{
     EntityGateReleaseResponse as RemoteEntityGateReleaseResponse,
     EntityGateRequest as RemoteEntityGateRequest, EntityGateResponse as RemoteEntityGateResponse,
     Envelope, LookupRequest as RemoteLookupRequest, LookupResponse as RemoteLookupResponse,
-    MAX_CONCURRENT_HEALTH_PROBES, OwnershipHandoffFailure, PeerResolver,
+    OwnershipHandoffFailure, PeerResolver,
     PrepareForcedOwnershipRecoveryRequest as RemotePrepareForcedOwnershipRecoveryRequest,
     RemoteOperationFailure, RemoteOperationSubject, RuntimeErrorEvent as RemoteRuntimeErrorEvent,
     StreamHandlerError, StreamingResponse,
@@ -544,7 +544,12 @@ impl Application {
             "starting nervix server"
         );
 
-        let db = ApplicationStartup::open_node_database(db_path.clone(), &executor).await?;
+        let db = ApplicationStartup::open_node_database(
+            db_path.clone(),
+            &executor,
+            capabilities.node_database,
+        )
+        .await?;
         let registry = Arc::new(
             match Registry::from_database(db.clone(), Some(db_path.as_path())) {
                 Ok(registry) => registry,
@@ -557,6 +562,7 @@ impl Application {
         let runtime = {
             let mapping_input = Runtime::with_environment(
                 RuntimeEnvironment {
+                    interconnect_request_timeout: settings.interconnect.request_timeout(),
                     executor,
                     client_endpoints,
                     outward_tls: outward_tls.clone(),
@@ -630,10 +636,9 @@ impl Application {
                 join_terms: settings.join_terms(),
             },
             interconnect_tls,
-            nervix_interconnect::TransportOptions {
-                peer_receive: Some(peer_receive),
-                ..Default::default()
-            },
+            settings
+                .interconnect
+                .options(Some(peer_receive), Some(settings.shutdown.drain_timeout())),
             startup.runtime.executor().clone(),
             PeerResolver::new(dns),
         )
@@ -656,6 +661,8 @@ impl Application {
             executor: startup.runtime.executor().clone(),
             raft_timings,
             raft_retention,
+            operations: settings.consensus_operations,
+            database: capabilities.consensus_database,
         };
         let consensus_result = startup
             .open_consensus(consensus_settings, &fault_injection)
@@ -1144,6 +1151,7 @@ impl Application {
             }
             sleep(settings.membership.gossip_interval()).await;
         };
+        interconnect.install_cluster_parameters(record.values);
         runtime.install_cluster_parameters(record.values);
         registry.install_cluster_parameters(record.values);
         // Runtime admission waits for the same or a later committed publication before installing
@@ -1723,7 +1731,7 @@ impl Application {
                     let interconnect = interconnect_for_health.clone();
                     async move {
                         let outcome = match interconnect
-                            .request(target.node_id(), ApplicationHealthProbe)
+                            .request_with_timeout(target.node_id(), ApplicationHealthProbe, interconnect.liveness().probe_timeout())
                             .await
                         {
                             Ok(identity) if &identity == target.identity() => {
@@ -1756,7 +1764,7 @@ impl Application {
                         )
                     }
                 }))
-                .buffer_unordered(MAX_CONCURRENT_HEALTH_PROBES);
+                .buffer_unordered(settings.interconnect.health_probes());
                 tokio::pin!(probe_results);
                 // Let each bounded probe finish even when gossip publishes another update.
                 // Cancelling the round on every update can indefinitely hide an unreachable
@@ -2177,7 +2185,7 @@ impl Application {
                     let result = match service.handle_lookup_request(request).await {
                         Ok(Some(record)) => {
                             let mapping_input = record
-                                .encode_arrow_ipc(service.inner.runtime.executor())
+                                .encode_arrow_ipc(service.inner.runtime.executor(), nervix_execution::QueueAdmission::RefuseWhenFull)
                                 .await
                                 .map(|body| Some(body.to_vec()));
                             match mapping_input {

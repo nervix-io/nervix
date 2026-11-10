@@ -183,7 +183,8 @@ impl InterconnectRequest for PeerClockProbe {
     const SUBQUOTA: RequestSubquota = RequestSubquota::Discovery;
     // A probe is answered from the node's clock alone, as a gossip exchange is from its memory, so
     // it takes the same discovery deadline.
-    const TIMEOUT: Duration = <GossipExchange as InterconnectRequest>::TIMEOUT;
+    const DEADLINE: nervix_interconnect::RequestDeadline =
+        <GossipExchange as InterconnectRequest>::DEADLINE;
     const REQUIRES_LIVE_TARGET: bool = false;
 }
 

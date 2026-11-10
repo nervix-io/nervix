@@ -33,7 +33,7 @@ fn gossip_errors_keep_their_typed_interconnect_report() {
         RequestError::Timeout {
             node: node.clone(),
             request: GossipExchange::NAME,
-            timeout: GossipExchange::TIMEOUT,
+            timeout: GossipExchange::DEADLINE.declared_default(),
         },
     )));
     let GossipExchangeFailure::Request(report) = request

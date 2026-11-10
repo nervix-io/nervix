@@ -518,8 +518,8 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_payload_identity_licensing_capability_tls_inference_reset_epoch_logs`, `raft_payload_identity_licensing_capability_tls_inference_reset_epoch_meta`, `raft_payload_identity_licensing_capability_tls_inference_reset_epoch_state`, and
-`raft_payload_identity_licensing_capability_tls_inference_reset_epoch_snapshots`. Opening it validates the complete keyspace namespace before reading
+`raft_infrastructure_capabilities_identity_licensing_tls_inference_reset_epoch_engine_host_instances_logs`, `raft_infrastructure_capabilities_identity_licensing_tls_inference_reset_epoch_engine_host_instances_meta`, `raft_infrastructure_capabilities_identity_licensing_tls_inference_reset_epoch_engine_host_instances_state`, and
+`raft_infrastructure_capabilities_identity_licensing_tls_inference_reset_epoch_engine_host_instances_snapshots`. Opening it validates the complete keyspace namespace before reading
 any records. The committed cluster-parameter record stores ordered typed TLS cipher suites and
 key-exchange groups; recovery validates their complete pair before returning that record.
 This namespace identifies the current Model shape, including the separate JSON
@@ -530,7 +530,8 @@ consumer group's required start position, the serialized Sentry platform field, 
 count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of service an
 MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC emitter
 writes beside its publishing mode, its retained-publication flag and MQTT 5 property mappings, a
-`REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription,
+`REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription, an emitter's `INSTANCES`
+declaration,
 whether a polled HTTP request's header holds a literal or names a client secret, the endpoint kind
 whose signaling data exists only on its WebSockets variant, the branch partition count every
 resolved branch declaration of the committed schedule carries, and the partition epoch the
@@ -541,12 +542,12 @@ changes one part of its entity's body, an envelope clause or the properties, or 
 construction where it stands, including the typed `payload` expression scope and a
 `RESET WASM PROCESSOR ... STATE` that names its processor and scope and takes its domain from
 the transaction, as the step effect and commit plan step keep it too. The database also stores
-incarnation-bound node capability claims under record-family tag `C`. Its state metadata
-requires the current `ClusterState` encoding, 24, including the cluster identity reference,
+incarnation-bound node capability claims under record-family tag `C`, including transport, DNS, database, consensus, engine and connector host capacities. Its state metadata
+requires the current `ClusterState` encoding, 27, including the cluster identity reference,
 committed cluster parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,
-typed ingestor instancing, exact-unit placement-group members
+typed ingestor and emitter instancing, exact-unit placement-group members
 and entity-versus-unit transaction gate targets. Placement Models carry corridor or domain-wide
 coverage; domain records carry pace, and relocation statements retain exact partition or instance
 selectors. Native counts in commands, queued transactions,
@@ -814,3 +815,25 @@ keyed lookup and no user scan. Recovery validates that the count covers both the
 creation policy and every recovered user before publishing the state. Snapshot metadata and
 user records preserve the complete values. The namespace and state-encoding checks above fence
 this shape before rkyv reads any user record or log entry.
+
+## Declared Engine And Database Capacities
+
+[Node Settings](node-settings.md#consensus-capacities) lists the local consensus capacity and
+pacing options. The composition root supplies them to storage, the append network factory,
+retention and membership operations. The node and dedicated consensus database each receive
+explicit cache, journal and worker options through their existing bounded storage-executor job.
+Automatic journal persistence, full synchronization of every acknowledged Raft append, storage
+ordering, independent databases and orderly shutdown remain unchanged.
+
+The maintained OpenRaft configuration explicitly selects active queue capacities, API/append
+batch bounds, retry backoff, purge size, pre-vote, tick/heartbeat/election operation, leadership
+restoration, removed-member step-down and snapshot policy. Its snapshot chunk bound follows the
+same executor bulk chunk owner as Nervix's transfer path. The library's retained deprecated
+chunk-sender field is not used by Nervix. Replication lag follows twice the snapshot entry threshold
+and remains greater than it. A whole snapshot transfer keeps one configured deadline.
+
+The current capability record includes transport, resolver, database and consensus projections.
+Its larger announcement is boxed within its one command variant, keeping the existing 256-byte
+inline Raft payload guard for all commands. No other Raft command gains a boxing allocation.
+The current keyspace names and interconnect fingerprint identify this representation. A database
+from another shape must be recreated; there is no alternate reader or migration path.

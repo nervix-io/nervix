@@ -185,6 +185,7 @@ async fn domain_ingestor(
 ) -> KafkaTopicIngestor {
     let (_rebalance, receiver) = watch::channel(1);
     let plan = KafkaTopicIngestorPlan {
+        settings: crate::KafkaTopicIngestorSettings::default(),
         executor,
         config: vec![
             ClientConfigEntry {

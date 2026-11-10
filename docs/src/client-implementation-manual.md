@@ -513,7 +513,10 @@ reset. A genuine reset failure arrives as `RequestFailed` and follows the failur
   `UnsubscribeRequest`, and MUST release its name; a deletion whose session ends before it is
   answered is complete too.
 - **S-8.** A client MUST bound what it retains for subscriptions, per subscription and in total, and
-  SHOULD let one subscription retain at least one frame of the frame limit.
+  SHOULD let one subscription retain at least one frame of the frame limit. Local configurable
+  limits MUST validate positive capacities and every derived record/byte product before opening
+  the transport. The native client uses its typed capabilities for subscription retention and
+  upload/restore queues; see [Connection Capabilities](client-tools-cli.md#connection-capabilities).
 - **S-9.** A client that stops reading a `BLOCKING` subscription holds back the relay it reads. A
   client that cannot keep up SHOULD use `DROPPING` delivery.
 
@@ -635,6 +638,11 @@ a session solely to detach. [CLI streaming](client-tools-cli.md#streaming-a-rela
 statuses and operator-facing output.
 
 ## Producers
+
+Nervix supplies the opening session's authenticated user name as `metadata.user` to the ingestor's
+arrival filter and routes. That identity belongs to the producer attachment, including when the
+serving node forwards it to another owner. The producer's expected input fields and submitted rows
+remain the schema the ingestor declares; a payload field cannot replace the authenticated name.
 
 - **P-1.** A client MUST open a producer with `OpenIngestorRequest`, naming the domain, the
   ingestor, the exact fields it expects, including each field's optionality and sensitivity, and

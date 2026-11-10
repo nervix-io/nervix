@@ -493,7 +493,7 @@ impl Runtime {
             },
         };
         let input_schema = input.schema();
-        let programs = ExecutionBuildDeps::from_routing(domain, &routing)
+        let programs = ExecutionBuildDeps::from_routing(domain, &routing, self.inner.vm_settings)
             .bind_ingestor(ingestor, &input_schema)
             .change_context_lazy(|| IngestorStartError::Bind {
                 domain: domain.clone(),
@@ -678,9 +678,12 @@ mod tests {
 
     /// A runtime with the host's resolver installed, as every node's runtime has one.
     async fn runtime_with_dns() -> Runtime {
-        let dns = nervix_dns::DnsResolver::load(nervix_dns::DnsConfiguration::system())
-            .await
-            .expect("the host's resolver configuration should load");
+        let dns = nervix_dns::DnsResolver::load(
+            nervix_dns::DnsConfiguration::system(),
+            nervix_dns::DnsSettings::default(),
+        )
+        .await
+        .expect("the host's resolver configuration should load");
         let environment = RuntimeEnvironment {
             dns: Some(dns),
             ..RuntimeEnvironment::transient(nervix_execution::Executor::default())

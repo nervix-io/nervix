@@ -264,6 +264,7 @@ const fn otel_capabilities(
 ) -> EmitterEntityCapabilities {
     EmitterEntityCapabilities {
         events: crate::DeclaredEvents::NONE,
+        instancing: crate::EmitterInstancingCapability::Instances,
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::Otel),
         body: EmitterBodyForm::Values,

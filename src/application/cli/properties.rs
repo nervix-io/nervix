@@ -33,7 +33,7 @@ use crate::{
     runtime::RuntimeSettings,
 };
 
-const CASE_BYTES: usize = 1024;
+const CASE_BYTES: usize = 2048;
 
 /// The most whole seconds a generated duration spans, far beyond any timing a node runs with and
 /// well inside what duration text can name.
@@ -363,13 +363,13 @@ impl<'bytes> GeneratedSettings<'bytes> {
 
     fn raft_retention(&mut self) -> RaftRetentionSettings {
         RaftRetentionSettings::resolve(RaftRetentionBounds {
-            snapshot_entry_threshold: Some(self.count()),
+            snapshot_entry_threshold: Some(self.count().min(u64::MAX - 1)),
             snapshot_byte_threshold: Some(self.bytes()),
             covered_entries_retained: Some(self.count()),
             covered_bytes_retained: Some(self.bytes()),
             retained_log_cap: Some(self.bytes()),
         })
-        .assured("the Raft retention bounds declare no validation")
+        .assured("the generated snapshot threshold leaves room for a larger replication lag")
     }
 
     fn capacity(&mut self) -> CapacitySettings {
@@ -442,6 +442,114 @@ impl<'bytes> GeneratedSettings<'bytes> {
         ubyte::ByteUnit::Byte(self.bytes().as_u64().max(1))
     }
 
+    fn infrastructure_count(&mut self, maximum: u64) -> usize {
+        usize::try_from(self.entropy.between(1..=maximum))
+            .verified("infrastructure generator bounds fit supported target widths")
+    }
+
+    fn infrastructure_duration(&mut self) -> Duration {
+        Duration::from_millis(self.entropy.boundary_biased(1..=86_400_000))
+    }
+
+    fn interconnect(&mut self) -> nervix_interconnect::TransportSettings {
+        let max_peers = self.infrastructure_count(128);
+        let queue = self.infrastructure_count(4096);
+        let request_quota =
+            if self.entropy.flag() {
+                Some(self.infrastructure_count(
+                    u64::try_from(queue).assured("the generated queue fits u64"),
+                ))
+            } else {
+                None
+            };
+        let backoff = self.infrastructure_duration();
+        let maximum = backoff.max(self.infrastructure_duration());
+        nervix_interconnect::TransportSettings::resolve(
+            nervix_interconnect::TransportSettingValues {
+                max_peers: Some(max_peers),
+                concurrent_handshakes: Some(self.infrastructure_count(128)),
+                incoming_queue_capacity: Some(queue),
+                request_quota,
+                stream_receive_window: Some(ByteUnit::Byte(
+                    self.entropy.between(1..=(1 << 31) - 1),
+                )),
+                connection_receive_window: Some(ByteUnit::Byte(
+                    self.entropy.between(1..=(1 << 31) - 1),
+                )),
+                connection_setup_timeout: Some(self.infrastructure_duration()),
+                request_timeout: Some(self.infrastructure_duration()),
+                progress_timeout: Some(self.infrastructure_duration()),
+                reconnect_backoff: Some(backoff),
+                max_reconnect_backoff: Some(maximum),
+                reconnect_jitter_permille: Some(
+                    u16::try_from(self.entropy.up_to(1000)).assured("permille fits u16"),
+                ),
+            },
+        )
+        .assured("generated positive bounds fit primitive and HTTP/2 limits")
+    }
+
+    fn dns(&mut self, peers: usize) -> nervix_dns::DnsSettings {
+        nervix_dns::DnsSettings::resolve(
+            nervix_dns::DnsSettingValues {
+                cache_entries: Some(self.entropy.between(1..=65536)),
+                positive_max_ttl: Some(self.infrastructure_duration()),
+                negative_max_ttl: Some(self.infrastructure_duration()),
+                hook_lookup_budget: Some(self.infrastructure_duration()),
+                address_family_policy: Some(self.entropy.pick([
+                    nervix_dns::AddressFamilies::DualStack,
+                    nervix_dns::AddressFamilies::Ipv4,
+                    nervix_dns::AddressFamilies::Ipv6,
+                ])),
+                trust_negative_answers: Some(self.entropy.flag()),
+            },
+            peers,
+        )
+        .assured("generated resolver bounds are positive")
+    }
+
+    fn database<N: nervix_models::DatabaseNamespace>(
+        &mut self,
+    ) -> nervix_models::DatabaseSettings<N> {
+        nervix_models::DatabaseSettings::resolve(nervix_models::DatabaseSettingValues {
+            cache_bytes: Some(ByteUnit::Byte(self.entropy.between(1..=64 << 20))),
+            journal_bytes: Some(ByteUnit::Byte(self.entropy.between((64 << 20)..=1 << 30))),
+            workers: if self.entropy.flag() {
+                Some(self.infrastructure_count(16))
+            } else {
+                None
+            },
+        })
+        .assured("the generated cache, journal and worker inputs satisfy database bounds")
+    }
+
+    fn consensus_operations(&mut self) -> nervix_consensus::RaftOperationSettings {
+        let backoff = self.infrastructure_duration();
+        let maximum = backoff.max(self.infrastructure_duration());
+        nervix_consensus::RaftOperationSettings::resolve(nervix_consensus::RaftOperationValues {
+            event_capacity: Some(self.infrastructure_count(4096)),
+            append_batch_entries: Some(self.entropy.between(1..=4096)),
+            outstanding_append_batches: Some(self.infrastructure_count(4096)),
+            outstanding_append_bytes: Some(ByteUnit::Byte(
+                self.entropy.between((2 << 20)..=64 << 20),
+            )),
+            append_idle_bound: Some(self.infrastructure_duration()),
+            snapshot_transfer_timeout: Some(self.infrastructure_duration()),
+            membership_mutation_timeout: Some(self.infrastructure_duration()),
+            retention_interval: Some(self.infrastructure_duration()),
+            retention_admission_timeout: Some(self.infrastructure_duration()),
+            purge_batch_entries: Some(self.entropy.between(1..=4096)),
+            api_channel_capacity: Some(self.entropy.between(1..=4096)),
+            notification_channel_capacity: Some(self.entropy.between(1..=4096)),
+            state_machine_channel_capacity: Some(self.entropy.between(1..=4096)),
+            api_batch_capacity: Some(self.entropy.between(1..=4096)),
+            replication_backoff: Some(backoff),
+            replication_backoff_maximum: Some(maximum),
+            membership_step_down_delay: Some(self.infrastructure_duration()),
+        })
+        .assured("generated engine capacities fit bounded counts and milliseconds")
+    }
+
     fn node_settings(&mut self) -> NodeSettings {
         let execution = self.execution();
         let runtime_threads = crate::application::RuntimeThreadOverrides {
@@ -498,9 +606,50 @@ impl<'bytes> GeneratedSettings<'bytes> {
         } else {
             None
         };
-        let runtime =
+        let mut runtime =
             RuntimeSettings::resolve(Some(self.cluster_duration()), restore_staging_max_bytes)
                 .assured("the runtime settings declare no validation");
+        runtime.vm = nervix_vm::VmSettings::resolve(nervix_vm::VmSettingOverrides {
+            inline_row_limit: Some(
+                usize::try_from(self.entropy.boundary_biased(0..=4096))
+                    .assured("bounded rows fit usize"),
+            ),
+            regex_search_cache_bytes: Some(self.entropy.boundary_biased(1..=8_388_608)),
+            dynamic_pattern_cache_capacity: Some(
+                usize::try_from(self.entropy.boundary_biased(1..=128))
+                    .assured("bounded caches fit usize"),
+            ),
+            pattern_sets_per_batch: Some(
+                usize::try_from(self.entropy.boundary_biased(1..=128))
+                    .assured("bounded sets fit usize"),
+            ),
+        })
+        .assured("generated positive cache sizes validate");
+        runtime.wasm_engine = nervix_wasm::WasmEngineSettings::resolve(
+            Some(self.entropy.boundary_biased(1..=8_388_608)),
+            Some(self.entropy.boundary_biased(0..=8_589_934_592)),
+        )
+        .assured("bounded engine sizes fit this native host");
+        runtime.connector_host = crate::runtime::ConnectorHostSettings::resolve(
+            crate::runtime::ConnectorHostSettingOverrides {
+                retry_multiplier: std::num::NonZeroU32::new(
+                    u32::try_from(self.entropy.boundary_biased(1..=8))
+                        .assured("bounded multiplier fits u32"),
+                ),
+                retry_jitter_percent: Some(
+                    u8::try_from(self.entropy.boundary_biased(0..=100))
+                        .assured("percentages fit u8"),
+                ),
+                kafka_assignment_retry: Some(self.cluster_duration()),
+                kafka_partition_watch_interval: Some(self.cluster_duration()),
+                syslog_queue_capacity: std::num::NonZeroUsize::new(
+                    usize::try_from(self.entropy.boundary_biased(1..=128))
+                        .assured("bounded queue fits usize"),
+                ),
+                syslog_read_chunk_bytes: Some(self.entropy.boundary_biased(1..=65_536)),
+            },
+        )
+        .assured("generated connector host bounds validate");
         let transactions = TransactionLimits::resolve(TransactionBounds {
             idle_timeout: Some(self.cluster_duration()),
             tombstone_retention: Some(self.cluster_duration()),
@@ -542,7 +691,14 @@ impl<'bytes> GeneratedSettings<'bytes> {
             )),
             bulk_window_bytes: Some(ByteUnit::Byte(self.positive_bytes().as_u64().min(16 << 20))),
         };
+        let interconnect = self.interconnect();
+        let dns = self.dns(interconnect.max_peers());
         let mut settings = NodeSettings {
+            interconnect,
+            dns,
+            consensus_operations: self.consensus_operations(),
+            node_database: self.database(),
+            consensus_database: self.database(),
             parameter_seeds: nervix_models::ClusterParameterSeedValues {
                 tls_cipher_suites: Some(tls_cipher_suites),
                 tls_key_exchange_groups: Some(tls_key_exchange_groups),
