@@ -347,7 +347,7 @@ async fn processor_dispatch_hands_dequeued_work_into_branch_mailbox() {
     let mut instances = ProcessorBranches::new();
     instances.insert_restored(
         None,
-        Timestamp::now(),
+        Timestamp::from_unix_nanos(1),
         1,
         ProcessorBranchSlot::Live(ProcessorBranchTask {
             input: input_tx,
