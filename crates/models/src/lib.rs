@@ -39,6 +39,7 @@ mod duration_text;
 mod emitter;
 mod emitter_batch;
 mod emitter_envelope;
+mod emitter_instances;
 mod entity_labels;
 mod execution_unit;
 mod expression;
@@ -267,6 +268,9 @@ pub use emitter_batch::{
 pub use emitter_envelope::{
     EmitterEnvelope, EmitterEnvelopeAlteration, EnvelopeClause, EnvelopeClauseValue,
     EnvelopeDeclarationError, EnvelopeProperty,
+};
+pub use emitter_instances::{
+    EmitterInstances, EmitterInstancingCapability, SingleEmitterReason, SingleInstanceRefusal,
 };
 pub use entity_labels::*;
 pub use execution_unit::{Unit, UnitIndexError, UnitKind};

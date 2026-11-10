@@ -235,6 +235,7 @@ Feature: Domain entity labels
         'endpoint' = '{{http_receiver.emitter}}', 'timeout_ms' = 60000
       };
       CREATE HTTP REQUEST EMITTER published FROM distinct_orders
+        INSTANCES 3
         TO publication_api METHOD 'POST' PATH concat('/orders/', input.tenant, '/', input.id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

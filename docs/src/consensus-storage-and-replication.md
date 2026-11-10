@@ -530,7 +530,8 @@ consumer group's required start position, the serialized Sentry platform field, 
 count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of service an
 MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC emitter
 writes beside its publishing mode, its retained-publication flag and MQTT 5 property mappings, a
-`REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription,
+`REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription, an emitter's `INSTANCES`
+declaration,
 whether a polled HTTP request's header holds a literal or names a client secret, the endpoint kind
 whose signaling data exists only on its WebSockets variant, the branch partition count every
 resolved branch declaration of the committed schedule carries, and the partition epoch the
@@ -542,11 +543,11 @@ construction where it stands, including the typed `payload` expression scope and
 `RESET WASM PROCESSOR ... STATE` that names its processor and scope and takes its domain from
 the transaction, as the step effect and commit plan step keep it too. The database also stores
 incarnation-bound node capability claims under record-family tag `C`, including transport, DNS, database, consensus, engine and connector host capacities. Its state metadata
-requires the current `ClusterState` encoding, 27, including the cluster identity reference,
+requires the current `ClusterState` encoding, 28, including the cluster identity reference,
 committed cluster parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,
-typed ingestor instancing, exact-unit placement-group members
+typed ingestor and emitter instancing, exact-unit placement-group members
 and entity-versus-unit transaction gate targets. Placement Models carry corridor or domain-wide
 coverage; domain records carry pace, and relocation statements retain exact partition or instance
 selectors. Native counts in commands, queued transactions,

@@ -56,6 +56,8 @@ pub(super) struct EmitterDraft {
     pub(super) inputs: Vec<InputDraft>,
     pub(super) active_input: usize,
     pub(super) collect: Option<InputCollectPolicy>,
+    /// `<count>`, `PER PARTITION`, or empty for the one instance an emitter runs by default.
+    pub(super) instances: String,
     pub(super) mode: AckMode,
     pub(super) body: Option<BodyChoice>,
     pub(super) codec: Option<SelectedReference<CodecName>>,
@@ -81,6 +83,7 @@ impl Default for EmitterDraft {
             inputs: vec![InputDraft::default()],
             active_input: 0,
             collect: None,
+            instances: String::new(),
             mode: AckMode::Attached,
             body: None,
             codec: None,
@@ -100,6 +103,14 @@ impl Default for EmitterDraft {
 }
 
 impl EmitterDraft {
+    /// Whether the chosen entity may run several instances, so the form offers `INSTANCES`.
+    pub(super) fn offers_instances(&self) -> bool {
+        let Some(kind) = self.destination.kind else {
+            return false;
+        };
+        kind.capabilities().instancing.refusal(kind).is_none()
+    }
+
     pub(super) fn choose_kind(&mut self, kind: nervix_models::EmitterEntityKind) {
         if self.destination.kind == Some(kind) {
             return;
@@ -109,6 +120,9 @@ impl EmitterDraft {
             ..EmitterDestinationDraft::default()
         };
         self.codec = None;
+        if kind.capabilities().instancing.refusal(kind).is_some() {
+            self.instances.clear();
+        }
         self.body = match kind.capabilities().body {
             EmitterBodyForm::Codec => Some(BodyChoice::Codec),
             EmitterBodyForm::CodecOrWithoutBody => None,
@@ -329,6 +343,23 @@ impl EmitterDraft {
         })
     }
 
+    /// The instances the draft declares: one where its field is empty.
+    fn build_instances(
+        &self,
+    ) -> error_stack::Result<nervix_models::EmitterInstances, EmitterDraftError> {
+        let value = self.instances.trim();
+        if value.is_empty() {
+            return Ok(nervix_models::EmitterInstances::ONE);
+        }
+        if value.eq_ignore_ascii_case("PER PARTITION") {
+            return Ok(nervix_models::EmitterInstances::PerPartition);
+        }
+        let count = value
+            .parse::<std::num::NonZeroU64>()
+            .change_context(EmitterDraftError::Invalid("instances"))?;
+        Ok(nervix_models::EmitterInstances::Count(count))
+    }
+
     pub(super) fn build(&self) -> error_stack::Result<CreateEmitter, EmitterDraftError> {
         let name = EmitterName::parse(self.name.trim())
             .change_context(EmitterDraftError::Invalid("emitter name"))?;
@@ -388,8 +419,20 @@ impl EmitterDraft {
             None
         };
         let envelope = self.envelope.build(connector.kind())?;
+        let instances = self.build_instances()?;
+        if !instances.is_one()
+            && let Some(refusal) = connector
+                .capabilities()
+                .instancing
+                .refusal(connector.kind())
+        {
+            return Err(
+                Report::new(refusal).change_context(EmitterDraftError::Invalid("instances"))
+            );
+        }
         let emitter = CreateEmitter {
             labels: Default::default(),
+            instances,
             name,
             from: self.build_inputs()?,
             body,

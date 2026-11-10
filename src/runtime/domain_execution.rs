@@ -233,7 +233,7 @@ pub(super) struct DomainExecution {
     pub(super) branched_entrypoints: HashMap<ModelName, Vec<Arc<IngestorRouteRuntime>>>,
     pub(super) endpoint_routes: HashMap<EndpointName, EndpointRoute>,
     pub(super) node_tasks: HashMap<NodeUnitRef, ScheduledNodeTask>,
-    pub(super) emitter_tasks: HashMap<NodeRef, ScheduledEmitterTask>,
+    pub(super) emitter_tasks: HashMap<NodeUnitRef, ScheduledEmitterTask>,
     pub(super) generator_tasks: HashMap<NodeUnitRef, JoinHandle<()>>,
     pub(super) reingestor_tasks: HashMap<NodeRef, Vec<JoinHandle<()>>>,
     /// Placement-derived tasks grouped by the scheduled node whose assignment owns them, so a
@@ -762,21 +762,45 @@ impl Runtime {
         }
 
         for emitter in emitter_plans.emitters() {
-            let mut inputs = Vec::with_capacity(emitter.inputs.len());
-            for input in &emitter.inputs {
-                let Some(relay) = relay_builders.get_mut(&input.relay) else {
-                    return Err(Report::new(ExecutionBuildError::MissingInputRelay {
-                        node: NodeRef::new(ModelKind::Emitter, ModelName::from(&emitter.name)),
-                        relay: input.relay.clone(),
-                    })
-                    .change_context(build()));
-                };
-                inputs.push((
-                    input.relay.clone(),
-                    relay.runtime_consumer_fan_in_for_mode(emitter.mode),
-                ));
+            let units = emitter
+                .units
+                .units()
+                .verified("the plan's units were checked against the emitter's schedule");
+            for unit in units {
+                if emitter.is_idle(unit) {
+                    continue;
+                }
+                let mut inputs = Vec::new();
+                for input in &emitter.inputs {
+                    let Some(relay) = relay_builders.get_mut(&input.relay) else {
+                        return Err(Report::new(ExecutionBuildError::MissingInputRelay {
+                            node: NodeRef::new(ModelKind::Emitter, ModelName::from(&emitter.name)),
+                            relay: input.relay.clone(),
+                        })
+                        .change_context(build()));
+                    };
+                    match emitter.input_units(unit, input) {
+                        crate::emitter_execution_plan::EmitterInputUnits::WholeRelay => {
+                            inputs.push(super::emitter_supervision::EmitterInput {
+                                relay: input.relay.clone(),
+                                relay_unit: None,
+                                fan_in: relay.runtime_consumer_fan_in_for_mode(emitter.mode),
+                            });
+                        }
+                        crate::emitter_execution_plan::EmitterInputUnits::Units(relay_units) => {
+                            for relay_unit in relay_units {
+                                inputs.push(super::emitter_supervision::EmitterInput {
+                                    relay: input.relay.clone(),
+                                    relay_unit: Some(relay_unit),
+                                    fan_in: relay
+                                        .runtime_consumer_fan_in_for_unit(emitter.mode, relay_unit),
+                                });
+                            }
+                        }
+                    }
+                }
+                emitter_specs.push((emitter.as_ref().clone(), unit, inputs));
             }
-            emitter_specs.push((emitter.as_ref().clone(), inputs));
         }
         for plan in entrypoints.reingestors() {
             for input in &plan.inputs {
@@ -964,27 +988,28 @@ impl Runtime {
             }
         }
 
-        for (emitter, inputs) in emitter_specs {
+        for (emitter, unit, inputs) in emitter_specs {
             let entity = NodeRef {
                 kind: ModelKind::Emitter,
                 identifier: ModelName::from(&emitter.name),
             };
-            emitter_tasks.insert(
-                entity,
-                self.spawn_emitter_task(
+            let deps = self
+                .emitter_task_deps(execution_build_deps, &emitter)
+                .change_context_lazy(build)?;
+            let task = self
+                .spawn_emitter_task(
                     EmitterTaskBuildDeps {
                         domain,
                         shutdown_tx: &shutdown_tx,
                         codecs: &codecs,
-                        deps: self
-                            .emitter_task_deps(execution_build_deps, &emitter)
-                            .change_context_lazy(build)?,
+                        deps,
                     },
                     emitter,
+                    unit,
                     inputs,
                 )
-                .change_context_lazy(build)?,
-            );
+                .change_context_lazy(build)?;
+            emitter_tasks.insert(NodeUnitRef::new(entity, unit), task);
         }
 
         let ReingestorRuntimes {

@@ -311,6 +311,7 @@ mod tests {
     fn emitter(invocations: Vec<Invocation>) -> Model {
         Model::Emitter(CreateEmitter {
             labels: Default::default(),
+            instances: nervix_models::EmitterInstances::ONE,
             name: EmitterName::parse("headers").assured("the fixture emitter name is valid"),
             from: ProcessorInputs::single(
                 RelayName::parse("events").assured("the fixture relay name is valid"),

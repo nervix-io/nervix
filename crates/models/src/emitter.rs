@@ -32,6 +32,10 @@ pub struct CreateEmitter {
     pub labels: crate::EntityLabels,
     pub name: EmitterName,
     pub from: ProcessorInputs,
+    /// `INSTANCES <count>` or `INSTANCES PER PARTITION`, or [`EmitterInstances::ONE`] where the
+    /// statement writes no clause. Only an entity whose capability admits instances declares more
+    /// than one.
+    pub instances: crate::EmitterInstances,
     pub body: EmitterBody,
     /// The envelope clauses and properties the statement writes after the payload, which set what
     /// the transport carries beside each payload.
@@ -208,7 +212,22 @@ impl CreateEmitter {
                 self.error_policies.general = policy.clone();
                 Ok(())
             }
+            AlterEmitterOperation::SetInstances { instances } => self.set_instances(*instances),
         }
+    }
+
+    /// `SET INSTANCES <count>` or `SET INSTANCES PER PARTITION`, which only an entity that runs more
+    /// than one instance accepts.
+    fn set_instances(
+        &mut self,
+        instances: crate::EmitterInstances,
+    ) -> error_stack::Result<(), AlterEmitterError> {
+        let kind = self.connector.kind();
+        if let Some(refusal) = kind.capabilities().instancing.refusal(kind) {
+            return Err(Report::new(AlterEmitterError::SingleInstance(refusal)));
+        }
+        self.instances = instances;
+        Ok(())
     }
 
     /// `ADD FROM <relay> [WHERE <expression>]`.
@@ -436,6 +455,10 @@ pub enum AlterEmitterOperation {
     SetGeneralError {
         policy: crate::GeneralErrorPolicy,
     },
+    /// `SET INSTANCES <count>` or `SET INSTANCES PER PARTITION`.
+    SetInstances {
+        instances: crate::EmitterInstances,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -484,6 +507,8 @@ pub enum AlterEmitterError {
     Batch(EmitterBatchContractError),
     #[error("the emitter's envelope cannot take this alteration")]
     Envelope,
+    #[error(transparent)]
+    SingleInstance(crate::SingleInstanceRefusal),
 }
 
 /// Why an emitter's batching clause does not fit the emitter it publishes to.

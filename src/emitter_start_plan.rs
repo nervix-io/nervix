@@ -1680,6 +1680,7 @@ mod tests {
     fn emitter(connector: EmitterEntity) -> CreateEmitter {
         CreateEmitter {
             labels: Default::default(),
+            instances: nervix_models::EmitterInstances::ONE,
             name: named("orders_out"),
             from: ProcessorInputs::single(named("orders")),
             body: nervix_models::EmitterBody::Values,

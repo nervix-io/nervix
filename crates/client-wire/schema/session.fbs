@@ -627,6 +627,7 @@ enum ModelChangeAspect : ubyte {
   EntityCreated,
   EntityDropped,
   BranchPartitions,
+  EmitterInstances,
   EntityLabels
 }
 

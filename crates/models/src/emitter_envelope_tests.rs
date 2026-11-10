@@ -39,6 +39,7 @@ const PROPERTIES: &[PropertyDeclaration] = &[
 fn declared() -> EmitterEntityCapabilities {
     EmitterEntityCapabilities {
         events: crate::DeclaredEvents::NONE,
+        instancing: crate::EmitterInstancingCapability::Instances,
         envelope: CLAUSES,
         properties: PROPERTIES,
         ..ENTITY.capabilities()
@@ -375,6 +376,7 @@ fn an_emitter_presents_the_envelope_it_writes_among_its_inspection_rows() {
 fn an_emitter_statement_writes_its_envelope_after_its_payload() {
     let emitter = crate::CreateEmitter {
         labels: Default::default(),
+        instances: crate::EmitterInstances::ONE,
         name: crate::EmitterName::try_from("publish_events").expect("valid emitter name"),
         from: crate::ProcessorInputs::single(
             crate::RelayName::try_from("events").expect("valid relay name"),

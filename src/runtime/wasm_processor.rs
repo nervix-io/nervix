@@ -865,7 +865,7 @@ pub(super) async fn wasm_envelope_from_relay_batch(
 ) -> error_stack::Result<(WasmEnvelope, WasmAckMap), WasmInstanceError> {
     let arrow_ipc_batch = batch
         .batch
-        .encode_arrow_ipc(executor)
+        .encode_arrow_ipc(executor, nervix_execution::QueueAdmission::RefuseWhenFull)
         .await
         .change_context(WasmInstanceError::EncodeInput)?
         .to_vec();

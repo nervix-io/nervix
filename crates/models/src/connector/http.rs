@@ -637,6 +637,7 @@ pub struct HttpRequestEmitter {
 impl EmitterDeclaration for HttpRequestEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         events: crate::DeclaredEvents::NONE,
+        instancing: crate::EmitterInstancingCapability::Instances,
         // A request's application fields: names in lowercase, a later write of a name replacing the
         // earlier one, written in ascending order of name.
         headers: Some(HeaderModel::lowercase(HeaderLayout::SortedByName)),

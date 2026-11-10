@@ -25,6 +25,7 @@ impl Default for EndpointFixture {
         Self {
             model: CreateEmitter {
                 labels: Default::default(),
+                instances: nervix_models::EmitterInstances::ONE,
                 name: named("output"),
                 from: ProcessorInputs::single(named("input")),
                 body: EmitterBody::Client,

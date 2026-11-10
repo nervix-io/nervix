@@ -2438,7 +2438,15 @@ impl CreateEmitter {
     pub(crate) fn configuration_to_canonical_plexus(
         &self,
     ) -> error_stack::Result<String, CanonicalPlexusError> {
-        let mut clauses = processor_input_clauses(&self.from, self.mode)?;
+        let mut clauses = vec![Clause::line(format!(
+            "FROM {}",
+            processor_inputs_to_plexus(&self.from)?
+        ))];
+        // The single instance a statement declares by writing no clause stays unwritten.
+        if !self.instances.is_one() {
+            clauses.push(Clause::line(format!("INSTANCES {}", self.instances)));
+        }
+        clauses.push(Clause::line(self.mode.as_ref()));
         clauses.extend(materialized_state_clauses(&self.materialized_state)?);
         let (reference, body) =
             emitter_destination_parts(&self.connector, &self.body, &self.envelope, None)?;
@@ -3001,6 +3009,9 @@ fn alter_emitter_operation_to_plexus(
         }
         AlterEmitterOperation::DropCollect => Ok("DROP COLLECT".to_string()),
         AlterEmitterOperation::SetAttachment { mode } => Ok(format!("SET {}", mode.as_ref())),
+        AlterEmitterOperation::SetInstances { instances } => {
+            Ok(format!("SET INSTANCES {instances}"))
+        }
         AlterEmitterOperation::SetBatch { policy } => {
             Ok(format!("SET {}", emitter_batch_policy_to_plexus(policy)))
         }
@@ -4928,6 +4939,7 @@ mod tests {
             let rendered_kind = connector.kind().phrase();
             let emitter = CreateEmitter {
                 labels: Default::default(),
+                instances: crate::EmitterInstances::ONE,
                 name: named("emit_orders"),
                 from: ProcessorInputs::single(named("orders_stream"))
                     .with_collect_policy("50ms".to_string(), Some("4MiB".to_string())),
@@ -4958,6 +4970,7 @@ mod tests {
             );
 
             let batching = CreateEmitter {
+                instances: crate::EmitterInstances::ONE,
                 batch: Some(batch_policy(500, "1MiB")),
                 ..emitter
             };
@@ -5073,6 +5086,7 @@ mod tests {
     fn renders_postgres_conflict_action_canonical() {
         let emitter = CreateEmitter {
             labels: Default::default(),
+            instances: crate::EmitterInstances::ONE,
             name: named("emit_notifications"),
             from: ProcessorInputs::single(named("notifications")),
             body: EmitterBody::Values,
@@ -5132,6 +5146,7 @@ mod tests {
     fn renders_mysql_conflict_action_canonical() {
         let emitter = CreateEmitter {
             labels: Default::default(),
+            instances: crate::EmitterInstances::ONE,
             name: named("emit_notifications"),
             from: ProcessorInputs::single(named("notifications")),
             body: EmitterBody::Values,
@@ -5189,6 +5204,7 @@ mod tests {
     fn renders_mongodb_conflict_action_canonical() {
         let emitter = CreateEmitter {
             labels: Default::default(),
+            instances: crate::EmitterInstances::ONE,
             name: named("emit_notifications"),
             from: ProcessorInputs::single(named("notifications")),
             body: EmitterBody::Values,

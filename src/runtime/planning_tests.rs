@@ -1284,6 +1284,7 @@ fn branched_node_specs_capture_downstream_processing_tree() {
                 identifier: named("orders_emitter"),
                 model: nervix_models::Model::Emitter(CreateEmitter {
                     labels: Default::default(),
+                    instances: nervix_models::EmitterInstances::ONE,
                     name: named("orders_emitter"),
                     from: ProcessorInputs::single(named("aggregated_orders")),
                     body: nervix_models::EmitterBody::Codec {

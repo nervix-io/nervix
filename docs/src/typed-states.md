@@ -362,13 +362,13 @@ the receive count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the sessi
 service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC
 emitter writes beside its publishing mode, its retained-publication flag and MQTT 5 property
 mappings, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a `PATTERN`,
-that header state, inferencer state bindings with their initial expressions, and the typed `payload`
-expression scope.
+that header state, inferencer state bindings with their initial expressions, the typed `payload`
+expression scope and an emitter's `INSTANCES` declaration.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
 Consensus's `raft_entity_labels_` keyspaces and current
-`ClusterState` metadata encoding, 25, identify its stored shapes, including the partition count of every resolved
+`ClusterState` metadata encoding, 28, identify its stored shapes, including the partition count of every resolved
 branch declaration in the committed schedule, the partition epoch the schedule records for each
 branch whose count changed, and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations and a `RESET WASM PROCESSOR ... STATE` that takes
