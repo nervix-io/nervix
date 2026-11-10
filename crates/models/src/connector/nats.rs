@@ -616,6 +616,7 @@ pub struct NatsSubjectEmitter {
 impl EmitterDeclaration for NatsSubjectEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         events: crate::DeclaredEvents::NONE,
+        instancing: crate::EmitterInstancingCapability::Instances,
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         reference: EmitterReferenceKind::Client(ConnectorKind::Nats),
         body: EmitterBodyForm::Codec,
@@ -651,6 +652,7 @@ pub struct NatsStreamEmitter {
 impl EmitterDeclaration for NatsStreamEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         events: crate::DeclaredEvents::NONE,
+        instancing: crate::EmitterInstancingCapability::Instances,
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         reference: EmitterReferenceKind::Client(ConnectorKind::Nats),
         body: EmitterBodyForm::Codec,
