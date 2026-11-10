@@ -606,7 +606,7 @@ use processor_state_inspection::{
 };
 pub(crate) use processor_state_inspection::{
     BranchStateReadError, ProcessorStatePageBounds, ProcessorStatePageError,
-    ProcessorStatePageMemory, ProcessorStateSectionColumns,
+    ProcessorStatePageMemory, ProcessorStateSectionColumns, ProcessorStateSelection,
 };
 use processor_template::{
     MaterializedDependencyResolution, ProcessorInputFilterKind, ProcessorTemplateError,
