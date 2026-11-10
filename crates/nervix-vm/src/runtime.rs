@@ -2489,6 +2489,7 @@ fn execute_builtin(
         BuiltinLowering::Last => execute_list_item(&column(0)?, ListItem::Last),
         BuiltinLowering::Count => Ok(TypedArray::Int64(execute_list_count(&column(0)?)?)),
         BuiltinLowering::Nth => execute_list_item(&column(0)?, ListItem::Nth(count(1)?)),
+        BuiltinLowering::ListShape(function) => function.execute(&column(0)?),
         BuiltinLowering::Contains => {
             let input = column(0)?;
             if let TypedArray::Generic(_) = input {
@@ -4244,7 +4245,9 @@ fn execute_list_item(
         | DataType::Float32
         | DataType::Float64
         | DataType::Boolean
-        | DataType::Utf8 => {}
+        | DataType::Utf8
+        | DataType::List(_)
+        | DataType::FixedSizeList(_, _) => {}
         DataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, Some(tz))
             if tz.as_ref() == "+00:00" || tz.as_ref() == "UTC" => {}
         other => {
@@ -5994,6 +5997,8 @@ fn row_selected(predicate: &BooleanArray, row: usize) -> bool {
 #[path = "runtime_list_tests.rs"]
 mod list_tests;
 
+mod list_shape;
+
 #[cfg(test)]
 #[path = "runtime_admission_tests.rs"]
 mod admission_tests;
@@ -6899,43 +6904,6 @@ mod tests {
         assert_eq!(grown.value(1), 0.0);
         assert_eq!(rounded.value(1), 0.0);
         assert!(output.errors().is_error_free());
-    }
-
-    #[test]
-    fn list_item_functions_reject_nested_elements() {
-        let detection =
-            DataType::FixedSizeList(StdArc::new(Field::new("item", DataType::Float32, true)), 6);
-        let detections = DataType::List(StdArc::new(Field::new("item", detection.clone(), true)));
-        let input_schema = schema(vec![Field::new("detections", detections, true)]);
-        let output_schema = with_output_fields(
-            &input_schema,
-            vec![Field::new("detection", detection, true)],
-        );
-
-        for program in [
-            "SET detection = first(input.detections)",
-            "SET detection = last(input.detections)",
-            "SET detection = nth(input.detections, 0)",
-        ] {
-            let parsed = parse_program(program).expect("must parse");
-            let compiled = compile_program_for_bindings(
-                &parsed,
-                output_schema.clone(),
-                [CompileBinding::writable("input", input_schema.clone())],
-            );
-            let Err(error) = compiled else {
-                panic!("`{program}` selects a nested element and must be rejected");
-            };
-            assert_eq!(error.current_context().code(), "unsupported_function");
-            assert!(
-                error
-                    .current_context()
-                    .message
-                    .contains("requires ARRAY or VEC elements of a scalar type"),
-                "unexpected rejection for `{program}`: {}",
-                error.current_context().message
-            );
-        }
     }
 
     #[test]

@@ -541,6 +541,14 @@ CREATE INFERENCER score_events
 
 Every required route-output field is explicit. The source input is not implicitly inherited.
 
+Shape a fixed sequence to the model's exact input dimensions with
+[`list_reshape`, `list_flatten`, and `list_transpose`](filter-map-functions.md#array-and-vector-functions).
+For example, an `ARRAY<F32, 6>` field maps to `DENSE TENSOR<F32>[2, 3]` with
+`list_reshape(input.sequence, 2, 3)`. The dimensions are positive integer literals with the same
+element count as the input. Nervix validates them when the statement is applied, so the shape
+operation may be used in `INPUTS`, which has no message-error route. Shaping preserves sensitivity;
+the mapped input must still be required and have the model's exact `F32` element type.
+
 `USING RESOURCE` requires `VERSION <n>` or `VERSION LATEST`. The inferencer loads the model file
 from the one version it stores, so a later upload of the resource does not change the scoring
 model; see [Versioning](resources.md#versioning).

@@ -3395,7 +3395,8 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
         | FunctionName::Mean
         | FunctionName::Dot
         | FunctionName::Distance
-        | FunctionName::Datetime(_) => None,
+        | FunctionName::Datetime(_)
+        | FunctionName::ListShape(_) => None,
     }
 }
 

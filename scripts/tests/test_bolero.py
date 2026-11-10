@@ -407,6 +407,7 @@ class InventoryTests(unittest.TestCase):
             "rate-limit-utc-generations",
             "vm-decimal-rounding-floats",
             "vm-decimal-rounding-integers",
+            "vm-list-shapes",
             "approx-into-rounding",
             "approx-into-exact",
             "simd-json-escapes",
