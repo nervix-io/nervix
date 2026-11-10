@@ -389,6 +389,7 @@ class InventoryTests(unittest.TestCase):
             "jaq-native-numbers",
             "jaq-yaml-string-values",
             "node-settings-command-line",
+            "client-capabilities-command-line",
             "remote-relay-rows",
             "remote-relay-rows-malformed",
             "relay-wire-messages",
@@ -470,6 +471,7 @@ class InventoryTests(unittest.TestCase):
             "dns-operation-budget",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
+            "nervix-cli",
             "nervix-benchmark",
             "nervix-connector-nats",
             "nervix-client-core",
@@ -535,7 +537,7 @@ class InventoryTests(unittest.TestCase):
                 target.test_target,
                 {
                     "lib", "test:representations", "test:connectors", "test:columns",
-                    "test:fields", "test:metrics_report_properties", "bin:nervix-web-console",
+                    "test:fields", "test:metrics_report_properties", "bin:nervix-cli", "bin:nervix-web-console",
                 },
             )
             self.assertEqual(target.corpus.parent.name, target.test.replace("::", "__"))
@@ -547,7 +549,7 @@ class InventoryTests(unittest.TestCase):
         }
         for target, version in {
             "benchmark-metrics-report": 1,
-            "node-settings-command-line": 8,
+            "node-settings-command-line": 9,
             "ingestor-describe-envelope": 11,
             "plexus-model": 60,
             "plexus-archive-model": 63,
@@ -557,13 +559,13 @@ class InventoryTests(unittest.TestCase):
             "plexus-format-text": 64,
             "models-archived-models": 65,
             "registry-archived-models": 55,
-            "consensus-state-records": 60,
-            "consensus-state-corruption": 60,
-            "consensus-raft-records": 59,
+            "consensus-state-records": 61,
+            "consensus-state-corruption": 61,
+            "consensus-raft-records": 60,
             "registry-stored-models": 48,
             "registry-stored-models-corruption": 48,
             "cluster-identity-record-rkyv": 1,
-            "node-capability-records": 2,
+            "node-capability-records": 3,
             "inferencer-tensor-columns": 1,
             "inferencer-state-snapshots": 1,
             "backup-inferencer-values": 2,
@@ -581,6 +583,8 @@ class InventoryTests(unittest.TestCase):
             "console-emitter-drafts": 5,
             "console-processor-drafts": 6,
             "client-requests": 12,
+            "client-producer-link-frames": 10,
+            "client-producer-link-frames-malformed": 10,
         }.items():
             with self.subTest(target=target):
                 self.assertEqual(versions[target], version)

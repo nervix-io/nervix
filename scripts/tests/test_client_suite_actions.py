@@ -32,6 +32,8 @@ class ActionAdapterTests(unittest.TestCase):
         for sequence, action, perform in (
             (1, "refuse-next-subscription-opening", self.harness.refuse_next_subscription_opening),
             (2, "clear-subscription-opening-refusals", self.harness.clear_subscription_opening_refusals),
+            (3, "refuse-next-clock-attachment", self.harness.refuse_next_clock_attachment),
+            (4, "clear-clock-attachment-refusals", self.harness.clear_clock_attachment_refusals),
         ):
             os.write(
                 self.input_write,

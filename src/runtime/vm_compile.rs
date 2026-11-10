@@ -290,6 +290,7 @@ pub(in crate::runtime) struct CompiledEmitterFilterMapProgram {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RuntimeVmCompileContext<'a> {
+    pub(crate) settings: nervix_vm::VmSettings,
     pub(crate) available_materialized_streams: &'a HashMap<RelayName, RuntimeMaterializedRelaySpec>,
     pub(crate) available_lookups: &'a HashMap<LookupName, Arc<LookupRuntime>>,
     pub(crate) current_branching: &'a ResolvedBranching,
@@ -322,7 +323,8 @@ impl RuntimeVmCompileContext<'_> {
         )
     }
 
-    pub(super) fn compile_options(&self, options: VmCompileOptions) -> VmCompileOptions {
+    pub(super) fn compile_options(&self, mut options: VmCompileOptions) -> VmCompileOptions {
+        options.settings = self.settings;
         runtime_udf_compile_options(self.udfs, options)
     }
 }
@@ -690,6 +692,7 @@ pub(super) fn compile_message_error_set_program(
         "error_output",
         &bindings,
         context.udfs,
+        context.settings,
     )
     .change_context_lazy(|| RuntimeVmCompileError::CompileMessageErrorLookups {
         node: node.clone(),
@@ -743,6 +746,7 @@ pub(super) fn compile_finalized_output_filter_program(
 pub(super) enum RuntimeFilterScope {
     Ingestor {
         allow_header_reads: bool,
+        metadata: IngestorMetadataDeclaration,
         payload: nervix_models::IngestorPayloadDeclaration,
     },
     Source {
@@ -776,9 +780,7 @@ impl RuntimeFilterScope {
 
     pub(super) const fn allow_metadata(self) -> bool {
         match self {
-            Self::Ingestor {
-                allow_header_reads, ..
-            } => allow_header_reads,
+            Self::Ingestor { metadata, .. } => !metadata.is_empty(),
             Self::Source { allow_metadata, .. } => allow_metadata,
             Self::FinalizedOutput => false,
         }
@@ -840,7 +842,16 @@ pub(super) fn bind_scoped_filter_program(
         VmCompileBinding::writable(scope.namespace(), schema.clone())
             .with_sensitivity(sensitivity.clone()),
     ];
-    if let RuntimeFilterScope::Ingestor { payload, .. } = scope {
+    if let RuntimeFilterScope::Ingestor {
+        metadata, payload, ..
+    } = scope
+    {
+        if let Some(schema) = metadata.arrow_schema() {
+            bindings.push(VmCompileBinding::readonly(
+                INGEST_METADATA_NAMESPACE,
+                StdArc::new(schema),
+            ));
+        }
         local_namespaces.insert(INGEST_PAYLOAD_NAMESPACE.to_string());
         if let Some(binding) = ingestor_payload_binding(payload, parsed) {
             bindings.push(binding);
@@ -865,6 +876,7 @@ pub(super) fn bind_scoped_filter_program(
         scope.namespace(),
         &bindings,
         context.udfs,
+        context.settings,
     )
     .change_context_lazy(failure)?;
     if let Some(lookup_binding) = lookup_binding {
@@ -1044,9 +1056,14 @@ pub(super) fn bind_processor_output_filter_map_program(
     let (parsed, pending_lookup_calls) =
         rewrite_lookup_hash_map_program(parsed, context.available_lookups)
             .change_context_lazy(failure)?;
-    let (lookup_hash_maps, lookup_binding) =
-        compile_lookup_hash_map_calls(pending_lookup_calls, "output", &bindings, context.udfs)
-            .change_context_lazy(failure)?;
+    let (lookup_hash_maps, lookup_binding) = compile_lookup_hash_map_calls(
+        pending_lookup_calls,
+        "output",
+        &bindings,
+        context.udfs,
+        context.settings,
+    )
+    .change_context_lazy(failure)?;
     if let Some(lookup_binding) = lookup_binding {
         bindings.push(lookup_binding);
     }
@@ -1119,6 +1136,7 @@ pub(super) fn bind_output_branch_program(
         BRANCH_NAMESPACE,
         &bindings,
         context.udfs,
+        context.settings,
     )
     .change_context_lazy(failure)?;
     if let Some(lookup_binding) = lookup_binding {
@@ -1193,9 +1211,14 @@ pub(super) fn compile_wasm_output_filter_map_program(
     let (parsed, pending_lookup_calls) =
         rewrite_lookup_hash_map_program(&parsed, context.available_lookups)
             .change_context_lazy(failure)?;
-    let (lookup_hash_maps, lookup_binding) =
-        compile_lookup_hash_map_calls(pending_lookup_calls, "output", &bindings, context.udfs)
-            .change_context_lazy(failure)?;
+    let (lookup_hash_maps, lookup_binding) = compile_lookup_hash_map_calls(
+        pending_lookup_calls,
+        "output",
+        &bindings,
+        context.udfs,
+        context.settings,
+    )
+    .change_context_lazy(failure)?;
     if let Some(lookup_binding) = lookup_binding {
         bindings.push(lookup_binding);
     }
@@ -1333,6 +1356,7 @@ pub(super) fn compile_emitter_filter_map_part(
         lookup_output_namespace,
         &bindings,
         context.udfs,
+        context.settings,
     )
     .change_context_lazy(failure)?;
     if let Some(lookup_binding) = lookup_binding {
@@ -1371,6 +1395,7 @@ pub(in crate::runtime) fn compile_key_projection_program(
     expressions: &[nervix_models::Expression],
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
+    vm_settings: nervix_vm::VmSettings,
 ) -> RuntimeVmCompileResult<VmCompiledProgram> {
     let target = KeyProjectionTarget {
         kind,
@@ -1437,6 +1462,7 @@ pub(in crate::runtime) fn compile_key_projection_program(
         runtime_udf_compile_options(
             udfs,
             VmCompileOptions {
+                settings: vm_settings,
                 output_mode: VmOutputMode::ExplicitOnly,
                 ..VmCompileOptions::default()
             },
@@ -1450,6 +1476,7 @@ pub(super) async fn evaluate_constant_expression_vm(
     expression: &nervix_models::Expression,
     udfs: Option<&UdfExecutor>,
     execution_now: Timestamp,
+    vm_settings: nervix_vm::VmSettings,
 ) -> RuntimeVmCompileResult<RuntimeValue> {
     const OUTPUT_NAMESPACE: &str = "constant";
     const OUTPUT_FIELD: &str = "value";
@@ -1500,6 +1527,7 @@ pub(super) async fn evaluate_constant_expression_vm(
             runtime_udf_compile_options(
                 udfs,
                 VmCompileOptions {
+                    settings: vm_settings,
                     output_mode: VmOutputMode::ExplicitOnly,
                     ..VmCompileOptions::default()
                 },
@@ -1552,6 +1580,7 @@ pub(super) fn compile_reorderer_program(
     order_by: &[nervix_models::Expression],
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
+    vm_settings: nervix_vm::VmSettings,
 ) -> RuntimeVmCompileResult<CompiledReordererProgram> {
     if order_by.is_empty() {
         return Err(Report::new(RuntimeVmCompileError::MissingReordererOrder {
@@ -1565,6 +1594,7 @@ pub(super) fn compile_reorderer_program(
         order_by,
         input_schema,
         udfs,
+        vm_settings,
     )?;
     Ok(CompiledReordererProgram {
         key_column_offset: 0,
@@ -1620,9 +1650,14 @@ pub(super) fn bind_ingestor_filter_map_program(
     let (parsed, pending_lookup_calls) =
         rewrite_lookup_hash_map_program(parsed, context.available_lookups)
             .change_context_lazy(failure)?;
-    let (lookup_hash_maps, lookup_binding) =
-        compile_lookup_hash_map_calls(pending_lookup_calls, "output", &bindings, context.udfs)
-            .change_context_lazy(failure)?;
+    let (lookup_hash_maps, lookup_binding) = compile_lookup_hash_map_calls(
+        pending_lookup_calls,
+        "output",
+        &bindings,
+        context.udfs,
+        context.settings,
+    )
+    .change_context_lazy(failure)?;
     if let Some(lookup_binding) = lookup_binding {
         bindings.push(lookup_binding);
     }
@@ -1685,6 +1720,7 @@ pub(super) fn compile_generator_set_program(
     route: &GeneratorRoutePlan,
     schemas: GeneratorSetProgramSchemas,
     udfs: Option<&UdfExecutor>,
+    vm_settings: nervix_vm::VmSettings,
 ) -> RuntimeVmCompileResult<CompiledProgramWithMaterializedInterest> {
     let failure = || RuntimeVmCompileError::CompileGeneratorOutput {
         generator: generator.clone(),
@@ -1722,6 +1758,7 @@ pub(super) fn compile_generator_set_program(
         runtime_udf_compile_options(
             udfs,
             VmCompileOptions {
+                settings: vm_settings,
                 output_mode: VmOutputMode::ExplicitOnly,
                 ..VmCompileOptions::default()
             },
@@ -1906,6 +1943,7 @@ mod tests {
                 &[],
                 input_schema.clone(),
                 None,
+                nervix_vm::VmSettings::default(),
             )
             .expect_err("a key projection must have an input relay");
             let RuntimeVmCompileError::MissingKeyProjectionInput { target } =
@@ -1926,6 +1964,7 @@ mod tests {
             &expressions,
             input_schema,
             None,
+            nervix_vm::VmSettings::default(),
         )
         .expect_err("an unknown key field must fail type inference");
         let RuntimeVmCompileError::InferKeyProjection { target, .. } = error.current_context()
@@ -1953,6 +1992,7 @@ mod tests {
             &[],
             StdArc::new(arrow_schema::Schema::empty()),
             None,
+            nervix_vm::VmSettings::default(),
         )
         .expect_err("a reorderer must declare at least one order expression");
         let RuntimeVmCompileError::MissingReordererOrder {
@@ -1980,6 +2020,7 @@ mod tests {
             },
             None,
             RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
                 current_branching: &ResolvedBranching::unbranched(),
@@ -2005,6 +2046,7 @@ mod tests {
         let available_lookups = HashMap::default();
         let branching = ResolvedBranching::unbranched();
         let context = || RuntimeVmCompileContext {
+            settings: nervix_vm::VmSettings::default(),
             available_materialized_streams: &available_materialized_streams,
             available_lookups: &available_lookups,
             current_branching: &branching,
@@ -2131,6 +2173,7 @@ mod tests {
                 output_sensitivity: VmSchemaSensitivity::default(),
             },
             RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
                 current_branching: &ResolvedBranching::unbranched(),
@@ -2171,6 +2214,7 @@ mod tests {
             output_schema.arrow_schema(),
             VmSchemaSensitivity::default(),
             RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
                 current_branching: &ResolvedBranching::unbranched(),
@@ -2226,6 +2270,7 @@ mod tests {
             output_schema.arrow_schema(),
             VmSchemaSensitivity::default(),
             RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
                 current_branching: &ResolvedBranching::unbranched(),
@@ -2252,6 +2297,7 @@ mod tests {
             schema.arrow_schema(),
             VmSchemaSensitivity::default(),
             RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &available_materialized_streams,
                 available_lookups: &available_lookups,
                 current_branching: &branching,
@@ -2294,6 +2340,7 @@ mod tests {
             },
             None,
             RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &available_materialized_streams,
                 available_lookups: &available_lookups,
                 current_branching: &branching,

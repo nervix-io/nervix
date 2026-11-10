@@ -99,8 +99,6 @@ use crate::{
     url_component::{self, UrlComponent},
 };
 
-pub const INLINE_ROW_LIMIT: usize = 1_024;
-
 /// One register's value during an execution.
 #[derive(Clone)]
 enum Register<A> {
@@ -835,7 +833,7 @@ pub async fn execute_program_with_selection_in_context(
     context: &ExecutionContext,
 ) -> error_stack::Result<ExecutionResult, RuntimeError> {
     let calls_extension = program_calls_extension(program, context);
-    if batch.row_count() <= INLINE_ROW_LIMIT && !calls_extension {
+    if batch.row_count() <= program.settings.inline_row_limit() && !calls_extension {
         return execute_program_with_selection_in_context_sync(program, batch, context, None);
     }
     let class = if calls_extension {
@@ -2438,7 +2436,7 @@ fn execute_builtin(
             span,
         )?)),
         BuiltinLowering::ContainsAny(call) => {
-            let lists = if let text_search::ContainsAnyCall::Dynamic = call {
+            let lists = if let text_search::ContainsAnyCall::Dynamic { .. } = call {
                 Some(column(1)?)
             } else {
                 None
@@ -9309,6 +9307,7 @@ mod tests {
         let float_input = RegisterRef::new(RegisterSpace::Input, RegisterType::Float64, 0);
         let utf8_output = RegisterRef::new(RegisterSpace::Output, RegisterType::Utf8, 0);
         let program = CompiledProgram {
+            settings: crate::VmSettings::default(),
             input_schema: schema.clone(),
             output_schema: StdArc::new(Schema::new(vec![Field::new(
                 "lowered",
@@ -9376,6 +9375,7 @@ mod tests {
         let right = RegisterRef::new(RegisterSpace::Input, RegisterType::Int64, 1);
         let utf8_output = RegisterRef::new(RegisterSpace::Output, RegisterType::Utf8, 0);
         let program = CompiledProgram {
+            settings: crate::VmSettings::default(),
             input_schema: schema.clone(),
             output_schema: StdArc::new(Schema::new(vec![Field::new("bad", DataType::Utf8, true)])),
             inputs: vec![

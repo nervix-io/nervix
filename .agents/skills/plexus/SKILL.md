@@ -86,6 +86,8 @@ Java and JVM programs follow [JVM Client Library](../../../docs/src/client-libra
 Ruby applications follow [Ruby Client Library](../../../docs/src/client-library-ruby.md),
 and C and C++ programs follow [C And C++ Client Library](../../../docs/src/client-library-c.md).
 Read its execution, clock and endpoint sections before choosing application-side lifecycle handling.
+For using the authenticated producer identity in arrival filters and routes, read
+[Client Ingestors](../../../docs/src/ingestors.md#client-ingestors) before choosing metadata fields.
 For typed state inspection in Python, Ruby or JVM applications, read that host guide's
 `Inspect Materialized State` section for page/refusal metadata, opaque continuation and retained
 schema/frame lifetimes before suggesting application code.
@@ -109,6 +111,11 @@ the CLI's Completion section.
 For live subscription, clock and notice output while editing, and terminal omission notices,
 follow the CLI's [Asynchronous Output](../../../docs/src/client-tools-cli.md#asynchronous-output)
 section.
+For native client deadlines, reconnect pacing and retention, read the CLI's
+[Connection Capabilities](../../../docs/src/client-tools-cli.md#connection-capabilities).
+For VM admission/cache limits, WASM engine resources and connector-host cadences, read
+[Engine And Connector Host Capabilities](../../../docs/src/node-settings.md#engine-and-connector-host-capabilities).
+Keep external-system timing and pool choices in the connector's declared client configuration.
 For secure CLI connections and console leader redirects, follow those chapters' connection
 sections and [Native session TLS](../../../docs/src/installation-cargo.md#native-session-tls).
 For scripted CLI use, read [Modes](../../../docs/src/client-tools-cli.md#modes) and

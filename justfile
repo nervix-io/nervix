@@ -367,6 +367,13 @@ test-scenarios *args: tests-deps test-client-python-api-run
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
 
+# Exercise authenticated producer metadata without preparing unrelated host-language drivers.
+test-client-producer-metadata *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() + "/tests/features/runtime/{client_producer_metadata,client_producer_metadata}.feature") }} {{ quote(args) }}
+
 # Exercise transport payload facts without unrelated paced client-driver preparation.
 test-ingestor-payload *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash
@@ -532,6 +539,13 @@ test-partition-placement feature="tests/features/cluster/partition_placement.fea
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(feature) }} {{ quote(args) }}
+
+# Exercise local engine admission and CLI settings through public node and REPL interfaces.
+test-engine-settings *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/engine_settings.feature {{ quote(args) }}
 
 # Exercise emitter destination keys and partitions without unrelated client-tool preparation.
 test-emitter-destinations *args: build-deps
@@ -2541,6 +2555,10 @@ test-scenarios-coverage-shard shard:
 # the current ones in a report.
 coverage-clean-workspace:
     cargo llvm-cov clean --workspace
+
+# Discard old counters before measuring revised sources, retaining instrumented build artifacts.
+coverage-clean-profiles:
+    cargo llvm-cov clean --profraw-only
 
 # Rewrite lcov-workspace.info and its checkout path from the profiles the last coverage recipe
 # collected, over the sources of every workspace package, so crate lines the server's tests executed

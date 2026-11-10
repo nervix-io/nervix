@@ -2041,16 +2041,17 @@ measured accuracy beyond the exactness above.
 
 ## Limits
 
-Every limit an expression can reach is fixed by Nervix rather than configured, except the window
-state size a window processor declares:
+Expression rejection limits are fixed by Nervix. A window processor declares its state-size bound;
+local execution admission and caches follow the node's
+[engine capabilities](./node-settings.md#engine-and-connector-host-capabilities).
 
 | Limit | Bound | Reached by |
 | --- | --- | --- |
 | Text or octets one `STRING` or `BYTES` column holds | 2,147,483,647 bytes for the results of one call in one batch | The functions of [Result Size](#result-size), which fail each message that does not fit with `overflow`, and [`format_datetime`](#writing-values), which fails the batch |
 | Parts of one `split` result | 65,536 | `split`, with `overflow` |
 | LIKE pattern | 4,096 bytes | `like` and `ilike`, with `invalid_argument` |
-| `contains_any` set | 128 non-null patterns and 65,536 bytes of pattern text; 64 distinct sets prepared per batch | `contains_any`, with `invalid_argument` |
-| Compiled regular expression | 10 MiB; 64 compiled patterns cached per call | Regular-expression functions, with `invalid_argument` |
+| `contains_any` set | 128 non-null patterns and 65,536 bytes of pattern text | `contains_any`, with `invalid_argument` |
+| Compiled regular expression | 10 MiB | Regular-expression functions, with `invalid_argument` |
 | JSON document | 16,777,216 bytes and 128 levels of nesting | `JSON_VALUE` and `JSON_EXISTS`, with `invalid_argument`; `TRY_JSON_VALUE` yields null |
 | JSON path | 64 steps; array index up to 4,294,967,295 | Rejected when the statement is parsed |
 | `DATETIME` | `1677-09-21T00:12:43.145224192Z` through `2262-04-11T23:47:16.854775807Z`, in nanoseconds | Datetime functions and conversions, with `overflow` |
@@ -2070,7 +2071,7 @@ Two measured facts, from the [VM batch-size sweep](plexus-overview.md) and from 
 workloads below, shape what an expression costs:
 
 - Per-message cost falls steeply up to about a thousand messages per batch and then flattens.
-  Batches above 1,024 messages execute on the node's data workers, whose admission and hand-off
+  With the default inline limit, batches above 1,024 messages execute on the node's data workers, whose admission and hand-off
   cost more than a small batch does to execute.
 - An expression costs what its functions do for the messages that evaluate them. Inside a
   conditional arm, some operations run only for the messages that select the arm, so their cost

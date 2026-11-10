@@ -96,13 +96,15 @@ impl ConfiguredStreamAccept {
 }
 
 const SYSLOG: &str = "syslog";
-const STREAM_INTAKE_QUEUE_CAPACITY: usize = 64;
-/// The most bytes one read appends to a connection's frame buffer, so a buffer grows with the
-/// frames a connection actually sends rather than to its frame bound on the first read.
-const STREAM_READ_CHUNK: usize = 8_192;
+mod settings;
+pub use settings::{
+    SyslogIntakeQueueCapacity, SyslogListenerSettings, SyslogListenerSettingsError,
+    SyslogReadChunkBytes,
+};
 
 #[derive(Clone)]
 pub struct SyslogListenerIngestorPlan {
+    settings: SyslogListenerSettings,
     tls_policy: nervix_connector::OutwardTlsPolicy,
     client: SyslogListenerClient,
     bind_addr: SocketAddr,
@@ -115,12 +117,14 @@ impl SyslogListenerIngestorPlan {
         entries: Vec<ClientConfigEntry>,
         bind_addr: impl FnOnce(SocketAddr) -> SocketAddr,
         tls_policy: nervix_connector::OutwardTlsPolicy,
+        settings: SyslogListenerSettings,
     ) -> error_stack::Result<Self, SyslogConfigError> {
         let client =
             SyslogListenerClient::read(&entries).change_context(SyslogConfigError::Client)?;
         let connections = ConnectionDeadlines::read(&entries)?;
         let bind_addr = bind_addr(client.bind);
         Ok(Self {
+            settings,
             tls_policy,
             client,
             bind_addr,
@@ -239,6 +243,7 @@ struct SyslogUdpListener {
 }
 
 struct SyslogStreamListener {
+    read_chunk_bytes: usize,
     /// An accept failure retires only this socket; established connection tasks and queued
     /// frames remain owned by the same ingestor until resume rebinds it.
     listener: Option<TcpListener>,
@@ -250,6 +255,7 @@ struct SyslogStreamListener {
 }
 
 pub struct SyslogListenerIngestor {
+    settings: SyslogListenerSettings,
     client: SyslogListenerClient,
     bind_addr: SocketAddr,
     connections: ConnectionDeadlines,
@@ -347,6 +353,7 @@ impl IngestorConnector for SyslogListenerIngestor {
         Ok(Self {
             client: plan.client.clone(),
             bind_addr: plan.bind_addr,
+            settings: plan.settings,
             connections: plan.connections,
             tls_acceptor,
             listener: None,
@@ -491,9 +498,10 @@ impl SyslogListenerIngestor {
                         source,
                     })
                 })?;
-                let (frame_tx, frame_rx) = mpsc::channel(STREAM_INTAKE_QUEUE_CAPACITY);
+                let (frame_tx, frame_rx) = mpsc::channel(self.settings.queue_capacity());
                 let (paused, _) = watch::channel(false);
                 Ok(SyslogListener::Stream(SyslogStreamListener {
+                    read_chunk_bytes: self.settings.read_chunk_bytes(),
                     listener: Some(listener),
                     frame_tx,
                     frame_rx,
@@ -570,6 +578,7 @@ impl SyslogStreamListener {
                     let tx = self.frame_tx.clone();
                     let paused = self.paused.subscribe();
                     let connection_tls = tls_acceptor.clone();
+                    let read_chunk_bytes = self.read_chunk_bytes;
                     self.connections.spawn(async move {
                         if let Some(acceptor) = connection_tls {
                             let stream =
@@ -578,7 +587,7 @@ impl SyslogStreamListener {
                             read_stream_connection(
                                 stream,
                                 peer,
-                                max_message_size,
+                                StreamReadLimits { max_message_size, read_chunk_bytes },
                                 framing,
                                 deadlines.idle,
                                 tx,
@@ -589,7 +598,7 @@ impl SyslogStreamListener {
                             read_stream_connection(
                                 stream,
                                 SyslogPeer::Tcp(peer_addr),
-                                max_message_size,
+                                StreamReadLimits { max_message_size, read_chunk_bytes },
                                 framing,
                                 deadlines.idle,
                                 tx,
@@ -640,6 +649,13 @@ async fn accept_tls(
     }
 }
 
+/// The frame allowance and the local growth bound a connection reads under.
+#[derive(Clone, Copy)]
+struct StreamReadLimits {
+    max_message_size: NonZeroUsize,
+    read_chunk_bytes: usize,
+}
+
 #[cfg_attr(
     nervix_lint,
     nervix::dispatch(
@@ -650,13 +666,17 @@ async fn accept_tls(
 async fn read_stream_connection(
     mut stream: impl AsyncRead + Unpin,
     peer: SyslogPeer,
-    max_message_size: NonZeroUsize,
+    limits: StreamReadLimits,
     framing: Option<SyslogFraming>,
     idle: Option<ConfiguredDeadline>,
     tx: mpsc::Sender<ReceivedSyslogFrame>,
     mut paused: watch::Receiver<bool>,
 ) -> error_stack::Result<(), SyslogConnectionError> {
-    let mut decoder = StreamFrameDecoder::new(max_message_size, framing);
+    let StreamReadLimits {
+        max_message_size,
+        read_chunk_bytes,
+    } = limits;
+    let mut decoder = StreamFrameDecoder::new(max_message_size, framing, read_chunk_bytes);
     loop {
         nervix_primitives::task::consume_budget().await;
         if *paused.borrow() {
@@ -758,6 +778,7 @@ enum FrameProgress {
 /// a read delivers are moved at most once however many frames they hold. Delimiters are found
 /// with `memchr`, from where the previous search of the same frame stopped.
 struct StreamFrameDecoder {
+    read_chunk_bytes: usize,
     /// Framed bytes before `cursor`, then the bytes of the frames not yet complete.
     buffer: Vec<u8>,
     /// The first byte of the next frame.
@@ -770,11 +791,16 @@ struct StreamFrameDecoder {
 }
 
 impl StreamFrameDecoder {
-    fn new(max_message_size: NonZeroUsize, framing: Option<SyslogFraming>) -> Self {
+    fn new(
+        max_message_size: NonZeroUsize,
+        framing: Option<SyslogFraming>,
+        read_chunk_bytes: usize,
+    ) -> Self {
         Self {
             buffer: Vec::new(),
             cursor: 0,
             progress: FrameProgress::Unread,
+            read_chunk_bytes,
             max_message_size,
             framing,
         }
@@ -809,7 +835,7 @@ impl StreamFrameDecoder {
                 maximum: self.max_message_size,
             }));
         }
-        let limit = remaining.min(STREAM_READ_CHUNK);
+        let limit = remaining.min(self.read_chunk_bytes);
         self.buffer.reserve(limit);
         Ok((&mut self.buffer).limit(limit))
     }
@@ -954,7 +980,11 @@ pub fn frame_stream(
 ) -> error_stack::Result<usize, SyslogFrameError> {
     const IN_MEMORY: &str = "every count is a length of the stream this call holds in memory";
 
-    let mut decoder = StreamFrameDecoder::new(max_message_size, None);
+    let mut decoder = StreamFrameDecoder::new(
+        max_message_size,
+        None,
+        SyslogListenerSettings::default().read_chunk_bytes(),
+    );
     let mut position = 0_usize;
     let mut payload_bytes = 0_usize;
     loop {

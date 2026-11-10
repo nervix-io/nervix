@@ -14,7 +14,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | CLIENT PRODUCER | Compare `CLIENT CONSUMER`: modes, ingest payload facts. Native Arrow batches cross an application session; producers submit batches and consumers explicitly acknowledge delivery attempts, with no broker envelope. |
+| Entity | CLIENT PRODUCER | Compare `CLIENT CONSUMER`: modes, ingest metadata, ingest payload facts. Native Arrow batches cross an application session; producers submit batches and consumers explicitly acknowledge delivery attempts, with no broker envelope. |
 | Reference | SCHEMA &lt;schema&gt; |  |
 | Locator and validation rule | Not offered: The body references the native schema; there is no external topic, queue or table to locate. |  |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
@@ -23,7 +23,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Connector events | None declared. |  |
 | Instancing | single |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
-| Metadata | Not offered: Application batches have no broker envelope, peer address or external message attributes; the native schema describes each row. |  |
+| Metadata | metadata.user: STRING OPTIONAL |  |
 | Payload facts | payload.bytes: U64<br>payload.rows: U64 |  |
 | Every live node | no; scheduled owner |  |
 | Position class | none |  |
@@ -373,7 +373,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Every live node | yes |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
-| Buffers | UDP datagrams admitted after a fixed 65,535-byte receive scratch buffer: set by max_message_size; when full, drops and counts what does not fit<br>TCP and TLS frame assembly across unlimited connections (max_message_size + 11 bytes per connection; an oversized frame closes only that connection): unbounded<br>completed TCP and TLS frames waiting for the intake queue (one frame per connection, at most max_message_size bytes; unlimited connections): unbounded<br>frames read from TCP and TLS connections: at most 64 frames; when full, holds back what fills it |  |
+| Buffers | UDP datagrams admitted after a fixed 65,535-byte receive scratch buffer: set by max_message_size; when full, drops and counts what does not fit<br>TCP and TLS frame assembly across unlimited connections (max_message_size + 11 bytes per connection; an oversized frame closes only that connection): unbounded<br>completed TCP and TLS frames waiting for the intake queue (one frame per connection, at most max_message_size bytes; unlimited connections): unbounded<br>frames read from TCP and TLS connections: set by node capability syslog-intake-queue-capacity; when full, holds back what fills it |  |
 | Network waits | the TLS handshake of an accepted connection: `connect_timeout_ms`; 30s when omitted<br>reading a connection: `idle_timeout_ms`; unbounded when omitted |  |
 | Driver limits | Datagrams wait in the kernel's UDP receive buffer, which drops what does not fit. |  |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |  |

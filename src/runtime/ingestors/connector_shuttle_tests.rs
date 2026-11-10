@@ -334,6 +334,7 @@ fn engagement_during_dispatch(family: IngestorFamily, cause: IngestorQuiesceCaus
                         position_class: PositionClass::None,
                     },
                     shutdown_rx,
+                    nervix_connector::RetryBackoffSettings::default(),
                 ))
             }
             IngestorFamily::Paced => nervix_primitives::task::spawn(run_paced_ingestor(
@@ -458,6 +459,7 @@ fn interrupted_gathering(cause: ReadInterruptionCause) {
             IngestorHost::new(RecordingHost::new(events.clone(), control.clone())),
             gathering_policy(3),
             shutdown_rx,
+            nervix_connector::RetryBackoffSettings::default(),
         ));
         let deliverer = nervix_primitives::task::spawn(async move {
             for position in [1, 2] {
@@ -519,6 +521,7 @@ fn lost_connection_during_settlement(losses: usize) {
             IngestorHost::new(RedeliveryHost::new(broker.clone(), false)),
             sequential_policy(PositionClass::BrokerRedelivered),
             shutdown_rx,
+            nervix_connector::RetryBackoffSettings::default(),
         ));
         let loser = nervix_primitives::task::spawn({
             let broker = broker.clone();
@@ -784,6 +787,7 @@ fn drain_observing_a_confirmation() {
             }),
             policy,
             shutdown_rx,
+            nervix_connector::RetryBackoffSettings::default(),
         ));
         let graph = nervix_primitives::task::spawn({
             let progress = progress.clone();
@@ -1026,6 +1030,7 @@ fn drain_observing_a_batch_with_a_refused_payload(queue: &'static [u64]) {
             }),
             policy,
             shutdown_rx,
+            nervix_connector::RetryBackoffSettings::default(),
         ));
         let graph = nervix_primitives::task::spawn({
             let progress = progress.clone();
@@ -1161,6 +1166,7 @@ fn instance_unit_handoff() {
                     position_class: PositionClass::None,
                 },
                 shutdown_rx,
+                nervix_connector::RetryBackoffSettings::default(),
             ));
             (messages, dispatches, engagement, shutdown, task)
         };

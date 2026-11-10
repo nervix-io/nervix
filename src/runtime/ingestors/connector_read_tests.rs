@@ -568,6 +568,7 @@ impl RunningLoop {
             IngestorHost::new(host),
             policy,
             shutdown_rx,
+            nervix_connector::RetryBackoffSettings::default(),
         ));
         Self { shutdown, task }
     }

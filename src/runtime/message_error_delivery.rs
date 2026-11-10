@@ -655,6 +655,7 @@ mod tests {
             schema.clone(),
             MessageErrorCompileSchemas::default(),
             RuntimeVmCompileContext {
+                settings: nervix_vm::VmSettings::default(),
                 available_materialized_streams: &materialized,
                 available_lookups: &lookups,
                 current_branching: &branching,

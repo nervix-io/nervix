@@ -234,6 +234,7 @@ struct KafkaPartitionWatch {
     topic: nervix_models::KafkaTopicName,
     events: RuntimeEvents,
     rebalance: watch::Sender<u64>,
+    interval: Duration,
 }
 
 impl IngestorCompanion for KafkaPartitionWatch {
@@ -277,7 +278,7 @@ impl KafkaPartitionWatch {
                         break;
                     }
                 }
-                _ = sleep(DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL) => {}
+                _ = sleep(self.interval) => {}
             }
             let Some(current) = self.observe().await else {
                 continue;
@@ -348,6 +349,10 @@ impl KafkaTopicIngestorStartPlan {
                 topic: topic.clone(),
                 events: runtime.events().clone(),
                 rebalance: rebalance_tx.clone(),
+                interval: runtime
+                    .inner
+                    .connector_host
+                    .kafka_partition_watch_interval(),
             }));
         }
 
@@ -395,6 +400,7 @@ impl KafkaTopicIngestorStartPlan {
         };
         let connector_plan = IngestorPlan {
             connector: KafkaTopicIngestorPlan {
+                settings: runtime.inner.connector_host.kafka,
                 executor: runtime.executor().clone(),
                 config: resolved_client.entries,
                 topic,
@@ -448,6 +454,10 @@ mod tests {
         let mut events = runtime.subscribe_events();
         let (rebalance, _changes) = watch::channel(0);
         let watch = KafkaPartitionWatch {
+            interval: runtime
+                .inner
+                .connector_host
+                .kafka_partition_watch_interval(),
             inspector: TopicPartitionInspector::new(
                 &[],
                 "report-chain-test".into(),
