@@ -253,7 +253,7 @@ async fn checkpoint_answer_beyond_its_operation_deadline_retains_the_typed_timeo
     assert!(matches!(
         failure.downcast_ref::<nervix_interconnect::RequestError>(),
         Some(nervix_interconnect::RequestError::Timeout { request: "state_sync", timeout, .. })
-            if *timeout == StateSyncRequest::TIMEOUT
+            if *timeout == StateSyncRequest::DEADLINE.declared_default()
     ));
     owner
         .runtime
@@ -281,7 +281,7 @@ async fn catalog_answer_beyond_its_operation_deadline_retains_the_typed_timeout(
     assert!(matches!(
         failure.downcast_ref::<nervix_interconnect::RequestError>(),
         Some(nervix_interconnect::RequestError::Timeout { request: "branch_checkpoint_listing", timeout, .. })
-            if *timeout == BranchCheckpointListingRequest::TIMEOUT
+            if *timeout == BranchCheckpointListingRequest::DEADLINE.declared_default()
     ));
     owner
         .runtime
