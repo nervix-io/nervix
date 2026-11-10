@@ -3,7 +3,8 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Compiled wire formats and ordered jaq clauses, handshake state and timeout, frame
-//!   encoding and matching, and accepted-data delivery through the caller's connector.
+//!   encoding and matching, accepted-data delivery through the caller's connector, and typed
+//!   peer-Close and stream-end outcomes with the peer's status and reason retained.
 //! - **Depends on.** The connector contract, typed signaling plans and host services, vocabulary
 //!   values, jaq, protobuf reflection, execution primitives, WebSocket transport, and contextual errors.
 //! - **Must not know.** Configuration Models, Plexus, registry or resource-store state, graph
@@ -34,7 +35,7 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::{
     WebSocketStream,
-    tungstenite::{Error as WebSocketError, Message},
+    tungstenite::{Error as WebSocketError, Message, protocol::frame::coding::CloseCode},
 };
 
 /// How much of a rejection value is carried into the failure reason.
@@ -246,8 +247,12 @@ pub enum WebsocketSignalingError {
         timeout: Duration,
         unsatisfied: Vec<String>,
     },
-    #[error("websocket closed before signaling completed")]
-    Closed,
+    #[error("peer closed before signaling completed with code {code}: {reason}")]
+    PeerClosed { code: CloseCode, reason: String },
+    #[error("peer closed without a status before signaling completed")]
+    PeerClosedWithoutStatus,
+    #[error("connection ended before signaling completed")]
+    Ended,
 }
 
 /// The protobuf message types a signaling protocol speaks in each direction.
@@ -712,7 +717,7 @@ impl WebsocketSignalingSession {
         while !pending.is_empty() {
             nervix_primitives::task::consume_budget().await;
             let Some(message) = websocket.next().await else {
-                return Err(Report::new(WebsocketSignalingError::Closed));
+                return Err(Report::new(WebsocketSignalingError::Ended));
             };
             let message = message
                 .map_err(|error| Report::new(WebsocketSignalingError::Receive(Box::new(error))))?;
@@ -725,7 +730,16 @@ impl WebsocketSignalingSession {
                     })?;
                     continue;
                 }
-                Message::Close(_) => return Err(Report::new(WebsocketSignalingError::Closed)),
+                Message::Close(frame) => {
+                    let failure = match frame {
+                        Some(frame) => WebsocketSignalingError::PeerClosed {
+                            code: frame.code,
+                            reason: frame.reason.into_owned(),
+                        },
+                        None => WebsocketSignalingError::PeerClosedWithoutStatus,
+                    };
+                    return Err(Report::new(failure));
+                }
                 Message::Pong(_) | Message::Frame(_) => continue,
             };
 

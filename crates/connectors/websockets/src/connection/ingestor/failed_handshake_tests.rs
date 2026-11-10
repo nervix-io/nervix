@@ -316,6 +316,80 @@ async fn a_failed_handshake_reads_the_close_its_failure_earns_before_the_connect
 }
 
 #[nervix_primitives::test]
+async fn a_peer_close_during_signaling_is_answered_before_the_connection_is_released() {
+    for frame in [
+        Some(CloseFrame {
+            code: CloseCode::Policy,
+            reason: "subscription refused".into(),
+        }),
+        None,
+    ] {
+        let mut on_connect = subscribing("{op: \"subscribe\"}", &[], None, "5s");
+        on_connect.accept_data = true;
+        let protocol = compiled(SignalingWireFormat::Json, on_connect);
+        let (mut ingestor, listener) = tests::signaling_ingestor(Vec::new(), protocol).await;
+        let expected = frame.clone();
+        let peer = async {
+            let (stream, _) = listener.accept().await.assured("the ingestor connects");
+            let mut peer = tokio_tungstenite::accept_async(stream)
+                .await
+                .assured("the upgrade succeeds");
+            let subscription = peer
+                .next()
+                .await
+                .assured("the client sends its subscription")
+                .assured("the subscription is a valid frame");
+            assert!(matches!(subscription, Message::Text(_)));
+            peer.send(Message::Text("{\"user_id\":1}".to_string()))
+                .await
+                .assured("the failed attempt accepts a payload before the Close");
+            peer.send(Message::Close(frame))
+                .await
+                .assured("the peer writes its Close");
+            unread_ending(peer).await
+        };
+        let (resumed, ending) = timeout(Duration::from_secs(60), async {
+            tokio::join!(ingestor.resume(), peer)
+        })
+        .await
+        .assured("the client answers the Close and releases the connection within the budget");
+        let Err(report) = resumed else {
+            panic!("a peer Close leaves the signaling handshake unfinished");
+        };
+        let UnreadEnding::Closed(answer) = ending else {
+            panic!("the client answers the peer's Close before releasing the connection");
+        };
+        assert_eq!(
+            answer, expected,
+            "the reply echoes the exact status and reason"
+        );
+        match expected {
+            Some(frame) => {
+                let Some(WebsocketSignalingError::PeerClosed { code, reason }) =
+                    report.downcast_ref::<WebsocketSignalingError>()
+                else {
+                    panic!(
+                        "the resume failure retains the typed peer status and reason: {report:#}"
+                    );
+                };
+                assert_eq!(*code, frame.code);
+                assert_eq!(reason, frame.reason.as_ref());
+            }
+            None => assert!(matches!(
+                report.downcast_ref::<WebsocketSignalingError>(),
+                Some(WebsocketSignalingError::PeerClosedWithoutStatus)
+            )),
+        }
+        assert!(matches!(
+            report.current_context(),
+            IngestorError::Resume { .. }
+        ));
+        assert!(ingestor.needs_resume());
+        assert!(ingestor.pending.is_empty());
+    }
+}
+
+#[nervix_primitives::test]
 async fn a_handshake_whose_peer_ended_tcp_first_is_released_without_a_close() {
     let protocol = compiled(
         SignalingWireFormat::Json,
@@ -548,7 +622,7 @@ fn every_handshake_failure_names_the_close_it_earns() {
             "{failure:?}"
         );
     }
-    // The transport broke, already ended or is already closing: no frame reaches the peer.
+    // These endings offer no new Close. Resume flushes a peer Close's queued reply separately.
     let released = [
         WebsocketSignalingError::Receive(Box::new(WebsocketError::Protocol(
             ProtocolError::ResetWithoutClosingHandshake,
@@ -566,7 +640,12 @@ fn every_handshake_failure_names_the_close_it_earns() {
             ProtocolError::SendAfterClosing,
         ))),
         WebsocketSignalingError::Send(Box::new(WebsocketError::AlreadyClosed)),
-        WebsocketSignalingError::Closed,
+        WebsocketSignalingError::PeerClosed {
+            code: CloseCode::Policy,
+            reason: "subscription refused".to_string(),
+        },
+        WebsocketSignalingError::PeerClosedWithoutStatus,
+        WebsocketSignalingError::Ended,
     ];
     for failure in released {
         assert_eq!(

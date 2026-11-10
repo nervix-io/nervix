@@ -1861,8 +1861,10 @@ The outbound WebSocket ingestor sends a Close frame on suspension or close and w
 Close within a one-second budget covering both the send and the reply. The transport is detached
 before waiting, so cancellation also drops that exact connection. Suspension retains accepted
 signaling payloads; terminal close clears them even if the handshake fails. A peer-initiated Close
-is answered before releasing the transport and becomes a typed transient read failure carrying
-its status code and reason. An EOF or transport failure also reaches the host's retry path.
+is answered within the same control-frame budget before releasing the transport. It becomes a
+typed transient resume failure during signaling, or a read failure after readiness, carrying its
+status code and reason. A Close without a status remains distinct from an ended stream. An EOF or
+transport failure also reaches the host's retry path.
 
 A transport acknowledgement that fails because the connection died is handled the same way: the
 host rejects the positions, that rejection fails on the same lost connection, and the class decides.
@@ -3554,6 +3556,11 @@ sequenceDiagram
   that fails or produces no object. RFC 6455 erratum 3227 extends `1011` from servers to clients. A handshake
   whose own write failed or whose TCP ended can carry no frame and is released without one. A
   failed handshake still drops its attempt's handoff, so frames it accepted never reach a read.
+  A peer's Close during signaling is a distinct typed failure carrying its status and reason, or
+  the explicit absence of a status. Before returning that resume failure, the connection flushes
+  the transport's queued reply within the existing one-second control-frame budget, preserving
+  the peer's exact Close rather than sending a new failure status. Cancellation drops that exact
+  transport. An ended stream queues no reply.
   The host reconnects on its policy. Suspension closes the connection while retaining successful
   handshake payloads, which drain before another connection opens; close clears the queue.
   Transport failure requires another resume of the retained ingestor.
