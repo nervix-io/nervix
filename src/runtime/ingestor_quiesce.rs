@@ -31,8 +31,6 @@ use super::*;
 mod readiness;
 pub(in crate::runtime) use readiness::IngestorInstanceReadiness;
 
-pub(super) const DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL: Duration = Duration::from_secs(1);
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
 pub(in crate::runtime) enum IngestorQuiesceCause {
     #[strum(serialize = "entity hold")]

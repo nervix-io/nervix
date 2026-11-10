@@ -301,6 +301,7 @@ pub(super) fn compile_deduplicator_key_program(
     deduplicate_on: &[Expression],
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
+    vm_settings: nervix_vm::VmSettings,
 ) -> error_stack::Result<CompiledDeduplicatorKeyProgram, ProcessorCompileError> {
     if deduplicate_on.is_empty() {
         return Err(Report::new(
@@ -316,6 +317,7 @@ pub(super) fn compile_deduplicator_key_program(
         deduplicate_on,
         input_schema,
         udfs,
+        vm_settings,
     )
     .change_context_lazy(|| ProcessorCompileError::DeduplicatorKeyProgram {
         processor: processor.clone(),
@@ -809,6 +811,7 @@ mod tests {
             &[],
             nervix_primitives::sync::StdArc::new(arrow_schema::Schema::empty()),
             None,
+            nervix_vm::VmSettings::default(),
         ) else {
             panic!("a deduplicator without DEDUPLICATE ON expressions must not compile");
         };

@@ -422,7 +422,10 @@ mod tests {
             backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(4),
         };
-        let mut backoff = RuntimeReconnectBackoff::from_policy(policy);
+        let mut backoff = RuntimeReconnectBackoff::from_policy(
+            policy,
+            nervix_connector::RetryBackoffSettings::default(),
+        );
         let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
         assert_eq!(backoff.next_delay(), Duration::from_millis(1));
@@ -436,10 +439,13 @@ mod tests {
 
     #[test]
     fn emitter_retry_delay_honors_the_server_minimum() {
-        let mut backoff = RuntimeReconnectBackoff::from_policy(ParsedRetryPolicy {
-            backoff: Duration::from_millis(10),
-            max_backoff: Duration::from_millis(100),
-        });
+        let mut backoff = RuntimeReconnectBackoff::from_policy(
+            ParsedRetryPolicy {
+                backoff: Duration::from_millis(10),
+                max_backoff: Duration::from_millis(100),
+            },
+            nervix_connector::RetryBackoffSettings::default(),
+        );
         let error = emitter_publish_failure(
             Report::new(EmitterWriteError::Publish { connector: "test" })
                 .attach(EmitterRetryDelay(Duration::from_secs(2))),
@@ -454,10 +460,13 @@ mod tests {
 
     #[test]
     fn a_server_delay_the_monotonic_clock_cannot_represent_leaves_the_declared_backoff() {
-        let mut backoff = RuntimeReconnectBackoff::from_policy(ParsedRetryPolicy {
-            backoff: Duration::from_millis(10),
-            max_backoff: Duration::from_millis(100),
-        });
+        let mut backoff = RuntimeReconnectBackoff::from_policy(
+            ParsedRetryPolicy {
+                backoff: Duration::from_millis(10),
+                max_backoff: Duration::from_millis(100),
+            },
+            nervix_connector::RetryBackoffSettings::default(),
+        );
         let error = emitter_publish_failure(
             Report::new(EmitterWriteError::Publish { connector: "test" })
                 .attach(EmitterRetryDelay(Duration::MAX)),

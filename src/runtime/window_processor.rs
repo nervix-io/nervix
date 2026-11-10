@@ -2721,6 +2721,7 @@ mod tests {
                 &output,
                 &output_only,
                 None,
+                nervix_vm::VmSettings::default(),
             )),
             "window aggregate input relay 'latencies' has no runtime schema"
         );
@@ -2735,6 +2736,7 @@ mod tests {
             &output,
             &unrelated_output,
             None,
+            nervix_vm::VmSettings::default(),
         ) else {
             panic!("an assignment to an undeclared field must not compile");
         };
@@ -2755,6 +2757,7 @@ mod tests {
             &output,
             &scalar_output,
             None,
+            nervix_vm::VmSettings::default(),
         ) else {
             panic!("an array cannot be assigned to a scalar field");
         };

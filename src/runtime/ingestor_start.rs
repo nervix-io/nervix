@@ -493,7 +493,7 @@ impl Runtime {
             },
         };
         let input_schema = input.schema();
-        let programs = ExecutionBuildDeps::from_routing(domain, &routing)
+        let programs = ExecutionBuildDeps::from_routing(domain, &routing, self.inner.vm_settings)
             .bind_ingestor(ingestor, &input_schema)
             .change_context_lazy(|| IngestorStartError::Bind {
                 domain: domain.clone(),

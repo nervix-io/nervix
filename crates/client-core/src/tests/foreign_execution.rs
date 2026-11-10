@@ -121,7 +121,7 @@ async fn an_aborted_reader_interrupts_its_waiters_and_ends_its_generation() {
 async fn a_cancelled_interruption_keeps_cleanup_owned_until_close_finishes() {
     use std::{future::Future as _, task::Poll};
 
-    let events = SessionEvents::new();
+    let events = SessionEvents::new(crate::ClientCapabilities::default());
     let (frames, _outbound) = mpsc::channel(1);
     let pending = Arc::new(Mutex::new(PendingReplies::new()));
     let mut exchange = detached_exchange(frames, pending, events.emitters.clone());

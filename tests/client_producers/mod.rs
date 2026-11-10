@@ -586,6 +586,35 @@ async fn refused_open_with(
     }
 }
 
+#[given(
+    expr = "client {string} is connected to node {string} as user {string} with password {string}"
+)]
+async fn given_client_producer_session_is_authenticated(
+    world: &mut ScenarioWorld,
+    name: String,
+    node: String,
+    username: String,
+    password: String,
+) {
+    let name = expand_placeholders(world, &name);
+    let node = expand_placeholders(world, &node);
+    let endpoint = world
+        .cluster()
+        .grpc_uri(&node)
+        .assured("the scenario starts the named session node before connecting");
+    let mut options = client_connect_options(&endpoint)
+        .assured("the cluster fixture supplies the session's TLS configuration");
+    options.username = Some(expand_placeholders(world, &username));
+    options.password = Some(expand_placeholders(world, &password));
+    let client = Client::connect_with_options(&endpoint, client_domain(&world.domain), options)
+        .await
+        .assured("the scenario created this user with these exact credentials");
+    assert!(
+        world.transaction_clients.insert(name, client).is_none(),
+        "each client session has its own name"
+    );
+}
+
 #[given(expr = "WebSocket session {string} is connected to node {string}")]
 async fn given_websocket_session_is_connected(
     world: &mut ScenarioWorld,

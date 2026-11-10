@@ -1556,9 +1556,11 @@ stateDiagram-v2
 
 A consumer must stay bounded however fast rows arrive, and must never let an unread event hold back
 a reply. The Rust client charges each subscription event for the whole frame its rows keep alive and
-for the event itself. One subscription holds at most 32 events and one frame of the frame limit,
-4 MiB, with the event that carries it; all subscriptions together hold four times as much, 128
-events and 16 MiB of frames with their events. An event that does not fit drops that subscription's
+for the event itself. By default one subscription holds at most 32 events and one frame of the
+frame limit, 4 MiB, with the event that carries it; all subscriptions together hold four times as
+much, 128 events and 16 MiB of frames with their events. The native client exposes these local
+record, frame-retention and aggregate-multiplier capabilities through `ConnectOptions`; the
+[CLI flags](client-tools-cli.md#connection-capabilities) project the same validated settings. An event that does not fit drops that subscription's
 queued events, reports a consumer overflow, and marks the subscription `DeliveryFailed`; the reader
 that routes replies never waits. An event stops counting once the application reads it, so a
 subscription whose events are read before the next one arrives stays within its own allowance
@@ -1722,6 +1724,11 @@ domain's `START` generation, the endpoint contract digest, the ingestor's window
 retry backoff, the granted credit with the largest batch one submission may carry, and whether
 admission is open.
 
+The ordered open captures the session's authenticated user name and carries it to the ingestor
+owner. Every row of that producer's batches reads the same identity as `metadata.user`, including
+through a forwarded attachment. The user is supplied by session authentication; an application
+cannot choose it in the producer open or substitute an Arrow payload field for it.
+
 The request identity of the open names the producer: every later request and frame about it carries
 that identity as its `ProducerId`, so a client needs no second identity space. The producer accepts
 batches from the moment its reply is queued. It belongs to the session: `USE` does not retarget it,
@@ -1755,6 +1762,10 @@ message. The four outcomes keep the boundary's four facts apart:
   unresolved, `OwnerLost` when the node that executes it, or the connection to that node, was lost.
 
 A transport receipt is never an outcome, and a reply is never sent before the outcome is decided.
+`Rejected` can be decided when one branch's acknowledgement fails, while another branch of the
+same submission still holds buffered work. It is not a flush or drain barrier. Later submissions
+follow the configured route buffering too, so their rows can share a branch buffer with those
+remaining rows.
 The session never replays a batch: the client decides, and only a temporary refusal is safe to send
 again unchanged.
 
