@@ -1373,7 +1373,7 @@ impl SessionServiceImpl {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use meticulous::{OptionExt as _, ResultExt as _};
+    use meticulous::OptionExt as _;
     #[cfg(feature = "testing")]
     use nervix_consensus::{ConsensusTestProbe, StorageBoundary};
     use nervix_models::{
