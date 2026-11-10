@@ -422,21 +422,7 @@ impl StateMachineData {
             )?,
         };
         state.resources.check_recovered()?;
-        if state.schedule.domains.len() != 0 {
-            let parameters = state
-                .parameters
-                .as_ref()
-                .ok_or_else(|| io::Error::other(StorageFailure::InvalidState))?;
-            let limits = nervix_models::EntityLabelLimits::from(&parameters.values);
-            for schedule in state.schedule.domains.values() {
-                for node in schedule.nodes.values() {
-                    node.config
-                        .labels()
-                        .validate(&limits)
-                        .map_err(crate::durable_batch::storage_report_io)?;
-                }
-            }
-        }
+        state.check_recovered_entity_labels()?;
         if let Some(parameters) = state.parameters {
             let required =
                 nervix_models::PasswordCost::try_from(parameters.values.password_iterations())
@@ -466,6 +452,26 @@ impl StateMachineData {
             return Err(io::Error::other(StorageFailure::InvalidState));
         }
         Ok(state)
+    }
+
+    /// Checks every recovered label map under the recovered record's committed policy.
+    fn check_recovered_entity_labels(&self) -> io::Result<()> {
+        if self.schedule.domains.len() != 0 {
+            let parameters = self
+                .parameters
+                .as_ref()
+                .ok_or_else(|| io::Error::other(StorageFailure::InvalidState))?;
+            let limits = nervix_models::EntityLabelLimits::from(&parameters.values);
+            for schedule in self.schedule.domains.values() {
+                for node in schedule.nodes.values() {
+                    node.config
+                        .labels()
+                        .validate(&limits)
+                        .map_err(crate::durable_batch::storage_report_io)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// How many keyed records this revision stores, besides its metadata.

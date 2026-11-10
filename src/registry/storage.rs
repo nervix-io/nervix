@@ -1664,7 +1664,23 @@ fn deserialize_value(bytes: &[u8]) -> Result<Model, Report<RegistryError>> {
 
 // The header identifies the current persisted Model shape before archive decoding.
 const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX LABELS   ";
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the current Model archive stores exactly four little-endian u64 label-limit \
+                  values"
+    )
+)]
 const MODEL_LABEL_LIMIT_BYTES: usize = 4 * size_of::<u64>();
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the current Model archive prefix is its shape header plus the fixed \
+                  label-policy record"
+    )
+)]
 const MODEL_ARCHIVE_PREFIX_BYTES: usize = MODEL_ARCHIVE_HEADER.len() + MODEL_LABEL_LIMIT_BYTES;
 
 #[cfg(test)]

@@ -384,12 +384,18 @@ impl From<Tls> for TlsRequirement {
     }
 }
 
-/// Adds every enumeration to the module.
-pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+/// Adds the shared vocabulary used by typed inspection views, in declaration order.
+fn register_inspection_enums(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<EntityLabelViewKind>()?;
     module.add_class::<InspectionRejection>()?;
     module.add_class::<InspectionStage>()?;
     module.add_class::<InspectionUnitKind>()?;
+    Ok(())
+}
+
+/// Adds every enumeration to the module.
+pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    register_inspection_enums(module)?;
     module.add_class::<FailureKind>()?;
     module.add_class::<Disposition>()?;
     module.add_class::<UploadFailure>()?;
