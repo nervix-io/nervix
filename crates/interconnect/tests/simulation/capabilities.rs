@@ -18,7 +18,8 @@ impl InterconnectRequest for CurrentReceiveBound {
     type Response = u64;
     const NAME: &'static str = "simulation_current_receive_bound";
     const CLASS: PoolClass = PoolClass::Management;
-    const TIMEOUT: Duration = Duration::from_secs(1);
+    const DEADLINE: nervix_interconnect::RequestDeadline =
+        nervix_interconnect::RequestDeadline::Control;
 }
 
 fn receive(bytes: u64) -> PeerReceiveSettings {
@@ -39,6 +40,29 @@ fn claim(incarnation: u64, bytes: u64) -> NodeCapabilityRecord {
             ClusterNodeIncarnation::new(incarnation),
         ),
         capabilities: NodeCapabilities {
+            interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
+            dns: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
+                .node_capability_record()
+                .capabilities
+                .dns,
+            node_database: nervix_arbitrary::Arbitrary::new(
+                &[],
+                nervix_arbitrary::Domain::Vocabulary,
+            )
+            .node_capability_record()
+            .capabilities
+            .node_database,
+            consensus_database: nervix_arbitrary::Arbitrary::new(
+                &[],
+                nervix_arbitrary::Domain::Vocabulary,
+            )
+            .node_capability_record()
+            .capabilities
+            .consensus_database,
+            consensus: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
+                .node_capability_record()
+                .capabilities
+                .consensus,
             engines: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
                 .node_engine_capabilities(),
             connector_host: nervix_arbitrary::Arbitrary::new(

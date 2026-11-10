@@ -49,10 +49,10 @@ pub(super) const RELAY_BUFFER_DIRECTION_CONCRETE: &str = "concrete";
 /// channel its sender resumes still finds its watermark there, and a receiver's sweep of watermarks
 /// unreconciled for the whole retention raises its retired-channel floor over a live channel's next
 /// batch only when that batch is delayed for longer than the difference.
-const RELAY_CHANNEL_IDLE_ROTATION: Duration = Duration::from_secs(300);
+const RELAY_CHANNEL_IDLE_ROTATION: Duration = nervix_models::HOST_RELAY_ADMISSION_BOUND;
 const _: () = assert!(
     RELAY_CHANNEL_IDLE_ROTATION.as_nanos()
-        < nervix_interconnect::RELAY_CHANNEL_RETENTION.as_nanos(),
+        < nervix_models::HOST_RELAY_ADMISSION_BOUND.as_nanos() * 2,
     "an idle relay channel rotates before its receiver's watermark retention ends"
 );
 

@@ -549,6 +549,13 @@ test-cluster-identity *args: build-deps build-plexus-format build-test-cli build
     # Absolute globs keep Cucumber's file walk within the feature directory.
     cargo test --package nervix-scenarios --test scenarios -- --input "$(pwd)/tests/features/runtime/cluster_identity*.feature" {{ quote(args) }}
 
+# Verify infrastructure capacities and derived liveness through native nodes and public clients.
+test-infrastructure-settings *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input "$(pwd)/tests/features/cluster/infrastructure_settings*.feature" {{ quote(args) }}
+
 # Placement and console scenarios use native nodes and public clients, without paced simulation.
 test-partition-placement feature="tests/features/cluster/partition_placement.feature" *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash
@@ -1309,6 +1316,13 @@ test-kafka-driver checkout *args:
 test-settings:
     cargo test --package nervix-models --lib settings::
     cargo test --package nervix-models --doc SettingDefinition
+
+# Exercise node settings' public argument groups without building unrelated host probes.
+test-node-settings *args: build-web-console download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --lib application::cli::tests:: -- {{ args }}
 
 # Run one integration test target of one workspace package whose tests need no server test
 # dependencies, such as the vocabulary's representation properties.

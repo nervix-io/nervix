@@ -148,7 +148,8 @@ impl ConnectionFailureReason {
             | TransportError::ProgressTimeout { .. }
             | TransportError::PeerProcessChanged { .. }
             | TransportError::Closed(_) => Self::Setup,
-            TransportError::InvalidHandshake(_)
+            TransportError::Settings
+            | TransportError::InvalidHandshake(_)
             | TransportError::StaleRoute { .. }
             | TransportError::InvalidServerName(_)
             | TransportError::InvalidOptions { .. }
@@ -162,7 +163,8 @@ impl ConnectionFailureReason {
             | TransportError::RelayCancelled
             | TransportError::RelayIndeterminate
             | TransportError::RelayRejected(_) => Self::Handshake,
-            TransportError::PoolExhausted
+            TransportError::Http2StreamCapacity { .. }
+            | TransportError::PoolExhausted
             | TransportError::IncomingQueueFull
             | TransportError::RelayBoundsRefused(_)
             | TransportError::BulkReceiveWindowRefused { .. } => Self::Capacity,
@@ -191,7 +193,8 @@ impl StreamResetReason {
             TransportError::RequestTimeout { .. }
             | TransportError::ProgressTimeout { .. }
             | TransportError::ConnectionSetupTimeout { .. } => Self::Deadline,
-            TransportError::PoolExhausted
+            TransportError::Http2StreamCapacity { .. }
+            | TransportError::PoolExhausted
             | TransportError::IncomingQueueFull
             | TransportError::PayloadTooLarge { .. }
             | TransportError::BulkReceiveWindowRefused { .. }
@@ -211,6 +214,7 @@ impl StreamResetReason {
             | TransportError::InvalidOptions { .. }
             | TransportError::BulkReceiveWindowUnbacked { .. }
             | TransportError::InvalidServerName(_)
+            | TransportError::Settings
             | TransportError::InvalidHandshake(_) => Self::Malformed,
             TransportError::Io(_)
             | TransportError::Tls(_)

@@ -312,6 +312,7 @@ impl Harness {
         let store = FjallStore::from_database(
             Database::builder(directory.path()).open()?,
             executor.clone(),
+            crate::RaftOperationSettings::default(),
             licensing.clone(),
         )
         .await?;
@@ -333,6 +334,7 @@ impl Harness {
         let store = FjallStore::from_database(
             Database::builder(directory.path()).open()?,
             executor.clone(),
+            crate::RaftOperationSettings::default(),
             licensing.clone(),
         )
         .await?;
@@ -1330,9 +1332,10 @@ async fn log_entry_stream_reads_a_large_range_in_separate_chunks() -> TestResult
 
 #[nervix_primitives::test]
 async fn log_entry_stream_yields_at_the_entry_count_bound() -> TestResult {
-    let entry_count = MAX_APPEND_BATCH_ENTRIES
-        .checked_add(1)
-        .assured("one more than the fixed append entry bound fits in u64");
+    let entry_count =
+        <crate::AppendBatchEntries as nervix_models::SettingDefinition>::default_value(&())
+            .checked_add(1)
+            .assured("one more than the fixed append entry bound fits in u64");
     let mut harness = Harness::new().await?;
     harness.append(entry_count).await?;
     assert!(
@@ -1343,7 +1346,9 @@ async fn log_entry_stream_yields_at_the_entry_count_bound() -> TestResult {
     let mut reader = harness.store.get_log_reader().await;
     let entries = reader.entries_stream(..).await;
     tokio::pin!(entries);
-    for expected in 1..=MAX_APPEND_BATCH_ENTRIES {
+    for expected in
+        1..=<crate::AppendBatchEntries as nervix_models::SettingDefinition>::default_value(&())
+    {
         nervix_primitives::task::consume_budget().await;
         let entry = entries
             .next()
@@ -2780,6 +2785,7 @@ async fn current_record_storage_requires_its_metadata() -> TestResult {
     let result = FjallStore::from_database(
         Database::builder(directory.path()).open()?,
         executor,
+        crate::RaftOperationSettings::default(),
         crate::LicensingEnvironment::default(),
     )
     .await;
@@ -2795,6 +2801,7 @@ async fn current_consensus_storage_rejects_an_unknown_keyspace() -> TestResult {
     let result = FjallStore::from_database(
         database,
         Executor::default(),
+        crate::RaftOperationSettings::default(),
         crate::LicensingEnvironment::default(),
     )
     .await;

@@ -35,8 +35,22 @@ use rkyv::{
 use thiserror::Error;
 
 /// The durable archive ceiling matches the standard interconnect decoder depth.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the current durable archive validation contract bounds decoder nesting at 64"
+    )
+)]
 const STORAGE_ARCHIVE_MAX_DEPTH: usize = 64;
 /// Enough alignment for every archived primitive in the durable record vocabulary.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the current archived primitive vocabulary requires at most 16-byte alignment"
+    )
+)]
 const STORAGE_ARCHIVE_ALIGNMENT: usize = 16;
 
 #[derive(Debug, Error)]

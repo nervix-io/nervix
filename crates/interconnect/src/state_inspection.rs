@@ -11,8 +11,6 @@
     nervix::layer(engine, reason = "owns the boundary declared above")
 )]
 
-use std::time::Duration;
-
 use nervix_models::{
     BranchKeyFingerprint, ClusterNodeIdentity, DomainName, NodeRef, ProcessorStateSection,
     RelayName, RemoteRuntimeField, SchemaField, SchemaFingerprint, StateInspectionBranchSelection,
@@ -40,10 +38,7 @@ impl InterconnectStreamRequest for ReadMaterializedStatePage {
     const NAME: &'static str = "read_materialized_state_page";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    #[inline]
-    fn default_timeout() -> Duration {
-        <nervix_models::StateInspectionReadTimeout as nervix_models::SettingDefinition>::default_value(&())
-    }
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Request;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
@@ -93,10 +88,7 @@ impl InterconnectStreamRequest for ReadProcessorStatePage {
     const NAME: &'static str = "read_processor_state_page";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    #[inline]
-    fn default_timeout() -> Duration {
-        <nervix_models::StateInspectionReadTimeout as nervix_models::SettingDefinition>::default_value(&())
-    }
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Request;
 }
 
 /// What one unit's processor page holds: the read origin, the complete counts, where the page
