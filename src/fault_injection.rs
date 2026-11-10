@@ -29,9 +29,9 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector_syslog::SyslogListenerFault;
 use nervix_execution::Executor;
 use nervix_models::{
-    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CommandExecutionReference,
-    DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName, RelayName,
-    RemoteRuntimeField, RestoreStep,
+    BranchKeyFingerprint, ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName,
+    CommandExecutionReference, DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind,
+    ModelName, NodeRef, RelayName, RemoteRuntimeField, RestoreStep,
 };
 use nervix_primitives::{
     collections::DashMap,
@@ -81,6 +81,7 @@ mod pause;
 mod relay_memory;
 mod relay_partition_fanout;
 mod relay_slicing;
+pub use relay_slicing::RelayCapabilityRefusal;
 mod relocation_commit;
 mod resource_discovery;
 mod resource_publication;
@@ -1781,6 +1782,54 @@ impl FaultInjection {
     ) {
         let pause = self.emitter_swap_after_detach_pause(domain, emitter);
         pause.release();
+    }
+
+    /// Holds a concrete branch before creating its buffer and arming its flush deadline.
+    pub fn pause_ingestor_branch_buffer(
+        &self,
+        ingestor: DomainNodeRef,
+        branch: BranchKeyFingerprint,
+    ) {
+        self.arm_command_pause(CommandPausePoint::IngestorBranchBuffer(ingestor, branch));
+    }
+
+    pub async fn wait_for_ingestor_branch_buffer_pause(
+        &self,
+        ingestor: &DomainNodeRef,
+        branch: BranchKeyFingerprint,
+    ) {
+        self.wait_for_command_pause(&CommandPausePoint::IngestorBranchBuffer(
+            ingestor.clone(),
+            branch,
+        ))
+        .await;
+    }
+
+    pub fn release_ingestor_branch_buffer_pause(
+        &self,
+        ingestor: &DomainNodeRef,
+        branch: BranchKeyFingerprint,
+    ) {
+        self.release_command_pause(&CommandPausePoint::IngestorBranchBuffer(
+            ingestor.clone(),
+            branch,
+        ));
+    }
+
+    pub(crate) async fn pause_ingestor_branch_buffer_if_armed(
+        &self,
+        domain: &DomainName,
+        ingestor: &NodeRef,
+        branch: Option<BranchKeyFingerprint>,
+    ) {
+        let Some(branch) = branch else {
+            return;
+        };
+        self.pause_command_if_armed(CommandPausePoint::IngestorBranchBuffer(
+            ingestor.in_domain(domain),
+            branch,
+        ))
+        .await;
     }
 
     /// Holds one route after accepting its input and before observing handoff or flush state.

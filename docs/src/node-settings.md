@@ -835,6 +835,13 @@ three-node cluster with such a setting, through the harness step that names a se
 node, before restarting it with a valid one. Converting and validating the options takes no lock
 and adds no lifecycle path, so the deadlock detector has nothing of it to observe.
 
+The relay-capability scenarios preserve both concrete branches, exactly-once output and confirmed
+acknowledgements across raised and lowered receive bounds. The oversized-row case observes both
+branch refusals before submitting its fitting batch. A producer's first negative acknowledgement
+does not establish that every branch buffer has flushed. Controlled examples stagger the branch
+buffers' deadlines to exercise that distinction, while keeping the same subsequent delivery and
+producer-completion assertions.
+
 The prerequisite record, its compatibility rule, its gossip text and the order `DESCRIBE CLUSTER`
 lists it in have unit tests beside the record, and the record's gossip text has a registered Bolero
 property that requires it to read back unchanged. A second, `cluster-peer-clock-probes`, requires

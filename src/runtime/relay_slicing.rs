@@ -97,6 +97,13 @@ impl RemoteDispatcher {
                         if cursor.shrink() {
                             continue;
                         }
+                        #[cfg(feature = "testing")]
+                        self.fault_injection.observe_capability_relay_refusal(
+                            &payload.domain,
+                            node,
+                            delivery,
+                            batch.batch().num_rows(),
+                        );
                         return Err(Report::new(RemoteDispatchError::RowAboveReceiveBounds {
                             target: node.clone(),
                         }));
@@ -113,6 +120,13 @@ impl RemoteDispatcher {
                         if cursor.shrink() {
                             continue;
                         }
+                        #[cfg(feature = "testing")]
+                        self.fault_injection.observe_capability_relay_refusal(
+                            &payload.domain,
+                            node,
+                            delivery,
+                            batch.batch().num_rows(),
+                        );
                         return Err(Report::new(RemoteDispatchError::RowAboveReceiveBounds {
                             target: node.clone(),
                         }));

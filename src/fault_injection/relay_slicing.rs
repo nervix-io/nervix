@@ -1,9 +1,9 @@
-//! Scenario pauses between retaining a relay batch and asking its peer for a grant.
+//! Scenario control and bounded observations of relay capability outcomes.
 //!
 //! Layer: test harness.
-//! - **Owns.** One scenario-domain pause and its reached/released observations.
-//! - **Depends on.** The common pause primitive and typed domain names.
-//! - **Must not know.** Receiver bounds, payloads, acknowledgement owners or graph schedules.
+//! - **Owns.** One scenario-domain pause and bounded admission/refusal observations.
+//! - **Depends on.** The common pause primitive and typed domain, peer and delivery identities.
+//! - **Must not know.** Admission decisions, acknowledgement owners or graph schedules.
 
 #![cfg_attr(
     nervix_lint,
@@ -12,10 +12,18 @@
 
 use super::*;
 
+#[derive(Clone, Debug)]
+pub struct RelayCapabilityRefusal {
+    pub node: ClusterNodeName,
+    pub delivery: nervix_interconnect::RelayDelivery,
+    pub rows: usize,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct RelayCapabilityProbe {
     pause: TestPause,
     accepted: nervix_primitives::sync::blocking::Mutex<Vec<(ClusterNodeName, usize, usize)>>,
+    refused: nervix_primitives::sync::blocking::Mutex<Vec<RelayCapabilityRefusal>>,
 }
 
 impl FaultInjection {
@@ -111,5 +119,51 @@ impl FaultInjection {
             .value()
             .clone();
         probe.accepted.lock().clone()
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "one scenario-owned relay refusal observation",
+            key = "scenario domain",
+            bound = "one keyed read and one guard over at most 32 observations; no await"
+        )
+    )]
+    pub(crate) fn observe_capability_relay_refusal(
+        &self,
+        domain: &DomainName,
+        node: &ClusterNodeName,
+        delivery: nervix_interconnect::RelayDelivery,
+        rows: usize,
+    ) {
+        let probe = self
+            .inner
+            .relay_before_grant_pauses
+            .get(domain.as_str())
+            .map(|entry| entry.value().clone());
+        if let Some(probe) = probe {
+            let mut refused = probe.refused.lock();
+            assert!(
+                refused.len() < 32,
+                "the scenario observes bounded relay refusals"
+            );
+            refused.push(RelayCapabilityRefusal {
+                node: node.clone(),
+                delivery,
+                rows,
+            });
+        }
+    }
+
+    pub fn capability_relay_refusals(&self, domain: &str) -> Vec<RelayCapabilityRefusal> {
+        let probe = self
+            .inner
+            .relay_before_grant_pauses
+            .get(domain)
+            .verified("the scenario armed this domain")
+            .value()
+            .clone();
+        probe.refused.lock().clone()
     }
 }
