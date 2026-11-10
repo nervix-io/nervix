@@ -955,8 +955,8 @@ guidance:
 - **Variable-length work.** Ragged lists, text search, and JSON ran at single-digit millions.
 - **Failures.** Dense failures made checked arithmetic about six times slower, because each failed
   row builds an error.
-- **The executor hop.** Crossing the 1,024-row threshold admits the execution onto the data
-  workers, which costs more than executing a small batch.
+- **The executor hop.** Crossing the configured inline threshold (1,024 rows in these measurements)
+  admits the execution onto the data workers, which costs more than executing a small batch.
 - **Conditional arms.** A regular expression in an arm that selects half the batch costs about
   twelve times one that selects none.
 - **JSON sharing.** Four extractions from one document cost less than a third of four extractions
@@ -1432,12 +1432,12 @@ Treat this as the checklist for a new builtin, or for a new family.
 
 **Limits:**
 
-- Column limits: 2,147,483,647 bytes of text or bytes in one column; 1,024 rows before execution
-  moves to the node's data workers.
-- Regular expressions: 10 MiB compiled and a 2 MiB search cache per pattern, and 64 field-supplied
-  patterns cached per call.
-- Pattern sets: 128 patterns and 64 KiB per constant `contains_any` list, and 64 per-row pattern
-  sets per batch.
+- Column limits: 2,147,483,647 bytes of text or bytes in one column. The node's `vm-inline-row-limit`
+  controls admission to its data workers.
+- Regular expressions: 10 MiB compiled. Search caches and retained field-supplied patterns follow
+  `vm-regex-search-cache-bytes` and `vm-dynamic-pattern-cache-capacity`.
+- Pattern sets: 128 patterns and 64 KiB per constant `contains_any` list. The node's
+  `vm-pattern-sets-per-batch` controls retained per-row matchers without changing these rejection limits.
 - Text functions: 4 KiB `LIKE` patterns and 65,536 `split` parts.
 - JSON: 16 MiB, 128-level documents, and 64-step paths.
 - Datetimes: 256-byte formatted values.

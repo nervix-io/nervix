@@ -916,8 +916,8 @@ may also hold one completed frame of at most `max_message_size` bytes while its 
 An oversized stream frame closes only its connection; it neither fails the listener's ingestor read
 nor makes the host reconnect. UDP admission separately drops and counts a datagram above
 `max_message_size`, after receiving it into a fixed 65,535-byte scratch buffer. The shared stream
-intake queue holds at most 64 frames and applies backpressure; that queue does not limit the
-connection count or total connection-local retention.
+intake queue holds at most the node's `syslog-intake-queue-capacity` frames and applies backpressure;
+that queue does not limit the connection count or total connection-local retention.
 
 A wait ends at a client deadline key, a statement clause such as `ACK TIMEOUT`, a protocol interval
 another client key sets, such as MQTT's `keep_alive_ms`, a fixed bound Nervix sets, or the driver's
@@ -3293,8 +3293,8 @@ sequenceDiagram
   `NATS SUBJECT` instance reconnects never reach it, while a stream keeps them for its consumer as
   long as its retention and limits allow.
 - **Syslog stream listener.** Each accepted TCP or TLS connection has one task that owns its frame
-  buffer and reads into it directly, at most 8 KiB per read and never beyond the connection's
-  frame bound of `max_message_size` plus the eleven bytes of the longest octet count and its
+  buffer and reads into it directly, at most the node's `syslog-read-chunk-bytes` per read and never
+  beyond the connection's frame bound of `max_message_size` plus the eleven bytes of the longest octet count and its
   space. Framing moves a cursor through the buffer and copies each payload into the frame the
   intake queue carries; the bytes before the cursor are discarded once, when the next read needs
   room, so the bytes a read delivers are moved at most once however many frames they hold. The

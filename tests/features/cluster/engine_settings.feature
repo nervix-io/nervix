@@ -25,9 +25,15 @@ Feature: Local engine and client capabilities
       """
       DESCRIBE CLUSTER;
       """
-    Then the last command output contains "vm-inline-row-limit=0"
-    And the last command output contains "wasm-parallel-compilation=false"
-    Then the data execution count on node "node-1" is saved
+    Then the last command output contains
+      """
+      vm-inline-row-limit=0
+      """
+    And the last command output contains
+      """
+      wasm-parallel-compilation=false
+      """
+    And the data execution count on node "node-1" is saved
     When http payload is posted to node "node-1" with host "engine-{{test_id}}.example.com" path "/events"
       """
       {"value":41}

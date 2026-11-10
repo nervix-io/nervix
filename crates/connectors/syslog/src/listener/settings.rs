@@ -69,14 +69,21 @@ impl SyslogListenerSettings {
         queue: Option<NonZeroUsize>,
         chunk: Option<u64>,
     ) -> Result<Self, Report<SyslogListenerSettingsError>> {
-        let chunk = chunk
-            .map(|bytes| {
-                usize::try_from(bytes)
-                    .ok()
-                    .and_then(NonZeroUsize::new)
-                    .ok_or_else(|| Report::new(SyslogListenerSettingsError::ReadChunk { bytes }))
-            })
-            .transpose()?;
+        let chunk = match chunk {
+            Some(bytes) => {
+                let value = usize::try_from(bytes).map_err(|source| {
+                    Report::new(source)
+                        .change_context(SyslogListenerSettingsError::ReadChunk { bytes })
+                })?;
+                let Some(value) = NonZeroUsize::new(value) else {
+                    return Err(Report::new(SyslogListenerSettingsError::ReadChunk {
+                        bytes,
+                    }));
+                };
+                Some(value)
+            }
+            None => None,
+        };
         Ok(Self {
             queue_capacity: Setting::resolve(queue, &())?,
             read_chunk_bytes: Setting::resolve(chunk, &())?,
