@@ -395,6 +395,57 @@ fn an_element_conversion_keeps_the_offsets_and_validity_of_every_level() {
         &expected,
         &[None, None],
     );
+
+    // Every VEC level keeps its offsets, the inner one beneath a null outer row and an empty
+    // inner list included.
+    let nested = vec_column(
+        vec_column(integers(&[1, 2, 3, 4]), &[2, 0, 1, 1], None),
+        &[2, 0, 2],
+        Some(&[true, false, true]),
+    );
+    let expected = vec_column(
+        vec_column(
+            StdArc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+            &[2, 0, 1, 1],
+            None,
+        ),
+        &[2, 0, 2],
+        Some(&[true, false, true]),
+    );
+    let nested_type = vec_type(vec_type(DataType::Int64));
+    let nested_target = vec_type(vec_type(DataType::Float64));
+    assert_converts(
+        &nested_type,
+        &nested_target,
+        &nested,
+        &expected,
+        &[None, None, None],
+    );
+    let converted = convert(
+        &plan(&nested_type, &nested_target),
+        &nested,
+        CastFailure::Error,
+    );
+    let outer_input = as_vec(&nested);
+    let outer_output = as_vec(&converted.output);
+    assert_eq!(
+        outer_output.offsets().inner().inner().as_ptr(),
+        outer_input.offsets().inner().inner().as_ptr(),
+        "the converted outer VEC reuses the input's offsets"
+    );
+    assert_eq!(
+        as_vec(outer_output.values())
+            .offsets()
+            .inner()
+            .inner()
+            .as_ptr(),
+        as_vec(outer_input.values())
+            .offsets()
+            .inner()
+            .inner()
+            .as_ptr(),
+        "the converted inner VEC reuses the input's offsets"
+    );
 }
 
 fn as_vec(column: &ArrayRef) -> &ListArray {
@@ -584,6 +635,26 @@ fn a_null_row_never_fails_whatever_its_hidden_elements_hold() {
         &pairs,
         &expected,
         &[None, None, None],
+    );
+
+    // A null VEC usually holds no element and may hide any count of them, so neither has the
+    // length of the ARRAY it becomes: the null row holds that many placeholders instead.
+    let readings = vec_column(
+        integers(&[1, 2, 5, 6, 7, 8, 9]),
+        &[2, 0, 2, 3],
+        Some(&[true, false, true, false]),
+    );
+    let expected = array_column(
+        integers(&[1, 2, 0, 0, 5, 6, 0, 0]),
+        2,
+        Some(&[true, false, true, false]),
+    );
+    assert_converts(
+        &vec_type(DataType::Int64),
+        &array_type(DataType::Int64, 2),
+        &readings,
+        &expected,
+        &[None, None, None, None],
     );
 }
 
