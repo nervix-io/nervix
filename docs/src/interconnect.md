@@ -2545,6 +2545,15 @@ capture published generations instead of asking branch tasks. Sealed window meta
 are decoded under bounded admission, with cancellation and storage charges retained through
 encoding. A zero-row request returns only counts for the processor's `DESCRIBE` summary.
 
+A deduplicator or window inspection during repartitioning additionally requests the complete
+selected branch-fingerprint catalog and a set of copies to exclude. Count-only census requests
+use an empty exclusion set. The returned catalog precedes exclusion, while counts, rows and
+continuation positions describe only the selected authoritative copies. The coordinator compares
+each page's catalog with its census and refuses raced membership as `not_ready`. Ordinary requests
+carry no partition selection or catalog. The receiver checks catalog presence, selector membership
+and the filtered branch count before accepting a page. Catalog metadata stays inside the existing
+bounded descriptor, with no new stream framing or checkpoint-transfer operation.
+
 The stream frames an eight-byte little-endian descriptor length, a bounded typed rkyv descriptor and
 one native Arrow snapshot section per returned section. The descriptor carries the read origin, the
 complete counts, the returned offset and last branch, the returned rows as runs of one section and
