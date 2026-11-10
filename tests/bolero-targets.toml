@@ -5024,6 +5024,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/nervix-vm/src/runtime/list_arithmetic/__fuzz__/runtime__list_arithmetic__properties__bolero_list_arithmetic_matches_scalar_lanes/corpus"
+domain_version = 1
+features = []
+id = "vm-list-arithmetic"
+invariant = "Every valid result element equals independent checked scalar arithmetic at its exact numeric width, float bits included; fixed and ragged shapes, sliced offsets and null validity are preserved, length and first-element failures report exactly one typed message error, and scalar columns and shared scalars agree with the same reference."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-vm"
+random_iterations = 128
+source = "crates/nervix-vm/src/runtime/list_arithmetic/properties.rs"
+test = "runtime::list_arithmetic::properties::bolero_list_arithmetic_matches_scalar_lanes"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/nervix-cli/src/__fuzz__/connection_args__tests__bolero_client_capabilities_survive_their_command_line/corpus"
 domain_version = 1
 features = []
