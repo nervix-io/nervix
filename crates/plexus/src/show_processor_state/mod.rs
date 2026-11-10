@@ -150,7 +150,7 @@ mod tests {
             for selector in [
                 "FOR ALL BRANCHES",
                 "FOR UNBRANCHED",
-                "FOR BRANCH VALUES { tenant = 'alpha', shard = -7 }",
+                "FOR BRANCH KEY { tenant = 'alpha', shard = -7 }",
             ] {
                 let text = format!(
                     "{head} {selector} LIMIT 3 AFTER $cursor$opaque'position$cursor$ FORMAT JSON;"
@@ -206,7 +206,7 @@ mod tests {
             "SHOW CORRELATOR held STATE LIMIT -1;",
             "SHOW CORRELATOR held STATE AFTER 'position';",
             "SHOW REORDERER held STATE LIMIT 1 AFTER 3;",
-            "SHOW REORDERER held STATE FOR BRANCH VALUES {};",
+            "SHOW REORDERER held STATE FOR BRANCH KEY {};",
             "SHOW REORDERER held STATE FORMAT JSON LIMIT 1;",
             "SHOW REORDERER held STATE FOR UNBRANCHED FOR ALL BRANCHES;",
             "SHOW REORDERER held STATE FORMAT XML;",
@@ -254,7 +254,7 @@ mod tests {
         assert!(suggest_show_processor_state(input, input.len()).contains(&"STATE".to_string()));
         for (prefix, expected) in [
             ("SHOW REORDERER held STATE FOR ", "ALL BRANCHES"),
-            ("SHOW CORRELATOR held STATE FOR ", "BRANCH VALUES"),
+            ("SHOW CORRELATOR held STATE FOR ", "BRANCH KEY"),
             ("SHOW REORDERER held STATE ", "LIMIT"),
             ("SHOW CORRELATOR held STATE FORMAT ", "JSON"),
             ("SHOW REORDERER held STATE LIMIT 1 ", "AFTER"),
@@ -287,7 +287,7 @@ mod wasm_state_tests {
         for selector in [
             "FOR ALL BRANCHES",
             "FOR UNBRANCHED",
-            "FOR BRANCH VALUES { tenant = 'alpha', shard = -7 }",
+            "FOR BRANCH KEY { tenant = 'alpha', shard = -7 }",
         ] {
             let text = format!(
                 "SHOW WASM PROCESSOR counting_guest STATE {selector} LIMIT 2 AFTER \
@@ -332,7 +332,7 @@ mod wasm_state_tests {
             "LIMIT -1",
             "AFTER 'position'",
             "LIMIT 1 AFTER 3",
-            "FOR BRANCH VALUES {}",
+            "FOR BRANCH KEY {}",
             "FORMAT JSON LIMIT 1",
             "FOR UNBRANCHED FOR ALL BRANCHES",
             "FORMAT XML",
@@ -374,7 +374,7 @@ mod wasm_state_tests {
             ),
             (
                 "SHOW WASM PROCESSOR counting_guest STATE FOR ",
-                "BRANCH VALUES",
+                "BRANCH KEY",
             ),
             ("SHOW WASM PROCESSOR counting_guest STATE FORMAT ", "JSON"),
             ("SHOW WASM PROCESSOR counting_guest STATE LIMIT 1 ", "AFTER"),

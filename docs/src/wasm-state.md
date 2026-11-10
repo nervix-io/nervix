@@ -567,8 +567,9 @@ recovery start on the owner, where there is no session, and carry their domain w
 The leader admits a reset only when the domain exists and is running, the processor is scheduled
 with an owner, and the scope matches the processor's declaration: `UNBRANCHED` only for an
 unbranched processor, and a concrete branch or every branch only for a branched one. A concrete
-branch is named by exactly the declared branch-key fields with exact typed values, and it must be a
-branch the owner is running. The reset takes the domain's exclusive alteration lock, so a concurrent
+branch is named with `FOR BRANCH KEY { field = literal, ... }`, using exactly the declared branch-key
+fields with exact typed values, and it must be a branch the owner is running. The reset takes the
+domain's exclusive alteration lock, so a concurrent
 reset, lifecycle, model, placement, handoff, or rebinding operation is rejected rather than queued.
 While a reset of the processor is `Publishing`, only the same request can proceed, and reusing a
 request reference with a different scope or reason is rejected.
@@ -752,7 +753,7 @@ Effective Delivery](./emitters.md#ack-semantics-and-effective-delivery).
 
 `SHOW WASM PROCESSOR <name> STATE` reads a processor's guest-state facts through the typed state
 inspection envelope every `SHOW ... STATE` statement shares, with the same optional clauses:
-`FOR ALL BRANCHES`, `FOR UNBRANCHED` or `FOR BRANCH VALUES { ... }` selects branches, `LIMIT n`
+`FOR ALL BRANCHES`, `FOR UNBRANCHED` or `FOR BRANCH KEY { ... }` selects branches, `LIMIT n`
 bounds the branch entries of one reply and `AFTER '<continuation>'` resumes after the last entry of
 an earlier reply, and `FORMAT TEXT` (the default) or `FORMAT JSON` picks the rendering. An omitted
 selection reads every branch. The page names the pinned module (`wasm_binding`: resource, version

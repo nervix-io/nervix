@@ -150,7 +150,7 @@ Feature: Typed WASM processor state inspection
     And the last WASM state inspection JSON branch fingerprints are disjoint from placeholder "first_page"
     When these Plexus commands are executed on the leader node
       """
-      SHOW WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 'beta' } LIMIT 1 FORMAT JSON;
+      SHOW WASM PROCESSOR counting_guest STATE FOR BRANCH KEY { tenant = 'beta' } LIMIT 1 FORMAT JSON;
       """
     Then the last command output is a JSON document where
       """
@@ -168,7 +168,7 @@ Feature: Typed WASM processor state inspection
     Then the last command output JSON value at "/continuation" is saved as placeholder "stale_continuation"
     When these Plexus commands are executed through the client on the leader node
       """
-      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 'gamma' };
+      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH KEY { tenant = 'gamma' };
       """
     Given client "reader" is connected to node "node-1"
     When client "reader" submits this Plexus command request
@@ -198,7 +198,7 @@ Feature: Typed WASM processor state inspection
       """
     When these Plexus commands are executed through the client on the leader node
       """
-      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 'alpha' };
+      RESET WASM PROCESSOR counting_guest STATE FOR BRANCH KEY { tenant = 'alpha' };
       """
     Then within "10s" SHOW WASM PROCESSOR "counting_guest" STATE on the leader node contains
       """
@@ -208,7 +208,7 @@ Feature: Typed WASM processor state inspection
       """
     When these Plexus commands are executed on the leader node
       """
-      SHOW WASM PROCESSOR counting_guest STATE FOR BRANCH VALUES { tenant = 'alpha' } FORMAT JSON;
+      SHOW WASM PROCESSOR counting_guest STATE FOR BRANCH KEY { tenant = 'alpha' } FORMAT JSON;
       """
     Then the last command output is a JSON document where
       """

@@ -75,7 +75,7 @@ impl OpenWindowFixture {
             &output_relay,
             &relay_schemas,
             None,
-            nervix_vm::VmSettings::default(),
+            nervix_vm::CompileOptions::default(),
         )
         .expect("the window aggregate compiles against its relays");
         let plan = WindowAccumulatorPlan::new([&compiled.route], None, None);

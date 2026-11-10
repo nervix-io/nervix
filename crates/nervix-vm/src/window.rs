@@ -13,10 +13,12 @@
     )
 )]
 
+mod collection_type;
 mod route;
 
 use std::{num::NonZeroUsize, time::Duration};
 
+pub(crate) use collection_type::FixedWindowCollection;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
@@ -267,7 +269,9 @@ impl WindowAggregateFunction {
             }
             Self::Corr | Self::CovarPop | Self::CovarSamp => WindowAggregateStorageKind::CoMoments,
             Self::Count => WindowAggregateStorageKind::Counter,
-            Self::CollectVec | Self::First | Self::Last => WindowAggregateStorageKind::Sequence,
+            Self::CollectArray | Self::CollectVec | Self::First | Self::Last => {
+                WindowAggregateStorageKind::Sequence
+            }
             Self::Max | Self::Min => WindowAggregateStorageKind::Extremes,
             Self::PercentileLinearHistogram => WindowAggregateStorageKind::Histogram,
             Self::Sum => WindowAggregateStorageKind::Sum,
