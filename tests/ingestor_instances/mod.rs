@@ -522,13 +522,7 @@ async fn wait_for_each_instance_ready_on_its_owner(
 ) {
     let duration = parse_duration_text(&duration).assured("the scenario writes a valid timeout");
     let deadline = PhaseDeadline::after(duration);
-    // A failover scenario asks after one node stopped, so the leader is the one the running nodes
-    // agree on.
-    let node_id = world
-        .cluster()
-        .wait_for_leader_among_running()
-        .await
-        .expect("the running nodes agree on a leader");
+    let node_id = current_leader_node(world).await;
     let mut last_description = None;
     let mut last_error = None;
     loop {
@@ -705,7 +699,13 @@ async fn wait_for_emitter_instances(
     let duration = parse_duration_text(&duration).assured("the scenario writes a valid timeout");
     let emitter = expand_placeholders(world, &emitter);
     let deadline = PhaseDeadline::after(duration);
-    let node_id = current_leader_node(world).await;
+    // A failover scenario asks after one node stopped, so the leader is the one the running nodes
+    // agree on.
+    let node_id = world
+        .cluster()
+        .wait_for_leader_among_running()
+        .await
+        .expect("the running nodes agree on a leader");
     let mut last_description = None;
     let mut last_error = None;
     loop {
