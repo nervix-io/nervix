@@ -76,6 +76,11 @@ pub(super) struct LicensingClient<'a> {
     backoff_max: Duration,
 }
 
+struct SignedRequest {
+    body: Zeroizing<String>,
+    expires_at: Timestamp,
+}
+
 impl Operation {
     fn name(&self) -> nervix_licensing_protocol::requests::Operation {
         match self {
@@ -233,16 +238,15 @@ impl<'a> LicensingClient<'a> {
         operation: Operation,
         request_id: Uuid,
     ) -> Result<DecisionResponse, Report<LicensingRequestError>> {
-        let mut signed = None;
-        let mut expires_at = Timestamp::from_unix_nanos(i64::MIN);
+        let mut signed: Option<SignedRequest> = None;
         let mut backoff = self.budget.min(self.backoff_max);
         loop {
             nervix_primitives::task::consume_budget().await;
             let now = clock::observe(self.service.inner.runtime.fault_injection());
             let attempt = async {
-                if signed.is_none() || now >= expires_at {
+                if !matches!(signed.as_ref(), Some(request) if now < request.expires_at) {
                     let challenge = self.challenge(cluster).await?;
-                    expires_at = Timestamp::try_from(challenge.expires_at)
+                    let expires_at = Timestamp::try_from(challenge.expires_at)
                         .change_context(LicensingRequestError::Response)?;
                     let request = self.request(cluster, &operation, request_id, challenge, now);
                     let executor = self.service.inner.runtime.executor();
@@ -260,12 +264,15 @@ impl<'a> LicensingClient<'a> {
                         .await
                         .change_context(LicensingRequestError::Signing)?
                         .verified("initialized licensing requests hold an identity");
-                    signed = Some(Zeroizing::new(
-                        signer
-                            .sign(request, self.environment.limits(), reservation)
-                            .await
-                            .change_context(LicensingRequestError::Signing)?,
-                    ));
+                    signed = Some(SignedRequest {
+                        body: Zeroizing::new(
+                            signer
+                                .sign(request, self.environment.limits(), reservation)
+                                .await
+                                .change_context(LicensingRequestError::Signing)?,
+                        ),
+                        expires_at,
+                    });
                 }
                 let route = match &operation {
                     Operation::Create { .. } => "/v1/activations".to_owned(),
@@ -287,6 +294,7 @@ impl<'a> LicensingClient<'a> {
                             signed
                                 .as_ref()
                                 .verified("request was signed")
+                                .body
                                 .as_bytes()
                                 .to_vec(),
                         )
