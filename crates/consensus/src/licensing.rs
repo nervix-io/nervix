@@ -172,22 +172,21 @@ pub(super) fn admit_domain(
     quota: nervix_licensing_vocabulary::Quota,
 ) -> error_stack::Result<(), nervix_licensing_vocabulary::LicensingRefusal> {
     use nervix_licensing_vocabulary::{QuotaConstraint, QuotaName};
-    if let (Some(record), Some(Ok(verified))) = (&state.licensing, &state.licensing_verification) {
-        if verified
+    if let (Some(record), Some(Ok(verified))) = (&state.licensing, &state.licensing_verification)
+        && verified
             .decision
             .timing
             .valid_until
             .is_some_and(|until| record.licensing_time.into_datetime() >= until)
-        {
-            return Err(Report::new(nervix_licensing_vocabulary::LicensingRefusal {
-                state: nervix_licensing_vocabulary::AdmissionState::Lapsed,
-                condition: QuotaName::ClusterDomains,
-                limit: u64::try_from(state.domains.len()).assured("materialized domains fit u64"),
-                current_usage: u64::try_from(state.domains.len())
-                    .assured("materialized domains fit u64"),
-                requested: 1,
-            }));
-        }
+    {
+        return Err(Report::new(nervix_licensing_vocabulary::LicensingRefusal {
+            state: nervix_licensing_vocabulary::AdmissionState::Lapsed,
+            condition: QuotaName::ClusterDomains,
+            limit: u64::try_from(state.domains.len()).assured("materialized domains fit u64"),
+            current_usage: u64::try_from(state.domains.len())
+                .assured("materialized domains fit u64"),
+            requested: 1,
+        }));
     }
     QuotaConstraint {
         name: QuotaName::ClusterDomains,
