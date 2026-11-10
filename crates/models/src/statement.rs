@@ -41,8 +41,9 @@ use crate::{
     ModelName, NodeRef, PlacementName, ProcessorOutput, ProcessorOutputs, RebindResource,
     RefreshLicense, ReingestorName, RelayName, ReleaseLicense, ReordererName,
     RequestedResourceVersion, ResetWasmState, ResourceName, Restore, RotateLicenseClusterKey,
-    SchemaName, SignalingProtocolName, SubscriptionName, Timestamp, TransactionInspectionRequest,
-    UdfName, Unit, UserName, VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
+    SchemaName, ShowWasmProcessorState, SignalingProtocolName, SubscriptionName, Timestamp,
+    TransactionInspectionRequest, UdfName, Unit, UserName, VhostName, WasmProcessorName,
+    WindowProcessorName, WireSchemaName,
 };
 
 #[derive(
@@ -109,6 +110,7 @@ pub enum Statement {
     ShowPlacements(ShowPlacements),
     ShowRelayMaterializedState(ShowRelayMaterializedState),
     ShowProcessorState(ShowProcessorState),
+    ShowWasmProcessorState(ShowWasmProcessorState),
     ShowClusterStatus(ShowClusterStatus),
     ShowTransactions(ShowTransactions),
     DescribeTransaction(DescribeTransaction),
@@ -196,6 +198,7 @@ impl Statement {
             | Self::ShowPlacements(_)
             | Self::ShowRelayMaterializedState(_)
             | Self::ShowProcessorState(_)
+            | Self::ShowWasmProcessorState(_)
             | Self::ShowClusterStatus(_)
             | Self::ShowTransactions(_)
             | Self::DescribeTransaction(_)
@@ -1081,7 +1084,6 @@ pub struct DescribeWindowProcessor {
 )]
 pub struct DescribeWasmProcessor {
     pub name: WasmProcessorName,
-    pub format: InspectionFormat,
 }
 
 #[derive(

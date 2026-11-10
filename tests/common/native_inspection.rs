@@ -113,8 +113,10 @@ pub fn page(unit: Unit, stage: StateInspectionStage, value: u64) -> StateInspect
                     omitted_rows: 1,
                     watermarks: Some(StateWatermarkColumns { low: 3, high: 4 }),
                 }],
+                wasm: None,
             }],
             continuation: Some("opaque\0position".to_owned()),
+            wasm_binding: None,
         }),
     }
 }

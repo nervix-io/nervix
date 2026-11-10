@@ -101,6 +101,7 @@ pub(in crate::application) fn requires_leader(statement: &Statement) -> bool {
             | Statement::ShowPlacements(_)
             | Statement::ShowRelayMaterializedState(_)
             | Statement::ShowProcessorState(_)
+            | Statement::ShowWasmProcessorState(_)
     )
 }
 

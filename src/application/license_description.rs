@@ -408,8 +408,10 @@ impl SessionServiceImpl {
                                 },
                                 counts,
                                 sections,
+                                wasm: None,
                             }],
                             continuation: None,
+                            wasm_binding: None,
                         })
                     }
                     (Err(error), _) | (_, Err(error)) => {
