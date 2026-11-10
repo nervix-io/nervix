@@ -127,6 +127,7 @@ impl WindowCollectionBenchmark {
 
 fn schema(name: &str, field: &str, ty: ParseAsType) -> CompiledSchema {
     compile_schema(&CreateSchema {
+        labels: Default::default(),
         name: name.try_into().assured("the schema name is valid"),
         fields: vec![SchemaField {
             name: field.try_into().assured("the field name is valid"),
