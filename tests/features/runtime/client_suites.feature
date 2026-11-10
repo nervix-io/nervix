@@ -15,6 +15,9 @@ Feature: Language-level client suites
   its numbered confirmation. Its subscription restoration test cuts the session relay, asks every
   node to refuse its next subscription opening as unavailable, restores the relay, checks the
   interruption and the refusal's cause, message and retry wait, then reads rows after recovery.
+  Its clock restoration test uses the same exchange to refuse the next clock attachment as
+  in-transaction, checks the interrupted clock and refusal details, then reads its restored state
+  with the same domain and generation. Every fault is cleared during test teardown.
 
   Scenario Outline: A <runtime> client's suite passes its cluster tests over <transport> on <cluster_size> nodes
     Given client grpc transport is configured with mode "<transport>"
@@ -93,6 +96,8 @@ Feature: Language-level client suites
       | runtime | cluster_size | transport | tags_type   | grid_type     |
       | python  | 1            | https     | VEC<STRING> | ARRAY<I16, 2> |
       | python  | 3            | https     | VEC<STRING> | ARRAY<I16, 2> |
+      | python  | 1            | http      | VEC<STRING> | ARRAY<I16, 2> |
+      | python  | 3            | http      | VEC<STRING> | ARRAY<I16, 2> |
 
     @client_conformance_toolchain @client_suite_java @long_running @slots_1
     Examples: Java over the JVM library on TLS and plaintext listeners
