@@ -33,6 +33,7 @@ use arrow_array::{
         TimestampNanosecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
     },
 };
+use arrow_buffer::NullBuffer;
 use arrow_schema::{DataType, TimeUnit};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -49,10 +50,10 @@ use crate::{
     program::Span,
 };
 
-/// Runs `$body` with `$Element` naming the Arrow type of the list's numeric elements, or refuses a
-/// list of any other elements.
+/// Runs `$body` with `$Element` naming the Arrow type of the list's numeric elements, or `$refusal`
+/// with `$other` naming the type of any other elements.
 macro_rules! with_numeric_element {
-    ($list:expr, $operation:expr, $Element:ident => $body:expr) => {
+    ($list:expr, $Element:ident => $body:expr, $other:ident => $refusal:expr) => {
         match $list.element_data_type() {
             DataType::UInt8 => {
                 type $Element = UInt8Type;
@@ -94,10 +95,7 @@ macro_rules! with_numeric_element {
                 type $Element = Float64Type;
                 $body
             }
-            other => Err(Report::new(RuntimeError::CollectionNonNumericElement {
-                operation: $operation,
-                actual: other.clone(),
-            })),
+            $other => $refusal,
         }
     };
 }
@@ -115,22 +113,35 @@ pub(super) fn execute_list_statistic(
     match statistic {
         ListStatistic::Dispersion(dispersion) => {
             let failures = RowFailures::new(dispersion.float_statistic(), row_errors, span);
-            let output = with_numeric_element!(list, operation, Element => {
-                dispersion_of::<Element>(list, dispersion, failures)
-            })?;
+            let output = with_numeric_element!(
+                list,
+                Element => dispersion_of::<Element>(list, dispersion, failures),
+                other => Err(non_numeric_element(operation, other))
+            )?;
             Ok(TypedArray::Float64(output))
         }
         ListStatistic::Quantile(quantile) => {
             let failures = RowFailures::new(quantile.float_statistic(), row_errors, span);
-            let output = with_numeric_element!(list, operation, Element => {
-                quantile_of::<Element>(list, quantile, failures)
-            })?;
+            let output = with_numeric_element!(
+                list,
+                Element => quantile_of::<Element>(list, quantile, failures),
+                other => Err(non_numeric_element(operation, other))
+            )?;
             Ok(TypedArray::Float64(output))
         }
         ListStatistic::ExtremeIndex(extremum) => Ok(TypedArray::Int64(extreme_positions(
             list, extremum, operation,
         )?)),
     }
+}
+
+/// The refusal of a list whose elements a floating-point statistic cannot read as numbers, which
+/// the compiler refuses before any batch reaches the kernel.
+fn non_numeric_element(operation: &'static str, actual: &DataType) -> Report<RuntimeError> {
+    Report::new(RuntimeError::CollectionNonNumericElement {
+        operation,
+        actual: actual.clone(),
+    })
 }
 
 /// A numeric element type, with how one of its values reads as the nearest `F64` and which of its
@@ -399,9 +410,12 @@ fn extreme_positions(
                 .as_any()
                 .downcast_ref::<BooleanArray>()
                 .ok_or_else(|| collection_backing_mismatch(list.element_data_type()))?;
-            Ok(first_extremes(list, extremum, values, |left, right| {
-                values.value(left).cmp(&values.value(right))
-            }))
+            Ok(first_extremes(
+                list,
+                extremum,
+                values.nulls(),
+                |left, right| values.value(left).cmp(&values.value(right)),
+            ))
         }
         DataType::Utf8 => {
             let values = list
@@ -409,16 +423,24 @@ fn extreme_positions(
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .ok_or_else(|| collection_backing_mismatch(list.element_data_type()))?;
-            Ok(first_extremes(list, extremum, values, |left, right| {
-                values.value(left).cmp(values.value(right))
-            }))
+            Ok(first_extremes(
+                list,
+                extremum,
+                values.nulls(),
+                |left, right| values.value(left).cmp(values.value(right)),
+            ))
         }
         DataType::Timestamp(TimeUnit::Nanosecond, _) => {
             primitive_extremes::<TimestampNanosecondType>(list, extremum)
         }
-        _ => with_numeric_element!(list, operation, Element => {
-            primitive_extremes::<Element>(list, extremum)
-        }),
+        _ => with_numeric_element!(
+            list,
+            Element => primitive_extremes::<Element>(list, extremum),
+            other => Err(Report::new(RuntimeError::CollectionUnorderedElement {
+                operation,
+                actual: other.clone(),
+            }))
+        ),
     }
 }
 
@@ -431,17 +453,18 @@ fn primitive_extremes<T: ArrowPrimitiveType>(
     Ok(first_extremes(
         list,
         extremum,
-        elements.values,
+        elements.values.nulls(),
         |left, right| values[left].compare(values[right]),
     ))
 }
 
 /// Scans each row's list for the first present element no later element is strictly more extreme
-/// than, comparing child positions with `compare`.
+/// than, comparing child positions with `compare`. `nulls` marks the child positions that hold no
+/// value.
 fn first_extremes(
     list: ListColumn<'_>,
     extremum: ListExtremum,
-    values: &dyn Array,
+    nulls: Option<&NullBuffer>,
     compare: impl Fn(usize, usize) -> Ordering,
 ) -> Int64Array {
     let mut positions = Vec::with_capacity(list.len());
@@ -453,7 +476,9 @@ fn first_extremes(
         // The extreme so far, as its position in the list and its child index.
         let mut extreme: Option<(usize, usize)> = None;
         for (position, index) in list.value_range(row).enumerate() {
-            if values.is_null(index) {
+            if let Some(nulls) = nulls
+                && nulls.is_null(index)
+            {
                 continue;
             }
             let replaces = match extreme {

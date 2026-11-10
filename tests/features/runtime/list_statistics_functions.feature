@@ -163,7 +163,7 @@ Feature: Statistics over one list
       | 1            | 0             |
       | 3            | 0             |
 
-  Scenario Outline: A window route applies list statistics inside aggregate arguments of each branch
+  Scenario Outline: A window route applies list statistics to its collected values and inside aggregate arguments of each branch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -173,7 +173,17 @@ Feature: Statistics over one list
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA history_reading (tenant STRING, level F64, history <history_type>);
-      CREATE SCHEMA history_summary (tenant STRING, level_spread F64 OPTIONAL, mean_history_spread F64 OPTIONAL, peak_history_median F64 OPTIONAL);
+      CREATE SCHEMA history_summary (
+        tenant STRING,
+        level_mean F64 OPTIONAL,
+        level_spread F64 OPTIONAL,
+        collected_spread F64 OPTIONAL,
+        collected_variance F64 OPTIONAL,
+        collected_median F64 OPTIONAL,
+        lowest_at I64 OPTIONAL,
+        mean_history_spread F64 OPTIONAL,
+        peak_history_median F64 OPTIONAL
+      );
       CREATE JAQ JSON CODEC history_codec TO SCHEMA history_reading WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA history_branch_schema (tenant STRING);
       CREATE BRANCH history_branch SCHEMA history_branch_schema TTL 5m;
@@ -190,7 +200,12 @@ Feature: Statistics over one list
       CREATE WINDOW PROCESSOR history_window FROM history_readings WIDTH 2 MESSAGES STEP 2 MESSAGES
         BRANCHED BY history_branch TO history_summaries
         SET tenant = FIRST(input.tenant),
+            level_mean = AVG(input.level),
             level_spread = STDDEV_POP(input.level),
+            collected_spread = list_stddev_pop(COLLECT_VEC(input.level)),
+            collected_variance = list_var_samp(COLLECT_VEC(input.level)),
+            collected_median = list_median(COLLECT_VEC(input.level)),
+            lowest_at = list_argmin(COLLECT_VEC(input.level)),
             mean_history_spread = AVG(list_stddev_pop(input.history)),
             peak_history_median = MAX(list_median(input.history))
         ON MESSAGE ERROR LOG;
@@ -199,12 +214,12 @@ Feature: Statistics over one list
       """
     And http payload is posted to node "node-1" with host "history-{{test_id}}.example.com" path "/history"
       """
-      [{"tenant":"acme","level":1,"history":[1,3]},{"tenant":"beta","level":10,"history":[10]},{"tenant":"acme","level":3,"history":[2,2,8]},{"tenant":"beta","level":10,"history":[4,6]}]
+      [{"tenant":"acme","level":1,"history":[1,3]},{"tenant":"beta","level":12,"history":[10]},{"tenant":"acme","level":3,"history":[2,2,8]},{"tenant":"beta","level":10,"history":[4,6]}]
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      key={"tenant":"acme"} payload={"level_spread":1.0,"mean_history_spread":1.9142135623730951,"peak_history_median":2.0,"tenant":"acme"}
-      key={"tenant":"beta"} payload={"level_spread":0.0,"mean_history_spread":0.5,"peak_history_median":10.0,"tenant":"beta"}
+      key={"tenant":"acme"} payload={"collected_median":2.0,"collected_spread":1.0,"collected_variance":2.0,"level_mean":2.0,"level_spread":1.0,"lowest_at":0,"mean_history_spread":1.9142135623730951,"peak_history_median":2.0,"tenant":"acme"}
+      key={"tenant":"beta"} payload={"collected_median":11.0,"collected_spread":1.0,"collected_variance":2.0,"level_mean":11.0,"level_spread":1.0,"lowest_at":1,"mean_history_spread":0.5,"peak_history_median":10.0,"tenant":"beta"}
       """
 
     Examples:

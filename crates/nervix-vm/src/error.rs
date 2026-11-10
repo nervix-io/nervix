@@ -699,6 +699,11 @@ pub enum RuntimeError {
         operation: &'static str,
         actual: DataType,
     },
+    #[error("{operation} requires ordered collection elements, found {actual:?}")]
+    CollectionUnorderedElement {
+        operation: &'static str,
+        actual: DataType,
+    },
     #[error("{operation} exceeds {limit}")]
     CollectionTooLarge {
         operation: &'static str,

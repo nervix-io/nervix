@@ -16,8 +16,10 @@
 
 use arrow_array::{
     ArrayRef, FixedSizeListArray, Float64Array, Int64Array, ListArray,
-    builder::{BooleanBuilder, ListBuilder, StringBuilder, TimestampNanosecondBuilder},
-    types::{Float64Type, Int64Type},
+    builder::{
+        BinaryBuilder, BooleanBuilder, ListBuilder, StringBuilder, TimestampNanosecondBuilder,
+    },
+    types::{Float32Type, Float64Type, Int64Type},
 };
 use arrow_schema::{Field, Schema};
 use nervix_primitives::sync::StdArc;
@@ -352,6 +354,79 @@ fn statistics_skip_missing_children_and_read_sliced_lists() {
     let sliced = fixed.slice(1, 2);
     assert_eq!(floats(MEDIAN, &sliced), [Some(2.5), None]);
     assert_eq!(positions(ARGMIN, &sliced), [Some(1), None]);
+}
+
+#[test]
+fn float32_elements_widen_to_f64_and_fail_on_their_own_non_finite_values() {
+    let lists: ArrayRef = StdArc::new(ListArray::from_iter_primitive::<Float32Type, _, _>([
+        Some(vec![Some(1.5_f32), Some(2.5)]),
+        Some(vec![Some(f32::NAN), Some(1.0)]),
+        Some(vec![Some(-0.0_f32), Some(0.0)]),
+    ]));
+    let (variances, errors) = run(VAR_POP, &lists);
+    let TypedArray::Float64(variances) = variances else {
+        panic!("a variance yields F64");
+    };
+    assert_eq!(variances.value(0), 0.25);
+    assert!(variances.is_null(1));
+    assert_eq!(
+        errors.row(1)[0].reason,
+        SideErrorReason::NonFiniteListElement(FloatListStatistic::ListVarPop)
+    );
+    assert_eq!(variances.value(2), 0.0);
+    assert!(errors.row(0).is_empty() && errors.row(2).is_empty());
+
+    let (medians, errors) = run(MEDIAN, &lists);
+    let TypedArray::Float64(medians) = medians else {
+        panic!("a median yields F64");
+    };
+    assert_eq!(medians.value(0), 2.0);
+    assert!(medians.is_null(1));
+    assert_eq!(errors.row(1)[0].code(), ErrorCode::InvalidArgument);
+
+    // A positive NaN orders above every value and negative zero below positive zero.
+    assert_eq!(positions(ARGMIN, &lists), [Some(0), Some(1), Some(0)]);
+    assert_eq!(positions(ARGMAX, &lists), [Some(1), Some(0), Some(1)]);
+    assert_identities(&lists);
+}
+
+#[test]
+fn kernels_refuse_elements_their_statements_never_compile_for() {
+    let mut labels = ListBuilder::new(StringBuilder::new());
+    labels.values().append_value("a");
+    labels.append(true);
+    let labels = TypedArray::Generic(StdArc::new(labels.finish()));
+    for (statistic, operation) in [(VAR_POP, "list_var_pop"), (MEDIAN, "list_median")] {
+        let mut errors = RowErrors::new(1);
+        let refused = execute_list_statistic(statistic, &labels, &mut errors, SPAN)
+            .expect_err("a STRING list has no numeric value to read");
+        assert!(
+            matches!(
+                refused.current_context(),
+                RuntimeError::CollectionNonNumericElement { operation: refused, .. }
+                    if *refused == operation
+            ),
+            "{refused:?}"
+        );
+    }
+
+    let mut digests = ListBuilder::new(BinaryBuilder::new());
+    digests.values().append_value(b"a");
+    digests.append(true);
+    let digests = TypedArray::Generic(StdArc::new(digests.finish()));
+    let mut errors = RowErrors::new(1);
+    let refused = execute_list_statistic(ARGMIN, &digests, &mut errors, SPAN)
+        .expect_err("BYTES values have no order the list functions use");
+    assert!(
+        matches!(
+            refused.current_context(),
+            RuntimeError::CollectionUnorderedElement {
+                operation: "list_argmin",
+                ..
+            }
+        ),
+        "{refused:?}"
+    );
 }
 
 /// `nth(list, list_argmin(list))` is `min(list)` and the same holds for the greatest element,

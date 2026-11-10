@@ -283,3 +283,72 @@ pub enum FloatListStatistic {
     ListMedian,
     ListQuantile,
 }
+
+#[cfg(test)]
+mod tests {
+    use std::hash::DefaultHasher;
+
+    use meticulous::OptionExt as _;
+    use strum::IntoEnumIterator as _;
+
+    use super::*;
+
+    fn hash_of(percentile: ListPercentile) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        percentile.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[test]
+    fn a_percentile_reads_zero_to_one_hundred_and_names_one_value() {
+        assert_eq!(ListPercentile::new(-0.5), None);
+        assert_eq!(ListPercentile::new(100.5), None);
+        assert_eq!(ListPercentile::new(f64::NAN), None);
+        let zero = ListPercentile::new(0.0).verified("zero is a percentile");
+        let negative_zero = ListPercentile::new(-0.0).verified("negative zero reads as zero");
+        assert_eq!(zero, negative_zero);
+        assert_eq!(hash_of(zero), hash_of(negative_zero));
+        assert_eq!(negative_zero.value().to_bits(), 0.0_f64.to_bits());
+        let quartile = ListPercentile::new(25.0).verified("25 is a percentile");
+        assert!(quartile < ListPercentile::MEDIAN);
+        assert_eq!(quartile.cmp(&quartile), Ordering::Equal);
+        assert_eq!(ListQuantile::Median.percentile(), ListPercentile::MEDIAN);
+        assert_eq!(ListQuantile::Percentile(quartile).percentile(), quartile);
+    }
+
+    #[test]
+    fn floating_statistics_fail_rows_and_an_index_never_does() {
+        for dispersion in [
+            ListDispersion::VarPop,
+            ListDispersion::VarSamp,
+            ListDispersion::StddevPop,
+            ListDispersion::StddevSamp,
+        ] {
+            let statistic = ListStatistic::Dispersion(dispersion);
+            assert!(statistic.semantics().can_error);
+            assert_eq!(statistic.arm_execution(), ArmExecution::WholeBatch);
+        }
+        let median = ListStatistic::Quantile(ListQuantile::Median);
+        assert!(median.semantics().can_error);
+        assert_eq!(median.arm_execution(), ArmExecution::SelectedRows);
+        for extremum in [ListExtremum::Least, ListExtremum::Greatest] {
+            let statistic = ListStatistic::ExtremeIndex(extremum);
+            assert!(!statistic.semantics().can_error);
+            assert_eq!(statistic.arm_execution(), ArmExecution::WholeBatch);
+        }
+    }
+
+    #[test]
+    fn every_name_reads_back_without_regard_to_letter_case() {
+        let names = ListStatisticName::iter().collect::<Vec<_>>();
+        assert_eq!(names.len(), 8);
+        for name in names {
+            let written = name.to_string();
+            assert!(written.starts_with("list_"), "{written}");
+            assert_eq!(
+                written.to_ascii_uppercase().parse::<ListStatisticName>(),
+                Ok(name)
+            );
+        }
+    }
+}

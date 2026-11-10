@@ -1884,9 +1884,10 @@ null.
   with `function 'list_argmax' requires ordered scalar elements, found Binary`.
 
 The `list_` prefix keeps these names apart from the window aggregates. In a window route `VAR_POP`,
-`STDDEV_SAMP`, and the other aggregates keep their meaning, and a list statistic may appear inside
-an aggregate's argument, as `AVG(list_stddev_pop(input.history))` averages the spread of each
-retained row's list.
+`STDDEV_SAMP`, and the other aggregates keep their meaning, and a list statistic reads a collected
+sequence, as `list_median(COLLECT_VEC(input.level))` takes the median of the values
+`STDDEV_POP(input.level)` reads, or appears inside an aggregate's argument, as
+`AVG(list_stddev_pop(input.history))` averages the spread of each retained row's list.
 
 ## Window Aggregates
 
@@ -1933,7 +1934,8 @@ admission, as `FIRST` and `LAST` are. It preserves the argument's exact type: co
 argument must be required, because list elements are never null. An optional argument is refused
 when the processor is applied; use `coalesce` to choose its explicit value. A collecting route
 requires a message `WIDTH` or `MAX STATE SIZE`; a duration alone does not bound its retained values.
-List functions such as `nth`, `mean`, `slice`, and `dot` can consume the result in the same route.
+List functions such as `nth`, `mean`, `slice`, `dot`, and the [list statistics](#list-statistics)
+can consume the result in the same route.
 
 The [approximate sketches](#approximate-sketches) describe the last three table entries.
 

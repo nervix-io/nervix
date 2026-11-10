@@ -3342,6 +3342,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/nervix-vm/src/runtime/__fuzz__/runtime__list_statistics__tests__bolero_list_statistics_match_a_reference_over_fixed_ragged_sliced_and_null_lists/corpus"
+domain_version = 1
+features = []
+id = "vm-list-statistics"
+invariant = "Over generated fixed and ragged F64 lists with null containers, a slice that skips leading rows and at most one NaN, infinity or signed zero in a list, every variance and standard deviation agrees with the exact variance of the list's integer sums within (count + 8) units of the last place of its magnitude, every median and quantile equals by bits the value a full total-order sort interpolates at rank percentile / 100 * (n - 1), list_argmin and list_argmax return the first position a total-order scan finds and nth at that position equals min or max by bits, a null list gives null without an error, and a list holding a non-finite value fails only its own row with invalid_argument."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-vm"
+random_iterations = 256
+source = "crates/nervix-vm/src/runtime/list_statistics_tests.rs"
+test = "runtime::list_statistics::tests::bolero_list_statistics_match_a_reference_over_fixed_ragged_sliced_and_null_lists"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/approx-into/src/__fuzz__/properties__bolero_conversions_round_to_the_nearest_value_or_name_no_integer/corpus"
 domain_version = 1
 features = []
