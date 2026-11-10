@@ -3741,7 +3741,7 @@ manifest = "Cargo.toml"
 max_input_bytes = 160
 package = "nervix-connector-iceberg"
 random_iterations = 256
-source = "crates/connectors/iceberg/src/table/mod.rs"
+source = "crates/connectors/iceberg/src/table/tests.rs"
 test = "table::tests::bolero_nested_iceberg_datetimes_are_narrowed_at_every_depth"
 test_target = "lib"
 
