@@ -34,6 +34,7 @@ use crate::{
     runtime_schema::{RuntimeValue, test_runtime_row},
 };
 
+#[path = "relay_boundary_tests/fixtures.rs"]
 mod fixtures;
 use fixtures::{relay_metrics, single_ingress_cancelled, single_presence};
 
