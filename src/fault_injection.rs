@@ -1829,6 +1829,16 @@ impl FaultInjection {
         ));
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "one scenario-owned processor installation pause is claimed once",
+            key = "one test domain, processor and claim phase",
+            bound = "one keyed read and conditional removal; guards end before the \
+                     test-controlled wait"
+        )
+    )]
     pub(crate) async fn pause_processor_partition_install_if_armed(
         &self,
         domain: &DomainName,
@@ -1858,6 +1868,16 @@ impl FaultInjection {
         ));
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "one scenario-owned processor forget pause is claimed once",
+            key = "one test domain, processor and claim phase",
+            bound = "one keyed read and conditional removal; guards end before the \
+                     test-controlled wait"
+        )
+    )]
     pub(crate) async fn pause_processor_partition_forget_if_armed(
         &self,
         domain: &DomainName,

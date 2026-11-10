@@ -3784,6 +3784,14 @@ Deterministic owner tests cover growing, shrinking and a return to one partition
 orders, catalog races and admission refusal. Public one- and three-node cases hold claims before
 installation and before forget and verify exact branch/row/byte counts, retained values and paging.
 
+Those scenario controls are a bounded test protocol keyed by domain, processor and claim phase.
+Each phase retains one armed pause; its keyed read and conditional removal release every shard
+guard before the pause's watch wait. One atomic claim lets only one key wait at that phase, while
+other claims proceed. The scenario waits at most 60 seconds for a phase to be reached and releases
+both phases explicitly; ordinary scenario teardown releases and clears any remaining pause after
+a failed step. The testing hooks carry this bounded source contract. Product builds use borrowed
+no-op hooks and retain no pause lookup or wait.
+
 Window inspection reads input and argument views, sequence and lifetime facts, the next duration or
 delayed-removal deadline, and the production state admission charge. Sealed metadata parsing runs
 on the Bulk executor with cancellation; the existing bounded native decoder opens its Arrow
