@@ -2519,6 +2519,28 @@ mod tests {
         assert_eq!(handoff_status.node_work_items, 0);
         assert!(handoff_status.is_drained());
 
+        let mut flush = runtime.force_flush_participant(&domain, counters.clone());
+        runtime.force_flush_domain(&domain);
+        let completion = flush
+            .changed()
+            .await
+            .expect("the requested flush is available");
+        let targets = nervix_models::EntityGateTargets::Entities(vec![branch.owner.node.clone()]);
+        let status =
+            runtime.entity_drain_status(&domain, &[], &targets, EntityGatePurpose::ModelAlteration);
+        assert_eq!(counters.parked_work(), 1);
+        assert_eq!(counters.force_flush_obligations(), 1);
+        assert_eq!(status.node_work_items, 2);
+        assert!(!status.is_drained());
+
+        completion.complete();
+        let status =
+            runtime.entity_drain_status(&domain, &[], &targets, EntityGatePurpose::ModelAlteration);
+        assert_eq!(counters.parked_work(), 1);
+        assert_eq!(counters.force_flush_obligations(), 0);
+        assert_eq!(status.node_work_items, 1);
+        assert!(!status.is_drained());
+
         drop(gauges);
         assert_eq!(counters.outstanding_work(), 0);
     }

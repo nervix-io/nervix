@@ -12,7 +12,6 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
-use ahash::{HashSet, HashSetExt as _};
 use error_stack::{Report, ResultExt as _};
 
 use super::*;
@@ -540,67 +539,16 @@ impl WindowProcessorState {
         let Some(limit) = plan.max_state_bytes else {
             return Ok(());
         };
-        let mut required = 1024_u128;
-        let mut panes = BTreeSet::new();
-        let mut charged_arguments = HashSet::new();
-        let mut charged_batches = HashSet::new();
+        let mut charge = super::window_state_charge::WindowStateCharge::new(plan);
         for entry in &self.entries {
-            required = required
-                .checked_add(Self::admission_bytes(
-                    &entry.message,
-                    &entry.row.arguments,
-                    &mut charged_arguments,
-                    &mut charged_batches,
-                ))
-                .assured("addressable retained allocations fit u128");
-            if let Some(layout) = plan.sketch_layout {
-                panes.insert(layout.pane_of(entry.row.timestamp.unix_nanos()));
-            }
+            charge.admit(&entry.message, &entry.row.arguments);
         }
         for admission in incoming {
             let arguments = arguments
                 .verified("incoming admissions are evaluated together with their argument columns");
-            required = required
-                .checked_add(Self::admission_bytes(
-                    &admission.message,
-                    arguments,
-                    &mut charged_arguments,
-                    &mut charged_batches,
-                ))
-                .assured("addressable incoming allocations fit u128");
-            if let Some(layout) = plan.sketch_layout {
-                panes.insert(layout.pane_of(message_timestamp(&admission.message).unix_nanos()));
-            }
+            charge.admit(&admission.message, arguments);
         }
-        if let Some(layout) = plan.sketch_layout {
-            let panes = panes.len();
-            if u64::try_from(panes).assured("addressable pane count fits u64")
-                > layout.maximum_panes
-            {
-                return Err(Report::new(WindowProcessorError::PaneLimitExceeded {
-                    panes,
-                    limit: layout.maximum_panes,
-                }));
-            }
-            let mut reserved = 0_u128;
-            for sketch in plan.demands().iter().filter_map(|demand| demand.sketch) {
-                reserved = reserved
-                    .checked_add(sketch.reserved_bytes())
-                    .assured("addressable sketch demands fit a u128 byte allowance");
-            }
-            // Emission merges the retained panes into one more sketch while they remain live.
-            let pane_allocations = u128::try_from(panes)
-                .assured("addressable pane count fits u128")
-                .checked_add(1)
-                .assured("addressable panes and one merged sketch fit u128");
-            required = required
-                .checked_add(
-                    reserved
-                        .checked_mul(pane_allocations)
-                        .assured("configured sketch bounds fit u128"),
-                )
-                .assured("configured sketch bounds and addressable rows fit u128");
-        }
+        let required = charge.finish()?;
         if required > u128::from(limit.get()) {
             return Err(Report::new(WindowProcessorError::StateBudgetExceeded {
                 required,
@@ -608,79 +556,6 @@ impl WindowProcessorState {
             }));
         }
         Ok(())
-    }
-
-    fn admission_bytes(
-        message: &RelayMessage,
-        arguments: &Arc<WindowArgumentColumns>,
-        charged_arguments: &mut HashSet<*const WindowArgumentColumns>,
-        charged_batches: &mut HashSet<*const RuntimeRecordBatch>,
-    ) -> u128 {
-        // A restored snapshot may hold each retained input row in its own one-row Arrow batch.
-        // Reserve array and batch headers per row so an admitted branch also fits after handoff.
-        let record_columns = u128::try_from(message.record.batch().batch().num_columns())
-            .assured("an addressable Arrow schema has fewer than 2^128 fields");
-        let row_handles = record_columns
-            .checked_add(1)
-            .assured("an addressable Arrow schema's field count fits u128");
-        let row_headers = row_handles
-            .checked_mul(256)
-            .assured("an addressable Arrow schema's row headers fit u128");
-        let mut bytes = row_headers;
-        if charged_arguments.insert(Arc::as_ptr(arguments)) {
-            bytes = bytes
-                .checked_add(arguments.allocated_bytes())
-                .assured("addressable Arrow argument allocations fit u128");
-        }
-        let batch = message.record.batch();
-        if charged_batches.insert(Arc::as_ptr(batch)) {
-            let mut actual = 0_u128;
-            let mut logical = 0_u128;
-            for column in batch.batch().columns() {
-                actual = actual
-                    .checked_add(
-                        u128::try_from(column.get_array_memory_size())
-                            .assured("an addressable Arrow allocation fits u128"),
-                    )
-                    .assured("addressable Arrow record allocations fit u128");
-                logical = logical
-                    .checked_add(
-                        u128::try_from(
-                            column
-                                .to_data()
-                                .get_slice_memory_size()
-                                .assured("a validated Arrow record has bounded slice memory"),
-                        )
-                        .assured("an addressable Arrow slice fits u128"),
-                    )
-                    .assured("addressable Arrow record slices fit u128");
-            }
-            let rows = u128::try_from(batch.batch().num_rows())
-                .assured("an addressable Arrow batch length fits u128");
-            let columns = u128::try_from(batch.batch().num_columns())
-                .assured("an addressable Arrow schema has fewer than 2^128 fields");
-            let elements = rows
-                .checked_mul(columns)
-                .assured("an addressable Arrow batch's element count fits u128");
-            let headers = elements
-                .checked_mul(128)
-                .assured("an addressable Arrow batch's array headers fit u128");
-            let payload = logical
-                .checked_mul(2)
-                .assured("an addressable Arrow batch's doubled payload fits u128");
-            let estimated = payload
-                .checked_add(headers)
-                .assured("an addressable Arrow batch's restored shape fits u128");
-            let batch_bytes = actual.max(estimated);
-            bytes = bytes
-                .checked_add(batch_bytes)
-                .assured("addressable Arrow record allocations fit u128");
-        }
-        let key_bytes = u128::try_from(format!("{:?}", message.key).len())
-            .assured("an addressable branch key fits u128");
-        bytes
-            .checked_add(key_bytes)
-            .assured("addressable branch state fits u128")
     }
 
     /// Admit `run`, consecutive rows of one evaluated batch in arrival order, into the window and

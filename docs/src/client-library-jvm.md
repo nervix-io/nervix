@@ -77,12 +77,28 @@ Other dispositions include leadership or transaction changes, an unknown outcome
 conflict or expiry, and a stale preview. Follow the
 [command completion contract](command-completion.md) for their recovery rules.
 
+`UPLOAD RESOURCE <name> VERSION '<directory>';` streams a local directory as a new version of a
+resource the domain declares. The session serves it itself, under the upload identity the prepared
+`Execution` fixed, so executing that object again sends the same archive under the same identity
+and completes without installing a second version. An upload the cluster refused is a `FAILED`
+outcome whose `uploadFailure()` says why; it is `null` for a completed upload and for every other
+command. `IDENTITY_CONFLICT` means the identity already names another archive: keep the original
+bytes to recover that upload, and prepare the statement again for a different one.
+
+```java
+{{#include ../../tests/client_conformance/java/suite/cluster/ClusterTests.java:upload}}
+```
+
 ### Inspect Materialized State
 
 `Outcome.stateInspection()` returns an independently retained inspection, or `null` when the
 command returned no inspection. Check `rejection()` against `InspectionRejection` before using
 page fields. A refusal has no counts or units; a successful empty page has zero counts.
 `json()` preserves the complete typed envelope.
+
+`DESCRIBE LICENSE;` uses this envelope for cluster scope: `entityKind()` is `"LICENSE"`, while
+`domain()` and `entityName()` are `null`. Its summary and quota rows describe the answering node's
+committed policy. The command also works without selecting a domain.
 
 Complete `counts()` cover the selected cut. Units carry their own counts, owner, ordered
 replicas, captured origin, `InspectionUnitKind` and `index()`. `InspectionStage` distinguishes live and stored

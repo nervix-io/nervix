@@ -83,17 +83,19 @@ Bolero obligation, and none of those discharges a suite.
 | `scripts/chaos/*-scenario.sh` | Each scenario's faults, observations and verdicts |
 | `node-faults.sh`, `network-faults.sh`, `link-degradation.sh`, `link-ping-helper.sh`, `link-rate-helper.sh` | The fault primitives: process faults through Pumba and Docker, and one netem effect on a container's egress toward chosen addresses; partition plans, rules, effect matrices, preflight and healing; link degradation and its ICMP and transfer probes |
 | `mixed-plan.sh`, `mixed-plan.jq` | Seeded plan generation, plan validation and default coverage |
-| `verify-*.sh` | The external verifiers: ledgers, load pacing, Docker events, and crash, pause, partition, degraded-link, recovery, restart, drain, state, clock, mixed, endpoint, lifetimes and diagnostic evidence |
+| `verify-*.sh` | The external verifiers: ledgers, load pacing, Docker events, and crash, pause, partition, degraded-link, recovery, restart, drain, state, clock, mixed, endpoint, lifetimes, outward TLS and diagnostic evidence |
+| `outward-tls.sh`, `tls-probe.py`, `tls-probe-openssl.cnf` | The three-node leader crash's outward TLS observations, the restricted TLS probe that runs inside the pinned Python image, and the probe's OpenSSL configuration |
 | `continuous-load.sh`, `observe-nodes.sh`, `observe-clock.sh` | The paced producer, the listener observer and the domain-clock observer, each running inside a container |
 | `connector-metrics.sh`, `connector_metrics.py` | The held input boundary and maintained-parser evidence checks for fresh connector counters and progress after an owner crash |
 | `endpoint-client.py` | The [endpoints](#endpoints) scenario's HTTP and WebSocket client, which runs inside the pinned Python image and writes its ledger of attempts to its log |
 | `binding_client.py`, `binding_evidence.py`, `binding-scenario.sh`, `binding-image.sh`, `install_binding.py` | The binding endpoint scenario's Python-package producer/consumer, its exact effect and settlement verdict, fault coordination, source/wheel identity checks and offline image preparation |
 | `docker-event-recording.sh` | The run's live Docker event recording and its marker windows |
 | `output-boundary.sh`, `consumer-group.sh`, `startup-status.sh`, `image-package-check.sh`, `image-identity.sh`, `tool-images.sh`, `select-subnet.sh`, `require-jq.sh` | Kafka end-offset observations and the output boundary, the ingestor consumer group's members and the nodes that run them, startup status publication, the image-package check, image identity rules, the tool image pins, network selection and the jq requirement |
-| `verifier-self-check.sh` | The verifier self-check's bound, the identity of the chaos scripts and the judgement of the record a suite hands its runs |
+| `verifier-self-check.sh` | The verifier self-check's bound and session, the run labels its parts record and the removal of what they still own, the identity of the chaos scripts and the judgement of the record a suite hands its runs |
+| `sessions.sh` | The sessions in which a controller starts its runs and its verifier self-check, and the end of what such a session leaves |
 | `cleanup.sh` | Removal of one run's labeled resources, with optional evidence capture |
 | `suite.sh`, `suites.json`, `suite-report.jq` | The suites: catalog, shard budgets, runs, verdict records, summaries and suite cleanup |
-| `compose.yaml`, `compose.diagnostic.yaml` | The deployment and its diagnostic overlay |
+| `compose.yaml`, `compose.diagnostic.yaml`, `compose.outward-tls.yaml` | The deployment, its diagnostic overlay and the outward TLS overlay of a three-node leader crash |
 | `compose.fresh-cluster.yaml`, `compose.fresh-cluster.diagnostic.yaml` | The second cluster that a [fresh-cluster restore](#restore-into-a-fresh-cluster) starts, and its diagnostic overlay |
 | `fixtures/` | The Plexus graphs, record generators, the WASM guest and an explicit mixed plan |
 | `tests/` | The runner's self-tests |
@@ -162,7 +164,7 @@ digest:
 | Apache Kafka | 3.9.1 | Multi-architecture index digest | The broker, and topic and consumer-group administration |
 | kcat | 1.7.1 | Its single linux/amd64 manifest, the only one published | The continuous loads, the baseline producer and the topic readers |
 | Alpine | 3.22.6 | Multi-architecture index digest | Listener, readiness and metrics probes, the listener observer, link probes and Docker event markers |
-| Python | 3.13.18 on Alpine 3.24 | Multi-architecture index digest | The [endpoints](#endpoints) scenario's HTTP and WebSocket client, which uses only the standard library |
+| Python | 3.13.18 on Alpine 3.24 | Multi-architecture index digest | The [endpoints](#endpoints) scenario's HTTP and WebSocket client and the three-node [leader crash](#crash-scenarios)'s TLS probe, which use only the standard library |
 | PostgreSQL | 17.11 on Alpine 3.24 | Multi-architecture index digest | The [lifetimes](#lifetimes) scenario's database for its pooled table emitters, with its data on a tmpfs |
 | Pumba | 1.2.1 | Multi-architecture index digest | Every process and network fault |
 | Pumba nettools | The helper published with Pumba 1.2.1 | Multi-architecture index digest | `tc` and `iptables` inside a node's network namespace |
@@ -307,6 +309,7 @@ half of the range. The manifest records the subnet, the dynamic range and the no
 | `load`, `state-load`, `paced-load`, `life-load` | kcat | The continuous loads |
 | `endpoint-binding` | Prepared Python binding image | The [binding endpoints](#binding-endpoints) scenario's package client |
 | `endpoint-load`, `endpoint-websocket` | Python | The [endpoints](#endpoints) scenario's HTTP and WebSocket clients |
+| `tls-probe` | Python | The three-node [leader crash](#crash-scenarios)'s disposable TLS probes of the web console's HTTPS listeners |
 | `postgres` | PostgreSQL | The [lifetimes](#lifetimes) scenario's database, with its data on a tmpfs |
 | `observer` | Alpine | The independent listener observer |
 | `clock-observer` | Nervix | One domain-clock observer per node |
@@ -329,6 +332,9 @@ Every node listens for:
 - the web console on 47420
 - observability on 9090
 - the interconnect on 47395, with the run's TLS material
+
+A three-node `leader-crash` run also serves the web console over HTTPS on 47421, with the node's run
+certificate, for its [outward TLS observations](#crash-scenarios).
 
 Each node also has these container settings:
 
@@ -356,13 +362,16 @@ inspection where a verdict depends on them:
 Each run generates its own certificate authority, RSA 2048 and valid for two days. A subject
 attribute holds at most 64 characters while a run ID may have 96, so the authority's subject names
 a digest of the run ID. Each node certificate names the node's host name and its
-`nervix://cluster/<cluster>/node/<node>` identity. The private keys exist only in the run directory.
+`nervix://cluster/<cluster>/node/<node>` identity, and a three-node `leader-crash` run also presents
+it on the web console's HTTPS listener. The private keys exist only in the run directory.
 The run removes them when it ends, and suite cleanup removes those of any run whose exit trap never
 ran.
 
 ### Labels And Ownership
 
-Every container, network and volume a run owns carries `io.nervix.chaos.run=<run-id>`.
+Every container, network and volume a run owns carries `io.nervix.chaos.run=<run-id>`. The parts
+of a [verifier self-check](#the-verifier-self-check) label theirs with run IDs of their own, which
+the check records for its controller.
 `io.nervix.chaos.role` names each container's role, such as `node`, `broker`, `admin`, `load`,
 `observer`, `fault` or `deadlock-report`, and node containers also carry
 `io.nervix.chaos.target=true`. The run label serves three purposes:
@@ -420,10 +429,12 @@ The focused checks run parts of the runner on their own:
 | `just test-chaos-network-preflight [CASE]` | The real network-fault preflight and its refusal controls; a case name runs one control with the live installation, effect and healing check |
 | `just test-chaos-rate-probe` | The production link transfer and ICMP probes, with delayed Docker launches and starts, stalled, partial, lost and refused transfers, failed log reads and cleanup, and invalid clocks |
 | `just test-chaos-degraded-evidence` | The degraded-link controller, parser and effect limits at 40 and 400 packets |
+| `just test-chaos-outward-tls` | The [outward TLS verdict](#crash-scenarios) against observations that pass and that contradict the policy: committed lists that name or omit the probed members, a stale, different or unreported running record, a revision that did not advance, a console target that answered against expectation, failed or is missing, an interconnect that admitted the probe or is missing, an unrestricted offer, and malformed descriptions. Also the probe against local servers that admit both members, exclude the suite, exclude the group or present another name's certificate, against a port that refuses the connection, and without its OpenSSL configuration |
 | `just test-chaos-hold-quorum` | The mixed-instability hold check for a degraded link that leaves every voter in a quorum |
 | `just test-chaos-pause-delivery` | A failover-length pause's emitter check on the retained leader and relay-owner pause timelines: the ingestor consumer group's handoff from a paused ingestor owner, read before the relocated consumer joins and after the handoff deadline; a handoff that never comes or comes after the unpause; a stalled emitter; the window that opens at placement when the consumer stayed in place; and emitter progress sampled after the unpause |
 | `just test-chaos-output-boundary [SELECTION]` | The suite preparation and baseline execution budgets and the Kafka end-offset observations, without Docker |
 | `just test-chaos-verifier-self-check` | The identity of the chaos scripts, every reason a verifier self-check record does not apply, and a run's refusal of such a record before it creates anything, without Docker |
+| `just test-chaos-verifier-cancellation` | A [verifier self-check](#the-verifier-self-check) ended at its deadline and by its controller while the production rate probe holds its namespace owners: no process of the check remains, nothing carries the run label the probe recorded, the probe's records stay in the check's evidence directory, and the controller's cleanup evidence names exactly the owners and the network it removed |
 | `just test-chaos-image-package` | The image-package check and its refused or invalid observations |
 | `just test-chaos-startup-status` | Bounded startup status publication |
 | `just test-chaos-backup-fixture` | Derivation of the backup graph from the baseline fixture |
@@ -450,7 +461,7 @@ A run records each phase it enters in `phases.ndjson` and its final phase in `ma
 | --- | --- |
 | `action plan and fixtures` | Mixed instability only: it generates or copies the plan and validates it, then sizes and generates the fixture, before any container exists |
 | `preflight` | Arguments and host tools; the tool images; the Nervix image; the live Docker event recording; the image-package check; a diagnostic image's evidence directories; Pumba's version and Docker access; the [network preflight](#network-preflight) |
-| `verifier self-check` | `tests/self-test.sh`, bounded to 600 seconds, which proves the external verifiers on this worker before they judge the run. A run of a suite instead adopts the record of the check its suite executed once before its first run: it copies the record into `results/verifier-self-check.json` and the check's output into `results/verifier-self-test.txt`, and its manifest names the record under `verifier_self_check` |
+| `verifier self-check` | `tests/self-test.sh`, bounded to 600 seconds, which proves the external verifiers on this worker before they judge the run. It leads a session of its own, and however it ends the run removes what it left; see [The Verifier Self-Check](#the-verifier-self-check). A run of a suite instead adopts the record of the check its suite executed once before its first run: it copies the record into `results/verifier-self-check.json` and the check's output into `results/verifier-self-test.txt`, and its manifest names the record under `verifier_self_check` |
 | `TLS generation` | The run's certificate authority and node certificates |
 | `Compose validation` | `docker compose config`, rendered into `compose.rendered.yaml`. Mixed instability also records the node settings and load interval Compose renders |
 | `broker startup and provisioning` | The broker, within 90 seconds, and every topic the scenario uses |
@@ -775,7 +786,10 @@ both sides of the inclusive thresholds.
 The rate-probe self-test keeps its sender and receiver namespace owners alive until its cleanup
 removes them. Their lifetime follows the whole control sequence, so a slow worker cannot expire a
 namespace before a later control reaches it. Probe, sample and controller deadlines retain their
-own bounds.
+own bounds. Inside a verifier self-check it records its run label before it creates them and writes
+its records into the check's evidence directory as it takes them, so when the check's deadline or
+a signal ends it first, the check's controller still removes the owners and keeps the records; see
+[The Verifier Self-Check](#the-verifier-self-check).
 
 ### Network Preflight
 
@@ -1385,6 +1399,40 @@ after the fault must be acknowledged. A canary attempted during the outage recor
 acknowledged or uncertain, and its final effect. An acknowledged one whose effect is absent after
 recovery fails the run.
 
+A three-node `leader-crash` run also qualifies the committed [outward TLS
+policy](cryptography.md#algorithm-policy) through its failover. It adds `compose.outward-tls.yaml`:
+every node also serves the web console over HTTPS on 47421 with its run certificate, and
+`tls-probe.py`, in the pinned Python image, offers each node only TLS 1.3 with
+`TLS_CHACHA20_POLY1305_SHA256` and `X25519`, the members the `fips` alias excludes. The probe takes
+its TLS 1.3 cipher suites from `tls-probe-openssl.cnf`, reads its offer back and refuses to judge
+when the offer is anything else. `verify-outward-tls-evidence.sh` judges each observation: a public
+`DESCRIBE CLUSTER`, and one probe of the web console and one of the interconnect, on 47395, of every
+node it names. The interconnect's algorithms are fixed and never follow the outward policy, so every
+observation requires it to refuse the probe with a `handshake_failure` alert, also while the
+committed policy admits both members. The observations are:
+
+1. Before the kill, every node refuses the probe with a `handshake_failure` alert under the
+   bootstrap `fips` policy, within 60 seconds.
+2. From the kill on, the controller commits `TLS_CIPHER_SUITES = ('fips',
+   'TLS13_CHACHA20_POLY1305_SHA256')` and `TLS_KEY_EXCHANGE_GROUPS = ('fips', 'X25519')` through the
+   first survivor. It retries each unacknowledged attempt for up to 90 seconds, in the background,
+   so the statement crosses the election and re-placement without changing their measured times. A
+   change must be acknowledged while the killed leader is still down.
+3. Once delivery resumes, the survivors run the new committed revision and accept the probe, within
+   60 seconds.
+4. After the restart and settlement, every node, the restarted former leader included, runs the
+   same revision and accepts the probe, within 90 seconds. The description is read through an
+   authenticated session to the restarted node, whose stored PBKDF2 credential must verify after the
+   restart.
+5. The `fips` policy is committed again, and every node runs it and refuses the probe, within 60
+   seconds.
+
+Each observation also requires every named node's running record to equal the committed lists at
+the committed revision. The observations stay in `crash/outward-tls/`, and
+`results/outward-tls.json` summarizes the revisions, the nodes whose interconnect refused in each
+observation, the commit attempts and how long after the kill the change was acknowledged. A one-node run and the other crash scenarios start no HTTPS listener
+and make no TLS observation.
+
 `results/crash-progress.json` measures election, placement, outage, listener and settlement times;
 election and placement are `null` where the fault does not require them. The exact ledger accepts
 replay duplicates.
@@ -1724,6 +1772,23 @@ restart experiments on one host. The host, its page cache and its disks survive,
 nothing about host power loss or storage corruption.
 
 ### Stateful
+
+The stateful and lifetimes scenarios read their materialized profiles through
+`SHOW RELAY ... MATERIALIZED STATE FORMAT JSON`. Their shared `materialized-profile` reader
+accepts only a complete page for the requested relay in `chaos_baseline`: every execution unit
+must be present exactly once, section and complete row/branch counts must agree, and no
+continuation or omitted rows may remain. It projects the schema's typed cells into the existing
+key/payload observations, retaining every profile field and both ingestion watermark columns.
+Empty partition units remain part of the completeness check. A complete empty page can establish
+branch absence; missing or unreadable evidence cannot.
+
+Each read keeps the CLI transcript as `.txt`, its public envelope as `.inspection.json`, and the
+verified key/payload rows as `.json`. A malformed or incomplete successful reply ends the
+controller with a reader diagnostic in `.reader-error.txt`, before a profile wait or absence
+predicate can mistake it for product state. A failed CLI attempt remains retryable, restores the
+previous host and discards any prior projected rows at that path. The canonical stateful and
+lifetimes verifier self-tests exercise both production readers with complete single-unit and
+partitioned pages, exact profiles, empty state and unreadable observations.
 
 ```bash
 just chaos run stateful --image nervix:debian
@@ -2586,7 +2651,7 @@ Each run writes bounded evidence under `ARTIFACTS/RUN_ID/`, by default `target/c
 | `public/` | Every packaged-CLI command and its output: domain and graph creation, placements, descriptions, cluster status and metrics |
 | `traffic/` | Accepted input, observed output, every Kafka end-offset read, the output-boundary polls, consumer groups, load timestamps and producer results |
 | `results/` | The verdicts: the scenario's result and progress, the ledger, the output boundary, load pacing, container images, a diagnostic run's evidence verdict, `finding.json`. Also the verifier self-check's output, `verifier-self-test.txt`, and in a run of a suite the record it adopted, `verifier-self-check.json` |
-| `diagnostics/` | The live event recording and its bounds, container inspection, Compose logs (a fresh-cluster restore adds `fresh-compose-ps.json` and `fresh-compose.log` for its second project), the image-package and startup-status records, preflight and healing records, cleanup output |
+| `diagnostics/` | The live event recording and its bounds, container inspection, Compose logs (a fresh-cluster restore adds `fresh-compose-ps.json` and `fresh-compose.log` for its second project), the image-package and startup-status records, preflight and healing records, cleanup output. Also `verifier-self-test/`, the evidence of a [verifier self-check](#the-verifier-self-check) that did not pass or left something behind |
 | `backup/`, `backup-cycles/`, `backup-fault/`, `restore-fresh/`, `restore-fault/`, `restore-volume/`, `restarts/`, `crash/`, `pauses/`, `partitions/`, `degraded/`, `stale/`, `former-owner/`, `restart/`, `stateful/`, `domain-time/`, `mixed/` | Each scenario's own evidence, in catalog order: `restarts/` belongs to rolling restarts and `restart/` to cluster restarts |
 | `deadlock/` | A diagnostic run's per-node evidence files, their inspections and qualifications, in `node-N/` for the run's nodes and `fresh-N/` for a fresh-cluster restore's |
 | `tls/` | The run's certificates. The private keys are removed when the run ends |
@@ -2635,6 +2700,35 @@ A container that was exiting while its removal ran can still hold its network. C
 removes whatever the listing still finds, in at most three rounds two seconds apart, and fails only
 when the last listing still finds something. `cleanup.json` in `DIR` records what was removed, the
 rounds taken and what remained. A run that left nothing gets no evidence directory.
+
+### The Verifier Self-Check
+
+A standalone run executes its verifier self-check the way a suite executes the one check of all its
+runs. The check leads a session of its own in the background. Its 600-second bound, or the run's
+remaining timeout when that is shorter, ends it with one TERM to the check's process group and
+kills `tests/self-test.sh` five seconds later if it still executes. A signal to the controller while
+the check executes reaches the check as one TERM through the same bound. The bound exits with
+`tests/self-test.sh`, which ends at once on TERM, while the parts of the check still run their own
+exit work, and a part can leave the group. The controller therefore kills whatever is left of the
+check's session once the bound has exited. No bound changed.
+
+The parts of the check give Docker resources run labels of their own, such as the network and
+namespace owners of the rate-probe self-test, `rate-probe-check-<pid>-<n>`. Each part records its
+label in `run-ids.txt` of the check's evidence directory before it creates anything under it, and
+the rate-probe self-test writes its records into `rate-probe/` there as it takes them. However the
+check ends, by itself, at its deadline or by a signal, its controller then cleans up every recorded
+label as `just chaos cleanup --evidence` does, keeping what it found under `cleanup/<run-id>/`
+beside the records, before anything else:
+
+- **A check that did not pass** keeps the records its parts took, the labels and what cleanup found
+  under them. A run lists them in its finding.
+- **A check that passed** and whose labels owned nothing leaves no evidence directory.
+- **A check that passed but left what cleanup cannot remove** fails the run, or the suite, as a
+  controller failure in the `verifier self-check` phase, before any other phase or run starts.
+
+The evidence directory is `diagnostics/verifier-self-test/` in a run and `verifier-self-test/` in a
+suite. `just test-chaos-verifier-cancellation` holds the production rate probe once its owners exist
+and ends the check both ways.
 
 ## Diagnostic Images
 
@@ -2796,15 +2890,17 @@ A few soak entries need explanation:
 - **Before the first run.** The suite checks its own verdict logic with `tests/suite-self-test.sh`,
   which `just chaos self-test` also runs. After it has resolved the image, it executes the full
   verifier self-check, `tests/self-test.sh`, once and within its 600-second bound. The check leads
-  a session of its own, as a run does. It passes only when it exits 0 and the chaos scripts were
-  the same when it ended as when it began. The suite then writes `verifier-self-check.json`: the
+  a session of its own, as a run does, and the suite removes what it leaves as a run does; see
+  [The Verifier Self-Check](#the-verifier-self-check). It passes only when it exits 0, the chaos
+  scripts were the same when it ended as when it began, and cleanup removed whatever its run labels
+  still owned. The suite then writes `verifier-self-check.json`: the
   check's outcome and timing, the digest of its output, the identity of the chaos scripts it
   checked and the boot identity of the worker. Every run receives that record with
   `--verifier-self-check` and adopts it instead of executing its own check. A run refuses a record
   that did not pass on its worker, during its boot, for exactly its scripts, as a setup error
   before it creates anything.
-- **A failed verifier self-check.** A check that fails, or whose scripts change while it executes,
-  starts no run and leaves no record a run could adopt. The suite fails as a controller failure,
+- **A failed verifier self-check.** A check that fails, whose scripts change while it executes, or
+  whose leftovers cleanup cannot remove, starts no run and leaves no record a run could adopt. The suite fails as a controller failure,
   with exit status 1, and records every entry as not started.
 - **Image resolution.** The suite resolves the image once. A digest reference stays as given, and
   any other reference runs as the local image ID it resolves to, so every run of the suite uses one
@@ -2838,8 +2934,9 @@ A suite writes `ARTIFACTS/SUITE_ID/`, by default `target/chaos/<suite>-<time>-<p
   - a diagnostic run's evidence verdict and counts
   - the result files
 - **`verifier-self-test.txt`, `verifier-self-check.json` and `verifier-self-test/`.** The verifier
-  self-check's whole output, the record every run adopts, and the probe records a failed rate-probe
-  self-test keeps. `suite.json` records the check under `verifier_self_check`: its status, exit
+  self-check's whole output, the record every run adopts, and the evidence of a check that did not
+  pass or left something behind: the run labels its parts recorded, the records a failed or
+  interrupted rate-probe self-test took and what cleanup found under the labels. `suite.json` records the check under `verifier_self_check`: its status, exit
   status, start, end, duration, bound, process, output and record.
 - **`summary.md`.** The same verdicts rendered for a reader, with the verifier self-check's outcome.
   The suite also prints it at the end.
@@ -2888,12 +2985,15 @@ cleanup works in this order:
 3. Cleanup then kills the controller if it still executes, and every process left in each run's
    session and in the session of a verifier self-check that still executed.
 4. For every run the suite started, cleanup runs `just chaos cleanup --evidence` into
-   `cleanup/<run-id>/`, and removes the private keys of any run whose exit trap never ran.
+   `cleanup/<run-id>/`, and removes the private keys of any run whose exit trap never ran. It does
+   the same for every run label the verifier self-check recorded and still keeps, into
+   `cleanup/<run-id>/` of that label.
 5. It keeps the verdict of a run that finished before its controller ended. It records entries that
    never reported an exit status as interrupted, and entries never started as not-started.
 6. It records how the controller ended, which runs it signalled or killed, and under
    `cleanup.verifier_self_check` whether it signalled a verifier self-check that still executed and
-   how many of its processes it killed. A check that still executed is recorded as interrupted.
+   how many of its processes it killed, and under `cleanup.verifier_runs` what it removed for the
+   check's run labels. A check that still executed is recorded as interrupted.
    Cleanup then renders the summary again.
 
 ### Shard Budgets
@@ -3155,6 +3255,7 @@ from the fixed source tree onto the same official image, and then requalified on
 | [Backup 07](https://app.clickup.com/t/86bc8dbxv) | Backup cycles with exact deduplicator and window verdicts; quiesced backups under an owner crash, a leader crash, an owner partition and a rolling restart of the download; a restore into a fresh three-node cluster; and soak shards 10 and 11, which run them |
 | [Backup: Qualify restores through a leader crash, a partitioned coordinator, an owner restart and concurrent staging volume](https://app.clickup.com/t/86bckvq84) | Restores held in staging through a leader crash, an isolation of the coordinating leader from its peers and the client, a state owner's crash, and a state owner's crash while a failed restore awaits reclamation; the measured staging volume of three concurrent restores; and their entries in soak shards 10 and 11 |
 | [Typed Ratchet 10](https://app.clickup.com/t/86bc9etg7) | The [endpoints](#endpoints) and [lifetimes](#lifetimes) scenarios, which run the workloads that Typed Ratchet 04, 09, 11 and 12 handed to external qualification, and their smoke shards 2 and 3 and soak shards 12 to 14 |
+| [FIPS Prep 08](https://app.clickup.com/t/86bcwmb4r) | The outward TLS observations of the three-node [leader crash](#crash-scenarios): a policy change committed while the killed leader is down, judged by real handshakes on every node's console and fixed interconnect before the fault, during the outage, after the restart and after the `fips` policy returns |
 
 **Product defects.** The suite found these product defects. Each was fixed through its own task
 and requalified with the scenario that found it:

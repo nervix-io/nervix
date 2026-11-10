@@ -553,6 +553,17 @@ so the server's `testing` feature reaches no ordinary build of the workspace. Ca
 its package's directory, so `main` moves to the workspace root first, and every path a scenario or
 `--input` names stays relative to it.
 
+`--input` accepts a feature file, directory or quoted glob, either relative to the workspace root
+or absolute. A literal file is parsed directly; a directory discovers its feature files; a glob
+walks only below its literal directory prefix. Relative focused inputs therefore do not traverse
+generated build trees. Matching, Gherkin parsing and outline expansion remain owned by globwalk,
+Gherkin and Cucumber, and discovery keeps deterministic path order before sharding and feature
+prioritization.
+Missing inputs and traversal or parsing errors fail the run. A completed invocation that took up
+no scenarios also fails, including when its name, tag or shard filter matched nothing; its zero
+counts never qualify a workload. The harness regressions cover relative and absolute literal
+files, directories, wildcard/brace/question-mark/character-class patterns and missing inputs.
+
 The relay-channel turnover scenario posts through an acknowledged HTTP endpoint on a node other
 than the relay owner. Its generated-payload step reuses one HTTP client and requires each request
 to return HTTP 200 with the complete `completed` / `none` outcome before posting the next tenant.
@@ -4110,11 +4121,11 @@ selections runs the inventory's fixed number of scenarios at once, four, rather 
 build pays for its tracked acquisitions on every lock, and a fixed count puts the same load on its
 nodes locally and on CI's 16-vCPU runner.
 
-The lane resolves every feature pattern against its repository root before passing it to
-Cucumber. A relative pattern would make Cucumber traverse the whole working directory, including
-generated build artifacts. An exact feature uses an absolute pattern with two identical literal
-alternatives, so the walker starts at that feature's parent directory and still selects only
-that file. This bounds discovery without changing the registered examples or their deadlines.
+The lane resolves every feature pattern against its repository root before passing it to the
+scenario harness. Its exact-feature recipes use an absolute pattern with two identical literal
+alternatives. The harness also accepts literal files and relative patterns directly, rooting their
+discovery at the selected directory prefix. Neither form traverses generated build artifacts for
+a focused feature, and neither changes the registered examples or their deadlines.
 
 Under the native coverage collector the lane instruments only workspace crates, the scope the
 ordinary coverage build has. Before starting the workload clock it repeats every selected build
@@ -4422,8 +4433,9 @@ shard's `scenario-logs-<I>` artifact carries its `tests/logs`.
 Server processes write their logs into their own temporary directories, and a failure quotes the
 tail it needs.
 
-The scenario tracing default enables the consensus owner's trace contexts and vote send/completion
-events, while retaining the replication module's debug selection and OpenRaft's existing filter.
+The scenario tracing default enables the consensus owner's receiver contexts and vote
+send/completion events at `debug`, while retaining the replication module's debug selection and
+OpenRaft's existing filter.
 The concrete local listener distinguishes same-named nodes in parallel isolated clusters. Vote
 events retain the peer, vote, deadline, elapsed transport time and existing result; receiver
 contexts identify the node whose Raft API accepted the request. These infrequent election events
@@ -4433,6 +4445,24 @@ enable OpenRaft debug events to compare received append gaps and API-to-core pro
 neither a passing replay nor a final leader snapshot establishes why an earlier election stalled.
 Compare the same cluster's request, processing and reply boundaries with runner load and scheduler
 evidence; the Cucumber task's stall detector does not observe every node worker.
+
+The default selects nothing more verbose than `debug`, which
+`the_scenario_default_selects_nothing_more_verbose_than_debug` in
+`src/application/tracing_setup_filter_tests.rs` holds. A scenario run records through one process
+subscriber, and the `log` bridge that subscriber installs hands it every record a dependency writes
+through the `log` crate, up to the most verbose level the filter selects for any target, to be
+judged one record at a time. Cranelift writes `trace` records throughout every module it compiles,
+and a node compiles the module of a WASM processor it installs before it reports the revision
+prepared: after a restart or a restore, and on every node other than the one whose transaction
+validated the module. From 3 November 2026 the default selected `nervix_consensus=trace` for the
+vote events, and one compile of the suite's 1.77 MB Rust guest took 23.8 to 26.7 seconds on a
+development host where it takes 4.2 to 4.6 seconds with the default at `debug` or with no
+subscriber. CI shards spent about 31 seconds on it on an otherwise idle core, and longer under
+load, against the 40 seconds a revision has to become prepared and ready: the scenario cluster's
+10-second node-unavailability timeout plus the 30-second readiness propagation bound. `CREATE
+SUBSCRIPTION` after a cluster restart or a restore then timed out waiting for the revision to become
+ready, and a transaction step on three nodes timed out waiting for its followers to prepare it. An
+explicit `RUST_LOG` that selects `trace` anywhere brings that cost back for its run.
 
 The materialized input round and the delayed-coordinator publication observation each own a
 `BackupPhase`. It captures the existing 120-second deadline before dispatching the operation through

@@ -73,9 +73,24 @@ Cancellation ends a wait; it does not roll back a transaction the server already
 suite holds an admitted commit behind an unsettled delivery, cancels its wait, then recovers it
 through the same execution and checks the resulting configuration.
 
+`UPLOAD RESOURCE <name> VERSION '<directory>';` streams a local directory as a new version of a
+resource the domain declares. The session serves it itself, under the upload identity its
+`nx_execution` fixed, so executing the same execution again sends the same archive under the same
+identity and completes without installing a second version. For an upload the cluster refused,
+whose disposition is failed, `nx_outcome_upload_failure` returns true and writes the typed
+`nx_upload_failure`; it returns false for a completed upload and for every other command.
+`NX_UPLOAD_IDENTITY_CONFLICT` means the identity already names another archive: keep the original
+bytes to recover that upload, and prepare the statement again for a different one.
+
+```c
+{{#include ../../tests/client_conformance/c/suite/contract.h:upload}}
+```
+
 ### Read Materialized State
 
 `SHOW RELAY <relay> MATERIALIZED STATE` returns its typed result with the command's outcome.
+`DESCRIBE LICENSE;` uses the same result for cluster scope. Its JSON has
+`"scope": "cluster_license"`, and its three rows contain the summary and cluster quotas.
 `nx_outcome_inspection` retains that result as an `nx_inspection` you own: it outlives the outcome
 and is released with `nx_inspection_free`. `nx_inspection_counts` reads the branches, rows and bytes
 of the complete selected cut, and returns false for a refused read, whose outcome is a failed

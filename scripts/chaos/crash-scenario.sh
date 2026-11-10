@@ -5,6 +5,8 @@
 source "${script_dir}/instance-owners.sh"
 # shellcheck source=connector-metrics.sh
 source "${script_dir}/connector-metrics.sh"
+# shellcheck source=outward-tls.sh
+source "${script_dir}/outward-tls.sh"
 
 crash_fail() {
     failure_category="$1"
@@ -215,6 +217,10 @@ run_crash() {
         || crash_fail product 'acknowledged precrash control canary is absent'
     check_support_containers
     check_other_nodes ""
+    if outward_tls_qualified; then
+        phase 'outward TLS policy before the fault'
+        outward_tls_before "${crash_dir}"
+    fi
 
     phase "SIGKILL ${scenario}: ${selected_host}"
     failure_category=injection
@@ -300,6 +306,14 @@ run_crash() {
     failure_category=product
     phase 'outage and failover observations'
     compose_call_timeout=20
+    if outward_tls_qualified; then
+        for host in "${node_hosts[@]}"; do
+            if [[ "${host}" != "${selected_host}" ]]; then
+                outward_tls_start_commit "${crash_dir}" "${host}"
+                break
+            fi
+        done
+    fi
     local observer_id
     observer_id="$(owned_service_container observer)" || return 1
     wait_for "observer saw ${selected_host} unavailable" 20 \
@@ -338,6 +352,10 @@ run_crash() {
         if [[ "${connector_metrics}" == true ]]; then
             connector_metric_replacement_progress "${crash_dir}" || return 1
         fi
+    fi
+    if outward_tls_qualified; then
+        outward_tls_finish_commit "${crash_dir}" "${container_id}" "${kill_requested_ms}"
+        outward_tls_survivors "${crash_dir}" "${control_host}" "${selected_host}"
     fi
     wait_for 'source traffic progressed during outage' 30 \
         topic_progressed chaos_input "${source_before}"
@@ -412,6 +430,14 @@ run_crash() {
         --arg during_effect "${during_effect}" \
         '{before:$before[0],during:($during[0]+{observed_effect:$during_effect}),after:$after[0],acknowledged_effects_present:true}' \
         >"${crash_dir}/control-results.json"
+    local outward_tls_result_file=null
+    if outward_tls_qualified; then
+        phase 'outward TLS policy after recovery'
+        outward_tls_recovered "${crash_dir}" "${selected_host}"
+        outward_tls_reverted "${crash_dir}"
+        outward_tls_result "${crash_dir}" "${selected_node}"
+        outward_tls_result_file='"results/outward-tls.json"'
+    fi
     local source_after output_after
     source_after="$(topic_end_offset chaos_input)"
     output_after="$(topic_end_offset chaos_output)"
@@ -455,7 +481,8 @@ run_crash() {
         --argjson output_before "${output_before}" \
         --argjson output_while_stopped "${output_while_stopped}" \
         --argjson output_after "${output_after}" \
-        '{scenario:$scenario,node:$node,container_id:$container_id,observed_leader:$observed_leader,recovered_leader:$recovered_leader,fault_since:$fault_since,kill_duration_ms:$kill_ms,held_outage_ms:$outage_ms,election_ms:$election_ms,placement_ms:$placement_ms,delivery_resume_ms:$delivery_resume_ms,listener_recovery_ms:$listener_recovery_ms,settled_recovery_ms:$settled_recovery_ms,source_offset_before:$source_before,source_offset_while_stopped:$source_while_stopped,source_offset_after:$source_after,output_offset_before:$output_before,output_offset_while_stopped:$output_while_stopped,output_offset_after:$output_after,kill_verified:true,listener_recovered:true,cluster_settled:true,control:"crash/control-results.json",node_events:"crash/all-node-events.ndjson",node_event_recording:"crash/all-node-events.recording.json"}' \
+        --argjson outward_tls "${outward_tls_result_file}" \
+        '{scenario:$scenario,node:$node,container_id:$container_id,observed_leader:$observed_leader,recovered_leader:$recovered_leader,fault_since:$fault_since,kill_duration_ms:$kill_ms,held_outage_ms:$outage_ms,election_ms:$election_ms,placement_ms:$placement_ms,delivery_resume_ms:$delivery_resume_ms,listener_recovery_ms:$listener_recovery_ms,settled_recovery_ms:$settled_recovery_ms,source_offset_before:$source_before,source_offset_while_stopped:$source_while_stopped,source_offset_after:$source_after,output_offset_before:$output_before,output_offset_while_stopped:$output_while_stopped,output_offset_after:$output_after,kill_verified:true,listener_recovered:true,cluster_settled:true,control:"crash/control-results.json",outward_tls:$outward_tls,node_events:"crash/all-node-events.ndjson",node_event_recording:"crash/all-node-events.recording.json"}' \
         >"${artifact_dir}/results/crash-progress.json"
 
     phase 'crash traffic final boundary'

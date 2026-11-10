@@ -466,6 +466,8 @@ Feature: Web console Plexus REPL
     When selector ".prompt-row input" is pressed with "Tab"
     Then selector ".prompt-row input" has value "SHOW CLUSTER"
     When selector ".prompt-row input" is pressed with "Tab"
+    Then selector ".prompt-row input" has value "SHOW CORRELATOR"
+    When selector ".prompt-row input" is pressed with "Tab"
     Then selector ".prompt-row input" has value "SHOW CREATE"
 
   @connector_completion

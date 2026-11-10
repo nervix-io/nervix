@@ -675,6 +675,7 @@ pub(in crate::application) fn transaction_statement_label(statement: &Statement)
         | Statement::ShowEmitters(_)
         | Statement::ShowPlacements(_)
         | Statement::ShowRelayMaterializedState(_)
+        | Statement::ShowProcessorState(_)
         | Statement::ShowClusterStatus(_)
         | Statement::ShowTransactions(_) => "SHOW",
         Statement::DescribeRelay(_)
@@ -696,7 +697,8 @@ pub(in crate::application) fn transaction_statement_label(statement: &Statement)
         | Statement::DescribePlacement(_)
         | Statement::DescribeRelocation(_)
         | Statement::DescribeTransaction(_)
-        | Statement::DescribeCluster(_) => "DESCRIBE",
+        | Statement::DescribeCluster(_)
+        | Statement::DescribeLicense(_) => "DESCRIBE",
         _ => "statement",
     }
 }

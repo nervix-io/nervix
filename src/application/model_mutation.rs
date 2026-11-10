@@ -2438,6 +2438,12 @@ impl SessionServiceImpl {
                     .verified("this statement requires a request domain, which was resolved above");
                 self.show_stream_materialized_state(domain, show).await
             }
+            Statement::ShowProcessorState(show) => {
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
+                self.show_processor_state(domain, show).await
+            }
             Statement::ShowUdfs(_) => {
                 let domain = domain
                     .as_ref()
@@ -2480,9 +2486,11 @@ impl SessionServiceImpl {
                     &self.inner.cluster,
                     &self.inner.consensus,
                     &self.inner.interconnect,
+                    &self.inner.runtime,
                 )
                 .await,
             ),
+            Statement::DescribeLicense(_) => self.describe_license().await,
             Statement::ShowTransactions(_) => self.show_transactions().await,
             Statement::DescribeTransaction(describe) => {
                 self.describe_transaction(describe, query, session).await

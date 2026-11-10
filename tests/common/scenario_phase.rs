@@ -233,6 +233,11 @@ static ACTIVE_SCENARIOS: LazyLock<Mutex<ActiveScenarios>> =
 static SCENARIO_ATTEMPTS: LazyLock<Mutex<BTreeMap<ScenarioIdentity, u32>>> =
     LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
+/// Distinct scenario runs taken up by this process, excluding their retries.
+pub(crate) fn registered_scenario_count() -> usize {
+    SCENARIO_ATTEMPTS.lock().len()
+}
+
 #[derive(Clone, Debug)]
 struct AttemptTime {
     identity: ScenarioIdentity,

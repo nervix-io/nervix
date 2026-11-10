@@ -28,6 +28,7 @@ pub(in crate::application) fn requires_request_domain(statement: &Statement) -> 
             | Statement::StopDomain(_)
             | Statement::ShowClusterStatus(_)
             | Statement::DescribeCluster(_)
+            | Statement::DescribeLicense(_)
             | Statement::ShowTransactions(_)
             | Statement::DescribeTransaction(_)
             | Statement::DropNode(_)
@@ -48,6 +49,7 @@ pub(in crate::application) fn requires_existing_domain(statement: &Statement) ->
             | Statement::StopDomain(_)
             | Statement::ShowClusterStatus(_)
             | Statement::DescribeCluster(_)
+            | Statement::DescribeLicense(_)
             | Statement::ShowTransactions(_)
             | Statement::DescribeTransaction(_)
             | Statement::DropNode(_)
@@ -62,6 +64,7 @@ pub(in crate::application) fn requires_leader(statement: &Statement) -> bool {
         statement,
         Statement::ShowClusterStatus(_)
             | Statement::DescribeCluster(_)
+            | Statement::DescribeLicense(_)
             | Statement::ShowTransactions(_)
             | Statement::DescribeResource(_)
             | Statement::DescribeDomain(_)
@@ -88,6 +91,7 @@ pub(in crate::application) fn requires_leader(statement: &Statement) -> bool {
             | Statement::ShowEmitters(_)
             | Statement::ShowPlacements(_)
             | Statement::ShowRelayMaterializedState(_)
+            | Statement::ShowProcessorState(_)
     )
 }
 

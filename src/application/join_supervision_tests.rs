@@ -26,6 +26,27 @@ use super::{
 use crate::cluster::ClockSkew;
 
 const TOLERANCE: Duration = Duration::from_millis(500);
+
+#[test]
+fn licensing_refusal_stops_a_newcomer_with_its_typed_cause_until_admitted() {
+    let refusal = crate::licensing::LicensingRefusal {
+        condition: crate::licensing::QuotaName::ClusterNodes,
+        limit: 3,
+        current_usage: 3,
+        requested: 1,
+    };
+    let judge = judge(JoinStanding::Newcomer);
+    assert_eq!(
+        judge.step(judged(
+            AdmissionVerdict::QuotaRefused { refusal },
+            &["node-1"]
+        )),
+        JoinStep::Ended(JoinOutcome::Refused(JoinRefusedError::Licensing(refusal)))
+    );
+    let mut view = judged(AdmissionVerdict::QuotaRefused { refusal }, &["node-1"]);
+    view.admitted = true;
+    assert_eq!(judge.step(view), JoinStep::Ended(JoinOutcome::Admitted));
+}
 const WITHIN: ClockSkew = ClockSkew::PeerAhead {
     at_least: Duration::from_millis(200),
 };

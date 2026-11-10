@@ -72,6 +72,7 @@ fjall = { workspace = true }
 flatbuffers = { workspace = true }
 flate2 = { workspace = true }
 futures-util = { workspace = true }
+globwalk = { workspace = true }
 h2 = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }

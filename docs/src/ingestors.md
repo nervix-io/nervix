@@ -1000,7 +1000,7 @@ may ask for, the session or node has no room left, or the session holds a transa
 | --- | --- |
 | Producers per session | 32 |
 | Outstanding bytes per session | Committed producer cap, 32 MiB by default |
-| Outstanding bytes per node, including batches retained for forwarded producers | 128 MiB |
+| Outstanding bytes per node, including batches retained for forwarded producers | Resolved producer node credit; see [Execution Capabilities](node-settings.md#execution-capabilities) |
 | Batches one producer may ask to have outstanding | 1,024 |
 | Rows per batch | Grant's committed client-row cap, 65,536 by default |
 
@@ -3556,6 +3556,9 @@ After signaling succeeds, the idle timer starts. An explicit idle timeout overri
 ping-derived value. Every received frame, including a ping or pong, refreshes activity. Sending a
 client ping or cancelling a read leaves the inactivity deadline in place. The idle deadline is
 physical time and a silent connection is closed and retried on the host's reconnect cadence.
+Closing it sends the peer a Close frame with status `1001` (going away) if the connection takes the
+frame at once. Nervix waits neither to write the frame nor for the peer's reply, so a peer that has
+stopped reading never delays the reconnect.
 Choose a bound that permits the peer's expected idle periods or keepalive cadence. Three ping
 intervals must fit the shared schedulable bound when they supply the deadline; the signaling
 handshake has its own `TIMEOUT`.

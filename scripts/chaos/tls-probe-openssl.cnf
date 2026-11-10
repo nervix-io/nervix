@@ -1,0 +1,17 @@
+# The client configuration of the outward TLS policy probe, tls-probe.py, which OPENSSL_CONF names.
+# Every OpenSSL context the probe creates offers only TLS 1.3, TLS_CHACHA20_POLY1305_SHA256 and
+# X25519: the members the `fips` policy alias excludes. The probe reads the offer back and refuses to
+# judge when this file did not take effect.
+openssl_conf = probe_init
+
+[probe_init]
+ssl_conf = probe_ssl
+
+[probe_ssl]
+system_default = probe_system_default
+
+[probe_system_default]
+MinProtocol = TLSv1.3
+MaxProtocol = TLSv1.3
+Ciphersuites = TLS_CHACHA20_POLY1305_SHA256
+Groups = X25519

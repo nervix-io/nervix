@@ -43,7 +43,7 @@ impl Inspection {
 #[pymethods]
 impl Inspection {
     #[getter]
-    fn domain(&self) -> &str {
+    fn domain(&self) -> Option<&str> {
         self.owner.domain()
     }
     #[getter]
@@ -51,7 +51,7 @@ impl Inspection {
         self.owner.entity_kind()
     }
     #[getter]
-    fn entity_name(&self) -> &str {
+    fn entity_name(&self) -> Option<&str> {
         self.owner.entity_name()
     }
     #[getter]

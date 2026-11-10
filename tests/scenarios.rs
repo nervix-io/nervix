@@ -239,6 +239,7 @@ mod ingestion_time;
 mod ingestor_instances;
 mod ingestor_payload;
 mod kafka_metadata;
+mod licensing;
 mod materialized_state_inspection;
 mod mqtt_fixtures;
 mod mqtt_properties;
@@ -256,6 +257,7 @@ mod paced_simulation;
 mod password_credentials;
 mod postgres_fixtures;
 mod process_cluster;
+mod processor_state_inspection;
 mod pulsar_delivery;
 mod pulsar_emission;
 mod pulsar_metadata;
@@ -580,6 +582,8 @@ struct ScenarioWorld {
     /// than its message.
     last_client_outcome: Option<ClientCommandOutcome>,
     inspection_observations: materialized_state_inspection::Observations,
+    /// The continuation a reorderer or correlator state page saved for a later resume.
+    processor_state_observations: processor_state_inspection::Observations,
     /// The exact source of the last request a named client submitted, which the spans of that
     /// request's diagnostics index.
     last_client_request: Option<String>,
@@ -14848,6 +14852,42 @@ async fn when_ingestor_route_poll_pause_released(world: &mut ScenarioWorld, inge
     world
         .fault_injection
         .release_ingestor_route_poll_pause(&world.ingestor_dispatch_ref(&ingestor));
+}
+
+fn junction_flush_ref(world: &ScenarioWorld, junction: &str) -> nervix_models::DomainNodeRef {
+    nervix_models::DomainNodeRef::node_in(
+        nervix_models::DomainName::try_from(world.domain.as_str())
+            .assured("the scenario domain is an identifier-shaped name"),
+        nervix_models::ModelKind::Junction,
+        nervix_models::ModelName::try_from(expand_placeholders(world, junction).as_str())
+            .assured("the scenario junction is an identifier-shaped name"),
+    )
+}
+
+#[given(expr = "the flush completion of junction {string} is held")]
+fn given_junction_flush_completion_held(world: &mut ScenarioWorld, junction: String) {
+    world
+        .fault_injection
+        .pause_processor_flush_completion(junction_flush_ref(world, &junction));
+}
+
+#[then(expr = "the flush completion hold of junction {string} is reached")]
+async fn then_junction_flush_completion_hold_reached(world: &mut ScenarioWorld, junction: String) {
+    nervix_primitives::time::timeout(
+        Duration::from_secs(10),
+        world
+            .fault_injection
+            .wait_for_processor_flush_completion_pause(&junction_flush_ref(world, &junction)),
+    )
+    .await
+    .expect("the junction finishes its flush while retaining the completion obligation");
+}
+
+#[when(expr = "the flush completion hold of junction {string} is released")]
+fn when_junction_flush_completion_hold_released(world: &mut ScenarioWorld, junction: String) {
+    world
+        .fault_injection
+        .release_processor_flush_completion_pause(&junction_flush_ref(world, &junction));
 }
 
 #[given(expr = "ownership handoff for domain {string} pauses after requesting flush")]
@@ -37566,8 +37606,8 @@ struct ScenarioRunArgs {
     shard: ScenarioShardArgs,
 }
 
-/// Parse the same Gherkin inputs and CLI options as Cucumber's basic parser, keep a shard's own
-/// scenario runs when the run is one shard of a sharded run, then take the limited feature chains
+/// Parse the selected Gherkin files, keep a shard's own scenario runs when the run is one shard of
+/// a sharded run, then take the limited feature chains
 /// up before the bulk. Cucumber may schedule all parsed scenarios at once; admission to a feature
 /// and to a run slot happens in the before hook.
 #[derive(Clone, Debug, Default)]
@@ -37577,17 +37617,17 @@ struct PrioritizedScenarioParser {
 }
 
 impl<I: AsRef<Path>> cucumber::parser::Parser<I> for PrioritizedScenarioParser {
-    type Cli = cucumber::parser::basic::Cli;
+    type Cli = common::scenario_input::ScenarioInput;
     type Output = futures_util::stream::LocalBoxStream<
         'static,
         cucumber::parser::Result<cucumber::gherkin::Feature>,
     >;
 
     fn parse(self, input: I, cli: Self::Cli) -> Self::Output {
-        let parsed = cucumber::parser::Parser::parse(cucumber::parser::Basic::new(), input, cli);
+        let parsed = common::scenario_input::parse_features(&workspace_root(), input.as_ref(), cli);
         let shard = self.shard;
         futures_util::stream::once(async move {
-            let mut features = parsed.collect::<Vec<_>>().await;
+            let mut features = parsed;
             if let Some(shard) = shard {
                 let selection = shard.keep_own_runs(&mut features);
                 println!("scenario {selection}");
@@ -37954,6 +37994,10 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
             messages.push(format!("{hook_errors} hook error(s)"));
         }
         SuiteOutcome::Failed(messages.join(", "))
+    } else if common::scenario_phase::registered_scenario_count() == 0 {
+        SuiteOutcome::Failed(
+            "no scenarios selected; check --input, --name, --tags and --shard".to_owned(),
+        )
     } else {
         SuiteOutcome::Passed
     };

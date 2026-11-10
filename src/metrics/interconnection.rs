@@ -354,6 +354,18 @@ const SERIES: &[SeriesSpec] = &[
         labels: CLASS_DIRECTION,
     },
     SeriesSpec {
+        name: "nervix_execution_operation_limit_bytes",
+        help: "Resolved byte ceiling for one execution operation on this node.",
+        kind: SeriesKind::Gauge,
+        labels: OPERATION,
+    },
+    SeriesSpec {
+        name: "nervix_execution_resident_replication_batches",
+        help: "Resolved number of resident replication batches admitted on this node.",
+        kind: SeriesKind::Gauge,
+        labels: NO_LABELS,
+    },
+    SeriesSpec {
         name: "nervix_execution_memory_capacity_bytes",
         help: "Transient interconnection memory reserved for one execution class.",
         kind: SeriesKind::Gauge,
@@ -392,6 +404,12 @@ const SERIES: &[SeriesSpec] = &[
     SeriesSpec {
         name: "nervix_execution_jobs_pending",
         help: "Jobs waiting in one execution class's bounded queue.",
+        kind: SeriesKind::Gauge,
+        labels: CLASS,
+    },
+    SeriesSpec {
+        name: "nervix_execution_queue_capacity",
+        help: "Jobs one execution class may hold waiting for a worker.",
         kind: SeriesKind::Gauge,
         labels: CLASS,
     },
@@ -891,6 +909,20 @@ fn execution_families(families: &mut Families, executor: &nervix_execution::Exec
         },
     ];
 
+    let mut limits = families.open("nervix_execution_operation_limit_bytes");
+    for (operation, bytes) in [
+        ("relay_encoded", executor.limits.relay_encoded_bytes),
+        ("relay_decoded", executor.limits.relay_decoded_bytes),
+        ("relay_scratch", executor.limits.relay_scratch_bytes),
+        ("bulk_chunk", executor.limits.bulk_chunk_bytes),
+    ] {
+        limits.sample(&[("operation", operation)], bytes.as_u64().approx_into());
+    }
+    let mut resident = families.open("nervix_execution_resident_replication_batches");
+    resident.sample(
+        &[],
+        f64::from(executor.limits.resident_replication_batches.get()),
+    );
     let mut capacity = families.open("nervix_execution_memory_capacity_bytes");
     for entry in &memory {
         capacity.sample(
@@ -939,6 +971,13 @@ fn execution_families(families: &mut Families, executor: &nervix_execution::Exec
         pending.sample(
             &[("class", entry.class)],
             entry.workers.pending.approx_into(),
+        );
+    }
+    let mut queue_capacity = families.open("nervix_execution_queue_capacity");
+    for entry in &workers {
+        queue_capacity.sample(
+            &[("class", entry.class)],
+            entry.workers.queue_capacity.approx_into(),
         );
     }
     let mut admitted = families.open("nervix_execution_jobs_total");

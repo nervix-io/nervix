@@ -1136,6 +1136,21 @@ static void test_inspection_retains_typed_state_after_its_outcome_is_released(vo
     const char *show = "SHOW RELAY c_state MATERIALIZED STATE FOR UNBRANCHED LIMIT 10 FORMAT JSON;";
     suite_await_state_rows(session, show, 1);
     // ANCHOR: inspection
+    {
+        nx_outcome *license_outcome = suite_completed(session, "DESCRIBE LICENSE;");
+        nx_inspection *license_inspection = NULL;
+        suite_check(nx_outcome_inspection(license_outcome, &license_inspection));
+        HOLD(nx_inspection, license_inspection);
+        suite_drop(license_outcome);
+        uint64_t license_branches = 0, license_rows = 0, license_bytes = 0;
+        REQUIRE(nx_inspection_counts(license_inspection, &license_branches, &license_rows, &license_bytes));
+        REQUIRE(license_branches == 0 && license_rows == 3 && license_bytes > 0);
+        const uint8_t *license_json = NULL;
+        size_t license_json_len = 0;
+        nx_inspection_json(license_inspection, &license_json, &license_json_len);
+        REQUIRE(suite_contains(license_json, license_json_len, "\"cluster_license\""));
+        suite_drop(license_inspection);
+    }
     nx_outcome *outcome = suite_completed(session, show);
     nx_inspection *inspection = NULL;
     suite_check(nx_outcome_inspection(outcome, &inspection));
@@ -1953,6 +1968,50 @@ static void test_b1_cancel_an_admitted_commit_and_recover_its_recorded_outcome(v
     suite_check(nx_consumer_close(consumer, suite_deadline(120000)));
 }
 
+static void suite_write_file(const char *path, const char *text) {
+    FILE *file = fopen(path, "wb");
+    REQUIRE(file != NULL);
+    size_t length = strlen(text);
+    size_t written = fwrite(text, 1, length, file);
+    int closed = fclose(file);
+    REQUIRE(written == length && closed == 0);
+}
+
+/* Registered after the backup and restore cases: no statement removes a resource, and their
+ * archives of this domain must hold no resource version. */
+static void test_b1_an_upload_completes_again_under_its_identity_and_refuses_another_archive(void) {
+    nx_session *session = suite_connect(NULL, NULL);
+    char directory[1024], payload[1100], query[1200];
+    int length = snprintf(directory, sizeof directory, "%s/c-bundle", suite_env("NERVIX_SUITE_BACKUP_DIRECTORY"));
+    REQUIRE(length > 0 && (size_t)length < sizeof directory && strchr(directory, '\'') == NULL);
+    REQUIRE(mkdir(directory, 0700) == 0);
+    length = snprintf(payload, sizeof payload, "%s/payload.txt", directory);
+    REQUIRE(length > 0 && (size_t)length < sizeof payload);
+    suite_write_file(payload, "first archive\n");
+    suite_completed(session, "CREATE RESOURCE c_bundle;");
+    length = snprintf(query, sizeof query, "UPLOAD RESOURCE c_bundle VERSION '%s';", directory);
+    REQUIRE(length > 0 && (size_t)length < sizeof query);
+    // ANCHOR: upload
+    nx_execution *execution = suite_prepare(session, query);
+    nx_upload_failure failure = NX_UPLOAD_INVALID_STREAM;
+    for (size_t call = 0; call < 2; ++call) {
+        /* A second call of the same execution sends the same archive under the same upload
+         * identity, so it completes again instead of installing a second version. */
+        nx_outcome *uploaded = NULL;
+        suite_check(nx_session_execute(session, execution, suite_deadline(120000), &uploaded));
+        HOLD(nx_outcome, uploaded);
+        REQUIRE(nx_outcome_disposition(uploaded) == NX_DISPOSITION_COMPLETED);
+        REQUIRE(!nx_outcome_upload_failure(uploaded, &failure));
+    }
+    suite_write_file(payload, "different archive\n");
+    nx_outcome *refused = NULL;
+    suite_check(nx_session_execute(session, execution, suite_deadline(120000), &refused));
+    HOLD(nx_outcome, refused);
+    REQUIRE(nx_outcome_disposition(refused) == NX_DISPOSITION_FAILED);
+    REQUIRE(nx_outcome_upload_failure(refused, &failure) && failure == NX_UPLOAD_IDENTITY_CONFLICT);
+    // ANCHOR_END: upload
+}
+
 #define SUITE_CONTRACT_TESTS \
     {"boundary", "test_boundary_fields_and_arguments", test_boundary_fields_and_arguments}, \
     {"boundary", "test_boundary_public_enumeration_domains", test_boundary_public_enumeration_domains}, \
@@ -1972,6 +2031,7 @@ static void test_b1_cancel_an_admitted_commit_and_recover_its_recorded_outcome(v
     {"cluster", "test_b8_backup_recovers_under_its_execution_reference", test_b8_backup_recovers_under_its_execution_reference}, \
     {"cluster", "test_b9_clock_events_retain_release_and_restore_after_a_gap", test_b9_clock_events_retain_release_and_restore_after_a_gap}, \
     {"cluster", "test_b10_restore_streams_the_archive_and_reports_its_steps", test_b10_restore_streams_the_archive_and_reports_its_steps}, \
+    {"cluster", "test_b1_an_upload_completes_again_under_its_identity_and_refuses_another_archive", test_b1_an_upload_completes_again_under_its_identity_and_refuses_another_archive}, \
     {"cluster", "test_b11_read_the_attached_clock_before_ticks_and_project_it", test_b11_read_the_attached_clock_before_ticks_and_project_it}, \
     {"cluster", "test_b12_exact_fields_and_typed_open_refusals", test_b12_exact_fields_and_typed_open_refusals}, \
     {"cluster", "test_b13_builders_copy_every_level_and_batches_keep_their_owners", test_b13_builders_copy_every_level_and_batches_keep_their_owners}, \

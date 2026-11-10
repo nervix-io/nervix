@@ -301,6 +301,7 @@ Feature: Entity-pause model alterations
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
+    And junction "enrich_parked" takes "0s" to read its materialized state
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA parked_event ( tenant STRING, value STRING, state STRING OPTIONAL );
@@ -358,10 +359,15 @@ Feature: Entity-pause model alterations
       """
       {"tenant":"acme","value":"input-acme"}
       """
-    And these Plexus commands fail with "node_work_items=1"
+    Then junction "enrich_parked" has parked a message on its materialized state
+    Given the flush completion of junction "enrich_parked" is held
+    # One parked batch and its deliberately unsettled flush obligation both prevent a drain.
+    When these Plexus commands fail with "node_work_items=2"
       """
       ALTER JUNCTION enrich_parked SET DETACHED;
       """
+    Then the flush completion hold of junction "enrich_parked" is reached
+    When the flush completion hold of junction "enrich_parked" is released
     And these Plexus commands are executed on the leader node
       """
       SHOW CREATE JUNCTION enrich_parked;

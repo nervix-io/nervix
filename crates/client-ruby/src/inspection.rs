@@ -30,13 +30,13 @@ impl Inspection {
             owner: Arc::new(inspection),
         }
     }
-    fn domain(&self) -> &str {
+    fn domain(&self) -> Option<&str> {
         self.owner.domain()
     }
     fn entity_kind(&self) -> &str {
         self.owner.entity_kind()
     }
-    fn entity_name(&self) -> &str {
+    fn entity_name(&self) -> Option<&str> {
         self.owner.entity_name()
     }
     fn json(&self) -> &str {

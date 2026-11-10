@@ -1,5 +1,8 @@
 //! Current inspection envelope round trips, exact cells and retained backing storage.
 
+#[path = "published_tests.rs"]
+mod published;
+
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, DomainNodeRef, ModelKind, ParseAsType,
@@ -66,7 +69,8 @@ pub(crate) fn inspection(value: u64) -> StateInspection {
             name("sales"),
             ModelKind::Relay,
             name::<nervix_models::RelayName>("events"),
-        ),
+        )
+        .into(),
         result: StateInspectionResult::Page(StateInspectionPage {
             counts,
             unit_count: 1,
@@ -213,7 +217,15 @@ fn bolero_state_inspection_envelope_round_trips() {
             let mut arbitrary =
                 nervix_arbitrary::Arbitrary::new(bytes, nervix_arbitrary::Domain::Vocabulary);
             let mut state = inspection(arbitrary.positive_u64().get());
-            state.entity.domain = arbitrary.name();
+            state.entity = if arbitrary.entropy().flag() {
+                StateInspectionEntity::ClusterLicense
+            } else {
+                StateInspectionEntity::DomainNode(DomainNodeRef::node_in(
+                    arbitrary.name(),
+                    ModelKind::Relay,
+                    arbitrary.name::<nervix_models::RelayName>(),
+                ))
+            };
             if arbitrary.entropy().flag() {
                 let reason = codec::ALL_STATE_INSPECTION_REJECTIONS[arbitrary.entropy().index(
                     std::num::NonZeroUsize::new(codec::ALL_STATE_INSPECTION_REJECTIONS.len())

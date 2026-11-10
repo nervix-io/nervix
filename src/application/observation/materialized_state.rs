@@ -22,14 +22,17 @@ use nervix_interconnect::{
     StreamingResponse,
 };
 use nervix_models::{
-    ClusterNodeIdentity, CreateRelay, CreateSchema, DomainName, DomainNodeRef, FieldName,
-    InspectionFormat, ModelKind, ParseAsType, RelayName, ResolvedBranching,
-    ResolvedStateBranchSelection, ScheduledNode, SchemaField, ShowRelayMaterializedState,
-    StateInspectionBranchSelection, StateInspectionCounts, StateInspectionOrigin,
-    StateInspectionPosition, StateInspectionRejection, Unit,
+    ClusterNodeIdentity, CreateRelay, CreateSchema, DomainName, DomainNodeRef, InspectionFormat,
+    ModelKind, NodeRef, ParseAsType, RelayName, ResolvedBranching, ResolvedStateBranchSelection,
+    ScheduledNode, ShowRelayMaterializedState, StateInspectionBranchSelection,
+    StateInspectionCounts, StateInspectionOrigin, StateInspectionPosition,
+    StateInspectionRejection,
 };
 use nervix_primitives::time::timeout;
 
+use super::inspection_pages::{
+    add_counts, distinct_field, inspection_owner, inspection_refusal, resume_position,
+};
 use crate::{
     application::{
         command_result::CommandResult,
@@ -43,16 +46,6 @@ use crate::{
     },
     state_inspection_cursor::StateInspectionCursor,
 };
-
-/// Project an observed internal failure to the fixed inspection protocol refusal.
-/// The diagnostic records the complete report before its wire projection leaves this boundary.
-fn inspection_refusal(
-    error: impl std::fmt::Display,
-    reason: StateInspectionRejection,
-) -> StateInspectionRejection {
-    tracing::debug!(error = %format_args!("{error:#}"), ?reason, "state inspection refused");
-    reason
-}
 
 fn resume_offset(after: Option<(Option<nervix_models::BranchKeyFingerprint>, u64)>) -> u64 {
     match after {
@@ -130,7 +123,7 @@ impl SessionServiceImpl {
         )
         .await;
         let state = StateInspection {
-            entity,
+            entity: entity.into(),
             result: match result {
                 Ok(Ok(page)) => StateInspectionResult::Page(page),
                 Ok(Err(reason)) => StateInspectionResult::Rejected(reason),
@@ -230,7 +223,7 @@ impl SessionServiceImpl {
         };
         if cursor.as_ref().is_some_and(|cursor| {
             cursor.domain != *domain
-                || cursor.relay != show.relay
+                || cursor.entity != NodeRef::new(ModelKind::Relay, show.relay.clone())
                 || cursor.schema != relay.node.schema_fingerprint
                 || cursor.control_revision != state.revision
                 || cursor.selection != selection
@@ -441,7 +434,7 @@ impl SessionServiceImpl {
             Some(
                 StateInspectionCursor {
                     domain: plan.domain,
-                    relay: plan.relay,
+                    entity: NodeRef::new(ModelKind::Relay, plan.relay),
                     schema: plan.node.schema_fingerprint,
                     control_revision: plan.control_revision,
                     generations,
@@ -642,60 +635,6 @@ impl SessionServiceImpl {
     }
 }
 
-fn inspection_owner(
-    node: &ScheduledNode,
-    unit: Unit,
-    local: &nervix_models::ClusterNodeName,
-) -> Result<nervix_models::ClusterNodeName, StateInspectionRejection> {
-    if let Some(owner) = node.unit_execution_node(unit) {
-        return Ok(owner.clone());
-    }
-    if node.unit_executes_on(unit, local) {
-        return Ok(local.clone());
-    }
-    Err(StateInspectionRejection::OwnerUnavailable)
-}
-
-fn resume_position(
-    cursor: Option<&StateInspectionCursor>,
-    unit: Unit,
-) -> (
-    bool,
-    Option<(Option<nervix_models::BranchKeyFingerprint>, u64)>,
-) {
-    match cursor.map(|cursor| &cursor.position) {
-        Some(StateInspectionPosition::AfterUnit(previous)) => (unit <= *previous, None),
-        Some(StateInspectionPosition::Rows {
-            unit: previous,
-            branch,
-            offset,
-        }) => (
-            unit < *previous,
-            (unit == *previous).then_some((*branch, *offset)),
-        ),
-        None => (false, None),
-    }
-}
-
-fn add_counts(
-    total: &mut StateInspectionCounts,
-    unit: StateInspectionCounts,
-) -> Result<(), StateInspectionRejection> {
-    total.branches = total
-        .branches
-        .checked_add(unit.branches)
-        .ok_or(StateInspectionRejection::ReplyTooLarge)?;
-    total.rows = total
-        .rows
-        .checked_add(unit.rows)
-        .ok_or(StateInspectionRejection::ReplyTooLarge)?;
-    total.bytes = total
-        .bytes
-        .checked_add(unit.bytes)
-        .ok_or(StateInspectionRejection::ReplyTooLarge)?;
-    Ok(())
-}
-
 struct EncodedInspectionRows {
     section: Option<StateInspectionSection>,
     rows: usize,
@@ -712,10 +651,24 @@ fn encode_records(
     cancellation: &nervix_execution::Cancellation,
 ) -> Result<EncodedInspectionRows, StateInspectionRejection> {
     let mut schema = payload_schema.clone();
-    let low = watermark_field(&schema, "ingested_at_low_watermark", cancellation)?;
+    let low = distinct_field(
+        &schema.fields,
+        "ingested_at_low_watermark",
+        ParseAsType::Datetime,
+        false,
+        false,
+        cancellation,
+    )?;
     let low_index = schema.fields.len();
     schema.fields.push(low);
-    let high = watermark_field(&schema, "ingested_at_high_watermark", cancellation)?;
+    let high = distinct_field(
+        &schema.fields,
+        "ingested_at_high_watermark",
+        ParseAsType::Datetime,
+        false,
+        false,
+        cancellation,
+    )?;
     let high_index = schema.fields.len();
     schema.fields.push(high);
     let mut frames = Vec::with_capacity(records.len());
@@ -803,90 +756,4 @@ fn encode_records(
             }),
         }),
     })
-}
-
-fn watermark_field(
-    schema: &RowSchema,
-    base: &str,
-    cancellation: &nervix_execution::Cancellation,
-) -> Result<SchemaField, StateInspectionRejection> {
-    // n payload names cannot occupy n+1 distinct candidates. Numeric suffixes keep every
-    // candidate addressable even when the payload occupies all underscore suffixes to the name
-    // limit. Each scan is bounded by the session's schema collection bound.
-    for suffix in 0..=schema.fields.len() {
-        cancellation
-            .check()
-            .map_err(|error| inspection_refusal(error, StateInspectionRejection::Deadline))?;
-        let name = if suffix == 0 {
-            base.to_string()
-        } else {
-            format!("{base}_{suffix}")
-        };
-        if schema
-            .fields
-            .iter()
-            .any(|field| field.name.as_str() == name)
-        {
-            continue;
-        }
-        return Ok(SchemaField {
-            name: FieldName::parse(&name)
-                .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))?,
-            ty: ParseAsType::Datetime,
-            optional: false,
-            sensitive: false,
-        });
-    }
-    unreachable!("n schema fields cannot occupy n+1 distinct metadata names")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[nervix_primitives::test]
-    async fn state_inspection_watermarks_remain_addressable_after_dense_name_collisions() {
-        let base = "ingested_at_low_watermark";
-        let mut fields = Vec::new();
-        for suffix in 0..128 {
-            let candidate = format!("{base}{}", "_".repeat(suffix));
-            let Ok(name) = FieldName::parse(&candidate) else {
-                break;
-            };
-            fields.push(SchemaField {
-                name,
-                ty: ParseAsType::I64,
-                optional: false,
-                sensitive: false,
-            });
-        }
-        assert!(fields.len() > 1);
-        let schema = RowSchema {
-            fields,
-            branch: None,
-        };
-        let executor = nervix_execution::Executor::default();
-        let charge = executor
-            .try_reserve(nervix_execution::MemoryClass::Bulk, 4096)
-            .assured("fixture admission");
-        executor
-            .run_cpu(
-                nervix_execution::CpuClass::Bulk,
-                charge,
-                move |_charge, cancellation| {
-                    let watermark = watermark_field(&schema, base, cancellation)
-                        .assured("a distinct metadata name fits");
-                    assert!(
-                        schema
-                            .fields
-                            .iter()
-                            .all(|field| field.name != watermark.name)
-                    );
-                    assert_eq!(watermark.ty, ParseAsType::Datetime);
-                    assert!(!watermark.optional && !watermark.sensitive);
-                },
-            )
-            .await
-            .assured("bounded naming job");
-    }
 }

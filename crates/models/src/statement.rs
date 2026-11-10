@@ -103,10 +103,12 @@ pub enum Statement {
     ShowEmitters(ShowEmitters),
     ShowPlacements(ShowPlacements),
     ShowRelayMaterializedState(ShowRelayMaterializedState),
+    ShowProcessorState(ShowProcessorState),
     ShowClusterStatus(ShowClusterStatus),
     ShowTransactions(ShowTransactions),
     DescribeTransaction(DescribeTransaction),
     DescribeCluster(DescribeCluster),
+    DescribeLicense(DescribeLicense),
     DescribeClient(DescribeClient),
     AlterBranch(AlterBranch),
 }
@@ -183,10 +185,12 @@ impl Statement {
             | Self::ShowEmitters(_)
             | Self::ShowPlacements(_)
             | Self::ShowRelayMaterializedState(_)
+            | Self::ShowProcessorState(_)
             | Self::ShowClusterStatus(_)
             | Self::ShowTransactions(_)
             | Self::DescribeTransaction(_)
             | Self::DescribeCluster(_)
+            | Self::DescribeLicense(_)
             | Self::ResetWasmState(_) => false,
         }
     }
@@ -394,6 +398,20 @@ pub struct ShowClusterStatus;
 pub struct DescribeCluster;
 
 #[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub struct DescribeLicense;
+
+#[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct ShowTransactions;
@@ -429,6 +447,29 @@ pub struct ShowRelayMaterializedState {
     pub selection: Option<crate::StateBranchSelection>,
     pub page: Option<StateInspectionPageRequest>,
     pub format: InspectionFormat,
+}
+
+/// `SHOW REORDERER <name> STATE` or `SHOW CORRELATOR <name> STATE`: a bounded read of the rows a
+/// processor's branch tasks hold, with the clauses every state inspection takes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct ShowProcessorState {
+    pub processor: StateInspectedProcessor,
+    pub selection: Option<crate::StateBranchSelection>,
+    pub page: Option<StateInspectionPageRequest>,
+    pub format: InspectionFormat,
+}
+
+/// A stateful processor that `SHOW <kind> <name> STATE` reads, named with its kind.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum StateInspectedProcessor {
+    Reorderer(ReordererName),
+    Correlator(CorrelatorName),
+    Deduplicator(DeduplicatorName),
+    WindowProcessor(WindowProcessorName),
 }
 
 #[derive(

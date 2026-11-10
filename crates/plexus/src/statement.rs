@@ -136,12 +136,15 @@ pub fn statement_parser<'src>()
         crate::drop_stmt::drop_parser().map(Statement::Drop),
         crate::show_cluster_status::show_cluster_status_parser().map(Statement::ShowClusterStatus),
         crate::describe_cluster::describe_cluster_parser().map(Statement::DescribeCluster),
+        crate::describe_license::describe_license_parser().map(Statement::DescribeLicense),
         crate::show_transactions::show_transactions_parser().map(Statement::ShowTransactions),
         crate::describe_transaction::describe_transaction_parser()
             .map(Statement::DescribeTransaction),
         crate::show_create::show_create_parser().map(Statement::ShowCreate),
         crate::show_stream_state::show_stream_materialized_state_parser()
             .map(Statement::ShowRelayMaterializedState),
+        crate::show_processor_state::show_processor_state_parser()
+            .map(Statement::ShowProcessorState),
         crate::udf::describe_udf_parser().map(Statement::DescribeUdf),
         crate::udf::show_udfs_parser().map(Statement::ShowUdfs),
         crate::ingestor::show_ingestors_parser().map(Statement::ShowIngestors),
@@ -187,8 +190,10 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
         let statement = out
             .into_output()
             .verified("has_errors returned false above, so this parse produced output");
-        if matches!(statement, Statement::ShowRelayMaterializedState(_))
-            && source.ends_with(char::is_whitespace)
+        if matches!(
+            statement,
+            Statement::ShowRelayMaterializedState(_) | Statement::ShowProcessorState(_)
+        ) && source.ends_with(char::is_whitespace)
             && !matches!(tokens.last(), Some(Token::Semicolon))
         {
             // An impossible continuation makes the composed grammar expose the optional clauses
