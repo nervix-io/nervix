@@ -346,11 +346,12 @@ final application record and terminal visibility barrier.
 For a transaction containing a WASM state reset, the frozen preview describes the planned reset
 effect, while the retained actual step separately records quiescence engagement and whether
 application completed. `DESCRIBE TRANSACTION` renders those same typed facts in text or JSON; an
-uncertain engagement remains uncertain on inspection. `DESCRIBE WASM PROCESSOR` is a separate
-read-only observation of the current scheduled lifetime and owner checkpoint progress. Its client
-outcome carries the typed state inspection beside the text message, and reading it does not advance
-checkpoint durability or change a retained command outcome. `FORMAT JSON` renders that same typed
-state inspection as JSON while retaining it in the client outcome.
+uncertain engagement remains uncertain on inspection. `SHOW WASM PROCESSOR <processor> STATE` is a
+separate read-only observation of the current scheduled lifetime and owner checkpoint progress. Its
+client outcome carries the typed state inspection envelope beside the text message, and reading it
+does not advance checkpoint durability or change a retained command outcome. `FORMAT JSON` renders
+that same envelope as JSON while retaining it in the client outcome. `DESCRIBE WASM PROCESSOR`
+prints the per-unit summary as text only.
 
 ```mermaid
 sequenceDiagram
@@ -477,7 +478,9 @@ grammar. Kinded endpoint, codec and connector heads are offered as one item, suc
 reference kinds are offered. Clients do not merge independent statement parsers' suggestions.
 The [statement-head contract](architecture.md#statement-heads-and-body-properties) defines those
 boundaries; the [CLI completion guide](client-tools-cli.md#completion) describes cursor edits
-and transaction-aware choices.
+and transaction-aware choices. [Visual Creation And Shared
+Completion](./visual-creation.md#text-completion) describes how the server resolves these
+expectations and the console's typed choices.
 
 These authoring requests remain available while an earlier administrative command is pending;
 they do not acknowledge or complete its effect. Command completion above retains its durable

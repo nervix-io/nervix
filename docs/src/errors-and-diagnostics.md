@@ -4009,3 +4009,12 @@ an executor total above memory. `PreflightError::MemoryBelowBudgets` additionall
 client node-credit capacities. Receive-limit and native-runtime relationship errors retain their
 typed causes beneath the startup context; they never turn a refused allocation into a decode or
 authentication failure. A runtime stack or blocking-thread refusal happens before node listeners.
+
+## Licensing Notification Failures
+
+The outbound licensing stream retains typed setup, transport, idle-timeout, content-type,
+notification-payload and identifier failures. Each interruption ends that response and reconnects
+under the declared backoff; polling and signed deadlines remain independent. Parser failures keep
+their concrete cause in a sanitized context whose rendering contains no untrusted event data.
+Tickets use sensitive authorization headers and never enter URLs or logs. An invalidation hint
+cannot become a permission or a record-rejection outcome.

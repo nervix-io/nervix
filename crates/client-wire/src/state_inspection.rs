@@ -13,12 +13,14 @@
 use nervix_models::{ClusterNodeName, Unit};
 pub use nervix_models::{
     StateInspectionCounts, StateInspectionEntity, StateInspectionOrigin, StateInspectionRejection,
-    StateInspectionStage,
+    StateInspectionStage, WasmStateBinding, WasmUnitStateInspection,
 };
 
 use crate::{RowSchema, StateRowFrame};
 mod codec;
 mod presentation;
+mod wasm;
+pub use wasm::{MAX_ENCODED_WASM_BRANCH_ENTRY_BYTES, wasm_unit_summary_lines};
 
 /// One read, with either a page from its captured generations or a typed refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +41,8 @@ pub struct StateInspectionPage {
     pub unit_count: u64,
     pub units: Vec<StateInspectionUnit>,
     pub continuation: Option<String>,
+    /// The pinned module of an inspected WASM processor; other kinds have none.
+    pub wasm_binding: Option<WasmStateBinding>,
 }
 
 /// One execution unit's exact owner, replicas and captured read origin.
@@ -50,6 +54,13 @@ pub struct StateInspectionUnit {
     pub origin: StateInspectionOrigin,
     pub counts: StateInspectionCounts,
     pub sections: Vec<StateInspectionSection>,
+    /// A WASM processor unit's guest-state lifetimes, counts and page of branch entries; other
+    /// kinds have none.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "wasm::serialize_unit"
+    )]
+    pub wasm: Option<WasmUnitStateInspection>,
 }
 
 /// A section's frames retain typed cells and their independently verified backing bytes.

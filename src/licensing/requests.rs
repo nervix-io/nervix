@@ -11,7 +11,7 @@ use meticulous::OptionExt as _;
 use nervix_licensing_protocol::requests::Operation;
 use nervix_models::Timestamp;
 use nervix_primitives::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     watch,
 };
 
@@ -66,12 +66,14 @@ impl RequestEvent {
 pub(crate) use nervix_models::LicensingConnectivity as Connectivity;
 
 pub(super) struct RequestObservations {
+    pub(super) stream_connected: AtomicBool,
     counters: BTreeMap<(&'static str, &'static str), AtomicU64>,
     pub(super) connectivity: watch::Sender<Connectivity>,
 }
 impl Default for RequestObservations {
     fn default() -> Self {
         Self {
+            stream_connected: AtomicBool::new(false),
             counters: Operation::ALL
                 .iter()
                 .flat_map(|operation| {

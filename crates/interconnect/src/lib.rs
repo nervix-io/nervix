@@ -1589,3 +1589,6 @@ pub use state_inspection::{
     ProcessorStateSectionTransfer, ReadMaterializedStatePage, ReadProcessorStatePage,
     StatePageBody,
 };
+
+mod wasm_state_inspection;
+pub use wasm_state_inspection::{ReadWasmStatePage, ReadWasmStatePageResponse, WasmStatePage};

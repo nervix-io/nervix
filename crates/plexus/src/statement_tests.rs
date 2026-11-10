@@ -959,7 +959,6 @@ fn parses_describe_wasm_processor_statement() {
         parsed,
         Statement::DescribeWasmProcessor(nervix_models::DescribeWasmProcessor {
             name: WasmProcessorName::parse("filter_even").expect("valid name"),
-            format: nervix_models::InspectionFormat::Text,
         })
     );
 }
@@ -969,17 +968,6 @@ fn describe_resource_summary_context_suggests_version_keyword() {
     let input = "DESCRIBE RESOURCE fraud_model ";
     let suggestions = suggest_statement(input, input.len());
     assert!(suggestions.contains(&"VERSION".to_string()));
-}
-
-#[test]
-fn wasm_description_offers_the_shared_inspection_format() {
-    let input = "DESCRIBE WASM PROCESSOR filter_even ";
-    let suggestions = suggest_statement(input, input.len());
-    assert!(suggestions.contains(&"FORMAT".to_string()));
-    let input = "DESCRIBE WASM PROCESSOR filter_even FORMAT ";
-    let suggestions = suggest_statement(input, input.len());
-    assert!(suggestions.contains(&"JSON".to_string()));
-    assert!(suggestions.contains(&"TEXT".to_string()));
 }
 
 #[test]

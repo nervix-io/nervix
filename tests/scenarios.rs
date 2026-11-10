@@ -272,6 +272,7 @@ mod session_protocol;
 mod session_tls;
 mod standalone_transaction;
 mod subscription_restoration;
+mod wasm_state_inspection;
 mod web_console_command_retry;
 mod web_console_connections;
 mod web_console_request_window;
@@ -26760,13 +26761,18 @@ async fn then_all_wasm_branches_have_confirmed_checkpoint(
     );
     loop {
         nervix_primitives::task::consume_budget().await;
-        let output = run_plexus_commands_on_node(
+        // An owner that is failing over refuses the read until its successor serves the unit, so
+        // a refusal is another sample that has not converged yet.
+        let output = match run_plexus_commands_on_node(
             world,
             &node,
-            &format!("DESCRIBE WASM PROCESSOR {processor};"),
+            &format!("SHOW WASM PROCESSOR {processor} STATE;"),
         )
         .await
-        .expect("describe wasm processor command must succeed");
+        {
+            Ok(output) => output,
+            Err(error) => error,
+        };
         let checkpoints = output
             .lines()
             .filter(|line| line.trim_start().starts_with("checkpoint branch="))
@@ -26812,14 +26818,22 @@ fn then_last_client_outcome_reports_wasm_reset(
         .as_ref()
         .assured("the preceding step executed a client command");
     let state = outcome
-        .wasm_state
+        .state
         .as_ref()
-        .assured("the preceding command described a WASM processor");
-    let resets = state
-        .units
-        .iter()
-        .filter_map(|unit| unit.reset.as_ref())
-        .collect::<Vec<_>>();
+        .assured("the preceding command read a WASM processor's state");
+    let nervix_client_wire::StateInspectionResult::Page(page) = &state.result else {
+        panic!("the preceding WASM state read was refused: {state:?}");
+    };
+    let mut resets = Vec::new();
+    for unit in &page.units {
+        let guest = unit
+            .wasm
+            .as_ref()
+            .assured("a WASM processor state read carries each unit's guest state");
+        if let Some(reset) = &guest.reset {
+            resets.push(reset);
+        }
+    }
     assert!(
         !resets.is_empty(),
         "the preceding transaction published a WASM state reset"

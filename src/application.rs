@@ -2162,6 +2162,16 @@ impl Application {
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
 
+        let wasm_state_page_service = service.clone();
+        interconnect
+            .register_handler::<nervix_interconnect::ReadWasmStatePage, _, _>(
+                move |_context, request| {
+                    let service = wasm_state_page_service.clone();
+                    async move { service.handle_read_wasm_state_page(request).await }
+                },
+            )
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
         let describe_metrics_service = service.clone();
         interconnect
             .register_handler::<RemoteDescribeMetricsRequest, _, _>(move |_context, request| {
