@@ -59,6 +59,23 @@ fn a_continued_channel_on_a_fresh_receiver_is_definitely_unopened() {
     );
 }
 
+#[test]
+fn an_admitted_attempt_keeps_its_channel_open_before_its_outcome_returns() {
+    let fixture = PeerFixture::new(2);
+    let record = fixture.register(1, 1);
+    let _returning = fixture.admit_with_outcome_in_flight(&record, 1);
+    assert_eq!(
+        fixture.owner.grant_position(&PeerFixture::attempt(1, 2)),
+        RelayGrantPosition::OutOfOrder,
+        "an admitted attempt keeps the channel known before its watermark is recorded"
+    );
+    assert_eq!(
+        fixture.owner.grant_position(&PeerFixture::attempt(1, 1)),
+        RelayGrantPosition::Next,
+        "only the immediately following position can retire the retained attempt"
+    );
+}
+
 impl PeerFixture {
     /// A peer that holds `capacity` attempts and twice as many channel watermarks.
     fn new(capacity: usize) -> Self {
@@ -990,6 +1007,11 @@ fn shuttle_the_next_grant_racing_the_outcome_return_before_it_takes_the_next_pos
         });
         let granting = StdArc::clone(&fixture);
         let granted = thread::spawn(move || {
+            assert_eq!(
+                granting.owner.grant_position(&PeerFixture::attempt(1, 2)),
+                RelayGrantPosition::OutOfOrder,
+                "a skipped position stays out of order before or after the outcome returns"
+            );
             assert_eq!(
                 granting.owner.grant_position(&PeerFixture::attempt(1, 1)),
                 RelayGrantPosition::Next,

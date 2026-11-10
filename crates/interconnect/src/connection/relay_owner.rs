@@ -320,7 +320,8 @@ impl RelayPeerOwner {
             RelayGrantPosition::Next
         } else if attempt.sequence != 0
             && state.watermarks.get(&attempt.channel).is_none()
-            && !state.forgotten(&attempt.channel)
+            && !state.watermarks.is_forgotten(&attempt.channel)
+            && !RelayPeerProtocol::holds_attempt(&state.attempts, &attempt.channel)
         {
             RelayGrantPosition::Unopened
         } else {
