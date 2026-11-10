@@ -10,6 +10,8 @@
     nervix::layer(vocabulary, reason = "owns shared licensing words")
 )]
 
+mod decision;
+pub use decision::{BindingField, DecisionRejection, RevisionField, TimingField};
 use error_stack::Report;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
