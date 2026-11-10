@@ -187,6 +187,7 @@ impl Model {
         activation_id: Uuid,
         grants_until: DateTime<Utc>,
     ) -> Result<Uuid, ProblemKind> {
+        let issued_at = self.now;
         let held = self
             .activations
             .get_mut(&activation_id)
@@ -194,6 +195,8 @@ impl Model {
         if held.binding.generation != common.key_generation {
             return Err(ProblemKind::GenerationMismatch);
         }
+        let refreshed =
+            super::timing::RefreshTiming::new(issued_at, &held.decision.conditions.operating);
         let mut decision = held.decision.clone();
         decision.decision_id = id();
         decision.decision_revision = decision
@@ -207,7 +210,13 @@ impl Model {
             .assured("bounded scenario revision");
         decision.conditions.usage = FREE_POLICY.usage();
         decision.status = DecisionStatus::Released;
-        decision.issued_at = self.now;
+        decision.issued_at = issued_at;
+        decision.timing.refresh_after = refreshed.refresh_after;
+        decision.timing.overdue_at = refreshed.overdue_at;
+        decision.timing.valid_until = refreshed.valid_until;
+        decision
+            .transitions
+            .retain(|transition| transition.deadline > issued_at);
         decision.in_reply_to = common.request_id;
         held.capacity_until = (grants_until > self.now).then_some(grants_until);
         held.prior_decision = Some(std::mem::replace(&mut held.decision, decision));

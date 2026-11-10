@@ -41,7 +41,7 @@ Feature: Cluster licensing release and transfer
     When the cluster licensing clock passes the "valid_until" deadline
     And these Plexus commands are executed on the leader node
       """
-      CREATE DOMAIN released_free_policy CLOCK UNPACED START '2026-11-06T00:00:00Z';
+      CREATE UNPACED DOMAIN released_free_policy;
       """
     When the cluster is restarted
     And the licensing service clock catches up with the cluster

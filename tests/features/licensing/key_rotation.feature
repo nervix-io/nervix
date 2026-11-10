@@ -58,7 +58,7 @@ Feature: Cluster licensing key rotation
       """
       REFRESH LICENSE;
       """
-    And node "node-1" eventually describes this license without a selected domain
+    Then node "node-1" eventually describes this license without a selected domain
       """
       mode: activated
       verification: verified

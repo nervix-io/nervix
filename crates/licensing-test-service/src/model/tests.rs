@@ -138,3 +138,68 @@ async fn a_signed_tampering_script_is_distinct_from_a_broken_signature() {
         }
     }
 }
+
+#[nervix_primitives::test]
+async fn late_release_reissues_refresh_fields_without_moving_fixed_deadlines() {
+    let mut model = fixture();
+    let cluster = signer().assured("cluster signer");
+    let mut plan = model.conditions();
+    plan.operating.durations.insert(
+        OFFLINE_ALLOWANCE.to_owned(),
+        ConditionValue::Known(ConditionDuration::Bounded { seconds: 2_400 }),
+    );
+    model.plan(plan);
+    let mut common = common(&mut model).await;
+    let activation_id = model
+        .create(
+            &common,
+            &model.license_key.clone(),
+            &ActivationKind::Persistent,
+            cluster.public_key(),
+        )
+        .assured("activation is admitted");
+    model.reduce_domain_quota_with_grace();
+    common.request_id = id();
+    model
+        .refresh(&common, &activation_id, None)
+        .assured("quota reduction issues a grant");
+    let before = model
+        .activations
+        .get(&activation_id)
+        .verified("activation retained")
+        .decision
+        .clone();
+    assert!(!before.transitions.is_empty());
+    let after_offline = before
+        .timing
+        .valid_until
+        .verified("bounded allowance")
+        .checked_add_signed(TimeDelta::seconds(1))
+        .verified("fixture deadline fits");
+    model.set_time(after_offline);
+    common.request_id = id();
+    common.sent_at = model.now;
+    model
+        .release(&common, activation_id, model.now)
+        .assured("release is admitted");
+    let after = &model
+        .activations
+        .get(&activation_id)
+        .verified("activation retained")
+        .decision;
+    assert_eq!(after.status, DecisionStatus::Released);
+    assert!(after.issued_at <= after.timing.refresh_after);
+    assert!(after.timing.refresh_after <= after.timing.overdue_at);
+    assert!(after.timing.overdue_at <= after.timing.valid_until.verified("bounded allowance"));
+    assert_eq!(after.activation, before.activation);
+    assert_eq!(after.license, before.license);
+    assert_eq!(after.timing.term_ends_at, before.timing.term_ends_at);
+    assert_eq!(
+        after.timing.ephemeral_expires_at,
+        before.timing.ephemeral_expires_at
+    );
+    assert!(
+        after.transitions.is_empty(),
+        "elapsed grants are not acknowledged as current release grants"
+    );
+}
