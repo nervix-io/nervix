@@ -483,6 +483,7 @@ All paths are relative to the repository root.
 | `src/runtime/message_error.rs` | Structured message errors, the rows whose required outputs are missing, and execution of prepared error-record programs |
 | `src/runtime/window_processor.rs`, `window_accumulator/`, `window_state.rs` | Branch-local windows, their aggregate structures, and their snapshots |
 | `benches/window_sketches.rs` | The cost of admitting retained rows into pane sketches, from a new pane for every row to a thousand rows per pane |
+| `benches/window_collection.rs` | Complete collection-route emission at 64 and 4,096 retained rows, including Arrow gathering and IPC qualification |
 | `src/runtime/window_archive.rs` | A captured window as bounded archive Arrow groups, and the window snapshot rebuilt from them |
 | `src/runtime/subscription_predicate.rs` | Session subscription filters |
 
