@@ -3,8 +3,8 @@
 //! Layer: test harness.
 //! - **Owns.** Cancelled openings, replacement payload delivery, established-reset assertions,
 //!   scripted subprotocol answers, ping reports ordered around a held signaling handshake, and how
-//!   a silent or oversized-message peer reads the ending of the connection it never read and of
-//!   its replacement.
+//!   a silent, oversized-message or failed-handshake peer reads the ending of the connection it
+//!   never read and of its replacement.
 //! - **Depends on.** The shared WebSocket peer, execution primitives and the public protocol.
 //! - **Must not know.** Scenario state, connector internals or runtime ownership handles.
 
@@ -31,7 +31,9 @@ use tokio_tungstenite::{
     },
 };
 
-use crate::websocket_peer::{PEER_WAIT, PeerEvent, SubprotocolAnswer, UnreadEnding, WebsocketPeer};
+use crate::websocket_peer::{
+    FirstHandshake, PEER_WAIT, PeerEvent, SubprotocolAnswer, UnreadEnding, WebsocketPeer,
+};
 
 async fn connect(address: SocketAddr) -> WebSocketStream<TcpStream> {
     let mut request = format!("ws://{address}/events")
@@ -469,6 +471,80 @@ async fn an_oversized_message_peer_reports_the_refused_connection_ending_before_
                 .await
                 .assured("the fixture task joins")
                 .assured("the peer ends once the client closes its replacement");
+        }
+    })
+    .await
+    .assured("the fixture qualifies within its existing budget");
+}
+
+#[nervix_primitives::test]
+async fn a_failed_handshake_peer_reports_the_failed_connection_ending_before_the_reconnect() {
+    timeout(PEER_WAIT, async {
+        for first in [FirstHandshake::Refused, FirstHandshake::Stalled] {
+            for policy_violation in [true, false] {
+                let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                    .await
+                    .assured("the fixture binds");
+                let address = listener.local_addr().assured("the listener has an address");
+                let mut peer = WebsocketPeer::failed_handshake(listener, first);
+                let mut failed = open_silent(address).await;
+                failed
+                    .send(Message::Text("{\"op\":\"subscribe\"}".to_string()))
+                    .await
+                    .assured("the client sends its subscription");
+                if let FirstHandshake::Refused = first {
+                    assert_eq!(
+                        receive_text(&mut failed).await,
+                        "{\"error\":\"subscription refused\"}"
+                    );
+                }
+                if policy_violation {
+                    failed
+                        .close(Some(CloseFrame {
+                            code: CloseCode::Policy,
+                            reason: "".into(),
+                        }))
+                        .await
+                        .assured("the client sends its Close");
+                }
+                // The client read everything the peer sent, so TCP ends in order.
+                drop(failed);
+                assert!(matches!(peer.next().await, PeerEvent::Connected(_)));
+                // The ending is reported before any replacement opens.
+                let PeerEvent::UnreadConnectionEnded(ending) = peer.next().await else {
+                    panic!("the peer reports how the failed connection ended before a replacement");
+                };
+                if policy_violation {
+                    let UnreadEnding::Closed(Some(frame)) = ending else {
+                        panic!("the peer reads the client's Close behind its subscription");
+                    };
+                    assert_eq!(frame.code, CloseCode::Policy);
+                } else {
+                    assert!(
+                        matches!(ending, UnreadEnding::WithoutClose),
+                        "a connection ended without a Close is reported as such"
+                    );
+                }
+
+                let mut replacement = open_silent(address).await;
+                assert_eq!(receive_text(&mut replacement).await, "{\"ready\":true}");
+                assert_eq!(receive_text(&mut replacement).await, "{\"user_id\":43}");
+                assert!(matches!(peer.next().await, PeerEvent::Connected(_)));
+                replacement
+                    .close(None)
+                    .await
+                    .assured("the client closes its replacement");
+                let answer = replacement
+                    .next()
+                    .await
+                    .assured("the peer answers the client's Close")
+                    .assured("the answer is a valid frame");
+                assert!(matches!(answer, Message::Close(_)), "got {answer:?}");
+                peer.join()
+                    .await
+                    .assured("the fixture task joins")
+                    .assured("the peer ends once the client closes its replacement");
+            }
         }
     })
     .await
