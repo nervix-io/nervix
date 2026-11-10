@@ -27,6 +27,9 @@ pub(in crate::application) async fn run(service: SessionServiceImpl, shutdown: C
     let mut topology = observer.subscribe_topology();
     let mut applied = observer.subscribe_applied();
     let mut requests = RefreshAttempts::new();
+    let mut streams = super::stream::StreamTasks::default();
+    let (hints, mut hint_changes) = nervix_primitives::sync::watch::channel(());
+    let mut notification_due = false;
     let mut connectivity_changes = service.inner.licensing.connectivity_changes();
     let mut clock_changes = service
         .inner
@@ -46,10 +49,16 @@ pub(in crate::application) async fn run(service: SessionServiceImpl, shutdown: C
             .filter(|leader| leader.leader_id() == observer.local_node_id());
         if current != tenure {
             requests.abort_all();
-            while requests.join_next().await.is_some() {}
+            while requests.join_next().await.is_some() {
+                nervix_primitives::task::consume_budget().await;
+            }
+            streams.stop().await;
+            notification_due = false;
+            hint_changes.borrow_and_update();
             tenure = current;
             retry_at = Instant::now();
         }
+        streams.reconcile(&service, tenure.is_some(), &hints).await;
         let publication = (tenure.clone(), service.inner.licensing.connectivity());
         if published.as_ref() != Some(&publication) {
             service
@@ -63,7 +72,14 @@ pub(in crate::application) async fn run(service: SessionServiceImpl, shutdown: C
             published = Some(publication);
         }
         let delay = if tenure.is_some() {
-            reconcile(&service, &mut requests, retry_at, &mut announced).await
+            reconcile(
+                &service,
+                &mut requests,
+                retry_at,
+                &mut announced,
+                &mut notification_due,
+            )
+            .await
         } else {
             None
         };
@@ -95,20 +111,45 @@ pub(in crate::application) async fn run(service: SessionServiceImpl, shutdown: C
             }
         };
         nervix_primitives::select! {
+            changed = hint_changes.changed() => {
+                if changed.is_err() { break; }
+                notification_due = true;
+                retry_at = Instant::now();
+                if !requests.is_empty() {
+                    service.inner.licensing_requests.expedite();
+                }
+            },
+            completed = streams.tasks.join_next(), if !streams.tasks.is_empty() => {
+                if let Some(Err(error)) = completed {
+                    tracing::warn!(%error, "licensing stream task ended unexpectedly");
+                }
+                streams.reset();
+            },
             _ = clock_changed => {},
             changed = connectivity_changes.changed() => if changed.is_err() { break; },
             _ = shutdown.cancelled() => break,
             changed = topology.changed() => if !changed { break; },
             changed = applied.changed() => if changed.is_err() { break; },
             completed = requests.join_next(), if !requests.is_empty() => {
+                let succeeded = matches!(&completed, Some(Ok(Ok(()))));
+                if !succeeded {
+                    notification_due = true;
+                }
                 report_attempt(completed);
-                retry_at = Instant::now() + service.cluster_parameters().licensing_request_timeout();
+                retry_at = Instant::now() + if succeeded && notification_due {
+                    Duration::ZERO
+                } else {
+                    service.cluster_parameters().licensing_request_timeout()
+                };
             }
             _ = timer => {},
         }
     }
     requests.abort_all();
-    while requests.join_next().await.is_some() {}
+    while requests.join_next().await.is_some() {
+        nervix_primitives::task::consume_budget().await;
+    }
+    streams.stop().await;
     service
         .inner
         .cluster
@@ -121,6 +162,7 @@ async fn reconcile(
     requests: &mut RefreshAttempts,
     retry_at: Instant,
     announced: &mut Option<PolicyState>,
+    notification_due: &mut bool,
 ) -> Option<Duration> {
     let policy = crate::licensing::policy::evaluate_policy(
         service.inner.consensus.observer().licensing_snapshot(),
@@ -151,7 +193,8 @@ async fn reconcile(
         Some(Ok(verified)) => now.into_datetime() >= verified.decision.timing.refresh_after,
         Some(Err(_)) | None => true,
     };
-    if due && requests.is_empty() && Instant::now() >= retry_at {
+    if (due || *notification_due) && requests.is_empty() && Instant::now() >= retry_at {
+        *notification_due = false;
         let requester = service.clone();
         requests.spawn(async move { requester.refresh_license_in_background().await });
     }

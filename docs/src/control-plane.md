@@ -947,3 +947,15 @@ The command's authoritative effect and applied parameter revision are recorded a
 Recovery of an earlier execution observes that progress and never reapplies its values over a
 later command. Success waits for the existing runtime readiness barrier.
 [Node Settings](node-settings.md#committed-parameter-changes) owns the values and bootstrap contract.
+
+## Licensing Notification Coordination
+
+The licensing coordinator owns separate refresh attempts and an activation/key-bound stream task.
+It aborts and joins both on a leadership-tenure change. The stream owns its reconnect cursor and
+publishes a bounded coalescing wakeup; only the coordinator starts a refresh, through the existing
+serialized request owner. A notification can expedite a refresh retry, while stream reads and
+backoff never occupy that request turn. Failed refreshes retain their pending work and respect
+retry timing. The independent deadline timer and normal due polling continue while the stream
+is silent or reconnecting. [Cluster Licensing](node-settings.md#cluster-licensing) owns the public
+contract and settings; [Shared Licensing Protocol](licensing-protocol.md#notification-payloads)
+owns the hint payloads.

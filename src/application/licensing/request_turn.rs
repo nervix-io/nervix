@@ -16,6 +16,9 @@ pub(in crate::application) struct LicensingRequests {
 }
 
 impl LicensingRequests {
+    pub(super) fn expedite(&self) {
+        self.refresh.notify_one();
+    }
     pub(super) async fn background(&self) -> MutexGuard<'_, ()> {
         self.turn.lock().await
     }
