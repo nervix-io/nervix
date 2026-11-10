@@ -527,6 +527,13 @@ check-tls-configuration-source source:
 fmt-tls-configuration-source source:
     cargo fmt --manifest-path {{ quote(source / "rustls/Cargo.toml") }} --package rustls
 
+# Verify licensing policy, request ownership and observations through their production owners.
+test-licensing-owners *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-server --lib -- licensing:: {{ quote(args) }}
+
 # Free-policy and quota checks use the native session client.
 test-licensing-free *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash
