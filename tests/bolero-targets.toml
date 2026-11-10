@@ -1828,7 +1828,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__requests__bolero_client_requests_keep_complete_values/corpus"
-domain_version = 13
+domain_version = 14
 features = []
 id = "client-requests"
 invariant = "Every current typed client request decodes to its complete original value, including identities, positions, schemas, a restoration's expected schema and opaque payloads."
@@ -2848,10 +2848,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/window_accumulator/__fuzz__/runtime__window_accumulator__collection_properties__bolero_collected_windows_match_admit_step_restore_sequences/corpus"
-domain_version = 1
+domain_version = 2
 features = ["testing"]
 id = "runtime-window-collection"
-invariant = "A required collected column and its FIRST/LAST endpoints equal an independent watermark/admission-ordered deque after up to 32 admissions, prefix steps and snapshot restores over at most 264 rows, preserving schema, nullability and every I64 value across argument batches."
+invariant = "Required vector collections and full fixed-array windows of widths 1 through 8, with their FIRST/LAST endpoints, equal an independent watermark/admission-ordered deque after up to 32 admissions, prefix steps and snapshot restores over at most 264 rows, preserving schema, nullability and every I64 value across argument batches; partial fixed windows retain their rows without emission."
 manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-server"
@@ -3353,6 +3353,21 @@ package = "nervix-vm"
 random_iterations = 128
 source = "crates/nervix-vm/src/runtime/list_shape/properties.rs"
 test = "runtime::list_shape::properties::bolero_shape_laws_preserve_complete_values_and_validity"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-vm/src/runtime/__fuzz__/runtime__list_statistics__tests__bolero_list_statistics_match_a_reference_over_fixed_ragged_sliced_and_null_lists/corpus"
+domain_version = 1
+features = []
+id = "vm-list-statistics"
+invariant = "Over generated fixed and ragged F64 lists with null containers, a slice that skips leading rows and at most one NaN, infinity or signed zero in a list, every variance and standard deviation agrees with the exact variance of the list's integer sums within (count + 8) units of the last place of its magnitude, every median and quantile equals by bits the value a full total-order sort interpolates at rank percentile / 100 * (n - 1), list_argmin and list_argmax return the first position a total-order scan finds and nth at that position equals min or max by bits, a null list gives null without an error, and a list holding a non-finite value fails only its own row with invalid_argument."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-vm"
+random_iterations = 256
+source = "crates/nervix-vm/src/runtime/list_statistics_tests.rs"
+test = "runtime::list_statistics::tests::bolero_list_statistics_match_a_reference_over_fixed_ragged_sliced_and_null_lists"
 test_target = "lib"
 
 [[target]]
@@ -4645,6 +4660,21 @@ package = "nervix-web-console"
 random_iterations = 128
 source = "crates/web-console/src/create_dialog/processor_model_tests.rs"
 test = "create_dialog::processor_model_tests::bolero_processor_drafts_preserve_every_complete_model"
+test_target = "bin:nervix-web-console"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/web-console/src/create_dialog/__fuzz__/create_dialog__placement_draft__tests__bolero_placement_drafts_preserve_every_complete_model/corpus"
+domain_version = 1
+features = []
+id = "console-placement-drafts"
+invariant = "Every complete domain-wide or corridor placement Model filled into its browser draft builds back to the complete original and canonical Plexus, including both member sides in their written order, every policy, the optional RANK and IF NOT EXISTS."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-web-console"
+random_iterations = 256
+source = "crates/web-console/src/create_dialog/placement_draft.rs"
+test = "create_dialog::placement_draft::tests::bolero_placement_drafts_preserve_every_complete_model"
 test_target = "bin:nervix-web-console"
 
 [[target]]

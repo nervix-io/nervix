@@ -99,6 +99,8 @@ use crate::{
     url_component::{self, UrlComponent},
 };
 
+mod list_statistics;
+
 /// One register's value during an execution.
 #[derive(Clone)]
 enum Register<A> {
@@ -2472,6 +2474,9 @@ fn execute_builtin(
         BuiltinLowering::ListMin => Ok(execute_list_extremum(&column(0)?, ListExtremum::Min)?),
         BuiltinLowering::ListMax => Ok(execute_list_extremum(&column(0)?, ListExtremum::Max)?),
         BuiltinLowering::Mean => Ok(execute_list_mean(&column(0)?, row_errors, span)?),
+        BuiltinLowering::ListStatistic(statistic) => {
+            list_statistics::execute_list_statistic(*statistic, &column(0)?, row_errors, span)
+        }
         BuiltinLowering::ListArithmetic(operation) => match operation.arithmetic() {
             Some(arithmetic) if operation.has_scalar() => list_arithmetic::scalar(
                 arithmetic,

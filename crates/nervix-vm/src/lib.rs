@@ -53,6 +53,7 @@ mod ip_address;
 mod ir;
 mod json;
 mod list_shape;
+mod list_statistics;
 mod membership;
 mod numeric;
 mod operand;
@@ -105,6 +106,10 @@ pub use ir::{
 pub use json::{
     JsonDefect, JsonExtraction, JsonKind, JsonOperation, JsonOutput, JsonPlace, JsonScanOutput,
     JsonTarget, JsonTargetDefect, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_DEPTH,
+};
+pub use list_statistics::{
+    FloatListStatistic, ListDispersion, ListExtremum, ListPercentile, ListQuantile, ListStatistic,
+    ListStatisticName,
 };
 pub use membership::{MembershipSet, SMALL_SET_CAPACITY};
 pub use regexp::{

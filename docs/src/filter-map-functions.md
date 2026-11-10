@@ -145,7 +145,7 @@ Every builtin follows these rules unless its own description says otherwise:
 | --- | --- |
 | Types | Arguments are never converted implicitly. A function that accepts several types, such as `abs` over every numeric type, takes each of them as it is. |
 | Nulls | A null argument produces a null result. `coalesce`, `nullif`, `concat`, `concat_ws`, `is_null`, `greatest`, and `least` define their own null handling, and a function can also yield null for present arguments where its description says so, such as `regexp_substr` without a match, `nth` past the end of a list, or `url_host` of a URL without a host. |
-| Optional results | A result is optional when any argument is. `is_null`, `IS [NOT] DISTINCT FROM`, `now`, `uuid_v4`, `uuid_v7`, and `read_headers` are never optional; `coalesce`, `greatest`, and `least` are optional only when every argument is; and `TRY_CAST`, `JSON_VALUE`, `TRY_JSON_VALUE`, `nullif`, `LOOKUP_HASH_MAP`, `read_header`, `url_host`, `url_port`, `url_query`, `url_fragment`, `url_query_value`, and the list functions `first`, `last`, `nth`, `sum`, `min`, `max`, and `mean` are always optional. An optional result initializes a required field only through an expression that is never null, such as `coalesce(<result>, <default>)`; assigning it directly is rejected when the statement is applied with `SET field '<field>' may be null but the output field is required`. |
+| Optional results | A result is optional when any argument is. `is_null`, `IS [NOT] DISTINCT FROM`, `now`, `uuid_v4`, `uuid_v7`, and `read_headers` are never optional; `coalesce`, `greatest`, and `least` are optional only when every argument is; and `TRY_CAST`, `JSON_VALUE`, `TRY_JSON_VALUE`, `nullif`, `LOOKUP_HASH_MAP`, `read_header`, `url_host`, `url_port`, `url_query`, `url_fragment`, `url_query_value`, the list functions `first`, `last`, `nth`, `sum`, `min`, `max`, and `mean`, and the [list statistics](#list-statistics) are always optional. An optional result initializes a required field only through an expression that is never null, such as `coalesce(<result>, <default>)`; assigning it directly is rejected when the statement is applied with `SET field '<field>' may be null but the output field is required`. |
 | Sensitivity | A result is sensitive when any argument is sensitive, including results such as `length(...)`, `is_null(...)`, and `count(...)` that do not contain the argument's value. A conditional is sensitive when its operand, any condition, or any result is. Literals and calls without arguments are not sensitive. Only `leak_sensitive(...)` removes sensitivity. |
 | Volatility | Every builtin is deterministic except `now()`, which returns one value for an execution, and `uuid_v4()` and `uuid_v7()`, which return a new value for every message. |
 | Errors | A function that can fail reports a per-message error and yields null for that message. Inside a conditional, only the selected arm can report one. [Errors](#errors) describes how an error reaches the message's error policy. |
@@ -1890,6 +1890,57 @@ rather than counting the elements of one list. A window route therefore cannot u
 functions, even inside an aggregate's argument, where `SUM(count(input.values))` is rejected as a
 nested aggregate. Everywhere else these names are the list functions above.
 
+### List Statistics
+
+Eight functions describe the values of one `ARRAY` or `VEC`, beside `sum`, `mean`, `min`, and
+`max`:
+
+| Function | Elements | Returns | Null when |
+| --- | --- | --- | --- |
+| `list_var_pop(list)`, `list_stddev_pop(list)` | numeric | optional `F64` | the list is empty |
+| `list_var_samp(list)`, `list_stddev_samp(list)` | numeric | optional `F64` | the list has fewer than two elements |
+| `list_median(list)` | numeric | optional `F64` | the list is empty |
+| `list_quantile(list, percentile)` | numeric; `percentile` a numeric literal from 0 to 100 | optional `F64` | the list is empty |
+| `list_argmin(list)`, `list_argmax(list)` | numeric, `BOOL`, `STRING`, `DATETIME` | optional `I64` | the list is empty |
+
+The results are always optional, as those of `mean`, `min`, and `first` are, and a null list gives
+null.
+
+- **Variance and standard deviation.** Each element is read as the nearest `F64`, and the moments
+  are kept centered on the list's own mean, as the window statistics keep theirs, so a variance is
+  never the difference of two large sums of squares. The population forms divide by the number of
+  elements `n` and the sample forms by `n - 1`; a standard deviation is the square root of its
+  variance.
+- **Median and quantile.** `list_quantile` is exact over all of the list's elements: it orders them
+  and interpolates linearly at rank `percentile / 100 * (n - 1)`, the rule
+  [`APPROX_QUANTILE`](#approximate-sketches) follows within its exact range. `list_median(list)` is
+  `list_quantile(list, 50)`. Elements order by the IEEE 754 total order, so equal values and
+  `-0.0` beside `0.0` give one result whatever their written order. The percentile is read once,
+  when the statement is applied, from an integer or decimal literal such as `90` or `99.5`. Any
+  other expression, a negative literal such as `-1` included, is refused with `function
+  'list_quantile' requires its percentile to be a numeric literal`, and a literal outside 0 to 100
+  with `function 'list_quantile' requires a percentile from 0 to 100, found 101`.
+- **Index of the extreme.** `list_argmin` and `list_argmax` return the zero-based position of the
+  least or greatest element, counted as `nth` counts. Elements order as `min` and `max` order them,
+  floats by the IEEE 754 total order, and the first of equal elements wins, so
+  `nth(list, list_argmin(list))` is `min(list)` and `nth(list, list_argmax(list))` is `max(list)`.
+  Neither function fails.
+- **Errors.** A variance, standard deviation, median, or quantile of a list holding NaN or an
+  infinity reports `invalid_argument` with `list_median input contains a non-finite element`,
+  naming the function, and a result that is not finite reports `list_var_pop produced a non-finite
+  result`, as the variance of `[1e308, -1e308]` does. The function yields null for that message.
+- **Types.** A nested `ARRAY` or `VEC` element is refused when the statement is applied, with
+  `function 'list_var_pop' requires ARRAY or VEC elements of a scalar type`, and so is a
+  non-numeric element of the dispersion and quantile functions, with `function 'list_median'
+  requires numeric input, found Utf8`, and a `BYTES` element of `list_argmin` and `list_argmax`,
+  with `function 'list_argmax' requires ordered scalar elements, found Binary`.
+
+The `list_` prefix keeps these names apart from the window aggregates. In a window route `VAR_POP`,
+`STDDEV_SAMP`, and the other aggregates keep their meaning, and a list statistic reads a collected
+sequence, as `list_median(COLLECT_VEC(input.level))` takes the median of the values
+`STDDEV_POP(input.level)` reads, or appears inside an aggregate's argument, as
+`AVG(list_stddev_pop(input.history))` averages the spread of each retained row's list.
+
 ## Window Aggregates
 
 A [window processor](processors.md#window-processor) route computes its output from aggregates over
@@ -1918,6 +1969,7 @@ with `... cannot retain BYTES in aggregate demand <n> argument <m>`.
 | `MIN(value)`, `MAX(value)` | numeric, `BOOL`, `STRING`, or `DATETIME` | the argument's type | no row has a value |
 | `FIRST(value)`, `LAST(value)` | any | the argument's type | no row has a value |
 | `COLLECT_VEC(value)` | any required value | required `VEC<value type>` | never; a window emits only while it retains a row |
+| `COLLECT_ARRAY(value)` | any required value; count-only `WIDTH n MESSAGES` | required `ARRAY<value type, n>` | never; each emission retains exactly `n` rows |
 | `ARG_MIN(value, key)`, `ARG_MAX(value, key)` | any value; a numeric, `BOOL`, `STRING`, or `DATETIME` key | the value's type | no row has both a value and a key |
 | `VAR_POP(value)`, `STDDEV_POP(value)` | numeric | `F64` | no row has a value |
 | `VAR_SAMP(value)`, `STDDEV_SAMP(value)` | numeric | `F64` | fewer than two rows have a value |
@@ -1935,7 +1987,18 @@ admission, as `FIRST` and `LAST` are. It preserves the argument's exact type: co
 argument must be required, because list elements are never null. An optional argument is refused
 when the processor is applied; use `coalesce` to choose its explicit value. A collecting route
 requires a message `WIDTH` or `MAX STATE SIZE`; a duration alone does not bound its retained values.
-List functions such as `nth`, `mean`, `slice`, and `dot` can consume the result in the same route.
+List functions such as `nth`, `mean`, `slice`, `dot`, and the [list statistics](#list-statistics)
+can consume the result in the same route.
+
+`COLLECT_ARRAY` uses the same required argument, order, sensitivity and retained sequence. It is
+accepted only under `WIDTH n MESSAGES` with no duration bound. Its length comes from that width,
+independently of the assigned field: a field of another length is an exact-type error. A duration
+or combined bound is refused when the processor is applied; use `COLLECT_VEC` for those windows.
+With `WIDTH 64 MESSAGES`, collecting `[input.cpu, input.mem]` yields `ARRAY<F32, 64, 2>` when both
+inputs are required `F32` values. Collecting a vector adds a fixed outer level and retains the
+vector inside it. The width and every necessarily present nested fixed dimension must fit Arrow's
+signed 32-bit field lengths. Actual output bytes still pass the node's decoded and encoded relay
+limits; a byte or admission refusal follows the existing window emission-failure policy.
 
 The [approximate sketches](#approximate-sketches) describe the last three table entries.
 
@@ -1944,14 +2007,14 @@ present, so a null argument contributes nothing. `COUNT` is the exception: it co
 row whatever its argument holds, so `SUM(input.amount) / COUNT(input.amount)` is not the mean of an
 optional field; use `AVG`. A window emits only while it retains at least one row, so an aggregate
 whose arguments are all required always has a value, except the sample statistics and `CORR`, which
-can be undefined in any window. `COUNT`, `COUNT_IF`, `COLLECT_VEC`, `APPROX_COUNT_DISTINCT`, and `APPROX_TOP_K` are
+can be undefined in any window. `COUNT`, `COUNT_IF`, `COLLECT_VEC`, `COLLECT_ARRAY`, `APPROX_COUNT_DISTINCT`, and `APPROX_TOP_K` are
 never optional; `VAR_SAMP`, `STDDEV_SAMP`, `COVAR_SAMP`, and `CORR` are always optional; every other
 aggregate is optional exactly when an argument it reads is. Assign an aggregate that can be null to
 an `OPTIONAL` field or give it a value with `COALESCE`; assigning it to a required field is rejected
 when the processor is applied.
 
 **Order and ties.** `MIN`, `MAX`, `ARG_MIN`, and `ARG_MAX` return the earliest admitted row among
-rows with equal keys. `FIRST`, `LAST`, and `COLLECT_VEC` order rows by their ingestion low watermark,
+rows with equal keys. `FIRST`, `LAST`, `COLLECT_VEC`, and `COLLECT_ARRAY` order rows by their ingestion low watermark,
 then by admission. Element zero of a collection equals `FIRST` and its last element equals `LAST`
 over the same argument. `BOOL` orders `false` before `true`, `STRING` orders by bytes, and floating-point keys
 order NaN above every other value and treat both zeros as equal.
@@ -1996,7 +2059,7 @@ field that is not sensitive.
 arguments share it: `AVG`, the variances, and the standard deviations of one argument share a
 `moments` structure; the covariances and `CORR` of one argument pair, in the same order, share
 `co_moments`; `COUNT_IF`, `BOOL_AND`, and `BOOL_OR` share a `truth_counter`; `ARG_MIN` and `ARG_MAX`
-share `arg_extremes`; `MIN` and `MAX` share `extremes`; `FIRST`, `LAST`, and `COLLECT_VEC` share a `sequence`;
+share `arg_extremes`; `MIN` and `MAX` share `extremes`; `FIRST`, `LAST`, `COLLECT_VEC`, and `COLLECT_ARRAY` share a `sequence`;
 `APPROX_QUANTILE` calls with one argument and capacity share a `quantile_sketch`; and
 `PERCENTILE_LINEAR_HISTOGRAM` calls with one argument, bucket count, bounds, and delay share a
 `linear_histogram`. `DESCRIBE WINDOW PROCESSOR` lists every structure with the functions it serves
@@ -2218,10 +2281,13 @@ errors. `T` is the argument's type, and a list is an `ARRAY` or a `VEC`.
 | `distance` | `F64` | [Array And Vector Functions](#array-and-vector-functions) |
 | `list_add`, `list_sub`, `list_mul`, `list_div` | `ARRAY` or `VEC` | [List Arithmetic](#list-arithmetic) |
 | `list_add_scalar`, `list_sub_scalar`, `list_mul_scalar`, `list_div_scalar`, `list_abs` | same list type | [List Arithmetic](#list-arithmetic) |
+| `list_var_pop`, `list_var_samp`, `list_stddev_pop`, `list_stddev_samp`, `list_median`, `list_quantile` | optional `F64` | [List Statistics](#list-statistics) |
+| `list_argmin`, `list_argmax` | optional `I64` | [List Statistics](#list-statistics) |
 | `COUNT`, `COUNT_IF`, `APPROX_COUNT_DISTINCT` | `I64` | [Window Aggregates](#window-aggregates) |
 | `BOOL_AND`, `BOOL_OR` | `BOOL` | [Window Aggregates](#window-aggregates) |
 | `SUM`, `MIN`, `MAX`, `FIRST`, `LAST` | the argument's type | [Window Aggregates](#window-aggregates) |
 | `COLLECT_VEC` | required `VEC` of the argument's exact type | [Window Aggregates](#window-aggregates) |
+| `COLLECT_ARRAY` | required `ARRAY` of the argument's exact type and the count-only window width | [Window Aggregates](#window-aggregates) |
 | `ARG_MIN`, `ARG_MAX` | the value's type | [Window Aggregates](#window-aggregates) |
 | `AVG`, `VAR_POP`, `VAR_SAMP`, `STDDEV_POP`, `STDDEV_SAMP`, `COVAR_POP`, `COVAR_SAMP`, `CORR` | `F64` | [Window Aggregates](#window-aggregates) |
 | `PERCENTILE_LINEAR_HISTOGRAM` | `F64` | [Linear Histogram Percentiles](#linear-histogram-percentiles) |

@@ -167,9 +167,10 @@ The web console's visual Create forms also cover internal schemas, declared JSON
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
 Roto UDFs, ingestors and emitters for every connector and entity pair, junctions, deduplicators,
 reorderers, window processors, correlators, reingestors, generators, inferencers, WASM processors,
-and session subscriptions; use the same web-console chapter for their typed fields, resource
-versions, tensor shapes, guest limits, program editors, reference lookup, and transaction
-behavior.
+domain-wide and corridor placement rules, and session subscriptions; use the same web-console
+chapter for their typed fields, resource versions, tensor shapes, guest limits, program editors,
+reference lookup, placement members, contextual create actions, and transaction behavior, and its
+Creation Coverage section for which form creates each statement.
 
 For materialized relay inspection, read [Relay → Inspect Materialized State](../../../docs/src/relay.md#inspect-materialized-state)
 for selector, LIMIT/AFTER and FORMAT clause order, typed rows, sensitivity and stale continuations.
@@ -542,8 +543,9 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   - `AND`, `OR`, and `coalesce` evaluate every operand, so only an `IF` or `CASE` arm shields an
     operand that can fail, such as a division by a field that can be zero;
   - an optional result (`TRY_CAST`, JSON extraction, `nullif`, `LOOKUP_HASH_MAP`, `regexp_substr`,
-    `regexp_extract`, URL components, list `first`/`last`/`nth`/`sum`/`min`/`max`/`mean`, sample
-    window statistics, `CASE` without `ELSE`) reaches a required field only through `coalesce`;
+    `regexp_extract`, URL components, list `first`/`last`/`nth`/`sum`/`min`/`max`/`mean`, the
+    `list_` statistics, sample window statistics, `CASE` without `ELSE`) reaches a required field
+    only through `coalesce`;
   - every route whose functions can fail has an `ON MESSAGE ERROR` policy, which also receives a
     failed ingestor `BRANCHED BY ... SET`, and expressions that can fail stay out of deduplication
     keys, reorderer `BY`, `CORRELATE WHERE`, inferencer `INPUTS`, and a reingestor's
@@ -553,20 +555,22 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   - before shaping an inferencer input or reading a nested list, read `Expression Functions` →
     `Array And Vector Functions` and `Processors` → `Inferencer`; check the fixed shape and literal
     dimensions rather than treating a change of axes as an element-type conversion;
-  - datetime units, parts, `date_bin` widths, zones, formats, and disambiguations are literals, a
-    local calendar names its zone, `now()` supplies domain time, and foreign timestamps are read
-    with a strict `parse_datetime` format;
+  - datetime units, parts, `date_bin` widths, zones, formats, and disambiguations, and the
+    `list_quantile` percentile, are literals, a local calendar names its zone, `now()` supplies
+    domain time, and foreign timestamps are read with a strict `parse_datetime` format;
   - IP text is parsed once into a `BYTES` field, IPv4-mapped addresses are unmapped before IPv4
     network tests, URL inputs are absolute, and many JSON fields are read from one document field;
   - every sensitive value stored in a field that is not sensitive goes through `leak_sensitive(...)`;
     hashing, counting, or testing a sensitive value keeps the result sensitive.
 - In window routes, read `Expression Functions` → `Window Aggregates`. Aggregates appear only in
   window route `SET`, `input` only inside their arguments, and `COUNT`, `SUM`, `FIRST`, `LAST`,
-  `MIN`, and `MAX` are aggregates there, never list functions. Compute window output from aggregates
+  `MIN`, and `MAX` are aggregates there, never list functions, while the `list_` statistics stay
+  list functions an aggregate's argument may call. Compute window output from aggregates
   and constants, and prefer the dedicated aggregates (`AVG`, `COUNT_IF`, `ARG_MIN`, `ARG_MAX`, the
-  `*_POP` and `*_SAMP` statistics, `CORR`) over hand-built formulas. Before using `COLLECT_VEC`,
-  check its required argument and bounded-retention rules in that reference; use the documented
-  list functions to consume its result. For `APPROX_COUNT_DISTINCT`,
+  `*_POP` and `*_SAMP` statistics, `CORR`) over hand-built formulas. Before using `COLLECT_VEC` or
+  `COLLECT_ARRAY`, check the reference's required-argument, retention and count-width rules;
+  follow the Generators quickstart for sampled sequences and visible cadence gaps. Use the
+  documented list functions to consume the result. For `APPROX_COUNT_DISTINCT`,
   `APPROX_QUANTILE`, and `APPROX_TOP_K`, read `Approximate Sketches`: the window needs
   `MAX STATE SIZE` after duration `WIDTH` and `STEP`, a branched window a branch with
   `MAX INSTANCES <n> EVICT LRU`, and the precision or capacity sets both accuracy and memory.
