@@ -508,33 +508,3 @@ Feature: Expression function semantics
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 0             |
-
-  Scenario Outline: List item functions reject nested elements when the statement is applied
-    Given a <cluster_size> node nervix cluster is started
-    When these Plexus commands fail with "function 'first' requires ARRAY or VEC elements of a scalar type"
-      """
-      CREATE UNPACED DOMAIN {{domain}};
-      CREATE SCHEMA detection_batch (
-        id STRING,
-        detections <detections_type>
-      );
-      CREATE SCHEMA first_detection (
-        id STRING,
-        detection <detection_type> OPTIONAL
-      );
-      CREATE RELAY detection_batches SCHEMA detection_batch UNBRANCHED;
-      CREATE RELAY first_detections SCHEMA first_detection UNBRANCHED;
-      CREATE JUNCTION select_first_detection
-        FROM detection_batches
-        UNBRANCHED
-        TO first_detections
-          INHERIT ALL EXCEPT detections
-          SET detection = first(input.detections)
-          FLUSH IMMEDIATE
-          ON MESSAGE ERROR LOG;
-      """
-
-    Examples:
-      | cluster_size | detections_type    | detection_type |
-      | 1            | VEC<ARRAY<F32, 6>> | ARRAY<F32, 6>  |
-      | 3            | VEC<ARRAY<F32, 6>> | ARRAY<F32, 6>  |

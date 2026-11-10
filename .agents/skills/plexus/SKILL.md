@@ -551,6 +551,9 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   - a list changes its element type or container only through `AS` or `TRY_CAST` to the full list
     type, nested as deep as the operand (`input.readings AS ARRAY<F32, 64>`); a `VEC` that does not
     hold the `ARRAY`'s length fails its message, and a list never converts to a scalar or `STRING`;
+  - before shaping an inferencer input or reading a nested list, read `Expression Functions` →
+    `Array And Vector Functions` and `Processors` → `Inferencer`; check the fixed shape and literal
+    dimensions rather than treating a change of axes as an element-type conversion;
   - datetime units, parts, `date_bin` widths, zones, formats, and disambiguations are literals, a
     local calendar names its zone, `now()` supplies domain time, and foreign timestamps are read
     with a strict `parse_datetime` format;

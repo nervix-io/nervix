@@ -413,6 +413,7 @@ class InventoryTests(unittest.TestCase):
             "vm-decimal-rounding-integers",
             "vm-list-conversions",
             "vm-list-conversion-lengths",
+            "vm-list-shapes",
             "vm-list-arithmetic",
             "approx-into-rounding",
             "approx-into-exact",

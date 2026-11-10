@@ -3372,6 +3372,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/nervix-vm/src/runtime/list_shape/__fuzz__/runtime__list_shape__properties__bolero_shape_laws_preserve_complete_values_and_validity/corpus"
+domain_version = 1
+features = []
+id = "vm-list-shapes"
+invariant = "Reshaping fixed columns preserves every logical value bit and container validity, fixed flatten of a rank-two reshape preserves their innermost order, reshaping back and transposing twice reproduce the complete original, and one transpose agrees with an independent outer-axis reference while retaining deeper dimensions."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-vm"
+random_iterations = 128
+source = "crates/nervix-vm/src/runtime/list_shape/properties.rs"
+test = "runtime::list_shape::properties::bolero_shape_laws_preserve_complete_values_and_validity"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/approx-into/src/__fuzz__/properties__bolero_conversions_round_to_the_nearest_value_or_name_no_integer/corpus"
 domain_version = 1
 features = []
