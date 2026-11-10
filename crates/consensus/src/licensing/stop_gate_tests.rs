@@ -2,7 +2,8 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** Deterministic gate, refusal, stop-cause and supersession proofs through the
-//!   production consensus apply path.
+//!   production consensus apply path, and the activated state other consensus owners' tests close
+//!   the gate on partway through their own operations.
 //! - **Depends on.** Real protocol signers, typed commands and current domain records.
 //! - **Must not know.** Clocks, service networking or the leader's stop loop.
 
@@ -95,6 +96,29 @@ fn stop_cause(state: &StateMachineData, name: &str) -> Option<DomainStopCause> {
         .get(&domain(name))
         .verified("the fixture created the domain")
         .stop_cause
+}
+
+/// A cluster whose ephemeral activation is committed and has not expired, so the gate is open.
+pub(crate) fn ephemeral_state() -> StateMachineData {
+    let fixture = SignedFixture::new();
+    let mut state = fixture.state();
+    assert_eq!(
+        activate(&fixture, &mut state, FIRST, 0),
+        ConsensusResponse::Applied
+    );
+    assert_eq!(state.licensing_stop(), None, "the activation is live");
+    state
+}
+
+/// Commits licensing time at the ephemeral expiry, which closes the gate, and returns its reason.
+pub(crate) fn pass_expiry(state: &mut StateMachineData) -> LicensingStopReason {
+    let expires_at = expiry(state);
+    advance(state, expires_at);
+    let reason = LicensingStopReason::EphemeralExpired {
+        expired_at: expires_at,
+    };
+    assert_eq!(state.licensing_stop(), Some(reason));
+    reason
 }
 
 #[test]
@@ -328,4 +352,39 @@ fn only_a_new_activation_after_the_expiry_lifts_the_gate_and_starts_stay_explici
         .verified("created above");
     assert_eq!(tenant.status, DomainStatus::Running);
     assert_eq!(tenant.stop_cause, None);
+}
+
+#[test]
+fn a_closed_gate_refuses_a_pause_recovery_that_would_resume_the_domain() {
+    let mut state = ephemeral_state();
+    assert_eq!(
+        put(&mut state, "paused", DomainStatus::Paused),
+        ConsensusResponse::Applied
+    );
+    let reference =
+        nervix_models::CommandExecutionReference::parse("018bcfe5-6800-7000-8000-000000000001")
+            .assured("the fixture reference is a UUIDv7");
+    let mutation =
+        crate::DomainMutationLease::recorded(crate::DomainMutationOwner::command(reference), 11);
+    state
+        .domain_mutations
+        .insert(domain("paused"), mutation.clone());
+    let reason = pass_expiry(&mut state);
+    let recovery = ConsensusCommand::RecoverOrphanedModelPause {
+        domain_id: domain("paused"),
+        mutation: Box::new(mutation),
+    };
+    let applied = apply_consensus_command(&mut state, &recovery);
+    assert_eq!(
+        applied.response,
+        ConsensusResponse::Conflict(ConsensusConflict::LicensingStop { reason })
+    );
+    assert!(!applied.domains_changed);
+    // The pause stays until the leader's licensing stop ends it; nothing resumes the domain.
+    let paused = state
+        .domains
+        .get(&domain("paused"))
+        .verified("created above");
+    assert_eq!(paused.status, DomainStatus::Paused);
+    assert_eq!(paused.stop_cause, None);
 }

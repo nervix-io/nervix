@@ -894,7 +894,14 @@ mod tests {
     fn preparing_restore_with_lifecycle(
         lifecycle: nervix_models::RestoreLifecycle,
     ) -> (StateMachineData, CommandExecutionReference) {
-        let mut state = StateMachineData::default();
+        preparing_restore_in(StateMachineData::default(), lifecycle)
+    }
+
+    /// Admits a restore into `state` and applies every step before its model installation.
+    fn preparing_restore_in(
+        mut state: StateMachineData,
+        lifecycle: nervix_models::RestoreLifecycle,
+    ) -> (StateMachineData, CommandExecutionReference) {
         let reference = reference_at(45);
         let mut restore = cluster_restore(ExistingUserPolicy::Fail);
         restore.restore.lifecycle = lifecycle;
@@ -1104,6 +1111,53 @@ mod tests {
                 .get(&domain("prod"))
                 .assured("restored domain exists"),
             &complete
+        );
+    }
+
+    #[test]
+    fn a_resume_the_licensing_gate_closed_under_completes_with_its_domain_stopped_by_licensing() {
+        let (mut state, reference) = preparing_restore_in(
+            crate::licensing::stop_gate_tests::ephemeral_state(),
+            nervix_models::RestoreLifecycle::Resume,
+        );
+        let authority = begin_installation(&mut state, &reference, 3, 12);
+        let before = state
+            .domains
+            .get(&domain("prod"))
+            .assured("restored domain exists")
+            .clone();
+        assert_eq!(before.status, DomainStatus::Stopped);
+        let reason = crate::licensing::stop_gate_tests::pass_expiry(&mut state);
+        assert_eq!(
+            step(
+                &mut state,
+                &reference,
+                RestoreStep::ApplyModels(domain("prod")),
+                RestoreStepEffect::InstalledState {
+                    authority,
+                    clock: None,
+                }
+            ),
+            ConsensusResponse::Applied,
+            "the installation completes under the closed gate"
+        );
+        let restored = state
+            .domains
+            .get(&domain("prod"))
+            .assured("restored domain exists");
+        assert_eq!(restored.status, DomainStatus::Stopped);
+        assert_eq!(
+            restored.stop_cause,
+            Some(nervix_models::DomainStopCause::Licensing(reason))
+        );
+        assert_eq!(restored.start_version, before.start_version);
+        assert_eq!(restored.last_start, before.last_start);
+        assert_eq!(restored.clock, None);
+        assert!(
+            !state
+                .domain_restore_installations
+                .contains_key(&domain("prod")),
+            "the completed installation releases its gate, so a later START may run the domain"
         );
     }
 

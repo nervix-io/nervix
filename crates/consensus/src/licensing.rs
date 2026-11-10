@@ -19,7 +19,7 @@ pub use activation::{
 };
 pub use environment::{LICENSING_SERVICE, LicensingEnvironment};
 #[cfg(test)]
-mod stop_gate_tests;
+pub(crate) mod stop_gate_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 #[cfg(test)]
