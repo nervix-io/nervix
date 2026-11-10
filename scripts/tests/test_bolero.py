@@ -375,6 +375,7 @@ class InventoryTests(unittest.TestCase):
             "runtime-state-snapshots-malformed",
             "runtime-state-store-checkpoints",
             "runtime-window-snapshots",
+            "runtime-window-collection",
             "runtime-window-snapshots-malformed",
             "runtime-window-sealed-checkpoints",
             "runtime-arrow-bodies",
@@ -576,6 +577,10 @@ class InventoryTests(unittest.TestCase):
             "backup-capture-wire": 3,
             "backup-capture-wire-malformed": 3,
             "backup-section-mapping": 4,
+            "runtime-window-collection": 1,
+            "runtime-window-snapshots": 5,
+            "runtime-window-sealed-checkpoints": 5,
+            "backup-window-groups": 5,
 
             "inferencer-state-snapshots-malformed": 1,
             "inferencer-native-snapshot-projection": 1,

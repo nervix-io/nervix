@@ -310,6 +310,11 @@ harness = false
 name = "window_sketches"
 required-features = ["benchmarks"]
 
+[[bench]]
+harness = false
+name = "window_collection"
+required-features = ["benchmarks"]
+
 [workspace]
 members = [
   ".",

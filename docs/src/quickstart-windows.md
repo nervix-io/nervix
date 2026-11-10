@@ -17,6 +17,7 @@ CREATE SCHEMA order_window (
   customer STRING,
   order_count I64,
   total_amount I64,
+  amounts VEC<I64>,
   max_amount I64,
   avg_amount F64
 );
@@ -39,6 +40,7 @@ CREATE WINDOW PROCESSOR customer_order_window
     SET customer = FIRST(input.customer),
         order_count = COUNT(input.order_id),
         total_amount = SUM(input.amount),
+        amounts = COLLECT_VEC(input.amount),
         max_amount = MAX(input.amount),
         avg_amount = AVG(input.amount)
   ON MESSAGE ERROR LOG;
@@ -46,7 +48,7 @@ CREATE WINDOW PROCESSOR customer_order_window
 COMMIT;
 ```
 
-- The aggregate functions are `COUNT`, `COUNT_IF`, `SUM`, `AVG`, `MIN`, `MAX`, `FIRST`, `LAST`,
+- The aggregate functions are `COUNT`, `COUNT_IF`, `SUM`, `AVG`, `MIN`, `MAX`, `FIRST`, `LAST`, `COLLECT_VEC`,
   `ARG_MIN`, `ARG_MAX`, `BOOL_AND`, `BOOL_OR`, `VAR_POP`, `VAR_SAMP`, `STDDEV_POP`, `STDDEV_SAMP`,
   `COVAR_POP`, `COVAR_SAMP`, `CORR`, and `PERCENTILE_LINEAR_HISTOGRAM`, and the approximate
   `APPROX_COUNT_DISTINCT`, `APPROX_QUANTILE`, and `APPROX_TOP_K`. Aggregate calls also participate
@@ -56,6 +58,9 @@ COMMIT;
 - A null argument contributes nothing to an aggregate. An aggregate that can be null, such as
   `VAR_SAMP` or any aggregate over an `OPTIONAL` field, needs an `OPTIONAL` output field or a
   `COALESCE`.
+- `COLLECT_VEC` returns the retained amounts as one list in `FIRST`-to-`LAST` order. It requires a
+  required argument and either a message `WIDTH` or `MAX STATE SIZE`. Choose a null default with
+  `coalesce` before collecting an optional field.
 - `input.<field>` is valid **only** inside aggregate arguments; a bare `customer = input.customer`
   is rejected. Aggregates cannot be nested.
 - `WIDTH` equal to `STEP` makes the windows tumbling (no overlap); a smaller `STEP` slides them.

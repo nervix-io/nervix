@@ -2398,7 +2398,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__window_archive__tests__bolero_window_archive_groups_rebuild_the_published_window/corpus"
-domain_version = 4
+domain_version = 5
 features = ["testing"]
 id = "backup-window-groups"
 invariant = "Resident and bounded readers of the same current native window produce byte-identical complete input and argument groups with identical revision, incarnation, sequences, watermarks, boundaries and delayed removals; restoring the bounded reader's archive preserves every live row, bit-exact branch key and argument and answers every aggregate as before."
@@ -2833,7 +2833,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__window_state__tests__bolero_window_snapshots_restore_every_retained_row_and_typed_state/corpus"
-domain_version = 4
+domain_version = 5
 features = []
 id = "runtime-window-snapshots"
 invariant = "A window of up to 192 rows with bounded string columns and 96 delayed removals splits columns, identities and typed sections under generated limits and restores every row's sequence, ingestion time, branch bits, schemas and argument values, its next sequence, branch lifetime and typed aggregate state; another branch lifetime restores nothing."
@@ -2843,6 +2843,21 @@ package = "nervix-server"
 random_iterations = 128
 source = "src/runtime/window_state.rs"
 test = "runtime::window_state::tests::bolero_window_snapshots_restore_every_retained_row_and_typed_state"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/window_accumulator/__fuzz__/runtime__window_accumulator__collection_properties__bolero_collected_windows_match_admit_step_restore_sequences/corpus"
+domain_version = 1
+features = ["testing"]
+id = "runtime-window-collection"
+invariant = "A required collected column and its FIRST/LAST endpoints equal an independent watermark/admission-ordered deque after up to 32 admissions, prefix steps and snapshot restores over at most 264 rows, preserving schema, nullability and every I64 value across argument batches."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-server"
+random_iterations = 128
+source = "src/runtime/window_accumulator/collection_properties.rs"
+test = "runtime::window_accumulator::collection_properties::bolero_collected_windows_match_admit_step_restore_sequences"
 test_target = "lib"
 
 [[target]]
@@ -2953,7 +2968,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__window_state__tests__bolero_sealed_window_checkpoints_match_their_resident_encoding/corpus"
-domain_version = 4
+domain_version = 5
 features = []
 id = "runtime-window-sealed-checkpoints"
 invariant = "A window of up to 192 rows with bounded string columns and 96 delayed removals sealed under generated section and record limits concatenates into its bit-identical resident container, restores the complete window and bit-exact branch keys, preserves the artifact's length and digest, and returns every bulk charge."
