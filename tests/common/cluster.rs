@@ -3250,12 +3250,13 @@ impl Cluster {
 
     /// The integer `field` of the JSON payload of every message JetStream `stream` holds, in the
     /// order the stream stored them.
-    pub(crate) async fn nats_stream_field_values(
+    pub(crate) async fn nats_stream_padded_field_values(
         &self,
         stream: &str,
         field: &str,
+        padding_bytes: usize,
     ) -> io::Result<Vec<i64>> {
-        nats_stream_field_values(&self.dependencies, stream, field).await
+        nats_stream_padded_field_values(&self.dependencies, stream, field, padding_bytes).await
     }
 
     /// Provisions the durable pull consumer `consumer` on JetStream `stream`, as an operator does.
@@ -8255,11 +8256,13 @@ async fn nats_stream_message_count(
 /// Reads every message JetStream `stream` holds when the read begins, through an ordered consumer
 /// of its own, and returns the integer `field` of each message's JSON payload in the order the
 /// stream stored them.
-async fn nats_stream_field_values(
+async fn nats_stream_padded_field_values(
     dependencies: &DependencyEndpoints,
     stream: &str,
     field: &str,
+    padding_bytes: usize,
 ) -> io::Result<Vec<i64>> {
+    let expected_padding = "x".repeat(padding_bytes);
     let client = nats_client(dependencies).await?;
     let mut stream_handle = async_nats::jetstream::new(client)
         .get_stream(stream)
@@ -8297,6 +8300,14 @@ async fn nats_stream_field_values(
         let message = message.map_err(io::Error::other)?;
         let payload: serde_json::Value =
             serde_json::from_slice(&message.payload).map_err(io::Error::other)?;
+        if payload.get("padding").and_then(serde_json::Value::as_str)
+            != Some(expected_padding.as_str())
+        {
+            return Err(io::Error::other(format!(
+                "message {read} of NATS JetStream stream '{stream}' does not keep its \
+                 {padding_bytes}-byte backpressure padding"
+            )));
+        }
         let Some(value) = payload.get(field).and_then(serde_json::Value::as_i64) else {
             return Err(io::Error::other(format!(
                 "a message of NATS JetStream stream '{stream}' carries no integer '{field}': \

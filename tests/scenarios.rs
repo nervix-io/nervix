@@ -29928,7 +29928,7 @@ fn consecutive_runs(values: &[i64], limit: usize) -> String {
 /// then requires that it holds exactly one message for each value from 1 to `once`.
 #[then(
     expr = "within {string} NATS JetStream stream {string} holds every record from 1 to {int} by \
-            field {string}, and records 1 to {int} exactly once"
+            field {string}, and records 1 to {int} exactly once, with {int} padding bytes"
 )]
 async fn then_nats_jetstream_stream_holds_records(
     world: &mut ScenarioWorld,
@@ -29937,6 +29937,7 @@ async fn then_nats_jetstream_stream_holds_records(
     last: i64,
     field: String,
     once: i64,
+    padding_bytes: usize,
 ) {
     let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let stream = expand_placeholders(world, &stream);
@@ -29964,7 +29965,7 @@ async fn then_nats_jetstream_stream_holds_records(
         }
         let values = world
             .cluster()
-            .nats_stream_field_values(&stream, &field)
+            .nats_stream_padded_field_values(&stream, &field, padding_bytes)
             .await
             .unwrap_or_else(|error| {
                 panic!("failed to read NATS JetStream stream '{stream}': {error}")

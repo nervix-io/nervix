@@ -192,6 +192,8 @@ Feature: NATS emission
       | 3            |
 
   @nats_core_connection_loss @deloxide_stress
+  # Padding belongs to the external write under test. Relay hops carry the same 12000 sequence
+  # records, and the emitter constructs their 1000-byte padding before its client sees them.
   Scenario Outline: A core NATS write retries every record through connection loss
     Given NATS is running
     And a NATS endpoint the scenario controls is configured
@@ -210,7 +212,7 @@ Feature: NATS emission
       CREATE JAQ JSON CODEC core_loss_input_codec TO SCHEMA core_loss_input
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON CODEC core_loss_codec FROM WIRE SCHEMA core_loss_wire TO SCHEMA core_loss_event;
-      CREATE RELAY core_loss_events SCHEMA core_loss_event UNBRANCHED;
+      CREATE RELAY core_loss_events SCHEMA core_loss_input UNBRANCHED;
       CREATE NATS CLIENT core_loss_in CONFIG { 'addr' = '{{nats_addr}}' };
       CREATE NATS SUBJECT INGESTOR core_loss_ingestor
         FROM core_loss_in SUBJECT 'core_loss_in_{{test_id}}'
@@ -218,7 +220,6 @@ Feature: NATS emission
         ON QUIESCE DROP DECODE USING core_loss_input_codec
         TO core_loss_events
           INHERIT ALL
-          SET padding = repeat('x', 1000)
           UNBRANCHED
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
@@ -232,6 +233,7 @@ Feature: NATS emission
           MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s
           ENCODE USING core_loss_codec
         INHERIT ALL
+        SET padding = repeat('x', 1000)
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -245,7 +247,7 @@ Feature: NATS emission
     And a NATS message carrying records 1 to 12000 by field "sequence" is published to subject "core_loss_in_{{test_id}}"
     Then within "60s" the controlled NATS endpoint has stopped reading a publish
     When the controlled NATS connection is lost during publication
-    Then within "180s" the observed broker receives every record from 1 to 12000 by field "sequence"
+    Then within "180s" the observed broker receives every record from 1 to 12000 by field "sequence", with 1000 padding bytes
 
     Examples:
       | cluster_size |
@@ -705,6 +707,7 @@ Feature: NATS emission
   # after the endpoint forwards again never sends those records a second time. A record the client
   # had taken without an answer reaches the stream again, as at-least-once delivery allows.
   @nats_jetstream_confirmation_window
+  # Keep artificial backpressure padding at the emitter, after the cross-node relay hops.
   Scenario Outline: A NATS JetStream emitter never resends the records JetStream confirmed before its client stopped taking records
     Given NATS is running
     And a NATS endpoint the scenario controls is configured
@@ -725,14 +728,13 @@ Feature: NATS emission
       CREATE WIRE JSON CODEC window_record_codec
         FROM WIRE SCHEMA window_record_wire
         TO SCHEMA window_record;
-      CREATE RELAY window_records SCHEMA window_record UNBRANCHED;
+      CREATE RELAY window_records SCHEMA window_input UNBRANCHED;
       CREATE NATS CLIENT nats_in CONFIG { 'addr' = '{{nats_addr}}' };
       CREATE NATS SUBJECT INGESTOR window_in
         FROM nats_in SUBJECT 'window_in_{{test_id}}' QUEUE GROUP 'window_in_group_{{test_id}}' INSTANCES 1 MODE NO ACK
         ON QUIESCE DROP DECODE USING window_input_codec
         TO window_records
           INHERIT ALL
-          SET padding = repeat('x', 1000)
           UNBRANCHED
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
@@ -744,6 +746,7 @@ Feature: NATS emission
             RETRY POLICY BACKOFF 100ms MAX 1s
           ENCODE USING window_record_codec
         INHERIT ALL
+        SET padding = repeat('x', 1000)
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -760,7 +763,7 @@ Feature: NATS emission
       timed out: didn't receive ack in time
       """
     When the controlled NATS endpoint forwards everything
-    Then within "180s" NATS JetStream stream "window_{{test_id}}" holds every record from 1 to 12000 by field "sequence", and records 1 to 16 exactly once
+    Then within "180s" NATS JetStream stream "window_{{test_id}}" holds every record from 1 to 12000 by field "sequence", and records 1 to 16 exactly once, with 1000 padding bytes
 
     Examples:
       | cluster_size |
