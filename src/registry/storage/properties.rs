@@ -15,7 +15,6 @@
 
 use std::collections::BTreeMap;
 
-use meticulous::ResultExt as _;
 use nervix_arbitrary::{Arbitrary, Domain};
 
 use super::*;

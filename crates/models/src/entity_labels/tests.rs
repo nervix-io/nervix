@@ -178,7 +178,7 @@ fn current_archives_refuse_duplicate_and_unordered_keys_in_maps_and_key_sets() {
         .windows(b"team/a".len())
         .position(|bytes| bytes == b"team/a")
         .assured("the archive contains the first current key's literal bytes");
-    for replacement in [b'b', b'c'] {
+    for replacement in *b"bc" {
         let mut malformed = key_archive.clone();
         malformed[key_position + b"team/".len()] = replacement;
         assert!(rkyv::from_bytes::<EntityLabelKeys, rkyv::rancor::Error>(&malformed).is_err());

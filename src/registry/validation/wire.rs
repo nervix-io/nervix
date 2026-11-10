@@ -19,10 +19,10 @@ use error_stack::Report;
 use nervix_jaq::CompiledJaqProgram;
 use nervix_models::{
     AvroType, CborType, CodecEncoding, CodecEncodingRule, CodecJaqTransformations, CodecName,
-    CodecWireFormat, CreateAvroWireSchema, CreateCborWireSchema, CreateCodec, CreateJsonWireSchema,
-    CreateLookup, CreateRelay, CreateSchema, CreateWireSchema, DomainName, FieldName,
-    IngestorInput, JsonType, LookupName, Model, ModelIndex, ModelKind, ModelName, ParseAsType,
-    RelayName, ResolvedCodecWireFormat, WireSchemaField, WireSchemaLookup, WireSchemaName,
+    CodecWireFormat, CreateCodec, CreateLookup, CreateRelay, CreateSchema, CreateWireSchema,
+    DomainName, FieldName, IngestorInput, JsonType, LookupName, Model, ModelIndex, ModelKind,
+    ModelName, ParseAsType, RelayName, ResolvedCodecWireFormat, WireSchemaField, WireSchemaLookup,
+    WireSchemaName,
 };
 
 use crate::registry::{error::RegistryError, validation::schema::expect_schema_model};
@@ -269,7 +269,7 @@ pub(in crate::registry) fn ensure_codec_schema_compatibility(
         ResolvedCodecWireFormat::Json(json) => ensure_wire_field_set_matches(
             domain,
             identifier,
-            &json.fields,
+            json.fields,
             schema,
             "json",
             &field_encodings,
@@ -277,7 +277,7 @@ pub(in crate::registry) fn ensure_codec_schema_compatibility(
         ResolvedCodecWireFormat::Cbor(cbor) => ensure_wire_field_set_matches(
             domain,
             identifier,
-            &cbor.fields,
+            cbor.fields,
             schema,
             "cbor",
             &field_encodings,
@@ -285,7 +285,7 @@ pub(in crate::registry) fn ensure_codec_schema_compatibility(
         ResolvedCodecWireFormat::Avro(avro) => ensure_wire_field_set_matches(
             domain,
             identifier,
-            &avro.fields,
+            avro.fields,
             schema,
             "avro",
             &field_encodings,

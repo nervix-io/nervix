@@ -1635,14 +1635,12 @@ fn deserialize_value(bytes: &[u8]) -> Result<Model, Report<RegistryError>> {
     let (encoded_limits, archive) = archive
         .split_at_checked(MODEL_LABEL_LIMIT_BYTES)
         .ok_or_else(|| Report::new(RegistryError::InvalidModelArchive))?;
-    let mut values = encoded_limits.chunks_exact(size_of::<u64>());
+    let mut values = encoded_limits.as_chunks::<{ size_of::<u64>() }>().0.iter();
     let mut next = || {
         u64::from_le_bytes(
-            values
+            *values
                 .next()
-                .assured("the fixed policy prefix holds one word per declared limit")
-                .try_into()
-                .assured("each policy word contains exactly eight bytes"),
+                .assured("the fixed policy prefix holds one word per declared limit"),
         )
     };
     let limits = nervix_models::EntityLabelLimits {
@@ -1684,7 +1682,6 @@ mod properties;
 mod tests {
     use std::{collections::BTreeSet, fs};
 
-    use meticulous::ResultExt as _;
     use nervix_models::{
         AckMode, AlterEmitter, AlterJunction, AlterProcessorOperation, AlterRelay,
         AlterRelayOperation, AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema,

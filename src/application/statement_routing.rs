@@ -86,6 +86,7 @@ pub(in crate::application) fn requires_leader(statement: &Statement) -> bool {
             | Statement::DescribePlacement(_)
             | Statement::DescribeRelocation(_)
             | Statement::LookupQuery(_)
+            | Statement::ShowLabels(_)
             | Statement::ShowCreate(_)
             | Statement::ShowUdfs(_)
             | Statement::ShowIngestors(_)
@@ -131,10 +132,25 @@ mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::{
         AlterCluster, ClientName, ClusterParameterChange, ClusterParameterUpdates, DescribeClient,
-        DescribeCluster,
+        DescribeCluster, InspectionFormat, ModelKind, ModelName, NodeRef, ShowLabels,
     };
 
     use super::*;
+
+    #[test]
+    fn entity_label_inspection_is_a_domain_read() {
+        let statement = Statement::ShowLabels(ShowLabels {
+            entity: NodeRef::new(
+                ModelKind::Schema,
+                ModelName::parse("events").assured("events is a valid model name"),
+            ),
+            format: InspectionFormat::Text,
+        });
+        assert!(requires_request_domain(&statement));
+        assert!(requires_existing_domain(&statement));
+        assert!(!requires_leader(&statement));
+        assert!(!is_persistent_statement(&statement));
+    }
 
     #[test]
     fn configured_client_inspection_is_a_domain_read() {

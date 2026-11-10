@@ -93,7 +93,6 @@ impl SessionServiceImpl {
             .collect::<Vec<_>>();
         let (captured, labels) = self
             .plan_transaction_statements_against(
-                domain,
                 &statements,
                 &references,
                 0,

@@ -31,10 +31,10 @@ use nervix_execution::QueueAdmission;
 use nervix_models::{
     CanonicalImpactSet, CommandExecutionReference, DomainName, DomainSchedule, DomainState,
     DomainStatus, ExecutionStepImpactReport, ImpactNodeCoverage, ImpactPlanningBasis, Model,
-    ModelIndex, OwnershipMoveImpact, RequestedResourceVersion, ResourceId, ResourceName,
-    ResourceUploads, Statement, TransactionCommitStepKind, TransactionOperationAdmission,
-    TransactionOperationNumber, TransactionPosition, TransactionPreviewIdentity,
-    TransactionResolvedDomainStart, TransactionStatus, UserName,
+    ModelIndex, OwnershipMoveImpact, ResourceId, ResourceName, ResourceUploads, Statement,
+    TransactionCommitStepKind, TransactionOperationAdmission, TransactionOperationNumber,
+    TransactionPosition, TransactionPreviewIdentity, TransactionResolvedDomainStart,
+    TransactionStatus, UserName,
 };
 use nervix_plexus::client_statement::ClientStatement;
 use nervix_primitives::sync::{
@@ -59,7 +59,7 @@ use super::{
 use crate::{
     registry::{
         PlannedTransaction, PlannedTransactionStep, PlannedTransactionStepKind, Registry,
-        RegistryError, RegistryMutation, TransactionPlanningError, TransactionPlanningSnapshot,
+        RegistryError, TransactionPlanningError, TransactionPlanningSnapshot,
         TransactionScheduleDecision,
     },
     runtime::RuntimeError,
@@ -1076,7 +1076,6 @@ impl SessionServiceImpl {
             .await;
         let (captured, ()) = self
             .plan_transaction_statements_against(
-                domain,
                 statements,
                 operation_references,
                 first_operation_index,
@@ -1120,7 +1119,6 @@ impl SessionServiceImpl {
     /// Inspect the same pure candidate and planning basis without preparing external bindings.
     pub(in crate::application) async fn plan_transaction_statements_against<T>(
         &self,
-        domain: &DomainName,
         statements: &[Statement],
         operation_references: &[CommandExecutionReference],
         first_operation_index: usize,
@@ -1128,6 +1126,7 @@ impl SessionServiceImpl {
         control: nervix_consensus::TransactionControlSnapshot,
         inspect: impl FnOnce(&ModelIndex) -> T,
     ) -> Result<(CapturedTransactionPlan, T), Report<TransactionPlanningError>> {
+        let domain = control.planning_inputs.domain();
         let models = match control.planning_inputs.schedule() {
             Some(schedule) => schedule
                 .nodes

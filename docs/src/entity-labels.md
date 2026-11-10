@@ -54,6 +54,11 @@ target entity to exist and validate the complete result before any effect.
 ```plexus
 SET LABELS ON SCHEMA readings { 'owner' = 'Platform', 'empty' = '' };
 DROP LABELS ON SCHEMA readings { 'team/path', 'already-absent' };
+```
+
+Inspect the result in a separate request:
+
+```plexus
 SHOW LABELS ON SCHEMA readings FORMAT JSON;
 ```
 
@@ -73,6 +78,8 @@ commit fences as configuration changes. Reversion publishes nothing.
 label map and a committed revision or an explicitly staged transaction view. `FORMAT TEXT` is
 the default; `FORMAT JSON` is a projection of that same result. Clients receive the typed result
 and do not reconstruct it from display text. Keys render in lexicographic order.
+Send the inspection as a single-statement request. Inside a transaction it reads beside the
+queue without appending an operation or changing the transaction's position.
 
 The result also carries the committed policy revision and the four limits captured with the read.
 A client validates the received complete set against that policy and its transport's outer bounds.

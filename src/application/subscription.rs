@@ -117,8 +117,8 @@ pub(in crate::application) enum SessionCommandPlanError {
     #[error("REVERT requires an active transaction")]
     RevertWithoutTransaction,
     #[error(
-        "DESCRIBE TRANSACTION and SHOW TRANSACTIONS must be executed separately; they read \
-         transaction state and never join a multi-statement request"
+        "DESCRIBE TRANSACTION, SHOW TRANSACTIONS and SHOW LABELS must be executed separately; \
+         they read transaction state and never join a multi-statement request"
     )]
     MixedTransactionInspection,
     #[error("transaction command is missing its expected queue position")]

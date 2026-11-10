@@ -28,6 +28,14 @@ fn metadata() -> EntityLabels {
 }
 
 #[test]
+fn metadata_inspection_reads_beside_the_transaction_queue() {
+    let statement = parse_statement("SHOW LABELS ON SCHEMA events;")
+        .assured("the metadata inspection is valid");
+    let statement = crate::client_statement::ClientStatement::Server(statement);
+    assert!(statement.reads_transaction_state());
+}
+
+#[test]
 fn every_current_model_has_the_same_trailing_metadata_and_typed_address() {
     let mut seen = BTreeSet::new();
     for variant in ModelVariant::iter() {

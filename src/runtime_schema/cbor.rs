@@ -29,7 +29,7 @@ use ciborium::value::Value;
 use ciborium_ll::{Decoder as CborDecoder, Header as CborHeader};
 use error_stack::{Report, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
-use nervix_models::{CborType, CreateWireSchema, ParseAsType, WireSchemaStrictness};
+use nervix_models::{CborType, ParseAsType, WireSchemaStrictness};
 use serde::{
     Serialize, Serializer,
     ser::{SerializeMap, SerializeSeq},

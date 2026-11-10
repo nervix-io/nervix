@@ -1690,7 +1690,7 @@ mod properties;
 
 #[cfg(test)]
 mod tests {
-    use meticulous::{OptionExt as _, ResultExt as _};
+    use meticulous::OptionExt as _;
     use nervix_models::ClusterNodeName;
 
     use super::{super::test_fixtures::placement_member, *};

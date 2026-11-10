@@ -29,6 +29,9 @@ Feature: Domain entity labels
       """
       SET LABELS ON SCHEMA labelled_event { 'owner' = 'Platform', 'region' = 'east' };
       DROP LABELS ON SCHEMA labelled_event { 'empty', 'absent' };
+      """
+    And these Plexus commands are executed on the leader node
+      """
       SHOW LABELS ON SCHEMA labelled_event FORMAT JSON;
       """
     Then the last command output is a JSON document where
@@ -362,6 +365,9 @@ Feature: Domain entity labels
       """
       BEGIN;
       SET LABELS ON SCHEMA labelled_event { 'owner' = 'Platform', 'new' = 'staged' };
+      """
+    And client "editor" executes these Plexus commands
+      """
       SHOW LABELS ON SCHEMA labelled_event FORMAT JSON;
       """
     Then the last command output is a JSON document where
@@ -382,6 +388,9 @@ Feature: Domain entity labels
     When client "editor" executes these Plexus commands
       """
       REVERT;
+      """
+    And client "editor" executes these Plexus commands
+      """
       SHOW LABELS ON SCHEMA labelled_event FORMAT JSON;
       """
     Then the last command output is a JSON document where
@@ -421,6 +430,9 @@ Feature: Domain entity labels
     When these Plexus commands are executed on the leader node
       """
       CREATE IF NOT EXISTS SCHEMA labelled_event ( value U32 ) LABELS { 'owner' = 'Other' };
+      """
+    And these Plexus commands are executed on the leader node
+      """
       SHOW LABELS ON SCHEMA labelled_event FORMAT JSON;
       """
     Then the last command output is a JSON document where
@@ -431,6 +443,9 @@ Feature: Domain entity labels
       """
       DROP SCHEMA labelled_event;
       CREATE SCHEMA labelled_event ( value U32 );
+      """
+    And these Plexus commands are executed on the leader node
+      """
       SHOW LABELS ON SCHEMA labelled_event FORMAT JSON;
       """
     Then the last command output is a JSON document where
@@ -460,6 +475,9 @@ Feature: Domain entity labels
     When these Plexus commands are executed on the leader node
       """
       SET LABELS ON SCHEMA labelled_event { 'owner' = 'Second updated' };
+      """
+    And these Plexus commands are executed on the leader node
+      """
       SHOW LABELS ON SCHEMA labelled_event FORMAT JSON;
       """
     Then the last command output is a JSON document where
@@ -550,6 +568,9 @@ Feature: Domain entity labels
     And these Plexus commands are executed on the leader node
       """
       SET LABELS ON SCHEMA labelled_event { 'k2' = 'two' };
+      """
+    And these Plexus commands are executed on the leader node
+      """
       SHOW LABELS ON SCHEMA labelled_event FORMAT JSON;
       """
     Then the last command output is a JSON document where
@@ -568,6 +589,9 @@ Feature: Domain entity labels
       """
       DROP LABELS ON SCHEMA labelled_event { 'k2' };
       ALTER CLUSTER SET ENTITY_LABELS_MAX_COUNT = 1;
+      """
+    And these Plexus commands are executed on the leader node
+      """
       SHOW LABELS ON SCHEMA labelled_event FORMAT JSON;
       """
     Then the last command output is a JSON document where
@@ -601,6 +625,9 @@ Feature: Domain entity labels
     When these Plexus commands are executed on the leader node
       """
       SET LABELS ON WIRE CBOR SCHEMA payload { 'format' = 'CBOR' };
+      """
+    And these Plexus commands are executed on the leader node
+      """
       SHOW LABELS ON WIRE CBOR SCHEMA payload FORMAT JSON;
       """
     Then the last command output is a JSON document where
@@ -632,6 +659,9 @@ Feature: Domain entity labels
     When these Plexus commands are executed on the leader node
       """
       ALTER PLACEMENT preferred RENAME TO renamed;
+      """
+    And these Plexus commands are executed on the leader node
+      """
       SHOW LABELS ON PLACEMENT renamed FORMAT JSON;
       """
     Then the last command output is a JSON document where
