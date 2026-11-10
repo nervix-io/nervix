@@ -750,6 +750,7 @@ tags = [
   "@snapshot_receive_admission",
   "@stateful_inferencer_persistence",
   "@inferencer_handoff_capture",
+  "@inferencer_promoted_acknowledgement",
   "@session_shutdown_ending",
   "@client_wire_restoration_end",
   "@session_shutdown_unread",
@@ -5005,6 +5006,8 @@ workloads = [
 [[owner]]
 path = "src/runtime_ack.rs"
 workloads = [
+  "scenario.inferencer-promoted-acknowledgement",
+  "stress.inferencer-promoted-acknowledgement",
   "owner.emitter-branch-retirement",
   "scenario.sqs-parallel-batch",
   "stress.sqs-parallel-batch",
@@ -6571,6 +6574,26 @@ id = "stress.inferencer-fenced-owner"
 invariant = "A returning former owner is fenced and receives its successor's sums when ownership moves back."
 invocation = "stress-restore-scenarios"
 scenario = "A returning former owner is fenced and receives its successor's sums when ownership moves back"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "A stateful inferencer resolving the acknowledgement share of each row it forwards, before and after a promoted replica takes over, reaches the acknowledgement root's tracked completion lock, and the promotion reaches the state store's tracked installation locks. Kafka transport waits, native tensor execution and async admission are outside Deloxide."
+examples = 1
+feature = "tests/features/cluster/inferencer_state_acknowledgement.feature"
+id = "scenario.inferencer-promoted-acknowledgement"
+invariant = "Every record a stateful inferencer admits in a batch is acknowledged to its Kafka source, before and after a promoted replica takes over."
+invocation = "scenarios"
+scenario = "Records a promoted inference replica emits are acknowledged to their source"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: A stateful inferencer resolving the acknowledgement share of each row it forwards, before and after a promoted replica takes over, reaches the acknowledgement root's tracked completion lock, and the promotion reaches the state store's tracked installation locks. Kafka transport waits, native tensor execution and async admission are outside Deloxide."
+examples = 1
+feature = "tests/features/cluster/inferencer_state_acknowledgement.feature"
+id = "stress.inferencer-promoted-acknowledgement"
+invariant = "Every record a stateful inferencer admits in a batch is acknowledged to its Kafka source, before and after a promoted replica takes over."
+invocation = "stress-restore-scenarios"
+scenario = "Records a promoted inference replica emits are acknowledged to their source"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
