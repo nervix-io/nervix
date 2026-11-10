@@ -10,7 +10,10 @@
     nervix::layer(harness, reason = "collection reference property")
 )]
 
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    num::{NonZeroU32, NonZeroU64},
+};
 
 use arrow_array::{Array, Int64Array, cast::AsArray as _, types::Int64Type};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -37,21 +40,39 @@ struct CollectionOracle {
     retained: VecDeque<ReferenceRow>,
     sequence: u64,
     executor: Executor,
+    fixed_width: Option<NonZeroU32>,
 }
 
 impl CollectionOracle {
-    fn new(executor: Executor) -> Self {
+    fn new(executor: Executor, fixed_width: Option<NonZeroU32>) -> Self {
         let input = [OptionalTestField {
             name: "value",
             ty: ParseAsType::I64,
             optional: false,
         }];
+        let collected_type = match fixed_width {
+            Some(len) => ParseAsType::Array {
+                element: Box::new(ParseAsType::I64),
+                len,
+            },
+            None => ParseAsType::Vec {
+                element: Box::new(ParseAsType::I64),
+            },
+        };
+        let function = match fixed_width {
+            Some(_) => nervix_vm::program::WindowAggregateFunction::CollectArray,
+            None => nervix_vm::program::WindowAggregateFunction::CollectVec,
+        };
+        let message_width = fixed_width.map(NonZeroU64::from);
+        let set = format!(
+            "SET collected = {}(input.value), first_value = FIRST(input.value), last_value = \
+             LAST(input.value)",
+            function.plexus_name()
+        );
         let output = [
             OptionalTestField {
                 name: "collected",
-                ty: ParseAsType::Vec {
-                    element: Box::new(ParseAsType::I64),
-                },
+                ty: collected_type,
                 optional: false,
             },
             OptionalTestField {
@@ -66,23 +87,37 @@ impl CollectionOracle {
             },
         ];
         Self {
-            window: TestWindow::new(
-                "SET collected = COLLECT_VEC(input.value), first_value = FIRST(input.value), \
-                 last_value = LAST(input.value)",
-                &input,
-                &output,
-            ),
+            window: TestWindow::with_message_width(&set, &input, &output, message_width),
             retained: VecDeque::new(),
             sequence: 0,
             executor,
+            fixed_width,
         }
     }
 
     async fn admit(&mut self, entropy: &mut Entropy<'_>) {
-        let count = entropy
+        let offered = entropy
             .count(7)
             .checked_add(1)
             .assured("at most eight generated rows fit usize");
+        let count = match self.fixed_width {
+            Some(width) => {
+                let width =
+                    usize::try_from(width.get()).assured("the generated width is at most eight");
+                let remaining = width
+                    .checked_sub(self.retained.len())
+                    .verified("generated admissions never exceed the fixed width");
+                offered.min(remaining)
+            }
+            None => offered,
+        };
+        self.admit_count(entropy, count).await;
+    }
+
+    async fn admit_count(&mut self, entropy: &mut Entropy<'_>, count: usize) {
+        if count == 0 {
+            return;
+        }
         let mut values = Vec::with_capacity(count);
         let mut timestamps = Vec::with_capacity(count);
         for _ in 0..count {
@@ -137,6 +172,14 @@ impl CollectionOracle {
         if self.retained.is_empty() {
             return;
         }
+        if let Some(width) = self.fixed_width {
+            let width =
+                usize::try_from(width.get()).assured("the generated width is at most eight");
+            assert!(self.retained.len() <= width);
+            if self.retained.len() < width {
+                return;
+            }
+        }
         let batch = evaluate_window_aggregate(
             &self.executor,
             &self.window.compiled,
@@ -151,9 +194,22 @@ impl CollectionOracle {
         let mut ordered = self.retained.iter().copied().collect::<Vec<_>>();
         ordered.sort();
         let expected = ordered.iter().map(|row| row.value).collect::<Vec<_>>();
-        let list = batch.batch().column(0).as_list::<i32>();
-        assert_eq!(list.null_count(), 0);
-        let values = list.value(0);
+        let values = match self.fixed_width {
+            Some(width) => {
+                let list = batch.batch().column(0).as_fixed_size_list();
+                assert_eq!(list.null_count(), 0);
+                assert_eq!(
+                    list.value_length(),
+                    i32::try_from(width.get()).assured("the generated width is at most eight")
+                );
+                list.value(0)
+            }
+            None => {
+                let list = batch.batch().column(0).as_list::<i32>();
+                assert_eq!(list.null_count(), 0);
+                list.value(0)
+            }
+        };
         let values = values.as_primitive::<Int64Type>();
         assert_eq!(values.null_count(), 0);
         assert_eq!(values.values(), expected.as_slice());
@@ -174,7 +230,16 @@ impl CollectionOracle {
     }
 
     async fn check(mut self, entropy: &mut Entropy<'_>) {
-        self.admit(entropy).await;
+        match self.fixed_width {
+            Some(width) => {
+                self.admit_count(
+                    entropy,
+                    usize::try_from(width.get()).assured("the generated width is at most eight"),
+                )
+                .await
+            }
+            None => self.admit(entropy).await,
+        }
         self.verify().await;
         let operations = entropy
             .count(31)
@@ -204,6 +269,13 @@ fn bolero_collected_windows_match_admit_step_restore_sequences() {
                 .assured("a property runtime opens");
             let executor = Executor::default();
             let mut entropy = Entropy::new(bytes);
-            runtime.block_on(CollectionOracle::new(executor).check(&mut entropy));
+            let fixed_width = if entropy.byte().is_multiple_of(2) {
+                let width = u32::try_from(entropy.between(1..=8))
+                    .assured("the generated width is at most eight");
+                Some(NonZeroU32::new(width).assured("the generated width is positive"))
+            } else {
+                None
+            };
+            runtime.block_on(CollectionOracle::new(executor, fixed_width).check(&mut entropy));
         });
 }

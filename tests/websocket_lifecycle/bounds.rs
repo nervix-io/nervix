@@ -1,14 +1,18 @@
 //! Peers that expose the outbound source's handshake, idle and message bounds.
 //!
 //! Layer: test harness.
-//! - **Owns.** A bounded handshake flood, a silent connection and a message above the client's
-//!   limit, observed through real sockets, with how the client ended each connection it gave up.
+//! - **Owns.** A bounded handshake flood, a signaling handshake refused or left unanswered, a
+//!   silent connection and a message above the client's limit, observed through real sockets,
+//!   with how the client ended each connection it gave up.
 //! - **Depends on.** The scenario-local peer and public Plexus statements.
 //! - **Must not know.** Connector queues, connection owners or the host's retry implementation.
 
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
-use super::{peer::UnreadEnding, *};
+use super::{
+    peer::{FirstHandshake, UnreadEnding},
+    *,
+};
 
 #[given(expr = "a WebSocket bounds peer {word}")]
 async fn bounds_peer(world: &mut ScenarioWorld, behavior: String) {
@@ -46,6 +50,26 @@ async fn oversized_message_peer(world: &mut ScenarioWorld, size: usize) {
         format!("ws://127.0.0.1:{port}"),
     );
     world.websocket_peer = Some(WebsocketPeer::oversized_message(listener, size));
+}
+
+#[given(expr = "a WebSocket bounds peer {word} its first signaling handshake")]
+async fn failed_handshake_peer(world: &mut ScenarioWorld, behavior: String) {
+    let first = match behavior.as_str() {
+        "refuses" => FirstHandshake::Refused,
+        "stalls" => FirstHandshake::Stalled,
+        "closes" => FirstHandshake::Closed,
+        _ => panic!("the failed-handshake fixture declares refuses, stalls or closes"),
+    };
+    initialize_scenario_identity(world);
+    let port = draw_scenario_port(world, "WebSocket failed-handshake peer");
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+        .await
+        .assured("the scenario's reserved WebSocket port is available");
+    world.placeholders.insert(
+        "websocket_peer".to_string(),
+        format!("ws://127.0.0.1:{port}"),
+    );
+    world.websocket_peer = Some(WebsocketPeer::failed_handshake(listener, first));
 }
 
 #[then("the WebSocket bounds peer observes a reconnect after the idle bound")]
@@ -113,5 +137,38 @@ async fn oversized_connection_closed(world: &mut ScenarioWorld) {
     assert_closed_with(ending, CloseCode::Size, "oversized");
     let PeerEvent::Connected(_) = peer.next().await else {
         panic!("the client reconnects after the oversized message ends its connection");
+    };
+}
+
+#[then(
+    expr = "the WebSocket bounds peer's {word} handshake ends its connection with Close status \
+            {int} before the client reconnects"
+)]
+async fn failed_handshake_closed(world: &mut ScenarioWorld, handshake: String, status: u16) {
+    let peer = world
+        .websocket_peer
+        .as_mut()
+        .assured("the scenario started its bounds peer");
+    let PeerEvent::Connected(_) = peer.next().await else {
+        panic!("the first connection was upgraded");
+    };
+    let PeerEvent::UnreadConnectionEnded(ending) = peer.next().await else {
+        panic!("the {handshake} handshake's connection ends before the client reconnects");
+    };
+    if handshake == "peer_closed"
+        && let UnreadEnding::Closed(Some(frame)) = &ending
+    {
+        assert_eq!(
+            frame.reason, "subscription refused",
+            "the reply echoes the peer's reason"
+        );
+    }
+    assert_closed_with(
+        ending,
+        CloseCode::from(status),
+        &format!("{handshake} handshake's"),
+    );
+    let PeerEvent::Connected(_) = peer.next().await else {
+        panic!("the client reconnects after its {handshake} handshake ends the connection");
     };
 }

@@ -39,7 +39,11 @@ fn every_declared_emitter_renders_its_entity_options_body_modes_and_policies() {
         let connection_state = RwSignal::new(super::super::ConsoleConnectionState::Waiting);
         let generation = RwSignal::new(1);
         let request_tx = RwSignal::new(None);
-        signals.open(CreateKind::Emitter, Some(domain), "global-create-button");
+        signals.open(
+            CreateKind::Model(ModelKind::Emitter),
+            Some(domain),
+            "global-create-button",
+        );
         for kind in EmitterEntityKind::all() {
             signals.emitter.update(|draft| draft.choose_kind(kind));
             let dialog = CreateDialog(
@@ -113,7 +117,11 @@ fn emitter_questions_keep_output_schema_inputs_and_all_branch_dependencies_separ
     Owner::new().with(|| {
         let signals = CreateSignals::new();
         let domain = DomainName::parse("orders").assured("valid domain");
-        signals.open(CreateKind::Emitter, Some(domain), "global-create-button");
+        signals.open(
+            CreateKind::Model(ModelKind::Emitter),
+            Some(domain),
+            "global-create-button",
+        );
         signals
             .emitter
             .update(|draft| draft.choose_kind(EmitterEntityKind::Http(HttpEmitterEntity::Request)));

@@ -69,7 +69,7 @@ Feature: Typed inspection of published deduplicator keys and window state
     When inspection client "reader" connects away from the last relay owner when possible
     And client "reader" executes these Plexus commands
       """
-      SHOW DEDUPLICATOR remembered STATE FOR BRANCH VALUES { tenant = 'west' } LIMIT 1 FORMAT JSON;
+      SHOW DEDUPLICATOR remembered STATE FOR BRANCH KEY { tenant = 'west' } LIMIT 1 FORMAT JSON;
       """
     Then the last processor state counts 2 rows in 1 branches
     And the typed inspection used its unit owner and a remote page when the cluster permits it
@@ -181,14 +181,14 @@ Feature: Typed inspection of published deduplicator keys and window state
     When inspection client "reader" connects away from the last relay owner when possible
     And client "reader" executes these Plexus commands
       """
-      SHOW WINDOW PROCESSOR retained STATE FOR BRANCH VALUES { tenant = 'west' } LIMIT 1 FORMAT JSON;
+      SHOW WINDOW PROCESSOR retained STATE FOR BRANCH KEY { tenant = 'west' } LIMIT 1 FORMAT JSON;
       """
     Then the last processor state counts 2 rows in 1 branches
     And the typed inspection used its unit owner and a remote page when the cluster permits it
 
     When client "reader" executes these Plexus commands
       """
-      SHOW WINDOW PROCESSOR retained STATE FOR BRANCH VALUES { tenant = 'east' } LIMIT 1 FORMAT JSON;
+      SHOW WINDOW PROCESSOR retained STATE FOR BRANCH KEY { tenant = 'east' } LIMIT 1 FORMAT JSON;
       """
     Then the last processor state counts 0 rows in 1 branches
     And the last processor state has no "rows" rows

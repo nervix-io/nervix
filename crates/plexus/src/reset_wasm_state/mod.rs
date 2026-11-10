@@ -41,7 +41,7 @@ mod tests {
     #[test]
     fn parses_explicit_branch_values() {
         let statement = parse_statement(
-            "RESET WASM PROCESSOR counter STATE FOR BRANCH VALUES { tenant = 'alpha' };",
+            "RESET WASM PROCESSOR counter STATE FOR BRANCH KEY { tenant = 'alpha' };",
         )
         .assured("the test command has an explicit branch");
         let Statement::ResetWasmState(reset) = statement else {
@@ -71,7 +71,7 @@ mod tests {
             Statement::ResetWasmState(reset) if reset.scope == StateBranchSelection::AllBranches
         ));
         let numeric =
-            parse_statement("RESET WASM PROCESSOR counter STATE FOR BRANCH VALUES { shard = -7 };")
+            parse_statement("RESET WASM PROCESSOR counter STATE FOR BRANCH KEY { shard = -7 };")
                 .assured("the test command contains a valid signed numeric literal");
         assert!(matches!(
             numeric,
@@ -79,10 +79,9 @@ mod tests {
                 if matches!(&reset.scope, StateBranchSelection::Branch(fields)
                     if fields[0].value == Literal::I64(-7))
         ));
-        let fractional = parse_statement(
-            "RESET WASM PROCESSOR counter STATE FOR BRANCH VALUES { shard = -1.25 };",
-        )
-        .assured("the test command contains a valid floating-point literal");
+        let fractional =
+            parse_statement("RESET WASM PROCESSOR counter STATE FOR BRANCH KEY { shard = -1.25 };")
+                .assured("the test command contains a valid floating-point literal");
         assert!(matches!(
             fractional,
             Statement::ResetWasmState(reset)
@@ -97,8 +96,8 @@ mod tests {
         assert!(parse_statement("RESET WASM PROCESSOR counter FOR UNBRANCHED;").is_err());
         assert!(
             parse_statement(
-                "RESET WASM PROCESSOR counter STATE FOR BRANCH VALUES { tenant = 'alpha', tenant \
-                 = 'beta' };"
+                "RESET WASM PROCESSOR counter STATE FOR BRANCH KEY { tenant = 'alpha', tenant = \
+                 'beta' };"
             )
             .is_err()
         );
@@ -111,8 +110,8 @@ mod tests {
             ("RESET WASM ", "PROCESSOR"),
             ("RESET WASM PROCESSOR counter ", "STATE"),
             ("RESET WASM PROCESSOR counter STATE FOR ", "ALL BRANCHES"),
-            ("RESET WASM PROCESSOR counter STATE FOR ", "BRANCH VALUES"),
-            ("RESET WASM PROCESSOR counter STATE FOR BRANCH ", "VALUES"),
+            ("RESET WASM PROCESSOR counter STATE FOR ", "BRANCH KEY"),
+            ("RESET WASM PROCESSOR counter STATE FOR BRANCH ", "KEY"),
         ];
         for (input, suggestion) in cases {
             let actual = suggest_statement(input, input.len());
@@ -134,8 +133,8 @@ mod tests {
 
     #[test]
     fn selected_reset_roundtrips_through_canonical_plexus() {
-        let source = "reset wasm processor counter state for branch values { tenant = 'alpha', \
-                      shard = -7 };";
+        let source =
+            "reset wasm processor counter state for branch key { tenant = 'alpha', shard = -7 };";
         let parsed = parse_statement(source)
             .assured("the test command contains an explicit and valid branch selection");
         let canonical = parsed

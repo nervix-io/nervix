@@ -105,7 +105,11 @@ fn a_domain_wide_placement_keeps_its_scope_policy_and_full_width_rank() {
     Owner::new().with(|| {
         let signals = CreateSignals::new();
         let scope = domain("orders");
-        signals.open(CreateKind::Placement, Some(scope.clone()), "trigger");
+        signals.open(
+            CreateKind::Model(ModelKind::Placement),
+            Some(scope.clone()),
+            "trigger",
+        );
         signals.placement.update(|draft| {
             draft.name = "whole_domain".to_owned();
             draft.policy = PlacementPolicy::PreferColocation;
@@ -134,7 +138,7 @@ fn a_domain_wide_placement_keeps_its_scope_policy_and_full_width_rank() {
             "CREATE IF NOT EXISTS PLACEMENT whole_domain DOMAIN WIDE PREFER COLOCATION;"
         );
         assert_eq!(
-            open_form_controls(signals, CreateKind::Placement),
+            open_form_controls(signals, CreateKind::Model(ModelKind::Placement)),
             [ChoiceControl::PlacementPolicy]
         );
     });
@@ -175,7 +179,11 @@ fn a_resource_requires_the_scope_captured_when_the_dialog_opened() {
 fn independent_choice_controls_discard_older_drafts_and_session_generations() {
     Owner::new().with(|| {
         let signals = CreateSignals::new();
-        signals.open(CreateKind::Relay, Some(domain("orders")), "trigger");
+        signals.open(
+            CreateKind::Model(ModelKind::Relay),
+            Some(domain("orders")),
+            "trigger",
+        );
         let revision = signals.revision.get_untracked();
         let pace_context = ChoiceRequestContext {
             control: ChoiceControl::RelaySchema,
@@ -250,7 +258,11 @@ fn independent_choice_controls_discard_older_drafts_and_session_generations() {
 fn a_reply_fills_only_a_control_of_the_open_form() {
     Owner::new().with(|| {
         let signals = CreateSignals::new();
-        signals.open(CreateKind::Relay, Some(domain("orders")), "trigger");
+        signals.open(
+            CreateKind::Model(ModelKind::Relay),
+            Some(domain("orders")),
+            "trigger",
+        );
         let context = |control| ChoiceRequestContext {
             control,
             draft_revision: signals.revision.get_untracked(),
@@ -557,7 +569,11 @@ fn choice_requests_preserve_control_context_and_report_unavailable_channels() {
         assert_eq!(request.page_cursor(), Some("page-two"));
         assert!(context.append);
 
-        signals.open(CreateKind::Placement, Some(domain("orders")), "trigger");
+        signals.open(
+            CreateKind::Model(ModelKind::Placement),
+            Some(domain("orders")),
+            "trigger",
+        );
         request_choices(
             signals,
             ChoiceControl::PlacementPolicy,
@@ -692,7 +708,11 @@ fn branch_scope_change_keeps_the_draft_and_requires_reselecting_its_schema() {
         signals.change_scope(Some(first.clone()));
         assert_eq!(signals.captured_domain.get_untracked(), None);
 
-        signals.open(CreateKind::Branch, Some(first.clone()), "trigger");
+        signals.open(
+            CreateKind::Model(ModelKind::Branch),
+            Some(first.clone()),
+            "trigger",
+        );
         signals.structured.update(|drafts| {
             drafts.branch.name = "by_tenant".to_string();
             drafts.branch.schema = Some(SelectedReference::chosen(schema.clone()));
@@ -720,7 +740,7 @@ fn branch_scope_change_keeps_the_draft_and_requires_reselecting_its_schema() {
             Some(second.clone())
         );
 
-        signals.open(CreateKind::Branch, Some(first), "trigger");
+        signals.open(CreateKind::Model(ModelKind::Branch), Some(first), "trigger");
         assert_eq!(signals.captured_domain.get_untracked(), Some(second));
         assert_eq!(signals.structured.get_untracked().branch.name, "by_tenant");
     });
@@ -730,7 +750,11 @@ fn branch_scope_change_keeps_the_draft_and_requires_reselecting_its_schema() {
 fn relay_and_subscription_scope_changes_invalidate_their_references() {
     Owner::new().with(|| {
         let signals = CreateSignals::new();
-        signals.open(CreateKind::Relay, Some(domain("first")), "trigger");
+        signals.open(
+            CreateKind::Model(ModelKind::Relay),
+            Some(domain("first")),
+            "trigger",
+        );
         signals.relay.update(|draft| {
             draft.select_schema(&node(ModelKind::Schema, "order_record"));
             draft.select_branch(&node(ModelKind::Branch, "by_tenant"));
@@ -779,7 +803,7 @@ fn branch_schema_requests_bind_the_captured_domain_and_page_cursor() {
         let branch_schema = signals.choice_signals(ChoiceControl::BranchSchema);
         let (sender, mut receiver) = request_handoff();
         let request_tx = RwSignal::new(Some(sender));
-        signals.open(CreateKind::Branch, None, "trigger");
+        signals.open(CreateKind::Model(ModelKind::Branch), None, "trigger");
         request_choices(signals, ChoiceControl::BranchSchema, request_tx, 9, false);
         assert_eq!(
             branch_schema.load.get_untracked(),
@@ -1020,7 +1044,7 @@ fn domain_scoped_forms_need_their_captured_domain_and_run_where_they_belong() {
             draft.materialized_state = Some(MaterializedRelayState::LastByTimestamp);
             draft.if_not_exists = true;
         });
-        signals.open(CreateKind::Relay, None, "trigger");
+        signals.open(CreateKind::Model(ModelKind::Relay), None, "trigger");
         assert_eq!(
             signals
                 .submission()
@@ -1038,7 +1062,11 @@ fn domain_scoped_forms_need_their_captured_domain_and_run_where_they_belong() {
         );
 
         let scope = domain("orders");
-        signals.open(CreateKind::Relay, Some(scope.clone()), "trigger");
+        signals.open(
+            CreateKind::Model(ModelKind::Relay),
+            Some(scope.clone()),
+            "trigger",
+        );
         assert_eq!(signals.captured_domain.get_untracked(), None);
         signals.change_scope(Some(scope.clone()));
         signals.relay.update(|draft| {
@@ -1063,13 +1091,16 @@ fn domain_scoped_forms_need_their_captured_domain_and_run_where_they_belong() {
                 .to_string(),
             "Capacity must be a positive integer"
         );
-        assert!(CreateKind::Relay.takes_if_not_exists());
+        assert!(CreateKind::Model(ModelKind::Relay).takes_if_not_exists());
         assert!(!CreateKind::Subscription.takes_if_not_exists());
         assert_eq!(
             ChoiceControl::SubscriptionField.form(),
             CreateKind::Subscription
         );
-        assert_eq!(ChoiceControl::RelayBranch.form(), CreateKind::Relay);
+        assert_eq!(
+            ChoiceControl::RelayBranch.form(),
+            CreateKind::Model(ModelKind::Relay)
+        );
     });
 }
 
@@ -1082,16 +1113,16 @@ fn each_form_asks_only_the_questions_its_draft_needs() {
             [ChoiceControl::DomainPace]
         );
         assert_eq!(
-            open_form_controls(signals, CreateKind::Branch),
+            open_form_controls(signals, CreateKind::Model(ModelKind::Branch)),
             [ChoiceControl::BranchSchema]
         );
         assert_eq!(
-            open_form_controls(signals, CreateKind::Relay),
+            open_form_controls(signals, CreateKind::Model(ModelKind::Relay)),
             [ChoiceControl::RelaySchema]
         );
         signals.relay.update(|draft| draft.choose_branched());
         assert_eq!(
-            open_form_controls(signals, CreateKind::Relay),
+            open_form_controls(signals, CreateKind::Model(ModelKind::Relay)),
             [ChoiceControl::RelaySchema, ChoiceControl::RelayBranch]
         );
         assert_eq!(
@@ -1104,8 +1135,8 @@ fn each_form_asks_only_the_questions_its_draft_needs() {
         for kind in [
             CreateKind::User,
             CreateKind::Resource,
-            CreateKind::Schema,
-            CreateKind::WireJsonSchema,
+            CreateKind::Model(ModelKind::Schema),
+            CreateKind::Model(ModelKind::WireJsonSchema),
         ] {
             assert!(open_form_controls(signals, kind).is_empty());
         }
@@ -1238,7 +1269,7 @@ fn creation_components_render_each_typed_draft_and_accessible_status() {
             });
         });
         signals.open(
-            CreateKind::Schema,
+            CreateKind::Model(ModelKind::Schema),
             Some(scope.clone()),
             "global-create-button",
         );
@@ -1249,19 +1280,19 @@ fn creation_components_render_each_typed_draft_and_accessible_status() {
 
         for (kind, field_type, format_name, field_type_name) in [
             (
-                CreateKind::WireJsonSchema,
+                CreateKind::Model(ModelKind::WireJsonSchema),
                 WireFieldType::Json(JsonType::String),
                 "JSON",
                 "STRING",
             ),
             (
-                CreateKind::WireCborSchema,
+                CreateKind::Model(ModelKind::WireCborSchema),
                 WireFieldType::Cbor(CborType::Text),
                 "CBOR",
                 "TEXT",
             ),
             (
-                CreateKind::WireAvroSchema,
+                CreateKind::Model(ModelKind::WireAvroSchema),
                 WireFieldType::Avro(AvroType::String),
                 "AVRO",
                 "STRING",
@@ -1291,7 +1322,7 @@ fn creation_components_render_each_typed_draft_and_accessible_status() {
             drafts.branch.ttl = "5m".to_string();
         });
         signals.open(
-            CreateKind::Branch,
+            CreateKind::Model(ModelKind::Branch),
             Some(scope.clone()),
             "global-create-button",
         );
@@ -1307,7 +1338,7 @@ fn creation_components_render_each_typed_draft_and_accessible_status() {
             draft.capacity = "4".to_string();
         });
         signals.open(
-            CreateKind::Relay,
+            CreateKind::Model(ModelKind::Relay),
             Some(scope.clone()),
             "global-create-button",
         );

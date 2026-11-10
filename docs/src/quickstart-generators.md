@@ -72,8 +72,56 @@ order and heartbeats start arriving every five seconds, repeating the latest `ac
 Produce a `globex` order and a second, independent heartbeat stream joins in. Send a newer `acme`
 order and the `acme` heartbeat switches to it on the next tick.
 
-One lifecycle caveat: `START` clears materialized state for the domain, so after a restart the
-generators stay silent until new records materialize branches again
+One lifecycle caveat: `START` clears materialized state for the domain, so after a `STOP`/`START`
+the generators stay silent until new records materialize branches again
 ([Materialized State](relay.md#materialized-state)).
+
+## Collect Samples For A Fixed Tensor
+
+A generator can sample the materialized relay and send each sample to a count window. The window
+owns the retained sequence. This example uses the existing `orders_by_customer` relay and
+`by_customer` branch, and an uploaded resource `sequence_model` containing `score.onnx`, with a
+required `F32[2]` input named `features` and a required `F32[1]` output named `score`:
+
+```plexus
+CREATE SCHEMA order_sample (amount F32, sampled_at DATETIME);
+CREATE SCHEMA order_sequence (series ARRAY<F32, 2>, sampled_at ARRAY<DATETIME, 2>);
+CREATE SCHEMA order_score (score ARRAY<F32, 1>);
+CREATE RELAY order_samples SCHEMA order_sample BRANCHED BY by_customer;
+CREATE RELAY order_sequences SCHEMA order_sequence BRANCHED BY by_customer;
+CREATE RELAY order_scores SCHEMA order_score BRANCHED BY by_customer;
+
+CREATE GENERATOR sample_orders
+  USING MATERIALIZED STATE orders_by_customer EACH 5s
+  BRANCHED BY by_customer TO order_samples
+    SET amount = relay_state.orders_by_customer.amount AS F32,
+        sampled_at = now()
+    FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+
+CREATE WINDOW PROCESSOR collect_samples FROM order_samples
+  WIDTH 2 MESSAGES STEP 2 MESSAGES BRANCHED BY by_customer
+  TO order_sequences
+    SET series = COLLECT_ARRAY(input.amount),
+        sampled_at = COLLECT_ARRAY(input.sampled_at)
+    ON MESSAGE ERROR LOG;
+
+CREATE INFERENCER score_sequence FROM order_sequences
+  USING RESOURCE sequence_model VERSION 1 FILE 'score.onnx'
+  INPUTS { 'features' DENSE TENSOR<F32>[2] = input.series }
+  OUTPUT SCHEMA { 'score' DENSE TENSOR<F32>[1] }
+  BRANCHED BY by_customer TO order_scores SET score = score
+  FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+```
+
+Each customer has its own two-sample array and score. `COLLECT_ARRAY` gets its fixed length from
+the count-only `WIDTH`, so it binds the inferencer's fixed axis directly. A duration or combined
+bound requires `COLLECT_VEC`, whose variable length does not bind that fixed axis.
+
+The two samples need not be exactly five seconds apart. Slow execution coalesces occurrences,
+and a restart anchors a new generator cadence. `sampled_at` records the actual domain-time
+snapshot beside each value; inspect or subscribe to `order_sequences` to see those gaps. `START`
+preserves the window's retained samples and clears materialized relay state, so each branch needs
+new relay input before generation resumes after that operation. Node recovery restores persisted
+materialized entries ([Materialized State](relay.md#materialized-state)).
 
 Next: join two streams in [Correlators](./quickstart-correlators.md).

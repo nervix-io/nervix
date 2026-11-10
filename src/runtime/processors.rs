@@ -657,7 +657,7 @@ impl CompiledWindowAggregateProgram {
         output_relay: &RelayName,
         relay_schemas: &HashMap<RelayName, Arc<CompiledSchema>>,
         udfs: Option<&UdfExecutor>,
-        vm_settings: nervix_vm::VmSettings,
+        vm_options: VmCompileOptions,
     ) -> error_stack::Result<Self, ProcessorCompileError> {
         let output_schema = relay_schemas.get(output_relay).ok_or_else(|| {
             Report::new(ProcessorCompileError::WindowOutputSchema {
@@ -685,13 +685,7 @@ impl CompiledWindowAggregateProgram {
                 output: &output_arrow_schema,
                 output_sensitivity: &output_sensitivity,
             },
-            &super::runtime_udf_compile_options(
-                udfs,
-                VmCompileOptions {
-                    settings: vm_settings,
-                    ..VmCompileOptions::default()
-                },
-            ),
+            &super::runtime_udf_compile_options(udfs, vm_options),
         )
         .change_context_lazy(|| ProcessorCompileError::WindowRoute {
             relay: output_relay.clone(),

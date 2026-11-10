@@ -1259,6 +1259,17 @@ pub struct WindowBound {
 }
 
 impl WindowBound {
+    /// The positive width of a window bounded only by a message count.
+    pub fn fixed_message_width(&self) -> Option<NonZeroU64> {
+        if self.duration.is_some() {
+            return None;
+        }
+        match self.messages {
+            Some(messages) => NonZeroU64::new(messages),
+            None => None,
+        }
+    }
+
     /// A bound counted in messages alone.
     pub fn of_messages(messages: u64) -> Self {
         Self {

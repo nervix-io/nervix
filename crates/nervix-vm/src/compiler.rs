@@ -1,18 +1,20 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     hash::Hash,
+    num::NonZeroU64,
 };
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use arrow_array::{BooleanArray, Float64Array, Int64Array, StringArray};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{HeaderValues, ParseAsType};
 use nervix_primitives::sync::StdArc;
 
 use crate::{
     batch::TypedArray,
+    cast::CastTarget,
     error::{CompileError, CompileErrorCode, SideErrorReason},
     ip_address::{self, IpNetwork, NetworkSource},
     ir::{
@@ -32,10 +34,11 @@ use crate::{
     semantics::{
         ArmExecution, BitwiseOperation, BuiltinLowering, CaseMapping, FloatClass, IntegerBits as _,
         binary_descriptor, binary_output_type, builtin_descriptor, builtin_semantics_for_lowering,
-        builtin_signature, cast_arm_execution, cast_descriptor, expr_semantics, unary_descriptor,
+        builtin_signature, cast_descriptor, expr_semantics, unary_descriptor,
     },
     text_search::ContainsAnyCall,
     url_component,
+    window::FixedWindowCollection,
 };
 
 #[derive(Clone)]
@@ -198,6 +201,7 @@ struct Compiler {
     json_scans: HashMap<JsonScanKey, JsonScanSite>,
     allow_header_reads: bool,
     header_writes: Option<HeaderValues>,
+    window_message_width: Option<NonZeroU64>,
     udf_signatures: UdfSignatures,
     injector: Option<nervix_primitives::sync::Arc<Box<dyn crate::runtime::FunctionInjector>>>,
 }
@@ -346,6 +350,8 @@ pub struct CompileOptions {
     /// The values an emitter's `write_header` calls may write, as its entity declares them, or
     /// `None` where the program runs outside an emitter and makes no header writes.
     pub header_writes: Option<HeaderValues>,
+    /// The positive width of a count-only window, supplied by its owner rather than an output field.
+    pub window_message_width: Option<NonZeroU64>,
     pub udf_signatures: UdfSignatures,
     pub injector: Option<nervix_primitives::sync::Arc<Box<dyn crate::runtime::FunctionInjector>>>,
 }
@@ -359,6 +365,7 @@ impl Default for CompileOptions {
             allow_sensitive_output: false,
             allow_header_reads: false,
             header_writes: None,
+            window_message_width: None,
             udf_signatures: UdfSignatures::default(),
             injector: None,
         }
@@ -536,6 +543,23 @@ impl Compiler {
         }
         let first_type = self.infer_expr_type(&args[0])?;
         match function {
+            WindowAggregateFunction::CollectArray => {
+                let Some(width) = self.window_message_width else {
+                    return Err(Report::new(CompileError {
+                        code: CompileErrorCode::UnsupportedFunctionContext,
+                        message: "COLLECT_ARRAY requires the window's exact message width"
+                            .to_string(),
+                        span,
+                    }));
+                };
+                FixedWindowCollection::from(width)
+                    .output_type(first_type)
+                    .change_context(CompileError {
+                        code: CompileErrorCode::TypeMismatch,
+                        message: "COLLECT_ARRAY result type is not representable".to_string(),
+                        span,
+                    })
+            }
             WindowAggregateFunction::CollectVec => Ok(DataType::List(StdArc::new(Field::new(
                 "item", first_type, false,
             )))),
@@ -833,6 +857,7 @@ impl Compiler {
                 current_selection: None,
                 allow_header_reads: false,
                 header_writes: None,
+                window_message_width: None,
                 udf_signatures: UdfSignatures::default(),
                 injector: None,
             },
@@ -966,6 +991,7 @@ impl Compiler {
         self.settings = options.settings;
         self.allow_header_reads = options.allow_header_reads;
         self.header_writes = options.header_writes;
+        self.window_message_width = options.window_message_width;
         self.udf_signatures.clone_from(&options.udf_signatures);
         self.injector.clone_from(&options.injector);
     }
@@ -1595,6 +1621,7 @@ impl Compiler {
                     let window_function = invocation.function;
                     if let WindowAggregateFunction::ApproxCountDistinct
                     | WindowAggregateFunction::ApproxTopK
+                    | WindowAggregateFunction::CollectArray
                     | WindowAggregateFunction::CollectVec
                     | WindowAggregateFunction::Count
                     | WindowAggregateFunction::CountIf = window_function
@@ -1629,7 +1656,8 @@ impl Compiler {
                 | FunctionName::Sum
                 | FunctionName::Min
                 | FunctionName::Max
-                | FunctionName::Mean = function
+                | FunctionName::Mean
+                | FunctionName::ListStatistic(_) = function
                 {
                     return Ok(true);
                 }
@@ -2028,10 +2056,11 @@ impl Compiler {
                 on_failure,
             } => {
                 let input = self.compile_expr(inner)?;
-                let target = RegisterType::from_data_type(data_type).verified(
-                    "type inference above rejected every data type that has no register type",
+                let input_type = self.infer_expr_type(inner)?;
+                let target = CastTarget::between(&input_type, data_type).verified(
+                    "type inference above accepted only conversions this pair of types takes",
                 );
-                let dst = self.alloc_temp(target);
+                let dst = self.alloc_temp(target.register_type());
                 self.emit(
                     InstructionKind::Cast {
                         dst,
@@ -2902,8 +2931,12 @@ fn evaluate_set_element(element: &SpannedExpr) -> Result<TypedArray, SetElementD
             on_failure,
         } => {
             let value = evaluate_set_element(expr)?;
-            let target = RegisterType::from_data_type(data_type)
-                .verified("type inference accepted only casts to a register type");
+            let target = CastTarget::between(&value.data_type(), data_type)
+                .verified("type inference accepted only conversions this pair of types takes");
+            // A list is never a constant element of a set.
+            let CastTarget::Scalar(target) = target else {
+                return Err(SetElementDefect::NotConstant);
+            };
             match cast_constant(value, target) {
                 Ok(converted) => Ok(converted),
                 // A tolerant conversion yields a typed null for a value it cannot convert, and no
@@ -3411,9 +3444,20 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
         | FunctionName::Min
         | FunctionName::Max
         | FunctionName::Mean
+        | FunctionName::ListAdd
+        | FunctionName::ListSub
+        | FunctionName::ListMul
+        | FunctionName::ListDiv
+        | FunctionName::ListAddScalar
+        | FunctionName::ListSubScalar
+        | FunctionName::ListMulScalar
+        | FunctionName::ListDivScalar
+        | FunctionName::ListAbs
         | FunctionName::Dot
         | FunctionName::Distance
-        | FunctionName::Datetime(_) => None,
+        | FunctionName::Datetime(_)
+        | FunctionName::ListShape(_)
+        | FunctionName::ListStatistic(_) => None,
     }
 }
 
@@ -3604,6 +3648,7 @@ pub fn compile_predicate_with_options_for_bindings(
             allow_header_reads: options.allow_header_reads,
             header_writes: None,
             udf_signatures: options.udf_signatures,
+            window_message_width: None,
             injector: options.injector,
         },
     )?;
@@ -4157,10 +4202,8 @@ fn instruction_observes_selection(kind: &InstructionKind) -> bool {
             on_failure,
             ..
         } => {
-            let converts_text = matches!(
-                cast_arm_execution(input.ty, *target),
-                ArmExecution::SelectedRows
-            );
+            let converts_text =
+                matches!(target.arm_execution(input.ty), ArmExecution::SelectedRows);
             cast_descriptor(*on_failure).semantics.can_error || converts_text
         }
         InstructionKind::Builtin { lowering, .. } => {

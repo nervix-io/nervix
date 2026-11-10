@@ -254,7 +254,7 @@ Deduplication state is branch-local. Duplicate details are logged at `debug` or 
 
 ```plexus
 SHOW DEDUPLICATOR unique_notifications STATE
-  FOR BRANCH VALUES { tenant = 'alpha' } LIMIT 100 FORMAT JSON;
+  FOR BRANCH KEY { tenant = 'alpha' } LIMIT 100 FORMAT JSON;
 ```
 
 `SHOW DEDUPLICATOR <name> STATE` reads one immutable publication per selected branch through the
@@ -351,7 +351,7 @@ pause.
 SHOW REORDERER ordered_notifications STATE
   FOR ALL BRANCHES LIMIT 100 FORMAT JSON;
 SHOW REORDERER ordered_notifications STATE
-  FOR BRANCH VALUES { tenant = 'alpha' } FORMAT TEXT;
+  FOR BRANCH KEY { tenant = 'alpha' } FORMAT TEXT;
 ```
 
 `SHOW REORDERER <name> STATE` reads the rows the reorderer holds back, as one `pending` section per
@@ -434,6 +434,13 @@ same ordering as `FIRST` and `LAST`. Its argument must be required; use `coalesc
 field. A collecting route needs a message `WIDTH` or `MAX STATE SIZE`. Collection shares the
 retained argument column with `FIRST` and `LAST`, including through snapshot restore, and its
 values and structure remain visible through the existing state inspection commands.
+
+Use `COLLECT_ARRAY(input.value)` under `WIDTH n MESSAGES` without a duration to produce a required
+`ARRAY` of exactly `n` values. A fixed tensor axis can consume that field directly. The width sets
+the result type; the output schema must match it exactly. A new width requires a new window
+processor. Both collection forms use the existing branch-local retained columns through restart
+and ownership changes. See the [sampled-sequence example](quickstart-generators.md#collect-samples-for-a-fixed-tensor)
+for a generator feeding a count window and an inferencer.
 
 `MAX STATE SIZE <bytes>` caps the live state of each concrete branch. It charges retained Arrow
 input and argument allocations, row handles, branch keys, and the reserved capacity of every
@@ -552,6 +559,14 @@ CREATE INFERENCER score_events
 ```
 
 Every required route-output field is explicit. The source input is not implicitly inherited.
+
+Shape a fixed sequence to the model's exact input dimensions with
+[`list_reshape`, `list_flatten`, and `list_transpose`](filter-map-functions.md#array-and-vector-functions).
+For example, an `ARRAY<F32, 6>` field maps to `DENSE TENSOR<F32>[2, 3]` with
+`list_reshape(input.sequence, 2, 3)`. The dimensions are positive integer literals with the same
+element count as the input. Nervix validates them when the statement is applied, so the shape
+operation may be used in `INPUTS`, which has no message-error route. Shaping preserves sensitivity;
+the mapped input must still be required and have the model's exact `F32` element type.
 
 `USING RESOURCE` requires `VERSION <n>` or `VERSION LATEST`. The inferencer loads the model file
 from the one version it stores, so a later upload of the resource does not change the scoring
@@ -726,11 +741,11 @@ domain is a different processor and keeps its state. The scope is mandatory:
 USE sales;
 RESET WASM PROCESSOR normalize_events STATE FOR UNBRANCHED;
 RESET WASM PROCESSOR normalize_events STATE FOR ALL BRANCHES;
-RESET WASM PROCESSOR normalize_events STATE FOR BRANCH VALUES { tenant = 'acme' };
+RESET WASM PROCESSOR normalize_events STATE FOR BRANCH KEY { tenant = 'acme' };
 ```
 
 Use `FOR UNBRANCHED` only for an unbranched processor. Use `FOR ALL BRANCHES` or exact
-`FOR BRANCH VALUES` fields only for a branched processor. Values must match the declared branch
+`FOR BRANCH KEY` fields only for a branched processor. Key fields must match the declared branch
 schema exactly. A selected branch must already be active; the command does not create one.
 The selected branch loses its previous guest computation state and starts from the guest's initial
 state. Sibling branches keep their state and continue processing.

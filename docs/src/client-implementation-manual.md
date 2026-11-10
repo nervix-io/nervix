@@ -265,7 +265,9 @@ archive; see [Restore Streams](#restore-streams).
   relay and branch-field targets. A generator's materialized-relay target carries a domain alone
   for an unbranched generator, or a domain followed by its branch `Model` reference, and returns
   only relays with materialized state on exactly that branch declaration; the generator's routes
-  then use the input-branch target with that relay as the first input. An emitter-reference
+  then use the input-branch target with that relay as the first input. A placement-member
+  target carries a domain and returns exactly the runtime nodes a placement rule accepts as
+  `FROM` or `TO` members. An emitter-reference
   target carries a domain and offers only the client connectors its entity declares; a client
   consumer instead uses the schema target.
   The Iceberg catalog target uses its declared catalog-client option. An emitter encoding-codec

@@ -129,7 +129,7 @@ Feature: Bounded typed materialized relay inspection
     And the inspection continuation is saved with its complete counts and rows
     When client "reader" executes these Plexus commands
       """
-      SHOW RELAY events MATERIALIZED STATE FOR BRANCH VALUES { tenant = 'beta-private' } LIMIT 1 FORMAT TEXT;
+      SHOW RELAY events MATERIALIZED STATE FOR BRANCH KEY { tenant = 'beta-private' } LIMIT 1 FORMAT TEXT;
       """
     Then the last typed inspection has 1 returned rows and 1 complete rows
     And the last inspection TEXT uses its typed rows after the owner header
@@ -172,7 +172,7 @@ Feature: Bounded typed materialized relay inspection
     Then the typed inspection refuses the read with "invalid_limit"
     When client "reader" submits this Plexus command request
       """
-      SHOW RELAY events MATERIALIZED STATE FOR BRANCH VALUES { absent = 'value' } FORMAT JSON;
+      SHOW RELAY events MATERIALIZED STATE FOR BRANCH KEY { absent = 'value' } FORMAT JSON;
       """
     Then the typed inspection refuses the read with "invalid_selection"
     When http payload is posted to node "node-1" with host "typed-state-{{test_id}}.example.com" path "/root"

@@ -66,10 +66,10 @@ pub enum Domain {
     ///
     /// This excludes vocabulary states Plexus has no spelling for: a negative or non-finite numeric
     /// literal (a negative number is written as a negation of its magnitude), an empty array or a
-    /// `CASE` without a `WHEN`, a cast to a collection type, a `DROP` of a kind Plexus cannot drop, a
-    /// batching HTTP emitter, a correlator filter, a relay named `message` or `branch`, a
-    /// placement member named like an `ALTER` operation keyword, and a Postgres update whose
-    /// conflict target includes every mapped column.
+    /// `CASE` without a `WHEN`, a fixed-length array longer than Arrow carries, a `DROP` of a kind
+    /// Plexus cannot drop, a batching HTTP emitter, a correlator filter, a relay named `message` or
+    /// `branch`, a placement member named like an `ALTER` operation keyword, and a Postgres update
+    /// whose conflict target includes every mapped column.
     Plexus,
     /// Every value the vocabulary types hold, including the states Plexus cannot spell. Stored and
     /// archived forms carry these, so their round trips draw from this domain.

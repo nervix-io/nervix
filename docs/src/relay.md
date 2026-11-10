@@ -402,14 +402,14 @@ owners.
 SHOW RELAY events MATERIALIZED STATE
   FOR ALL BRANCHES LIMIT 100 FORMAT JSON;
 SHOW RELAY events MATERIALIZED STATE
-  FOR BRANCH VALUES { tenant = 'alpha' } LIMIT 10 FORMAT TEXT;
+  FOR BRANCH KEY { tenant = 'alpha' } LIMIT 10 FORMAT TEXT;
 ```
 
 The clauses are ordered: optional `FOR ALL BRANCHES`, `FOR UNBRANCHED` or
-`FOR BRANCH VALUES { field = literal, ... }`; optional `LIMIT n` with optional
+`FOR BRANCH KEY { field = literal, ... }`; optional `LIMIT n` with optional
 `AFTER 'continuation'`; optional `FORMAT TEXT` or `FORMAT JSON`. The default selector reads all
 branches and the default format is text. `LIMIT` is positive and cannot exceed the serving node's
-inspection row capability. Branch values follow the same typed, complete-key rules as state reset: string, boolean, signed
+inspection row capability. Branch key fields follow the same typed, complete-key rules as state reset: string, boolean, signed
 64-bit integer and 64-bit float literals match their declared field types exactly. `FOR ALL
 BRANCHES` reads every branch regardless of its key field types.
 
