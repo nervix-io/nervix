@@ -30,6 +30,7 @@ pub(crate) struct Observations {
     continuation: Option<String>,
 }
 
+mod partition_moves;
 #[path = "published.rs"]
 mod published;
 

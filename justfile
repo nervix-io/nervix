@@ -371,6 +371,10 @@ test-scenarios *args: tests-deps test-client-python-api-run
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
 
+# Observe released and installed processor keys through bounded public inspection pages.
+test-partition-state-inspection *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/partition_state_inspection{,}.feature") }} {{ quote(args) }}
+
 # Exercise domain entity metadata through the public command path.
 test-entity-labels *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash
