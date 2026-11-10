@@ -3568,8 +3568,13 @@ expires. The ping write retains its one-second bound.
 This rule also applies with an explicit `idle_timeout_ms`. On-schedule pings do not extend the
 ordinary idle bound. Without configured client pings, the deadline stays in physical time across
 handoff and cancelled reads. A silent connection is closed and retried on the host's reconnect
-cadence. Choose a bound that permits the peer's expected idle periods or keepalive cadence. Three
-ping intervals must fit the shared schedulable bound when they supply the deadline; the signaling
+cadence.
+
+Closing it sends the peer a Close frame with status `1001` (going away) if the connection takes the
+frame at once. Nervix waits neither to write the frame nor for the peer's reply, so a peer that has
+stopped reading never delays the reconnect.
+Choose a bound that permits the peer's expected idle periods or keepalive cadence. Three ping
+intervals must fit the shared schedulable bound when they supply the deadline; the signaling
 handshake has its own `TIMEOUT`.
 
 Accepted signaling data stays in one bounded handoff until the handshake completes. The ingestor

@@ -1,11 +1,14 @@
 //! Peers that expose the outbound source's handshake and idle bounds.
 //!
 //! Layer: test harness.
-//! - **Owns.** A bounded handshake flood and a silent connection, observed through real sockets.
+//! - **Owns.** A bounded handshake flood and a silent connection, observed through real sockets,
+//!   with how the client ended the silent connection.
 //! - **Depends on.** The scenario-local peer and public Plexus statements.
 //! - **Must not know.** Connector queues, connection owners or the host's retry implementation.
 
-use super::*;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+
+use super::{peer::UnreadEnding, *};
 
 #[given(expr = "a WebSocket bounds peer {word}")]
 async fn bounds_peer(world: &mut ScenarioWorld, behavior: String) {
@@ -47,4 +50,28 @@ async fn idle_reconnect(world: &mut ScenarioWorld) {
         second.duration_since(first) >= Duration::from_millis(300),
         "a 100ms ping interval allows three intervals before declaring silence"
     );
+}
+
+#[then("the WebSocket bounds peer's silent connection ends with a going-away Close frame")]
+async fn silent_connection_closed(world: &mut ScenarioWorld) {
+    let peer = world
+        .websocket_peer
+        .as_mut()
+        .assured("the scenario started its bounds peer");
+    let PeerEvent::SilentConnectionEnded(ending) = peer.next().await else {
+        panic!("the bounds peer reports how the client ended the connection it never read");
+    };
+    match ending {
+        UnreadEnding::Closed(Some(frame)) => assert_eq!(
+            frame.code,
+            CloseCode::Away,
+            "the client leaves a silent connection going away, not with {frame:?}"
+        ),
+        UnreadEnding::Closed(None) => {
+            panic!("the client closed the silent connection without a status")
+        }
+        UnreadEnding::WithoutClose => {
+            panic!("the client ended the silent connection without a Close frame")
+        }
+    }
 }

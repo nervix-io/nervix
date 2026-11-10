@@ -1,7 +1,9 @@
-//! Real-transport checks of the connection's frame and header ownership and configured pings.
+//! Real-transport checks of the connection's frame and header ownership, configured pings and the
+//! Close a silent peer is offered when the idle deadline ends its connection.
 //!
 //! Layer: test harness.
-//! - **Owns.** Observing the production connection owner through a local protocol peer.
+//! - **Owns.** Observing the production connection owner through a local protocol peer, and
+//!   reading again through the WebSocket driver what a peer that never read was sent.
 //! - **Depends on.** The ingestor's fixture, connector contract and execution primitives.
 //! - **Must not know.** Registry, graph or host synchronization internals.
 
@@ -9,6 +11,17 @@
     nervix_lint,
     nervix::layer(harness, reason = "owns the test boundary declared above")
 )]
+
+use futures_util::FutureExt as _;
+use nervix_primitives::task::unconstrained;
+use tokio::io::AsyncReadExt as _;
+use tokio_tungstenite::{
+    WebSocketStream,
+    tungstenite::{
+        Error as WebsocketError,
+        protocol::{CloseFrame, Role, frame::coding::CloseCode},
+    },
+};
 
 use super::*;
 
@@ -395,4 +408,125 @@ async fn inbound_message_and_frame_limits_end_the_exact_connection_with_the_driv
         ));
         assert!(ingestor.needs_resume());
     }
+}
+
+/// How the client ended a connection whose peer never read it.
+enum UnreadEnding {
+    /// A Close frame, with the status it carried, came before the end of TCP.
+    Closed(Option<CloseFrame<'static>>),
+    /// TCP ended with no Close frame before it.
+    WithoutClose,
+}
+
+/// Reads everything TCP delivered to a peer that never read its connection, once the client has
+/// released it, then reads it again through the WebSocket driver. Nothing is written back, so the
+/// pongs the driver queues for unanswered pings cannot fail the reading. The calling test bounds
+/// the wait for the client's release.
+async fn unread_ending(mut peer: WebSocketStream<TcpStream>) -> UnreadEnding {
+    let mut delivered = Vec::new();
+    peer.get_mut()
+        .read_to_end(&mut delivered)
+        .await
+        .assured("the peer sent the client nothing to leave unread, so TCP ends in order");
+    let mut replay = WebSocketStream::from_raw_socket(
+        tokio::io::join(std::io::Cursor::new(delivered), tokio::io::sink()),
+        Role::Server,
+        None,
+    )
+    .await;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        match replay.next().await {
+            Some(Ok(Message::Close(frame))) => return UnreadEnding::Closed(frame),
+            Some(Ok(Message::Ping(_))) => {}
+            Some(Err(WebsocketError::Protocol(ProtocolError::ResetWithoutClosingHandshake))) => {
+                return UnreadEnding::WithoutClose;
+            }
+            other => panic!("a silent connection carries only pings and a Close, not {other:?}"),
+        }
+    }
+}
+
+#[nervix_primitives::test]
+async fn a_silent_peer_reads_a_going_away_close_before_its_connection_ends() {
+    for explicit in [false, true] {
+        let mut config = vec![ClientConfigEntry {
+            key: "ping_interval_ms".to_string(),
+            value: "10".to_string(),
+        }];
+        if explicit {
+            config.push(ClientConfigEntry {
+                key: "idle_timeout_ms".to_string(),
+                value: "100".to_string(),
+            });
+        }
+        let (mut ingestor, silent_peer) =
+            tests::connected_pair_with(config, WebsocketsUpgradeHeaders::default()).await;
+        let result = timeout(
+            Duration::from_secs(60),
+            ingestor.next_batch(
+                IngestorBatchRequest {
+                    max_messages: std::num::NonZeroUsize::MIN,
+                    batch_timeout: None,
+                },
+                &IngestorReadCancellation::new(),
+            ),
+        )
+        .await
+        .assured("the ingestor's idle bound ends its read");
+        assert!(result.is_err(), "a peer that sends no frame must expire");
+        assert!(ingestor.needs_resume());
+        let ending = timeout(Duration::from_secs(60), unread_ending(silent_peer))
+            .await
+            .assured("the client releases the connection within the fixture budget");
+        let UnreadEnding::Closed(Some(frame)) = ending else {
+            panic!("the idle deadline ends the connection with a Close frame before TCP ends");
+        };
+        assert_eq!(frame.code, CloseCode::Away);
+    }
+}
+
+#[nervix_primitives::test]
+async fn the_idle_verdict_never_waits_for_a_transport_that_cannot_take_its_close() {
+    const IDLE: Duration = Duration::from_millis(1);
+    let config = vec![ClientConfigEntry {
+        key: "idle_timeout_ms".to_string(),
+        value: IDLE.as_millis().to_string(),
+    }];
+    let (mut ingestor, _unread_peer) =
+        tests::connected_pair_with(config, WebsocketsUpgradeHeaders::default()).await;
+    let connection = ingestor
+        .connection
+        .as_mut()
+        .assured("the pair is connected");
+    // The peer reads nothing, so the client's transport fills until it takes no more. Each
+    // write is polled outside the cooperative budget, so only a full transport refuses one.
+    let chunk = vec![0_u8; 64 * 1024];
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let written =
+            unconstrained(connection.relay.send(Message::Binary(chunk.clone()))).now_or_never();
+        match written {
+            Some(Ok(())) => {}
+            Some(Err(error)) => panic!("the unread transport stays open: {error}"),
+            None => break,
+        }
+    }
+    nervix_primitives::time::sleep(IDLE).await;
+    // A fresh cooperative budget for the one poll below.
+    nervix_primitives::task::yield_now().await;
+    let verdict = ingestor
+        .next_batch(
+            IngestorBatchRequest {
+                max_messages: std::num::NonZeroUsize::MIN,
+                batch_timeout: None,
+            },
+            &IngestorReadCancellation::new(),
+        )
+        .now_or_never();
+    let Some(Err(report)) = verdict else {
+        panic!("the idle verdict returns at once although the transport cannot take its Close");
+    };
+    assert!(report.contains::<nervix_connector::DeadlineElapsed>());
+    assert!(ingestor.needs_resume());
 }

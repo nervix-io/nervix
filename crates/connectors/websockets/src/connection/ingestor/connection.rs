@@ -1,9 +1,11 @@
 //! One outbound WebSockets connection and the exact upgrade snapshot its frames retain.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** The active transport, immutable response headers, optional ping cadence and the
-//!   inbound activity deadline and bounded missed-ping response window retained across cancellation.
-//! - **Depends on.** Connector outcomes, execution primitives and WebSocket transport.
+//! - **Owns.** The active transport, immutable response headers, optional ping cadence, the
+//!   inbound activity deadline and bounded missed-ping response window retained across cancellation,
+//!   and the going-away Close a connection that deadline ends offers its peer.
+//! - **Depends on.** Connector outcomes, execution primitives, recovery classes and WebSocket
+//!   transport.
 //! - **Must not know.** Configuration Models, Plexus, domains, relays, registry or host admission.
 
 #![cfg_attr(
@@ -18,7 +20,7 @@
 use std::time::Duration;
 
 use error_stack::Report;
-use futures_util::StreamExt as _;
+use futures_util::{FutureExt as _, SinkExt as _, StreamExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     ClientConfigResult, ConfiguredDeadline, IngestMessageHeaders, IngestorError, IngestorResult,
@@ -28,9 +30,17 @@ use nervix_models::{ClientConfigEntry, WebsocketsUpgradeHeaders};
 use nervix_primitives::{
     net::TcpStream,
     sync::Arc,
+    task::unconstrained,
     time::{Instant, error::Elapsed, timeout_at},
 };
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
+use nervix_recovery::Reported as _;
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream,
+    tungstenite::{
+        Message,
+        protocol::{CloseFrame, frame::coding::CloseCode},
+    },
+};
 
 use super::{WEBSOCKETS, WebsocketsConnectionIngestorFailure, pings::WebsocketPings};
 
@@ -176,7 +186,7 @@ impl WebsocketConnection {
                 {
                     return Ok(WebsocketRead::Ping);
                 }
-                return Err(self.idle_deadline.elapsed(error));
+                return Err(self.end_silent(error));
             }
         };
         match frame {
@@ -192,6 +202,29 @@ impl WebsocketConnection {
             })),
             None => Ok(WebsocketRead::Frame(None)),
         }
+    }
+
+    /// Ends a connection whose peer the idle deadline found silent, returning the read failure
+    /// the host reconnects after.
+    ///
+    /// An endpoint that gives up on an established connection sends a Close frame with a status
+    /// before releasing it (RFC 6455 section 7.1.7), here 1001, going away: this client leaves the
+    /// connection and opens another. The peer was just found silent and may not be reading at
+    /// all, so the frame is written only if the transport takes it at once. The verdict waits for
+    /// neither the write nor a reply, and the reconnect starts no later than it would without the
+    /// frame. A transport that cannot take the frame now belongs to a peer that has stopped
+    /// reading, which could not read the frame either; that connection is released all the same.
+    fn end_silent(&mut self, elapsed: Elapsed) -> Report<IngestorError> {
+        let going_away = Message::Close(Some(CloseFrame {
+            code: CloseCode::Away,
+            reason: "".into(),
+        }));
+        // One poll outside the cooperative budget, so only a full transport holds the frame back.
+        let offered = unconstrained(self.relay.send(going_away)).now_or_never();
+        if let Some(written) = offered {
+            written.reported("offering a silent WebSocket peer a going-away Close");
+        }
+        self.idle_deadline.elapsed(elapsed)
     }
 }
 

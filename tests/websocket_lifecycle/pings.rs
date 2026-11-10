@@ -52,7 +52,10 @@ async fn pings_follow_signaling(world: &mut ScenarioWorld, pings: u32, interval:
             PeerEvent::Ended | PeerEvent::ReceivedClose => {
                 panic!("the connection ended during signaling")
             }
-            PeerEvent::OpeningCancelled | PeerEvent::SentClose(_) | PeerEvent::Upgraded { .. } => {
+            PeerEvent::OpeningCancelled
+            | PeerEvent::SentClose(_)
+            | PeerEvent::Upgraded { .. }
+            | PeerEvent::SilentConnectionEnded(_) => {
                 panic!("the ping peer reports only its connection, signaling and pings")
             }
         }
