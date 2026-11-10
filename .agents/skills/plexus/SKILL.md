@@ -99,6 +99,10 @@ between retained rows and window metadata; use each processor's `DESCRIBE` for a
 For inspections while partitions change, also read [Relay → Changing the partition count](../../../docs/src/relay.md#changing-the-partition-count)
 before interpreting a key's partition or retrying a raced inspection.
 
+For arithmetic on sequences, read [Expression Functions → List Arithmetic](../../../docs/src/filter-map-functions.md#list-arithmetic)
+before choosing a two-list or scalar-broadcast function. Check its exact numeric type, fixed-shape,
+null and message-error rules; scalar operators do not select list arithmetic.
+
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
 contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and
@@ -544,6 +548,9 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
     `BRANCHED BY ... SET`, which have no error route;
   - `IN` sets hold non-null constants of the operand's exact type, and string positions count from
     1 while `nth`, `slice`, and JSON path indexes count from 0;
+  - before shaping an inferencer input or reading a nested list, read `Expression Functions` →
+    `Array And Vector Functions` and `Processors` → `Inferencer`; check the fixed shape and literal
+    dimensions rather than treating a change of axes as an element-type conversion;
   - datetime units, parts, `date_bin` widths, zones, formats, and disambiguations are literals, a
     local calendar names its zone, `now()` supplies domain time, and foreign timestamps are read
     with a strict `parse_datetime` format;
@@ -555,9 +562,10 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   window route `SET`, `input` only inside their arguments, and `COUNT`, `SUM`, `FIRST`, `LAST`,
   `MIN`, and `MAX` are aggregates there, never list functions. Compute window output from aggregates
   and constants, and prefer the dedicated aggregates (`AVG`, `COUNT_IF`, `ARG_MIN`, `ARG_MAX`, the
-  `*_POP` and `*_SAMP` statistics, `CORR`) over hand-built formulas. Before using `COLLECT_VEC`,
-  check its required argument and bounded-retention rules in that reference; use the documented
-  list functions to consume its result. For `APPROX_COUNT_DISTINCT`,
+  `*_POP` and `*_SAMP` statistics, `CORR`) over hand-built formulas. Before using `COLLECT_VEC` or
+  `COLLECT_ARRAY`, check the reference's required-argument, retention and count-width rules;
+  follow the Generators quickstart for sampled sequences and visible cadence gaps. Use the
+  documented list functions to consume the result. For `APPROX_COUNT_DISTINCT`,
   `APPROX_QUANTILE`, and `APPROX_TOP_K`, read `Approximate Sketches`: the window needs
   `MAX STATE SIZE` after duration `WIDTH` and `STEP`, a branched window a branch with
   `MAX INSTANCES <n> EVICT LRU`, and the precision or capacity sets both accuracy and memory.
@@ -892,7 +900,7 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   the policy discards state for none of those under either value. Only an owner loss whose forced
   recovery cannot prepare the new owner recreates guest state without the guest's verdict.
 - To intentionally replace an existing WASM processor's guest state, use
-  `RESET WASM PROCESSOR <processor> STATE FOR UNBRANCHED|ALL BRANCHES|BRANCH VALUES { <field> = <literal>, ... };`.
+  `RESET WASM PROCESSOR <processor> STATE FOR UNBRANCHED|ALL BRANCHES|BRANCH KEY { <field> = <literal>, ... };`.
   It acts on the session's active domain, so `USE` that domain first.
   Choose the explicit scope that matches its declared branch, and supply every branch-key field
   with an exact typed literal for one selected branch. The processor must be running and the

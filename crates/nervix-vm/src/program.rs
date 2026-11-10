@@ -25,8 +25,13 @@ use arrow_schema::DataType;
 use meticulous::OptionExt as _;
 use strum::{AsRefStr, EnumString, IntoEnumIterator as _, IntoStaticStr, VariantNames};
 
-pub use crate::datetime::{DatetimeFormat, DatetimeParser, Zone};
 use crate::json::JsonExtraction;
+pub use crate::{
+    datetime::{DatetimeFormat, DatetimeParser, Zone},
+    list_shape::{
+        ArrayDimensions, ListShapeArgumentError, ListShapeFunction, ListShapeFunctionName,
+    },
+};
 
 /// Identifies one semantic operation in a lowered VM program.
 ///
@@ -572,6 +577,15 @@ pub enum FunctionName {
     Min,
     Max,
     Mean,
+    ListAdd,
+    ListSub,
+    ListMul,
+    ListDiv,
+    ListAddScalar,
+    ListSubScalar,
+    ListMulScalar,
+    ListDivScalar,
+    ListAbs,
     Dot,
     Distance,
     Sum,
@@ -588,6 +602,8 @@ pub enum FunctionName {
     RegexpExtract,
     #[strum(disabled)]
     Datetime(DatetimeFunction),
+    #[strum(disabled)]
+    ListShape(ListShapeFunction),
     LeakSensitive,
     LookupHashMap,
     ReadHeader,
@@ -899,6 +915,7 @@ pub enum WindowAggregateFunction {
     Avg,
     BoolAnd,
     BoolOr,
+    CollectArray,
     CollectVec,
     Corr,
     Count,
@@ -962,6 +979,11 @@ impl PartialOrd for WindowAggregateInvocation {
 }
 
 impl WindowAggregateFunction {
+    /// Whether the function gathers the retained argument as a list value.
+    pub const fn collects_values(self) -> bool {
+        matches!(self, Self::CollectArray | Self::CollectVec)
+    }
+
     pub fn plexus_name(&self) -> &str {
         self.as_ref()
     }
@@ -975,6 +997,7 @@ impl WindowAggregateFunction {
             Self::Avg
             | Self::BoolAnd
             | Self::BoolOr
+            | Self::CollectArray
             | Self::CollectVec
             | Self::Count
             | Self::CountIf
@@ -1001,6 +1024,7 @@ impl WindowAggregateFunction {
             | Self::ApproxTopK
             | Self::BoolAnd
             | Self::BoolOr
+            | Self::CollectArray
             | Self::CollectVec
             | Self::Count
             | Self::CountIf
@@ -1027,6 +1051,7 @@ impl FunctionName {
             .map(|function| function.as_str().to_string())
             .collect::<Vec<_>>();
         names.extend(DatetimeFunctionName::iter().map(|function| function.to_string()));
+        names.extend(ListShapeFunctionName::iter().map(|function| function.to_string()));
         names.extend(["ceiling", "power", "substring"].map(str::to_string));
         names.sort();
         names.dedup();
@@ -1149,6 +1174,15 @@ impl FunctionName {
             "min" => Self::Min,
             "max" => Self::Max,
             "mean" => Self::Mean,
+            "list_add" => Self::ListAdd,
+            "list_sub" => Self::ListSub,
+            "list_mul" => Self::ListMul,
+            "list_div" => Self::ListDiv,
+            "list_add_scalar" => Self::ListAddScalar,
+            "list_sub_scalar" => Self::ListSubScalar,
+            "list_mul_scalar" => Self::ListMulScalar,
+            "list_div_scalar" => Self::ListDivScalar,
+            "list_abs" => Self::ListAbs,
             "dot" => Self::Dot,
             "distance" => Self::Distance,
             "sum" => Self::Sum,
@@ -1279,6 +1313,15 @@ impl FunctionName {
             Self::Min => "min",
             Self::Max => "max",
             Self::Mean => "mean",
+            Self::ListAdd => "list_add",
+            Self::ListSub => "list_sub",
+            Self::ListMul => "list_mul",
+            Self::ListDiv => "list_div",
+            Self::ListAddScalar => "list_add_scalar",
+            Self::ListSubScalar => "list_sub_scalar",
+            Self::ListMulScalar => "list_mul_scalar",
+            Self::ListDivScalar => "list_div_scalar",
+            Self::ListAbs => "list_abs",
             Self::Dot => "dot",
             Self::Distance => "distance",
             Self::Sum => "sum",
@@ -1294,6 +1337,7 @@ impl FunctionName {
             Self::RegexpSubstr => "regexp_substr",
             Self::RegexpExtract => "regexp_extract",
             Self::Datetime(function) => function.name().into(),
+            Self::ListShape(function) => function.name().into(),
             Self::LeakSensitive => "leak_sensitive",
             Self::LookupHashMap => "lookup_hash_map",
             Self::ReadHeader => "read_header",

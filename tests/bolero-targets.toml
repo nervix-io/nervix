@@ -2848,10 +2848,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/window_accumulator/__fuzz__/runtime__window_accumulator__collection_properties__bolero_collected_windows_match_admit_step_restore_sequences/corpus"
-domain_version = 1
+domain_version = 2
 features = ["testing"]
 id = "runtime-window-collection"
-invariant = "A required collected column and its FIRST/LAST endpoints equal an independent watermark/admission-ordered deque after up to 32 admissions, prefix steps and snapshot restores over at most 264 rows, preserving schema, nullability and every I64 value across argument batches."
+invariant = "Required vector collections and full fixed-array windows of widths 1 through 8, with their FIRST/LAST endpoints, equal an independent watermark/admission-ordered deque after up to 32 admissions, prefix steps and snapshot restores over at most 264 rows, preserving schema, nullability and every I64 value across argument batches; partial fixed windows retain their rows without emission."
 manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-server"
@@ -3338,6 +3338,21 @@ package = "nervix-vm"
 random_iterations = 256
 source = "crates/nervix-vm/src/numeric/decimal_rounding_tests.rs"
 test = "numeric::decimal_rounding::tests::bolero_rounded_integer_columns_match_a_wide_reference"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-vm/src/runtime/list_shape/__fuzz__/runtime__list_shape__properties__bolero_shape_laws_preserve_complete_values_and_validity/corpus"
+domain_version = 1
+features = []
+id = "vm-list-shapes"
+invariant = "Reshaping fixed columns preserves every logical value bit and container validity, fixed flatten of a rank-two reshape preserves their innermost order, reshaping back and transposing twice reproduce the complete original, and one transpose agrees with an independent outer-axis reference while retaining deeper dimensions."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-vm"
+random_iterations = 128
+source = "crates/nervix-vm/src/runtime/list_shape/properties.rs"
+test = "runtime::list_shape::properties::bolero_shape_laws_preserve_complete_values_and_validity"
 test_target = "lib"
 
 [[target]]
@@ -4960,6 +4975,21 @@ package = "nervix-client-wire"
 random_iterations = 128
 source = "crates/client-wire/src/state_inspection/published_tests.rs"
 test = "state_inspection::tests::published::bolero_published_processor_sections_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-vm/src/runtime/list_arithmetic/__fuzz__/runtime__list_arithmetic__properties__bolero_list_arithmetic_matches_scalar_lanes/corpus"
+domain_version = 1
+features = []
+id = "vm-list-arithmetic"
+invariant = "Every valid result element equals independent checked scalar arithmetic at its exact numeric width, float bits included; fixed and ragged shapes, sliced offsets and null validity are preserved, length and first-element failures report exactly one typed message error, and scalar columns and shared scalars agree with the same reference."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-vm"
+random_iterations = 128
+source = "crates/nervix-vm/src/runtime/list_arithmetic/properties.rs"
+test = "runtime::list_arithmetic::properties::bolero_list_arithmetic_matches_scalar_lanes"
 test_target = "lib"
 
 [[target]]

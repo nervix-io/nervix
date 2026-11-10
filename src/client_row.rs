@@ -169,7 +169,7 @@ impl<'a> ArrowColumn<'a> {
                     ArrowDataType::FixedSizeList(element, _) => element.is_nullable(),
                     _ => false,
                 };
-                Self::list_element(field, element_nullable, array.values().as_ref())?;
+                Self::list_element(field, element_nullable)?;
                 Self::FixedList {
                     array,
                     element: Box::new(Self::new(field, element, array.values().as_ref())?),
@@ -181,7 +181,7 @@ impl<'a> ArrowColumn<'a> {
                     ArrowDataType::List(element) => element.is_nullable(),
                     _ => false,
                 };
-                Self::list_element(field, element_nullable, array.values().as_ref())?;
+                Self::list_element(field, element_nullable)?;
                 Self::List {
                     array,
                     element: Box::new(Self::new(field, element, array.values().as_ref())?),
@@ -193,7 +193,6 @@ impl<'a> ArrowColumn<'a> {
     fn list_element(
         field: &FieldName,
         nullable: bool,
-        values: &dyn Array,
     ) -> Result<(), Report<SubscriptionRowEncodingError>> {
         if nullable {
             return Err(Report::new(
@@ -202,14 +201,8 @@ impl<'a> ArrowColumn<'a> {
                 },
             ));
         }
-        if values.null_count() > 0 {
-            return Err(Report::new(
-                SubscriptionRowEncodingError::ListElementNulls {
-                    field: field.clone(),
-                    nulls: values.null_count(),
-                },
-            ));
-        }
+        // Arrow validates required children against their parent's validity. A null fixed list
+        // may therefore hide physical child nulls, which encoding never visits.
         Ok(())
     }
 
@@ -256,7 +249,7 @@ impl<'a> ArrowColumn<'a> {
     ) -> Result<(), Report<WireEncodeError>> {
         (!self.is_null(index))
             .then_some(())
-            .verified("list child columns were checked for nulls before encoding");
+            .verified("Arrow required-child validity guarantees every visible element is present");
         self.write_present(index, writer)
     }
 
@@ -405,8 +398,6 @@ pub enum SubscriptionRowEncodingError {
     },
     #[error("required field `{field}` contains {nulls} null values")]
     RequiredFieldNulls { field: FieldName, nulls: usize },
-    #[error("list field `{field}` contains {nulls} null elements")]
-    ListElementNulls { field: FieldName, nulls: usize },
     #[error("list field `{field}` declares nullable elements")]
     NullableListElements { field: FieldName },
     #[error("Arrow batch has {batch_rows} rows, but {branch_keys} branch keys")]
