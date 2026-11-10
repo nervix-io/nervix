@@ -557,6 +557,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
         .assured("generated engine capacities fit bounded counts and milliseconds")
     }
 
+    #[cfg(test)]
     fn listeners(&mut self) -> crate::application::listener_settings::ListenerSettings {
         use crate::application::listener_settings::{ListenerOverrides, ListenerSettings};
         ListenerSettings::resolve(ListenerOverrides {

@@ -4224,6 +4224,10 @@ qualify-typed-ratchet-cache: typed-ratchet-build
 test-typed-ratchet-reports:
     CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib
 
+# Run one deterministic source-contract regression through its existing report-test build.
+test-typed-source-contract filter:
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib -- {{ quote(filter) }} --exact --nocapture
+
 # Focused deterministic tests of the analysis runner and host memory admission.
 test-ratchet-runner *args:
     just ratchet-tests lib {{ args }}
