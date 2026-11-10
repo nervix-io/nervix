@@ -4302,6 +4302,21 @@ test_target = "test:connectors"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/models/tests/connectors/__fuzz__/emitter_instancing__bolero_emitter_instancing_preserves_its_count_or_partition_form/corpus"
+domain_version = 1
+features = []
+id = "models-emitter-instancing"
+invariant = "Every positive 64-bit emitter instance count, both boundary counts and PerPartition preserve their exact form through the production JSON and archive encodings without allocating placement units."
+manifest = "Cargo.toml"
+max_input_bytes = 8
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/tests/connectors/emitter_instancing.rs"
+test = "emitter_instancing::bolero_emitter_instancing_preserves_its_count_or_partition_form"
+test_target = "test:connectors"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/runtime_state__replication_properties__bolero_intake_unit_requests_preserve_their_selection/corpus"
 domain_version = 8
 features = []

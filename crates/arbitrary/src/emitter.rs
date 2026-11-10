@@ -76,7 +76,9 @@ impl Arbitrary<'_> {
         }
     }
 
-    /// The instances an emitter of `kind` declares, with small counts and both boundary forms.
+    /// A small instancing declaration an emitter of `kind` makes in generated graphs, whose stored
+    /// schedules materialize one unit per instance. The `models-emitter-instancing` property covers
+    /// the full count range through the encodings without allocating units.
     ///
     /// Plexus writes no `INSTANCES` clause for an entity that runs one instance. The vocabulary
     /// can still hold a declaration, which a stored form must carry back, so its domain may draw
@@ -95,7 +97,7 @@ impl Arbitrary<'_> {
         if self.entropy.flag() {
             return EmitterInstances::PerPartition;
         }
-        let count = self.entropy.pick([2_u64, 3, 4, u64::MAX]);
+        let count = self.entropy.pick([2_u64, 3, 4]);
         EmitterInstances::Count(
             NonZeroU64::new(count).assured("every declared count choice is positive"),
         )

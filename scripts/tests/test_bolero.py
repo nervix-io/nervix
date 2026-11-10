@@ -162,6 +162,7 @@ class InventoryTests(unittest.TestCase):
             "password-credentials-malformed",
             "runtime-ingestor-metric-layouts",
             "models-ingestor-instancing",
+            "models-emitter-instancing",
             "interconnect-intake-units",
             "typed-runner-lease",
             "typed-runner-policy",
