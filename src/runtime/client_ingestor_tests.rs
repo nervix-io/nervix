@@ -107,7 +107,10 @@ async fn runtime_report_chain_admitted_client_batch_log() {
     };
     let body = test_runtime_row([("id".into(), RuntimeValue::U64(1))])
         .one_row_batch()
-        .encode_arrow_ipc(runtime.executor())
+        .encode_arrow_ipc(
+            runtime.executor(),
+            nervix_execution::QueueAdmission::RefuseWhenFull,
+        )
         .await
         .assured("the fixture has a valid Arrow batch for client admission");
     runtime

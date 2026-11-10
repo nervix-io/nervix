@@ -684,7 +684,10 @@ async fn a_flush_change_names_the_emitter_whose_task_did_not_take_it() {
         .assured("the test installed the domain's execution")
         .emitter_tasks
         .insert(
-            NodeRef::new(ModelKind::Emitter, named::<ModelName>("audit")),
+            NodeUnitRef::new(
+                NodeRef::new(ModelKind::Emitter, named::<ModelName>("audit")),
+                Unit::SINGLE,
+            ),
             ScheduledEmitterTask {
                 commands,
                 stop_signal,
@@ -741,6 +744,7 @@ fn emitting_nodes() -> Vec<ScheduledNode> {
             materialized_state: None,
         })),
         scheduled_model(nervix_models::Model::Emitter(CreateEmitter {
+            instances: nervix_models::EmitterInstances::ONE,
             name: named("audit"),
             from: ProcessorInputs::single(named("events")),
             body: EmitterBody::Codec {
@@ -816,7 +820,10 @@ async fn an_emitter_swap_keeps_the_task_that_did_not_stop() {
         emitting_nodes(),
         DomainRoutingSnapshot::default(),
     );
-    let emitter = NodeRef::new(ModelKind::Emitter, named::<ModelName>("audit"));
+    let emitter = NodeUnitRef::new(
+        NodeRef::new(ModelKind::Emitter, named::<ModelName>("audit")),
+        Unit::SINGLE,
+    );
     let (commands, closed) = mpsc::channel(1);
     drop(closed);
     let (stop_signal, _) = watch::channel(None);
@@ -839,7 +846,7 @@ async fn an_emitter_swap_keeps_the_task_that_did_not_stop() {
         .swap_scheduled_nodes(
             &domain,
             test_execution_revision(&domain, emitting_nodes()),
-            &swap_of(emitter.clone()),
+            &swap_of(emitter.node.clone()),
         )
         .await
         .expect_err("an emitter whose task does not stop cannot be swapped");
@@ -857,7 +864,7 @@ async fn an_emitter_swap_keeps_the_task_that_did_not_stop() {
         .apply_schedule_delta(
             &node,
             &revision,
-            &ExecutionDelta::EntitySwap(swap_of(emitter.clone())),
+            &ExecutionDelta::EntitySwap(swap_of(emitter.node.clone())),
             true,
         )
         .await;

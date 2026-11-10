@@ -22,6 +22,24 @@ use super::*;
 pub(super) enum WindowProcessorError {
     #[error("window aggregate requires a non-empty window")]
     EmptyWindow,
+    #[error("COLLECT_VEC cannot address {rows} retained rows with list offsets")]
+    CollectionRows { rows: usize },
+    #[error("COLLECT_VEC exceeds variable offsets at argument depth {depth}")]
+    CollectionOffsets { depth: usize },
+    #[error("COLLECT_VEC working memory size overflows")]
+    CollectionSizeOverflow,
+    #[error("COLLECT_VEC working memory was not admitted")]
+    CollectionAdmission,
+    #[error("COLLECT_VEC data execution failed")]
+    CollectionExecution,
+    #[error("COLLECT_VEC cannot produce the compiled {data_type:?} output type")]
+    CollectionOutputType { data_type: ArrowDataType },
+    #[error("failed to build the COLLECT_VEC output column")]
+    BuildCollection,
+    #[error("COLLECT_VEC output has {bytes} decoded bytes, exceeding the relay limit {limit}")]
+    CollectionOutputLimit { bytes: u64, limit: u64 },
+    #[error("COLLECT_VEC output cannot be carried as a relay batch")]
+    CollectionOutput,
     #[error("window processor '{}' failed to snapshot branch state", .processor.as_str())]
     Snapshot { processor: ModelName },
     #[error(
@@ -999,6 +1017,7 @@ pub(super) async fn evaluate_window_aggregate(
     execution_now: Timestamp,
 ) -> error_stack::Result<RuntimeRecordBatch, WindowProcessorError> {
     let mut results = BTreeMap::new();
+    let mut collects = false;
     for compiled in &program.route.invocations {
         let demand = program
             .demand_offset
@@ -1008,12 +1027,24 @@ pub(super) async fn evaluate_window_aggregate(
             .accumulators
             .get(demand)
             .verified("a route's demands follow the demands of every route written before it");
-        let result = accumulator.evaluate(
-            demand,
-            &compiled.invocation,
-            &compiled.output_type,
-            &state.entries,
-        )?;
+        let result = match compiled.invocation.function {
+            WindowAggregateFunction::CollectVec => {
+                collects = true;
+                window_accumulator::collection::CollectedSequence::evaluate(
+                    executor,
+                    demand,
+                    &compiled.output_type,
+                    &state.entries,
+                )
+                .await?
+            }
+            _ => accumulator.evaluate(
+                demand,
+                &compiled.invocation,
+                &compiled.output_type,
+                &state.entries,
+            )?,
+        };
         results.insert(compiled.invocation.clone(), result);
     }
     let injector: Arc<Box<dyn VmFunctionInjector>> =
@@ -1057,8 +1088,26 @@ pub(super) async fn evaluate_window_aggregate(
     }
     let batch = RecordBatch::try_new(StdArc::clone(&schema), columns)
         .change_context(WindowProcessorError::BuildAggregateOutput)?;
-    RuntimeRecordBatch::from_record_batch(schema, batch)
-        .change_context(WindowProcessorError::BuildAggregateOutput)
+    let batch = RuntimeRecordBatch::from_record_batch(schema, batch)
+        .change_context(WindowProcessorError::BuildAggregateOutput)?;
+    if collects {
+        let bytes = batch.estimated_bytes();
+        let limit = executor.limits().relay_decoded_bytes.as_u64();
+        if bytes > limit {
+            return Err(Report::new(WindowProcessorError::CollectionOutputLimit {
+                bytes,
+                limit,
+            }));
+        }
+        // Qualify the complete emitted row before any route can publish it. The maintained IPC
+        // writer owns the encoded limit; its typed error stays a window emission failure.
+        let encoded = batch
+            .encode_arrow_ipc(executor, nervix_execution::QueueAdmission::WaitForPlace)
+            .await
+            .change_context(WindowProcessorError::CollectionOutput)?;
+        drop(encoded);
+    }
+    Ok(batch)
 }
 
 /// Evaluate one assigned value as a one-row array of `data_type`.

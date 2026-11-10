@@ -231,7 +231,11 @@ impl TransformedEncodingBenchmark {
             .assured("the benchmark installs its unpaced domain clock above");
         let node_runtime = Runtime::new();
         let emitter = identifier::<EmitterName>("admitted_work_emitter");
-        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
+        let key = nervix_models::DomainNodeUnitRef::single(DomainNodeRef::node_in(
+            domain.clone(),
+            ModelKind::Emitter,
+            emitter.clone(),
+        ));
         Self {
             runtime: build_runtime(),
             context: EmitterConnectorContext {
@@ -249,6 +253,7 @@ impl TransformedEncodingBenchmark {
                 interactions: node_runtime.inner.metrics.register_emitter_interactions(
                     &domain,
                     &emitter,
+                    nervix_models::Unit::SINGLE,
                     None,
                     nervix_models::EmitterEntityKind::Kafka(
                         nervix_models::KafkaEmitterEntity::Topic,
@@ -257,6 +262,7 @@ impl TransformedEncodingBenchmark {
                 runtime: node_runtime,
                 domain,
                 emitter,
+                unit: nervix_models::Unit::SINGLE,
                 error_policies: ErrorPolicies::handled_by_log(),
                 udfs: None,
                 clock,

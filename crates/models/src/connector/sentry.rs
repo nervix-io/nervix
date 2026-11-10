@@ -105,6 +105,7 @@ impl EmitterDeclaration for SentryEventEmitter {
     /// codec's batch transformation can say where in that event the members go.
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         events: crate::DeclaredEvents::NONE,
+        instancing: crate::EmitterInstancingCapability::Instances,
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::Sentry),
         body: EmitterBodyForm::Codec,

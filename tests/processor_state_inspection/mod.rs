@@ -158,6 +158,14 @@ fn sorted(mut rows: Vec<String>) -> Vec<String> {
     rows
 }
 
+fn rendered_rows(rows: &[Value]) -> Vec<String> {
+    sorted(
+        rows.iter()
+            .map(|row| serde_json::to_string(&ordered_members(row)).assured("a row serializes"))
+            .collect(),
+    )
+}
+
 /// `value` with every object's members ordered by name. A JSON object's members are unordered, and
 /// the Row presentation writes them by name while an expected row lists them as written, so rows
 /// compare by their members' values alone.
@@ -341,14 +349,48 @@ fn counts(world: &mut ScenarioWorld, rows: u64, branches: u64) {
 fn rows_match(world: &mut ScenarioWorld, name: String, #[step] step: &Step) {
     let observed = section_rows(last_state(world), &name);
     let expected = expected_rows(&expand_placeholders(world, docstring(step)));
-    let render = |rows: &[Value]| {
-        sorted(
-            rows.iter()
-                .map(|row| serde_json::to_string(&ordered_members(row)).assured("a row serializes"))
-                .collect(),
-        )
-    };
-    assert_eq!(render(&observed), render(&expected));
+    assert_eq!(rendered_rows(&observed), rendered_rows(&expected));
+}
+
+#[then(
+    expr = "within {string} client {string} sees {word} {string} section {string} rows matching"
+)]
+async fn rows_eventually_match(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client: String,
+    kind: String,
+    name: String,
+    section: String,
+    #[step] step: &Step,
+) {
+    let duration = parse_duration_text(&duration).assured("the scenario names a valid bound");
+    let expected = rendered_rows(&expected_rows(&expand_placeholders(world, docstring(step))));
+    let statement = format!(
+        "SHOW {} {} STATE FORMAT JSON;",
+        statement_kind(&kind),
+        expand_placeholders(world, &name)
+    );
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let outcome = execute(world, &client, statement.clone()).await;
+        let matched = outcome.state.as_deref().is_some_and(|state| {
+            matches!(&state.result, StateInspectionResult::Page(_))
+                && rendered_rows(&section_rows(state, &section)) == expected
+        });
+        if matched {
+            record(world, outcome);
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{kind} {name:?} section {section:?} never matched {expected:?} within the bound; \
+             last: {}",
+            outcome.message
+        );
+        sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[then(expr = "the last processor state has no {string} rows")]

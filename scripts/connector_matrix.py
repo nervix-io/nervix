@@ -188,7 +188,10 @@ def entity_rows(row, side, notes):
             maximum = "A batch is written as one frame within the frame limits below; general BATCH limits still apply."
         else:
             maximum = "No additional protocol maximum is declared; general BATCH limits still apply."
-        rows.extend([("Body", row["body"]), ("BATCH", row["batch"]), ("Protocol batch maximum", maximum)])
+        rows.extend([
+            ("Instancing", row["instancing"]),
+            ("Body", row["body"]), ("BATCH", row["batch"]), ("Protocol batch maximum", maximum),
+        ])
         if frame_limits:
             rows.append(("Frame limits", "\n".join(frame_limits)))
         rows.extend([
