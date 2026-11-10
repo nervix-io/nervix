@@ -864,6 +864,40 @@ run_bounded() {
     timeout --foreground --kill-after=5s "${limit}s" "$@"
 }
 
+# Executes the verifier self-check, tests/self-test.sh, within its bound and the run's remaining
+# timeout. The check leads a session of its own in the background, so its deadline reaches every
+# part of it, and a signal to the run interrupts the wait at once; the exit trap then ends the
+# check. However the check ends, the run kills what is left of its session and removes what every
+# run label the check recorded still owns before anything else. Returns the check's exit status, or
+# 1 when the check passed but cleanup could not remove what such a label owns.
+execute_verifier_self_check() {
+    local remaining
+    remaining="$(remaining_seconds)"
+    if ((remaining == 0)); then
+        printf 'overall timeout reached during phase %s\n' "${current_phase}" >&2
+        return 124
+    fi
+    local limit="${chaos_verifier_self_check_seconds}"
+    if ((limit > remaining)); then
+        limit="${remaining}"
+    fi
+    local evidence="${artifact_dir}/diagnostics/verifier-self-test"
+    chaos_verifier_start "${limit}" "${evidence}" "${artifact_dir}/results/verifier-self-test.txt" \
+        "${script_dir}/tests/self-test.sh"
+    local status=0
+    wait "${chaos_verifier_pid}" || status=$?
+    if ! chaos_verifier_end "${evidence}"; then
+        printf 'cleanup could not remove what the verifier self-check left; see diagnostics/verifier-self-test/cleanup\n' >&2
+        if ((status == 0)); then
+            status=1
+        fi
+    fi
+    if ((status == 0)); then
+        chaos_verifier_forget "${evidence}"
+    fi
+    return "${status}"
+}
+
 phase() {
     current_phase="$1"
     printf '\n==> %s\n' "${current_phase}"
@@ -1270,6 +1304,12 @@ finish() {
     trap - EXIT INT TERM HUP
     set +e
     local teardown_started="${SECONDS}"
+    # A signal during the verifier self-check leaves the check executing. It ends first, so its
+    # records are final before evidence is gathered and nothing it started outlives the run.
+    if [[ -n "${chaos_verifier_pid}" ]]; then
+        chaos_verifier_end "${artifact_dir}/diagnostics/verifier-self-test" \
+            || printf 'cleanup could not remove what the verifier self-check left; see diagnostics/verifier-self-test/cleanup\n' >&2
+    fi
     if [[ "${scenario}" == mixed-instability ]]; then
         # The sampler and every pause the controller still waits for end before anything is healed.
         if declare -F mixed_stop_sampler >/dev/null; then
@@ -1561,7 +1601,8 @@ finish() {
             done < <(find "${artifact_dir}/traffic/offsets" -mindepth 2 -maxdepth 2 -type f \
                 \( -name 'result.json' -o -name 'stdout.txt' -o -name 'stderr.txt' \) -size +0c | sort)
         fi
-        # A failed self-check names its output and the probe records a failed self-test retained.
+        # A failed self-check names its output, the probe records a failed or interrupted self-test
+        # retained, the run labels its parts recorded and what cleanup found under them.
         if [[ "${current_phase}" == "verifier self-check" \
             && -s "${artifact_dir}/results/verifier-self-test.txt" ]]; then
             evidence_paths+=(results/verifier-self-test.txt)
@@ -1570,7 +1611,8 @@ finish() {
             while IFS= read -r evidence_path; do
                 evidence_paths+=("${evidence_path#"${artifact_dir}/"}")
             done < <(find "${artifact_dir}/diagnostics/verifier-self-test" -type f \
-                \( -name '*.probe.json' -o -name '*.helper-state.json' -o -name '*.helper-events.ndjson' \) \
+                \( -name '*.probe.json' -o -name '*.helper-state.json' -o -name '*.helper-events.ndjson' \
+                -o -name 'run-ids.txt' -o -name 'cleanup.json' \) \
                 -size +0c | sort)
         fi
         if [[ -n "${diagnostic_selection}" ]]; then
@@ -2308,12 +2350,10 @@ if [[ -n "${verifier_record}" ]]; then
 else
     # The self-check drives Docker as a scenario does, so the worker's load stretches it: it takes
     # two and a half minutes on a CI worker and longer beside other chaos runs. The bound only ends a
-    # self-check that hangs. A failed rate-probe self-test keeps its probes' records under
-    # diagnostics/verifier-self-test.
+    # self-check that hangs. A failed or interrupted check keeps its rate probes' records, the run
+    # labels its parts recorded and what cleanup found under them in diagnostics/verifier-self-test.
     verifier_started="${SECONDS}"
-    run_bounded "${chaos_verifier_self_check_seconds}" "${script_dir}/tests/self-test.sh" \
-        --evidence "${artifact_dir}/diagnostics/verifier-self-test" \
-        >"${artifact_dir}/results/verifier-self-test.txt" 2>&1
+    execute_verifier_self_check
     # The dollars in this jq filter are jq variables, not shell expansion.
     # shellcheck disable=SC2016
     update_manifest '.verifier_self_check = {executed_by: "run", duration_seconds: $duration}' \
