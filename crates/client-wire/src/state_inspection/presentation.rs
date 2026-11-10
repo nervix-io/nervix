@@ -14,12 +14,15 @@ use crate::{CellView, CellsView, RowBatchView, WireDecodeError};
 
 impl StateInspection {
     pub fn display_text(&self) -> Result<String, Report<WireDecodeError>> {
-        let mut output = format!(
-            "kind: {}\nentity: {}\ndomain: {}\n",
-            self.entity.node.kind.keyword_phrase(),
-            self.entity.node.identifier,
-            self.entity.domain
-        );
+        let mut output = match &self.entity {
+            StateInspectionEntity::DomainNode(entity) => format!(
+                "kind: {}\nentity: {}\ndomain: {}\n",
+                entity.node.kind.keyword_phrase(),
+                entity.node.identifier,
+                entity.domain
+            ),
+            StateInspectionEntity::ClusterLicense => String::new(),
+        };
         let page = match &self.result {
             StateInspectionResult::Page(page) => page,
             StateInspectionResult::Rejected(reason) => {
@@ -28,6 +31,9 @@ impl StateInspection {
                 return Ok(output);
             }
         };
+        if self.entity == StateInspectionEntity::ClusterLicense {
+            return license_text(page);
+        }
         writeln!(
             output,
             "branches: {}\nrows: {}\nbytes: {}\nunits: {}",
@@ -101,6 +107,69 @@ impl StateInspection {
     }
 }
 
+fn license_text(page: &StateInspectionPage) -> Result<String, Report<WireDecodeError>> {
+    let mut output = String::new();
+    for unit in &page.units {
+        for section in &unit.sections {
+            for frame in &section.frames {
+                for row in frame.batch().rows() {
+                    if section.name == "quotas" {
+                        let condition = display_cell(row.get(0))?;
+                        let usage = display_cell(row.get(1))?;
+                        let limit = match row.get(2) {
+                            Some(CellView::String("unlimited")) => "unlimited".to_string(),
+                            Some(CellView::String("bounded")) => display_cell(row.get(3))?,
+                            _ => {
+                                return Err(Report::new(WireDecodeError::InvalidValue {
+                                    field: "StateInspection.quotas",
+                                    kind: "an explicit bounded or unlimited quota",
+                                }));
+                            }
+                        };
+                        writeln!(output, "quota {condition}: {usage} of {limit}")
+                            .assured("writing to a String succeeds");
+                    } else {
+                        for (index, field) in section.schema.fields.iter().enumerate() {
+                            if field.name.as_str() == "cluster_key_generation" {
+                                continue;
+                            }
+                            let label = field.name.as_str().replace('_', " ");
+                            let value = display_cell(row.get(index))?;
+                            if field.name.as_str() == "cluster_key" {
+                                writeln!(
+                                    output,
+                                    "{label}: {value} (generation {})",
+                                    display_cell(row.get(index + 1))?
+                                )
+                                .assured("writing to a String succeeds");
+                            } else {
+                                writeln!(output, "{label}: {value}")
+                                    .assured("writing to a String succeeds");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn display_cell(cell: Option<CellView<'_>>) -> Result<String, Report<WireDecodeError>> {
+    Ok(match cell {
+        Some(CellView::String(value)) => value.to_string(),
+        Some(CellView::U64(value)) => value.to_string(),
+        Some(CellView::Datetime(value)) => value.to_string(),
+        Some(value) => format!("{value:?}"),
+        None => {
+            return Err(Report::new(WireDecodeError::InvalidValue {
+                field: "StateInspection.license",
+                kind: "a complete licensing row",
+            }));
+        }
+    })
+}
+
 impl Serialize for StateInspection {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut output = serializer.serialize_map(None)?;
@@ -110,14 +179,22 @@ impl Serialize for StateInspection {
             kind: nervix_models::ModelKind,
             name: &'a nervix_models::ModelName,
         }
-        output.serialize_entry(
-            "entity",
-            &Entity {
-                domain: &self.entity.domain,
-                kind: self.entity.node.kind,
-                name: &self.entity.node.identifier,
-            },
-        )?;
+        match &self.entity {
+            StateInspectionEntity::DomainNode(entity) => {
+                output.serialize_entry("scope", "domain_node")?;
+                output.serialize_entry(
+                    "entity",
+                    &Entity {
+                        domain: &entity.domain,
+                        kind: entity.node.kind,
+                        name: &entity.node.identifier,
+                    },
+                )?;
+            }
+            StateInspectionEntity::ClusterLicense => {
+                output.serialize_entry("scope", "cluster_license")?
+            }
+        }
         match &self.result {
             StateInspectionResult::Page(page) => {
                 output.serialize_entry("outcome", "page")?;

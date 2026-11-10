@@ -214,3 +214,89 @@ Feature: Relay correlation
       | 1            | 0             | LATEST       | 2                    |
       | 3            | 0             | LATEST       | 2                    |
       | 3            | 1             | LATEST       | 2                    |
+
+  @correlator_timeout_send_to
+  Scenario Outline: Correlator sends each side's unmatched records to that side's timeout relay once MAX TIME passes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA settle_order (tenant STRING, order_id STRING, item STRING);
+      CREATE SCHEMA settle_payment (tenant STRING, order_id STRING, amount I64);
+      CREATE SCHEMA settled_order (tenant STRING, order_id STRING, item STRING, amount I64);
+      CREATE SCHEMA settle_tenant (tenant STRING);
+      CREATE BRANCH settle_by_tenant SCHEMA settle_tenant TTL 5m;
+      CREATE JAQ JSON CODEC settle_order_codec TO SCHEMA settle_order
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE JAQ JSON CODEC settle_payment_codec TO SCHEMA settle_payment
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE RELAY settle_orders SCHEMA settle_order BRANCHED BY settle_by_tenant;
+      CREATE RELAY settle_payments SCHEMA settle_payment BRANCHED BY settle_by_tenant;
+      CREATE RELAY settled_orders SCHEMA settled_order BRANCHED BY settle_by_tenant;
+      CREATE RELAY unpaid_orders SCHEMA settle_order BRANCHED BY settle_by_tenant;
+      CREATE RELAY unclaimed_payments SCHEMA settle_payment BRANCHED BY settle_by_tenant;
+      CREATE VHOST settle_host settle-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT settle_orders_endpoint ON settle_host PATH '/orders';
+      CREATE HTTP ENDPOINT settle_payments_endpoint ON settle_host PATH '/payments';
+      CREATE HTTP ENDPOINT INGESTOR settle_orders_ingestor FROM settle_orders_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING settle_order_codec
+        TO settle_orders INHERIT ALL BRANCHED BY settle_by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR settle_payments_ingestor FROM settle_payments_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING settle_payment_codec
+        TO settle_payments INHERIT ALL BRANCHED BY settle_by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CORRELATOR settle_payments_to_orders
+        LEFT FROM settle_orders
+        RIGHT FROM settle_payments
+        ATTACHED
+        CORRELATE WHERE left.order_id = right.order_id
+        MATCH EARLIEST
+        MAX TIME 2s
+        ON CORRELATION TIMEOUT SEND TO unpaid_orders, SEND TO unclaimed_payments
+        BRANCHED BY settle_by_tenant
+        TO settled_orders
+          SET tenant = left.tenant,
+              order_id = left.order_id,
+              item = left.item,
+              amount = right.amount
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION settled_orders_subscription TO settled_orders;
+      CREATE SUBSCRIPTION unpaid_orders_subscription TO unpaid_orders;
+      CREATE SUBSCRIPTION unclaimed_payments_subscription TO unclaimed_payments;
+      START;
+      """
+    # Both tenants order o1; tenant a's o2 is never paid and tenant b's payment for o9 has no order.
+    And http payload is posted to host "settle-{{test_id}}.example.com" path "/orders"
+      """
+      [
+        {"tenant":"a","order_id":"o1","item":"lamp"},
+        {"tenant":"b","order_id":"o1","item":"desk"},
+        {"tenant":"a","order_id":"o2","item":"rug"}
+      ]
+      """
+    And http payload is posted to host "settle-{{test_id}}.example.com" path "/payments"
+      """
+      [
+        {"tenant":"b","order_id":"o1","amount":200},
+        {"tenant":"a","order_id":"o1","amount":100},
+        {"tenant":"b","order_id":"o9","amount":50}
+      ]
+      """
+    Then within "30s" the relay subscription receives exactly one payload for each fragment set
+      """
+      "tenant":"a" | "order_id":"o1" | "item":"lamp" | "amount":100
+      "tenant":"b" | "order_id":"o1" | "item":"desk" | "amount":200
+      "tenant":"a" | "order_id":"o2" | "item":"rug"
+      "tenant":"b" | "order_id":"o9" | "amount":50
+      """
+    And the relay subscription does not receive a payload within "3s"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

@@ -715,6 +715,10 @@ selected entries, checkpoint stages and recovery outcomes, and the returned `bra
 order. Each branch entry names its opaque fingerprint, absent for the unbranched execution, and
 carries its current-lifetime checkpoint, its recorded recovery, or both.
 
+`DESCRIBE LICENSE;` returns the same typed envelope with `StateInspectionEntity::ClusterLicense`
+and summary/quota sections, including when no domain is selected. Match `StateInspectionEntity::DomainNode`
+to access the domain and graph-node reference of a materialized-state observation.
+
 The other libraries read the same envelope through their own typed inspection objects, which
 each guide shows with a tested example: [Python](client-library-python.md#inspect-materialized-state),
 [Ruby](client-library-ruby.md#inspect-materialized-state),

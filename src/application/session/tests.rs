@@ -1197,7 +1197,8 @@ fn bounded_state_inspection_reply_preserves_its_typed_refusal_and_requested_form
                 named("tenant"),
                 ModelKind::Relay,
                 named::<RelayName>("events"),
-            ),
+            )
+            .into(),
             result: StateInspectionResult::Page(StateInspectionPage {
                 counts: StateInspectionCounts::default(),
                 unit_count: 0,

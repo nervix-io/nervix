@@ -1446,7 +1446,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | KEY 'record-key'<br>PARTITION FROM BRANCH<br>TIMESTAMP occurred_at |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | PARTITION FROM BRANCH native topic metadata response: driver default, receive.message.max.bytes 100000000; when full, fails the publish for the host to retry<br>records the producer queues under ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, holds back what fills it<br>records the producer queues under NO ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |
-| Network waits | PARTITION FROM BRANCH topic metadata, including connector executor admission: driver default, socket.timeout.ms, 60 s; maximum 300 s<br>a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, delivery.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT`<br>destroying a producer, for its polling thread and the reports of the records its purge failed: driver default, 100 ms poll, then a 500 ms flush |
+| Network waits | PARTITION FROM BRANCH topic metadata, including connector executor admission: driver default, socket.timeout.ms, 60 s; maximum 300 s<br>a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, delivery.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT`<br>a failed publish under ACK, for the reports of the records its purge gave up: `ACK TIMEOUT`<br>destroying a producer, for its polling thread and the reports of the records its purge failed: driver default, 100 ms poll, then a 500 ms flush |
 | Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. MODE ACK sets delivery.timeout.ms from ACK TIMEOUT.<br>message.max.bytes 1000000<br>A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through ON MESSAGE ERROR.<br>A producer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes rust-rdkafka's 100 ms poll or 500 ms flush, and librdkafka then joins its threads, a broker thread still resolving a name included. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
@@ -1478,18 +1478,23 @@ as delivered once the producer takes it, so it is lost, like any other record it
 after that.
 
 `ACK` waits for every record's delivery report through the shared confirmation window. If a publish
-attempt fails, the window first settles the answers already received and returns only unresolved
-members for retry; confirmed records are not sent again by that attempt's retry. An unanswered
-report is still ambiguous: the broker may have accepted the record, so a retry can duplicate it.
+attempt fails, the emitter first makes its producer give up every record it still holds: it purges
+the records the producer queues or has in flight, and waits, for at most `ACK TIMEOUT`, for the
+report librdkafka then gives each of them. The window settles every report received by then and
+returns only unresolved members for retry, so a record the broker confirmed, even just before the
+purge, is not sent again by that attempt's retry. The producer holds no copy of an unresolved
+record by then, so it cannot deliver one beside the copy the retry sends. A record already on its
+way to the broker when the purge ran stays ambiguous, like any unanswered report: the broker may
+have accepted it, so a retry can duplicate it.
 
 Kafka's `acks`, idempotence, batching, linger, and compression remain pass-through client
 configuration. `ACK TIMEOUT` bounds the report wait and is also the producer's own delivery bound:
-the emitter sets the producer's `delivery.timeout.ms` to its
-`ACK TIMEOUT`, rounded up to the millisecond, replacing the client's own `delivery.timeout.ms`, the
-one name a Kafka client accepts for that librdkafka property. The producer therefore gives up a
-record within about a second of
-the emitter doing so, the interval at which librdkafka checks message timeouts, instead of
-delivering it later beside the copy the retry sends. An `ACK TIMEOUT` longer than the 2147483647
+the emitter sets the producer's `delivery.timeout.ms` to its `ACK TIMEOUT`, rounded up to the
+millisecond, replacing the client's own `delivery.timeout.ms`, the one name a Kafka client accepts
+for that librdkafka property, so librdkafka stops retrying a record when the publish stops waiting
+for it. librdkafka checks that bound only about once a second, though, and still sends a record
+whose bound has passed until it does, which is why a failed attempt purges what the producer holds
+instead of leaving the records to that check. An `ACK TIMEOUT` longer than the 2147483647
 milliseconds librdkafka holds refuses the emitter when it starts. `NO ACK` is fire-and-forget after
 local admission: Nervix acknowledges the emitter's `ATTACHED` ACK share when librdkafka accepts the
 record into its producer queue and does not wait for a delivery report. A later broker error,
@@ -1498,8 +1503,9 @@ local queue applies backpressure: Nervix waits for the oldest outstanding delive
 it, and tries to enqueue the same refused record again. The effective confirmation window is
 limited by both `MAX` and the producer queue's record and byte capacities. If no outstanding report
 remains, Nervix waits for the native delivery callback to release its queue place, bounded by
-`ACK TIMEOUT`. An unanswered or failed delivery report still ends the attempt after settling every
-answer already given, and only unresolved records are retried. In `NO ACK`, a temporarily full
+`ACK TIMEOUT`. An unanswered or failed delivery report still ends the attempt, once the producer
+gave up the records it held and every answer given by then was settled, and only unresolved records
+are retried. In `NO ACK`, a temporarily full
 queue is an infrastructure condition paced by the declared retry policy. In either mode, a record
 whose payload exceeds the entire `queue.buffering.max.kbytes` capacity is rejected through
 `ON MESSAGE ERROR`, with its payload size and the capacity in bytes. This queue capacity counts

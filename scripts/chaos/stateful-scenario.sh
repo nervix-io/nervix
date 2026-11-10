@@ -9,6 +9,8 @@
 source "${script_dir}/recovery-scenario.sh"
 # shellcheck source=node-faults.sh
 source "${script_dir}/node-faults.sh"
+# shellcheck source=materialized-profile.sh
+source "${script_dir}/materialized-profile.sh"
 
 recovery_graph_models[branch-chaos_state_branch]='SHOW CREATE BRANCH chaos_state_branch;'
 
@@ -147,10 +149,7 @@ stateful_profiles_at() {
     local version="$1"
     local host="$2"
     local output="$3"
-    cli_host="${host}"
-    domain_cli_command 'SHOW RELAY chaos_profiles MATERIALIZED STATE;' >"${output}.txt" 2>&1 || return 1
-    sed -n 's/^key=\({[^}]*}\) payload=\({[^}]*}\) low=.*$/{"key":\1,"payload":\2}/p' "${output}.txt" \
-        | jq -s '.' >"${output}.json" || return 1
+    materialized_profile_read chaos_profiles "${host}" "${output}" || return 1
     jq -e --argjson version "${version}" '
         ([.[] | select(.payload.branch_name == .key.branch_name
                        and .payload.profile_version == $version) | .key.branch_name] | sort)

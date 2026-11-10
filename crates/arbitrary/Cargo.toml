@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 meticulous = { workspace = true }
+nervix-licensing-vocabulary = { workspace = true }
 nervix-models = { workspace = true }
 nervix-wasm-protocol = { workspace = true }
 rkyv = { workspace = true }

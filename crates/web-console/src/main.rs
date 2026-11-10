@@ -12569,14 +12569,24 @@ mod tests {
             ChoiceControl::ProcessorInputRelay
             | ChoiceControl::ProcessorRouteRelay
             | ChoiceControl::ProcessorStateRelay
-            | ChoiceControl::ProcessorErrorRelay => nervix_client_wire::ChoiceTarget::Relay,
+            | ChoiceControl::ProcessorErrorRelay
+            | ChoiceControl::ProcessorRightInputRelay
+            | ChoiceControl::ProcessorLeftTimeoutRelay
+            | ChoiceControl::ProcessorRightTimeoutRelay => nervix_client_wire::ChoiceTarget::Relay,
             ChoiceControl::ProcessorBranch | ChoiceControl::ProcessorRouteBranch => {
                 nervix_client_wire::ChoiceTarget::Branch
             }
             ChoiceControl::ProcessorStateField
             | ChoiceControl::ProcessorInputField
             | ChoiceControl::ProcessorOutputField
-            | ChoiceControl::ProcessorErrorField => nervix_client_wire::ChoiceTarget::RelayField,
+            | ChoiceControl::ProcessorErrorField
+            | ChoiceControl::ProcessorAggregateField
+            | ChoiceControl::ProcessorCorrelateLeftField
+            | ChoiceControl::ProcessorCorrelateRightField
+            | ChoiceControl::ProcessorRouteLeftField
+            | ChoiceControl::ProcessorRouteRightField => {
+                nervix_client_wire::ChoiceTarget::RelayField
+            }
             ChoiceControl::ProcessorBranchField => nervix_client_wire::ChoiceTarget::BranchField,
             ChoiceControl::EmitterReference => {
                 nervix_client_wire::ChoiceTarget::EmitterHttpRequestReference

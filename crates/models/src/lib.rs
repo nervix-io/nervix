@@ -378,7 +378,8 @@ pub use state_branch_selection::{
 };
 pub use state_inspection::{
     ProcessorStateSection, StateInspectionBranchSelection, StateInspectionCounts,
-    StateInspectionOrigin, StateInspectionPosition, StateInspectionRejection, StateInspectionStage,
+    StateInspectionEntity, StateInspectionOrigin, StateInspectionPosition,
+    StateInspectionRejection, StateInspectionStage,
 };
 pub use state_inspection_settings::{
     StateInspectionMaxRows, StateInspectionMaxSections, StateInspectionReadTimeout,
@@ -395,8 +396,8 @@ pub use statement::{
     CreateSignalingProtocol, CreateStatement, CreateSubscription, CreateUser, CreateVhost,
     DeleteSubscription, DescribeClient, DescribeCluster, DescribeCorrelator, DescribeDeduplicator,
     DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction,
-    DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer,
-    DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
+    DescribeLicense, DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay,
+    DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
     DescribeWindowProcessor, DomainConfig, DomainPace, DomainStartPoint, DomainState, DomainStatus,
     DomainTick, DrainNode, DropModel, DropNode, EndpointKind, EndpointType, ErrorPolicies,
     GeneralErrorPolicy, IngestTimestampSource, InspectionFormat, LookupQuery,

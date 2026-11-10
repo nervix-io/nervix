@@ -2496,6 +2496,7 @@ impl SessionServiceImpl {
                 )
                 .await,
             ),
+            Statement::DescribeLicense(_) => self.describe_license().await,
             Statement::ShowTransactions(_) => self.show_transactions().await,
             Statement::DescribeTransaction(describe) => {
                 self.describe_transaction(describe, query, session).await

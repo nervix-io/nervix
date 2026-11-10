@@ -1772,7 +1772,10 @@ table StateInspectionUnit { unit: PlacementUnit (required); owner: string (requi
 table StateInspectionPage { counts: StateInspectionCounts (required); unit_count: ulong; units: [StateInspectionUnit] (required); continuation: string; wasm_binding: WasmStateBinding; }
 table StateInspectionRefused { reason: StateInspectionRejection = null; }
 union StateInspectionResult { StateInspectionPage, StateInspectionRefused }
-table StateInspection { domain: string (required); entity: NodeRef (required); result: StateInspectionResult (required); }
+table DomainNodeInspectionEntity { domain: string (required); node: NodeRef (required); }
+table ClusterLicenseInspectionEntity {}
+union StateInspectionEntity { DomainNodeInspectionEntity, ClusterLicenseInspectionEntity }
+table StateInspection { entity: StateInspectionEntity (required); result: StateInspectionResult (required); }
 
 table CommandOutcome {
   /// The execution_reference of the request.

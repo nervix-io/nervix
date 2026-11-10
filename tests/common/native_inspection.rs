@@ -86,7 +86,8 @@ pub fn page(unit: Unit, stage: StateInspectionStage, value: u64) -> StateInspect
             name("sales"),
             ModelKind::Relay,
             name::<RelayName>("events"),
-        ),
+        )
+        .into(),
         result: StateInspectionResult::Page(StateInspectionPage {
             counts,
             unit_count: 1,
@@ -122,7 +123,8 @@ pub fn page(unit: Unit, stage: StateInspectionStage, value: u64) -> StateInspect
 
 pub fn refused(reason: StateInspectionRejection) -> StateInspection {
     StateInspection {
-        entity: DomainNodeRef::node_in(name("sales"), ModelKind::Relay, name::<RelayName>("plain")),
+        entity: DomainNodeRef::node_in(name("sales"), ModelKind::Relay, name::<RelayName>("plain"))
+            .into(),
         result: StateInspectionResult::Rejected(reason),
     }
 }

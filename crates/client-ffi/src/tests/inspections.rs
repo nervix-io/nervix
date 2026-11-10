@@ -36,7 +36,8 @@ fn inspected() -> CommandOutcome {
             name("tenant"),
             ModelKind::Relay,
             name::<nervix_models::RelayName>("events"),
-        ),
+        )
+        .into(),
         result: StateInspectionResult::Page(StateInspectionPage {
             counts,
             unit_count: 1,

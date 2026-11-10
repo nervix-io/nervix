@@ -1572,8 +1572,14 @@ function wasmUnitLines(state: wire.WasmUnitStateFacts): string[] {
 }
 
 function stateInspectionLines(state: wire.StateInspection): string[] {
-  const entity = member(state.entity());
-  const lines = [`STATE domain=${state.domain()} kind=${wire.ModelKind[member(entity.kind())]} name=${entity.name()}`];
+  const lines: string[] = [];
+  if (state.entityType() === wire.StateInspectionEntity.DomainNodeInspectionEntity) {
+    const scope = member(state.entity(new wire.DomainNodeInspectionEntity()) as wire.DomainNodeInspectionEntity | null);
+    const entity = member(scope.node());
+    lines.push(`STATE domain=${scope.domain()} kind=${wire.ModelKind[member(entity.kind())]} name=${entity.name()}`);
+  } else if (state.entityType() === wire.StateInspectionEntity.ClusterLicenseInspectionEntity) {
+    lines.push('STATE scope=cluster_license kind=LICENSE');
+  } else throw new Error('unknown inspection entity scope');
   if (state.resultType() === wire.StateInspectionResult.StateInspectionRefused) {
     const refused = member(state.result(new wire.StateInspectionRefused()) as wire.StateInspectionRefused | null);
     lines.push(`STATE_REFUSED ${wire.StateInspectionRejection[member(refused.reason())]}`);

@@ -10,10 +10,10 @@
     nervix::layer(engine, reason = "owns the boundary declared above")
 )]
 
-use nervix_models::{ClusterNodeName, DomainNodeRef, Unit};
+use nervix_models::{ClusterNodeName, Unit};
 pub use nervix_models::{
-    StateInspectionCounts, StateInspectionOrigin, StateInspectionRejection, StateInspectionStage,
-    WasmStateBinding, WasmUnitStateInspection,
+    StateInspectionCounts, StateInspectionEntity, StateInspectionOrigin, StateInspectionRejection,
+    StateInspectionStage, WasmStateBinding, WasmUnitStateInspection,
 };
 
 use crate::{RowSchema, StateRowFrame};
@@ -25,7 +25,7 @@ pub use wasm::{MAX_ENCODED_WASM_BRANCH_ENTRY_BYTES, wasm_unit_summary_lines};
 /// One read, with either a page from its captured generations or a typed refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateInspection {
-    pub entity: DomainNodeRef,
+    pub entity: StateInspectionEntity,
     pub result: StateInspectionResult,
 }
 

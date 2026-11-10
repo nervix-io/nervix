@@ -233,7 +233,8 @@ impl WireValues<'_> {
                 self.arbitrary.name(),
                 ModelKind::WasmProcessor,
                 self.arbitrary.name::<nervix_models::WasmProcessorName>(),
-            ),
+            )
+            .into(),
             result: StateInspectionResult::Page(StateInspectionPage {
                 counts,
                 unit_count: u64::try_from(inspected.len()).assured("two units fit u64"),

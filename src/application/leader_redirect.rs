@@ -126,6 +126,7 @@ impl SessionServiceImpl {
         report: &Report<ConsensusError>,
         operation: String,
     ) -> CommandResult {
+        self.inner.licensing.record_refusal(report);
         let message = format!("{operation}: {}", ConsensusError::report_message(report));
         self.consensus_error_response(report.current_context(), message)
             .await

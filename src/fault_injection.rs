@@ -67,6 +67,7 @@ mod execution;
 mod explicit_commit;
 mod handoff_gate_link;
 mod interest_visibility;
+mod licensing;
 mod listener_accept;
 mod live_view_gap;
 #[cfg(test)]
@@ -185,6 +186,7 @@ pub struct FaultInjection {
 
 #[derive(Debug)]
 struct FaultInjectionState {
+    licensing_quotas: watch::Sender<[Option<u64>; 2]>,
     orphaned_domain_pauses: orphaned_domain_pause::OrphanedDomainPauses,
     /// One bounded command-reply script per scenario domain, absent from ordinary builds.
     command_reply_scripts: DashMap<DomainName, CommandReplyScript, RandomState>,
@@ -531,6 +533,7 @@ impl Default for FaultInjection {
         let (startup_observation_end, _) = watch::channel(StartupObservationEnd::Unarmed);
         Self {
             inner: Arc::new(FaultInjectionState {
+                licensing_quotas: watch::channel([None; 2]).0,
                 orphaned_domain_pauses: orphaned_domain_pause::OrphanedDomainPauses::default(),
                 command_reply_scripts: DashMap::default(),
                 emitter_faults: DashMap::default(),
