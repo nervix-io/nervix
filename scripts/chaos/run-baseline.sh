@@ -2368,7 +2368,7 @@ broker_admin /opt/kafka/bin/kafka-topics.sh \
 scenario_topics=()
 if [[ "${scenario}" == stateful ]]; then
     scenario_topics=(chaos_state_input chaos_profile_input chaos_unique_output chaos_window_output
-        chaos_enriched_output chaos_counted_output)
+        chaos_enriched_output chaos_counted_output chaos_inferred_output)
 elif [[ "${scenario}" == endpoints ]]; then
     scenario_topics=(chaos_edge_primary_http chaos_edge_peer_http chaos_edge_frames)
 elif [[ "${scenario}" == lifetimes ]]; then
@@ -2482,6 +2482,34 @@ if [[ "${scenario}" == stateful ]]; then
         >"${artifact_dir}/public/upload-wasm-resource.txt" 2>&1
     grep -Fxq 'uploaded resource version 1' "${artifact_dir}/public/upload-wasm-resource.txt" \
         || setup_error 'the packaged CLI did not upload the WASM fixture as resource version 1'
+    # The stateful inferencer's model is a checked-in ONNX fixture, pinned to its generator by
+    # scripts/tests/test_train_simple_onnx.py; the run uploads exactly that file and records its
+    # identity.
+    mkdir -p "${artifact_dir}/fixtures/onnx/models"
+    cp "${script_dir}/fixtures/onnx/models/running_sum.onnx" \
+        "${artifact_dir}/fixtures/onnx/models/running_sum.onnx"
+    chmod 0755 "${artifact_dir}/fixtures/onnx" "${artifact_dir}/fixtures/onnx/models"
+    chmod 0644 "${artifact_dir}/fixtures/onnx/models/running_sum.onnx"
+    onnx_fixture_digest="$(openssl dgst -sha256 -r \
+        "${artifact_dir}/fixtures/onnx/models/running_sum.onnx" | awk '{ print $1 }')"
+    [[ "${onnx_fixture_digest}" =~ ^[a-f0-9]{64}$ ]] \
+        || setup_error 'the ONNX fixture digest could not be computed'
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_manifest '.fixtures.onnx = {resource: "chaos_running_model", resource_version: 1,
+        file: "models/running_sum.onnx", format: "ONNX", sha256: $digest,
+        bytes: ($bytes | tonumber), source: "scripts/chaos/fixtures/onnx/models/running_sum.onnx"}' \
+        --arg digest "${onnx_fixture_digest}" \
+        --arg bytes "$(wc -c <"${artifact_dir}/fixtures/onnx/models/running_sum.onnx")"
+    domain_cli_command 'CREATE RESOURCE chaos_running_model;' \
+        >"${artifact_dir}/public/create-onnx-resource.txt" 2>&1
+    compose run --rm --no-deps -v "${artifact_dir}/fixtures/onnx:/chaos-onnx:ro" admin \
+        nervix-cli --server "http://${cli_host}:47391" --domain chaos_baseline \
+        --password "${CHAOS_PASSWORD}" \
+        --command "UPLOAD RESOURCE chaos_running_model VERSION '/chaos-onnx';" \
+        >"${artifact_dir}/public/upload-onnx-resource.txt" 2>&1
+    grep -Fxq 'uploaded resource version 1' "${artifact_dir}/public/upload-onnx-resource.txt" \
+        || setup_error 'the packaged CLI did not upload the ONNX fixture as resource version 1'
 fi
 domain_cli_command "${plexus_fixture}" \
     >"${artifact_dir}/public/configure-plexus.txt" 2>&1
@@ -2491,6 +2519,8 @@ if [[ "${scenario}" == stateful ]]; then
     update_manifest '.fixtures.stateful_partitions = $count' --argjson count "${stateful_partitions}"
     domain_cli_command "$(<"${script_dir}/fixtures/stateful.plexus")" \
         >"${artifact_dir}/public/configure-stateful-plexus.txt" 2>&1
+    domain_cli_command "$(<"${script_dir}/fixtures/stateful-inference.plexus")" \
+        >"${artifact_dir}/public/configure-stateful-inference-plexus.txt" 2>&1
 fi
 if [[ "${scenario}" == lifetimes ]]; then
     domain_cli_command "$(<"${script_dir}/fixtures/lifetimes.plexus")" \
