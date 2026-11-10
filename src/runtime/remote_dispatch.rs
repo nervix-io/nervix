@@ -800,7 +800,14 @@ impl RemoteDispatcher {
             };
             let (batch_ipc, decoded_bytes) = match encoded_body.clone() {
                 Some(bytes) => bytes,
-                None => match batch.batch.encode_arrow_ipc(self.executor()).await {
+                None => match batch
+                    .batch
+                    .encode_arrow_ipc(
+                        self.executor(),
+                        nervix_execution::QueueAdmission::RefuseWhenFull,
+                    )
+                    .await
+                {
                     Ok(bytes) => {
                         let bytes = (bytes, batch_payload_bytes(batch.batch.batch()));
                         encoded_body = Some(bytes.clone());

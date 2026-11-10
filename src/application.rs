@@ -2185,7 +2185,7 @@ impl Application {
                     let result = match service.handle_lookup_request(request).await {
                         Ok(Some(record)) => {
                             let mapping_input = record
-                                .encode_arrow_ipc(service.inner.runtime.executor())
+                                .encode_arrow_ipc(service.inner.runtime.executor(), nervix_execution::QueueAdmission::RefuseWhenFull)
                                 .await
                                 .map(|body| Some(body.to_vec()));
                             match mapping_input {

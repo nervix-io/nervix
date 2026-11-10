@@ -477,6 +477,12 @@ subsections after the boundary table follow this order.
 | Control plane | `AppError`, `DomainAlterError`, `BackupError`, `RestoreRefusal` and the transaction and lifecycle errors | A report the session edge turns into a command result |
 | Edges | The session service's `GrpcAuthenticationError`, `SessionTransactionBindingError` and `SnapshotEncodingError`; `ClientError` and the Rust client's `DomainClockReadError`; the CLI's and the benchmark command's own contexts | A command disposition, a status, an `NX_ERROR_*` kind, or the rendered chain |
 
+A window route compilation failure retains its compiler report beneath
+`RegistryError::WindowRouteCompile`, which names the domain, processor and output relay.
+`WindowRouteCompileError::CollectionArgumentNullable` names `COLLECT_VEC` and directs an optional
+argument to `coalesce`. `RegistryError::WindowCollectionMissingBound` names the same route and
+function when neither a message width nor a state limit bounds retained collection.
+
 ### Boundaries
 
 | Boundary | Failure meaning it owns | What its caller can decide |
@@ -2338,6 +2344,11 @@ Each failure reports its owner's typed context above the cause it kept:
   for a WASM processor's instance and the output its guest emitted. The VM, Arrow, ONNX or relay
   batch failure stays beneath. A WASM output route's FILTER-MAP reports the `PlannedGeneralError`
   step a planned batch reports, and the callback whose output did not forward is named by its kind.
+  Collection uses typed row-count, nested-offset, working-size, admission, execution, Arrow-build
+  and output-carriage contexts in `WindowProcessorError`. Its final decoded and encoded limits
+  are checked before publication; the original executor or Arrow body report stays beneath.
+  Failure follows the window emission rule: fail every retained acknowledgement and clear the
+  window, preserving output already emitted by earlier routes.
   Window statistics reject non-finite arguments or results at their respective boundaries.
   Overflow of a finite-input intermediate sum is handled by the moment kernel's normalized mean,
   so it does not itself classify the window as failed; constant overflow-scale runs keep zero

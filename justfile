@@ -1011,6 +1011,10 @@ bench-window-admission *args:
 bench-window-sketches *args: build-web-console
     cargo bench --package nervix-server --bench window_sketches --features benchmarks -- {{ args }}
 
+# Measure complete retained collection emissions at 64 and 4,096 rows.
+bench-window-collection *args: build-web-console
+    cargo bench --package nervix-server --bench window_collection --features benchmarks -- {{ args }}
+
 # Measure the checked integer SIMD kernels beside the lane loop they replaced, over one 1,024-lane
 # run each. Extra arguments are forwarded to Criterion.
 bench-checked-lanes *args:
@@ -3434,6 +3438,7 @@ bench-smoke-bodies:
     cargo bench --profile dev --package nervix-server --bench task_handles --features benchmarks -- target/task-handles-smoke.json
     cargo bench --profile dev --package nervix-server --bench state_replication --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench window_sketches --features benchmarks -- --test
+    cargo bench --profile dev --package nervix-server --bench window_collection --features benchmarks -- --test
     cargo bench --profile dev --package nervix-columnar-json --bench json_encode -- --test
     cargo bench --profile dev --package nervix-simd-kernels --bench constant_division -- --test
     cargo bench --profile dev --package nervix-simd-kernels --bench byte_classes -- --test

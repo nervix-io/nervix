@@ -20,6 +20,7 @@ use nervix_models::{
     EndpointType, FieldName, IngestorEntityKind, IngestorMetadataType, ModelKind, ModelName,
     RelayName,
 };
+use nervix_vm::program::WindowAggregateFunction;
 use thiserror::Error;
 
 /// The metadata fields an ingestor entity declares, as a refusal names them after the entity's
@@ -513,6 +514,22 @@ pub(crate) enum RegistryError {
         route: RelayName,
         demand: usize,
         argument: usize,
+    },
+    #[error(
+        "window processor '{processor}' in domain '{domain}' route '{route}' failed to compile \
+         its aggregate output"
+    )]
+    WindowRouteCompile {
+        domain: DomainName,
+        processor: ModelName,
+        route: RelayName,
+    },
+    #[error("window processor '{processor}' in domain '{domain}' route '{route}': {} requires a message WIDTH or MAX STATE SIZE", .function.plexus_name())]
+    WindowCollectionMissingBound {
+        domain: DomainName,
+        processor: ModelName,
+        route: RelayName,
+        function: WindowAggregateFunction,
     },
     #[error(
         "window processor '{processor}' in domain '{domain}' route '{route}' uses a sketch and \
