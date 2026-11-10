@@ -1,4 +1,9 @@
 //! Full COLLECT_VEC emission, including Arrow gathering, VM projection and IPC qualification.
+//!
+//! Layer: harness.
+//! - **Owns.** Criterion cases for complete collection emissions at two retained-row counts.
+//! - **Depends on.** The production collection fixture, Criterion and the primitive runtime.
+//! - **Must not know.** Model lowering, placement, transport or acknowledgement lifecycles.
 
 use std::num::NonZeroUsize;
 
