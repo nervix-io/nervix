@@ -1813,7 +1813,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__requests__bolero_client_requests_keep_complete_values/corpus"
-domain_version = 11
+domain_version = 12
 features = []
 id = "client-requests"
 invariant = "Every current typed client request decodes to its complete original value, including identities, positions, schemas, a restoration's expected schema and opaque payloads."
@@ -4560,10 +4560,10 @@ test_target = "bin:nervix-web-console"
 [[target]]
 case_timeout_seconds = 30
 corpus = "crates/web-console/src/create_dialog/__fuzz__/create_dialog__processor_model_tests__bolero_processor_drafts_preserve_every_complete_model/corpus"
-domain_version = 5
+domain_version = 6
 features = []
 id = "console-processor-drafts"
-invariant = "Every complete junction, deduplicator, reorderer, window processor, correlator and reingestor Model filled into its browser draft builds back to the complete original and canonical Plexus, including ordered inputs, predicates, collection, node branch, DEDUPLICATE ON and BY order, exact MAX TIME text, WIDTH and STEP bounds, MAX STATE SIZE, both correlator sides with their collection, CORRELATE WHERE, match policy and timeout actions, materialized dependencies and every route's construction, branch, flush and error policy."
+invariant = "Every complete junction, deduplicator, reorderer, window processor, correlator, reingestor, generator, inferencer and WASM processor Model filled into its browser draft builds back to the complete original and canonical Plexus, including ordered inputs, predicates, collection, node branch, DEDUPLICATE ON and BY order, exact MAX TIME text, WIDTH and STEP bounds, MAX STATE SIZE, both correlator sides with their collection, CORRELATE WHERE, match policy and timeout actions, a generator's materialized relay and EACH period, a requested resource version and exact file, ordered INPUTS, STATE and OUTPUT SCHEMA tensors with every axis, INITIAL values, MAX FUEL and MAX MEMORY, rejected-state and global error policies, materialized dependencies and every route's construction, branch, flush and error policy, with blank files and tensor or port names, which the forms require, named."
 manifest = "Cargo.toml"
 max_input_bytes = 4096
 package = "nervix-web-console"

@@ -213,6 +213,7 @@ enum ChoiceTarget : ubyte {
   EmitterMaterializedRelay,
   EmitterErrorRelay,
   SchemaField,
+  GeneratorMaterializedRelay,
 }
 
 enum DomainPaceChoice : ubyte {

@@ -77,6 +77,8 @@ mod ingestor_source_draft;
 mod inserted_reference;
 mod placement_draft;
 mod processor_assignment_editor;
+mod processor_binding_draft;
+mod processor_binding_editor;
 mod processor_choices;
 mod processor_correlation_editor;
 mod processor_correlator_draft;
@@ -84,6 +86,11 @@ mod processor_draft;
 mod processor_editor;
 #[cfg(test)]
 mod processor_family_form_tests;
+#[cfg(test)]
+mod processor_generated_family_form_tests;
+mod processor_generator_draft;
+mod processor_generator_editor;
+mod processor_inferencer_draft;
 mod processor_inheritance_editor;
 mod processor_input_draft;
 mod processor_input_editor;
@@ -95,6 +102,9 @@ mod processor_node_branch_editor;
 mod processor_route_editor;
 mod processor_route_references;
 mod processor_state_editor;
+mod processor_tensor_editor;
+mod processor_wasm_draft;
+mod processor_wasm_editor;
 mod processor_window_draft;
 mod processor_window_editor;
 mod relay_draft;
@@ -185,6 +195,9 @@ pub(crate) enum CreateKind {
     WindowProcessor,
     Correlator,
     Reingestor,
+    Generator,
+    Inferencer,
+    WasmProcessor,
 }
 
 impl CreateKind {
@@ -216,6 +229,9 @@ impl CreateKind {
             Self::WindowProcessor => "window processor",
             Self::Correlator => "correlator",
             Self::Reingestor => "reingestor",
+            Self::Generator => "generator",
+            Self::Inferencer => "inferencer",
+            Self::WasmProcessor => "WASM processor",
         }
     }
 
@@ -256,7 +272,10 @@ impl CreateKind {
             | Self::Reorderer
             | Self::WindowProcessor
             | Self::Correlator
-            | Self::Reingestor => None,
+            | Self::Reingestor
+            | Self::Generator
+            | Self::Inferencer
+            | Self::WasmProcessor => None,
         }
     }
 
@@ -269,6 +288,9 @@ impl CreateKind {
             Self::WindowProcessor => Some(ProcessorFamily::Window),
             Self::Correlator => Some(ProcessorFamily::Correlator),
             Self::Reingestor => Some(ProcessorFamily::Reingestor),
+            Self::Generator => Some(ProcessorFamily::Generator),
+            Self::Inferencer => Some(ProcessorFamily::Inferencer),
+            Self::WasmProcessor => Some(ProcessorFamily::Wasm),
             Self::Domain
             | Self::Placement
             | Self::User
@@ -364,6 +386,21 @@ pub(crate) enum ChoiceControl {
     ProcessorRouteLeftField,
     /// Inserts a field of the right side's record into the last output assignment.
     ProcessorRouteRightField,
+    /// A generator's materialized relay, on exactly the generator's branch.
+    GeneratorRelay,
+    /// Inserts a field of a generator's materialized state into the last output assignment.
+    GeneratorStateField,
+    /// The resource an inferencer or WASM processor loads.
+    ProcessorResource,
+    /// The completed version of that resource, or `LATEST`.
+    ProcessorResourceVersion,
+    /// Inserts a live input field into the inferencer `INPUTS` mapping being edited.
+    InferencerInputField,
+    /// Inserts a field of the concrete branch's key into the last output assignment.
+    ProcessorBranchKeyField,
+    /// Inserts a WASM guest's output field, aligned to the route's relay, into the last output
+    /// assignment.
+    WasmGuestField,
 }
 
 impl ChoiceControl {
@@ -426,7 +463,14 @@ impl ChoiceControl {
             | Self::ProcessorCorrelateLeftField
             | Self::ProcessorCorrelateRightField
             | Self::ProcessorRouteLeftField
-            | Self::ProcessorRouteRightField => CreateKind::Junction,
+            | Self::ProcessorRouteRightField
+            | Self::GeneratorRelay
+            | Self::GeneratorStateField
+            | Self::ProcessorResource
+            | Self::ProcessorResourceVersion
+            | Self::InferencerInputField
+            | Self::ProcessorBranchKeyField
+            | Self::WasmGuestField => CreateKind::Junction,
         }
     }
 
@@ -542,6 +586,13 @@ struct ChoiceControls {
     processor_correlate_right_field: ChoiceControlSignals,
     processor_route_left_field: ChoiceControlSignals,
     processor_route_right_field: ChoiceControlSignals,
+    generator_relay: ChoiceControlSignals,
+    generator_state_field: ChoiceControlSignals,
+    processor_resource: ChoiceControlSignals,
+    processor_resource_version: ChoiceControlSignals,
+    inferencer_input_field: ChoiceControlSignals,
+    processor_branch_key_field: ChoiceControlSignals,
+    wasm_guest_field: ChoiceControlSignals,
 }
 
 impl ChoiceControls {
@@ -610,6 +661,13 @@ impl ChoiceControls {
             processor_correlate_right_field: ChoiceControlSignals::new(),
             processor_route_left_field: ChoiceControlSignals::new(),
             processor_route_right_field: ChoiceControlSignals::new(),
+            generator_relay: ChoiceControlSignals::new(),
+            generator_state_field: ChoiceControlSignals::new(),
+            processor_resource: ChoiceControlSignals::new(),
+            processor_resource_version: ChoiceControlSignals::new(),
+            inferencer_input_field: ChoiceControlSignals::new(),
+            processor_branch_key_field: ChoiceControlSignals::new(),
+            wasm_guest_field: ChoiceControlSignals::new(),
         }
     }
 
@@ -678,6 +736,13 @@ impl ChoiceControls {
             ChoiceControl::ProcessorCorrelateRightField => self.processor_correlate_right_field,
             ChoiceControl::ProcessorRouteLeftField => self.processor_route_left_field,
             ChoiceControl::ProcessorRouteRightField => self.processor_route_right_field,
+            ChoiceControl::GeneratorRelay => self.generator_relay,
+            ChoiceControl::GeneratorStateField => self.generator_state_field,
+            ChoiceControl::ProcessorResource => self.processor_resource,
+            ChoiceControl::ProcessorResourceVersion => self.processor_resource_version,
+            ChoiceControl::InferencerInputField => self.inferencer_input_field,
+            ChoiceControl::ProcessorBranchKeyField => self.processor_branch_key_field,
+            ChoiceControl::WasmGuestField => self.wasm_guest_field,
         }
     }
 }
@@ -1133,6 +1198,9 @@ pub(crate) struct CreateSignals {
     window: RwSignal<ProcessorDraft>,
     correlator: RwSignal<ProcessorDraft>,
     reingestor: RwSignal<ProcessorDraft>,
+    generator: RwSignal<ProcessorDraft>,
+    inferencer: RwSignal<ProcessorDraft>,
+    wasm: RwSignal<ProcessorDraft>,
     /// The number the next generated subscription name carries. Numbers only increase, so no two
     /// generated names of one console coincide.
     next_subscription_name: RwSignal<u64>,
@@ -1157,6 +1225,9 @@ impl CreateSignals {
             ProcessorFamily::Window => self.window,
             ProcessorFamily::Correlator => self.correlator,
             ProcessorFamily::Reingestor => self.reingestor,
+            ProcessorFamily::Generator => self.generator,
+            ProcessorFamily::Inferencer => self.inferencer,
+            ProcessorFamily::Wasm => self.wasm,
         }
     }
 
@@ -1165,7 +1236,8 @@ impl CreateSignals {
         Some(self.processor(family))
     }
 
-    /// The submission of one processor form: its complete Model in the captured domain.
+    /// The submission of one processor form: its complete Model in the captured domain, with any
+    /// resource binding at its requested version.
     fn processor_submission(
         self,
         kind: CreateKind,
@@ -1176,7 +1248,7 @@ impl CreateSignals {
             captured_domain.ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
         let draft = self.processor(family).get_untracked();
         let model = draft.build().map_err(draft_error)?;
-        CreateSubmission::domain_model(kind, model, draft.if_not_exists, scope)
+        CreateSubmission::domain_requested_model(kind, model, draft.if_not_exists, scope)
     }
 
     pub(crate) fn new() -> Self {
@@ -1215,6 +1287,9 @@ impl CreateSignals {
             window: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Window)),
             correlator: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Correlator)),
             reingestor: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Reingestor)),
+            generator: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Generator)),
+            inferencer: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Inferencer)),
+            wasm: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Wasm)),
             next_subscription_name: RwSignal::new(2),
             choices: StoredValue::new(ChoiceControls::new()),
         }
@@ -1343,6 +1418,15 @@ impl CreateSignals {
                 CreateKind::Reingestor => self
                     .reingestor
                     .update(ProcessorDraft::invalidate_references),
+                CreateKind::Generator => {
+                    self.generator.update(ProcessorDraft::invalidate_references)
+                }
+                CreateKind::Inferencer => self
+                    .inferencer
+                    .update(ProcessorDraft::invalidate_references),
+                CreateKind::WasmProcessor => {
+                    self.wasm.update(ProcessorDraft::invalidate_references)
+                }
                 CreateKind::Udf | CreateKind::Placement => {}
                 CreateKind::Domain
                 | CreateKind::User
@@ -1818,7 +1902,14 @@ impl CreateSignals {
             | ChoiceControl::ProcessorCorrelateLeftField
             | ChoiceControl::ProcessorCorrelateRightField
             | ChoiceControl::ProcessorRouteLeftField
-            | ChoiceControl::ProcessorRouteRightField => self.processor_choice_query(control),
+            | ChoiceControl::ProcessorRouteRightField
+            | ChoiceControl::GeneratorRelay
+            | ChoiceControl::GeneratorStateField
+            | ChoiceControl::ProcessorResource
+            | ChoiceControl::ProcessorResourceVersion
+            | ChoiceControl::InferencerInputField
+            | ChoiceControl::ProcessorBranchKeyField
+            | ChoiceControl::WasmGuestField => self.processor_choice_query(control),
         }
     }
 
@@ -2025,6 +2116,15 @@ impl CreateSignals {
             CreateKind::Reingestor => {
                 self.processor_submission(kind, ProcessorFamily::Reingestor, captured_domain)
             }
+            CreateKind::Generator => {
+                self.processor_submission(kind, ProcessorFamily::Generator, captured_domain)
+            }
+            CreateKind::Inferencer => {
+                self.processor_submission(kind, ProcessorFamily::Inferencer, captured_domain)
+            }
+            CreateKind::WasmProcessor => {
+                self.processor_submission(kind, ProcessorFamily::Wasm, captured_domain)
+            }
             CreateKind::Subscription => {
                 let scope = captured_domain
                     .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
@@ -2155,6 +2255,15 @@ pub(crate) fn CreateMenu(
                 </button>
                 <button type="button" role="menuitem" data-create-kind="reingestor" on:click=move |_| choose.run(CreateKind::Reingestor)>
                     <span>"Reingestor"</span><em>"Transform records across branch boundaries"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="generator" on:click=move |_| choose.run(CreateKind::Generator)>
+                    <span>"Generator"</span><em>"Generate from materialized state on a cadence"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="inferencer" on:click=move |_| choose.run(CreateKind::Inferencer)>
+                    <span>"Inferencer"</span><em>"Score each branch with an ONNX model"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="wasm-processor" on:click=move |_| choose.run(CreateKind::WasmProcessor)>
+                    <span>"WASM processor"</span><em>"Run a guest with fuel and memory limits"</em>
                 </button>
             </div>
         </div>
@@ -2340,7 +2449,10 @@ fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceCon
         | CreateKind::Reorderer
         | CreateKind::WindowProcessor
         | CreateKind::Correlator
-        | CreateKind::Reingestor => signals.processor_open_controls(),
+        | CreateKind::Reingestor
+        | CreateKind::Generator
+        | CreateKind::Inferencer
+        | CreateKind::WasmProcessor => signals.processor_open_controls(),
         CreateKind::Udf => Vec::new(),
         CreateKind::User
         | CreateKind::Resource
@@ -2680,6 +2792,15 @@ fn CreateKindFields(
         <Show when=move || signals.open.get() == Some(CreateKind::Reingestor) fallback=|| ()>
             <ProcessorEditor family=ProcessorFamily::Reingestor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
+        <Show when=move || signals.open.get() == Some(CreateKind::Generator) fallback=|| ()>
+            <ProcessorEditor family=ProcessorFamily::Generator signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+        </Show>
+        <Show when=move || signals.open.get() == Some(CreateKind::Inferencer) fallback=|| ()>
+            <ProcessorEditor family=ProcessorFamily::Inferencer signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+        </Show>
+        <Show when=move || signals.open.get() == Some(CreateKind::WasmProcessor) fallback=|| ()>
+            <ProcessorEditor family=ProcessorFamily::Wasm signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+        </Show>
     }
     .into_any()
 }
@@ -2719,6 +2840,9 @@ fn IfNotExistsField(signals: CreateSignals) -> impl IntoView {
                         Some(CreateKind::WindowProcessor) => signals.window.get().if_not_exists,
                         Some(CreateKind::Correlator) => signals.correlator.get().if_not_exists,
                         Some(CreateKind::Reingestor) => signals.reingestor.get().if_not_exists,
+                        Some(CreateKind::Generator) => signals.generator.get().if_not_exists,
+                        Some(CreateKind::Inferencer) => signals.inferencer.get().if_not_exists,
+                        Some(CreateKind::WasmProcessor) => signals.wasm.get().if_not_exists,
                         Some(CreateKind::Subscription) | None => false,
                     }
                     disabled=move || signals.progress.get().is_pending()
@@ -2750,6 +2874,9 @@ fn IfNotExistsField(signals: CreateSignals) -> impl IntoView {
                             Some(CreateKind::WindowProcessor) => signals.window.update(|draft| draft.if_not_exists = checked),
                             Some(CreateKind::Correlator) => signals.correlator.update(|draft| draft.if_not_exists = checked),
                             Some(CreateKind::Reingestor) => signals.reingestor.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Generator) => signals.generator.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::Inferencer) => signals.inferencer.update(|draft| draft.if_not_exists = checked),
+                            Some(CreateKind::WasmProcessor) => signals.wasm.update(|draft| draft.if_not_exists = checked),
                             Some(CreateKind::Subscription) | None => {}
                         }
                         signals.edit();

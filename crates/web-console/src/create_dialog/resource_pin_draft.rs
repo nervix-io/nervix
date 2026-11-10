@@ -3,7 +3,7 @@
 //! Layer: edges.
 //!
 //! - **Owns.** Incomplete and context-invalidated resource pins for clients, VHOSTs, codecs,
-//!   signaling protocols, and hash maps.
+//!   signaling protocols, hash maps, inferencers and WASM processors.
 //! - **Depends on.** Typed resource names and requested resource versions.
 //! - **Must not know.** Resource storage, upload execution, or version resolution at apply time.
 
@@ -48,6 +48,19 @@ impl ResourcePinDraft {
         self.resource
             .as_ref()
             .and_then(SelectedReference::current_name)
+    }
+
+    /// Whether the resource or version was selected in a context the draft has since left.
+    pub(super) fn changed(&self) -> bool {
+        let resource_changed = match &self.resource {
+            Some(resource) => !resource.is_current(),
+            None => false,
+        };
+        let version_changed = match &self.version {
+            Some(version) => !version.is_current(),
+            None => false,
+        };
+        resource_changed || version_changed
     }
 
     pub(super) fn invalidate(&mut self) {
@@ -138,5 +151,23 @@ mod tests {
                 .map(|error| error.current_context().clone()),
             Some(ResourcePinError::ResourceChanged)
         );
+    }
+
+    #[test]
+    fn a_pin_reports_a_change_only_for_a_selection_its_context_no_longer_holds() {
+        let mut draft = ResourcePinDraft::default();
+        assert!(!draft.changed(), "nothing selected is no change");
+        draft.select_resource(ResourceName::parse("first").assured("valid resource"));
+        draft.select_version(RequestedResourceVersion::Latest);
+        assert!(!draft.changed());
+        draft.select_resource(ResourceName::parse("second").assured("valid resource"));
+        assert!(
+            draft.changed(),
+            "a version chosen for another resource is chosen again"
+        );
+        draft.select_version(RequestedResourceVersion::Number(1));
+        assert!(!draft.changed());
+        draft.invalidate();
+        assert!(draft.changed());
     }
 }

@@ -262,8 +262,12 @@ archive; see [Restore Streams](#restore-streams).
   branch, and the third a relay with materialized state in that branch. A junction's first input
   uses the ingestor relay target for its selected branch; a reingestor's first input uses the
   ordinary relay target. Reingestor routes that construct a different branch use the ingestor
-  relay and branch-field targets. An emitter-reference target carries a domain and offers only
-  the client connectors its entity declares; a client consumer instead uses the schema target.
+  relay and branch-field targets. A generator's materialized-relay target carries a domain alone
+  for an unbranched generator, or a domain followed by its branch `Model` reference, and returns
+  only relays with materialized state on exactly that branch declaration; the generator's routes
+  then use the input-branch target with that relay as the first input. An emitter-reference
+  target carries a domain and offers only the client connectors its entity declares; a client
+  consumer instead uses the schema target.
   The Iceberg catalog target uses its declared catalog-client option. An emitter encoding-codec
   target carries a domain and selects encoding-capable codecs; its schema may differ from the
   inputs because construction builds the output. A compatible-input target carries a domain

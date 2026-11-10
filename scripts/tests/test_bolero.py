@@ -576,8 +576,8 @@ class InventoryTests(unittest.TestCase):
             "inferencer-state-snapshots-malformed": 1,
             "inferencer-native-snapshot-projection": 1,
             "console-emitter-drafts": 5,
-            "console-processor-drafts": 5,
-            "client-requests": 11,
+            "console-processor-drafts": 6,
+            "client-requests": 12,
         }.items():
             with self.subTest(target=target):
                 self.assertEqual(versions[target], version)
